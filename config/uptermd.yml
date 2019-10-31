@@ -1,0 +1,45 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: uptermd
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: uptermd
+    spec:
+      containers:
+      - name: uptermd
+        image: jingweno/uptermd
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 22 # uptermd
+        - containerPort: 9000 # proxy
+        readinessProbe:
+           tcpSocket:
+             port: 22
+           periodSeconds: 10
+        livenessProbe:
+           tcpSocket:
+             port: 22
+           periodSeconds: 20
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: uptermd
+spec:
+  type: LoadBalancer
+  selector:
+    app: uptermd
+  ports:
+  - port: 22
+    protocol: TCP
+    targetPort: 22
+    name: uptermd
+  - port: 9000
+    protocol: TCP
+    targetPort: 9000
+    name: proxy
