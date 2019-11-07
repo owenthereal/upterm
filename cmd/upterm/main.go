@@ -18,15 +18,25 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
 
-	gssh "github.com/gliderlabs/ssh"
+	"github.com/google/shlex"
+	"github.com/google/uuid"
+	gssh "github.com/jingweno/ssh"
 )
 
 var (
-	flagHost string
-	flagAddr string
+	flagHost          string
+	flagAddr          string
+	flagAttachCommand string
 
 	rootCmd = &cobra.Command{
 		Use:  "upterm",
+		Long: "Share a terminal session.",
+		Example: `  # Run $SHELL and client will attach to host's stdin, stdout and stderr
+  upterm
+  # Run 'bash' and client will attach with to host's stdin, stdout and stderr
+  upterm bash
+  # Run 'tmux new pair' and client will attach with 'tmux attach -t pair' after it connects
+  upterm -t 'tmux attach -t pair' -- tmux new -t pair`,
 		RunE: run,
 	}
 
@@ -36,6 +46,7 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "0.0.0.0:2222", "server host")
 	rootCmd.PersistentFlags().StringVarP(&flagAddr, "address", "a", "0.0.0.0:9000", "address to expose on the server")
+	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
 	logger = log.New()
 }
 
@@ -69,25 +80,50 @@ func run(c *cobra.Command, args []string) error {
 	}
 	defer l.Close()
 
-	return runCmd(context.Background(), l, args[0], args[1:]...)
+	em := NewEventManager()
+	defer em.Stop()
+	go em.HandleEvent()
+
+	if err := printJoinCmd(); err != nil {
+		return err
+	}
+	defer logger.Info("Bye!")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if len(args) == 0 {
+		args, err = shlex.Split(os.Getenv("SHELL"))
+		if err != nil {
+			return err
+		}
+	}
+
+	return runCmd(ctx, l, em, args)
 }
 
-func runCmd(ctx context.Context, l net.Listener, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+func runCmd(ctx context.Context, l net.Listener, em *EventManager, args []string) error {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("unable to start pty: %w", err)
 	}
 	defer func() { _ = ptmx.Close() }()
 
+	te := em.TerminalEvent("local", ptmx)
+	defer te.TerminalDetached()
+
 	// Handle pty size.
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 	go func() {
 		for range ch {
-			if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
-				logger.Printf("error resizing pty: %s", err)
+			h, w, err := pty.Getsize(os.Stdin)
+			if err != nil {
+				logger.WithError(err).Info("error getting size of pty")
 			}
+
+			te.TerminalWindowChanged(w, h)
 		}
 	}()
 	ch <- syscall.SIGWINCH // Initial resize.
@@ -100,7 +136,8 @@ func runCmd(ctx context.Context, l net.Listener, name string, args ...string) er
 	defer func() { _ = terminal.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	// output
-	writers := upterm.NewMultiWriter(os.Stdout)
+	writers := upterm.NewMultiWriter()
+	writers.Append(os.Stdout)
 	go func() {
 		_, _ = io.Copy(writers, ptmx)
 	}()
@@ -110,22 +147,52 @@ func runCmd(ctx context.Context, l net.Listener, name string, args ...string) er
 		io.Copy(ptmx, os.Stdin)
 	}()
 
-	go serveSSHServer(l, ptmx, writers)
+	// ssh server for remote access
+	go serveSSHServer(ctx, l, em, ptmx, writers, flagAttachCommand)
 
 	return cmd.Wait()
 }
 
-func serveSSHServer(l net.Listener, ptmx *os.File, writers *upterm.MultiWriter) error {
+func serveSSHServer(ctx context.Context, l net.Listener, em *EventManager, ptmx *os.File, writers *upterm.MultiWriter, attachCommand string) error {
 	h := func(sess gssh.Session) {
-		defer writers.Remove(sess)
+		ptyReq, winCh, isPty := sess.Pty()
+		if !isPty {
+			io.WriteString(sess, "PTY is required.\n")
+			sess.Exit(1)
+		}
 
-		// output
-		go func() {
+		var err error
+		if attachCommand != "" {
+			// override ptmx
+			ptmx, err = startAttachCmd(ctx, attachCommand, ptyReq.Term)
+			if err != nil {
+				logger.Println(err)
+				sess.Exit(1)
+			}
+			defer ptmx.Close()
+
+			// reattach output
+			go func() {
+				_, _ = io.Copy(sess, ptmx)
+			}()
+		} else {
+			// output
 			writers.Append(sess)
+			defer writers.Remove(sess)
+		}
+
+		tm := em.TerminalEvent(uuid.New().String(), ptmx)
+		defer tm.TerminalDetached()
+
+		// pty
+		go func() {
+			for win := range winCh {
+				tm.TerminalWindowChanged(win.Width, win.Height)
+			}
 		}()
 
 		// input
-		_, err := io.Copy(ptmx, sess)
+		_, err = io.Copy(ptmx, sess)
 		if err != nil {
 			logger.Println(err)
 			sess.Exit(1)
@@ -135,4 +202,31 @@ func serveSSHServer(l net.Listener, ptmx *os.File, writers *upterm.MultiWriter) 
 	}
 
 	return gssh.Serve(l, h)
+}
+
+func startAttachCmd(ctx context.Context, cstr, term string) (*os.File, error) {
+	c, err := shlex.Split(cstr)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing command %s: %w", cstr, err)
+	}
+
+	cmd := exec.CommandContext(ctx, c[0], c[1:]...)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
+	return pty.Start(cmd)
+}
+
+func printJoinCmd() error {
+	host, _, err := net.SplitHostPort(flagHost)
+	if err != nil {
+		return err
+	}
+
+	_, port, err := net.SplitHostPort(flagAddr)
+	if err != nil {
+		return err
+	}
+
+	logger.Infof("ssh session: ssh pair@%s -p %s", host, port)
+
+	return nil
 }
