@@ -34,7 +34,6 @@ func main() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	tcph := &ssh.ForwardedTCPHandler{}
 	uh := upterm.NewForwardedUnixHandler(flagSocketDir, logger.WithField("struct", "SSHForwardedUnixHandler"))
 	h := upterm.NewSSHProxyHandler(flagSocketDir, logger.WithField("struct", "SSHProxyHandler"))
 
@@ -42,13 +41,10 @@ func run(cmd *cobra.Command, args []string) error {
 		Addr:    fmt.Sprintf(":%d", flagPort),
 		Handler: ssh.Handler(h.Handle),
 		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
-			// TODO: restrict port range
 			logger.WithFields(log.Fields{"host": host, "port": port}).Info("attemt to bind")
 			return true
 		}),
 		RequestHandlers: map[string]ssh.RequestHandler{
-			"tcpip-forward":                          tcph.HandleSSHRequest,
-			"cancel-tcpip-forward":                   tcph.HandleSSHRequest,
 			"streamlocal-forward@openssh.com":        uh.HandleSSHRequest,
 			"cancel-streamlocal-forward@openssh.com": uh.HandleSSHRequest,
 		},
