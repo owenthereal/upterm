@@ -1,4 +1,4 @@
-package upterm
+package server
 
 import (
 	"fmt"
@@ -8,45 +8,48 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/gliderlabs/ssh"
+	"github.com/jingweno/ssh"
+	"github.com/jingweno/upterm"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )
 
 const (
-	forwardedStreamLocalChannelType = "forwarded-streamlocal@openssh.com"
+	forwardedStreamlocalChannelType    = "forwarded-streamlocal@openssh.com"
+	streamlocalForwardChannelType      = "streamlocal-forward@openssh.com"
+	cancelStreamlocalForwardChanneType = "cancel-streamlocal-forward@openssh.com"
 )
 
-type streamLocalChannelForwardMsg struct {
+type streamlocalChannelForwardMsg struct {
 	SocketPath string
 }
 
-type forwardedStreamLocalPayload struct {
+type forwardedStreamlocalPayload struct {
 	SocketPath string
 	Reserved0  string
 }
 
-func NewForwardedUnixHandler(socketDir string, logger *log.Entry) *ForwardedUnixHandler {
-	return &ForwardedUnixHandler{
+func newStreamlocalForwardHandler(socketDir string, logger log.FieldLogger) *streamlocalForwardHandler {
+	return &streamlocalForwardHandler{
 		socketDir: socketDir,
 		forwards:  make(map[string]net.Listener),
 		logger:    logger,
 	}
 }
 
-type ForwardedUnixHandler struct {
+type streamlocalForwardHandler struct {
 	socketDir string
 	forwards  map[string]net.Listener
-	logger    *log.Entry
+	logger    log.FieldLogger
 	sync.Mutex
 }
 
-func (h *ForwardedUnixHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
 
 	switch req.Type {
-	case "streamlocal-forward@openssh.com":
-		var reqPayload streamLocalChannelForwardMsg
+	case streamlocalForwardChannelType:
+		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
 			h.logger.WithError(err).Info("error parsing streamlocal payload")
 			return false, []byte(err.Error())
@@ -56,30 +59,30 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server
 			return false, []byte("port forwarding is disabled")
 		}
 
-		socketPath := reqPayload.SocketPath
-		localSocketPath := filepath.Join(h.socketDir, socketPath)
-		logger := h.logger.WithFields(log.Fields{"socket": socketPath, "path": localSocketPath})
+		requestedSocet := reqPayload.SocketPath
+		socket := filepath.Join(h.socketDir, requestedSocet)
+		logger := h.logger.WithFields(log.Fields{"requested-socket": requestedSocet, "socket": socket})
 
-		if err := os.RemoveAll(localSocketPath); err != nil {
-			msg := fmt.Sprintf("socket %s is in use", socketPath)
+		if err := os.RemoveAll(socket); err != nil {
+			msg := fmt.Sprintf("socket %s is in use", socket)
 			logger.WithError(err).Info(msg)
 			return false, []byte(msg)
 		}
 
-		ln, err := net.Listen("unix", localSocketPath)
+		ln, err := net.Listen("unix", socket)
 		if err != nil {
 			logger.WithError(err).Info("error listening socketing")
 			return false, []byte(err.Error())
 		}
 
 		h.Lock()
-		h.forwards[socketPath] = ln
+		h.forwards[requestedSocet] = ln
 		h.Unlock()
 
 		go func() {
 			<-ctx.Done()
 			h.Lock()
-			ln, ok := h.forwards[socketPath]
+			ln, ok := h.forwards[requestedSocet]
 			h.Unlock()
 			if ok {
 				ln.Close()
@@ -92,11 +95,11 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server
 				if err != nil {
 					break
 				}
-				payload := gossh.Marshal(&forwardedStreamLocalPayload{
-					SocketPath: socketPath,
+				payload := gossh.Marshal(&forwardedStreamlocalPayload{
+					SocketPath: requestedSocet,
 				})
 				go func() {
-					ch, reqs, err := conn.OpenChannel(forwardedStreamLocalChannelType, payload)
+					ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 					if err != nil {
 						logger.WithError(err).Info("error opening channel")
 						c.Close()
@@ -116,14 +119,14 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server
 				}()
 			}
 			h.Lock()
-			delete(h.forwards, socketPath)
+			delete(h.forwards, requestedSocet)
 			h.Unlock()
-		}(logger, socketPath)
+		}(logger, requestedSocet)
 
 		return true, nil
 
-	case "cancel-streamlocal-forward@openssh.com":
-		var reqPayload streamLocalChannelForwardMsg
+	case cancelStreamlocalForwardChanneType:
+		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
 			h.logger.WithError(err).Info("error parsing steamlocal payload")
 			return false, []byte(err.Error())
@@ -143,26 +146,26 @@ func (h *ForwardedUnixHandler) HandleSSHRequest(ctx ssh.Context, srv *ssh.Server
 	}
 }
 
-type SSHProxyHandler struct {
-	socketDir string
-	logger    *log.Entry
-}
-
-func NewSSHProxyHandler(socketDir string, logger *log.Entry) *SSHProxyHandler {
-	return &SSHProxyHandler{
+func newSSHProxyHandler(socketDir string, logger log.FieldLogger) *sshProxyHandler {
+	return &sshProxyHandler{
 		socketDir: socketDir,
 		logger:    logger,
 	}
 }
 
-func (h *SSHProxyHandler) Handle(s ssh.Session) {
+type sshProxyHandler struct {
+	socketDir string
+	logger    log.FieldLogger
+}
+
+func (h *sshProxyHandler) Handler(s ssh.Session) {
 	if err := h.handle(s); err != nil {
 		h.logger.WithError(err).Info("error handling ssh session")
 		s.Exit(1)
 	}
 }
 
-func (h *SSHProxyHandler) handle(s ssh.Session) error {
+func (h *sshProxyHandler) handle(s ssh.Session) error {
 	ptyReq, winCh, isPty := s.Pty()
 	if !isPty {
 		return fmt.Errorf("no pty is requested")
@@ -170,7 +173,7 @@ func (h *SSHProxyHandler) handle(s ssh.Session) error {
 
 	user := s.User()
 	logger := h.logger.WithField("user", user)
-	socketPath := filepath.Join(h.socketDir, SocketFile(user))
+	socketPath := filepath.Join(h.socketDir, upterm.SocketFile(user))
 
 	if _, err := os.Stat(socketPath); err != nil {
 		return fmt.Errorf("socket does not exist: %w", err)

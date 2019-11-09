@@ -45,7 +45,7 @@ var (
 func init() {
 	logger = log.New()
 
-	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "0.0.0.0:2222", "server host")
+	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "127.0.0.1:2222", "server host")
 	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
 }
 
@@ -222,7 +222,7 @@ func printJoinCmd(sessionID string) error {
 	}
 
 	cmd := fmt.Sprintf("ssh session: ssh %s@%s", sessionID, host)
-	if port != "" {
+	if port != "22" {
 		cmd = fmt.Sprintf("%s -p %s", cmd, port)
 	}
 

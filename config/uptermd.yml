@@ -13,9 +13,9 @@ spec:
       - name: uptermd
         image: jingweno/uptermd
         imagePullPolicy: Always
+        args: ["--host", "0.0.0.0:22", "--socket-dir", "/sockets"]
         ports:
         - containerPort: 22 # uptermd
-        - containerPort: 9000 # proxy
         readinessProbe:
            tcpSocket:
              port: 22
@@ -24,6 +24,13 @@ spec:
            tcpSocket:
              port: 22
            periodSeconds: 20
+        volumeMounts:
+            - mountPath: /sockets
+              name: socket-dir
+      volumes:
+      - name: socket-dir
+        emptyDir:
+          medium: Memory
 ---
 
 apiVersion: v1
@@ -39,7 +46,3 @@ spec:
     protocol: TCP
     targetPort: 22
     name: uptermd
-  - port: 9000
-    protocol: TCP
-    targetPort: 9000
-    name: proxy
