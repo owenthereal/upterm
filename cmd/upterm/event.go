@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/creack/pty"
 )
@@ -31,14 +33,17 @@ type Window struct {
 	Height int
 }
 
-func NewEventManager() *EventManager {
+func NewEventManager(ctx context.Context) *EventManager {
 	return &EventManager{
 		tmCh: make(chan Event),
+		ctx:  ctx,
 	}
 }
 
 type EventManager struct {
 	tmCh chan Event
+	once sync.Once
+	ctx  context.Context
 }
 
 func (em *EventManager) HandleEvent() {
@@ -69,7 +74,9 @@ func (em *EventManager) HandleEvent() {
 }
 
 func (em *EventManager) Stop() {
-	close(em.tmCh)
+	em.once.Do(func() {
+		close(em.tmCh)
+	})
 }
 
 func (em *EventManager) TerminalEvent(id string, pty *os.File) *TerminalEventManager {
@@ -77,6 +84,7 @@ func (em *EventManager) TerminalEvent(id string, pty *os.File) *TerminalEventMan
 		id:  id,
 		pty: pty,
 		ch:  em.tmCh,
+		ctx: em.ctx,
 	}
 }
 
@@ -84,10 +92,18 @@ type TerminalEventManager struct {
 	id  string
 	pty *os.File
 	ch  chan Event
+	ctx context.Context
+}
+
+func (em *TerminalEventManager) send(evt Event) {
+	select {
+	case <-em.ctx.Done():
+	case em.ch <- evt:
+	}
 }
 
 func (em *TerminalEventManager) TerminalAttached(width, height int) {
-	em.ch <- Event{
+	em.send(Event{
 		Type: EventTerminalAttached,
 		Terminal: Terminal{
 			ID:  em.id,
@@ -97,21 +113,21 @@ func (em *TerminalEventManager) TerminalAttached(width, height int) {
 				Height: height,
 			},
 		},
-	}
+	})
 }
 
 func (em *TerminalEventManager) TerminalDetached() {
-	em.ch <- Event{
+	em.send(Event{
 		Type: EventTerminalDetached,
 		Terminal: Terminal{
 			ID:  em.id,
 			Pty: em.pty,
 		},
-	}
+	})
 }
 
 func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
-	em.ch <- Event{
+	em.send(Event{
 		Type: EventTerminalWindowChanged,
 		Terminal: Terminal{
 			ID:  em.id,
@@ -121,7 +137,7 @@ func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
 				Height: height,
 			},
 		},
-	}
+	})
 }
 
 func resizeWindow(ptmx *os.File, ts map[string]Terminal) error {

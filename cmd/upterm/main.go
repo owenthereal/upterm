@@ -80,7 +80,10 @@ func run(c *cobra.Command, args []string) error {
 	}
 	defer l.Close()
 
-	em := NewEventManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	em := NewEventManager(ctx)
 	defer em.Stop()
 	go em.HandleEvent()
 
@@ -88,9 +91,6 @@ func run(c *cobra.Command, args []string) error {
 		return err
 	}
 	defer logger.Info("Bye!")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	if len(args) == 0 {
 		args, err = shlex.Split(os.Getenv("SHELL"))

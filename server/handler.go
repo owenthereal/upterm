@@ -229,9 +229,10 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		return fmt.Errorf("error requesting shell: %w", err)
 	}
 
-	go io.Copy(s, stdout)
+	go io.Copy(stdin, s)
 	go io.Copy(s, stderr)
-	io.Copy(stdin, s)
+
+	io.Copy(s, stdout)
 
 	return nil
 }
