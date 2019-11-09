@@ -12,14 +12,14 @@ github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
 # github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 github.com/google/shlex
-# github.com/google/uuid v1.1.1
-github.com/google/uuid
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
 # github.com/jingweno/ssh v0.2.3-0.20191104070915-4295929dc492
 github.com/jingweno/ssh
 # github.com/konsorten/go-windows-terminal-sequences v1.0.1
 github.com/konsorten/go-windows-terminal-sequences
+# github.com/rs/xid v1.2.1
+github.com/rs/xid
 # github.com/sirupsen/logrus v1.4.2
 github.com/sirupsen/logrus
 # github.com/spf13/cobra v0.0.5

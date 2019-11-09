@@ -4,12 +4,14 @@ import (
 	"fmt"
 
 	"github.com/gliderlabs/ssh"
+	"github.com/jingweno/upterm"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var (
-	flagPort int
+	flagPort      int
+	flagSocketDir string
 
 	rootCmd = &cobra.Command{
 		Use:  "uptermd",
@@ -21,6 +23,7 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().IntVarP(&flagPort, "port", "p", 22, "port")
+	rootCmd.PersistentFlags().StringVarP(&flagSocketDir, "socket-dir", "d", "/tmp", "the directory to create reverse Unix sockets")
 	logger = log.New()
 }
 
@@ -31,22 +34,23 @@ func main() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	forwardHandler := &ssh.ForwardedTCPHandler{}
+	tcph := &ssh.ForwardedTCPHandler{}
+	uh := upterm.NewForwardedUnixHandler(flagSocketDir, logger.WithField("struct", "SSHForwardedUnixHandler"))
+	h := upterm.NewSSHProxyHandler(flagSocketDir, logger.WithField("struct", "SSHProxyHandler"))
 
 	server := ssh.Server{
-		Addr: fmt.Sprintf(":%d", flagPort),
-		Handler: ssh.Handler(func(s ssh.Session) {
-			// Disable ssh
-			s.Exit(1)
-		}),
+		Addr:    fmt.Sprintf(":%d", flagPort),
+		Handler: ssh.Handler(h.Handle),
 		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
 			// TODO: restrict port range
 			logger.WithFields(log.Fields{"host": host, "port": port}).Info("attemt to bind")
 			return true
 		}),
 		RequestHandlers: map[string]ssh.RequestHandler{
-			"tcpip-forward":        forwardHandler.HandleSSHRequest,
-			"cancel-tcpip-forward": forwardHandler.HandleSSHRequest,
+			"tcpip-forward":                          tcph.HandleSSHRequest,
+			"cancel-tcpip-forward":                   tcph.HandleSSHRequest,
+			"streamlocal-forward@openssh.com":        uh.HandleSSHRequest,
+			"cancel-streamlocal-forward@openssh.com": uh.HandleSSHRequest,
 		},
 	}
 

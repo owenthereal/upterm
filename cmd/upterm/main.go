@@ -19,13 +19,12 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/google/shlex"
-	"github.com/google/uuid"
 	gssh "github.com/jingweno/ssh"
+	"github.com/rs/xid"
 )
 
 var (
 	flagHost          string
-	flagAddr          string
 	flagAttachCommand string
 
 	rootCmd = &cobra.Command{
@@ -44,10 +43,10 @@ var (
 )
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "0.0.0.0:2222", "server host")
-	rootCmd.PersistentFlags().StringVarP(&flagAddr, "address", "a", "0.0.0.0:9000", "address to expose on the server")
-	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
 	logger = log.New()
+
+	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "0.0.0.0:2222", "server host")
+	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
 }
 
 func main() {
@@ -74,7 +73,8 @@ func run(c *cobra.Command, args []string) error {
 	}
 	defer conn.Close()
 
-	l, err := conn.Listen("tcp", flagAddr)
+	sessionID := xid.New().String()
+	l, err := conn.Listen("unix", upterm.SocketFile(sessionID))
 	if err != nil {
 		return fmt.Errorf("unable to register TCP forward: %w", err)
 	}
@@ -84,7 +84,7 @@ func run(c *cobra.Command, args []string) error {
 	defer em.Stop()
 	go em.HandleEvent()
 
-	if err := printJoinCmd(); err != nil {
+	if err := printJoinCmd(sessionID); err != nil {
 		return err
 	}
 	defer logger.Info("Bye!")
@@ -181,7 +181,7 @@ func serveSSHServer(ctx context.Context, l net.Listener, em *EventManager, ptmx 
 			defer writers.Remove(sess)
 		}
 
-		tm := em.TerminalEvent(uuid.New().String(), ptmx)
+		tm := em.TerminalEvent(xid.New().String(), ptmx)
 		defer tm.TerminalDetached()
 
 		// pty
@@ -215,18 +215,18 @@ func startAttachCmd(ctx context.Context, cstr, term string) (*os.File, error) {
 	return pty.Start(cmd)
 }
 
-func printJoinCmd() error {
-	host, _, err := net.SplitHostPort(flagHost)
+func printJoinCmd(sessionID string) error {
+	host, port, err := net.SplitHostPort(flagHost)
 	if err != nil {
 		return err
 	}
 
-	_, port, err := net.SplitHostPort(flagAddr)
-	if err != nil {
-		return err
+	cmd := fmt.Sprintf("ssh session: ssh %s@%s", sessionID, host)
+	if port != "" {
+		cmd = fmt.Sprintf("%s -p %s", cmd, port)
 	}
 
-	logger.Infof("ssh session: ssh pair@%s -p %s", host, port)
+	logger.Info(cmd)
 
 	return nil
 }

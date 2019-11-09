@@ -9,9 +9,10 @@ require (
 	github.com/gliderlabs/ssh v0.2.2
 	github.com/google/go-cmp v0.3.1
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
-	github.com/google/uuid v1.1.1
 	github.com/jingweno/ssh v0.2.3-0.20191104070915-4295929dc492
+	github.com/rs/xid v1.2.1
 	github.com/sirupsen/logrus v1.4.2
 	github.com/spf13/cobra v0.0.5
+	github.com/stretchr/testify v1.3.0 // indirect
 	golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf
 )
