@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jingweno/ssh"
 	"github.com/jingweno/upterm"
+	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -161,7 +163,13 @@ type sshProxyHandler struct {
 func (h *sshProxyHandler) Handler(s ssh.Session) {
 	if err := h.handle(s); err != nil {
 		h.logger.WithError(err).Info("error handling ssh session")
-		s.Exit(1)
+		if ee, ok := err.(*gossh.ExitError); ok {
+			s.Exit(ee.ExitStatus())
+		} else {
+			s.Exit(1)
+		}
+	} else {
+		s.Exit(0)
 	}
 }
 
@@ -172,7 +180,6 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 	}
 
 	user := s.User()
-	logger := h.logger.WithField("user", user)
 	socketPath := filepath.Join(h.socketDir, upterm.SocketFile(user))
 
 	if _, err := os.Stat(socketPath); err != nil {
@@ -202,14 +209,6 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		return fmt.Errorf("error requesting pty: %w", err)
 	}
 
-	go func() {
-		for win := range winCh {
-			if err := session.WindowChange(win.Height, win.Width); err != nil {
-				logger.WithError(err).Info("error requesting window change")
-			}
-		}
-	}()
-
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("error getting stdin pipe: %w", err)
@@ -229,10 +228,75 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		return fmt.Errorf("error requesting shell: %w", err)
 	}
 
-	go io.Copy(stdin, s)
-	go io.Copy(s, stderr)
+	ctx := context.Background()
+	var g run.Group
+	{
+		ctx, cancel := context.WithCancel(ctx)
+		g.Add(func() error {
+			for {
+				select {
+				case win := <-winCh:
+					if err := session.WindowChange(win.Height, win.Width); err != nil {
+						return err
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
 
-	io.Copy(s, stdout)
+			return nil
+		}, func(err error) {
+			cancel()
+		})
+	}
+	{
+		sch := make(chan ssh.Signal)
+		s.Signals(sch)
+		g.Add(func() error {
+			for s := range sch {
+				if err := session.Signal(gossh.Signal(s)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}, func(err error) {
+			close(sch)
+		})
+	}
+	{
+		g.Add(func() error {
+			_, err := io.Copy(s, stderr)
+			return err
+		}, func(err error) {
+		})
+	}
+	{
+		g.Add(func() error {
+			_, err := io.Copy(s, stdout)
+			return err
+		}, func(err error) {
+		})
+	}
+	{
+		ctx, cancel := context.WithCancel(ctx)
+		g.Add(func() error {
+			_, err := io.Copy(stdin, upterm.NewContextReader(ctx, s))
+			return err
+		}, func(err error) {
+			cancel()
+		})
+	}
+	{
+		g.Add(func() error {
+			return session.Wait()
+		}, func(err error) {
+			session.Close()
+		})
+	}
 
-	return nil
+	// FIXME: Don't interrupt this because the stdin
+	// will hang and require an extra keystroke to exit the program
+	//go io.Copy(stdin, s)
+
+	return g.Run()
 }

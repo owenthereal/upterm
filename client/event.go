@@ -1,10 +1,9 @@
-package main
+package client
 
 import (
 	"context"
 	"io"
 	"os"
-	"sync"
 
 	"github.com/creack/pty"
 )
@@ -42,11 +41,15 @@ func NewEventManager(ctx context.Context) *EventManager {
 
 type EventManager struct {
 	tmCh chan Event
-	once sync.Once
 	ctx  context.Context
 }
 
 func (em *EventManager) HandleEvent() {
+	go func() {
+		<-em.ctx.Done()
+		close(em.tmCh)
+	}()
+
 	m := make(map[io.ReadWriteCloser]map[string]Terminal)
 	for evt := range em.tmCh {
 		switch evt.Type {
@@ -73,12 +76,6 @@ func (em *EventManager) HandleEvent() {
 	}
 }
 
-func (em *EventManager) Stop() {
-	em.once.Do(func() {
-		close(em.tmCh)
-	})
-}
-
 func (em *EventManager) TerminalEvent(id string, pty *os.File) *TerminalEventManager {
 	return &TerminalEventManager{
 		id:  id,
@@ -96,9 +93,17 @@ type TerminalEventManager struct {
 }
 
 func (em *TerminalEventManager) send(evt Event) {
+	// exit early
 	select {
 	case <-em.ctx.Done():
+		return
+	default:
+	}
+
+	select {
 	case em.ch <- evt:
+	case <-em.ctx.Done():
+		return
 	}
 }
 

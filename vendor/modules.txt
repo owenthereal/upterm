@@ -16,6 +16,8 @@ github.com/inconshreveable/mousetrap
 github.com/jingweno/ssh
 # github.com/konsorten/go-windows-terminal-sequences v1.0.1
 github.com/konsorten/go-windows-terminal-sequences
+# github.com/oklog/run v1.0.0
+github.com/oklog/run
 # github.com/rs/xid v1.2.1
 github.com/rs/xid
 # github.com/sirupsen/logrus v1.4.2
