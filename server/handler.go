@@ -264,17 +264,21 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		})
 	}
 	{
+		ctx, cancel := context.WithCancel(ctx)
 		g.Add(func() error {
-			_, err := io.Copy(s, stderr)
+			_, err := io.Copy(s, upterm.NewContextReader(ctx, stderr))
 			return err
 		}, func(err error) {
+			cancel()
 		})
 	}
 	{
+		ctx, cancel := context.WithCancel(ctx)
 		g.Add(func() error {
-			_, err := io.Copy(s, stdout)
+			_, err := io.Copy(s, upterm.NewContextReader(ctx, stdout))
 			return err
 		}, func(err error) {
+			cancel()
 		})
 	}
 	{
@@ -293,10 +297,6 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 			session.Close()
 		})
 	}
-
-	// FIXME: Don't interrupt this because the stdin
-	// will hang and require an extra keystroke to exit the program
-	//go io.Copy(stdin, s)
 
 	return g.Run()
 }

@@ -98,10 +98,8 @@ func (c *Client) serveSSHServer(ctx context.Context) error {
 		if c.attachCommand != "" {
 			var cmd *exec.Cmd
 
-			ctx, cancel := context.WithCancel(ctx)
-			defer cancel()
-
-			cmd, ptmx, err = startAttachCmd(ctx, c.attachCommand, ptyReq.Term)
+			cmdCtx, cmdCancel := context.WithCancel(ctx)
+			cmd, ptmx, err = startAttachCmd(cmdCtx, c.attachCommand, ptyReq.Term)
 			if err != nil {
 				c.logger.Println(err)
 				sess.Exit(1)
@@ -110,17 +108,19 @@ func (c *Client) serveSSHServer(ctx context.Context) error {
 
 			{
 				// reattach output
+				ctx, cancel := context.WithCancel(ctx)
 				g.Add(func() error {
-					_, err := io.Copy(sess, ptmx)
+					_, err := io.Copy(sess, upterm.NewContextReader(ctx, ptmx))
 					return err
 				}, func(err error) {
+					cancel()
 				})
 			}
 			{
 				g.Add(func() error {
 					return cmd.Wait()
 				}, func(err error) {
-					cancel()
+					cmdCancel()
 					ptmx.Close()
 				})
 			}

@@ -65,19 +65,25 @@ func (c *Command) Run() error {
 		signal.Notify(ch, syscall.SIGWINCH)
 		ch <- syscall.SIGWINCH // Initial resize.
 		te := c.em.TerminalEvent("local", c.ptmx)
+		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
-			for range ch {
-				h, w, err := pty.Getsize(os.Stdin)
-				if err != nil {
-					return err
+			for {
+				select {
+				case <-ctx.Done():
+					close(ch)
+					return ctx.Err()
+				case <-ch:
+					h, w, err := pty.Getsize(os.Stdin)
+					if err != nil {
+						return err
+					}
+
+					te.TerminalWindowChanged(w, h)
 				}
-
-				te.TerminalWindowChanged(w, h)
 			}
-
 			return nil
 		}, func(err error) {
-			close(ch)
+			cancel()
 			te.TerminalDetached()
 		})
 	}
@@ -93,12 +99,14 @@ func (c *Command) Run() error {
 	}
 	{
 		// output
+		ctx, cancel := context.WithCancel(c.ctx)
 		c.writers.Append(os.Stdout)
 		g.Add(func() error {
-			_, err := io.Copy(c.writers, c.ptmx)
+			_, err := io.Copy(c.writers, upterm.NewContextReader(ctx, c.ptmx))
 			return err
 		}, func(err error) {
 			c.writers.Remove(os.Stdout)
+			cancel()
 		})
 	}
 	{

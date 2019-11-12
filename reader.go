@@ -3,7 +3,6 @@ package upterm
 import (
 	"context"
 	"io"
-	"sync"
 )
 
 func NewContextReader(ctx context.Context, r io.Reader) io.Reader {
@@ -24,12 +23,10 @@ type readResult struct {
 }
 
 func (r contextReader) Read(p []byte) (n int, err error) {
-	var wg sync.WaitGroup
 	c := make(chan *readResult, 1)
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer func() { close(c) }()
 
 		// return early if context is done
 		select {
@@ -45,11 +42,6 @@ func (r contextReader) Read(p []byte) (n int, err error) {
 		case <-r.ctx.Done():
 			return
 		}
-	}()
-
-	go func() {
-		wg.Wait()
-		close(c)
 	}()
 
 	select {
