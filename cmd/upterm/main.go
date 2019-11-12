@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
 
-	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client"
-	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -56,53 +53,21 @@ func runE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	ctx := context.Background()
-
-	writers := upterm.NewMultiWriter()
-
-	emCtx, emCancel := context.WithCancel(ctx)
-	em := client.NewEventManager(emCtx)
-
-	cmdCtx, cmdCancel := context.WithCancel(ctx)
-	cmd := client.NewCommand(args[0], args[1:], em, writers)
-	ptmx, err := cmd.Start(cmdCtx)
-	if err != nil {
-		return fmt.Errorf("error starting command: %w", err)
+	var attachCommand []string
+	if flagAttachCommand != "" {
+		attachCommand, err = shlex.Split(flagAttachCommand)
+		if err != nil {
+			return fmt.Errorf("error parsing command %s: %w", flagAttachCommand, err)
+		}
 	}
 
-	client := client.New(flagHost, flagAttachCommand, ptmx, em, writers, logger)
-
-	if err := printJoinCmd(client.ID()); err != nil {
+	client := client.NewClient(args, attachCommand, flagHost, logger)
+	if err := printJoinCmd(client.ClientID()); err != nil {
 		return err
 	}
 	defer logger.Info("Bye!")
 
-	var g run.Group
-	{
-		g.Add(func() error {
-			em.HandleEvent()
-			return nil
-		}, func(err error) {
-			emCancel()
-		})
-	}
-	{
-		g.Add(func() error {
-			return cmd.Run()
-		}, func(err error) {
-			cmdCancel()
-		})
-	}
-	{
-		ctx, cancel := context.WithCancel(ctx)
-		g.Add(func() error {
-			return client.Dial(ctx)
-		}, func(err error) {
-			cancel()
-		})
-	}
-
-	return g.Run()
+	return client.Run()
 }
 
 func printJoinCmd(sessionID string) error {

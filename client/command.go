@@ -11,12 +11,13 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/jingweno/upterm"
+	"github.com/jingweno/upterm/client/internal"
 	"github.com/oklog/run"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-func NewCommand(name string, args []string, em *EventManager, writers *upterm.MultiWriter) *Command {
-	return &Command{
+func newCommand(name string, args []string, em *internal.EventManager, writers *upterm.MultiWriter) *command {
+	return &command{
 		name:    name,
 		args:    args,
 		em:      em,
@@ -24,20 +25,20 @@ func NewCommand(name string, args []string, em *EventManager, writers *upterm.Mu
 	}
 }
 
-type Command struct {
+type command struct {
 	name string
 	args []string
 
 	cmd  *exec.Cmd
 	ptmx *os.File
 
-	em      *EventManager
+	em      *internal.EventManager
 	writers *upterm.MultiWriter
 
 	ctx context.Context
 }
 
-func (c *Command) Start(ctx context.Context) (*os.File, error) {
+func (c *command) Start(ctx context.Context) (*os.File, error) {
 	var err error
 
 	c.ctx = ctx
@@ -50,7 +51,7 @@ func (c *Command) Start(ctx context.Context) (*os.File, error) {
 	return c.ptmx, nil
 }
 
-func (c *Command) Run() error {
+func (c *command) Run() error {
 	// Set stdin in raw mode.
 	oldState, err := terminal.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
