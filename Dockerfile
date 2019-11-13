@@ -6,7 +6,7 @@ ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN make install
 
 # Prepare for image
-FROM ubuntu:18.04
+FROM ubuntu:latest
 MAINTAINER Owen Ou
 
 RUN apt-get update && apt-get install -y less curl iputils-ping
