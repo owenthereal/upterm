@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client/internal"
+	"github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -46,7 +46,7 @@ func (c *Client) ClientID() string {
 }
 
 func (c *Client) Run(ctx context.Context) error {
-	writers := upterm.NewMultiWriter()
+	writers := io.NewMultiWriter()
 
 	emCtx, emCancel := context.WithCancel(ctx)
 	em := internal.NewEventManager(emCtx)

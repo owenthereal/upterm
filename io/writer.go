@@ -1,4 +1,4 @@
-package upterm
+package io
 
 import (
 	"bytes"

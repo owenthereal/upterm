@@ -10,8 +10,8 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client/internal"
+	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"golang.org/x/crypto/ssh/terminal"
 )
@@ -22,7 +22,7 @@ func newCommand(
 	stdin *os.File,
 	stdout *os.File,
 	em *internal.EventManager,
-	writers *upterm.MultiWriter,
+	writers *uio.MultiWriter,
 ) *command {
 	return &command{
 		name:    name,
@@ -45,7 +45,7 @@ type command struct {
 	stdout *os.File
 
 	em      *internal.EventManager
-	writers *upterm.MultiWriter
+	writers *uio.MultiWriter
 
 	ctx context.Context
 }
@@ -110,7 +110,7 @@ func (c *command) Run() error {
 		// input
 		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
-			_, err := io.Copy(c.ptmx, upterm.NewContextReader(ctx, c.stdin))
+			_, err := io.Copy(c.ptmx, uio.NewContextReader(ctx, c.stdin))
 			return err
 		}, func(err error) {
 			cancel()
@@ -121,7 +121,7 @@ func (c *command) Run() error {
 		ctx, cancel := context.WithCancel(c.ctx)
 		c.writers.Append(c.stdout)
 		g.Add(func() error {
-			_, err := io.Copy(c.writers, upterm.NewContextReader(ctx, c.ptmx))
+			_, err := io.Copy(c.writers, uio.NewContextReader(ctx, c.ptmx))
 			return err
 		}, func(err error) {
 			c.writers.Remove(os.Stdout)

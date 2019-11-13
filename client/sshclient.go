@@ -11,15 +11,24 @@ import (
 
 	"github.com/creack/pty"
 	gssh "github.com/jingweno/ssh"
-	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client/internal"
+	uio "github.com/jingweno/upterm/io"
+	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
-func newSSHClient(clientID, host string, attachCommand []string, ptmx *os.File, em *internal.EventManager, writers *upterm.MultiWriter, logger log.FieldLogger) *sshClient {
+func newSSHClient(
+	clientID string,
+	host string,
+	attachCommand []string,
+	ptmx *os.File,
+	em *internal.EventManager,
+	writers *uio.MultiWriter,
+	logger log.FieldLogger,
+) *sshClient {
 	return &sshClient{
 		clientID:      clientID,
 		host:          host,
@@ -36,7 +45,7 @@ type sshClient struct {
 	attachCommand []string
 	ptmx          *os.File
 	em            *internal.EventManager
-	writers       *upterm.MultiWriter
+	writers       *uio.MultiWriter
 
 	clientID string
 
@@ -64,7 +73,7 @@ func (c *sshClient) Dial(ctx context.Context) error {
 		return fmt.Errorf("unable to connect: %w", err)
 	}
 
-	c.ln, err = c.client.Listen("unix", upterm.SocketFile(c.clientID))
+	c.ln, err = c.client.Listen("unix", utils.SocketFile(c.clientID))
 	if err != nil {
 		return fmt.Errorf("unable to register TCP forward: %w", err)
 	}
@@ -106,7 +115,7 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 				// reattach output
 				ctx, cancel := context.WithCancel(ctx)
 				g.Add(func() error {
-					_, err := io.Copy(sess, upterm.NewContextReader(ctx, ptmx))
+					_, err := io.Copy(sess, uio.NewContextReader(ctx, ptmx))
 					return err
 				}, func(err error) {
 					cancel()
@@ -149,7 +158,7 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 			// input
 			ctx, cancel := context.WithCancel(ctx)
 			g.Add(func() error {
-				_, err := io.Copy(ptmx, upterm.NewContextReader(ctx, sess))
+				_, err := io.Copy(ptmx, uio.NewContextReader(ctx, sess))
 				return err
 			}, func(err error) {
 				cancel()

@@ -1,4 +1,4 @@
-package upterm
+package utils
 
 import "path/filepath"
 

@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client"
 	"github.com/jingweno/upterm/server"
+	"github.com/jingweno/upterm/utils"
 	"github.com/pborman/ansi"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -113,7 +113,7 @@ func (c *Client) Connect(addr, socketDir string) error {
 		}
 	}()
 
-	if err := waitForUnixSocket(filepath.Join(socketDir, upterm.SocketFile(c.client.ClientID()))); err != nil {
+	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.client.ClientID()))); err != nil {
 		return err
 	}
 

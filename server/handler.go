@@ -10,7 +10,8 @@ import (
 	"sync"
 
 	"github.com/jingweno/ssh"
-	"github.com/jingweno/upterm"
+	uio "github.com/jingweno/upterm/io"
+	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
@@ -180,7 +181,7 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 	}
 
 	user := s.User()
-	socketPath := filepath.Join(h.socketDir, upterm.SocketFile(user))
+	socketPath := filepath.Join(h.socketDir, utils.SocketFile(user))
 
 	if _, err := os.Stat(socketPath); err != nil {
 		return fmt.Errorf("socket does not exist: %w", err)
@@ -266,7 +267,7 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		g.Add(func() error {
-			_, err := io.Copy(s, upterm.NewContextReader(ctx, stderr))
+			_, err := io.Copy(s, uio.NewContextReader(ctx, stderr))
 			return err
 		}, func(err error) {
 			cancel()
@@ -275,7 +276,7 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		g.Add(func() error {
-			_, err := io.Copy(s, upterm.NewContextReader(ctx, stdout))
+			_, err := io.Copy(s, uio.NewContextReader(ctx, stdout))
 			return err
 		}, func(err error) {
 			cancel()
@@ -284,7 +285,7 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		g.Add(func() error {
-			_, err := io.Copy(stdin, upterm.NewContextReader(ctx, s))
+			_, err := io.Copy(stdin, uio.NewContextReader(ctx, s))
 			return err
 		}, func(err error) {
 			cancel()
