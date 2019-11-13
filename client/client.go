@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/jingweno/upterm"
 	"github.com/jingweno/upterm/client/internal"
@@ -18,6 +19,9 @@ func NewClient(command, attachCommand []string, host string, logger log.FieldLog
 		attachCommand: attachCommand,
 		clientID:      xid.New().String(),
 		logger:        logger,
+
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
 	}
 }
 
@@ -27,22 +31,28 @@ type Client struct {
 	attachCommand []string
 	clientID      string
 	logger        log.FieldLogger
+
+	stdin  *os.File
+	stdout *os.File
+}
+
+func (c *Client) SetInputOutput(stdin, stdout *os.File) {
+	c.stdin = stdin
+	c.stdout = stdout
 }
 
 func (c *Client) ClientID() string {
 	return c.clientID
 }
 
-func (c *Client) Run() error {
-	ctx := context.Background()
-
+func (c *Client) Run(ctx context.Context) error {
 	writers := upterm.NewMultiWriter()
 
 	emCtx, emCancel := context.WithCancel(ctx)
 	em := internal.NewEventManager(emCtx)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
-	cmd := newCommand(c.command[0], c.command[1:], em, writers)
+	cmd := newCommand(c.command[0], c.command[1:], c.stdin, c.stdout, em, writers)
 	ptmx, err := cmd.Start(cmdCtx)
 	if err != nil {
 		return fmt.Errorf("error starting command: %w", err)

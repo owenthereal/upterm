@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -67,7 +68,7 @@ func runE(c *cobra.Command, args []string) error {
 	}
 	defer logger.Info("Bye!")
 
-	return client.Run()
+	return client.Run(context.Background())
 }
 
 func printJoinCmd(sessionID string) error {

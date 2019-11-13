@@ -18,6 +18,8 @@ github.com/jingweno/ssh
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/oklog/run v1.0.0
 github.com/oklog/run
+# github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
+github.com/pborman/ansi
 # github.com/rs/xid v1.2.1
 github.com/rs/xid
 # github.com/sirupsen/logrus v1.4.2

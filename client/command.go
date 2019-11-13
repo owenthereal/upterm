@@ -16,10 +16,19 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-func newCommand(name string, args []string, em *internal.EventManager, writers *upterm.MultiWriter) *command {
+func newCommand(
+	name string,
+	args []string,
+	stdin *os.File,
+	stdout *os.File,
+	em *internal.EventManager,
+	writers *upterm.MultiWriter,
+) *command {
 	return &command{
 		name:    name,
 		args:    args,
+		stdin:   stdin,
+		stdout:  stdout,
 		em:      em,
 		writers: writers,
 	}
@@ -31,6 +40,9 @@ type command struct {
 
 	cmd  *exec.Cmd
 	ptmx *os.File
+
+	stdin  *os.File
+	stdout *os.File
 
 	em      *internal.EventManager
 	writers *upterm.MultiWriter
@@ -53,14 +65,19 @@ func (c *command) Start(ctx context.Context) (*os.File, error) {
 
 func (c *command) Run() error {
 	// Set stdin in raw mode.
-	oldState, err := terminal.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return fmt.Errorf("unable to set terminal to raw mode: %w", err)
+
+	isTty := terminal.IsTerminal(int(c.stdin.Fd()))
+
+	if isTty {
+		oldState, err := terminal.MakeRaw(int(c.stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
+		}
+		defer func() { _ = terminal.Restore(int(c.stdin.Fd()), oldState) }()
 	}
-	defer func() { _ = terminal.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	var g run.Group
-	{
+	if isTty {
 		// pty
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGWINCH)
@@ -74,7 +91,7 @@ func (c *command) Run() error {
 					close(ch)
 					return ctx.Err()
 				case <-ch:
-					h, w, err := pty.Getsize(os.Stdin)
+					h, w, err := pty.Getsize(c.stdin)
 					if err != nil {
 						return err
 					}
@@ -88,11 +105,12 @@ func (c *command) Run() error {
 			te.TerminalDetached()
 		})
 	}
+
 	{
 		// input
 		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
-			_, err := io.Copy(c.ptmx, upterm.NewContextReader(ctx, os.Stdin))
+			_, err := io.Copy(c.ptmx, upterm.NewContextReader(ctx, c.stdin))
 			return err
 		}, func(err error) {
 			cancel()
@@ -101,7 +119,7 @@ func (c *command) Run() error {
 	{
 		// output
 		ctx, cancel := context.WithCancel(c.ctx)
-		c.writers.Append(os.Stdout)
+		c.writers.Append(c.stdout)
 		g.Add(func() error {
 			_, err := io.Copy(c.writers, upterm.NewContextReader(ctx, c.ptmx))
 			return err

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+
 	"github.com/jingweno/upterm/server"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -29,8 +31,15 @@ func main() {
 
 func run(cmd *cobra.Command, args []string) error {
 	logger := log.New()
-	s := server.New(flagHost, flagSocketDir, logger)
+
+	ln, err := net.Listen("tcp", flagHost)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
 
 	logger.WithFields(log.Fields{"host": flagHost, "socket-dir": flagSocketDir}).Info("starting ssh server")
-	return s.ListenAndServe()
+
+	s := server.New(flagSocketDir, logger)
+	return s.Serve(ln)
 }
