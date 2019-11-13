@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/jingweno/upterm/client"
 	log "github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ import (
 var (
 	flagHost          string
 	flagAttachCommand string
+	flagKeepAlive     uint8
 
 	rootCmd = &cobra.Command{
 		Use:  "upterm",
@@ -37,6 +39,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "127.0.0.1:2222", "server host")
 	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
+	rootCmd.PersistentFlags().Uint8VarP(&flagKeepAlive, "keep-alive", "", 30, "server keep alive duration in second")
 }
 
 func main() {
@@ -62,7 +65,7 @@ func runE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	client := client.NewClient(args, attachCommand, flagHost, logger)
+	client := client.NewClient(args, attachCommand, flagHost, time.Duration(flagKeepAlive), logger)
 	if err := printJoinCmd(client.ClientID()); err != nil {
 		return err
 	}
@@ -77,7 +80,7 @@ func printJoinCmd(sessionID string) error {
 		return err
 	}
 
-	cmd := fmt.Sprintf("ssh session: ssh %s@%s", sessionID, host)
+	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=%d %s@%s", flagKeepAlive, sessionID, host)
 	if port != "22" {
 		cmd = fmt.Sprintf("%s -p %s", cmd, port)
 	}

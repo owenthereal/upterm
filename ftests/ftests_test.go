@@ -105,7 +105,7 @@ func (c *Client) Connect(addr, socketDir string) error {
 		return err
 	}
 
-	c.client = client.NewClient(c.command, c.attachCommand, addr, log.New())
+	c.client = client.NewClient(c.command, c.attachCommand, addr, time.Duration(10), log.New())
 	c.client.SetInputOutput(stdinr, stdoutw)
 	go func() {
 		if err := c.client.Run(c.ctx); err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"time"
 
 	"github.com/creack/pty"
 	gssh "github.com/jingweno/ssh"
@@ -23,6 +24,7 @@ import (
 func newSSHClient(
 	clientID string,
 	host string,
+	keepAlive time.Duration,
 	attachCommand []string,
 	ptmx *os.File,
 	em *internal.EventManager,
@@ -32,6 +34,7 @@ func newSSHClient(
 	return &sshClient{
 		clientID:      clientID,
 		host:          host,
+		keepAlive:     keepAlive,
 		attachCommand: attachCommand,
 		ptmx:          ptmx,
 		em:            em,
@@ -42,6 +45,7 @@ func newSSHClient(
 
 type sshClient struct {
 	host          string
+	keepAlive     time.Duration
 	attachCommand []string
 	ptmx          *os.File
 	em            *internal.EventManager
@@ -77,6 +81,10 @@ func (c *sshClient) Dial(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to register TCP forward: %w", err)
 	}
+
+	go utils.KeepAlive(ctx, c.keepAlive*time.Second, func() {
+		c.client.SendRequest("ping", true, nil)
+	})
 
 	go func() {
 		<-ctx.Done()
@@ -134,7 +142,6 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 			c.writers.Append(sess)
 			defer c.writers.Remove(sess)
 		}
-
 		{
 			// pty
 			ctx, cancel := context.WithCancel(ctx)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/jingweno/ssh"
 	log "github.com/sirupsen/logrus"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 func New(socketDir string, logger log.FieldLogger) *Server {
@@ -32,8 +33,13 @@ func (s *Server) Serve(ln net.Listener) error {
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:      sh.Handler,
 			cancelStreamlocalForwardChanneType: sh.Handler,
+			pingRequestType:                    pingRequestHandler,
 		},
 	}
 
 	return server.Serve(ln)
+}
+
+func pingRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	return true, nil
 }

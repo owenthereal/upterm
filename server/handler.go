@@ -21,6 +21,7 @@ const (
 	forwardedStreamlocalChannelType    = "forwarded-streamlocal@openssh.com"
 	streamlocalForwardChannelType      = "streamlocal-forward@openssh.com"
 	cancelStreamlocalForwardChanneType = "cancel-streamlocal-forward@openssh.com"
+	pingRequestType                    = "ping"
 )
 
 type streamlocalChannelForwardMsg struct {

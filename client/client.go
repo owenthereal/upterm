@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jingweno/upterm/client/internal"
 	"github.com/jingweno/upterm/io"
@@ -12,9 +13,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func NewClient(command, attachCommand []string, host string, logger log.FieldLogger) *Client {
+func NewClient(command, attachCommand []string, host string, keepAlive time.Duration, logger log.FieldLogger) *Client {
 	return &Client{
 		host:          host,
+		keepAlive:     keepAlive,
 		command:       command,
 		attachCommand: attachCommand,
 		clientID:      xid.New().String(),
@@ -27,6 +29,7 @@ func NewClient(command, attachCommand []string, host string, logger log.FieldLog
 
 type Client struct {
 	host          string
+	keepAlive     time.Duration
 	command       []string
 	attachCommand []string
 	clientID      string
@@ -61,6 +64,7 @@ func (c *Client) Run(ctx context.Context) error {
 	sshClient := newSSHClient(
 		c.clientID,
 		c.host,
+		c.keepAlive,
 		c.attachCommand,
 		ptmx,
 		em,
