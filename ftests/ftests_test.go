@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -30,7 +31,18 @@ type Server struct {
 }
 
 func (s *Server) Start() error {
-	ss := server.New(s.socketDir, log.New())
+	// simulate prod to use ed25519
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+
+	signer, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		return err
+	}
+
+	ss := server.New([]ssh.Signer{signer}, s.socketDir, log.New())
 	return ss.Serve(s.ln)
 }
 

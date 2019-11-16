@@ -13,7 +13,7 @@ spec:
       - name: uptermd
         image: jingweno/uptermd
         imagePullPolicy: Always
-        args: ["--host", "0.0.0.0:22", "--socket-dir", "/sockets"]
+        args: ["--host", "0.0.0.0:22", "--host-key", "/host-keys/ed25519_key", "--socket-dir", "/sockets"]
         ports:
         - containerPort: 22 # uptermd
         readinessProbe:
@@ -27,10 +27,16 @@ spec:
         volumeMounts:
             - mountPath: /sockets
               name: socket-dir
+            - mountPath: /host-keys
+              name: host-keys
       volumes:
       - name: socket-dir
         emptyDir:
           medium: Memory
+      - name: host-keys
+        secret:
+          secretName: host-keys
+          defaultMode: 0600
 ---
 
 apiVersion: v1
