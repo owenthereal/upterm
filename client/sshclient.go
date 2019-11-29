@@ -66,10 +66,8 @@ func (c *sshClient) Dial(ctx context.Context) error {
 	}
 
 	config := &ssh.ClientConfig{
-		User: user.Username,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
+		User:            user.Username,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
 	c.client, err = ssh.Dial("tcp", c.host, config)
@@ -179,7 +177,11 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 		}
 	}
 
-	return gssh.Serve(c.ln, h)
+	server := gssh.Server{
+		Handler: h,
+	}
+
+	return server.Serve(c.ln)
 }
 
 func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *os.File, error) {
