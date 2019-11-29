@@ -230,7 +230,7 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		return fmt.Errorf("error requesting shell: %w", err)
 	}
 
-	ctx := context.Background()
+	ctx := s.Context()
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
