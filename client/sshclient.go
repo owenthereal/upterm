@@ -26,30 +26,36 @@ func newSSHClient(
 	host string,
 	keepAlive time.Duration,
 	attachCommand []string,
+	auths []ssh.AuthMethod,
+	authorizedKeys []ssh.PublicKey,
 	ptmx *os.File,
 	em *internal.EventManager,
 	writers *uio.MultiWriter,
 	logger log.FieldLogger,
 ) *sshClient {
 	return &sshClient{
-		clientID:      clientID,
-		host:          host,
-		keepAlive:     keepAlive,
-		attachCommand: attachCommand,
-		ptmx:          ptmx,
-		em:            em,
-		writers:       writers,
-		logger:        logger,
+		clientID:       clientID,
+		host:           host,
+		keepAlive:      keepAlive,
+		attachCommand:  attachCommand,
+		auths:          auths,
+		authorizedKeys: authorizedKeys,
+		ptmx:           ptmx,
+		em:             em,
+		writers:        writers,
+		logger:         logger,
 	}
 }
 
 type sshClient struct {
-	host          string
-	keepAlive     time.Duration
-	attachCommand []string
-	ptmx          *os.File
-	em            *internal.EventManager
-	writers       *uio.MultiWriter
+	host           string
+	keepAlive      time.Duration
+	attachCommand  []string
+	auths          []ssh.AuthMethod
+	authorizedKeys []ssh.PublicKey
+	ptmx           *os.File
+	em             *internal.EventManager
+	writers        *uio.MultiWriter
 
 	clientID string
 
@@ -67,6 +73,7 @@ func (c *sshClient) Dial(ctx context.Context) error {
 
 	config := &ssh.ClientConfig{
 		User:            user.Username,
+		Auth:            c.auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
@@ -179,6 +186,24 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 
 	server := gssh.Server{
 		Handler: h,
+		PasswordHandler: func(ctx gssh.Context, password string) bool {
+			if len(c.authorizedKeys) == 0 {
+				return true
+			}
+
+			pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
+			if err != nil {
+				return false
+			}
+
+			for _, k := range c.authorizedKeys {
+				if gssh.KeysEqual(k, pk) {
+					return true
+				}
+			}
+
+			return false
+		},
 	}
 
 	return server.Serve(c.ln)

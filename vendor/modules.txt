@@ -36,6 +36,7 @@ golang.org/x/crypto/internal/chacha20
 golang.org/x/crypto/internal/subtle
 golang.org/x/crypto/poly1305
 golang.org/x/crypto/ssh
+golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/terminal
 # golang.org/x/sys v0.0.0-20190422165155-953cdadca894
 golang.org/x/sys/cpu

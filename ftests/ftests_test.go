@@ -76,11 +76,40 @@ func NewServer() (*Server, error) {
 	return s, waitForServer(s.Addr())
 }
 
-func NewClient(command, attachCommand []string) *Client {
+var (
+	hostPublicKey    string
+	hostPrivateKey   string
+	clientPublicKey  string
+	clientPrivateKey string
+)
+
+const (
+	hostPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOA+rMcwWFPJVE2g6EwRPkYmNJfaS/+gkyZ99aR/65uz`
+	hostPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubswAAAIiu5GOBruRj
+gQAAAAtzc2gtZWQyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubsw
+AAAEDBHlsR95C/pGVHtQGpgrUi+Qwgkfnp9QlRKdEhhx4rxOA+rMcwWFPJVE2g6EwRPkYm
+NJfaS/+gkyZ99aR/65uzAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+	`
+	clientPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0EWrjdcHcuMfI8bGAyHPcGsAc/vd/gl5673pRkRBGY`
+	clientPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDdBFq43XB3LjHyPGxgMhz3BrAHP73f4Jeeu96UZEQRmAAAAIiRPFazkTxW
+swAAAAtzc2gtZWQyNTUxOQAAACDdBFq43XB3LjHyPGxgMhz3BrAHP73f4Jeeu96UZEQRmA
+AAAEDmpjZHP/SIyBTp6YBFPzUi18iDo2QHolxGRDpx+m7let0EWrjdcHcuMfI8bGAyHPcG
+sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+`
+)
+
+func NewClient(command, attachCommand, privateKeys []string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		command:       command,
 		attachCommand: attachCommand,
+		privateKeys:   privateKeys,
 		inputCh:       make(chan string),
 		outputCh:      make(chan string),
 		ctx:           ctx,
@@ -91,6 +120,7 @@ func NewClient(command, attachCommand []string) *Client {
 type Client struct {
 	command       []string
 	attachCommand []string
+	privateKeys   []string
 	inputCh       chan string
 	outputCh      chan string
 	client        *client.Client
@@ -106,6 +136,46 @@ func (c *Client) Close() {
 	c.cancel()
 }
 
+func writeTempFile(name, content string) (string, error) {
+	file, err := ioutil.TempFile("", name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := file.Write([]byte(content)); err != nil {
+		return "", err
+	}
+
+	return file.Name(), nil
+}
+
+func writeKeyPair() error {
+	var err error
+
+	hostPublicKey, err = writeTempFile("id_ed25519.pub", hostPublicKeyContent)
+	if err != nil {
+		return err
+	}
+
+	hostPrivateKey, err = writeTempFile("id_ed25519", hostPrivateKeyContent)
+	if err != nil {
+		return err
+	}
+
+	clientPublicKey, err = writeTempFile("id_ed25519.pub", clientPublicKeyContent)
+	if err != nil {
+		return err
+	}
+
+	clientPrivateKey, err = writeTempFile("id_ed25519", clientPrivateKeyContent)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c *Client) Connect(addr, socketDir string) error {
 	stdinr, stdinw, err := os.Pipe()
 	if err != nil {
@@ -117,7 +187,18 @@ func (c *Client) Connect(addr, socketDir string) error {
 		return err
 	}
 
-	c.client = client.NewClient(c.command, c.attachCommand, addr, time.Duration(10), log.New())
+	auths, err := client.AuthMethodsFromFiles(c.privateKeys)
+	if err != nil {
+		return err
+	}
+
+	// permit client public key
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(clientPublicKeyContent))
+	if err != nil {
+		return err
+	}
+
+	c.client = client.NewClient(c.command, c.attachCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
 	c.client.SetInputOutput(stdinr, stdoutw)
 	go func() {
 		if err := c.client.Run(c.ctx); err != nil {
@@ -199,14 +280,17 @@ func (p *Pair) Close() {
 }
 
 func (p *Pair) Join(clientID, addr string) error {
-	config := &ssh.ClientConfig{
-		User: clientID,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
+	auths, err := client.AuthMethodsFromFiles([]string{clientPrivateKey})
+	if err != nil {
+		return err
 	}
 
-	var err error
+	config := &ssh.ClientConfig{
+		User:            clientID,
+		Auth:            auths,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
 	p.sshClient, err = ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return err
@@ -285,6 +369,15 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if err := writeKeyPair(); err != nil {
+		log.Fatal(err)
+	}
+	defer os.Remove(hostPublicKey)
+	defer os.Remove(hostPrivateKey)
+	defer os.Remove(clientPublicKey)
+	defer os.Remove(clientPrivateKey)
+
 	exitCode := m.Run()
 	s.Close()
 
@@ -296,7 +389,7 @@ func Test_FTests(t *testing.T) {
 		t.Parallel()
 
 		// client connects to server
-		c := NewClient([]string{"bash"}, nil)
+		c := NewClient([]string{"bash"}, nil, []string{hostPrivateKey})
 		if err := c.Connect(s.Addr(), s.SocketDir()); err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +440,7 @@ func Test_FTests(t *testing.T) {
 		t.Parallel()
 
 		// client connects to server
-		c := NewClient([]string{"bash"}, []string{"bash"})
+		c := NewClient([]string{"bash"}, []string{"bash"}, []string{hostPrivateKey})
 		if err := c.Connect(s.Addr(), s.SocketDir()); err != nil {
 			t.Fatal(err)
 		}

@@ -40,6 +40,10 @@ func (s *Server) Serve(ln net.Listener) error {
 			s.logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port}).Info("attempt to bind")
 			return true
 		}),
+		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
+			// TODO: validate public keys
+			return true
+		},
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:      sh.Handler,
 			cancelStreamlocalForwardChanneType: sh.Handler,

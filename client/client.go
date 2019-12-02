@@ -11,16 +11,27 @@ import (
 	"github.com/oklog/run"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/ssh"
 )
 
-func NewClient(command, attachCommand []string, host string, keepAlive time.Duration, logger log.FieldLogger) *Client {
+func NewClient(
+	command,
+	attachCommand []string,
+	host string,
+	auths []ssh.AuthMethod,
+	authorizedKeys []ssh.PublicKey,
+	keepAlive time.Duration,
+	logger log.FieldLogger,
+) *Client {
 	return &Client{
-		host:          host,
-		keepAlive:     keepAlive,
-		command:       command,
-		attachCommand: attachCommand,
-		clientID:      xid.New().String(),
-		logger:        logger,
+		host:           host,
+		keepAlive:      keepAlive,
+		command:        command,
+		attachCommand:  attachCommand,
+		auths:          auths,
+		authorizedKeys: authorizedKeys,
+		clientID:       xid.New().String(),
+		logger:         logger,
 
 		stdin:  os.Stdin,
 		stdout: os.Stdout,
@@ -28,12 +39,14 @@ func NewClient(command, attachCommand []string, host string, keepAlive time.Dura
 }
 
 type Client struct {
-	host          string
-	keepAlive     time.Duration
-	command       []string
-	attachCommand []string
-	clientID      string
-	logger        log.FieldLogger
+	host           string
+	keepAlive      time.Duration
+	command        []string
+	attachCommand  []string
+	auths          []ssh.AuthMethod
+	authorizedKeys []ssh.PublicKey
+	clientID       string
+	logger         log.FieldLogger
 
 	stdin  *os.File
 	stdout *os.File
@@ -66,6 +79,8 @@ func (c *Client) Run(ctx context.Context) error {
 		c.host,
 		c.keepAlive,
 		c.attachCommand,
+		c.auths,
+		c.authorizedKeys,
 		ptmx,
 		em,
 		writers,

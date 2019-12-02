@@ -39,6 +39,7 @@ func newStreamlocalForwardHandler(socketDir string, logger log.FieldLogger) *str
 		forwards:  make(map[string]net.Listener),
 		logger:    logger,
 	}
+
 }
 
 type streamlocalForwardHandler struct {
@@ -188,8 +189,10 @@ func (h *sshProxyHandler) handle(s ssh.Session) error {
 		return fmt.Errorf("socket does not exist: %w", err)
 	}
 
+	authorizedKey := gossh.MarshalAuthorizedKey(s.PublicKey())
 	config := &gossh.ClientConfig{
 		User: user,
+		Auth: []gossh.AuthMethod{gossh.Password(string(authorizedKey))},
 		HostKeyCallback: func(hostname string, remote net.Addr, key gossh.PublicKey) error {
 			return nil
 		},
