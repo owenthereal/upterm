@@ -104,28 +104,28 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 `
 )
 
-func NewClient(command, attachCommand, privateKeys []string) *Client {
+func NewClient(command, joinCommand, privateKeys []string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		command:       command,
-		attachCommand: attachCommand,
-		privateKeys:   privateKeys,
-		inputCh:       make(chan string),
-		outputCh:      make(chan string),
-		ctx:           ctx,
-		cancel:        cancel,
+		command:     command,
+		joinCommand: joinCommand,
+		privateKeys: privateKeys,
+		inputCh:     make(chan string),
+		outputCh:    make(chan string),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
 type Client struct {
-	command       []string
-	attachCommand []string
-	privateKeys   []string
-	inputCh       chan string
-	outputCh      chan string
-	client        *client.Client
-	ctx           context.Context
-	cancel        func()
+	command     []string
+	joinCommand []string
+	privateKeys []string
+	inputCh     chan string
+	outputCh    chan string
+	client      *client.Client
+	ctx         context.Context
+	cancel      func()
 }
 
 func (c *Client) ClientID() string {
@@ -198,7 +198,7 @@ func (c *Client) Connect(addr, socketDir string) error {
 		return err
 	}
 
-	c.client = client.NewClient(c.command, c.attachCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
+	c.client = client.NewClient(c.command, c.joinCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
 	c.client.SetInputOutput(stdinr, stdoutw)
 	go func() {
 		if err := c.client.Run(c.ctx); err != nil {

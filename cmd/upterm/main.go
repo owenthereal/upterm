@@ -18,7 +18,7 @@ import (
 
 var (
 	flagHost           string
-	flagAttachCommand  string
+	flagJoinCommand    string
 	flagKeepAlive      uint8
 	flagPrivateKeys    []string
 	flagAuthorizedKeys string
@@ -26,11 +26,11 @@ var (
 	rootCmd = &cobra.Command{
 		Use:  "upterm",
 		Long: "Share a terminal session.",
-		Example: `  # Run $SHELL and client will attach to host's stdin, stdout and stderr
+		Example: `  # Host a session by running $SHELL. Client's input & output are attached to the host's.
   upterm
-  # Run 'bash' and client will attach with to host's stdin, stdout and stderr
+  # Host a session by running 'bash'. Client's input & output are attached to the host's.
   upterm bash
-  # Run 'tmux new pair' and client will attach with 'tmux attach -t pair' after it connects
+  # Host a session by running 'tmux new pair'. Client runs 'tmux attach -t pair' to attach to the session.
   upterm -t 'tmux attach -t pair' -- tmux new -t pair`,
 		RunE: runE,
 	}
@@ -47,7 +47,7 @@ func init() {
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", "127.0.0.1:2222", "server host")
-	rootCmd.PersistentFlags().StringVarP(&flagAttachCommand, "attach-command", "t", "", "attach command after client connects")
+	rootCmd.PersistentFlags().StringVarP(&flagJoinCommand, "join-command", "j", "", "command to run after client joins, otherwise client is attached to host's input/output.")
 	rootCmd.PersistentFlags().Uint8VarP(&flagKeepAlive, "keep-alive", "", 30, "server keep alive duration in second")
 	rootCmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "a file from which the private key for public key authentication is read")
 	rootCmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-keys", "a", "", "a file which lists public keys that are permitted to connect. This file is in the format of authorized_keys in OpenSSH.")
@@ -68,11 +68,11 @@ func runE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	var attachCommand []string
-	if flagAttachCommand != "" {
-		attachCommand, err = shlex.Split(flagAttachCommand)
+	var joinCommand []string
+	if flagJoinCommand != "" {
+		joinCommand, err = shlex.Split(flagJoinCommand)
 		if err != nil {
-			return fmt.Errorf("error parsing command %s: %w", flagAttachCommand, err)
+			return fmt.Errorf("error parsing command %s: %w", flagJoinCommand, err)
 		}
 	}
 
@@ -92,7 +92,7 @@ func runE(c *cobra.Command, args []string) error {
 		defer cleanup()
 	}
 
-	client := client.NewClient(args, attachCommand, flagHost, auths, authorizedKeys, time.Duration(flagKeepAlive), logger)
+	client := client.NewClient(args, joinCommand, flagHost, auths, authorizedKeys, time.Duration(flagKeepAlive), logger)
 	if err := printJoinCmd(client.ClientID()); err != nil {
 		return err
 	}

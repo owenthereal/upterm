@@ -16,7 +16,7 @@ import (
 
 func NewClient(
 	command,
-	attachCommand []string,
+	joinCommand []string,
 	host string,
 	auths []ssh.AuthMethod,
 	authorizedKeys []ssh.PublicKey,
@@ -27,7 +27,7 @@ func NewClient(
 		host:           host,
 		keepAlive:      keepAlive,
 		command:        command,
-		attachCommand:  attachCommand,
+		joinCommand:    joinCommand,
 		auths:          auths,
 		authorizedKeys: authorizedKeys,
 		clientID:       xid.New().String(),
@@ -42,7 +42,7 @@ type Client struct {
 	host           string
 	keepAlive      time.Duration
 	command        []string
-	attachCommand  []string
+	joinCommand    []string
 	auths          []ssh.AuthMethod
 	authorizedKeys []ssh.PublicKey
 	clientID       string
@@ -78,7 +78,7 @@ func (c *Client) Run(ctx context.Context) error {
 		c.clientID,
 		c.host,
 		c.keepAlive,
-		c.attachCommand,
+		c.joinCommand,
 		c.auths,
 		c.authorizedKeys,
 		ptmx,

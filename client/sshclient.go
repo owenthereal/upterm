@@ -25,7 +25,7 @@ func newSSHClient(
 	clientID string,
 	host string,
 	keepAlive time.Duration,
-	attachCommand []string,
+	joinCommand []string,
 	auths []ssh.AuthMethod,
 	authorizedKeys []ssh.PublicKey,
 	ptmx *os.File,
@@ -37,7 +37,7 @@ func newSSHClient(
 		clientID:       clientID,
 		host:           host,
 		keepAlive:      keepAlive,
-		attachCommand:  attachCommand,
+		joinCommand:    joinCommand,
 		auths:          auths,
 		authorizedKeys: authorizedKeys,
 		ptmx:           ptmx,
@@ -50,7 +50,7 @@ func newSSHClient(
 type sshClient struct {
 	host           string
 	keepAlive      time.Duration
-	attachCommand  []string
+	joinCommand    []string
 	auths          []ssh.AuthMethod
 	authorizedKeys []ssh.PublicKey
 	ptmx           *os.File
@@ -113,11 +113,11 @@ func (c *sshClient) serveSSHServer(ctx context.Context) error {
 			err  error
 			ptmx = c.ptmx
 		)
-		if len(c.attachCommand) > 0 {
+		if len(c.joinCommand) > 0 {
 			var cmd *exec.Cmd
 
 			cmdCtx, cmdCancel := context.WithCancel(ctx)
-			cmd, ptmx, err = startAttachCmd(cmdCtx, c.attachCommand, ptyReq.Term)
+			cmd, ptmx, err = startAttachCmd(cmdCtx, c.joinCommand, ptyReq.Term)
 			if err != nil {
 				c.logger.Println(err)
 				sess.Exit(1)
