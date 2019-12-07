@@ -154,13 +154,15 @@ func (c *Host) Share(addr, socketDir string) error {
 
 	c.client = client.NewClient(c.Command, c.JoinCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
 	c.client.SetInputOutput(stdinr, stdoutw)
+	errCh := make(chan error)
 	go func() {
 		if err := c.client.Run(c.ctx); err != nil {
 			log.WithError(err).Info("error running client")
+			errCh <- err
 		}
 	}()
 
-	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.client.ClientID()))); err != nil {
+	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.client.ClientID())), errCh); err != nil {
 		return err
 	}
 
@@ -357,20 +359,24 @@ func waitForServer(addr string) error {
 	return nil
 }
 
-func waitForUnixSocket(socket string) error {
+func waitForUnixSocket(socket string, errCh chan error) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	count := 0
-
-	for range ticker.C {
-		log.WithField("socket", socket).Info("waiting for unix socket")
-		if _, err := os.Stat(socket); err == nil {
-			break
-		}
-		count++
-		if count >= 10 {
-			return fmt.Errorf("waiting for unix socket failed")
+	for {
+		select {
+		case err := <-errCh:
+			return err
+		case <-ticker.C:
+			log.WithField("socket", socket).Info("waiting for unix socket")
+			if _, err := os.Stat(socket); err == nil {
+				return nil
+			}
+			count++
+			if count >= 10 {
+				return fmt.Errorf("waiting for unix socket failed")
+			}
 		}
 	}
 

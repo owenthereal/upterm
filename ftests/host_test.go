@@ -1,14 +1,20 @@
 package ftests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func Test_HostFailToShareWithoutPrivateKey(t *testing.T) {
 	h := &Host{
-		Command:     []string{"bash"},
-		PrivateKeys: []string{hostPrivateKey},
+		Command: []string{"bash"},
 	}
-	if err := h.Share(s.Addr(), s.SocketDir()); err != nil {
-		t.Fatal(err)
+	err := h.Share(s.Addr(), s.SocketDir())
+	if err == nil {
+		t.Fatal("expect error")
 	}
-	defer h.Close()
+
+	if !strings.Contains(err.Error(), "Permission denied (publickey)") {
+		t.Fatalf("expect permission denied error: %s", err)
+	}
 }

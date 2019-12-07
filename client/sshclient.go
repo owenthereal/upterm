@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"strings"
 	"time"
 
 	"github.com/creack/pty"
@@ -20,6 +21,32 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
+
+const (
+	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
+)
+
+type PermissionDeniedError struct {
+	host string
+	err  error
+}
+
+func (e *PermissionDeniedError) Error() string {
+	return fmt.Sprintf("%s: Permission denied (publickey).", e.host)
+}
+
+func (e *PermissionDeniedError) Unwrap() error { return e.err }
+
+func sshDialError(host string, err error) error {
+	if strings.Contains(err.Error(), publickeyAuthError) {
+		return &PermissionDeniedError{
+			host: host,
+			err:  err,
+		}
+	}
+
+	return fmt.Errorf("ssh dial error: %w", err)
+}
 
 func newSSHClient(
 	clientID string,
@@ -79,7 +106,7 @@ func (c *sshClient) Dial(ctx context.Context) error {
 
 	c.client, err = ssh.Dial("tcp", c.host, config)
 	if err != nil {
-		return fmt.Errorf("unable to connect: %w", err)
+		return sshDialError(c.host, err)
 	}
 
 	c.ln, err = c.client.Listen("unix", utils.SocketFile(c.clientID))
