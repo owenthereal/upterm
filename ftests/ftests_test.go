@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/client"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
@@ -24,57 +23,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
-
-type Server struct {
-	ln        net.Listener
-	socketDir string
-}
-
-func (s *Server) Start() error {
-	// simulate prod to use ed25519
-	_, private, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		return err
-	}
-
-	signer, err := ssh.NewSignerFromKey(private)
-	if err != nil {
-		return err
-	}
-
-	ss := server.New([]ssh.Signer{signer}, s.socketDir, log.New())
-	return ss.Serve(s.ln)
-}
-
-func (s *Server) Addr() string {
-	return s.ln.Addr().String()
-}
-
-func (s *Server) SocketDir() string {
-	return s.socketDir
-}
-
-func (s *Server) Close() {
-	s.ln.Close()
-	os.RemoveAll(s.socketDir)
-}
-
-func NewServer() (*Server, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, err
-	}
-
-	socketDir, err := ioutil.TempDir("", "sockets")
-	if err != nil {
-		return nil, err
-	}
-
-	s := &Server{ln, socketDir}
-	go s.Start()
-
-	return s, waitForServer(s.Addr())
-}
 
 var (
 	hostPublicKey    string
@@ -104,79 +52,85 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 `
 )
 
-func NewClient(command, joinCommand, privateKeys []string) *Client {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Client{
-		command:     command,
-		joinCommand: joinCommand,
-		privateKeys: privateKeys,
-		inputCh:     make(chan string),
-		outputCh:    make(chan string),
-		ctx:         ctx,
-		cancel:      cancel,
+func NewServer() (*Server, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
 	}
+
+	socketDir, err := ioutil.TempDir("", "sockets")
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Server{ln, socketDir}
+	go s.start()
+
+	return s, waitForServer(s.Addr())
 }
 
-type Client struct {
-	command     []string
-	joinCommand []string
-	privateKeys []string
-	inputCh     chan string
-	outputCh    chan string
-	client      *client.Client
-	ctx         context.Context
-	cancel      func()
+type Server struct {
+	ln        net.Listener
+	socketDir string
 }
 
-func (c *Client) ClientID() string {
+func (s *Server) start() error {
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+
+	signer, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		return err
+	}
+
+	ss := server.New([]ssh.Signer{signer}, s.socketDir, log.New())
+	return ss.Serve(s.ln)
+}
+
+func (s *Server) Addr() string {
+	return s.ln.Addr().String()
+}
+
+func (s *Server) SocketDir() string {
+	return s.socketDir
+}
+
+func (s *Server) Close() {
+	s.ln.Close()
+	os.RemoveAll(s.socketDir)
+}
+
+type Host struct {
+	Command     []string
+	JoinCommand []string
+	PrivateKeys []string
+
+	inputCh  chan string
+	outputCh chan string
+	client   *client.Client
+	ctx      context.Context
+	cancel   func()
+}
+
+func (c *Host) SessionID() string {
 	return c.client.ClientID()
 }
 
-func (c *Client) Close() {
+func (c *Host) Close() {
 	c.cancel()
 }
 
-func writeTempFile(name, content string) (string, error) {
-	file, err := ioutil.TempFile("", name)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	if _, err := file.Write([]byte(content)); err != nil {
-		return "", err
-	}
-
-	return file.Name(), nil
+func (c *Host) init() {
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.inputCh = make(chan string)
+	c.outputCh = make(chan string)
 }
 
-func writeKeyPair() error {
-	var err error
+func (c *Host) Share(addr, socketDir string) error {
+	c.init()
 
-	hostPublicKey, err = writeTempFile("id_ed25519.pub", hostPublicKeyContent)
-	if err != nil {
-		return err
-	}
-
-	hostPrivateKey, err = writeTempFile("id_ed25519", hostPrivateKeyContent)
-	if err != nil {
-		return err
-	}
-
-	clientPublicKey, err = writeTempFile("id_ed25519.pub", clientPublicKeyContent)
-	if err != nil {
-		return err
-	}
-
-	clientPrivateKey, err = writeTempFile("id_ed25519", clientPrivateKeyContent)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Client) Connect(addr, socketDir string) error {
 	stdinr, stdinw, err := os.Pipe()
 	if err != nil {
 		return err
@@ -187,7 +141,7 @@ func (c *Client) Connect(addr, socketDir string) error {
 		return err
 	}
 
-	auths, err := client.AuthMethodsFromFiles(c.privateKeys)
+	auths, err := client.AuthMethodsFromFiles(c.PrivateKeys)
 	if err != nil {
 		return err
 	}
@@ -198,7 +152,7 @@ func (c *Client) Connect(addr, socketDir string) error {
 		return err
 	}
 
-	c.client = client.NewClient(c.command, c.joinCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
+	c.client = client.NewClient(c.Command, c.JoinCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
 	c.client.SetInputOutput(stdinr, stdoutw)
 	go func() {
 		if err := c.client.Run(c.ctx); err != nil {
@@ -250,18 +204,11 @@ func (c *Client) Connect(addr, socketDir string) error {
 	return nil
 }
 
-func (c *Client) InputOutput() (chan string, chan string) {
+func (c *Host) InputOutput() (chan string, chan string) {
 	return c.inputCh, c.outputCh
 }
 
-func NewPair() *Pair {
-	return &Pair{
-		inputCh:  make(chan string),
-		outputCh: make(chan string),
-	}
-}
-
-type Pair struct {
+type Client struct {
 	sshClient *ssh.Client
 	session   *ssh.Session
 	sshStdin  io.WriteCloser
@@ -270,16 +217,23 @@ type Pair struct {
 	outputCh  chan string
 }
 
-func (p *Pair) InputOutput() (chan string, chan string) {
-	return p.inputCh, p.outputCh
+func (c *Client) init() {
+	c.inputCh = make(chan string)
+	c.outputCh = make(chan string)
 }
 
-func (p *Pair) Close() {
-	p.session.Close()
-	p.sshClient.Close()
+func (c *Client) InputOutput() (chan string, chan string) {
+	return c.inputCh, c.outputCh
 }
 
-func (p *Pair) Join(clientID, addr string) error {
+func (c *Client) Close() {
+	c.session.Close()
+	c.sshClient.Close()
+}
+
+func (c *Client) Join(clientID, addr string) error {
+	c.init()
+
 	auths, err := client.AuthMethodsFromFiles([]string{clientPrivateKey})
 	if err != nil {
 		return err
@@ -291,31 +245,31 @@ func (p *Pair) Join(clientID, addr string) error {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	p.sshClient, err = ssh.Dial("tcp", addr, config)
+	c.sshClient, err = ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return err
 	}
 
-	p.session, err = p.sshClient.NewSession()
+	c.session, err = c.sshClient.NewSession()
 	if err != nil {
 		return err
 	}
 
-	if err = p.session.RequestPty("xterm", 40, 80, ssh.TerminalModes{}); err != nil {
+	if err = c.session.RequestPty("xterm", 40, 80, ssh.TerminalModes{}); err != nil {
 		return err
 	}
 
-	p.sshStdin, err = p.session.StdinPipe()
+	c.sshStdin, err = c.session.StdinPipe()
 	if err != nil {
 		return err
 	}
 
-	p.sshStdout, err = p.session.StdoutPipe()
+	c.sshStdout, err = c.session.StdoutPipe()
 	if err != nil {
 		return err
 	}
 
-	if err = p.session.Shell(); err != nil {
+	if err = c.session.Shell(); err != nil {
 		return err
 	}
 
@@ -333,13 +287,13 @@ func (p *Pair) Join(clientID, addr string) error {
 			s := bufio.NewScanner(bytes.NewBuffer(b))
 			for s.Scan() {
 				if s.Text() != "" {
-					p.outputCh <- strings.TrimSpace(s.Text())
+					c.outputCh <- strings.TrimSpace(s.Text())
 				}
 			}
 
 			return len(pp), nil
 		})
-		if _, err := io.Copy(w, p.sshStdout); err != nil {
+		if _, err := io.Copy(w, c.sshStdout); err != nil {
 			log.WithError(err).Info("error copying from stdout")
 		}
 	}()
@@ -347,8 +301,8 @@ func (p *Pair) Join(clientID, addr string) error {
 	// input
 	go func() {
 		remoteWg.Wait()
-		for c := range p.inputCh {
-			if _, err := io.Copy(p.sshStdin, bytes.NewBufferString(c+"\n")); err != nil {
+		for s := range c.inputCh {
+			if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
 				log.WithError(err).Info("error copying to stdin")
 			}
 		}
@@ -362,7 +316,11 @@ func (p *Pair) Join(clientID, addr string) error {
 var s *Server
 
 func TestMain(m *testing.M) {
-	var err error
+	err := writeKeyPairs()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer removeKeyPairs()
 
 	// start the server
 	s, err = NewServer()
@@ -370,123 +328,10 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
-	if err := writeKeyPair(); err != nil {
-		log.Fatal(err)
-	}
-	defer os.Remove(hostPublicKey)
-	defer os.Remove(hostPrivateKey)
-	defer os.Remove(clientPublicKey)
-	defer os.Remove(clientPrivateKey)
-
 	exitCode := m.Run()
 	s.Close()
 
 	os.Exit(exitCode)
-}
-
-func Test_FTests(t *testing.T) {
-	t.Run("pair attaches to host with the same command", func(t *testing.T) {
-		t.Parallel()
-
-		// client connects to server
-		c := NewClient([]string{"bash"}, nil, []string{hostPrivateKey})
-		if err := c.Connect(s.Addr(), s.SocketDir()); err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-
-		hostInputCh, hostOutputCh := c.InputOutput()
-
-		<-hostOutputCh // discard prompt, e.g. bash-5.0$
-
-		hostInputCh <- "echo hello"
-		if want, got := "echo hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-
-		// pair joins client
-		p := NewPair()
-		if err := p.Join(c.ClientID(), s.Addr()); err != nil {
-			t.Fatal(err)
-		}
-
-		remoteInputCh, remoteOutputCh := p.InputOutput()
-
-		<-remoteOutputCh // discard cached prompt, e.g. bash-5.0$
-		<-remoteOutputCh // discard prompt, e.g. bash-5.0$
-
-		remoteInputCh <- "echo hello again"
-		if want, got := "echo hello again", <-remoteOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello again", <-remoteOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-
-		<-hostOutputCh // discard prompt, e.g. bash-5.0$
-		// host should link to remote with the same input/output
-		if want, got := "echo hello again", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello again", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-	})
-
-	t.Run("pair attaches to host with a different command", func(t *testing.T) {
-		t.Parallel()
-
-		// client connects to server
-		c := NewClient([]string{"bash"}, []string{"bash"}, []string{hostPrivateKey})
-		if err := c.Connect(s.Addr(), s.SocketDir()); err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-
-		hostInputCh, hostOutputCh := c.InputOutput()
-
-		<-hostOutputCh // discard prompt, e.g. bash-5.0$
-
-		hostInputCh <- "echo hello"
-		if want, got := "echo hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-
-		// pair joins client
-		p := NewPair()
-		if err := p.Join(c.ClientID(), s.Addr()); err != nil {
-			t.Fatal(err)
-		}
-
-		remoteInputCh, remoteOutputCh := p.InputOutput()
-
-		<-remoteOutputCh // discard prompt, e.g. bash-5.0$
-
-		remoteInputCh <- "echo hello again"
-		if want, got := "echo hello again", <-remoteOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello again", <-remoteOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-
-		<-hostOutputCh // discard prompt, e.g. bash-5.0$
-
-		// host shouldn't be linked to remote
-		hostInputCh <- "echo hello"
-		if want, got := "echo hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello", <-hostOutputCh; !strings.Contains(got, want) {
-			t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-		}
-	})
 }
 
 func waitForServer(addr string) error {
@@ -535,3 +380,50 @@ func waitForUnixSocket(socket string) error {
 type writeFunc func(p []byte) (n int, err error)
 
 func (rf writeFunc) Write(p []byte) (n int, err error) { return rf(p) }
+
+func writeKeyPairs() error {
+	var err error
+
+	hostPublicKey, err = writeTempFile("id_ed25519.pub", hostPublicKeyContent)
+	if err != nil {
+		return err
+	}
+
+	hostPrivateKey, err = writeTempFile("id_ed25519", hostPrivateKeyContent)
+	if err != nil {
+		return err
+	}
+
+	clientPublicKey, err = writeTempFile("id_ed25519.pub", clientPublicKeyContent)
+	if err != nil {
+		return err
+	}
+
+	clientPrivateKey, err = writeTempFile("id_ed25519", clientPrivateKeyContent)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func removeKeyPairs() {
+	os.Remove(hostPublicKey)
+	os.Remove(hostPrivateKey)
+	os.Remove(clientPublicKey)
+	os.Remove(clientPrivateKey)
+}
+
+func writeTempFile(name, content string) (string, error) {
+	file, err := ioutil.TempFile("", name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := file.Write([]byte(content)); err != nil {
+		return "", err
+	}
+
+	return file.Name(), nil
+}
