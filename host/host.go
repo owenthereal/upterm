@@ -35,17 +35,16 @@ func (c *Host) Run(ctx context.Context) error {
 		c.Stdout = os.Stdout
 	}
 
-	sshClient := ussh.Client{
+	rt := ussh.ReverseTunnel{
 		Host:      c.Host,
 		SessionID: c.SessionID,
 		Auths:     c.Auths,
 		KeepAlive: c.KeepAlive,
 	}
-	ln, err := sshClient.ReverseTunnel(ctx)
-	if err != nil {
+	if err := rt.Establish(ctx); err != nil {
 		return err
 	}
-	defer sshClient.Close()
+	defer rt.Close()
 
 	sshServer := ussh.Server{
 		Command:        c.Command,
@@ -56,5 +55,5 @@ func (c *Host) Run(ctx context.Context) error {
 		Logger:         c.Logger,
 	}
 
-	return sshServer.ServeWithContext(ctx, ln)
+	return sshServer.ServeWithContext(ctx, rt.Listener())
 }

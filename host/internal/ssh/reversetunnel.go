@@ -16,7 +16,7 @@ const (
 	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
 )
 
-type Client struct {
+type ReverseTunnel struct {
 	*ssh.Client
 
 	Host      string
@@ -27,15 +27,19 @@ type Client struct {
 	ln net.Listener
 }
 
-func (c *Client) Close() {
+func (c *ReverseTunnel) Close() {
 	c.ln.Close()
 	c.Client.Close()
 }
 
-func (c *Client) ReverseTunnel(ctx context.Context) (net.Listener, error) {
+func (c *ReverseTunnel) Listener() net.Listener {
+	return c.ln
+}
+
+func (c *ReverseTunnel) Establish(ctx context.Context) error {
 	user, err := user.Current()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	config := &ssh.ClientConfig{
@@ -46,12 +50,12 @@ func (c *Client) ReverseTunnel(ctx context.Context) (net.Listener, error) {
 
 	c.Client, err = ssh.Dial("tcp", c.Host, config)
 	if err != nil {
-		return nil, sshDialError(c.Host, err)
+		return sshDialError(c.Host, err)
 	}
 
 	c.ln, err = c.Client.Listen("unix", utils.SocketFile(c.SessionID))
 	if err != nil {
-		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
+		return fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
 
 	// make sure connection is alive
@@ -59,7 +63,7 @@ func (c *Client) ReverseTunnel(ctx context.Context) (net.Listener, error) {
 		c.Client.SendRequest("ping", true, nil)
 	})
 
-	return c.ln, nil
+	return nil
 }
 
 type PermissionDeniedError struct {
