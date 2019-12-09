@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jingweno/upterm/client"
+	"github.com/jingweno/upterm/host"
+	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -78,13 +79,13 @@ func runE(c *cobra.Command, args []string) error {
 
 	var authorizedKeys []ssh.PublicKey
 	if flagAuthorizedKeys != "" {
-		authorizedKeys, err = client.AuthorizedKeys(flagAuthorizedKeys)
+		authorizedKeys, err = host.AuthorizedKeys(flagAuthorizedKeys)
 	}
 	if err != nil {
 		return fmt.Errorf("error reading %s: %w", flagPrivateKeys, err)
 	}
 
-	auths, cleanup, err := client.AuthMethods(flagPrivateKeys)
+	auths, cleanup, err := host.AuthMethods(flagPrivateKeys)
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
@@ -92,13 +93,22 @@ func runE(c *cobra.Command, args []string) error {
 		defer cleanup()
 	}
 
-	client := client.NewClient(args, joinCommand, flagHost, auths, authorizedKeys, time.Duration(flagKeepAlive), logger)
-	if err := printJoinCmd(client.ClientID()); err != nil {
+	h := &host.Host{
+		Host:           flagHost,
+		SessionID:      xid.New().String(),
+		Command:        args,
+		JoinCommand:    joinCommand,
+		Auths:          auths,
+		AuthorizedKeys: authorizedKeys,
+		KeepAlive:      time.Duration(flagKeepAlive),
+		Logger:         logger,
+	}
+	if err := printJoinCmd(h.SessionID); err != nil {
 		return err
 	}
 	defer logger.Info("Bye!")
 
-	return client.Run(context.Background())
+	return h.Run(context.Background())
 }
 
 func printJoinCmd(sessionID string) error {

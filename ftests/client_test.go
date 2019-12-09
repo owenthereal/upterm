@@ -8,6 +8,8 @@ import (
 )
 
 func Test_ClientAttachHostWithSameCommand(t *testing.T) {
+	t.Parallel()
+
 	h := &Host{
 		Command:     []string{"bash"},
 		PrivateKeys: []string{hostPrivateKey},
@@ -30,7 +32,7 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID(), s.Addr()); err != nil {
+	if err := c.Join(h.SessionID, s.Addr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,6 +60,8 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 }
 
 func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
+	t.Parallel()
+
 	h := &Host{
 		Command:     []string{"bash"},
 		JoinCommand: []string{"bash"},
@@ -81,7 +85,7 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID(), s.Addr()); err != nil {
+	if err := c.Join(h.SessionID, s.Addr()); err != nil {
 		t.Fatal(err)
 	}
 

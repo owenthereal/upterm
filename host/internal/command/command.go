@@ -1,4 +1,4 @@
-package client
+package command
 
 import (
 	"context"
@@ -10,21 +10,21 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/jingweno/upterm/client/internal"
+	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-func newCommand(
+func NewCommand(
 	name string,
 	args []string,
 	stdin *os.File,
 	stdout *os.File,
-	em *internal.EventManager,
+	em *event.EventManager,
 	writers *uio.MultiWriter,
-) *command {
-	return &command{
+) *Command {
+	return &Command{
 		name:    name,
 		args:    args,
 		stdin:   stdin,
@@ -34,7 +34,7 @@ func newCommand(
 	}
 }
 
-type command struct {
+type Command struct {
 	name string
 	args []string
 
@@ -44,13 +44,13 @@ type command struct {
 	stdin  *os.File
 	stdout *os.File
 
-	em      *internal.EventManager
+	em      *event.EventManager
 	writers *uio.MultiWriter
 
 	ctx context.Context
 }
 
-func (c *command) Start(ctx context.Context) (*os.File, error) {
+func (c *Command) Start(ctx context.Context) (*os.File, error) {
 	var err error
 
 	c.ctx = ctx
@@ -63,7 +63,7 @@ func (c *command) Start(ctx context.Context) (*os.File, error) {
 	return c.ptmx, nil
 }
 
-func (c *command) Run() error {
+func (c *Command) Run() error {
 	// Set stdin in raw mode.
 
 	isTty := terminal.IsTerminal(int(c.stdin.Fd()))

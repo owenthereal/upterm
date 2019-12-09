@@ -16,10 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jingweno/upterm/client"
+	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
 	"github.com/pborman/ansi"
+	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -103,19 +104,16 @@ func (s *Server) Close() {
 }
 
 type Host struct {
+	*host.Host
+
 	Command     []string
 	JoinCommand []string
 	PrivateKeys []string
 
 	inputCh  chan string
 	outputCh chan string
-	client   *client.Client
 	ctx      context.Context
 	cancel   func()
-}
-
-func (c *Host) SessionID() string {
-	return c.client.ClientID()
 }
 
 func (c *Host) Close() {
@@ -141,7 +139,7 @@ func (c *Host) Share(addr, socketDir string) error {
 		return err
 	}
 
-	auths, err := client.AuthMethodsFromFiles(c.PrivateKeys)
+	auths, err := host.AuthMethodsFromFiles(c.PrivateKeys)
 	if err != nil {
 		return err
 	}
@@ -152,17 +150,28 @@ func (c *Host) Share(addr, socketDir string) error {
 		return err
 	}
 
-	c.client = client.NewClient(c.Command, c.JoinCommand, addr, auths, []ssh.PublicKey{pk}, time.Duration(10), log.New())
-	c.client.SetInputOutput(stdinr, stdoutw)
+	c.Host = &host.Host{
+		Host:           addr,
+		Command:        c.Command,
+		JoinCommand:    c.JoinCommand,
+		Auths:          auths,
+		AuthorizedKeys: []ssh.PublicKey{pk},
+		KeepAlive:      time.Duration(10),
+		Logger:         log.New(),
+		Stdin:          stdinr,
+		Stdout:         stdoutw,
+		SessionID:      xid.New().String(),
+	}
+
 	errCh := make(chan error)
 	go func() {
-		if err := c.client.Run(c.ctx); err != nil {
+		if err := c.Host.Run(c.ctx); err != nil {
 			log.WithError(err).Info("error running client")
 			errCh <- err
 		}
 	}()
 
-	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.client.ClientID())), errCh); err != nil {
+	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.Host.SessionID)), errCh); err != nil {
 		return err
 	}
 
@@ -236,7 +245,7 @@ func (c *Client) Close() {
 func (c *Client) Join(clientID, addr string) error {
 	c.init()
 
-	auths, err := client.AuthMethodsFromFiles([]string{clientPrivateKey})
+	auths, err := host.AuthMethodsFromFiles([]string{clientPrivateKey})
 	if err != nil {
 		return err
 	}

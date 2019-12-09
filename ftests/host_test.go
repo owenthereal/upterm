@@ -6,6 +6,8 @@ import (
 )
 
 func Test_HostFailToShareWithoutPrivateKey(t *testing.T) {
+	t.Parallel()
+
 	h := &Host{
 		Command: []string{"bash"},
 	}
