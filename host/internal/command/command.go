@@ -19,6 +19,7 @@ import (
 func NewCommand(
 	name string,
 	args []string,
+	env []string,
 	stdin *os.File,
 	stdout *os.File,
 	em *event.EventManager,
@@ -27,6 +28,7 @@ func NewCommand(
 	return &Command{
 		name:    name,
 		args:    args,
+		env:     env,
 		stdin:   stdin,
 		stdout:  stdout,
 		em:      em,
@@ -37,6 +39,7 @@ func NewCommand(
 type Command struct {
 	name string
 	args []string
+	env  []string
 
 	cmd  *exec.Cmd
 	ptmx *os.File
@@ -55,6 +58,7 @@ func (c *Command) Start(ctx context.Context) (*os.File, error) {
 
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
+	c.cmd.Env = append(c.env, os.Environ()...)
 	c.ptmx, err = pty.Start(c.cmd)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)

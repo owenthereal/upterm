@@ -1,0 +1,41 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "api.proto",
+    "version": "version not set"
+  },
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/session": {
+      "get": {
+        "operationId": "GetSession",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/apiGetSessionResponse"
+            }
+          }
+        },
+        "tags": [
+          "AdminService"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "apiGetSessionResponse": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

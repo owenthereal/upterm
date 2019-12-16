@@ -21,6 +21,7 @@ import (
 
 type Server struct {
 	Command        []string
+	CommandEnv     []string
 	JoinCommand    []string
 	AuthorizedKeys []ssh.PublicKey
 	Stdin          *os.File
@@ -35,7 +36,15 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	em := event.NewEventManager(emCtx)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
-	cmd := command.NewCommand(s.Command[0], s.Command[1:], s.Stdin, s.Stdout, em, writers)
+	cmd := command.NewCommand(
+		s.Command[0],
+		s.Command[1:],
+		s.CommandEnv,
+		s.Stdin,
+		s.Stdout,
+		em,
+		writers,
+	)
 	ptmx, err := cmd.Start(cmdCtx)
 	if err != nil {
 		return fmt.Errorf("error starting command: %w", err)
