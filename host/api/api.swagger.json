@@ -32,6 +32,9 @@
     "apiGetSessionResponse": {
       "type": "object",
       "properties": {
+        "host": {
+          "type": "string"
+        },
         "session_id": {
           "type": "string"
         }

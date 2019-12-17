@@ -16,5 +16,6 @@ message GetSessionRequest {
 }
 
 message GetSessionResponse {
-    string session_id = 1;
+    string host = 1;
+    string session_id = 2;
 }

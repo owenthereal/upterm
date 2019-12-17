@@ -15,6 +15,9 @@ import (
 // swagger:model apiGetSessionResponse
 type APIGetSessionResponse struct {
 
+	// host
+	Host string `json:"host,omitempty"`
+
 	// session id
 	SessionID string `json:"session_id,omitempty"`
 }

@@ -10,6 +10,7 @@ import (
 )
 
 type adminServer struct {
+	Host      string
 	SessionID string
 	ln        net.Listener
 	srv       *http.Server
@@ -23,7 +24,14 @@ func (s *adminServer) Serve(ctx context.Context, sock string) error {
 	}
 
 	mux := runtime.NewServeMux()
-	api.RegisterAdminServiceHandlerServer(ctx, mux, &adminServiceServer{SessionID: s.SessionID})
+	api.RegisterAdminServiceHandlerServer(
+		ctx,
+		mux,
+		&adminServiceServer{
+			SessionID: s.SessionID,
+			Host:      s.Host,
+		},
+	)
 
 	s.srv = &http.Server{
 		Handler: mux,
@@ -37,9 +45,10 @@ func (s *adminServer) Shutdown(ctx context.Context) error {
 }
 
 type adminServiceServer struct {
+	Host      string
 	SessionID string
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
-	return &api.GetSessionResponse{SessionId: s.SessionID}, nil
+	return &api.GetSessionResponse{SessionId: s.SessionID, Host: s.Host}, nil
 }

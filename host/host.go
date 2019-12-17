@@ -15,6 +15,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	UptermAdminSocketEnvVar = "UPTERM_ADMIN_SOCKET"
+)
+
 type Host struct {
 	Host           string
 	SessionID      string
@@ -61,7 +65,7 @@ func (c *Host) Run(ctx context.Context) error {
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := adminServer{SessionID: c.SessionID}
+		s := adminServer{SessionID: c.SessionID, Host: c.Host}
 		g.Add(func() error {
 			return s.Serve(ctx, adminSock)
 		}, func(err error) {
@@ -74,7 +78,7 @@ func (c *Host) Run(ctx context.Context) error {
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := ussh.Server{
 			Command:        c.Command,
-			CommandEnv:     []string{fmt.Sprintf("UPTERM_ADMIN_SOCK=%s", adminSock)},
+			CommandEnv:     []string{fmt.Sprintf("%s=%s", UptermAdminSocketEnvVar, adminSock)},
 			JoinCommand:    c.JoinCommand,
 			AuthorizedKeys: c.AuthorizedKeys,
 			Stdin:          c.Stdin,

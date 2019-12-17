@@ -13,6 +13,7 @@ func main() {
 	}
 
 	rootCmd.AddCommand(command.Share())
+	rootCmd.AddCommand(command.Session())
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)

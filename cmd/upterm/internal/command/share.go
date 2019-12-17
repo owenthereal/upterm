@@ -3,9 +3,9 @@ package command
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/shlex"
@@ -34,7 +34,8 @@ func Share() *cobra.Command {
   upterm share bash
   # Share a session by running 'tmux new pair'. Client runs 'tmux attach -t pair' to attach to the session.
   upterm share -t 'tmux attach -t pair' -- tmux new -t pair`,
-		RunE: shareRunE,
+		PreRunE: validateShareRequiredFlags,
+		RunE:    shareRunE,
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -42,13 +43,32 @@ func Share() *cobra.Command {
 		log.Fatal(err)
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagHost, "host", "", "127.0.0.1:2222", "server host")
+	cmd.PersistentFlags().StringVarP(&flagHost, "host", "", "127.0.0.1:2222", "server host (required)")
 	cmd.PersistentFlags().StringVarP(&flagJoinCommand, "join-command", "j", "", "command to run after client joins, otherwise client is attached to host's input/output.")
-	cmd.PersistentFlags().Uint8VarP(&flagKeepAlive, "keep-alive", "", 30, "server keep alive duration in second")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "a file from which the private key for public key authentication is read")
+	cmd.PersistentFlags().Uint8VarP(&flagKeepAlive, "keep-alive", "", 30, "server keep alive duration in second (required)")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "a file from which the private key for public key authentication is read (required)")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-keys", "a", "", "a file which lists public keys that are permitted to connect. This file is in the format of authorized_keys in OpenSSH.")
 
 	return cmd
+}
+
+func validateShareRequiredFlags(c *cobra.Command, args []string) error {
+	missingFlagNames := []string{}
+	if flagHost == "" {
+		missingFlagNames = append(missingFlagNames, "host")
+	}
+	if len(flagPrivateKeys) == 0 {
+		missingFlagNames = append(missingFlagNames, "private-key")
+	}
+	if flagKeepAlive == 0 {
+		missingFlagNames = append(missingFlagNames, "keep-alive")
+	}
+
+	if len(missingFlagNames) > 0 {
+		return fmt.Errorf(`required flag(s) "%s" not set`, strings.Join(missingFlagNames, ", "))
+	}
+
+	return nil
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
@@ -73,7 +93,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		authorizedKeys, err = host.AuthorizedKeys(flagAuthorizedKeys)
 	}
 	if err != nil {
-		return fmt.Errorf("error reading %s: %w", flagPrivateKeys, err)
+		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
 
 	auths, cleanup, err := host.AuthMethods(flagPrivateKeys)
@@ -94,28 +114,8 @@ func shareRunE(c *cobra.Command, args []string) error {
 		KeepAlive:      time.Duration(flagKeepAlive),
 		Logger:         log.New(),
 	}
-	if err := printJoinCmd(h.SessionID); err != nil {
-		return err
-	}
-	defer log.Info("Bye!")
 
 	return h.Run(context.Background())
-}
-
-func printJoinCmd(sessionID string) error {
-	host, port, err := net.SplitHostPort(flagHost)
-	if err != nil {
-		return err
-	}
-
-	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=%d %s@%s", flagKeepAlive, sessionID, host)
-	if port != "22" {
-		cmd = fmt.Sprintf("%s -p %s", cmd, port)
-	}
-
-	log.Info(cmd)
-
-	return nil
 }
 
 func defaultAuthorizedKeys(homeDir string) string {
