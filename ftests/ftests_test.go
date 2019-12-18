@@ -176,23 +176,17 @@ func (c *Host) Share(addr, socketDir string) error {
 	}
 
 	var hostWg sync.WaitGroup
-	hostWg.Add(1)
+	hostWg.Add(2)
 
 	// output
 	go func() {
-		hostWg.Wait()
+		hostWg.Done()
 		w := writeFunc(func(p []byte) (int, error) {
 			b, err := ansi.Strip(p)
 			if err != nil {
 				return 0, err
 			}
-			s := bufio.NewScanner(bytes.NewBuffer(b))
-			for s.Scan() {
-				if s.Text() != "" {
-					c.outputCh <- strings.TrimSpace(s.Text())
-				}
-			}
-
+			c.outputCh <- string(b)
 			return len(p), nil
 		})
 		if _, err := io.Copy(w, stdoutr); err != nil {
@@ -202,7 +196,7 @@ func (c *Host) Share(addr, socketDir string) error {
 
 	// input
 	go func() {
-		hostWg.Wait()
+		hostWg.Done()
 		for c := range c.inputCh {
 			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+"\n")); err != nil {
 				log.WithError(err).Info("error copying to stdin")
@@ -210,7 +204,7 @@ func (c *Host) Share(addr, socketDir string) error {
 		}
 	}()
 
-	hostWg.Done() // ready!
+	hostWg.Wait()
 
 	return nil
 }
@@ -285,23 +279,18 @@ func (c *Client) Join(clientID, addr string) error {
 	}
 
 	var remoteWg sync.WaitGroup
-	remoteWg.Add(1)
+	remoteWg.Add(2)
 
 	// output
 	go func() {
-		remoteWg.Wait()
+		remoteWg.Done()
 		w := writeFunc(func(pp []byte) (int, error) {
 			b, err := ansi.Strip(pp)
 			if err != nil {
 				return 0, err
 			}
-			s := bufio.NewScanner(bytes.NewBuffer(b))
-			for s.Scan() {
-				if s.Text() != "" {
-					c.outputCh <- strings.TrimSpace(s.Text())
-				}
-			}
-
+			fmt.Println(string(b))
+			c.outputCh <- string(b)
 			return len(pp), nil
 		})
 		if _, err := io.Copy(w, c.sshStdout); err != nil {
@@ -311,7 +300,7 @@ func (c *Client) Join(clientID, addr string) error {
 
 	// input
 	go func() {
-		remoteWg.Wait()
+		remoteWg.Done()
 		for s := range c.inputCh {
 			if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
 				log.WithError(err).Info("error copying to stdin")
@@ -319,7 +308,7 @@ func (c *Client) Join(clientID, addr string) error {
 		}
 	}()
 
-	remoteWg.Done() // ready!
+	remoteWg.Wait()
 
 	return nil
 }
@@ -343,6 +332,28 @@ func TestMain(m *testing.M) {
 	s.Close()
 
 	os.Exit(exitCode)
+}
+
+func scanner(ch chan string) *bufio.Scanner {
+	r, w := io.Pipe()
+	s := bufio.NewScanner(r)
+
+	go func() {
+		for str := range ch {
+			w.Write([]byte(str))
+		}
+
+	}()
+
+	return s
+}
+
+func scan(s *bufio.Scanner) string {
+	for s.Scan() {
+		return strings.TrimSpace(s.Text())
+	}
+
+	return s.Err().Error()
 }
 
 func waitForServer(addr string) error {
