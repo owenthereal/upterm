@@ -5,9 +5,25 @@ import (
 	"net"
 	"net/http"
 
+	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/host/api/swagger/client"
+	"github.com/jingweno/upterm/host/api/swagger/client/admin_service"
 )
+
+func AdminClient(socket string) *admin_service.Client {
+	cfg := client.DefaultTransportConfig()
+	t := httptransport.New(cfg.Host, cfg.BasePath, cfg.Schemes)
+	t.Transport = &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socket)
+		},
+	}
+
+	c := client.New(t, nil)
+	return c.AdminService
+}
 
 type adminServer struct {
 	Host      string

@@ -1,24 +1,52 @@
 package ftests
 
 import (
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/jingweno/upterm/host"
 )
 
 func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	t.Parallel()
 
+	adminSockDir, err := newAdminSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(adminSockDir)
+
+	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+
 	h := &Host{
-		Command:     []string{"bash", "-c", "PS1='' bash"},
-		PrivateKeys: []string{hostPrivateKey},
+		Command:         []string{"bash", "-c", "PS1='' bash"},
+		PrivateKeys:     []string{hostPrivateKey},
+		AdminSocketFile: adminSocketFile,
 	}
 	if err := h.Share(s.Addr(), s.SocketDir()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
+	// verify admin server
+	adminClient := host.AdminClient(adminSocketFile)
+	resp, err := adminClient.GetSession(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := resp.GetPayload()
+	if want, got := h.SessionID, session.SessionID; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := s.Addr(), session.Host; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+
+	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
 	hostScanner := scanner(hostOutputCh)
 
@@ -63,16 +91,40 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 	t.Parallel()
 
+	adminSockDir, err := newAdminSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(adminSockDir)
+
+	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+
 	h := &Host{
-		Command:     []string{"bash", "-c", "PS1='' bash"},
-		JoinCommand: []string{"bash", "-c", "PS1='' bash"},
-		PrivateKeys: []string{hostPrivateKey},
+		Command:         []string{"bash", "-c", "PS1='' bash"},
+		JoinCommand:     []string{"bash", "-c", "PS1='' bash"},
+		PrivateKeys:     []string{hostPrivateKey},
+		AdminSocketFile: adminSocketFile,
 	}
 	if err := h.Share(s.Addr(), s.SocketDir()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
+	// verify admin server
+	adminClient := host.AdminClient(adminSocketFile)
+	resp, err := adminClient.GetSession(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := resp.GetPayload()
+	if want, got := h.SessionID, session.SessionID; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := s.Addr(), session.Host; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+
+	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
 	hostScanner := scanner(hostOutputCh)
 
@@ -109,4 +161,8 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 	if want, got := "hello", scan(hostScanner); want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
+}
+
+func newAdminSocketDir() (string, error) {
+	return ioutil.TempDir("", "upterm")
 }

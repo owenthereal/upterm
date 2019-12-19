@@ -1,16 +1,12 @@
 package command
 
 import (
-	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"strings"
 
-	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/jingweno/upterm/host"
-	"github.com/jingweno/upterm/host/api/swagger/client"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -52,22 +48,13 @@ func validateSessionRequiredFlags(c *cobra.Command, args []string) error {
 }
 
 func sessionRunE(c *cobra.Command, args []string) error {
-	cfg := client.DefaultTransportConfig()
-	t := httptransport.New(cfg.Host, cfg.BasePath, cfg.Schemes)
-	t.Transport = &http.Transport{
-		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return net.Dial("unix", flagAdminSocket)
-		},
-	}
-
-	client := client.New(t, nil)
-	resp, err := client.AdminService.GetSession(nil)
+	client := host.AdminClient(flagAdminSocket)
+	resp, err := client.GetSession(nil)
 	if err != nil {
 		return err
 	}
 
 	session := resp.GetPayload()
-
 	host, port, err := net.SplitHostPort(session.Host)
 	if err != nil {
 		return err

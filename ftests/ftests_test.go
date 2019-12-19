@@ -106,9 +106,10 @@ func (s *Server) Close() {
 type Host struct {
 	*host.Host
 
-	Command     []string
-	JoinCommand []string
-	PrivateKeys []string
+	Command         []string
+	JoinCommand     []string
+	PrivateKeys     []string
+	AdminSocketFile string
 
 	inputCh  chan string
 	outputCh chan string
@@ -151,16 +152,17 @@ func (c *Host) Share(addr, socketDir string) error {
 	}
 
 	c.Host = &host.Host{
-		Host:           addr,
-		Command:        c.Command,
-		JoinCommand:    c.JoinCommand,
-		Auths:          auths,
-		AuthorizedKeys: []ssh.PublicKey{pk},
-		KeepAlive:      time.Duration(10),
-		Logger:         log.New(),
-		Stdin:          stdinr,
-		Stdout:         stdoutw,
-		SessionID:      xid.New().String(),
+		Host:            addr,
+		Command:         c.Command,
+		JoinCommand:     c.JoinCommand,
+		Auths:           auths,
+		AuthorizedKeys:  []ssh.PublicKey{pk},
+		AdminSocketFile: c.AdminSocketFile,
+		KeepAlive:       time.Duration(10),
+		Logger:          log.New(),
+		Stdin:           stdinr,
+		Stdout:          stdoutw,
+		SessionID:       xid.New().String(),
 	}
 
 	errCh := make(chan error)
@@ -289,7 +291,6 @@ func (c *Client) Join(clientID, addr string) error {
 			if err != nil {
 				return 0, err
 			}
-			fmt.Println(string(b))
 			c.outputCh <- string(b)
 			return len(pp), nil
 		})

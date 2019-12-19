@@ -20,16 +20,17 @@ const (
 )
 
 type Host struct {
-	Host           string
-	SessionID      string
-	KeepAlive      time.Duration
-	Command        []string
-	JoinCommand    []string
-	Auths          []ssh.AuthMethod
-	AuthorizedKeys []ssh.PublicKey
-	Logger         log.FieldLogger
-	Stdin          *os.File
-	Stdout         *os.File
+	Host            string
+	SessionID       string
+	KeepAlive       time.Duration
+	Command         []string
+	JoinCommand     []string
+	Auths           []ssh.AuthMethod
+	AuthorizedKeys  []ssh.PublicKey
+	AdminSocketFile string
+	Logger          log.FieldLogger
+	Stdin           *os.File
+	Stdout          *os.File
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -41,6 +42,15 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	if c.Stdout == nil {
 		c.Stdout = os.Stdout
+	}
+	if c.AdminSocketFile == "" {
+		adminSockDir, err := ioutil.TempDir("", "upterm")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(adminSockDir)
+
+		c.AdminSocketFile = filepath.Join(adminSockDir, "admin.sock")
 	}
 
 	rt := ussh.ReverseTunnel{
@@ -54,23 +64,15 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	defer rt.Close()
 
-	adminSockDir, err := ioutil.TempDir("", "upterm")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(adminSockDir)
-
-	adminSock := filepath.Join(adminSockDir, "admin.sock")
-
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		s := adminServer{SessionID: c.SessionID, Host: c.Host}
 		g.Add(func() error {
-			return s.Serve(ctx, adminSock)
+			return s.Serve(ctx, c.AdminSocketFile)
 		}, func(err error) {
-			cancel()
 			s.Shutdown(ctx)
+			cancel()
 		})
 	}
 	{
@@ -78,7 +80,7 @@ func (c *Host) Run(ctx context.Context) error {
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := ussh.Server{
 			Command:        c.Command,
-			CommandEnv:     []string{fmt.Sprintf("%s=%s", UptermAdminSocketEnvVar, adminSock)},
+			CommandEnv:     []string{fmt.Sprintf("%s=%s", UptermAdminSocketEnvVar, c.AdminSocketFile)},
 			JoinCommand:    c.JoinCommand,
 			AuthorizedKeys: c.AuthorizedKeys,
 			Stdin:          c.Stdin,
