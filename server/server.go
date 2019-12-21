@@ -3,7 +3,7 @@ package server
 import (
 	"net"
 
-	"github.com/jingweno/ssh"
+	"github.com/gliderlabs/ssh"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )

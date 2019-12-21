@@ -9,7 +9,7 @@ import (
 	"os/exec"
 
 	"github.com/creack/pty"
-	gssh "github.com/jingweno/ssh"
+	gssh "github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/host/internal/command"
 	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/jingweno/ssh"
+	"github.com/gliderlabs/ssh"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
