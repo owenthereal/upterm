@@ -96,7 +96,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
 
-	auths, cleanup, err := host.AuthMethods(flagPrivateKeys)
+	signers, cleanup, err := host.Signers(flagPrivateKeys)
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
@@ -109,7 +109,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		SessionID:      xid.New().String(),
 		Command:        args,
 		JoinCommand:    joinCommand,
-		Auths:          auths,
+		Signers:        signers,
 		AuthorizedKeys: authorizedKeys,
 		KeepAlive:      time.Duration(flagKeepAlive),
 		Logger:         log.New(),

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
@@ -21,7 +22,7 @@ type ReverseTunnel struct {
 
 	Host      string
 	SessionID string
-	Auths     []ssh.AuthMethod
+	Signers   []ssh.Signer
 	KeepAlive time.Duration
 
 	ln net.Listener
@@ -42,9 +43,15 @@ func (c *ReverseTunnel) Establish(ctx context.Context) error {
 		return err
 	}
 
+	var auths []ssh.AuthMethod
+	for _, signer := range c.Signers {
+		auths = append(auths, ssh.PublicKeys(signer))
+	}
+
 	config := &ssh.ClientConfig{
 		User:            user.Username,
-		Auth:            c.Auths,
+		Auth:            auths,
+		ClientVersion:   upterm.HostSSHClientVersion,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
@@ -53,14 +60,14 @@ func (c *ReverseTunnel) Establish(ctx context.Context) error {
 		return sshDialError(c.Host, err)
 	}
 
-	c.ln, err = c.Client.Listen("unix", utils.SocketFile(c.SessionID))
+	c.ln, err = c.Client.Listen("unix", c.SessionID)
 	if err != nil {
 		return fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
 
 	// make sure connection is alive
 	go utils.KeepAlive(ctx, c.KeepAlive*time.Second, func() {
-		c.Client.SendRequest("ping", true, nil)
+		c.Client.SendRequest(upterm.ServerPingRequestType, true, nil)
 	})
 
 	return nil

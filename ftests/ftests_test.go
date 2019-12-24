@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -26,6 +25,8 @@ import (
 )
 
 var (
+	serverPublicKey  string
+	serverPrivateKey string
 	hostPublicKey    string
 	hostPrivateKey   string
 	clientPublicKey  string
@@ -33,6 +34,14 @@ var (
 )
 
 const (
+	serverPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
+	serverPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAO8DN1EXZKIqfxipYspMa5M+ZOVPTnl98v2xNDc/z5egAAAIj7+f6n+/n+
+pwAAAAtzc2gtZWQyNTUxOQAAACAO8DN1EXZKIqfxipYspMa5M+ZOVPTnl98v2xNDc/z5eg
+AAAECJxt3qnAWGGklvhi4HTwyzY3EdjOAKpgXvcYTX6mDa+g7wM3URdkoip/GKliykxrkz
+5k5U9OeX3y/bE0Nz/Pl6AAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----`
 	hostPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOA+rMcwWFPJVE2g6EwRPkYmNJfaS/+gkyZ99aR/65uz`
 	hostPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
@@ -40,8 +49,7 @@ QyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubswAAAIiu5GOBruRj
 gQAAAAtzc2gtZWQyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubsw
 AAAEDBHlsR95C/pGVHtQGpgrUi+Qwgkfnp9QlRKdEhhx4rxOA+rMcwWFPJVE2g6EwRPkYm
 NJfaS/+gkyZ99aR/65uzAAAAAAECAwQF
------END OPENSSH PRIVATE KEY-----
-	`
+-----END OPENSSH PRIVATE KEY-----`
 	clientPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0EWrjdcHcuMfI8bGAyHPcGsAc/vd/gl5673pRkRBGY`
 	clientPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
@@ -49,8 +57,7 @@ QyNTUxOQAAACDdBFq43XB3LjHyPGxgMhz3BrAHP73f4Jeeu96UZEQRmAAAAIiRPFazkTxW
 swAAAAtzc2gtZWQyNTUxOQAAACDdBFq43XB3LjHyPGxgMhz3BrAHP73f4Jeeu96UZEQRmA
 AAAEDmpjZHP/SIyBTp6YBFPzUi18iDo2QHolxGRDpx+m7let0EWrjdcHcuMfI8bGAyHPcG
 sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
------END OPENSSH PRIVATE KEY-----
-`
+-----END OPENSSH PRIVATE KEY-----`
 )
 
 func NewServer() (*Server, error) {
@@ -64,8 +71,12 @@ func NewServer() (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{ln, socketDir}
-	go s.start()
+	s := &Server{ln: ln, socketDir: socketDir}
+	go func() {
+		if err := s.start(); err != nil {
+			log.WithError(err).Info("error starting test server")
+		}
+	}()
 
 	return s, waitForServer(s.Addr())
 }
@@ -73,21 +84,30 @@ func NewServer() (*Server, error) {
 type Server struct {
 	ln        net.Listener
 	socketDir string
+	server    *server.Server
 }
 
 func (s *Server) start() error {
-	_, private, err := ed25519.GenerateKey(nil)
+	dir, err := ioutil.TempDir("", "uptermd")
 	if err != nil {
 		return err
 	}
+	sshdSocketPath := filepath.Join(dir, "sshd.sock")
 
-	signer, err := ssh.NewSignerFromKey(private)
-	if err != nil {
-		return err
+	// TODO: use in-memory provider
+	provider := &server.UnixProvider{}
+	provider.SetOpts(server.NetworkOptions{
+		"session-socket-dir": s.socketDir,
+		"sshd-socket-path":   sshdSocketPath,
+	})
+
+	s.server = &server.Server{
+		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
+		NetworkProvider: provider,
+		Logger:          log.New(),
 	}
 
-	ss := server.New([]ssh.Signer{signer}, s.socketDir, log.New())
-	return ss.Serve(s.ln)
+	return s.server.Serve(s.ln)
 }
 
 func (s *Server) Addr() string {
@@ -99,7 +119,7 @@ func (s *Server) SocketDir() string {
 }
 
 func (s *Server) Close() {
-	s.ln.Close()
+	s.server.Shutdown()
 	os.RemoveAll(s.socketDir)
 }
 
@@ -140,7 +160,7 @@ func (c *Host) Share(addr, socketDir string) error {
 		return err
 	}
 
-	auths, err := host.AuthMethodsFromFiles(c.PrivateKeys)
+	signers, err := host.SignersFromFiles(c.PrivateKeys)
 	if err != nil {
 		return err
 	}
@@ -155,7 +175,7 @@ func (c *Host) Share(addr, socketDir string) error {
 		Host:            addr,
 		Command:         c.Command,
 		JoinCommand:     c.JoinCommand,
-		Auths:           auths,
+		Signers:         signers,
 		AuthorizedKeys:  []ssh.PublicKey{pk},
 		AdminSocketFile: c.AdminSocketFile,
 		KeepAlive:       time.Duration(10),
@@ -168,7 +188,7 @@ func (c *Host) Share(addr, socketDir string) error {
 	errCh := make(chan error)
 	go func() {
 		if err := c.Host.Run(c.ctx); err != nil {
-			log.WithError(err).Info("error running client")
+			log.WithError(err).Info("error running host")
 			errCh <- err
 		}
 	}()
@@ -241,7 +261,7 @@ func (c *Client) Close() {
 func (c *Client) Join(clientID, addr string) error {
 	c.init()
 
-	auths, err := host.AuthMethodsFromFiles([]string{clientPrivateKey})
+	auths, err := authMethodsFromFiles([]string{clientPrivateKey})
 	if err != nil {
 		return err
 	}
@@ -365,16 +385,17 @@ func waitForServer(addr string) error {
 
 	for range ticker.C {
 		log.WithField("addr", addr).Info("waiting for server")
-		conn, err := net.Dial("tcp", addr)
-		if err == nil {
-			break
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			count++
+			if count >= 10 {
+				return fmt.Errorf("waiting for unix socket failed")
+			}
+			continue
 		}
-		conn.Close()
 
-		count++
-		if count >= 10 {
-			return fmt.Errorf("waiting for unix socket failed")
-		}
+		conn.Close()
+		break
 	}
 
 	return nil
@@ -411,6 +432,16 @@ func (rf writeFunc) Write(p []byte) (n int, err error) { return rf(p) }
 func writeKeyPairs() error {
 	var err error
 
+	serverPublicKey, err = writeTempFile("id_ed25519.pub", serverPublicKeyContent)
+	if err != nil {
+		return err
+	}
+
+	serverPrivateKey, err = writeTempFile("id_ed25519", serverPrivateKeyContent)
+	if err != nil {
+		return err
+	}
+
 	hostPublicKey, err = writeTempFile("id_ed25519.pub", hostPublicKeyContent)
 	if err != nil {
 		return err
@@ -435,10 +466,26 @@ func writeKeyPairs() error {
 }
 
 func removeKeyPairs() {
+	os.Remove(serverPublicKey)
+	os.Remove(serverPrivateKey)
 	os.Remove(hostPublicKey)
 	os.Remove(hostPrivateKey)
 	os.Remove(clientPublicKey)
 	os.Remove(clientPrivateKey)
+}
+
+func authMethodsFromFiles(privateKeys []string) ([]ssh.AuthMethod, error) {
+	signers, err := host.SignersFromFiles(privateKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	var auths []ssh.AuthMethod
+	for _, signer := range signers {
+		auths = append(auths, ssh.PublicKeys(signer))
+	}
+
+	return auths, nil
 }
 
 func writeTempFile(name, content string) (string, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/creack/pty"
 	gssh "github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/host/internal/command"
+
 	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
@@ -23,6 +24,7 @@ type Server struct {
 	Command        []string
 	CommandEnv     []string
 	JoinCommand    []string
+	Signers        []ssh.Signer
 	AuthorizedKeys []ssh.PublicKey
 	Stdin          *os.File
 	Stdout         *os.File
@@ -79,14 +81,29 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		ph := passwordHandler{
 			authorizedKeys: s.AuthorizedKeys,
 		}
+
+		var ss []gssh.Signer
+		for _, signer := range s.Signers {
+			ss = append(ss, signer)
+		}
+
 		server := gssh.Server{
+			HostSigners:     ss,
 			Handler:         sh.HandleSession,
 			PasswordHandler: ph.HandlePassword,
+			PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
+				// This function is never executed and it's as an indicator
+				// to crypto/ssh that public key auth is enabled.
+				// This allows the Proxy to convert the public key auth to
+				// password auth with public key as the password in authorized
+				// key format.
+				return false
+			},
 		}
 		g.Add(func() error {
 			return server.Serve(l)
 		}, func(err error) {
-			// kill ssh session
+			// kill ssh sessionHandler
 			cancel()
 			// shut down ssh server
 			server.Shutdown(ctx)

@@ -39,32 +39,32 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 	return authorizedKeys, nil
 }
 
-func AuthMethods(privateKeys []string) (auths []ssh.AuthMethod, cleanup func(), err error) {
+func Signers(privateKeys []string) (signers []ssh.Signer, cleanup func(), err error) {
 	cleanup = func() {}
 
 	socket := os.Getenv("SSH_AUTH_SOCK")
 	if socket == "" {
-		auths, err = AuthMethodsFromFiles(privateKeys)
+		signers, err = SignersFromFiles(privateKeys)
 	} else {
-		auths, cleanup, err = AuthMethodsFromSSHAgent(socket, privateKeys)
+		signers, cleanup, err = SignersFromSSHAgent(socket, privateKeys)
 	}
 
-	return auths, cleanup, err
+	return signers, cleanup, err
 }
 
-func AuthMethodsFromFiles(privateKeys []string) ([]ssh.AuthMethod, error) {
-	var auths []ssh.AuthMethod
+func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
 	for _, file := range privateKeys {
 		s, err := signerFromFile(file)
 		if err == nil {
-			auths = append(auths, ssh.PublicKeys(s))
+			signers = append(signers, s)
 		}
 	}
 
-	return auths, nil
+	return signers, nil
 }
 
-func AuthMethodsFromSSHAgent(socket string, privateKeys []string) (auths []ssh.AuthMethod, cancel func(), err error) {
+func SignersFromSSHAgent(socket string, privateKeys []string) (signers []ssh.Signer, cancel func(), err error) {
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error connecting to ssh-agent %s: %w", socket, err)
@@ -79,15 +79,18 @@ func AuthMethodsFromSSHAgent(socket string, privateKeys []string) (auths []ssh.A
 
 	// fallback to read from files if ssh-agent doesn't match number of keys
 	if len(keys) != len(privateKeys) {
-		auths, err = AuthMethodsFromFiles(privateKeys)
+		signers, err = SignersFromFiles(privateKeys)
 		if err != nil {
 			return nil, cancel, err
 		}
 	} else {
-		auths = append(auths, ssh.PublicKeysCallback(agentClient.Signers))
+		signers, err = agentClient.Signers()
+		if err != nil {
+			return signers, cancel, err
+		}
 	}
 
-	return auths, cancel, nil
+	return signers, cancel, nil
 }
 
 func signerFromFile(file string) (ssh.Signer, error) {

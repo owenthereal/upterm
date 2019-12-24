@@ -9,14 +9,11 @@ import (
 	"time"
 
 	ussh "github.com/jingweno/upterm/host/internal/ssh"
+	"github.com/jingweno/upterm/upterm"
 	"github.com/oklog/run"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
-)
-
-const (
-	UptermAdminSocketEnvVar = "UPTERM_ADMIN_SOCKET"
 )
 
 type Host struct {
@@ -25,7 +22,7 @@ type Host struct {
 	KeepAlive       time.Duration
 	Command         []string
 	JoinCommand     []string
-	Auths           []ssh.AuthMethod
+	Signers         []ssh.Signer
 	AuthorizedKeys  []ssh.PublicKey
 	AdminSocketFile string
 	Logger          log.FieldLogger
@@ -56,7 +53,7 @@ func (c *Host) Run(ctx context.Context) error {
 	rt := ussh.ReverseTunnel{
 		Host:      c.Host,
 		SessionID: c.SessionID,
-		Auths:     c.Auths,
+		Signers:   c.Signers,
 		KeepAlive: c.KeepAlive,
 	}
 	if err := rt.Establish(ctx); err != nil {
@@ -80,8 +77,9 @@ func (c *Host) Run(ctx context.Context) error {
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := ussh.Server{
 			Command:        c.Command,
-			CommandEnv:     []string{fmt.Sprintf("%s=%s", UptermAdminSocketEnvVar, c.AdminSocketFile)},
+			CommandEnv:     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
 			JoinCommand:    c.JoinCommand,
+			Signers:        c.Signers,
 			AuthorizedKeys: c.AuthorizedKeys,
 			Stdin:          c.Stdin,
 			Stdout:         c.Stdout,

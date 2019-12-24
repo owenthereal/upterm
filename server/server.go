@@ -1,59 +1,112 @@
 package server
 
 import (
+	"context"
+	"crypto/ed25519"
 	"net"
 
-	"github.com/gliderlabs/ssh"
+	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh"
 )
 
-func New(privates []gossh.Signer, socketDir string, logger log.FieldLogger) *Server {
-	return &Server{
-		privates:  privates,
-		socketDir: socketDir,
-		logger:    logger,
-	}
+type Server struct {
+	HostPrivateKeys [][]byte
+	NetworkProvider NetworkProvider
+	Logger          log.FieldLogger
+
+	ctx    context.Context
+	cancel func()
 }
 
-type Server struct {
-	privates  []gossh.Signer
-	socketDir string
-	logger    log.FieldLogger
+func (s *Server) Shutdown() {
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 func (s *Server) Serve(ln net.Listener) error {
-	sh := newStreamlocalForwardHandler(s.socketDir, s.logger.WithField("handler", "streamlocalForwardHandler"))
-	ph := newSSHProxyHandler(s.socketDir, s.logger.WithField("handler", "sshProxyHandler"))
+	sshdDialListener := s.NetworkProvider.SSHD()
+	sessionDialListener := s.NetworkProvider.Session()
 
-	// convert []gossh.Signer to []ssh.Signer
-	// TODO: use gossh only
-	var signers []ssh.Signer
-	for _, p := range s.privates {
-		signers = append(signers, p)
+	signers, err := createSigners(s.HostPrivateKeys)
+	if err != nil {
+		return err
+	}
+	upstreamSigner := signers[0] // TODO: generate a new one
+
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
+	var g run.Group
+	{
+		g.Add(func() error {
+			<-s.ctx.Done()
+			return s.ctx.Err()
+		}, func(err error) {
+			s.cancel()
+		})
+	}
+	{
+		proxy := Proxy{
+			HostSigners:         signers,
+			UpstreamSigner:      upstreamSigner,
+			SSHDDialListener:    sshdDialListener,
+			SessionDialListener: sessionDialListener,
+			Logger:              s.Logger.WithField("app", "proxy"),
+		}
+		g.Add(func() error {
+			return proxy.Serve(ln)
+		}, func(err error) {
+			proxy.Shutdown()
+		})
+	}
+	{
+		ln, err := sshdDialListener.Listen()
+		if err != nil {
+			return err
+		}
+
+		sshd := SSHD{
+			HostSigners:         signers, // TODO: use different host keys
+			SessionDialListener: sessionDialListener,
+			Logger:              s.Logger.WithField("app", "sshd"),
+		}
+		g.Add(func() error {
+			return sshd.Serve(ln)
+		}, func(err error) {
+			sshd.Shutdown()
+		})
 	}
 
-	server := ssh.Server{
-		HostSigners: signers,
-		Handler:     ph.Handler,
-		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
-			s.logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port}).Info("attempt to bind")
-			return true
-		}),
-		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// TODO: validate public keys
-			return true
-		},
-		RequestHandlers: map[string]ssh.RequestHandler{
-			streamlocalForwardChannelType:      sh.Handler,
-			cancelStreamlocalForwardChanneType: sh.Handler,
-			pingRequestType:                    pingRequestHandler,
-		},
-	}
-
-	return server.Serve(ln)
+	return g.Run()
 }
 
-func pingRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
-	return true, nil
+func createSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
+
+	for _, pk := range privateKeys {
+		signer, err := ssh.ParsePrivateKey(pk)
+		if err != nil {
+			return nil, err
+		}
+
+		signers = append(signers, signer)
+	}
+
+	// generate one if no signer
+	if len(signers) == 0 {
+		_, private, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+
+		signer, err := ssh.NewSignerFromKey(private)
+		if err != nil {
+			return nil, err
+		}
+
+		signers = append(signers, signer)
+	}
+
+	return signers, nil
 }

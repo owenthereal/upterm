@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +30,7 @@ func Session() *cobra.Command {
 		RunE:    sessionRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "socket", "", os.Getenv(host.UptermAdminSocketEnvVar), "admin unix domain socket")
+	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "socket", "", os.Getenv(upterm.HostAdminSocketEnvVar), "admin unix domain socket")
 
 	return cmd
 }
