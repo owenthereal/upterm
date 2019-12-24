@@ -45,6 +45,9 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	if want, got := s.Addr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
+	if want, got := s.HostAddr, session.HostAddr; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -121,6 +124,9 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 	if want, got := s.Addr(), session.Host; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := s.HostAddr, session.HostAddr; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 

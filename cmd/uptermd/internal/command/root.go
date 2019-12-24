@@ -29,7 +29,7 @@ func Root() *cobra.Command {
 	rootCmd.PersistentFlags().StringVarP(&flagHost, "host", "", defaultHost("2222"), "host (required)")
 	rootCmd.PersistentFlags().StringSliceVarP(&flagHostKeys, "host-key", "", nil, "host private key")
 
-	rootCmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider used to communicate between components")
+	rootCmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
 	rootCmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
 	return rootCmd
@@ -56,6 +56,11 @@ func rootRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("network provider option error: %s", err)
 	}
 
+	logger := log.New().WithFields(log.Fields{
+		"host": flagHost,
+	})
+	logger.WithFields(log.Fields{"network": provider.Name(), "network-opts": provider.Opts()}).Infof("using network provider %s", provider.Name())
+
 	privateKeys, err := readFiles(flagHostKeys)
 	if err != nil {
 		return err
@@ -67,14 +72,10 @@ func rootRunE(c *cobra.Command, args []string) error {
 	}
 	defer ln.Close()
 
-	logger := log.New().WithFields(log.Fields{
-		"host":         flagHost,
-		"network":      provider.Name(),
-		"network-opts": provider.Opts(),
-	})
 	logger.Info("starting server")
 
 	s := &server.Server{
+		HostAddr:        flagHost,
 		HostPrivateKeys: privateKeys,
 		NetworkProvider: provider,
 		Logger:          logger,
@@ -90,6 +91,24 @@ func defaultHost(defaultPort string) string {
 	}
 
 	return fmt.Sprintf("127.0.0.1:%s", port)
+}
+
+func defaultHostAddr() string {
+	if addr := os.Getenv("UPTERM_HOST_ADDR"); addr != "" {
+		return addr
+	}
+
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			networkIp, ok := addr.(*net.IPNet)
+			if ok && !networkIp.IP.IsLoopback() && networkIp.IP.To4() != nil {
+				return networkIp.IP.String()
+			}
+		}
+	}
+
+	return "127.0.0.1"
 }
 
 func readFiles(paths []string) ([][]byte, error) {

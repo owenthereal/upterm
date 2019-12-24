@@ -61,7 +61,8 @@ func sessionRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=30 %s@%s", session.SessionID, host)
+	// Format: ssh session:host-addr@host
+	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=30 %s:%s@%s", session.SessionID, session.HostAddr, host)
 	if port != "22" {
 		cmd = fmt.Sprintf("%s -p %s", cmd, port)
 	}

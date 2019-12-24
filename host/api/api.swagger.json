@@ -35,6 +35,9 @@
         "host": {
           "type": "string"
         },
+        "host_addr": {
+          "type": "string"
+        },
         "session_id": {
           "type": "string"
         }

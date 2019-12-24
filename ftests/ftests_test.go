@@ -34,6 +34,7 @@ var (
 )
 
 const (
+	serverHostAddr          = "192.169.0.2"
 	serverPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
 	serverPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
@@ -84,7 +85,7 @@ func NewServer() (*Server, error) {
 type Server struct {
 	ln        net.Listener
 	socketDir string
-	server    *server.Server
+	*server.Server
 }
 
 func (s *Server) start() error {
@@ -101,13 +102,14 @@ func (s *Server) start() error {
 		"sshd-socket-path":   sshdSocketPath,
 	})
 
-	s.server = &server.Server{
+	s.Server = &server.Server{
+		HostAddr:        serverHostAddr,
 		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
 		NetworkProvider: provider,
 		Logger:          log.New(),
 	}
 
-	return s.server.Serve(s.ln)
+	return s.Server.Serve(s.ln)
 }
 
 func (s *Server) Addr() string {
@@ -119,7 +121,7 @@ func (s *Server) SocketDir() string {
 }
 
 func (s *Server) Close() {
-	s.server.Shutdown()
+	s.Server.Shutdown()
 	os.RemoveAll(s.socketDir)
 }
 

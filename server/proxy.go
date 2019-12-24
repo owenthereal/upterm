@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,7 +170,7 @@ func (p *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 		c, err = p.SSHDDialListener.Dial()
 	} else {
 		p.Logger.WithField("session", user).Info("dialing session")
-		c, err = p.SessionDialListener.Dial(user)
+		c, err = p.SessionDialListener.Dial(parseSessionIDFromUser(user))
 	}
 	if err != nil {
 		return nil, nil, err
@@ -210,4 +211,9 @@ func passwordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType,
 
 func shouldRouteToSSHD(conn ssh.ConnMetadata) bool {
 	return upterm.HostSSHClientVersion == string(conn.ClientVersion())
+}
+
+// user is in the format of username:host-addr@host
+func parseSessionIDFromUser(user string) string {
+	return strings.SplitN(user, ":", 2)[0]
 }
