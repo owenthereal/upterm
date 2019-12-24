@@ -13,7 +13,12 @@ spec:
       - name: uptermd
         image: jingweno/uptermd
         imagePullPolicy: Always
-        args: ["--host", "0.0.0.0:22", "--host-key", "/host-keys/ed25519_key", "--network", "unix", "--network-opt", "session-socket-dir=/sockets", "--network-opt", "sshd-socket-path=/sockets/sshd.sock"]
+        args: ["--host", "$(POD_IP):22", "--host-key", "/host-keys/ed25519_key", "--network", "unix", "--network-opt", "session-socket-dir=/sockets", "--network-opt", "sshd-socket-path=/sockets/sshd.sock"]
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         ports:
         - containerPort: 22 # uptermd
         readinessProbe:
