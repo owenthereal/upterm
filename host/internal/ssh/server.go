@@ -94,7 +94,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
 				// This function is never executed and it's as an indicator
 				// to crypto/ssh that public key auth is enabled.
-				// This allows the Proxy to convert the public key auth to
+				// This allows the Router to convert the public key auth to
 				// password auth with public key as the password in authorized
 				// key format.
 				return false

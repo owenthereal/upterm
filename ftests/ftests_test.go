@@ -60,7 +60,45 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----`
 )
 
-func NewServer() (*Server, error) {
+var (
+	singleNodeServer TestServer
+	router           TestServer
+)
+
+func TestMain(m *testing.M) {
+	err := writeKeyPairs()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer removeKeyPairs()
+
+	// start the single-node server
+	singleNodeServer, err = NewServer(true)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	router, err = NewRouter()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	exitCode := m.Run()
+
+	router.Shutdown()
+	singleNodeServer.Shutdown()
+
+	os.Exit(exitCode)
+}
+
+type TestServer interface {
+	Addr() string
+	SocketDir() string
+	HostAddr() string
+	Shutdown()
+}
+
+func NewServer(singleNodeMode bool) (TestServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -71,7 +109,7 @@ func NewServer() (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{ln: ln, socketDir: socketDir}
+	s := &Server{ln: ln, socketDir: socketDir, singleNodeMode: singleNodeMode}
 	go func() {
 		if err := s.start(); err != nil {
 			log.WithError(err).Info("error starting test server")
@@ -81,10 +119,71 @@ func NewServer() (*Server, error) {
 	return s, waitForServer(s.Addr())
 }
 
+func NewRouter() (TestServer, error) {
+	// start the multi-node server
+	multiNodeServer, err := NewServer(false)
+	if err != nil {
+		return nil, err
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+
+	r := &Router{ln: ln, multiNodeServer: multiNodeServer}
+	go func() {
+		if err := r.start(); err != nil {
+			log.WithError(err).Info("error starting test router")
+		}
+	}()
+
+	return r, waitForServer(r.Addr())
+}
+
+type Router struct {
+	ln              net.Listener
+	multiNodeServer TestServer
+	*server.GlobalRouter
+}
+
+func (r *Router) start() error {
+	signers, err := utils.CreateSigners([][]byte{[]byte(serverPrivateKeyContent)})
+	if err != nil {
+		return err
+	}
+
+	r.GlobalRouter = &server.GlobalRouter{
+		HostSigners:  signers,
+		UpstreamHost: r.multiNodeServer.Addr(),
+		Logger:       log.New(),
+	}
+
+	return r.GlobalRouter.Serve(r.ln)
+}
+
+func (r *Router) Addr() string {
+	return r.ln.Addr().String()
+}
+
+func (r *Router) HostAddr() string {
+	return r.multiNodeServer.HostAddr()
+}
+
+func (r *Router) SocketDir() string {
+	return r.multiNodeServer.SocketDir()
+}
+
+func (r *Router) Shutdown() {
+	r.GlobalRouter.Shutdown()
+	r.multiNodeServer.Shutdown()
+}
+
 type Server struct {
 	ln        net.Listener
 	socketDir string
-	server    *server.Server
+	*server.Server
+	singleNodeMode bool
 }
 
 func (s *Server) start() error {
@@ -101,25 +200,31 @@ func (s *Server) start() error {
 		"sshd-socket-path":   sshdSocketPath,
 	})
 
-	s.server = &server.Server{
+	s.Server = &server.Server{
+		HostAddr:        s.Addr(),
+		SingleNodeMode:  s.singleNodeMode,
 		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
 		NetworkProvider: provider,
 		Logger:          log.New(),
 	}
 
-	return s.server.Serve(s.ln)
+	return s.Server.Serve(s.ln)
 }
 
 func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
+func (s *Server) HostAddr() string {
+	return s.Server.HostAddr
+}
+
 func (s *Server) SocketDir() string {
 	return s.socketDir
 }
 
-func (s *Server) Close() {
-	s.server.Shutdown()
+func (s *Server) Shutdown() {
+	s.Server.Shutdown()
 	os.RemoveAll(s.socketDir)
 }
 
@@ -332,27 +437,6 @@ func (c *Client) Join(clientID, addr string) error {
 	remoteWg.Wait()
 
 	return nil
-}
-
-var s *Server
-
-func TestMain(m *testing.M) {
-	err := writeKeyPairs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer removeKeyPairs()
-
-	// start the server
-	s, err = NewServer()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	exitCode := m.Run()
-	s.Close()
-
-	os.Exit(exitCode)
 }
 
 func scanner(ch chan string) *bufio.Scanner {

@@ -56,7 +56,8 @@ func (c *Host) Run(ctx context.Context) error {
 		Signers:   c.Signers,
 		KeepAlive: c.KeepAlive,
 	}
-	if err := rt.Establish(ctx); err != nil {
+	info, err := rt.Establish(ctx)
+	if err != nil {
 		return err
 	}
 	defer rt.Close()
@@ -64,7 +65,11 @@ func (c *Host) Run(ctx context.Context) error {
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := adminServer{SessionID: c.SessionID, Host: c.Host}
+		s := adminServer{
+			SessionID: c.SessionID,
+			Host:      c.Host,
+			HostAddr:  info.HostAddr,
+		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)
 		}, func(err error) {

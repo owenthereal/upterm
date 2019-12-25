@@ -2,12 +2,14 @@ package ssh
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/user"
 	"strings"
 	"time"
 
+	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -37,10 +39,10 @@ func (c *ReverseTunnel) Listener() net.Listener {
 	return c.ln
 }
 
-func (c *ReverseTunnel) Establish(ctx context.Context) error {
+func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, error) {
 	user, err := user.Current()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var auths []ssh.AuthMethod
@@ -49,7 +51,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) error {
 	}
 
 	config := &ssh.ClientConfig{
-		User:            user.Username,
+		User:            utils.HostUser(user.Username),
 		Auth:            auths,
 		ClientVersion:   upterm.HostSSHClientVersion,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
@@ -57,12 +59,12 @@ func (c *ReverseTunnel) Establish(ctx context.Context) error {
 
 	c.Client, err = ssh.Dial("tcp", c.Host, config)
 	if err != nil {
-		return sshDialError(c.Host, err)
+		return nil, sshDialError(c.Host, err)
 	}
 
 	c.ln, err = c.Client.Listen("unix", c.SessionID)
 	if err != nil {
-		return fmt.Errorf("unable to create reverse tunnel: %w", err)
+		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
 
 	// make sure connection is alive
@@ -70,7 +72,23 @@ func (c *ReverseTunnel) Establish(ctx context.Context) error {
 		c.Client.SendRequest(upterm.ServerPingRequestType, true, nil)
 	})
 
-	return nil
+	return c.serverInfo()
+}
+
+func (c *ReverseTunnel) serverInfo() (*server.ServerInfo, error) {
+	ok, body, err := c.Client.SendRequest(upterm.ServerServerInfoRequestType, true, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching server info: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("error fetching server info")
+	}
+	var info *server.ServerInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("error unmarshaling server info: %w", err)
+	}
+
+	return info, nil
 }
 
 type PermissionDeniedError struct {

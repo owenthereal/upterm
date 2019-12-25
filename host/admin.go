@@ -27,6 +27,7 @@ func AdminClient(socket string) *admin_service.Client {
 
 type adminServer struct {
 	Host      string
+	HostAddr  string
 	SessionID string
 	ln        net.Listener
 	srv       *http.Server
@@ -46,6 +47,7 @@ func (s *adminServer) Serve(ctx context.Context, sock string) error {
 		&adminServiceServer{
 			SessionID: s.SessionID,
 			Host:      s.Host,
+			HostAddr:  s.HostAddr,
 		},
 	)
 
@@ -62,9 +64,14 @@ func (s *adminServer) Shutdown(ctx context.Context) error {
 
 type adminServiceServer struct {
 	Host      string
+	HostAddr  string
 	SessionID string
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
-	return &api.GetSessionResponse{SessionId: s.SessionID, Host: s.Host}, nil
+	return &api.GetSessionResponse{
+		SessionId: s.SessionID,
+		Host:      s.Host,
+		HostAddr:  s.HostAddr,
+	}, nil
 }

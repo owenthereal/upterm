@@ -18,6 +18,9 @@ type APIGetSessionResponse struct {
 	// host
 	Host string `json:"host,omitempty"`
 
+	// host addr
+	HostAddr string `json:"host_addr,omitempty"`
+
 	// session id
 	SessionID string `json:"session_id,omitempty"`
 }
