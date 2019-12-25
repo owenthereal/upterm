@@ -5,13 +5,11 @@ import (
 	"testing"
 )
 
-func Test_HostFailToShareWithoutPrivateKey(t *testing.T) {
-	t.Parallel()
-
+func testHostFailToShareWithoutPrivateKey(t *testing.T, testServer TestServer) {
 	h := &Host{
 		Command: []string{"bash"},
 	}
-	err := h.Share(singleNodeServer.Addr(), singleNodeServer.SocketDir())
+	err := h.Share(testServer.Addr(), testServer.SocketDir())
 	if err == nil {
 		t.Fatal("expect error")
 	}

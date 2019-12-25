@@ -11,9 +11,7 @@ import (
 	"github.com/jingweno/upterm/host"
 )
 
-func Test_ClientAttachHostWithSameCommand(t *testing.T) {
-	t.Parallel()
-
+func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +25,7 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 		PrivateKeys:     []string{hostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(singleNodeServer.Addr(), singleNodeServer.SocketDir()); err != nil {
+	if err := h.Share(testServer.Addr(), testServer.SocketDir()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -42,10 +40,10 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	if want, got := h.SessionID, session.SessionID; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := singleNodeServer.Addr(), session.Host; want != got {
+	if want, got := testServer.Addr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := singleNodeServer.HostAddr, session.HostAddr; want != got {
+	if want, got := testServer.HostAddr(), session.HostAddr; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 
@@ -62,7 +60,7 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID, singleNodeServer.Addr()); err != nil {
+	if err := c.Join(h.SessionID, testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -91,9 +89,7 @@ func Test_ClientAttachHostWithSameCommand(t *testing.T) {
 	}
 }
 
-func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
-	t.Parallel()
-
+func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServer) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +104,7 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 		PrivateKeys:     []string{hostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(singleNodeServer.Addr(), singleNodeServer.SocketDir()); err != nil {
+	if err := h.Share(testServer.Addr(), testServer.SocketDir()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -123,10 +119,10 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 	if want, got := h.SessionID, session.SessionID; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := singleNodeServer.Addr(), session.Host; want != got {
+	if want, got := testServer.Addr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := singleNodeServer.HostAddr, session.HostAddr; want != got {
+	if want, got := testServer.HostAddr(), session.HostAddr; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 
@@ -143,7 +139,7 @@ func Test_ClientAttachHostWithDifferentCommand(t *testing.T) {
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID, singleNodeServer.Addr()); err != nil {
+	if err := c.Join(h.SessionID, testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 
