@@ -52,9 +52,13 @@ k8s:
 	kubectl apply -f config/uptermd.yml -n $(K8S_NS)
 
 generate-host-keys:
-	rm -rf config/host_keys
-	mkdir config/host_keys
-	ssh-keygen -q -t ed25519  -f config/host_keys/ed25519_key -N "" -C ""
-	kubectl -n $(K8S_NS) create secret generic host-keys \
-		--from-file=config/host_keys/ed25519_key \
-		--from-file=config/host_keys/ed25519_key.pub
+	rm -rf config/server_host_keys config/router_host_keys
+	mkdir config/server_host_keys config/router_host_keys
+	ssh-keygen -q -t ed25519  -f config/server_host_keys/ed25519_key -N "" -C ""
+	ssh-keygen -q -t ed25519  -f config/router_host_keys/ed25519_key -N "" -C ""
+	kubectl -n $(K8S_NS) create secret generic server-host-keys \
+		--from-file=config/server_host_keys/ed25519_key \
+		--from-file=config/server_host_keys/ed25519_key.pub
+	kubectl -n $(K8S_NS) create secret generic router-host-keys \
+		--from-file=config/router_host_keys/ed25519_key \
+		--from-file=config/router_host_keys/ed25519_key.pub

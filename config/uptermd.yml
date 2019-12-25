@@ -1,19 +1,79 @@
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: uptermd
+  name: uptermd-router
 spec:
-  replicas: 1
+  replicas: 3
   template:
     metadata:
       labels:
-        app: uptermd
+        app: uptermd-router
     spec:
       containers:
-      - name: uptermd
+      - name: router
         image: jingweno/uptermd
         imagePullPolicy: Always
-        args: ["--host", "$(POD_IP):22", "--host-key", "/host-keys/ed25519_key", "--network", "unix", "--network-opt", "session-socket-dir=/sockets", "--network-opt", "sshd-socket-path=/sockets/sshd.sock"]
+        args:
+        - router
+        - --host
+        - $(POD_IP):22
+        - --host-key
+        - /host-keys/ed25519_key
+        - --upstream-host
+        - uptermd-server.default.svc.cluster.local:22
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        ports:
+        - containerPort: 22 # uptermd
+        readinessProbe:
+           tcpSocket:
+             port: 22
+           periodSeconds: 10
+        livenessProbe:
+           tcpSocket:
+             port: 22
+           periodSeconds: 20
+        volumeMounts:
+            - mountPath: /host-keys
+              name: host-keys
+      volumes:
+      - name: host-keys
+        secret:
+          secretName: router-host-keys
+          defaultMode: 0600
+---
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: uptermd-server
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: uptermd-server
+    spec:
+      containers:
+      - name: server
+        image: jingweno/uptermd
+        imagePullPolicy: Always
+        args:
+        - server
+        - --host
+        - $(POD_IP):22
+        - --host-key
+        - /host-keys/ed25519_key
+        - --network
+        - unix
+        - --network-opt
+        - session-socket-dir=/sockets
+        - --network-opt
+        - sshd-socket-path=/sockets/sshd.sock
+        - --multi-node
         env:
         - name: POD_IP
           valueFrom:
@@ -40,22 +100,40 @@ spec:
           medium: Memory
       - name: host-keys
         secret:
-          secretName: host-keys
+          secretName: server-host-keys
           defaultMode: 0600
+
 ---
 
 apiVersion: v1
 kind: Service
 metadata:
-  name: uptermd
+  name: uptermd-router
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
 spec:
   type: LoadBalancer
   selector:
-    app: uptermd
+    app: uptermd-router
   ports:
   - port: 22
     protocol: TCP
     targetPort: 22
-    name: uptermd
+    name: uptermd-router
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: uptermd-server
+  annotations:
+spec:
+  type: ClusterIP
+  selector:
+    app: uptermd-server
+  ports:
+  - port: 22
+    protocol: TCP
+    targetPort: 22
+    name: uptermd-server
