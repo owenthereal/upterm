@@ -6,13 +6,15 @@ import (
 	"net"
 	"path/filepath"
 
+	"github.com/jingweno/upterm/memlistener"
 	"github.com/jingweno/upterm/utils"
+	"github.com/rs/xid"
 )
 
 var Networks NetworkProviders
 
 func init() {
-	Networks = []NetworkProvider{&UnixProvider{}}
+	Networks = []NetworkProvider{&UnixProvider{}, &MemoryProvider{}}
 }
 
 type NetworkProviders []NetworkProvider
@@ -45,6 +47,54 @@ type SessionDialListener interface {
 type SSHDDialListener interface {
 	Listen() (net.Listener, error)
 	Dial() (net.Conn, error)
+}
+
+type MemoryProvider struct {
+	SocketPath string
+}
+
+func (p *MemoryProvider) Name() string {
+	return "mem"
+}
+
+func (p *MemoryProvider) Opts() string {
+	return fmt.Sprintf("ssh-socket-path=%s", p.SocketPath)
+}
+
+func (p *MemoryProvider) SetOpts(opts NetworkOptions) error {
+	p.SocketPath = xid.New().String()
+	return nil
+}
+
+func (p *MemoryProvider) Session() SessionDialListener {
+	return &memorySessionDialListener{}
+}
+
+func (p *MemoryProvider) SSHD() SSHDDialListener {
+	return &memorySSHDDialListener{socketPath: p.SocketPath}
+}
+
+type memorySSHDDialListener struct {
+	socketPath string
+}
+
+func (l *memorySSHDDialListener) Listen() (net.Listener, error) {
+	return memlistener.Listen("mem", l.socketPath)
+}
+
+func (l *memorySSHDDialListener) Dial() (net.Conn, error) {
+	return memlistener.DialMem(l.socketPath)
+}
+
+type memorySessionDialListener struct {
+}
+
+func (d *memorySessionDialListener) Listen(sessionID string) (net.Listener, error) {
+	return memlistener.Listen("mem", sessionID)
+}
+
+func (d *memorySessionDialListener) Dial(sessionID string) (net.Conn, error) {
+	return memlistener.DialMem(sessionID)
 }
 
 type UnixProvider struct {

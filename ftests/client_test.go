@@ -25,7 +25,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 		PrivateKeys:     []string{hostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(testServer.Addr(), testServer.SocketDir()); err != nil {
+	if err := h.Share(testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -104,7 +104,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 		PrivateKeys:     []string{hostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(testServer.Addr(), testServer.SocketDir()); err != nil {
+	if err := h.Share(testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
