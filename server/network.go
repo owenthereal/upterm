@@ -60,7 +60,12 @@ func (p *UnixProvider) SetOpts(opts NetworkOptions) error {
 	var ok bool
 	p.sessionSocketDir, ok = opts["session-socket-dir"]
 	if !ok {
-		return fmt.Errorf("missing \"session-socket-dir\" option for network provider %s", p.Name())
+		dir, err := ioutil.TempDir("", "uptermd")
+		if err != nil {
+			return fmt.Errorf("missing \"session-socket-dir\" option for network provider %s", p.Name())
+		}
+
+		p.sessionSocketDir = dir
 	}
 	p.sshdSocketPath, ok = opts["sshd-socket-path"]
 	if !ok {

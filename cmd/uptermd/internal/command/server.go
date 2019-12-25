@@ -31,7 +31,7 @@ func serverCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVarP(&flagServerHostKeys, "host-key", "", nil, "host private key")
 	cmd.PersistentFlags().BoolVarP(&flagServerMultiNodeMode, "multi-node", "", false, "indicate whether the server is run in multi-node mode")
 
-	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
+	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "unix", "network provider")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
 	return cmd
