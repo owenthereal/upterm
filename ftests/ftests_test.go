@@ -61,7 +61,7 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----`
 )
 
-func NewServer() (*Server, error) {
+func NewServer(singleNodeMode bool) (*Server, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -72,7 +72,7 @@ func NewServer() (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{ln: ln, socketDir: socketDir}
+	s := &Server{ln: ln, socketDir: socketDir, singleNodeMode: singleNodeMode}
 	go func() {
 		if err := s.start(); err != nil {
 			log.WithError(err).Info("error starting test server")
@@ -86,6 +86,7 @@ type Server struct {
 	ln        net.Listener
 	socketDir string
 	*server.Server
+	singleNodeMode bool
 }
 
 func (s *Server) start() error {
@@ -104,6 +105,7 @@ func (s *Server) start() error {
 
 	s.Server = &server.Server{
 		HostAddr:        serverHostAddr,
+		SingleNodeMode:  s.singleNodeMode,
 		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
 		NetworkProvider: provider,
 		Logger:          log.New(),
@@ -336,7 +338,7 @@ func (c *Client) Join(clientID, addr string) error {
 	return nil
 }
 
-var s *Server
+var singleNodeServer *Server
 
 func TestMain(m *testing.M) {
 	err := writeKeyPairs()
@@ -346,13 +348,13 @@ func TestMain(m *testing.M) {
 	defer removeKeyPairs()
 
 	// start the server
-	s, err = NewServer()
+	singleNodeServer, err = NewServer(true)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	exitCode := m.Run()
-	s.Close()
+	singleNodeServer.Close()
 
 	os.Exit(exitCode)
 }

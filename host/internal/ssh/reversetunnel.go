@@ -51,7 +51,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 	}
 
 	config := &ssh.ClientConfig{
-		User:            user.Username,
+		User:            utils.HostUser(user.Username),
 		Auth:            auths,
 		ClientVersion:   upterm.HostSSHClientVersion,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),

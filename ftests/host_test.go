@@ -11,7 +11,7 @@ func Test_HostFailToShareWithoutPrivateKey(t *testing.T) {
 	h := &Host{
 		Command: []string{"bash"},
 	}
-	err := h.Share(s.Addr(), s.SocketDir())
+	err := h.Share(singleNodeServer.Addr(), singleNodeServer.SocketDir())
 	if err == nil {
 		t.Fatal("expect error")
 	}

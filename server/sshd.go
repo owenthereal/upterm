@@ -45,7 +45,15 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// TODO: validate public keys from proxy
+			// This function is never executed and it's as an indicator
+			// to crypto/ssh that public key auth is enabled.
+			// This allows the Router to convert the public key auth to
+			// password auth with public key as the password in authorized
+			// key format.
+			return false
+		},
+		PasswordHandler: func(ctx ssh.Context, password string) bool {
+			// TODO: validate host authorized_keys
 			return true
 		},
 		RequestHandlers: map[string]ssh.RequestHandler{

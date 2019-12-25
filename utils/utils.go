@@ -2,8 +2,13 @@ package utils
 
 import (
 	"context"
+	"crypto/ed25519"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func SocketFile(name string) string {
@@ -22,4 +27,42 @@ func KeepAlive(ctx context.Context, d time.Duration, fn func()) {
 			fn()
 		}
 	}
+}
+
+func HostUser(user string) string {
+	return fmt.Sprintf("host-%s", user)
+}
+
+func IsHostUser(user string) bool {
+	return strings.HasPrefix(user, "host-")
+}
+
+func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
+
+	for _, pk := range privateKeys {
+		signer, err := ssh.ParsePrivateKey(pk)
+		if err != nil {
+			return nil, err
+		}
+
+		signers = append(signers, signer)
+	}
+
+	// generate one if no signer
+	if len(signers) == 0 {
+		_, private, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+
+		signer, err := ssh.NewSignerFromKey(private)
+		if err != nil {
+			return nil, err
+		}
+
+		signers = append(signers, signer)
+	}
+
+	return signers, nil
 }

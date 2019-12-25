@@ -2,18 +2,18 @@ package server
 
 import (
 	"context"
-	"crypto/ed25519"
 	"net"
 
+	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/crypto/ssh"
 )
 
 type Server struct {
 	HostPrivateKeys [][]byte
 	HostAddr        string
 	NetworkProvider NetworkProvider
+	SingleNodeMode  bool
 	Logger          log.FieldLogger
 
 	ctx    context.Context
@@ -30,11 +30,10 @@ func (s *Server) Serve(ln net.Listener) error {
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
 
-	signers, err := createSigners(s.HostPrivateKeys)
+	signers, err := utils.CreateSigners(s.HostPrivateKeys)
 	if err != nil {
 		return err
 	}
-	upstreamSigner := signers[0] // TODO: generate a new one
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
@@ -48,17 +47,17 @@ func (s *Server) Serve(ln net.Listener) error {
 		})
 	}
 	{
-		proxy := Proxy{
+		router := LocalRouter{
 			HostSigners:         signers,
-			UpstreamSigner:      upstreamSigner,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
+			SingleNodeMode:      s.SingleNodeMode,
 			Logger:              s.Logger.WithField("app", "proxy"),
 		}
 		g.Add(func() error {
-			return proxy.Serve(ln)
+			return router.Serve(ln)
 		}, func(err error) {
-			proxy.Shutdown()
+			router.Shutdown()
 		})
 	}
 	{
@@ -81,34 +80,4 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 
 	return g.Run()
-}
-
-func createSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
-	var signers []ssh.Signer
-
-	for _, pk := range privateKeys {
-		signer, err := ssh.ParsePrivateKey(pk)
-		if err != nil {
-			return nil, err
-		}
-
-		signers = append(signers, signer)
-	}
-
-	// generate one if no signer
-	if len(signers) == 0 {
-		_, private, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			return nil, err
-		}
-
-		signer, err := ssh.NewSignerFromKey(private)
-		if err != nil {
-			return nil, err
-		}
-
-		signers = append(signers, signer)
-	}
-
-	return signers, nil
 }
