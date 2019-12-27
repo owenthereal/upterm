@@ -13,7 +13,7 @@ type Server struct {
 	HostPrivateKeys [][]byte
 	HostAddr        string
 	NetworkProvider NetworkProvider
-	SingleNodeMode  bool
+	UpstreamNode    bool
 	Logger          log.FieldLogger
 
 	ctx    context.Context
@@ -51,7 +51,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			HostSigners:         signers,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
-			SingleNodeMode:      s.SingleNodeMode,
+			UpstreamNode:        s.UpstreamNode,
 			Logger:              s.Logger.WithField("app", "proxy"),
 		}
 		g.Add(func() error {

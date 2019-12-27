@@ -68,7 +68,7 @@ spec:
        - /host-keys/ed25519_key
        - --network
        - mem
-       - --multi-node
+       - --upstream-node
       env:
        - name: POD_IP
          valueFrom:

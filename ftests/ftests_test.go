@@ -73,7 +73,7 @@ func TestMain(m *testing.M) {
 	defer removeKeyPairs()
 
 	// start the single-node server
-	singleNodeServer, err = NewServer(true)
+	singleNodeServer, err = NewServer(false)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -97,13 +97,13 @@ type TestServer interface {
 	Shutdown()
 }
 
-func NewServer(singleNodeMode bool) (TestServer, error) {
+func NewServer(upstreamNode bool) (TestServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
 
-	s := &Server{ln: ln, singleNodeMode: singleNodeMode}
+	s := &Server{ln: ln, upstreamNode: upstreamNode}
 	go func() {
 		if err := s.start(); err != nil {
 			log.WithError(err).Info("error starting test server")
@@ -115,7 +115,7 @@ func NewServer(singleNodeMode bool) (TestServer, error) {
 
 func NewRouter() (TestServer, error) {
 	// start the multi-node server
-	multiNodeServer, err := NewServer(false)
+	multiNodeServer, err := NewServer(true)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (r *Router) Shutdown() {
 type Server struct {
 	ln net.Listener
 	*server.Server
-	singleNodeMode bool
+	upstreamNode bool
 }
 
 func (s *Server) start() error {
@@ -180,7 +180,7 @@ func (s *Server) start() error {
 	provider.SetOpts(nil)
 	s.Server = &server.Server{
 		HostAddr:        s.Addr(),
-		SingleNodeMode:  s.singleNodeMode,
+		UpstreamNode:    s.upstreamNode,
 		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
 		NetworkProvider: provider,
 		Logger:          log.New(),

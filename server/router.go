@@ -233,7 +233,7 @@ type LocalRouter struct {
 	HostSigners         []ssh.Signer
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
-	SingleNodeMode      bool
+	UpstreamNode        bool
 	Logger              log.FieldLogger
 
 	router *Router
@@ -274,20 +274,37 @@ func (r *LocalRouter) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addit
 		return nil, nil, err
 	}
 
-	return c, &ssh.AuthPipe{
-		User:                    user, // TODO: look up client user by public key
-		NoneAuthCallback:        r.noneCallback,
-		PasswordCallback:        r.passwordCallback,
-		PublicKeyCallback:       r.publicKeyCallback,
-		UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
-	}, nil
+	var pipe *ssh.AuthPipe
+	if r.UpstreamNode {
+		pipe = &ssh.AuthPipe{
+			User:                    user, // TODO: look up client user by public key
+			NoneAuthCallback:        r.noneCallback,
+			PasswordCallback:        r.passThroughPasswordCallback,
+			PublicKeyCallback:       r.discardPublicKeyCallback,
+			UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
+		}
+	} else {
+		pipe = &ssh.AuthPipe{
+			User:                    user, // TODO: look up client user by public key
+			NoneAuthCallback:        r.noneCallback,
+			PasswordCallback:        r.discardPasswordCallback,
+			PublicKeyCallback:       r.convertToPasswordPublicKeyCallback,
+			UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
+		}
+
+	}
+	return c, pipe, nil
 }
 
-func (r *LocalRouter) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	if !r.SingleNodeMode {
-		return ssh.AuthPipeTypeDiscard, nil, nil
-	}
+func (r *LocalRouter) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	return ssh.AuthPipeTypeDiscard, nil, nil
+}
 
+func (r *LocalRouter) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	return ssh.AuthPipeTypePassThrough, nil, nil
+}
+
+func (r *LocalRouter) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	// Can't auth with the public key against session upstream in the Host
 	// because we don't have the Client private key to re-sign the request.
 	// Public key auth is converted to password key auth with public key as
@@ -301,12 +318,8 @@ func (r *LocalRouter) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh
 	return ssh.AuthPipeTypeNone, nil, nil
 }
 
-func (r *LocalRouter) passwordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	if r.SingleNodeMode {
-		return ssh.AuthPipeTypeDiscard, nil, nil
-	} else {
-		return ssh.AuthPipeTypePassThrough, nil, nil
-	}
+func (r *LocalRouter) discardPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	return ssh.AuthPipeTypeDiscard, nil, nil
 }
 
 func (r *LocalRouter) shouldRouteToSSHD(conn ssh.ConnMetadata) bool {

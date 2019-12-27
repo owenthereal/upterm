@@ -30,12 +30,12 @@ func Test_all(t *testing.T) {
 
 	for _, target := range testTargets {
 		for _, test := range testCases {
-			target = target
-			test = test
+			targetLocal := target
+			testLocal := test
 
-			t.Run(funcName(test)+"/"+target.name, func(t *testing.T) {
+			t.Run(funcName(testLocal)+"/"+targetLocal.name, func(t *testing.T) {
 				t.Parallel()
-				test(t, target.testServer)
+				testLocal(t, targetLocal.testServer)
 			})
 		}
 	}
