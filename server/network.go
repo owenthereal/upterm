@@ -83,7 +83,7 @@ func (l *memorySSHDDialListener) Listen() (net.Listener, error) {
 }
 
 func (l *memorySSHDDialListener) Dial() (net.Conn, error) {
-	return memlistener.DialMem(l.socketPath)
+	return memlistener.Dial("mem", l.socketPath)
 }
 
 type memorySessionDialListener struct {
@@ -94,7 +94,7 @@ func (d *memorySessionDialListener) Listen(sessionID string) (net.Listener, erro
 }
 
 func (d *memorySessionDialListener) Dial(sessionID string) (net.Conn, error) {
-	return memlistener.DialMem(sessionID)
+	return memlistener.Dial("mem", sessionID)
 }
 
 type UnixProvider struct {
