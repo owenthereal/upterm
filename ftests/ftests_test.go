@@ -93,7 +93,7 @@ func TestMain(m *testing.M) {
 
 type TestServer interface {
 	Addr() string
-	HostAddr() string
+	NodeAddr() string
 	Shutdown()
 }
 
@@ -160,8 +160,8 @@ func (r *Router) Addr() string {
 	return r.ln.Addr().String()
 }
 
-func (r *Router) HostAddr() string {
-	return r.multiNodeServer.HostAddr()
+func (r *Router) NodeAddr() string {
+	return r.multiNodeServer.NodeAddr()
 }
 
 func (r *Router) Shutdown() {
@@ -179,7 +179,7 @@ func (s *Server) start() error {
 	provider := &server.MemoryProvider{}
 	provider.SetOpts(nil)
 	s.Server = &server.Server{
-		HostAddr:        s.Addr(),
+		NodeAddr:        s.Addr(),
 		UpstreamNode:    s.upstreamNode,
 		HostPrivateKeys: [][]byte{[]byte(serverPrivateKeyContent)},
 		NetworkProvider: provider,
@@ -193,8 +193,8 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
-func (s *Server) HostAddr() string {
-	return s.Server.HostAddr
+func (s *Server) NodeAddr() string {
+	return s.Server.NodeAddr
 }
 
 func (s *Server) Shutdown() {

@@ -43,7 +43,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	if want, got := testServer.Addr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := testServer.HostAddr(), session.HostAddr; want != got {
+	if want, got := testServer.NodeAddr(), session.NodeAddr; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 
@@ -122,7 +122,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 	if want, got := testServer.Addr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := testServer.HostAddr(), session.HostAddr; want != got {
+	if want, got := testServer.NodeAddr(), session.NodeAddr; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 

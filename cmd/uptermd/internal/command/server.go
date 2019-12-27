@@ -77,7 +77,7 @@ func serverRunE(c *cobra.Command, args []string) error {
 	logger.Info("starting server")
 
 	s := &server.Server{
-		HostAddr:        flagServerHost,
+		NodeAddr:        flagServerHost,
 		HostPrivateKeys: privateKeys,
 		NetworkProvider: provider,
 		UpstreamNode:    flagServerUpstreamNode,

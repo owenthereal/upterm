@@ -68,7 +68,7 @@ func (c *Host) Run(ctx context.Context) error {
 		s := adminServer{
 			SessionID: c.SessionID,
 			Host:      c.Host,
-			HostAddr:  info.HostAddr,
+			NodeAddr:  info.NodeAddr,
 		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)

@@ -11,7 +11,7 @@ import (
 
 type Server struct {
 	HostPrivateKeys [][]byte
-	HostAddr        string
+	NodeAddr        string
 	NetworkProvider NetworkProvider
 	UpstreamNode    bool
 	Logger          log.FieldLogger
@@ -68,7 +68,7 @@ func (s *Server) Serve(ln net.Listener) error {
 
 		sshd := SSHD{
 			HostSigners:         signers, // TODO: use different host keys
-			HostAddr:            s.HostAddr,
+			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
 			Logger:              s.Logger.WithField("app", "sshd"),
 		}

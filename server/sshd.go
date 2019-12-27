@@ -12,12 +12,12 @@ import (
 )
 
 type ServerInfo struct {
-	HostAddr string
+	NodeAddr string
 }
 
 type SSHD struct {
 	HostSigners         []gossh.Signer
-	HostAddr            string
+	NodeAddr            string
 	SessionDialListener SessionDialListener
 	Logger              log.FieldLogger
 
@@ -69,7 +69,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 
 func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	info := ServerInfo{
-		HostAddr: s.HostAddr,
+		NodeAddr: s.NodeAddr,
 	}
 
 	b, err := json.Marshal(info)
