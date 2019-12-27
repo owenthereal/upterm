@@ -68,11 +68,7 @@ spec:
         - --host-key
         - /host-keys/ed25519_key
         - --network
-        - unix
-        - --network-opt
-        - session-socket-dir=/sockets
-        - --network-opt
-        - sshd-socket-path=/sockets/sshd.sock
+        - mem
         - --multi-node
         env:
         - name: POD_IP
@@ -90,14 +86,9 @@ spec:
              port: 22
            periodSeconds: 20
         volumeMounts:
-            - mountPath: /sockets
-              name: socket-dir
             - mountPath: /host-keys
               name: host-keys
       volumes:
-      - name: socket-dir
-        emptyDir:
-          medium: Memory
       - name: host-keys
         secret:
           secretName: server-host-keys

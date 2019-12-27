@@ -93,7 +93,6 @@ func TestMain(m *testing.M) {
 
 type TestServer interface {
 	Addr() string
-	SocketDir() string
 	HostAddr() string
 	Shutdown()
 }
@@ -104,12 +103,7 @@ func NewServer(singleNodeMode bool) (TestServer, error) {
 		return nil, err
 	}
 
-	socketDir, err := ioutil.TempDir("", "sockets")
-	if err != nil {
-		return nil, err
-	}
-
-	s := &Server{ln: ln, socketDir: socketDir, singleNodeMode: singleNodeMode}
+	s := &Server{ln: ln, singleNodeMode: singleNodeMode}
 	go func() {
 		if err := s.start(); err != nil {
 			log.WithError(err).Info("error starting test server")
@@ -170,36 +164,20 @@ func (r *Router) HostAddr() string {
 	return r.multiNodeServer.HostAddr()
 }
 
-func (r *Router) SocketDir() string {
-	return r.multiNodeServer.SocketDir()
-}
-
 func (r *Router) Shutdown() {
 	r.GlobalRouter.Shutdown()
 	r.multiNodeServer.Shutdown()
 }
 
 type Server struct {
-	ln        net.Listener
-	socketDir string
+	ln net.Listener
 	*server.Server
 	singleNodeMode bool
 }
 
 func (s *Server) start() error {
-	dir, err := ioutil.TempDir("", "uptermd")
-	if err != nil {
-		return err
-	}
-	sshdSocketPath := filepath.Join(dir, "sshd.sock")
-
-	// TODO: use in-memory provider
-	provider := &server.UnixProvider{}
-	provider.SetOpts(server.NetworkOptions{
-		"session-socket-dir": s.socketDir,
-		"sshd-socket-path":   sshdSocketPath,
-	})
-
+	provider := &server.MemoryProvider{}
+	provider.SetOpts(nil)
 	s.Server = &server.Server{
 		HostAddr:        s.Addr(),
 		SingleNodeMode:  s.singleNodeMode,
@@ -219,13 +197,8 @@ func (s *Server) HostAddr() string {
 	return s.Server.HostAddr
 }
 
-func (s *Server) SocketDir() string {
-	return s.socketDir
-}
-
 func (s *Server) Shutdown() {
 	s.Server.Shutdown()
-	os.RemoveAll(s.socketDir)
 }
 
 type Host struct {
@@ -252,7 +225,7 @@ func (c *Host) init() {
 	c.outputCh = make(chan string)
 }
 
-func (c *Host) Share(addr, socketDir string) error {
+func (c *Host) Share(addr string) error {
 	c.init()
 
 	stdinr, stdinw, err := os.Pipe()
@@ -274,6 +247,16 @@ func (c *Host) Share(addr, socketDir string) error {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(clientPublicKeyContent))
 	if err != nil {
 		return err
+	}
+
+	if c.AdminSocketFile == "" {
+		adminSockDir, err := newAdminSocketDir()
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(adminSockDir)
+
+		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
 	}
 
 	c.Host = &host.Host{
@@ -298,7 +281,7 @@ func (c *Host) Share(addr, socketDir string) error {
 		}
 	}()
 
-	if err := waitForUnixSocket(filepath.Join(socketDir, utils.SocketFile(c.Host.SessionID)), errCh); err != nil {
+	if err := waitForUnixSocket(c.AdminSocketFile, errCh); err != nil {
 		return err
 	}
 
