@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -56,13 +57,18 @@ func sessionRunE(c *cobra.Command, args []string) error {
 	}
 
 	session := resp.GetPayload()
+	user, err := api.EncodeIdentifierSession(session)
+	if err != nil {
+		return err
+	}
+
 	host, port, err := net.SplitHostPort(session.Host)
 	if err != nil {
 		return err
 	}
 
 	// Format: ssh session:host-addr@host
-	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=30 %s:%s@%s", session.SessionID, session.NodeAddr, host)
+	cmd := fmt.Sprintf("ssh session: ssh -o ServerAliveInterval=30 %s@%s", user, host)
 	if port != "22" {
 		cmd = fmt.Sprintf("%s -p %s", cmd, port)
 	}

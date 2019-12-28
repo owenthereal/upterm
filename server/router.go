@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/upterm"
-	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -184,17 +183,20 @@ func (r *GlobalRouter) findUpstreamFunc(conn ssh.ConnMetadata, challengeCtx ssh.
 		user = conn.User()
 	)
 
-	split := strings.SplitN(user, ":", 2)
-	// e.g., username:127.0.0.1:2222
-	if len(split) == 2 {
-		host, port, err := net.SplitHostPort(split[1])
+	id, err := api.DecodeIdentifier(user)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
+	}
+
+	if id.Type == api.Identifier_HOST {
+		c, err = net.Dial("tcp", r.UpstreamHost)
+	} else {
+		host, port, err := net.SplitHostPort(id.NodeAddr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("host address %s is malformed: %w", user, err)
 		}
 
 		c, err = net.Dial("tcp", net.JoinHostPort(host, port))
-	} else {
-		c, err = net.Dial("tcp", r.UpstreamHost) // if no host addr is specified, route to upstream LB
 	}
 	if err != nil {
 		return nil, nil, err
@@ -263,12 +265,18 @@ func (r *LocalRouter) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addit
 		err  error
 		user = conn.User()
 	)
-	if r.shouldRouteToSSHD(conn) {
-		r.Logger.WithField("user", user).Info("dialing sshd")
+
+	id, err := api.DecodeIdentifier(user)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
+	}
+
+	if id.Type == api.Identifier_HOST {
+		r.Logger.WithField("user", id.Id).Info("dialing sshd")
 		c, err = r.SSHDDialListener.Dial()
 	} else {
-		r.Logger.WithField("session", user).Info("dialing session")
-		c, err = r.SessionDialListener.Dial(r.parseSessionIDFromUser(user))
+		r.Logger.WithField("session", id.Id).Info("dialing session")
+		c, err = r.SessionDialListener.Dial(id.Id)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -320,15 +328,6 @@ func (r *LocalRouter) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh
 
 func (r *LocalRouter) discardPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeDiscard, nil, nil
-}
-
-func (r *LocalRouter) shouldRouteToSSHD(conn ssh.ConnMetadata) bool {
-	return utils.IsHostUser(conn.User()) || upterm.HostSSHClientVersion == string(conn.ClientVersion())
-}
-
-// user is in the format of username:host-addr@host
-func (r *LocalRouter) parseSessionIDFromUser(user string) string {
-	return strings.SplitN(user, ":", 2)[0]
 }
 
 func isIgnoredErr(err error) bool {

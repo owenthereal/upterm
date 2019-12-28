@@ -3,9 +3,7 @@ package utils
 import (
 	"context"
 	"crypto/ed25519"
-	"fmt"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -27,14 +25,6 @@ func KeepAlive(ctx context.Context, d time.Duration, fn func()) {
 			fn()
 		}
 	}
-}
-
-func HostUser(user string) string {
-	return fmt.Sprintf("host-%s", user)
-}
-
-func IsHostUser(user string) bool {
-	return strings.HasPrefix(user, "host-")
 }
 
 func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {

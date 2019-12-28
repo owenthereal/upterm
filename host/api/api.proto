@@ -20,3 +20,14 @@ message GetSessionResponse {
     string node_addr = 2;
     string session_id = 3;
 }
+
+message Identifier {
+    string id = 1;
+    Type type = 2;
+    string node_addr = 3;
+
+    enum Type {
+      HOST = 0;
+      CLIENT = 1;
+    }
+}
