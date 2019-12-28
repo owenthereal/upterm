@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/upterm"
@@ -22,10 +23,18 @@ type SSHD struct {
 	Logger              log.FieldLogger
 
 	server *ssh.Server
+	mux    sync.Mutex
 }
 
 func (s *SSHD) Shutdown() error {
-	return s.server.Shutdown(context.Background())
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	if s.server != nil {
+		return s.server.Shutdown(context.Background())
+	}
+
+	return nil
 }
 
 func (s *SSHD) Serve(ln net.Listener) error {
@@ -35,6 +44,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(s.SessionDialListener, s.Logger.WithField("handler", "streamlocalForwardHandler"))
+	s.mux.Lock()
 	s.server = &ssh.Server{
 		HostSigners: signers,
 		Handler: func(s ssh.Session) {
@@ -63,6 +73,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			upterm.ServerPingRequestType:        pingRequestHandler,
 		},
 	}
+	s.mux.Unlock()
 
 	return s.server.Serve(ln)
 }

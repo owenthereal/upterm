@@ -32,10 +32,12 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 
 	// write last cache to new writers
 	b := t.cache.Bytes()
-	for _, w := range writers {
-		_, err := w.Write(b)
-		if err != nil {
-			return err
+	if len(b) > 0 {
+		for _, w := range writers {
+			_, err := w.Write(b)
+			if err != nil {
+				return err
+			}
 		}
 	}
 

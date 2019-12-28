@@ -45,32 +45,33 @@ type EventManager struct {
 }
 
 func (em *EventManager) HandleEvent() {
-	go func() {
-		<-em.ctx.Done()
-		close(em.tmCh)
-	}()
-
 	m := make(map[io.ReadWriteCloser]map[string]Terminal)
-	for evt := range em.tmCh {
-		switch evt.Type {
-		case EventTerminalAttached, EventTerminalWindowChanged:
-			pty := evt.Terminal.Pty
-			ts, ok := m[pty]
-			if !ok {
-				ts = make(map[string]Terminal)
-				m[pty] = ts
-			}
-			ts[evt.Terminal.ID] = evt.Terminal
-			resizeWindow(evt.Terminal.Pty, ts)
-		case EventTerminalDetached:
-			pty := evt.Terminal.Pty
-			ts, ok := m[pty]
-			if ok {
-				delete(ts, evt.Terminal.ID)
-			}
+	for {
+		select {
+		case <-em.ctx.Done():
+			close(em.tmCh)
+			return
+		case evt := <-em.tmCh:
+			switch evt.Type {
+			case EventTerminalAttached, EventTerminalWindowChanged:
+				pty := evt.Terminal.Pty
+				ts, ok := m[pty]
+				if !ok {
+					ts = make(map[string]Terminal)
+					m[pty] = ts
+				}
+				ts[evt.Terminal.ID] = evt.Terminal
+				resizeWindow(evt.Terminal.Pty, ts)
+			case EventTerminalDetached:
+				pty := evt.Terminal.Pty
+				ts, ok := m[pty]
+				if ok {
+					delete(ts, evt.Terminal.ID)
+				}
 
-			if len(ts) == 0 {
-				delete(m, pty)
+				if len(ts) == 0 {
+					delete(m, pty)
+				}
 			}
 		}
 	}
@@ -101,8 +102,10 @@ func (em *TerminalEventManager) send(evt Event) {
 	}
 
 	select {
-	case em.ch <- evt:
 	case <-em.ctx.Done():
+		return
+	case em.ch <- evt:
+	default: // if channel is closed
 		return
 	}
 }

@@ -105,8 +105,9 @@ func (c *Command) Run() error {
 			}
 			return nil
 		}, func(err error) {
-			cancel()
 			te.TerminalDetached()
+			cancel()
+			c.ptmx.Close()
 		})
 	}
 
@@ -136,7 +137,6 @@ func (c *Command) Run() error {
 		g.Add(func() error {
 			return c.cmd.Wait()
 		}, func(err error) {
-			c.ptmx.Close()
 		})
 	}
 

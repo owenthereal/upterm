@@ -43,7 +43,7 @@ install:
 	go install ./cmd/... 
 
 test:
-	go test ./... -count=1
+	go test ./... -count=1 -race
 
 docker:
 	docker build -t jingweno/uptermd . && docker push jingweno/uptermd
