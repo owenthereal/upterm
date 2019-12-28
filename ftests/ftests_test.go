@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
 	"github.com/pborman/ansi"
@@ -346,7 +348,7 @@ func (c *Client) Close() {
 	c.sshClient.Close()
 }
 
-func (c *Client) Join(clientID, addr string) error {
+func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error {
 	c.init()
 
 	auths, err := authMethodsFromFiles([]string{clientPrivateKey})
@@ -354,8 +356,13 @@ func (c *Client) Join(clientID, addr string) error {
 		return err
 	}
 
+	user, err := api.EncodeIdentifierSession(session)
+	if err != nil {
+		return err
+	}
+
 	config := &ssh.ClientConfig{
-		User:            clientID,
+		User:            user,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}

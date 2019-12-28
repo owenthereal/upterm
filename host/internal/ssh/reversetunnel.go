@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
@@ -50,8 +51,17 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 		auths = append(auths, ssh.PublicKeys(signer))
 	}
 
+	id := &api.Identifier{
+		Id:   user.Username,
+		Type: api.Identifier_HOST,
+	}
+	encodedID, err := api.EncodeIdentifier(id)
+	if err != nil {
+		return nil, err
+	}
+
 	config := &ssh.ClientConfig{
-		User:            utils.HostUser(user.Username),
+		User:            encodedID,
 		Auth:            auths,
 		ClientVersion:   upterm.HostSSHClientVersion,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),

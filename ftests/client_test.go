@@ -60,7 +60,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID, testServer.Addr()); err != nil {
+	if err := c.Join(session, testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,7 +139,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 	}
 
 	c := &Client{}
-	if err := c.Join(h.SessionID, testServer.Addr()); err != nil {
+	if err := c.Join(session, testServer.Addr()); err != nil {
 		t.Fatal(err)
 	}
 
