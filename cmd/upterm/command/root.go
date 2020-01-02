@@ -10,7 +10,7 @@ func Root() *cobra.Command {
 		Short: "Secure Terminal Sharing",
 		Long:  "Upterm is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.",
 		Example: `  # Host a terminal session by running $SHELL
-  # The client's input/output is attached to the host's.
+  # The client's input/output is attached to the host's
   $ upterm host
 
   # Display the ssh connection string
