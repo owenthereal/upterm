@@ -19,14 +19,14 @@ func main() {
 		Source:  "Upterm " + command.Version,
 		Manual:  "Upterm Manual",
 	}
-	if err := doc.GenManTree(rootCmd, header, "./etc/man1"); err != nil {
+	if err := doc.GenManTree(rootCmd, header, "./etc/man/man1"); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := rootCmd.GenBashCompletionFile("./etc/upterm.bash_completion.sh"); err != nil {
+	if err := rootCmd.GenBashCompletionFile("./etc/completion/upterm.bash_completion.sh"); err != nil {
 		log.Fatal(err)
 	}
-	if err := rootCmd.GenZshCompletionFile("./etc/upterm.zsh_completion"); err != nil {
+	if err := rootCmd.GenZshCompletionFile("./etc/completion/upterm.zsh_completion"); err != nil {
 		log.Fatal(err)
 	}
 }
