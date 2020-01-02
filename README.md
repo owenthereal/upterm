@@ -1,6 +1,6 @@
 # upterm
 
-Upterm is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.
+[Upterm](https://github.com/jingweno/upterm) is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.
 
 ## What it's good for
 
