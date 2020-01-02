@@ -1,0 +1,9 @@
+language: go
+go: 1.13.5
+
+jobs:
+  include:
+    - stage: vet
+      script: make vet
+    - stage: test
+      script: make test
