@@ -19,7 +19,7 @@ func main() {
 		Source:  "Upterm " + command.Version,
 		Manual:  "Upterm Manual",
 	}
-	if err := doc.GenManTree(rootCmd, header, "./etc/man"); err != nil {
+	if err := doc.GenManTree(rootCmd, header, "./etc/man1"); err != nil {
 		log.Fatal(err)
 	}
 
