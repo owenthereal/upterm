@@ -45,11 +45,14 @@ build:
 install:
 	go install ./cmd/... 
 
-docker:
-	docker build -t jingweno/uptermd -f Dockerfile.uptermd . && docker push jingweno/uptermd
+docker_build:
+	docker build -t jingweno/uptermd -f Dockerfile.uptermd .
+
+docker: docker_build
+	docker push jingweno/uptermd
 
 test:
-	go test ./... -count=1 -race -v
+	go test ./... -mod=vendor -count=1 -race -v
 
 vet:
 	docker run --rm -v $$(pwd):/app -w /app golangci/golangci-lint:v1.21.0 golangci-lint run -v

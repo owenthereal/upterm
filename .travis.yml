@@ -1,0 +1,13 @@
+language: go
+go: 1.13.5
+
+jobs:
+  include:
+    - stage: build
+      script: make build
+    - stage: test
+      script: make test
+    - stage: vet
+      script: make vet
+    - stage: docker build
+      script: make docker_build
