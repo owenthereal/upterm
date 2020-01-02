@@ -65,7 +65,7 @@ upterm host -- docker run --rm -ti ubuntu bash
 $ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming`,
 ```
 
-More advanced usage is [here](https://github.com/jingweno/upterm/docs/upterm.md).
+More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/docs/upterm.md).
 
 ## Demo
 
