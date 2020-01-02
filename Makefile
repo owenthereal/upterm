@@ -6,7 +6,7 @@ generate: proto client
 
 docs:
 	rm -rf docs && mkdir docs
-	rm -rf man && mkdir man
+	rm -rf etc && mkdir -p etc/man
 	go run cmd/gendoc/main.go
 
 proto:
