@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -e
+
+version_file="cmd/upterm/command/version.go"
+
+if git diff --exit-code >/dev/null -- "$version_file"; then
+  echo "Update the version in $version_file and try again." >&2
+  exit 1
+fi
+
+version="$(grep -w 'Version =' "$version_file" | cut -d'"' -f2)"
+
+git commit -m "upterm $version" -- "$version_file"
+
+git tag "v${version}"
+
+git push origin HEAD "v${version}"
