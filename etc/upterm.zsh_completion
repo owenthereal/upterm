@@ -1,0 +1,114 @@
+#compdef _upterm upterm
+
+
+function _upterm {
+  local -a commands
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[help for upterm]' \
+    "1: :->cmnds" \
+    "*::arg:->args"
+
+  case $state in
+  cmnds)
+    commands=(
+      "help:Help about any command"
+      "host:Host a terminal session"
+      "session:Display session"
+      "version:Show version"
+    )
+    _describe "command" commands
+    ;;
+  esac
+
+  case "$words[1]" in
+  help)
+    _upterm_help
+    ;;
+  host)
+    _upterm_host
+    ;;
+  session)
+    _upterm_session
+    ;;
+  version)
+    _upterm_version
+    ;;
+  esac
+}
+
+function _upterm_help {
+  _arguments
+}
+
+function _upterm_host {
+  _arguments \
+    '(-a --authorized-key)'{-a,--authorized-key}'[an authorized_keys file that lists public keys that are permitted to connect.]:' \
+    '(-f --force-command)'{-f,--force-command}'[force execution of a command and attach its input/output to client'\''s.]:' \
+    '(-h --help)'{-h,--help}'[help for host]' \
+    '(*-i *--private-key)'{\*-i,\*--private-key}'[private key for public key authentication against the upterm server (required).]:' \
+    '--server[upterm server address (required)]:'
+}
+
+
+function _upterm_session {
+  local -a commands
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[help for session]' \
+    "1: :->cmnds" \
+    "*::arg:->args"
+
+  case $state in
+  cmnds)
+    commands=(
+      "current:Display the current session"
+      "help:Help about any command"
+      "info:Display session by name"
+      "list:List shared sessions"
+    )
+    _describe "command" commands
+    ;;
+  esac
+
+  case "$words[1]" in
+  current)
+    _upterm_session_current
+    ;;
+  help)
+    _upterm_session_help
+    ;;
+  info)
+    _upterm_session_info
+    ;;
+  list)
+    _upterm_session_list
+    ;;
+  esac
+}
+
+function _upterm_session_current {
+  _arguments \
+    '--admin-socket[admin unix domain socket (required)]:' \
+    '(-h --help)'{-h,--help}'[help for current]'
+}
+
+function _upterm_session_help {
+  _arguments
+}
+
+function _upterm_session_info {
+  _arguments \
+    '(-h --help)'{-h,--help}'[help for info]'
+}
+
+function _upterm_session_list {
+  _arguments \
+    '(-h --help)'{-h,--help}'[help for list]'
+}
+
+function _upterm_version {
+  _arguments \
+    '(-h --help)'{-h,--help}'[help for version]'
+}
+
