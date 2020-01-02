@@ -20,7 +20,7 @@ Clients connect to your terminal session over the public internet with `ssh`.
 ### Mac
 
 ```
-brew tap jingweno/homebrew-upterm
+brew tap jingweno/upterm
 brew install upterm
 ```
 
