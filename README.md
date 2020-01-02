@@ -17,6 +17,14 @@ Clients connect to your terminal session over the public internet with `ssh`.
 
 ## Installation
 
+### Mac
+
+```
+brew tap jingweno/homebrew-upterm
+brew install upterm
+
+```
+
 ### From source
 
 ```
