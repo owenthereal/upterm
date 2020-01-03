@@ -24,6 +24,10 @@ brew tap jingweno/upterm
 brew install upterm
 ```
 
+### Standalone
+
+`upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/jingweno/upterm/releases) and put it in your executable path.
+
 ### From source
 
 ```
