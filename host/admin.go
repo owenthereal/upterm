@@ -5,12 +5,14 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync"
 
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/client"
 	"github.com/jingweno/upterm/host/api/swagger/client/admin_service"
+	"github.com/jingweno/upterm/host/api/swagger/models"
 )
 
 func AdminSocketFile(dir ...string) string {
@@ -32,18 +34,13 @@ func AdminClient(socket string) *admin_service.Client {
 }
 
 type adminServer struct {
-	Host         string
-	NodeAddr     string
-	SessionID    string
-	Command      []string
-	ForceCommand []string
-	ln           net.Listener
-	srv          *http.Server
+	Session *models.APIGetSessionResponse
+	srv     *http.Server
+	sync.Mutex
 }
 
 func (s *adminServer) Serve(ctx context.Context, sock string) error {
-	var err error
-	s.ln, err = net.Listen("unix", sock)
+	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return err
 	}
@@ -53,41 +50,38 @@ func (s *adminServer) Serve(ctx context.Context, sock string) error {
 		ctx,
 		mux,
 		&adminServiceServer{
-			SessionID:    s.SessionID,
-			Host:         s.Host,
-			NodeAddr:     s.NodeAddr,
-			Command:      s.Command,
-			ForceCommand: s.ForceCommand,
+			Session: s.Session,
 		},
 	); err != nil {
 		return err
 	}
 
+	s.Lock()
 	s.srv = &http.Server{
 		Handler: mux,
 	}
+	s.Unlock()
 
-	return s.srv.Serve(s.ln)
+	return s.srv.Serve(ln)
 }
 
 func (s *adminServer) Shutdown(ctx context.Context) error {
+	s.Lock()
+	defer s.Unlock()
+
 	return s.srv.Shutdown(ctx)
 }
 
 type adminServiceServer struct {
-	Host         string
-	NodeAddr     string
-	SessionID    string
-	Command      []string
-	ForceCommand []string
+	Session *models.APIGetSessionResponse
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
 	return &api.GetSessionResponse{
-		SessionId:    s.SessionID,
-		Host:         s.Host,
-		NodeAddr:     s.NodeAddr,
-		Command:      s.Command,
-		ForceCommand: s.ForceCommand,
+		SessionId:    s.Session.SessionID,
+		Host:         s.Session.Host,
+		NodeAddr:     s.Session.NodeAddr,
+		Command:      s.Session.Command,
+		ForceCommand: s.Session.ForceCommand,
 	}, nil
 }
