@@ -34,14 +34,13 @@ compress() {
   ls -all
 }
 
-OSARCH="darwin/amd64 linux/amd64 linux/386 windows/amd64 windows/386"
+OSARCH="darwin/amd64 linux/amd64 linux/386 linux/arm freebsd/amd64"
 
-echo "Packaging ccat $(version)"
+echo "Packaging upterm $(version)"
 echo
 
-go get -u github.com/mitchellh/gox
-
-gox -osarch="$OSARCH" -output="release/{{.OS}}-{{.Arch}}-$(version)/{{.Dir}}"
+rm -rf release
+gox -osarch="$OSARCH" -output="release/{{.OS}}-{{.Arch}}-$(version)/{{.Dir}}" ./cmd/upterm/...
 echo
 
 compress
