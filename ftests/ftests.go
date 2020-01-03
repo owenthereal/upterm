@@ -59,6 +59,7 @@ var TestCases = []func(*testing.T, TestServer){
 	testClientAttachHostWithSameCommand,
 	testClientAttachHostWithDifferentCommand,
 	testHostFailToShareWithoutPrivateKey,
+	testHostSessionCreatedCallback,
 }
 
 var (
@@ -179,7 +180,9 @@ type Host struct {
 	Command                  []string
 	ForceCommand             []string
 	PrivateKeys              []string
+	SessionID                string
 	AdminSocketFile          string
+	SessionCreatedCallback   func(*models.APIGetSessionResponse) error
 	PermittedClientPublicKey string
 
 	inputCh  chan string
@@ -236,18 +239,23 @@ func (c *Host) Share(addr string) error {
 		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
 	}
 
+	if c.SessionID == "" {
+		c.SessionID = xid.New().String()
+	}
+
 	c.Host = &host.Host{
-		Host:            addr,
-		Command:         c.Command,
-		ForceCommand:    c.ForceCommand,
-		Signers:         signers,
-		AuthorizedKeys:  authorizedKeys,
-		AdminSocketFile: c.AdminSocketFile,
-		KeepAlive:       time.Duration(10),
-		Logger:          log.New(),
-		Stdin:           stdinr,
-		Stdout:          stdoutw,
-		SessionID:       xid.New().String(),
+		Host:                   addr,
+		Command:                c.Command,
+		ForceCommand:           c.ForceCommand,
+		Signers:                signers,
+		AuthorizedKeys:         authorizedKeys,
+		AdminSocketFile:        c.AdminSocketFile,
+		SessionCreatedCallback: c.SessionCreatedCallback,
+		KeepAlive:              time.Duration(10),
+		Logger:                 log.New(),
+		Stdin:                  stdinr,
+		Stdout:                 stdoutw,
+		SessionID:              c.SessionID,
 	}
 
 	errCh := make(chan error)

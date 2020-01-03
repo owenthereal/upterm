@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eiannone/keyboard"
 	"github.com/google/shlex"
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -111,17 +113,41 @@ func shareRunE(c *cobra.Command, args []string) error {
 	}
 
 	h := &host.Host{
-		Host:           flagServer,
-		SessionID:      xid.New().String(),
-		Command:        args,
-		ForceCommand:   forceCommand,
-		Signers:        signers,
-		AuthorizedKeys: authorizedKeys,
-		KeepAlive:      time.Duration(30),
-		Logger:         log.New(),
+		Host:                   flagServer,
+		SessionID:              xid.New().String(),
+		Command:                args,
+		ForceCommand:           forceCommand,
+		Signers:                signers,
+		AuthorizedKeys:         authorizedKeys,
+		KeepAlive:              time.Duration(30),
+		SessionCreatedCallback: displaySessionCallback,
+		Logger:                 log.New(),
 	}
 
 	return h.Run(context.Background())
+}
+
+func displaySessionCallback(session *models.APIGetSessionResponse) error {
+	if err := displaySession(session); err != nil {
+		return err
+	}
+
+	if err := keyboard.Open(); err != nil {
+		return err
+	}
+	defer keyboard.Close()
+
+	fmt.Println("Press <q> or <ctrl-c> to continue...")
+	for {
+		char, key, err := keyboard.GetKey()
+		if err != nil {
+			return err
+		} else if key == keyboard.KeyCtrlC || char == 'q' {
+			break
+		}
+	}
+
+	return nil
 }
 
 func defaultPrivateKeys(homeDir string) []string {
