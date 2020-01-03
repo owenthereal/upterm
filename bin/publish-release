@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -e
+
+project_name="jingweno/upterm"
+tag_name="${2?}"
+[[ $tag_name == *-* ]] && pre=1 || pre=
+
+assets=()
+for filename in $(ls ./release); do
+  assets+=( -a "./release/${filename}#${filename}" )
+done
+
+notes="$(git tag --list "$tag_name" --format='%(contents:subject)%0a%0a%(contents:body)')"
+
+if hub release --include-drafts | grep -q "^${tag_name}\$"; then
+  hub release edit "$tag_name" -m "" "${assets[@]}"
+elif [ $(wc -l <<<"$notes") -gt 1 ]; then
+  hub release create ${pre:+--prerelease} -F - "$tag_name" "${assets[@]}" <<<"$notes"
+else
+  { echo "${project_name} ${tag_name#v}"
+    echo
+    bin/changelog
+  } | hub release create --draft ${pre:+--prerelease} -F - "$tag_name" "${assets[@]}"
+fi
