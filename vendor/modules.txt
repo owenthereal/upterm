@@ -14,6 +14,8 @@ github.com/cpuguy83/go-md2man/md2man
 github.com/creack/pty
 # github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a
 github.com/dchest/bcrypt_pbkdf
+# github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
+github.com/eiannone/keyboard
 # github.com/gliderlabs/ssh v0.2.2 => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
 github.com/gliderlabs/ssh
 # github.com/go-openapi/analysis v0.19.5

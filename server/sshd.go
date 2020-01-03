@@ -53,6 +53,12 @@ func (s *SSHD) Serve(ln net.Listener) error {
 		Handler: func(s ssh.Session) {
 			_ = s.Exit(1) // disable ssh login
 		},
+		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
+			config := &gossh.ServerConfig{
+				ServerVersion: upterm.ServerSSHServerVersion,
+			}
+			return config
+		},
 		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
 			s.Logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port}).Info("attempt to bind")
 			return true

@@ -117,11 +117,11 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	return displaySession(host.AdminSocketFile(uptermDir, args[0]))
+	return displaySessionFromAdminSocketPath(host.AdminSocketFile(uptermDir, args[0]))
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
-	return displaySession(flagAdminSocket)
+	return displaySessionFromAdminSocketPath(flagAdminSocket)
 }
 
 func listSessions(dir string) ([][]string, error) {
@@ -163,12 +163,16 @@ func listSessions(dir string) ([][]string, error) {
 	return result, nil
 }
 
-func displaySession(path string) error {
+func displaySessionFromAdminSocketPath(path string) error {
 	session, err := session(path)
 	if err != nil {
 		return err
 	}
 
+	return displaySession(session)
+}
+
+func displaySession(session *models.APIGetSessionResponse) error {
 	user, err := api.EncodeIdentifierSession(session)
 	if err != nil {
 		return err
