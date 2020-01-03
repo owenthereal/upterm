@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -e
+
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+tmp_dir=$(mktemp -d -t upterm-XXXXXXXXXX)
+cp README.md $tmp_dir
+
+git checkout gh-pages
+cp $tmp_dir/README.md index.md
+git add index.md
+git commit -m "Sync with READMD.md"
+git push origin gh-pages
+
+git checkout $current_branch
