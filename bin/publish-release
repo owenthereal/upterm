@@ -3,7 +3,7 @@
 set -e
 
 project_name="jingweno/upterm"
-tag_name="${2?}"
+tag_name="${1?}"
 [[ $tag_name == *-* ]] && pre=1 || pre=
 
 assets=()
