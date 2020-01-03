@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -e
+
+version() {
+  ver_file="cmd/upterm/command/version.go"
+  ver="$(git describe --tags HEAD 2>/dev/null || true)"
+
+  if [ -z "$ver" ]; then
+    ver="$(grep -w 'Version =' "$ver_file" | cut -d'"' -f2)"
+    sha="$(git rev-parse --short HEAD 2>/dev/null || true)"
+    [ -z "$sha" ] || ver="${ver}-g${sha}"
+  fi
+
+  echo "${ver#v}"
+}
+
+compress() {
+  cd release
+
+  for dir in */
+  do
+    base=$(basename "$dir")
+    cp ../README.md ../LICENSE $dir
+
+    echo "Compressing $base"
+
+    tar -zcf "${base}.tar.gz" "$dir"
+    rm -rf $dir
+  done
+
+  echo
+
+  ls -all
+}
+
+OSARCH="darwin/amd64 linux/amd64 linux/386 windows/amd64 windows/386"
+
+echo "Packaging ccat $(version)"
+echo
+
+go get -u github.com/mitchellh/gox
+
+gox -osarch="$OSARCH" -output="release/{{.OS}}-{{.Arch}}-$(version)/{{.Dir}}"
+echo
+
+compress

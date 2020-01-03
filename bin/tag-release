@@ -11,7 +11,8 @@ fi
 
 version="$(grep -w 'Version =' "$version_file" | cut -d'"' -f2)"
 
-git commit -m "upterm $version" -- "$version_file"
+make docs
+git commit -m "Release Upterm $version" -- "$version_file" "docs/*" "etc/*"
 
 git tag "v${version}"
 
