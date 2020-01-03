@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jingweno/upterm/host/api/swagger/models"
 	ussh "github.com/jingweno/upterm/host/internal/ssh"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
@@ -17,17 +18,18 @@ import (
 )
 
 type Host struct {
-	Host            string
-	SessionID       string
-	KeepAlive       time.Duration
-	Command         []string
-	ForceCommand    []string
-	Signers         []ssh.Signer
-	AuthorizedKeys  []ssh.PublicKey
-	AdminSocketFile string
-	Logger          log.FieldLogger
-	Stdin           *os.File
-	Stdout          *os.File
+	Host                   string
+	SessionID              string
+	KeepAlive              time.Duration
+	Command                []string
+	ForceCommand           []string
+	Signers                []ssh.Signer
+	AuthorizedKeys         []ssh.PublicKey
+	AdminSocketFile        string
+	SessionCreatedCallback func(*models.APIGetSessionResponse) error
+	Logger                 log.FieldLogger
+	Stdin                  *os.File
+	Stdout                 *os.File
 }
 
 func (c *Host) createAdminSocketDir(sessionID string) (string, error) {
@@ -77,15 +79,25 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	defer rt.Close()
 
+	session := &models.APIGetSessionResponse{
+		SessionID:    c.SessionID,
+		Host:         c.Host,
+		NodeAddr:     info.NodeAddr,
+		Command:      c.Command,
+		ForceCommand: c.ForceCommand,
+	}
+
+	if c.SessionCreatedCallback != nil {
+		if err := c.SessionCreatedCallback(session); err != nil {
+			return err
+		}
+	}
+
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		s := adminServer{
-			SessionID:    c.SessionID,
-			Host:         c.Host,
-			NodeAddr:     info.NodeAddr,
-			Command:      c.Command,
-			ForceCommand: c.ForceCommand,
+			Session: session,
 		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)
@@ -95,7 +107,6 @@ func (c *Host) Run(ctx context.Context) error {
 		})
 	}
 	{
-
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := ussh.Server{
 			Command:        c.Command,
