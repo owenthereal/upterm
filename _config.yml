@@ -1,6 +1,7 @@
 title: Upterm
 theme: jekyll-theme-midnight
 description: Secure Terminal Sharing
+show_downloads: true
 github:
     public: true
     is_project_page: true
@@ -9,3 +10,5 @@ github:
     is_user_page: false
     owner_url: https://github.com/jingweno
     owner_name: jingweno
+    zip_url: https://github.com/jingweno/upterm/releases
+    tar_url: https://github.com/jingweno/upterm/releases
