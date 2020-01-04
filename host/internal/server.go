@@ -1,4 +1,4 @@
-package ssh
+package internal
 
 import (
 	"context"
@@ -8,12 +8,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/creack/pty"
 	gssh "github.com/gliderlabs/ssh"
-	"github.com/jingweno/upterm/host/internal/command"
 	"github.com/jingweno/upterm/upterm"
 
-	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"github.com/rs/xid"
@@ -37,11 +34,11 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 
 	emCtx, emCancel := context.WithCancel(ctx)
 	defer emCancel()
-	em := event.NewEventManager(emCtx, s.Logger.WithField("component", "event-manager"))
+	em := newEventManager(emCtx, s.Logger.WithField("component", "event-manager"))
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
-	cmd := command.NewCommand(
+	cmd := newCommand(
 		s.Command[0],
 		s.Command[1:],
 		s.CommandEnv,
@@ -142,8 +139,8 @@ func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool
 
 type sessionHandler struct {
 	forceCommand []string
-	ptmx         *os.File
-	em           *event.EventManager
+	ptmx         *pty
+	em           *eventManager
 	writers      *uio.MultiWriter
 	ctx          context.Context
 	logger       log.FieldLogger
@@ -237,10 +234,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 }
 
-func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *os.File, error) {
+func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *pty, error) {
 	cmd := exec.CommandContext(ctx, c[0], c[1:]...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
-	pty, err := pty.Start(cmd)
+	pty, err := startPty(cmd)
 
 	return cmd, pty, err
 }
