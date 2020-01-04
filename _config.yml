@@ -2,6 +2,7 @@ title: Upterm
 theme: jekyll-theme-midnight
 description: Secure Terminal Sharing
 show_downloads: true
+google_analytics: UA-155365325-1
 github:
     public: true
     is_project_page: true
