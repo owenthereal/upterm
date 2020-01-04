@@ -1,4 +1,4 @@
-package command
+package internal
 
 import (
 	"context"
@@ -9,23 +9,21 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/creack/pty"
-	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
-	"golang.org/x/crypto/ssh/terminal"
+	crytoterm "golang.org/x/crypto/ssh/terminal"
 )
 
-func NewCommand(
+func newCommand(
 	name string,
 	args []string,
 	env []string,
 	stdin *os.File,
 	stdout *os.File,
-	em *event.EventManager,
+	em *eventManager,
 	writers *uio.MultiWriter,
-) *Command {
-	return &Command{
+) *command {
+	return &command{
 		name:    name,
 		args:    args,
 		env:     env,
@@ -36,30 +34,30 @@ func NewCommand(
 	}
 }
 
-type Command struct {
+type command struct {
 	name string
 	args []string
 	env  []string
 
 	cmd  *exec.Cmd
-	ptmx *os.File
+	ptmx *pty
 
 	stdin  *os.File
 	stdout *os.File
 
-	em      *event.EventManager
+	em      *eventManager
 	writers *uio.MultiWriter
 
 	ctx context.Context
 }
 
-func (c *Command) Start(ctx context.Context) (*os.File, error) {
-	var err error
-
+func (c *command) Start(ctx context.Context) (*pty, error) {
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
 	c.cmd.Env = append(c.env, os.Environ()...)
-	c.ptmx, err = pty.Start(c.cmd)
+
+	var err error
+	c.ptmx, err = startPty(c.cmd)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}
@@ -67,17 +65,16 @@ func (c *Command) Start(ctx context.Context) (*os.File, error) {
 	return c.ptmx, nil
 }
 
-func (c *Command) Run() error {
+func (c *command) Run() error {
 	// Set stdin in raw mode.
-
-	isTty := terminal.IsTerminal(int(c.stdin.Fd()))
+	isTty := crytoterm.IsTerminal(int(c.stdin.Fd()))
 
 	if isTty {
-		oldState, err := terminal.MakeRaw(int(c.stdin.Fd()))
+		oldState, err := crytoterm.MakeRaw(int(c.stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
 		}
-		defer func() { _ = terminal.Restore(int(c.stdin.Fd()), oldState) }()
+		defer func() { _ = crytoterm.Restore(int(c.stdin.Fd()), oldState) }()
 	}
 
 	var g run.Group
@@ -95,7 +92,7 @@ func (c *Command) Run() error {
 					close(ch)
 					return ctx.Err()
 				case <-ch:
-					h, w, err := pty.Getsize(c.stdin)
+					h, w, err := getPtysize(c.stdin)
 					if err != nil {
 						return err
 					}
@@ -106,7 +103,6 @@ func (c *Command) Run() error {
 		}, func(err error) {
 			te.TerminalDetached()
 			cancel()
-			c.ptmx.Close()
 		})
 	}
 
@@ -138,6 +134,7 @@ func (c *Command) Run() error {
 		g.Add(func() error {
 			return c.cmd.Wait()
 		}, func(err error) {
+			c.ptmx.Close()
 		})
 	}
 
