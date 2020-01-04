@@ -10,6 +10,7 @@ import (
 
 	"github.com/creack/pty"
 	gssh "github.com/gliderlabs/ssh"
+	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/host/internal/command"
 	"github.com/jingweno/upterm/upterm"
 
@@ -142,7 +143,7 @@ func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool
 
 type sessionHandler struct {
 	forceCommand []string
-	ptmx         *os.File
+	ptmx         *internal.Pty
 	em           *event.EventManager
 	writers      *uio.MultiWriter
 	ctx          context.Context
@@ -237,10 +238,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 }
 
-func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *os.File, error) {
+func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *internal.Pty, error) {
 	cmd := exec.CommandContext(ctx, c[0], c[1:]...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
 	pty, err := pty.Start(cmd)
 
-	return cmd, pty, err
+	return cmd, internal.WrapPty(pty), err
 }

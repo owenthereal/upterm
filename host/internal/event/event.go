@@ -3,9 +3,9 @@ package event
 import (
 	"context"
 	"io"
-	"os"
 
 	"github.com/creack/pty"
+	"github.com/jingweno/upterm/host/internal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,7 +24,7 @@ type Event struct {
 
 type Terminal struct {
 	ID     string
-	Pty    *os.File
+	Pty    *internal.Pty
 	Window Window
 }
 
@@ -82,7 +82,7 @@ func (em *EventManager) HandleEvent() {
 	}
 }
 
-func (em *EventManager) TerminalEvent(id string, pty *os.File) *TerminalEventManager {
+func (em *EventManager) TerminalEvent(id string, pty *internal.Pty) *TerminalEventManager {
 	return &TerminalEventManager{
 		id:  id,
 		pty: pty,
@@ -93,7 +93,7 @@ func (em *EventManager) TerminalEvent(id string, pty *os.File) *TerminalEventMan
 
 type TerminalEventManager struct {
 	id  string
-	pty *os.File
+	pty *internal.Pty
 	ch  chan Event
 	ctx context.Context
 }
@@ -153,7 +153,7 @@ func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
 	})
 }
 
-func resizeWindow(ptmx *os.File, ts map[string]Terminal) error {
+func resizeWindow(ptmx *internal.Pty, ts map[string]Terminal) error {
 	var w, h int
 
 	for _, t := range ts {
@@ -171,5 +171,5 @@ func resizeWindow(ptmx *os.File, ts map[string]Terminal) error {
 		Cols: uint16(w),
 	}
 
-	return pty.Setsize(ptmx, size)
+	return ptmx.Setsize(size)
 }

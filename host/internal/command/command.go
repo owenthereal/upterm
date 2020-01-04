@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
@@ -42,7 +43,7 @@ type Command struct {
 	env  []string
 
 	cmd  *exec.Cmd
-	ptmx *os.File
+	ptmx *internal.Pty
 
 	stdin  *os.File
 	stdout *os.File
@@ -53,23 +54,22 @@ type Command struct {
 	ctx context.Context
 }
 
-func (c *Command) Start(ctx context.Context) (*os.File, error) {
-	var err error
-
+func (c *Command) Start(ctx context.Context) (*internal.Pty, error) {
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
 	c.cmd.Env = append(c.env, os.Environ()...)
-	c.ptmx, err = pty.Start(c.cmd)
+
+	ptmx, err := pty.Start(c.cmd)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}
+	c.ptmx = internal.WrapPty(ptmx)
 
 	return c.ptmx, nil
 }
 
 func (c *Command) Run() error {
 	// Set stdin in raw mode.
-
 	isTty := terminal.IsTerminal(int(c.stdin.Fd()))
 
 	if isTty {
@@ -106,7 +106,6 @@ func (c *Command) Run() error {
 		}, func(err error) {
 			te.TerminalDetached()
 			cancel()
-			c.ptmx.Close()
 		})
 	}
 
@@ -138,6 +137,7 @@ func (c *Command) Run() error {
 		g.Add(func() error {
 			return c.cmd.Wait()
 		}, func(err error) {
+			c.ptmx.Close()
 		})
 	}
 
