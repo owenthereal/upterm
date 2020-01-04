@@ -2,13 +2,27 @@ package internal
 
 import (
 	"os"
+	"os/exec"
 	"sync"
 
-	"github.com/creack/pty"
+	ptylib "github.com/creack/pty"
 )
 
-func WrapPty(f *os.File) *Pty {
-	return &Pty{File: f}
+func startPty(c *exec.Cmd) (*pty, error) {
+	f, err := ptylib.Start(c)
+	if err != nil {
+		return nil, err
+	}
+
+	return wrapPty(f), nil
+}
+
+func getPtysize(f *os.File) (h, w int, err error) {
+	return ptylib.Getsize(f)
+}
+
+func wrapPty(f *os.File) *pty {
+	return &pty{File: f}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -16,26 +30,30 @@ func WrapPty(f *os.File) *Pty {
 // See ftests failure:
 // * https://travis-ci.org/jingweno/upterm/jobs/632489866
 // * https://travis-ci.org/jingweno/upterm/jobs/632458125
-type Pty struct {
+type pty struct {
 	*os.File
 	sync.RWMutex
 }
 
-func (p *Pty) Setsize(ws *pty.Winsize) error {
-	p.RLock()
-	defer p.RUnlock()
+func (pty *pty) Setsize(h, w int) error {
+	pty.RLock()
+	defer pty.RUnlock()
 
-	return pty.Setsize(p.File, ws)
+	size := &ptylib.Winsize{
+		Rows: uint16(h),
+		Cols: uint16(w),
+	}
+	return ptylib.Setsize(pty.File, size)
 }
 
-func (pty *Pty) Read(p []byte) (n int, err error) {
+func (pty *pty) Read(p []byte) (n int, err error) {
 	pty.RLock()
 	defer pty.RUnlock()
 
 	return pty.File.Read(p)
 }
 
-func (pty *Pty) Close() error {
+func (pty *pty) Close() error {
 	pty.Lock()
 	defer pty.Unlock()
 

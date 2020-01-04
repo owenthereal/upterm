@@ -4,50 +4,49 @@ import (
 	"context"
 	"io"
 
-	"github.com/creack/pty"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	EventTerminalAttached EventType = iota
-	EventTerminalDetached
-	EventTerminalWindowChanged
+	eventTerminalAttached eventType = iota
+	eventTerminalDetached
+	eventTerminalWindowChanged
 )
 
-type EventType int
+type eventType int
 
-type Event struct {
-	Type     EventType
-	Terminal Terminal
+type event struct {
+	Type     eventType
+	Terminal terminal
 }
 
-type Terminal struct {
+type terminal struct {
 	ID     string
-	Pty    *Pty
-	Window Window
+	Pty    *pty
+	Window window
 }
 
-type Window struct {
+type window struct {
 	Width  int
 	Height int
 }
 
-func NewEventManager(ctx context.Context, logger log.FieldLogger) *EventManager {
-	return &EventManager{
-		tmCh:   make(chan Event),
+func newEventManager(ctx context.Context, logger log.FieldLogger) *eventManager {
+	return &eventManager{
+		tmCh:   make(chan event),
 		ctx:    ctx,
 		logger: logger,
 	}
 }
 
-type EventManager struct {
-	tmCh   chan Event
+type eventManager struct {
+	tmCh   chan event
 	ctx    context.Context
 	logger log.FieldLogger
 }
 
-func (em *EventManager) HandleEvent() {
-	m := make(map[io.ReadWriteCloser]map[string]Terminal)
+func (em *eventManager) HandleEvent() {
+	m := make(map[io.ReadWriteCloser]map[string]terminal)
 	for {
 		select {
 		case <-em.ctx.Done():
@@ -55,18 +54,18 @@ func (em *EventManager) HandleEvent() {
 			return
 		case evt := <-em.tmCh:
 			switch evt.Type {
-			case EventTerminalAttached, EventTerminalWindowChanged:
+			case eventTerminalAttached, eventTerminalWindowChanged:
 				pty := evt.Terminal.Pty
 				ts, ok := m[pty]
 				if !ok {
-					ts = make(map[string]Terminal)
+					ts = make(map[string]terminal)
 					m[pty] = ts
 				}
 				ts[evt.Terminal.ID] = evt.Terminal
 				if err := resizeWindow(evt.Terminal.Pty, ts); err != nil {
 					log.WithError(err).Debug("error resizing window")
 				}
-			case EventTerminalDetached:
+			case eventTerminalDetached:
 				pty := evt.Terminal.Pty
 				ts, ok := m[pty]
 				if ok {
@@ -81,8 +80,8 @@ func (em *EventManager) HandleEvent() {
 	}
 }
 
-func (em *EventManager) TerminalEvent(id string, pty *Pty) *TerminalEventManager {
-	return &TerminalEventManager{
+func (em *eventManager) TerminalEvent(id string, pty *pty) *terminalEventManager {
+	return &terminalEventManager{
 		id:  id,
 		pty: pty,
 		ch:  em.tmCh,
@@ -90,14 +89,14 @@ func (em *EventManager) TerminalEvent(id string, pty *Pty) *TerminalEventManager
 	}
 }
 
-type TerminalEventManager struct {
+type terminalEventManager struct {
 	id  string
-	pty *Pty
-	ch  chan Event
+	pty *pty
+	ch  chan event
 	ctx context.Context
 }
 
-func (em *TerminalEventManager) send(evt Event) {
+func (em *terminalEventManager) send(evt event) {
 	// exit early
 	select {
 	case <-em.ctx.Done():
@@ -114,13 +113,13 @@ func (em *TerminalEventManager) send(evt Event) {
 	}
 }
 
-func (em *TerminalEventManager) TerminalAttached(width, height int) {
-	em.send(Event{
-		Type: EventTerminalAttached,
-		Terminal: Terminal{
+func (em *terminalEventManager) TerminalAttached(width, height int) {
+	em.send(event{
+		Type: eventTerminalAttached,
+		Terminal: terminal{
 			ID:  em.id,
 			Pty: em.pty,
-			Window: Window{
+			Window: window{
 				Width:  width,
 				Height: height,
 			},
@@ -128,23 +127,23 @@ func (em *TerminalEventManager) TerminalAttached(width, height int) {
 	})
 }
 
-func (em *TerminalEventManager) TerminalDetached() {
-	em.send(Event{
-		Type: EventTerminalDetached,
-		Terminal: Terminal{
+func (em *terminalEventManager) TerminalDetached() {
+	em.send(event{
+		Type: eventTerminalDetached,
+		Terminal: terminal{
 			ID:  em.id,
 			Pty: em.pty,
 		},
 	})
 }
 
-func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
-	em.send(Event{
-		Type: EventTerminalWindowChanged,
-		Terminal: Terminal{
+func (em *terminalEventManager) TerminalWindowChanged(width, height int) {
+	em.send(event{
+		Type: eventTerminalWindowChanged,
+		Terminal: terminal{
 			ID:  em.id,
 			Pty: em.pty,
-			Window: Window{
+			Window: window{
 				Width:  width,
 				Height: height,
 			},
@@ -152,7 +151,7 @@ func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
 	})
 }
 
-func resizeWindow(ptmx *Pty, ts map[string]Terminal) error {
+func resizeWindow(ptmx *pty, ts map[string]terminal) error {
 	var w, h int
 
 	for _, t := range ts {
@@ -165,10 +164,5 @@ func resizeWindow(ptmx *Pty, ts map[string]Terminal) error {
 		}
 	}
 
-	size := &pty.Winsize{
-		Rows: uint16(h),
-		Cols: uint16(w),
-	}
-
-	return ptmx.Setsize(size)
+	return ptmx.Setsize(h, w)
 }
