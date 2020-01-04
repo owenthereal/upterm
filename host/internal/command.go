@@ -1,4 +1,4 @@
-package command
+package internal
 
 import (
 	"context"
@@ -10,8 +10,6 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/jingweno/upterm/host/internal"
-	"github.com/jingweno/upterm/host/internal/event"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"golang.org/x/crypto/ssh/terminal"
@@ -23,7 +21,7 @@ func NewCommand(
 	env []string,
 	stdin *os.File,
 	stdout *os.File,
-	em *event.EventManager,
+	em *EventManager,
 	writers *uio.MultiWriter,
 ) *Command {
 	return &Command{
@@ -43,18 +41,18 @@ type Command struct {
 	env  []string
 
 	cmd  *exec.Cmd
-	ptmx *internal.Pty
+	ptmx *Pty
 
 	stdin  *os.File
 	stdout *os.File
 
-	em      *event.EventManager
+	em      *EventManager
 	writers *uio.MultiWriter
 
 	ctx context.Context
 }
 
-func (c *Command) Start(ctx context.Context) (*internal.Pty, error) {
+func (c *Command) Start(ctx context.Context) (*Pty, error) {
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
 	c.cmd.Env = append(c.env, os.Environ()...)
@@ -63,7 +61,7 @@ func (c *Command) Start(ctx context.Context) (*internal.Pty, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}
-	c.ptmx = internal.WrapPty(ptmx)
+	c.ptmx = WrapPty(ptmx)
 
 	return c.ptmx, nil
 }

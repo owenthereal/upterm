@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jingweno/upterm/host/api/swagger/models"
-	ussh "github.com/jingweno/upterm/host/internal/ssh"
+	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
@@ -66,7 +66,7 @@ func (c *Host) Run(ctx context.Context) error {
 		c.AdminSocketFile = AdminSocketFile(adminSocketDir)
 	}
 
-	rt := ussh.ReverseTunnel{
+	rt := internal.ReverseTunnel{
 		Host:      c.Host,
 		SessionID: c.SessionID,
 		Signers:   c.Signers,
@@ -108,7 +108,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		sshServer := ussh.Server{
+		sshServer := internal.Server{
 			Command:        c.Command,
 			CommandEnv:     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
 			ForceCommand:   c.ForceCommand,

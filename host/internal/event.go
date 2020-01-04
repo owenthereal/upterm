@@ -1,11 +1,10 @@
-package event
+package internal
 
 import (
 	"context"
 	"io"
 
 	"github.com/creack/pty"
-	"github.com/jingweno/upterm/host/internal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,7 +23,7 @@ type Event struct {
 
 type Terminal struct {
 	ID     string
-	Pty    *internal.Pty
+	Pty    *Pty
 	Window Window
 }
 
@@ -82,7 +81,7 @@ func (em *EventManager) HandleEvent() {
 	}
 }
 
-func (em *EventManager) TerminalEvent(id string, pty *internal.Pty) *TerminalEventManager {
+func (em *EventManager) TerminalEvent(id string, pty *Pty) *TerminalEventManager {
 	return &TerminalEventManager{
 		id:  id,
 		pty: pty,
@@ -93,7 +92,7 @@ func (em *EventManager) TerminalEvent(id string, pty *internal.Pty) *TerminalEve
 
 type TerminalEventManager struct {
 	id  string
-	pty *internal.Pty
+	pty *Pty
 	ch  chan Event
 	ctx context.Context
 }
@@ -153,7 +152,7 @@ func (em *TerminalEventManager) TerminalWindowChanged(width, height int) {
 	})
 }
 
-func resizeWindow(ptmx *internal.Pty, ts map[string]Terminal) error {
+func resizeWindow(ptmx *Pty, ts map[string]Terminal) error {
 	var w, h int
 
 	for _, t := range ts {
