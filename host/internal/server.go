@@ -176,7 +176,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			ctx, cancel := context.WithCancel(h.ctx)
 			g.Add(func() error {
 				_, err := io.Copy(sess, uio.NewContextReader(ctx, ptmx))
-				return err
+				return ptyError(err)
 			}, func(err error) {
 				cancel()
 			})

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	ptylib "github.com/creack/pty"
 )
@@ -15,6 +16,17 @@ func startPty(c *exec.Cmd) (*pty, error) {
 	}
 
 	return wrapPty(f), nil
+}
+
+// Linux kernel return EIO when attempting to read from a master pseudo
+// terminal which no longer has an open slave. So ignore error here.
+// See https://github.com/creack/pty/issues/21
+func ptyError(err error) error {
+	if pathErr, ok := err.(*os.PathError); !ok || pathErr.Err != syscall.EIO {
+		return err
+	}
+
+	return nil
 }
 
 func getPtysize(f *os.File) (h, w int, err error) {
