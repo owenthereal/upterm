@@ -55,7 +55,7 @@ func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, ses
 		go func() {
 			ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 			if err != nil {
-				logger.WithError(err).Info("error opening channel")
+				logger.WithError(err).Error("error opening channel")
 				c.Close()
 				return
 			}
@@ -101,7 +101,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	case streamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			h.logger.WithError(err).Info("error parsing streamlocal payload")
+			h.logger.WithError(err).Error("error parsing streamlocal payload")
 			return false, []byte(err.Error())
 		}
 
@@ -113,7 +113,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		logger := h.logger.WithFields(log.Fields{"session-id": sessionID})
 		ln, err := h.sessionDialListener.Listen(sessionID)
 		if err != nil {
-			logger.WithError(err).Info("error listening socketing")
+			logger.WithError(err).Error("error listening socketing")
 			return false, []byte(err.Error())
 		}
 
@@ -143,7 +143,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	case cancelStreamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			h.logger.WithError(err).Info("error parsing steamlocal payload")
+			h.logger.WithError(err).Error("error parsing steamlocal payload")
 			return false, []byte(err.Error())
 		}
 
