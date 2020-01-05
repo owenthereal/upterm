@@ -21,7 +21,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash"},
+		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -106,8 +106,8 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash"},
-		ForceCommand:             []string{"bash", "-c", "PS1='' bash"},
+		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		ForceCommand:             []string{"bash", "-c", "PS1='' bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
