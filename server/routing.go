@@ -98,7 +98,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 				continue
 			}
 
-			p.Logger.WithError(err).Info("failed to accept connection")
+			p.Logger.WithError(err).Error("failed to accept connection")
 			return err
 		}
 
@@ -136,18 +136,18 @@ func (p *Routing) Serve(ln net.Listener) error {
 			case pc = <-pipec:
 			case err := <-errorc:
 				if !isIgnoredErr(err) {
-					logger.WithError(err).Info("connection establishing failed")
+					logger.WithError(err).Error("connection establishing failed")
 				}
 				return
 			case <-time.After(30 * time.Second):
-				logger.WithError(err).Info("pipe establishing timeout")
+				logger.WithError(err).Error("pipe establishing timeout")
 				return
 			}
 
 			defer pc.Close()
 
 			if err := pc.Wait(); err != nil && !isIgnoredErr(err) {
-				logger.WithError(err).Info("error waiting for pipe")
+				logger.WithError(err).Error("error waiting for pipe")
 			}
 		}(conn, logger)
 	}

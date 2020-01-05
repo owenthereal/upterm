@@ -104,7 +104,7 @@ func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
 	}
 	go func() {
 		if err := s.start(); err != nil {
-			log.WithError(err).Info("error starting test server")
+			log.WithError(err).Error("error starting test server")
 		}
 	}()
 
@@ -261,7 +261,7 @@ func (c *Host) Share(addr string) error {
 	errCh := make(chan error)
 	go func() {
 		if err := c.Host.Run(c.ctx); err != nil {
-			log.WithError(err).Info("error running host")
+			log.WithError(err).Error("error running host")
 			errCh <- err
 		}
 	}()
@@ -285,7 +285,7 @@ func (c *Host) Share(addr string) error {
 			return len(p), nil
 		})
 		if _, err := io.Copy(w, stdoutr); err != nil {
-			log.WithError(err).Info("error copying from stdout")
+			log.WithError(err).Error("error copying from stdout")
 		}
 	}()
 
@@ -294,7 +294,7 @@ func (c *Host) Share(addr string) error {
 		hostWg.Done()
 		for c := range c.inputCh {
 			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+"\n")); err != nil {
-				log.WithError(err).Info("error copying to stdin")
+				log.WithError(err).Error("error copying to stdin")
 			}
 		}
 	}()
@@ -394,7 +394,7 @@ func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error 
 			return len(pp), nil
 		})
 		if _, err := io.Copy(w, c.sshStdout); err != nil {
-			log.WithError(err).Info("error copying from stdout")
+			log.WithError(err).Error("error copying from stdout")
 		}
 	}()
 
@@ -403,7 +403,7 @@ func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error 
 		remoteWg.Done()
 		for s := range c.inputCh {
 			if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
-				log.WithError(err).Info("error copying to stdin")
+				log.WithError(err).Error("error copying to stdin")
 			}
 		}
 	}()
