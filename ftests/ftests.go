@@ -128,12 +128,16 @@ func (s *Server) start() error {
 
 	provider := &server.MemoryProvider{}
 	_ = provider.SetOpts(nil)
+
+	logger := log.New()
+	logger.Level = log.DebugLevel
+
 	s.Server = &server.Server{
 		HostSigners:     signers,
 		NodeAddr:        s.Addr(),
 		UpstreamNode:    s.upstreamNode,
 		NetworkProvider: provider,
-		Logger:          log.New(),
+		Logger:          logger,
 	}
 
 	return s.Server.Serve(s.ln)
@@ -244,6 +248,9 @@ func (c *Host) Share(addr string) error {
 		c.SessionID = xid.New().String()
 	}
 
+	logger := log.New()
+	logger.Level = log.DebugLevel
+
 	c.Host = &host.Host{
 		Host:                   addr,
 		Command:                c.Command,
@@ -253,7 +260,7 @@ func (c *Host) Share(addr string) error {
 		AdminSocketFile:        c.AdminSocketFile,
 		SessionCreatedCallback: c.SessionCreatedCallback,
 		KeepAlive:              time.Duration(10),
-		Logger:                 log.New(),
+		Logger:                 logger,
 		Stdin:                  stdinr,
 		Stdout:                 stdoutw,
 		SessionID:              c.SessionID,
