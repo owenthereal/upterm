@@ -12,8 +12,30 @@
 ## How it works
 
 You run the `upterm` program and specify the command for your terminal session.
-Upterm starts an SSH server locally and sets up a Reverse SSH tunnel to the [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
-Clients connect to your terminal session over the public internet with `ssh`.
+Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
+Clients connect to your terminal session over the public internet via `uptermd` using `ssh`.
+A community Upterm server is run at `uptermd.upterm.dev` and `upterm` points to this server by default.
+
+```
+                                                   ┌─────────────────────────────────┐
+                                                   │                                 │                          ┌───────────────────────────────────────────────┐
+                                                   │                                 │                          │                                               │
+                                                   │                                 │                          │                   Client 1                    │
+                                                   │                                 │            ┌────────────▶│(`ssh bo6nosstp9ll08doq0rg@uptermd.upterm.dev`)│
+┌────────────────────┬────┐                        │                                 │            │             │                                               │
+│                    │    │        reverse         │                                 │            │             │                                               │
+│        Host        │    │       ssh tunnel       │             uptermd             │      ssh   │             └───────────────────────────────────────────────┘
+│(`upterm host bash`)│sshd│◀──────────────────────▶│                                 │◀───────────┤
+│                    │    │                        │      (uptermd.upterm.dev)       │            │             ┌───────────────────────────────────────────────┐
+│                    │    │                        │                                 │            │             │                                               │
+└────────────────────┴────┘                        │                                 │            │             │                   Client 2                    │
+                                                   │                                 │            └────────────▶│(`ssh bo6nosstp9ll08doq0rg@uptermd.upterm.dev`)│
+                                                   │                                 │                          │                                               │
+                                                   │                                 │                          │                                               │
+                                                   │                                 │                          └───────────────────────────────────────────────┘
+                                                   └─────────────────────────────────┘
+```
+
 
 ## Installation
 
