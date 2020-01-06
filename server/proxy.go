@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -57,6 +58,11 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 	}
 
 	if id.Type == api.Identifier_HOST {
+		// Drop early if the request is not from a known client
+		if !r.UpstreamNode && !r.isKnownClient(conn) {
+			return nil, nil, fmt.Errorf("unknown client")
+		}
+
 		r.Logger.WithField("user", id.Id).Info("dialing sshd")
 		c, err = r.SSHDDialListener.Dial()
 	} else {
@@ -87,6 +93,10 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 
 	}
 	return c, pipe, nil
+}
+
+func (r *Proxy) isKnownClient(conn ssh.ConnMetadata) bool {
+	return string(conn.ClientVersion()) == upterm.HostSSHClientVersion
 }
 
 func (r *Proxy) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
