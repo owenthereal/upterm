@@ -15,7 +15,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 30 * time.Second
+	pipeEstablishingTimeout = 10 * time.Second
 )
 
 const (
