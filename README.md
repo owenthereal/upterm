@@ -17,17 +17,17 @@ Clients connect to your terminal session over the public internet via `uptermd` 
 A community Upterm server is run at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
 ```
-                                                                                      ┌───────────────────────────────┐
-                                                                                      │           Client 1            │
-┌────────────────────┬────┐                 ┌────────────────────┐         ┌─────────▶│(`ssh abcd@uptermd.upterm.dev`)│
-│                    │    │    reverse      │                    │         │          │                               │
-│        Host        │    │   ssh tunnel    │      uptermd       │   ssh   │          └───────────────────────────────┘
-│(`upterm host bash`)│sshd│◀───────────────▶│                    │◀────────┤
-│                    │    │                 │(uptermd.upterm.dev)│         │          ┌───────────────────────────────┐
-│                    │    │                 │                    │         │          │           Client 2            │
-└────────────────────┴────┘                 └────────────────────┘         └─────────▶│(`ssh abcd@uptermd.upterm.dev`)│
-                                                                                      │                               │
-                                                                                      └───────────────────────────────┘
+                                                                          ┌───────────────────────────────┐
+                                                                          │           Client 1            │
+┌────────────────────┬────┐            ┌────────────────────┐      ┌─────▶│(`ssh abcd@uptermd.upterm.dev`)│
+│                    │    │  reverse   │                    │      │      │                               │
+│        Host        │    │ ssh tunnel │      uptermd       │  ssh │      └───────────────────────────────┘
+│(`upterm host bash`)│sshd│◀──────────▶│                    │◀─────┤
+│                    │    │            │(uptermd.upterm.dev)│      │      ┌───────────────────────────────┐
+│                    │    │            │                    │      │      │           Client 2            │
+└────────────────────┴────┘            └────────────────────┘      └─────▶│(`ssh abcd@uptermd.upterm.dev`)│
+                                                                          │                               │
+                                                                          └───────────────────────────────┘
 ```
 
 ## Installation
