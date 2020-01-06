@@ -18,12 +18,12 @@ type Proxy struct {
 	Logger              log.FieldLogger
 
 	routing *Routing
-	sync.Mutex
+	mux     sync.Mutex
 }
 
 func (r *Proxy) Shutdown() error {
-	r.Lock()
-	defer r.Unlock()
+	r.mux.Lock()
+	defer r.mux.Unlock()
 
 	if r.routing != nil {
 		return r.routing.Shutdown()
@@ -33,13 +33,13 @@ func (r *Proxy) Shutdown() error {
 }
 
 func (r *Proxy) Serve(ln net.Listener) error {
-	r.Lock()
+	r.mux.Lock()
 	r.routing = &Routing{
 		HostSigners:      r.HostSigners,
 		Logger:           r.Logger,
 		FindUpstreamFunc: r.findUpstream,
 	}
-	r.Unlock()
+	r.mux.Unlock()
 
 	return r.routing.Serve(ln)
 }
