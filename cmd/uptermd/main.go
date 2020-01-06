@@ -14,7 +14,6 @@ func main() {
 	if token != "" {
 		logger.Info("Using Rollbar for error reporting")
 		defer rollrus.ReportPanic(token, "uptermd.upterm.dev")
-		logger.SetFormatter(&log.TextFormatter{DisableTimestamp: true})
 		logger.AddHook(rollrus.NewHook(token, "uptermd.upterm.dev"))
 	}
 
