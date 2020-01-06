@@ -63,7 +63,7 @@ func (em *eventManager) HandleEvent() {
 				}
 				ts[evt.Terminal.ID] = evt.Terminal
 				if err := resizeWindow(evt.Terminal.Pty, ts); err != nil {
-					log.WithError(err).Debug("error resizing window")
+					log.WithError(err).Error("error resizing window")
 				}
 			case eventTerminalDetached:
 				pty := evt.Terminal.Pty

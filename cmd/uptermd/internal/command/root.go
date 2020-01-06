@@ -19,11 +19,12 @@ var (
 	flagNetworkOpts  []string
 )
 
-func Root() *cobra.Command {
+func Root(logger log.FieldLogger) *cobra.Command {
+	rootCmd := &rootCmd{logger}
 	cmd := &cobra.Command{
 		Use:   "uptermd",
 		Short: "Upterm daemon",
-		RunE:  rootRunE,
+		RunE:  rootCmd.Run,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagHost, "host", "", utils.DefaultLocalhost("2222"), "host (required)")
@@ -38,7 +39,11 @@ func Root() *cobra.Command {
 	return cmd
 }
 
-func rootRunE(c *cobra.Command, args []string) error {
+type rootCmd struct {
+	logger log.FieldLogger
+}
+
+func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	provider := server.Networks.Get(flagNetwork)
 	if provider == nil {
 		return fmt.Errorf("unsupport network provider %q", flagNetwork)
@@ -49,7 +54,7 @@ func rootRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("network provider option error: %s", err)
 	}
 
-	logger := log.New().WithFields(log.Fields{
+	logger := cmd.logger.WithFields(log.Fields{
 		"host": flagHost,
 	})
 	logger.WithFields(log.Fields{
@@ -73,7 +78,7 @@ func rootRunE(c *cobra.Command, args []string) error {
 		NodeAddr:        flagHost,
 		NetworkProvider: provider,
 		UpstreamNode:    flagUpstreamNode,
-		Logger:          log.New().WithField("app", "uptermd"),
+		Logger:          cmd.logger.WithField("app", "uptermd"),
 	}
 
 	logger.Info("starting server")

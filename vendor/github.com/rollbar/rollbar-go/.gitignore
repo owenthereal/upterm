@@ -1,0 +1,4 @@
+rollbar.test
+.env
+cover.out
+cover.html

@@ -71,9 +71,11 @@ github.com/google/shlex
 github.com/grpc-ecosystem/grpc-gateway/internal
 github.com/grpc-ecosystem/grpc-gateway/runtime
 github.com/grpc-ecosystem/grpc-gateway/utilities
+# github.com/heroku/rollrus v0.1.1
+github.com/heroku/rollrus
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
-# github.com/konsorten/go-windows-terminal-sequences v1.0.1
+# github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/mailru/easyjson v0.0.0-20190626092158-b2ccc519800e
 github.com/mailru/easyjson/buffer
@@ -89,6 +91,8 @@ github.com/oklog/run
 github.com/olekukonko/tablewriter
 # github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
 github.com/pborman/ansi
+# github.com/rollbar/rollbar-go v1.2.0
+github.com/rollbar/rollbar-go
 # github.com/rs/xid v1.2.1
 github.com/rs/xid
 # github.com/russross/blackfriday v1.5.2
@@ -125,7 +129,7 @@ golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sys v0.0.0-20191210023423-ac6580df4449
+# golang.org/x/sys v0.0.0-20200103143344-a1369afcdac7
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
