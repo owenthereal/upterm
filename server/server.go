@@ -47,7 +47,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
 			UpstreamNode:        s.UpstreamNode,
-			Logger:              s.Logger.WithField("componet", "router"),
+			Logger:              s.Logger.WithField("componet", "proxy"),
 		}
 		g.Add(func() error {
 			return router.Serve(ln)
