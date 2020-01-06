@@ -20,7 +20,7 @@ var (
 
 const (
 	errReadConnectionResetByPeer = "read: connection reset by peer"
-	errSshDisconnectedByUser     = "ssh: disconnect, reason 11: disconnected by user"
+	errSshDisconnectReason11     = "ssh: disconnect, reason 11:"
 )
 
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
@@ -160,5 +160,5 @@ func (p *Routing) closeListenersLocked() error {
 func isIgnoredErr(err error) bool {
 	return errors.Is(err, io.EOF) ||
 		strings.Contains(err.Error(), errReadConnectionResetByPeer) ||
-		strings.Contains(err.Error(), errSshDisconnectedByUser)
+		strings.Contains(err.Error(), errSshDisconnectReason11)
 }
