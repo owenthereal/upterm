@@ -104,7 +104,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 				}
 				return
 			case <-time.After(pipeEstablishingTimeout):
-				logger.WithError(err).Error("pipe establishing timeout")
+				logger.Error("pipe establishing timeout")
 				return
 			}
 
