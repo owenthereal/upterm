@@ -1,0 +1,39 @@
+# See https://github.com/golangci/golangci-lint#config-file
+run:
+  deadline: 1m #Default
+  issues-exit-code: 1 #Default
+  tests: true #Default
+
+linters:
+  enable:
+    - misspell
+    - goimports
+    - golint
+    - stylecheck
+    - unconvert
+    - dupl
+    - gosec
+    - scopelint
+    - nakedret
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - lll
+    - maligned
+    - prealloc
+    - unparam
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - goconst # Don't run on test files because they may often repeat the same string
+
+linters-settings:
+  misspell:
+    locale: US
+    #ignore-words:
+    #  - someword
+  goimports:
+    local-prefixes: github.com/heroku/rollrus
