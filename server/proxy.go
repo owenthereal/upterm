@@ -60,7 +60,7 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 	if id.Type == api.Identifier_HOST {
 		// Drop early if the request is not from a known client
 		if !r.UpstreamNode && !r.isKnownClient(conn) {
-			return nil, nil, fmt.Errorf("unknown client")
+			return nil, nil, fmt.Errorf("unknown client: client=%s user=%s", conn.ClientVersion(), id.Id)
 		}
 
 		r.Logger.WithField("user", id.Id).Info("dialing sshd")
