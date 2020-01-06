@@ -13,10 +13,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-var ErrListnerClosed = errors.New("routing: listener closed")
+var (
+	ErrListnerClosed        = errors.New("routing: listener closed")
+	pipeEstablishingTimeout = 30 * time.Second
+)
 
 const (
 	errReadConnectionResetByPeer = "read: connection reset by peer"
+	errSshDisconnectedByUser     = "ssh: disconnect, reason 11: disconnected by user"
 )
 
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
@@ -27,49 +31,8 @@ type Routing struct {
 	Logger           log.FieldLogger
 
 	listener net.Listener
-	mu       sync.Mutex
+	mux      sync.Mutex
 	doneChan chan struct{}
-}
-
-func (p *Routing) getDoneChan() <-chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	return p.getDoneChanLocked()
-}
-
-func (p *Routing) getDoneChanLocked() chan struct{} {
-	if p.doneChan == nil {
-		p.doneChan = make(chan struct{})
-
-	}
-
-	return p.doneChan
-}
-
-func (p *Routing) closeDoneChanLocked() {
-	ch := p.getDoneChanLocked()
-	select {
-	case <-ch:
-		// Already closed. Don't close again.
-	default:
-		// Safe to close here. We're the only closer, guarded
-		// by s.mu.
-		close(ch)
-	}
-}
-
-func (p *Routing) closeListenersLocked() error {
-	return p.listener.Close()
-}
-
-func (p *Routing) Shutdown() error {
-	p.mu.Lock()
-	lnerr := p.closeListenersLocked()
-	p.closeDoneChanLocked()
-	p.mu.Unlock()
-
-	return lnerr
 }
 
 func (p *Routing) Serve(ln net.Listener) error {
@@ -84,6 +47,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 				return ErrListnerClosed
 			default:
 			}
+
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
 					tempDelay = 5 * time.Millisecond
@@ -93,12 +57,12 @@ func (p *Routing) Serve(ln net.Listener) error {
 				if max := 1 * time.Second; tempDelay > max {
 					tempDelay = max
 				}
-				p.Logger.Infof("http: Accept error: %v; retrying in %v", err, tempDelay)
+				p.Logger.WithError(err).Errorf("http: Accept error; retrying in %v", tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
 
-			p.Logger.WithError(err).Info("failed to accept connection")
+			p.Logger.WithError(err).Error("failed to accept connection")
 			return err
 		}
 
@@ -136,24 +100,65 @@ func (p *Routing) Serve(ln net.Listener) error {
 			case pc = <-pipec:
 			case err := <-errorc:
 				if !isIgnoredErr(err) {
-					logger.WithError(err).Info("connection establishing failed")
+					logger.WithError(err).Error("connection establishing failed")
 				}
 				return
-			case <-time.After(30 * time.Second):
-				logger.WithError(err).Info("pipe establishing timeout")
+			case <-time.After(pipeEstablishingTimeout):
+				logger.WithError(err).Error("pipe establishing timeout")
 				return
 			}
 
 			defer pc.Close()
 
 			if err := pc.Wait(); err != nil && !isIgnoredErr(err) {
-				logger.WithError(err).Info("error waiting for pipe")
+				logger.WithError(err).Error("error waiting for pipe")
 			}
 		}(conn, logger)
 	}
 }
 
+func (p *Routing) Shutdown() error {
+	p.mux.Lock()
+	lnerr := p.closeListenersLocked()
+	p.closeDoneChanLocked()
+	p.mux.Unlock()
+
+	return lnerr
+}
+
+func (p *Routing) getDoneChan() <-chan struct{} {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	return p.getDoneChanLocked()
+}
+
+func (p *Routing) getDoneChanLocked() chan struct{} {
+	if p.doneChan == nil {
+		p.doneChan = make(chan struct{})
+	}
+
+	return p.doneChan
+}
+
+func (p *Routing) closeDoneChanLocked() {
+	ch := p.getDoneChanLocked()
+	select {
+	case <-ch:
+		// Already closed. Don't close again.
+	default:
+		// Safe to close here. We're the only closer, guarded
+		// by p.mux.
+		close(ch)
+	}
+}
+
+func (p *Routing) closeListenersLocked() error {
+	return p.listener.Close()
+}
+
 func isIgnoredErr(err error) bool {
 	return errors.Is(err, io.EOF) ||
-		strings.Contains(err.Error(), errReadConnectionResetByPeer)
+		strings.Contains(err.Error(), errReadConnectionResetByPeer) ||
+		strings.Contains(err.Error(), errSshDisconnectedByUser)
 }

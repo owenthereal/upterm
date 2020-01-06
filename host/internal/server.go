@@ -166,7 +166,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 		cmd, ptmx, err = startAttachCmd(cmdCtx, h.forceCommand, ptyReq.Term)
 		if err != nil {
-			h.logger.WithError(err).Info("error starting force command")
+			h.logger.WithError(err).Error("error starting force command")
 			_ = sess.Exit(1)
 			return
 		}

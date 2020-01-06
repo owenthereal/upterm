@@ -82,7 +82,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 	go keepAlive(ctx, c.KeepAlive*time.Second, func() {
 		_, _, err := c.Client.SendRequest(upterm.ServerPingRequestType, true, nil)
 		if err != nil {
-			c.Logger.WithError(err).Debug("error pinging server")
+			c.Logger.WithError(err).Error("error pinging server")
 		}
 	})
 
