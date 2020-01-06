@@ -21,6 +21,7 @@ var (
 const (
 	errReadConnectionResetByPeer = "read: connection reset by peer"
 	errSshDisconnectReason11     = "ssh: disconnect, reason 11:"
+	errUnknownClient             = "unknown client:"
 )
 
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
@@ -99,12 +100,14 @@ func (p *Routing) Serve(ln net.Listener) error {
 			select {
 			case pc = <-pipec:
 			case err := <-errorc:
-				if !isIgnoredErr(err) {
+				if isIgnoredErr(err) {
+					logger.WithError(err).Debug("connection establishing failed")
+				} else {
 					logger.WithError(err).Error("connection establishing failed")
 				}
 				return
 			case <-time.After(pipeEstablishingTimeout):
-				logger.Error("pipe establishing timeout")
+				logger.Debug("pipe establishing timeout")
 				return
 			}
 
@@ -160,5 +163,6 @@ func (p *Routing) closeListenersLocked() error {
 func isIgnoredErr(err error) bool {
 	return errors.Is(err, io.EOF) ||
 		strings.Contains(err.Error(), errReadConnectionResetByPeer) ||
-		strings.Contains(err.Error(), errSshDisconnectReason11)
+		strings.Contains(err.Error(), errSshDisconnectReason11) ||
+		strings.Contains(err.Error(), errUnknownClient)
 }
