@@ -9,27 +9,6 @@
 * Remote debugging
 * \<insert your creative use cases\>
 
-## How it works
-
-You run the `upterm` program and specify the command for your terminal session.
-Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
-Clients connect to your terminal session over the public internet via `uptermd` using `ssh`.
-A community Upterm server is run at `uptermd.upterm.dev` and `upterm` points to this server by default.
-
-```
-                                                                        ┌───────────────────────────────┐
-                                                                        │           Client 1            │
-┌────────────────────┬────┐            ┌────────────────────┐     ┌────▶│(`ssh abcd@uptermd.upterm.dev`)│
-│                    │    │  reverse   │                    │     │     │                               │
-│        Host        │    │ ssh tunnel │      uptermd       │ ssh │     └───────────────────────────────┘
-│(`upterm host bash`)│sshd│◀──────────▶│                    │◀────┤
-│                    │    │            │(uptermd.upterm.dev)│     │     ┌───────────────────────────────┐
-│                    │    │            │                    │     │     │           Client 2            │
-└────────────────────┴────┘            └────────────────────┘     └────▶│(`ssh abcd@uptermd.upterm.dev`)│
-                                                                        │                               │
-                                                                        └───────────────────────────────┘
-```
-
 ## Installation
 
 ### Mac
@@ -97,6 +76,15 @@ More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/doc
 ## Demo
 
 [![asciicast](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm.svg)](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm)
+
+## How it works
+
+You run the `upterm` program and specify the command for your terminal session.
+Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
+Clients connect to your terminal session over the public internet via `uptermd` using `ssh`.
+A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
+
+![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.png)
 
 ## License
 
