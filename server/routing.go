@@ -39,6 +39,14 @@ type Routing struct {
 func (p *Routing) Serve(ln net.Listener) error {
 	p.listener = ln
 
+	piper := &ssh.PiperConfig{
+		FindUpstream:  p.FindUpstreamFunc,
+		ServerVersion: upterm.ServerSSHServerVersion,
+	}
+	for _, signer := range p.HostSigners {
+		piper.AddHostKey(signer)
+	}
+
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
 		conn, err := ln.Accept()
@@ -58,7 +66,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 				if max := 1 * time.Second; tempDelay > max {
 					tempDelay = max
 				}
-				p.Logger.WithError(err).Errorf("http: Accept error; retrying in %v", tempDelay)
+				p.Logger.WithError(err).Errorf("tcp: Accept error; retrying in %v", tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
@@ -70,14 +78,6 @@ func (p *Routing) Serve(ln net.Listener) error {
 		tempDelay = 0
 
 		logger := p.Logger.WithField("addr", conn.RemoteAddr())
-
-		piper := &ssh.PiperConfig{
-			FindUpstream:  p.FindUpstreamFunc,
-			ServerVersion: upterm.ServerSSHServerVersion,
-		}
-		for _, signer := range p.HostSigners {
-			piper.AddHostKey(signer)
-		}
 
 		go func(c net.Conn, logger log.FieldLogger) {
 			defer c.Close()
