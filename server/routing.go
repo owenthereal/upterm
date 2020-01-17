@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-kit/kit/metrics"
+	"github.com/go-kit/kit/metrics/provider"
+	libmetrics "github.com/jingweno/upterm/metrics"
 	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -30,10 +33,29 @@ type Routing struct {
 	HostSigners      []ssh.Signer
 	FindUpstreamFunc FindUpstreamFunc
 	Logger           log.FieldLogger
+	MetricsProvider  provider.Provider
 
 	listener net.Listener
 	mux      sync.Mutex
 	doneChan chan struct{}
+}
+
+type routingInstruments struct {
+	connections        metrics.Counter
+	activeConnections  metrics.Gauge
+	connectionDuration metrics.Histogram
+	errors             metrics.Counter
+	connectionTimeouts metrics.Counter
+}
+
+func newRoutingInstruments(p provider.Provider) *routingInstruments {
+	return &routingInstruments{
+		connections:        p.NewCounter("routing_connections_count"),
+		errors:             p.NewCounter("routing_errors_count"),
+		activeConnections:  p.NewGauge("routing_active_connections_count"),
+		connectionDuration: p.NewHistogram("routing_connection_duration_ms", 50),
+		connectionTimeouts: p.NewCounter("routing_connection_timeout_count"),
+	}
 }
 
 func (p *Routing) Serve(ln net.Listener) error {
@@ -46,6 +68,8 @@ func (p *Routing) Serve(ln net.Listener) error {
 	for _, signer := range p.HostSigners {
 		piper.AddHostKey(signer)
 	}
+
+	inst := newRoutingInstruments(p.MetricsProvider)
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
@@ -72,15 +96,20 @@ func (p *Routing) Serve(ln net.Listener) error {
 			}
 
 			p.Logger.WithError(err).Error("failed to accept connection")
+			inst.errors.Add(1)
 			return err
 		}
 
 		tempDelay = 0
 
 		logger := p.Logger.WithField("addr", conn.RemoteAddr())
-
-		go func(c net.Conn, logger log.FieldLogger) {
+		go func(c net.Conn, inst *routingInstruments, logger log.FieldLogger) {
 			defer c.Close()
+
+			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
+			defer inst.activeConnections.Add(-1)
+			inst.connections.Add(1)
+			inst.activeConnections.Add(1)
 
 			pipec := make(chan *ssh.PiperConn)
 			errorc := make(chan error)
@@ -105,9 +134,11 @@ func (p *Routing) Serve(ln net.Listener) error {
 				} else {
 					logger.WithError(err).Error("connection establishing failed")
 				}
+				inst.errors.Add(1)
 				return
 			case <-time.After(pipeEstablishingTimeout):
 				logger.Debug("pipe establishing timeout")
+				inst.connectionTimeouts.Add(1)
 				return
 			}
 
@@ -115,8 +146,9 @@ func (p *Routing) Serve(ln net.Listener) error {
 
 			if err := pc.Wait(); err != nil && !isIgnoredErr(err) {
 				logger.WithError(err).Error("error waiting for pipe")
+				inst.errors.Add(1)
 			}
-		}(conn, logger)
+		}(conn, inst, logger)
 	}
 }
 
