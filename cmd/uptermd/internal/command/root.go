@@ -1,10 +1,6 @@
 package command
 
 import (
-	"fmt"
-	"net"
-	"strings"
-
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -17,6 +13,7 @@ var (
 	flagUpstreamNode bool
 	flagNetwork      string
 	flagNetworkOpts  []string
+	flagMetricAddr   string
 )
 
 func Root(logger log.FieldLogger) *cobra.Command {
@@ -33,6 +30,8 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
+	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", utils.DefaultLocalhost("8080"), "metric server address (required)")
+
 	cmd.PersistentFlags().BoolVarP(&flagUpstreamNode, "upstream-node", "", false, "indicate that the server is one of the upstream nodes")
 	_ = cmd.PersistentFlags().MarkHidden("upstream-node")
 
@@ -44,53 +43,23 @@ type rootCmd struct {
 }
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
-	provider := server.Networks.Get(flagNetwork)
-	if provider == nil {
-		return fmt.Errorf("unsupport network provider %q", flagNetwork)
-	}
-
-	opts := parseNetworkOpts(flagNetworkOpts)
-	if err := provider.SetOpts(opts); err != nil {
-		return fmt.Errorf("network provider option error: %s", err)
+	opt := server.ServerOpt{
+		Addr:         flagHost,
+		KeyFiles:     flagHostKeys,
+		Network:      flagNetwork,
+		NetworkOpt:   flagNetworkOpts,
+		UpstreamNode: flagUpstreamNode,
+		MetricAddr:   flagMetricAddr,
 	}
 
 	logger := cmd.logger.WithFields(log.Fields{
-		"host": flagHost,
+		"host":         flagHost,
+		"metric-addr":  flagMetricAddr,
+		"network":      flagNetwork,
+		"network-opts": flagNetworkOpts,
 	})
-	logger.WithFields(log.Fields{
-		"network":      provider.Name(),
-		"network-opts": provider.Opts(),
-	}).Infof("using network provider %s", provider.Name())
-
-	signers, err := utils.CreateSignersFromFiles(flagHostKeys)
-	if err != nil {
-		return err
-	}
-
-	ln, err := net.Listen("tcp", flagHost)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	s := &server.Server{
-		HostSigners:     signers,
-		NodeAddr:        flagHost,
-		NetworkProvider: provider,
-		UpstreamNode:    flagUpstreamNode,
-		Logger:          cmd.logger.WithField("app", "uptermd"),
-	}
-
 	logger.Info("starting server")
-	return s.Serve(ln)
-}
+	defer logger.Info("shutting down sterver")
 
-func parseNetworkOpts(opts []string) server.NetworkOptions {
-	result := make(server.NetworkOptions)
-	for _, opt := range opts {
-		split := strings.SplitN(opt, "=", 2)
-		result[split[0]] = split[1]
-	}
-
-	return result
+	return server.StartServer(opt)
 }
