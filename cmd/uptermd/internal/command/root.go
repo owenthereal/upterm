@@ -43,7 +43,7 @@ type rootCmd struct {
 }
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
-	opt := server.ServerOpt{
+	opt := server.Opt{
 		Addr:         flagHost,
 		KeyFiles:     flagHostKeys,
 		Network:      flagNetwork,
@@ -61,5 +61,5 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	logger.Info("starting server")
 	defer logger.Info("shutting down sterver")
 
-	return server.StartServer(opt)
+	return server.Start(opt)
 }
