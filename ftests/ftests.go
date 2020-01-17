@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
@@ -126,8 +127,8 @@ func (s *Server) start() error {
 		return err
 	}
 
-	provider := &server.MemoryProvider{}
-	_ = provider.SetOpts(nil)
+	network := &server.MemoryProvider{}
+	_ = network.SetOpts(nil)
 
 	logger := log.New()
 	logger.Level = log.DebugLevel
@@ -136,8 +137,9 @@ func (s *Server) start() error {
 		HostSigners:     signers,
 		NodeAddr:        s.Addr(),
 		UpstreamNode:    s.upstreamNode,
-		NetworkProvider: provider,
+		NetworkProvider: network,
 		Logger:          logger,
+		MetricsProvider: provider.NewDiscardProvider(),
 	}
 
 	return s.Server.Serve(s.ln)

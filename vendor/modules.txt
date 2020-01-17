@@ -4,10 +4,16 @@ github.com/PuerkitoBio/purell
 github.com/PuerkitoBio/urlesc
 # github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
 github.com/ScaleFT/sshkeys
+# github.com/VividCortex/gohistogram v1.0.0
+github.com/VividCortex/gohistogram
 # github.com/anmitsu/go-shlex v0.0.0-20161002113705-648efa622239
 github.com/anmitsu/go-shlex
 # github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a
 github.com/asaskevich/govalidator
+# github.com/beorn7/perks v1.0.1
+github.com/beorn7/perks/quantile
+# github.com/cespare/xxhash/v2 v2.1.1
+github.com/cespare/xxhash/v2
 # github.com/cpuguy83/go-md2man v1.0.10
 github.com/cpuguy83/go-md2man/md2man
 # github.com/creack/pty v1.1.9
@@ -18,6 +24,23 @@ github.com/dchest/bcrypt_pbkdf
 github.com/eiannone/keyboard
 # github.com/gliderlabs/ssh v0.2.2 => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
 github.com/gliderlabs/ssh
+# github.com/go-kit/kit v0.9.0
+github.com/go-kit/kit/log
+github.com/go-kit/kit/metrics
+github.com/go-kit/kit/metrics/discard
+github.com/go-kit/kit/metrics/dogstatsd
+github.com/go-kit/kit/metrics/expvar
+github.com/go-kit/kit/metrics/generic
+github.com/go-kit/kit/metrics/graphite
+github.com/go-kit/kit/metrics/influx
+github.com/go-kit/kit/metrics/internal/lv
+github.com/go-kit/kit/metrics/internal/ratemap
+github.com/go-kit/kit/metrics/prometheus
+github.com/go-kit/kit/metrics/provider
+github.com/go-kit/kit/metrics/statsd
+github.com/go-kit/kit/util/conn
+# github.com/go-logfmt/logfmt v0.4.0
+github.com/go-logfmt/logfmt
 # github.com/go-openapi/analysis v0.19.5
 github.com/go-openapi/analysis
 github.com/go-openapi/analysis/internal
@@ -75,14 +98,22 @@ github.com/grpc-ecosystem/grpc-gateway/utilities
 github.com/heroku/rollrus
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
+# github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d
+github.com/influxdata/influxdb1-client/models
+github.com/influxdata/influxdb1-client/pkg/escape
+github.com/influxdata/influxdb1-client/v2
 # github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
+# github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515
+github.com/kr/logfmt
 # github.com/mailru/easyjson v0.0.0-20190626092158-b2ccc519800e
 github.com/mailru/easyjson/buffer
 github.com/mailru/easyjson/jlexer
 github.com/mailru/easyjson/jwriter
 # github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
+# github.com/matttproud/golang_protobuf_extensions v1.0.1
+github.com/matttproud/golang_protobuf_extensions/pbutil
 # github.com/mitchellh/mapstructure v1.1.2
 github.com/mitchellh/mapstructure
 # github.com/oklog/run v1.0.0
@@ -91,6 +122,20 @@ github.com/oklog/run
 github.com/olekukonko/tablewriter
 # github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
 github.com/pborman/ansi
+# github.com/prometheus/client_golang v1.3.0
+github.com/prometheus/client_golang/prometheus
+github.com/prometheus/client_golang/prometheus/internal
+github.com/prometheus/client_golang/prometheus/promhttp
+# github.com/prometheus/client_model v0.1.0
+github.com/prometheus/client_model/go
+# github.com/prometheus/common v0.7.0
+github.com/prometheus/common/expfmt
+github.com/prometheus/common/internal/bitbucket.org/ww/goautoneg
+github.com/prometheus/common/model
+# github.com/prometheus/procfs v0.0.8
+github.com/prometheus/procfs
+github.com/prometheus/procfs/internal/fs
+github.com/prometheus/procfs/internal/util
 # github.com/rollbar/rollbar-go v1.2.0
 github.com/rollbar/rollbar-go
 # github.com/rs/xid v1.2.1
@@ -129,7 +174,7 @@ golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sys v0.0.0-20200103143344-a1369afcdac7
+# golang.org/x/sys v0.0.0-20200117145432-59e60aa80a0c
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows

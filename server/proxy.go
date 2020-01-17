@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
@@ -17,6 +18,7 @@ type Proxy struct {
 	SessionDialListener SessionDialListener
 	UpstreamNode        bool
 	Logger              log.FieldLogger
+	MetricsProvider     provider.Provider
 
 	routing *Routing
 	mux     sync.Mutex
@@ -39,6 +41,7 @@ func (r *Proxy) Serve(ln net.Listener) error {
 		HostSigners:      r.HostSigners,
 		Logger:           r.Logger,
 		FindUpstreamFunc: r.findUpstream,
+		MetricsProvider:  r.MetricsProvider,
 	}
 	r.mux.Unlock()
 

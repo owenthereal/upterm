@@ -10,15 +10,15 @@ import (
 	"github.com/rs/xid"
 )
 
-var Networks NetworkProviders
+var networks networkProviders
 
 func init() {
-	Networks = []NetworkProvider{&UnixProvider{}, &MemoryProvider{}}
+	networks = []NetworkProvider{&UnixProvider{}, &MemoryProvider{}}
 }
 
-type NetworkProviders []NetworkProvider
+type networkProviders []NetworkProvider
 
-func (n NetworkProviders) Get(name string) NetworkProvider {
+func (n networkProviders) Get(name string) NetworkProvider {
 	for _, p := range n {
 		if p.Name() == name {
 			return p
