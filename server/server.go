@@ -57,7 +57,7 @@ func StartServer(opt ServerOpt) error {
 		g.Add(func() error {
 			return s.Serve(ln)
 		}, func(err error) {
-			_ = s.Shutdown()
+			s.Shutdown()
 			ln.Close()
 		})
 	}
@@ -66,7 +66,7 @@ func StartServer(opt ServerOpt) error {
 		g.Add(func() error {
 			return m.ListenAndServe(opt.MetricAddr)
 		}, func(err error) {
-			m.Shutdown(context.Background())
+			_ = m.Shutdown(context.Background())
 		})
 	}
 
