@@ -17,6 +17,10 @@ func (m *MetricsServer) Shutdown(ctx context.Context) error {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
+	if m.server == nil {
+		return nil
+	}
+
 	return m.server.Shutdown(ctx)
 }
 
