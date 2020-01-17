@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type ServerOpt struct {
+type Opt struct {
 	Addr         string
 	KeyFiles     []string
 	Network      string
@@ -23,8 +23,8 @@ type ServerOpt struct {
 	MetricAddr   string
 }
 
-func StartServer(opt ServerOpt) error {
-	network := Networks.Get(opt.Network)
+func Start(opt Opt) error {
+	network := networks.Get(opt.Network)
 	if network == nil {
 		return fmt.Errorf("unsupport network provider %q", opt.Network)
 	}
