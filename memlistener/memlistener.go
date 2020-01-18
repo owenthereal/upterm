@@ -57,6 +57,8 @@ func ListenMem(network, address string, sz int) (net.Listener, error) {
 	}
 
 	listenersMux.Lock()
+	defer listenersMux.Unlock()
+
 	ln := listeners[address]
 	if ln != nil {
 		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: addr{}, Err: errListenerAlreadyExist{address}}
@@ -68,7 +70,6 @@ func ListenMem(network, address string, sz int) (net.Listener, error) {
 		closeFunc: removeListener,
 	}
 	listeners[address] = ln
-	listenersMux.Unlock()
 
 	return ln, nil
 }
