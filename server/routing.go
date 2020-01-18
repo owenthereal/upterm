@@ -18,7 +18,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 10 * time.Second
+	pipeEstablishingTimeout = 5 * time.Second
 )
 
 const (
@@ -129,11 +129,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 			select {
 			case pc = <-pipec:
 			case err := <-errorc:
-				if isIgnoredErr(err) {
-					logger.WithError(err).Debug("connection establishing failed")
-				} else {
-					logger.WithError(err).Error("connection establishing failed")
-				}
+				logger.WithError(err).Debug("connection establishing failed")
 				inst.errors.Add(1)
 				return
 			case <-time.After(pipeEstablishingTimeout):
