@@ -10,8 +10,7 @@ import (
 )
 
 var (
-	listeners    = make(map[string]*memlistener)
-	listenersMux sync.Mutex
+	listeners sync.Map
 
 	errMissingAddress = errors.New("missing address")
 )
@@ -56,22 +55,17 @@ func ListenMem(network, address string, sz int) (net.Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: addr{}, Err: errMissingAddress}
 	}
 
-	listenersMux.Lock()
-	defer listenersMux.Unlock()
-
-	ln := listeners[address]
-	if ln != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: addr{}, Err: errListenerAlreadyExist{address}}
-	}
-
-	ln = &memlistener{
+	ln := &memlistener{
 		Listener:  bufconn.Listen(sz),
 		addr:      address,
 		closeFunc: removeListener,
 	}
-	listeners[address] = ln
+	actual, loaded := listeners.LoadOrStore(address, ln)
+	if loaded {
+		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: addr{}, Err: errListenerAlreadyExist{address}}
+	}
 
-	return ln, nil
+	return actual.(net.Listener), nil
 }
 
 func Dial(network, address string) (net.Conn, error) {
@@ -85,21 +79,18 @@ func Dial(network, address string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Net: network, Source: addr{}, Addr: addr{}, Err: errMissingAddress}
 	}
 
-	listenersMux.Lock()
-	ln, exist := listeners[address]
-	listenersMux.Unlock()
+	val, exist := listeners.Load(address)
 	if !exist {
 		return nil, &net.OpError{Op: "dial", Net: network, Source: addr{}, Addr: addr{}, Err: errListenerNotFound{address}}
 	}
+
+	ln := val.(*memlistener)
 
 	return ln.Dial()
 }
 
 func removeListener(address string) {
-	listenersMux.Lock()
-	defer listenersMux.Unlock()
-
-	delete(listeners, address)
+	listeners.Delete(address)
 }
 
 type memlistener struct {
