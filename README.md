@@ -27,7 +27,7 @@ brew install upterm
 ```
 git clone git@github.com:jingweno/upterm.git
 cd upterm
-make install
+GO111MODULE=on go install ./cmd/upterm/...
 ```
 
 ## Quick Start
