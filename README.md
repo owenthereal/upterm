@@ -25,7 +25,9 @@ brew install upterm
 ### From source
 
 ```
-go get -u github.com/jingweno/upterm/cmd/upterm
+git clone git@github.com:jingweno/upterm.git
+cd upterm
+make install
 ```
 
 ## Quick Start
