@@ -87,6 +87,7 @@ type Server struct {
 	HostSigners     []ssh.Signer
 	NodeAddr        string
 	NetworkProvider NetworkProvider
+	SessionService  SessionService
 	UpstreamNode    bool
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
@@ -113,6 +114,11 @@ func (s *Server) Serve(ln net.Listener) error {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.mux.Unlock()
 
+	sessionService := s.SessionService
+	if sessionService == nil {
+		sessionService = newInMemorySessionService(s.NodeAddr)
+	}
+
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -125,6 +131,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	{
 		router := Proxy{
 			HostSigners:         s.HostSigners,
+			SessionService:      sessionService,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
 			UpstreamNode:        s.UpstreamNode,
@@ -146,6 +153,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		sshd := SSHD{
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
+			SessionService:      sessionService,
 			SessionDialListener: sessionDialListener,
 			Logger:              s.Logger.WithField("componet", "sshd"),
 		}

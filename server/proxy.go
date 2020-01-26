@@ -14,6 +14,7 @@ import (
 
 type Proxy struct {
 	HostSigners         []ssh.Signer
+	SessionService      SessionService
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
 	UpstreamNode        bool
@@ -69,8 +70,14 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 		r.Logger.WithField("user", id.Id).Info("dialing sshd")
 		c, err = r.SSHDDialListener.Dial()
 	} else {
-		r.Logger.WithField("session", id.Id).Info("dialing session")
-		c, err = r.SessionDialListener.Dial(id.Id)
+		session, err := r.SessionService.GetSession(id.Id)
+		if err != nil {
+			r.Logger.WithError(err).WithField("session", id.Id).Debug("error getting session")
+			return nil, nil, err
+		}
+
+		r.Logger.WithField("session", session.ID).Info("dialing session")
+		c, err = r.SessionDialListener.Dial(session.ID)
 	}
 	if err != nil {
 		return nil, nil, err
