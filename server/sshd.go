@@ -20,6 +20,7 @@ type SSHD struct {
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
+	SessionService      SessionService
 	Logger              log.FieldLogger
 
 	server *ssh.Server
@@ -44,6 +45,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
+		s.SessionService,
 		s.SessionDialListener,
 		s.Logger.WithField("component", "stream-local-handler"),
 	)
@@ -87,6 +89,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	return s.server.Serve(ln)
 }
 
+// TODO: Remove it. SessionService should take care of routing by session
 func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	info := ServerInfo{
 		NodeAddr: s.NodeAddr,
