@@ -156,7 +156,7 @@ go.mongodb.org/mongo-driver/bson/bsonrw
 go.mongodb.org/mongo-driver/bson/bsontype
 go.mongodb.org/mongo-driver/bson/primitive
 go.mongodb.org/mongo-driver/x/bsonx/bsoncore
-# golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/jingweno/upterm.crypto v0.0.0-20191221200714-6f9467940236
+# golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/jingweno/upterm.crypto v0.0.0-20200126213837-9c017ed1a05e
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/curve25519
