@@ -62,7 +62,6 @@ var TestCases = []func(*testing.T, TestServer){
 	testClientAttachHostWithDifferentCommand,
 	testHostFailToShareWithoutPrivateKey,
 	testHostSessionCreatedCallback,
-	testHostUnknownClient,
 }
 
 var (
