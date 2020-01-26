@@ -57,11 +57,11 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 )
 
 var TestCases = []func(*testing.T, TestServer){
+	testClientNonExistingSession,
 	testClientAttachHostWithSameCommand,
 	testClientAttachHostWithDifferentCommand,
 	testHostFailToShareWithoutPrivateKey,
 	testHostSessionCreatedCallback,
-	testHostUnknownClient,
 }
 
 var (

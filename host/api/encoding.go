@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jingweno/upterm/host/api/swagger/models"
+	"github.com/jingweno/upterm/upterm"
 )
 
 func EncodeIdentifierSession(session *models.APIGetSessionResponse) (string, error) {
@@ -26,27 +27,28 @@ func EncodeIdentifier(id *Identifier) (string, error) {
 	return result, nil
 }
 
-func DecodeIdentifier(str string) (*Identifier, error) {
-	split := strings.SplitN(str, ":", 2)
+func DecodeIdentifier(id, clientVersion string) (*Identifier, error) {
+	t := Identifier_HOST
+	if clientVersion != upterm.HostSSHClientVersion {
+		t = Identifier_CLIENT
+	}
+
+	split := strings.SplitN(id, ":", 2)
 	var (
-		t        = Identifier_HOST
 		nodeAddr []byte
 		err      error
 	)
 
 	if len(split) == 2 {
-		t = Identifier_CLIENT
 		nodeAddr, err = base64.URLEncoding.DecodeString(split[1])
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	id := &Identifier{
+	return &Identifier{
 		Id:       split[0],
 		Type:     t,
 		NodeAddr: string(nodeAddr),
-	}
-
-	return id, nil
+	}, nil
 }
