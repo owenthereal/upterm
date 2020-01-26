@@ -7,13 +7,13 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
 type Proxy struct {
 	HostSigners         []ssh.Signer
+	SessionService      SessionService
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
 	UpstreamNode        bool
@@ -55,22 +55,23 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 		user = conn.User()
 	)
 
-	id, err := api.DecodeIdentifier(user)
+	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
 	if id.Type == api.Identifier_HOST {
-		// Drop early if the request is not from a known client
-		if !r.UpstreamNode && !r.isKnownClient(conn) {
-			return nil, nil, fmt.Errorf("unknown client: client=%s user=%s", conn.ClientVersion(), id.Id)
-		}
-
 		r.Logger.WithField("user", id.Id).Info("dialing sshd")
 		c, err = r.SSHDDialListener.Dial()
 	} else {
-		r.Logger.WithField("session", id.Id).Info("dialing session")
-		c, err = r.SessionDialListener.Dial(id.Id)
+		session, ee := r.SessionService.GetSession(id.Id)
+		if ee != nil {
+			r.Logger.WithError(ee).WithField("session", id.Id).Debug("error getting session")
+			return nil, nil, ee
+		}
+
+		r.Logger.WithField("session", session.ID).Info("dialing session")
+		c, err = r.SessionDialListener.Dial(session.ID)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -96,10 +97,6 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 
 	}
 	return c, pipe, nil
-}
-
-func (r *Proxy) isKnownClient(conn ssh.ConnMetadata) bool {
-	return string(conn.ClientVersion()) == upterm.HostSSHClientVersion
 }
 
 func (r *Proxy) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
