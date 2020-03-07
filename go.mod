@@ -19,6 +19,7 @@ require (
 	github.com/golang/protobuf v1.3.2
 	github.com/google/go-cmp v0.3.1
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
+	github.com/gorilla/websocket v1.4.1
 	github.com/grpc-ecosystem/grpc-gateway v1.12.1
 	github.com/heroku/rollrus v0.1.1
 	github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d // indirect
