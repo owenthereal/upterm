@@ -22,6 +22,8 @@ github.com/creack/pty
 github.com/dchest/bcrypt_pbkdf
 # github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
 github.com/eiannone/keyboard
+# github.com/fsnotify/fsnotify v1.4.7
+github.com/fsnotify/fsnotify
 # github.com/gliderlabs/ssh v0.2.2 => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
 github.com/gliderlabs/ssh
 # github.com/go-kit/kit v0.9.0
@@ -104,6 +106,10 @@ github.com/inconshreveable/mousetrap
 github.com/influxdata/influxdb1-client/models
 github.com/influxdata/influxdb1-client/pkg/escape
 github.com/influxdata/influxdb1-client/v2
+# github.com/jpillora/chisel v0.0.0-20190724232113-f3a8df20e389
+github.com/jpillora/chisel/share
+# github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9
+github.com/jpillora/sizestr
 # github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515

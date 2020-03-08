@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	chshare "github.com/jpillora/chisel/share"
+
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/oklog/run"
@@ -29,6 +31,10 @@ const (
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
 )
+
+func WrapWSConn(ws *websocket.Conn) net.Conn {
+	return chshare.NewWebSocketConn(ws)
+}
 
 type WebsocketServer struct {
 	SSHDDialListener    SSHDDialListener
@@ -59,7 +65,11 @@ func (s *WebsocketServer) Shutdown() error {
 	return s.srv.Shutdown(context.Background())
 }
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
 
 type wsHandler struct {
 	sshdDialListener    SSHDDialListener
@@ -109,40 +119,29 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	wsconn := WrapWSConn(ws)
 
-	closeFunc := func(ws *websocket.Conn) {
-		if err := ws.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-			time.Now().Add(writeWait),
-		); err != nil {
-			log.WithError(err).Error("error closing ws")
-		}
+	var o sync.Once
+	close := func() {
+		wsconn.Close()
+		conn.Close()
 	}
-	defer closeFunc(ws)
 
 	var g run.Group
 	{
 		g.Add(func() error {
-			return pumpReader(ws, conn, ctx)
+			_, err := io.Copy(wsconn, conn)
+			return err
 		}, func(err error) {
-			cancel()
+			o.Do(close)
 		})
 	}
 	{
 		g.Add(func() error {
-			return ping(ws, ctx)
+			_, err := io.Copy(conn, wsconn)
+			return err
 		}, func(err error) {
-			cancel()
-		})
-	}
-	{
-		g.Add(func() error {
-			return pumpWriter(ws, conn, ctx)
-		}, func(err error) {
-			cancel()
+			o.Do(close)
 		})
 	}
 

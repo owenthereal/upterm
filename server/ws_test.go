@@ -73,7 +73,8 @@ func Test_WebsocketServer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if wt != websocket.TextMessage {
+
+			if wt != websocket.BinaryMessage {
 				continue
 			}
 
@@ -101,7 +102,7 @@ func Test_WebsocketServer(t *testing.T) {
 	}
 
 	// test write
-	if err := wsc.WriteMessage(websocket.TextMessage, []byte("write\n")); err != nil { // need CR because func scan scans by line
+	if err := wsc.WriteMessage(websocket.BinaryMessage, []byte("write\n")); err != nil { // need CR because func scan scans by line
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff("write", scan(ws)); diff != "" {

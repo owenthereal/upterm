@@ -9,6 +9,10 @@ import (
 	"github.com/rs/xid"
 )
 
+func testWebsocketHost(t *testing.T, testServer TestServer) {
+
+}
+
 func testHostSessionCreatedCallback(t *testing.T, testServer TestServer) {
 	sessionID := xid.New().String()
 	h := &Host{
