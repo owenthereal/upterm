@@ -46,7 +46,7 @@ func hostCmd() *cobra.Command {
 		RunE:    shareRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "uptermd.upterm.dev:22", "upterm server address (required)")
+	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are ssh://, ws:// or wss://.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", nil, "private key for public key authentication against the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
