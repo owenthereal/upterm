@@ -2,13 +2,17 @@ package internal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os/user"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
@@ -23,7 +27,7 @@ const (
 type ReverseTunnel struct {
 	*ssh.Client
 
-	Host      string
+	Host      *url.URL
 	SessionID string
 	Signers   []ssh.Signer
 	KeepAlive time.Duration
@@ -68,9 +72,27 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	c.Client, err = ssh.Dial("tcp", c.Host, config)
+	if c.Host.Scheme == "ws" || c.Host.Scheme == "wss" {
+		auth := base64.StdEncoding.EncodeToString([]byte(encodedID + ":"))
+		header := make(http.Header)
+		header.Add("Authorization", "Basic "+auth)
+		header.Add("Upterm-Client-Version", upterm.HostSSHClientVersion)
+		wsc, _, err := websocket.DefaultDialer.Dial(c.Host.String(), header)
+		if err != nil {
+			return nil, err
+		}
+		// pass in addr without shceme for ssh
+		cc, chans, reqs, err := ssh.NewClientConn(server.WrapWSConn(wsc), c.Host.Host, config)
+		if err != nil {
+			return nil, err
+		}
+		c.Client = ssh.NewClient(cc, chans, reqs)
+	} else {
+		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
+	}
+
 	if err != nil {
-		return nil, sshDialError(c.Host, err)
+		return nil, sshDialError(c.Host.String(), err)
 	}
 
 	c.ln, err = c.Client.Listen("unix", c.SessionID)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -178,16 +179,25 @@ func displaySession(session *models.APIGetSessionResponse) error {
 		return err
 	}
 
-	host, port, err := net.SplitHostPort(session.Host)
+	u, err := url.Parse(session.Host)
 	if err != nil {
 		return err
 	}
 
-	sshCmd := fmt.Sprintf("ssh %s@%s", user, host)
-	if port != "22" {
-		sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return err
 	}
 
+	var sshCmd string
+	if u.Scheme == "ssh" {
+		sshCmd = fmt.Sprintf("ssh %s@%s", user, host)
+		if port != "22" {
+			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
+		}
+	} else {
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s", u.Scheme, user, u.Host, host)
+	}
 	data := [][]string{
 		[]string{"Command:", strings.Join(session.Command, " ")},
 		[]string{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},

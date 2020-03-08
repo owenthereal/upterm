@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"sync"
 
@@ -64,13 +65,16 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// This function is never executed and it's as an indicator
-			// to crypto/ssh that public key auth is enabled.
-			// This allows the Router to convert the public key auth to
-			// password auth with public key as the password in authorized
-			// key format.
+			// This function is never executed when the protocol is ssh.
+			// It acts as an indicator to crypto/ssh that public key auth
+			// is enabled. This allows the ssh router to convert the public
+			// key auth to password auth with public key as the password in
+			// authorized key format.
+			//
+			// However, this function needs to return true to allow publickey
+			// auth when the protocol is websocket.
 
-			// TODO: validate publickey
+// TODO: validate publickey
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {

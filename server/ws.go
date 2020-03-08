@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -39,6 +38,7 @@ func WrapWSConn(ws *websocket.Conn) net.Conn {
 type WebsocketServer struct {
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
+	Logger              log.FieldLogger
 
 	srv *http.Server
 	mux sync.Mutex
@@ -49,6 +49,7 @@ func (s *WebsocketServer) Serve(ln net.Listener) error {
 	h := &wsHandler{
 		sshdDialListener:    s.SSHDDialListener,
 		sessionDialListener: s.SessionDialListener,
+		logger:              s.Logger,
 	}
 	s.srv = &http.Server{
 		Handler: h,
@@ -103,7 +104,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
 	if err != nil {
-		wsError(ws, err)
+		wsError(ws, err, "error decoding id")
 		return
 	}
 
@@ -115,7 +116,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn, err = h.sessionDialListener.Dial(id.Id)
 	}
 	if err != nil {
-		wsError(ws, err)
+		wsError(ws, err, "error dialing")
 		return
 	}
 
@@ -146,65 +147,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.Run(); err != nil {
-		wsError(ws, err)
-	}
-}
-
-func pumpWriter(ws *websocket.Conn, w io.Writer, ctx context.Context) error {
-	ws.SetReadLimit(maxMessageSize)
-	ws.SetReadDeadline(time.Now().Add(pongWait))
-	ws.SetPongHandler(func(string) error { ws.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			// ignore
-		}
-
-		_, message, err := ws.ReadMessage()
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(message); err != nil {
-			return err
-		}
-	}
-}
-
-func pumpReader(ws *websocket.Conn, r io.Reader, ctx context.Context) error {
-	s := bufio.NewScanner(r)
-	s.Split(bufio.ScanBytes) // this may generate tons of requests
-	for s.Scan() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			// ignore
-		}
-
-		ws.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := ws.WriteMessage(websocket.TextMessage, s.Bytes()); err != nil {
-			return err
-		}
-	}
-
-	return s.Err()
-}
-
-func ping(ws *websocket.Conn, ctx context.Context) error {
-	ticker := time.NewTicker(pingPeriod)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
-				return err
-			}
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		wsError(ws, err, "error piping")
 	}
 }
 
@@ -214,7 +157,7 @@ func httpError(w http.ResponseWriter, err error) {
 	w.Write([]byte(err.Error()))
 }
 
-func wsError(ws *websocket.Conn, err error) {
-	log.WithError(err).Error("ws error")
+func wsError(ws *websocket.Conn, err error, msg string) {
+	log.WithError(err).Error(msg)
 	ws.WriteMessage(websocket.TextMessage, []byte(err.Error()))
 }

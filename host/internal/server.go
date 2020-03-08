@@ -93,12 +93,15 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			PasswordHandler: ph.HandlePassword,
 			Version:         upterm.HostSSHServerVersion,
 			PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
-				// This function is never executed and it's as an indicator
-				// to crypto/ssh that public key auth is enabled.
-				// This allows the Router to convert the public key auth to
-				// password auth with public key as the password in authorized
-				// key format.
-				return false
+				// This function is never executed when the protocol is ssh.
+				// It acts as an indicator to crypto/ssh that public key auth
+				// is enabled. This allows the ssh router to convert the public
+				// key auth to password auth with public key as the password in
+				// authorized key format.
+				//
+				// However, this function needs to return true to allow publickey
+				// auth when the protocol is websocket.
+				return true
 			},
 		}
 		g.Add(func() error {

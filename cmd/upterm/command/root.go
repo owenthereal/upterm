@@ -26,6 +26,7 @@ func Root() *cobra.Command {
 	}
 
 	rootCmd.AddCommand(hostCmd())
+	rootCmd.AddCommand(proxyCmd())
 	rootCmd.AddCommand(sessionCmd())
 	rootCmd.AddCommand(versionCmd())
 
