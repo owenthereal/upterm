@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,6 +29,35 @@ const (
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
 )
+
+type WebsocketServer struct {
+	SSHDDialListener    SSHDDialListener
+	SessionDialListener SessionDialListener
+
+	srv *http.Server
+	mux sync.Mutex
+}
+
+func (s *WebsocketServer) Serve(ln net.Listener) error {
+	s.mux.Lock()
+	h := &wsHandler{
+		sshdDialListener:    s.SSHDDialListener,
+		sessionDialListener: s.SessionDialListener,
+	}
+	s.srv = &http.Server{
+		Handler: h,
+	}
+	s.mux.Unlock()
+
+	return s.srv.Serve(ln)
+}
+
+func (s *WebsocketServer) Shutdown() error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	return s.srv.Shutdown(context.Background())
+}
 
 var upgrader = websocket.Upgrader{}
 

@@ -23,6 +23,7 @@ import (
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
+	"github.com/oklog/run"
 	"github.com/pborman/ansi"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -93,8 +94,13 @@ type TestServer interface {
 	Shutdown()
 }
 
-func NewServer(hostKey string) (TestServer, error) {
+func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+
+	wsln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +108,8 @@ func NewServer(hostKey string) (TestServer, error) {
 	s := &Server{
 		hostKeyContent: hostKey,
 		ln:             ln,
+		wsln:           wsln,
+		upstreamNode:   upstreamNode,
 	}
 	go func() {
 		if err := s.start(); err != nil {
@@ -109,14 +117,26 @@ func NewServer(hostKey string) (TestServer, error) {
 		}
 	}()
 
-	return s, utils.WaitForServer(s.Addr())
+	if err := utils.WaitForServer(s.Addr()); err != nil {
+		return nil, err
+	}
+
+	if err := utils.WaitForServer(s.WSAddr()); err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }
 
 type Server struct {
-	*server.Server
+	Server   *server.Server
+	WSServer *server.WebsocketServer
+
+	ln   net.Listener
+	wsln net.Listener
 
 	hostKeyContent string
-	ln             net.Listener
+	upstreamNode   bool
 }
 
 func (s *Server) start() error {
@@ -128,22 +148,53 @@ func (s *Server) start() error {
 	network := &server.MemoryProvider{}
 	_ = network.SetOpts(nil)
 
+	sshdDialListener := network.SSHD()
+	sessionDialListener := network.Session()
+
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
 	s.Server = &server.Server{
-		HostSigners:     signers,
-		NodeAddr:        s.Addr(),
-		NetworkProvider: network,
-		Logger:          logger,
-		MetricsProvider: provider.NewDiscardProvider(),
+		HostSigners:         signers,
+		NodeAddr:            s.Addr(),
+		SSHDDialListener:    sshdDialListener,
+		SessionDialListener: sessionDialListener,
+		UpstreamNode:        s.upstreamNode,
+		Logger:              logger,
+		MetricsProvider:     provider.NewDiscardProvider(),
+	}
+	s.WSServer = &server.WebsocketServer{
+		SSHDDialListener:    sshdDialListener,
+		SessionDialListener: sessionDialListener,
 	}
 
-	return s.Server.Serve(s.ln)
+	var g run.Group
+	{
+		g.Add(func() error {
+			return s.Server.Serve(s.ln)
+		}, func(err error) {
+			s.Server.Shutdown()
+			_ = s.ln.Close()
+		})
+	}
+	{
+		g.Add(func() error {
+			return s.WSServer.Serve(s.wsln)
+		}, func(err error) {
+			_ = s.WSServer.Shutdown()
+			_ = s.wsln.Close()
+		})
+	}
+
+	return g.Run()
 }
 
 func (s *Server) Addr() string {
 	return s.ln.Addr().String()
+}
+
+func (s *Server) WSAddr() string {
+	return s.wsln.Addr().String()
 }
 
 func (s *Server) NodeAddr() string {
@@ -152,6 +203,7 @@ func (s *Server) NodeAddr() string {
 
 func (s *Server) Shutdown() {
 	s.Server.Shutdown()
+	s.WSServer.Shutdown()
 }
 
 type Host struct {
