@@ -9,6 +9,7 @@ import (
 
 var (
 	flagHost        string
+    flagWSHost       string
 	flagHostKeys    []string
 	flagNetwork     string
 	flagNetworkOpts []string
@@ -24,6 +25,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagHost, "host", "", utils.DefaultLocalhost("2222"), "host (required)")
+	cmd.PersistentFlags().StringVarP(&flagWSHost, "ws-host", "", "", "websocket host")
 	cmd.PersistentFlags().StringSliceVarP(&flagHostKeys, "host-key", "", nil, "host private key")
 
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
@@ -40,11 +42,12 @@ type rootCmd struct {
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	opt := server.Opt{
-		Addr:       flagHost,
-		KeyFiles:   flagHostKeys,
-		Network:    flagNetwork,
-		NetworkOpt: flagNetworkOpts,
-		MetricAddr: flagMetricAddr,
+		Addr:         flagHost,
+		WSAddr:       flagWSHost,
+		KeyFiles:     flagHostKeys,
+		Network:      flagNetwork,
+		NetworkOpt:   flagNetworkOpts,
+		MetricAddr:   flagMetricAddr,
 	}
 
 	logger := cmd.logger.WithFields(log.Fields{
