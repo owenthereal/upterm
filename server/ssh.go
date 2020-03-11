@@ -27,12 +27,10 @@ type forwardedStreamlocalPayload struct {
 }
 
 func newStreamlocalForwardHandler(
-	sessionService SessionService,
 	sessionDialListener SessionDialListener,
 	logger log.FieldLogger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
-		sessionService:      sessionService,
 		sessionDialListener: sessionDialListener,
 		forwards:            make(map[string]net.Listener),
 		logger:              logger,
@@ -41,7 +39,6 @@ func newStreamlocalForwardHandler(
 
 type streamlocalForwardHandler struct {
 	sessionDialListener SessionDialListener
-	sessionService      SessionService
 	forwards            map[string]net.Listener
 	logger              log.FieldLogger
 	sync.Mutex
@@ -121,11 +118,6 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		sessionID := reqPayload.SocketPath
 		logger := h.logger.WithFields(log.Fields{"session-id": sessionID})
 
-		if err := h.sessionService.CreateSession(sessionID); err != nil {
-			logger.WithField("session", sessionID).WithError(err).Error("error creating session")
-			return false, []byte(err.Error())
-		}
-
 		ln, err := h.sessionDialListener.Listen(sessionID)
 		if err != nil {
 			logger.WithError(err).Error("error listening socketing")
@@ -152,12 +144,6 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		}
 
 		go func(sessionID string) {
-			defer func() {
-				if err := h.sessionService.DeleteSession(sessionID); err != nil {
-					h.logger.WithError(err).WithField("session", sessionID).Error("error deleting session")
-				}
-			}()
-
 			if err := g.Run(); err != nil {
 				h.logger.WithError(err).Debug("error handling ssh session")
 			}
@@ -173,10 +159,6 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 
 		sessionID := reqPayload.SocketPath
 		h.closeListener(sessionID)
-		if err := h.sessionService.DeleteSession(sessionID); err != nil {
-			h.logger.WithError(err).WithField("session", sessionID).Error("error deleting session")
-			return false, []byte(err.Error())
-		}
 
 		return true, nil
 
