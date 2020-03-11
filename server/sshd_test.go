@@ -43,7 +43,9 @@ func Test_SSHD_DisallowSession(t *testing.T) {
 		Logger:      logger,
 	}
 
-	go sshd.Serve(ln)
+	go func() {
+		_ = sshd.Serve(ln)
+	}()
 
 	if err := utils.WaitForServer(addr); err != nil {
 		t.Fatal(err)
