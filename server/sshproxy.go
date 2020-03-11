@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host/api"
@@ -11,13 +12,19 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	tcpDialTimeout = 1 * time.Second
+)
+
 type Proxy struct {
 	HostSigners         []ssh.Signer
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
+	NodeAddr            string
 	UpstreamNode        bool
-	Logger              log.FieldLogger
-	MetricsProvider     provider.Provider
+
+	Logger          log.FieldLogger
+	MetricsProvider provider.Provider
 
 	routing *Routing
 	mux     sync.Mutex
@@ -63,8 +70,20 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 		r.Logger.WithField("user", id.Id).Info("dialing sshd")
 		c, err = r.SSHDDialListener.Dial()
 	} else {
-		r.Logger.WithField("session", id.Id).Info("dialing session")
-		c, err = r.SessionDialListener.Dial(id.Id)
+		host, port, ee := net.SplitHostPort(id.NodeAddr)
+		if ee != nil {
+			return nil, nil, fmt.Errorf("host address %s is malformed: %w", user, ee)
+		}
+		addr := net.JoinHostPort(host, port)
+
+		if r.NodeAddr == addr {
+			r.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("dialing session")
+			c, err = r.SessionDialListener.Dial(id.Id)
+		} else {
+			// route to neighbour nodes
+			r.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
+			c, err = net.DialTimeout("tcp", addr, tcpDialTimeout)
+		}
 	}
 	if err != nil {
 		return nil, nil, err

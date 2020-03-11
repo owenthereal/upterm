@@ -127,6 +127,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			HostSigners:         s.HostSigners,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
+			NodeAddr:            s.NodeAddr,
 			UpstreamNode:        s.UpstreamNode,
 			Logger:              s.Logger.WithField("componet", "proxy"),
 			MetricsProvider:     s.MetricsProvider,
