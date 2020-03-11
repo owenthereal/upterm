@@ -20,7 +20,6 @@ type SSHD struct {
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
-	SessionService      SessionService
 	Logger              log.FieldLogger
 
 	server *ssh.Server
@@ -45,7 +44,6 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
-		s.SessionService,
 		s.SessionDialListener,
 		s.Logger.WithField("component", "stream-local-handler"),
 	)
