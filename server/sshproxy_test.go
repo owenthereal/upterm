@@ -29,7 +29,7 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 	defer proxyLn.Close()
 
 	proxyAddr := proxyLn.Addr().String()
-	proxy := &Proxy{
+	proxy := &SSHProxy{
 		HostSigners:     []ssh.Signer{signer},
 		NodeAddr:        proxyAddr,
 		Logger:          logger,

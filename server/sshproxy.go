@@ -16,7 +16,7 @@ const (
 	tcpDialTimeout = 1 * time.Second
 )
 
-type Proxy struct {
+type SSHProxy struct {
 	HostSigners         []ssh.Signer
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
@@ -30,7 +30,7 @@ type Proxy struct {
 	mux     sync.Mutex
 }
 
-func (r *Proxy) Shutdown() error {
+func (r *SSHProxy) Shutdown() error {
 	r.mux.Lock()
 	defer r.mux.Unlock()
 
@@ -41,7 +41,7 @@ func (r *Proxy) Shutdown() error {
 	return nil
 }
 
-func (r *Proxy) Serve(ln net.Listener) error {
+func (r *SSHProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
 	r.routing = &Routing{
 		HostSigners:      r.HostSigners,
@@ -54,7 +54,7 @@ func (r *Proxy) Serve(ln net.Listener) error {
 	return r.routing.Serve(ln)
 }
 
-func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error) {
+func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error) {
 	var (
 		c    net.Conn
 		err  error
@@ -111,15 +111,15 @@ func (r *Proxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalC
 	return c, pipe, nil
 }
 
-func (r *Proxy) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (r *SSHProxy) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeDiscard, nil, nil
 }
 
-func (r *Proxy) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (r *SSHProxy) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypePassThrough, nil, nil
 }
 
-func (r *Proxy) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (r *SSHProxy) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	// Can't auth with the public key against session upstream in the Host
 	// because we don't have the Client private key to re-sign the request.
 	// Public key auth is converted to password key auth with public key as
@@ -129,10 +129,10 @@ func (r *Proxy) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ss
 	return ssh.AuthPipeTypeMap, ssh.Password(string(authorizedKey)), nil
 }
 
-func (r *Proxy) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (r *SSHProxy) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeNone, nil, nil
 }
 
-func (r *Proxy) discardPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (r *SSHProxy) discardPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeDiscard, nil, nil
 }

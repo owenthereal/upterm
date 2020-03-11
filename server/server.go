@@ -123,7 +123,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		})
 	}
 	{
-		router := Proxy{
+		router := SSHProxy{
 			HostSigners:         s.HostSigners,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
