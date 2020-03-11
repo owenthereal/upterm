@@ -20,7 +20,6 @@ type SSHD struct {
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
-	SessionService      SessionService
 	Logger              log.FieldLogger
 
 	server *ssh.Server
@@ -45,7 +44,6 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
-		s.SessionService,
 		s.SessionDialListener,
 		s.Logger.WithField("component", "stream-local-handler"),
 	)
@@ -71,12 +69,16 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			// This allows the Router to convert the public key auth to
 			// password auth with public key as the password in authorized
 			// key format.
-			return false
-		},
-		PasswordHandler: func(ctx ssh.Context, password string) bool {
-			// TODO: validate host authorized_keys
+
+			// TODO: validate publickey
 			return true
 		},
+		PasswordHandler: func(ctx ssh.Context, password string) bool {
+			_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
+			// TODO: validate publickey
+			return err == nil
+		},
+		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:       sh.Handler,
 			cancelStreamlocalForwardChannelType: sh.Handler,
