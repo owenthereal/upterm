@@ -102,7 +102,7 @@ func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 		pipe = &ssh.AuthPipe{
 			User:                    user, // TODO: look up client user by public key
 			NoneAuthCallback:        r.noneCallback,
-			PasswordCallback:        r.discardPasswordCallback,
+			PasswordCallback:        r.passThroughPasswordCallback, // password needs to be passed through for sideway routing. Otherwise, it can be discarded
 			PublicKeyCallback:       r.convertToPasswordPublicKeyCallback,
 			UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
 		}
@@ -131,8 +131,4 @@ func (r *SSHProxy) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key
 
 func (r *SSHProxy) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeNone, nil, nil
-}
-
-func (r *SSHProxy) discardPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	return ssh.AuthPipeTypeDiscard, nil, nil
 }
