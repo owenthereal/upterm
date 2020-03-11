@@ -69,12 +69,13 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			// This allows the Router to convert the public key auth to
 			// password auth with public key as the password in authorized
 			// key format.
-			return false
+			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
 			// TODO: validate host authorized_keys
 			return true
 		},
+		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:       sh.Handler,
 			cancelStreamlocalForwardChannelType: sh.Handler,
