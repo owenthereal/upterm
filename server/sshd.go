@@ -75,12 +75,8 @@ func (s *SSHD) Serve(ln net.Listener) error {
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
 			_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
-			if err != nil {
-				return false
-			}
-
 			// TODO: validate publickey
-			return true
+			return err == nil
 		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{

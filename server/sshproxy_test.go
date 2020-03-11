@@ -36,7 +36,9 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 		MetricsProvider: provider.NewDiscardProvider(),
 	}
 
-	go proxy.Serve(proxyLn)
+	go func() {
+		_ = proxy.Serve(proxyLn)
+	}()
 
 	if err := utils.WaitForServer(proxyAddr); err != nil {
 		t.Fatal(err)
@@ -55,7 +57,9 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 		Logger:      logger,
 	}
 
-	go sshd.Serve(sshLn)
+	go func() {
+		_ = sshd.Serve(sshLn)
+	}()
 
 	if err := utils.WaitForServer(sshdAddr); err != nil {
 		t.Fatal(err)
