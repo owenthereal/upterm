@@ -19,7 +19,7 @@ func TestMain(m *testing.M) {
 	defer remove()
 
 	// start the single-node server
-	singleNodeServer, err = NewServer(ServerPrivateKeyContent, false)
+	singleNodeServer, err = NewServer(ServerPrivateKeyContent)
 	if err != nil {
 		log.Fatal(err)
 	}
