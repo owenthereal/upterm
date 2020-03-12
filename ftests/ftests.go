@@ -90,11 +90,13 @@ func funcName(i interface{}) string {
 
 type TestServer interface {
 	Addr() string
+	WSAddr() string
 	NodeAddr() string
 	Shutdown()
 }
 
-func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
+// TODO: break apart ssh and websocket
+func NewServer(hostKey string) (TestServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -109,7 +111,6 @@ func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
 		hostKeyContent: hostKey,
 		ln:             ln,
 		wsln:           wsln,
-		upstreamNode:   upstreamNode,
 	}
 	go func() {
 		if err := s.start(); err != nil {
@@ -136,7 +137,6 @@ type Server struct {
 	wsln net.Listener
 
 	hostKeyContent string
-	upstreamNode   bool
 }
 
 func (s *Server) start() error {
@@ -159,7 +159,6 @@ func (s *Server) start() error {
 		NodeAddr:            s.Addr(),
 		SSHDDialListener:    sshdDialListener,
 		SessionDialListener: sessionDialListener,
-		UpstreamNode:        s.upstreamNode,
 		Logger:              logger,
 		MetricsProvider:     provider.NewDiscardProvider(),
 	}
@@ -386,6 +385,7 @@ func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error 
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
+	// TODO: add websocket
 	c.sshClient, err = ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return err

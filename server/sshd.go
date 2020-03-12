@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"sync"
 
@@ -74,7 +73,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			// However, this function needs to return true to allow publickey
 			// auth when the protocol is websocket.
 
-// TODO: validate publickey
+			// TODO: validate publickey
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
