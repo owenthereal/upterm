@@ -8,12 +8,11 @@ import (
 )
 
 var (
-	flagHost         string
-	flagHostKeys     []string
-	flagUpstreamNode bool
-	flagNetwork      string
-	flagNetworkOpts  []string
-	flagMetricAddr   string
+	flagHost        string
+	flagHostKeys    []string
+	flagNetwork     string
+	flagNetworkOpts []string
+	flagMetricAddr  string
 )
 
 func Root(logger log.FieldLogger) *cobra.Command {
@@ -32,9 +31,6 @@ func Root(logger log.FieldLogger) *cobra.Command {
 
 	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", utils.DefaultLocalhost("9090"), "metric server address (required)")
 
-	cmd.PersistentFlags().BoolVarP(&flagUpstreamNode, "upstream-node", "", false, "indicate that the server is one of the upstream nodes")
-	_ = cmd.PersistentFlags().MarkHidden("upstream-node")
-
 	return cmd
 }
 
@@ -44,12 +40,11 @@ type rootCmd struct {
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	opt := server.Opt{
-		Addr:         flagHost,
-		KeyFiles:     flagHostKeys,
-		Network:      flagNetwork,
-		NetworkOpt:   flagNetworkOpts,
-		UpstreamNode: flagUpstreamNode,
-		MetricAddr:   flagMetricAddr,
+		Addr:       flagHost,
+		KeyFiles:   flagHostKeys,
+		Network:    flagNetwork,
+		NetworkOpt: flagNetworkOpts,
+		MetricAddr: flagMetricAddr,
 	}
 
 	logger := cmd.logger.WithFields(log.Fields{
