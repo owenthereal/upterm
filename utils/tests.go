@@ -20,7 +20,7 @@ func WaitForServer(addr string) error {
 		if err != nil {
 			count++
 			if count >= 10 {
-				return fmt.Errorf("waiting for unix socket failed")
+				return fmt.Errorf("waiting for addr %s failed", addr)
 			}
 			continue
 		}
