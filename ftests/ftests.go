@@ -93,7 +93,7 @@ type TestServer interface {
 	Shutdown()
 }
 
-func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
+func NewServer(hostKey string) (TestServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -102,7 +102,6 @@ func NewServer(hostKey string, upstreamNode bool) (TestServer, error) {
 	s := &Server{
 		hostKeyContent: hostKey,
 		ln:             ln,
-		upstreamNode:   upstreamNode,
 	}
 	go func() {
 		if err := s.start(); err != nil {
@@ -118,7 +117,6 @@ type Server struct {
 
 	hostKeyContent string
 	ln             net.Listener
-	upstreamNode   bool
 }
 
 func (s *Server) start() error {
@@ -136,7 +134,6 @@ func (s *Server) start() error {
 	s.Server = &server.Server{
 		HostSigners:     signers,
 		NodeAddr:        s.Addr(),
-		UpstreamNode:    s.upstreamNode,
 		NetworkProvider: network,
 		Logger:          logger,
 		MetricsProvider: provider.NewDiscardProvider(),

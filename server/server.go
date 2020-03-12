@@ -15,12 +15,11 @@ import (
 )
 
 type Opt struct {
-	Addr         string
-	KeyFiles     []string
-	Network      string
-	NetworkOpt   []string
-	UpstreamNode bool
-	MetricAddr   string
+	Addr       string
+	KeyFiles   []string
+	Network    string
+	NetworkOpt []string
+	MetricAddr string
 }
 
 func Start(opt Opt) error {
@@ -50,7 +49,6 @@ func Start(opt Opt) error {
 			HostSigners:     signers,
 			NodeAddr:        opt.Addr,
 			NetworkProvider: network,
-			UpstreamNode:    opt.UpstreamNode,
 			Logger:          log.New().WithField("app", "uptermd"),
 			MetricsProvider: mp,
 		}
@@ -87,7 +85,6 @@ type Server struct {
 	HostSigners     []ssh.Signer
 	NodeAddr        string
 	NetworkProvider NetworkProvider
-	UpstreamNode    bool
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
@@ -128,7 +125,6 @@ func (s *Server) Serve(ln net.Listener) error {
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
 			NodeAddr:            s.NodeAddr,
-			UpstreamNode:        s.UpstreamNode,
 			Logger:              s.Logger.WithField("componet", "proxy"),
 			MetricsProvider:     s.MetricsProvider,
 		}
