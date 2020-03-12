@@ -15,7 +15,7 @@ import (
 )
 
 type Opt struct {
-	Addr       string
+	SSHAddr    string
 	WSAddr     string
 	KeyFiles   []string
 	Network    string
@@ -43,17 +43,23 @@ func Start(opt Opt) error {
 	sessionDialListener := network.Session()
 	logger := log.New().WithField("app", "uptermd")
 
+	// default node addr to ssh addr or ws addr
+	nodeAddr := opt.SSHAddr
+	if nodeAddr == "" {
+		nodeAddr = opt.WSAddr
+	}
+
 	var g run.Group
 	{
 		mp := provider.NewPrometheusProvider("upterm", "uptermd")
-		ln, err := net.Listen("tcp", opt.Addr)
+		ln, err := net.Listen("tcp", opt.SSHAddr)
 		if err != nil {
 			return err
 		}
 		// TODO: break apart proxy and sshd
 		s := &Server{
 			HostSigners:         signers,
-			NodeAddr:            opt.Addr,
+			NodeAddr:            nodeAddr,
 			SSHDDialListener:    sshdDialListener,
 			SessionDialListener: sessionDialListener,
 			Logger:              logger.WithField("component", "server"),
