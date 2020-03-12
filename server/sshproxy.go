@@ -21,7 +21,6 @@ type SSHProxy struct {
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
 	NodeAddr            string
-	UpstreamNode        bool
 
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
@@ -89,30 +88,14 @@ func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 		return nil, nil, err
 	}
 
-	var pipe *ssh.AuthPipe
-	if r.UpstreamNode {
-		pipe = &ssh.AuthPipe{
-			User:                    user, // TODO: look up client user by public key
-			NoneAuthCallback:        r.noneCallback,
-			PasswordCallback:        r.passThroughPasswordCallback,
-			PublicKeyCallback:       r.discardPublicKeyCallback,
-			UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
-		}
-	} else {
-		pipe = &ssh.AuthPipe{
-			User:                    user, // TODO: look up client user by public key
-			NoneAuthCallback:        r.noneCallback,
-			PasswordCallback:        r.passThroughPasswordCallback, // password needs to be passed through for sideway routing. Otherwise, it can be discarded
-			PublicKeyCallback:       r.convertToPasswordPublicKeyCallback,
-			UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
-		}
-
+	pipe := &ssh.AuthPipe{
+		User:                    user, // TODO: look up client user by public key
+		NoneAuthCallback:        r.noneCallback,
+		PasswordCallback:        r.passThroughPasswordCallback, // password needs to be passed through for sideway routing. Otherwise, it can be discarded
+		PublicKeyCallback:       r.convertToPasswordPublicKeyCallback,
+		UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
 	}
 	return c, pipe, nil
-}
-
-func (r *SSHProxy) discardPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	return ssh.AuthPipeTypeDiscard, nil, nil
 }
 
 func (r *SSHProxy) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
