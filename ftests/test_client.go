@@ -26,7 +26,7 @@ func testClientNonExistingSession(t *testing.T, testServer TestServer) {
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(testServer.Addr()); err != nil {
+	if err := h.Share(testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -41,7 +41,7 @@ func testClientNonExistingSession(t *testing.T, testServer TestServer) {
 	if want, got := h.SessionID, session.SessionID; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := "ssh://"+testServer.Addr(), session.Host; want != got {
+	if want, got := "ssh://"+testServer.SSHAddr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 	if want, got := testServer.NodeAddr(), session.NodeAddr; want != got {
@@ -64,7 +64,7 @@ func testClientNonExistingSession(t *testing.T, testServer TestServer) {
 		PrivateKeys: []string{ClientPrivateKey},
 	}
 	session.SessionID = "not-existance" // set session ID to non-existance
-	err = c.Join(session, testServer.Addr())
+	err = c.Join(session, testServer.SSHAddr())
 
 	// Unfortunately there is no explicit error to the client.
 	// But ssh handshake fails with the connection closed
@@ -88,7 +88,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(testServer.Addr()); err != nil {
+	if err := h.Share(testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -103,7 +103,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	if want, got := h.SessionID, session.SessionID; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := "ssh://"+testServer.Addr(), session.Host; want != got {
+	if want, got := "ssh://"+testServer.SSHAddr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 	if want, got := testServer.NodeAddr(), session.NodeAddr; want != got {
@@ -125,7 +125,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, testServer TestServer) {
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, testServer.Addr()); err != nil {
+	if err := c.Join(session, testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,7 +174,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(testServer.Addr()); err != nil {
+	if err := h.Share(testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -189,7 +189,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 	if want, got := h.SessionID, session.SessionID; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
-	if want, got := "ssh://"+testServer.Addr(), session.Host; want != got {
+	if want, got := "ssh://"+testServer.SSHAddr(), session.Host; want != got {
 		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 	if want, got := testServer.NodeAddr(), session.NodeAddr; want != got {
@@ -211,7 +211,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, testServer TestServe
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, testServer.Addr()); err != nil {
+	if err := c.Join(session, testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 

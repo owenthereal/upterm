@@ -23,7 +23,6 @@ import (
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
-	"github.com/oklog/run"
 	"github.com/pborman/ansi"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -90,7 +89,7 @@ func funcName(i interface{}) string {
 }
 
 type TestServer interface {
-	Addr() string
+	SSHAddr() string
 	WSAddr() string
 	NodeAddr() string
 	Shutdown()
@@ -98,7 +97,7 @@ type TestServer interface {
 
 // TODO: break apart ssh and websocket
 func NewServer(hostKey string) (TestServer, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	sshln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
@@ -110,16 +109,17 @@ func NewServer(hostKey string) (TestServer, error) {
 
 	s := &Server{
 		hostKeyContent: hostKey,
-		ln:             ln,
+		sshln:          sshln,
 		wsln:           wsln,
 	}
+
 	go func() {
 		if err := s.start(); err != nil {
 			log.WithError(err).Error("error starting test server")
 		}
 	}()
 
-	if err := utils.WaitForServer(s.Addr()); err != nil {
+	if err := utils.WaitForServer(s.SSHAddr()); err != nil {
 		return nil, err
 	}
 
@@ -131,11 +131,10 @@ func NewServer(hostKey string) (TestServer, error) {
 }
 
 type Server struct {
-	Server   *server.Server
-	WSServer *server.WebsocketServer
+	Server *server.Server
 
-	ln   net.Listener
-	wsln net.Listener
+	sshln net.Listener
+	wsln  net.Listener
 
 	hostKeyContent string
 }
@@ -149,48 +148,22 @@ func (s *Server) start() error {
 	network := &server.MemoryProvider{}
 	_ = network.SetOpts(nil)
 
-	sshdDialListener := network.SSHD()
-	sessionDialListener := network.Session()
-
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
 	s.Server = &server.Server{
-		HostSigners:         signers,
-		NodeAddr:            s.Addr(),
-		SSHDDialListener:    sshdDialListener,
-		SessionDialListener: sessionDialListener,
-		Logger:              logger,
-		MetricsProvider:     provider.NewDiscardProvider(),
-	}
-	s.WSServer = &server.WebsocketServer{
-		SSHDDialListener:    sshdDialListener,
-		SessionDialListener: sessionDialListener,
+		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
+		HostSigners:     signers,
+		NetworkProvider: network,
+		MetricsProvider: provider.NewDiscardProvider(),
+		Logger:          logger,
 	}
 
-	var g run.Group
-	{
-		g.Add(func() error {
-			return s.Server.Serve(s.ln)
-		}, func(err error) {
-			s.Server.Shutdown()
-			_ = s.ln.Close()
-		})
-	}
-	{
-		g.Add(func() error {
-			return s.WSServer.Serve(s.wsln)
-		}, func(err error) {
-			_ = s.WSServer.Shutdown()
-			_ = s.wsln.Close()
-		})
-	}
-
-	return g.Run()
+	return s.Server.ServeWithContext(context.Background(), s.sshln, s.wsln)
 }
 
-func (s *Server) Addr() string {
-	return s.ln.Addr().String()
+func (s *Server) SSHAddr() string {
+	return s.sshln.Addr().String()
 }
 
 func (s *Server) WSAddr() string {
@@ -203,7 +176,6 @@ func (s *Server) NodeAddr() string {
 
 func (s *Server) Shutdown() {
 	s.Server.Shutdown()
-	s.WSServer.Shutdown()
 }
 
 type Host struct {

@@ -39,8 +39,7 @@ func Start(opt Opt) error {
 		return err
 	}
 
-	sshdDialListener := network.SSHD()
-	sessionDialListener := network.Session()
+	mp := provider.NewPrometheusProvider("upterm", "uptermd")
 	logger := log.New().WithField("app", "uptermd")
 
 	// default node addr to ssh addr or ws addr
@@ -49,47 +48,39 @@ func Start(opt Opt) error {
 		nodeAddr = opt.WSAddr
 	}
 
-	var g run.Group
-	{
-		mp := provider.NewPrometheusProvider("upterm", "uptermd")
-		ln, err := net.Listen("tcp", opt.SSHAddr)
+	var (
+		sshln net.Listener
+		wsln  net.Listener
+	)
+
+	if opt.SSHAddr != "" {
+		sshln, err = net.Listen("tcp", opt.SSHAddr)
 		if err != nil {
 			return err
 		}
-		// TODO: break apart proxy and sshd
+	}
+
+	if opt.WSAddr != "" {
+		wsln, err = net.Listen("tcp", opt.SSHAddr)
+		if err != nil {
+			return err
+		}
+	}
+
+	var g run.Group
+	{
 		s := &Server{
-			HostSigners:         signers,
-			NodeAddr:            nodeAddr,
-			SSHDDialListener:    sshdDialListener,
-			SessionDialListener: sessionDialListener,
-			Logger:              logger.WithField("component", "server"),
-			MetricsProvider:     mp,
+			NodeAddr:        nodeAddr,
+			HostSigners:     signers,
+			NetworkProvider: network,
+			Logger:          logger.WithField("component", "server"),
+			MetricsProvider: mp,
 		}
 		g.Add(func() error {
-			return s.Serve(ln)
+			return s.ServeWithContext(context.Background(), sshln, wsln)
 		}, func(err error) {
 			s.Shutdown()
-			ln.Close()
 		})
-	}
-	{
-		if opt.WSAddr != "" {
-			ln, err := net.Listen("tcp", opt.WSAddr)
-			if err != nil {
-				return err
-			}
-
-			ws := &WebsocketServer{
-				SSHDDialListener:    sshdDialListener,
-				SessionDialListener: sessionDialListener,
-				Logger:              logger.WithField("component", "ws-server"),
-			}
-			g.Add(func() error {
-				return ws.Serve(ln)
-			}, func(err error) {
-				_ = ws.Shutdown()
-			})
-		}
 	}
 	{
 		m := &MetricsServer{}
@@ -114,12 +105,14 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	HostSigners         []ssh.Signer
-	NodeAddr            string
-	SSHDDialListener    SSHDDialListener
-	SessionDialListener SessionDialListener
-	Logger              log.FieldLogger
-	MetricsProvider     provider.Provider
+	NodeAddr        string
+	HostSigners     []ssh.Signer
+	NetworkProvider NetworkProvider
+	MetricsProvider provider.Provider
+	Logger          log.FieldLogger
+
+	sshln net.Listener
+	wsln  net.Listener
 
 	mux    sync.Mutex
 	ctx    context.Context
@@ -130,15 +123,27 @@ func (s *Server) Shutdown() {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	if s.sshln != nil {
+		s.sshln.Close()
+	}
+
+	if s.wsln != nil {
+		s.wsln.Close()
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}
 }
 
-func (s *Server) Serve(ln net.Listener) error {
+func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
 	s.mux.Lock()
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.sshln, s.wsln = sshln, wsln
+	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mux.Unlock()
+
+	sshdDialListener := s.NetworkProvider.SSHD()
+	sessionDialListener := s.NetworkProvider.Session()
 
 	var g run.Group
 	{
@@ -150,22 +155,39 @@ func (s *Server) Serve(ln net.Listener) error {
 		})
 	}
 	{
-		router := SSHProxy{
-			HostSigners:         s.HostSigners,
-			SSHDDialListener:    s.SSHDDialListener,
-			SessionDialListener: s.SessionDialListener,
-			NodeAddr:            s.NodeAddr,
-			Logger:              s.Logger.WithField("componet", "proxy"),
-			MetricsProvider:     s.MetricsProvider,
+		if sshln != nil {
+			sshProxy := &SSHProxy{
+				HostSigners:         s.HostSigners,
+				SSHDDialListener:    sshdDialListener,
+				SessionDialListener: sessionDialListener,
+				NodeAddr:            s.NodeAddr,
+				Logger:              s.Logger.WithField("componet", "proxy"),
+				MetricsProvider:     s.MetricsProvider,
+			}
+			g.Add(func() error {
+				return sshProxy.Serve(sshln)
+			}, func(err error) {
+				_ = sshProxy.Shutdown()
+			})
+
 		}
-		g.Add(func() error {
-			return router.Serve(ln)
-		}, func(err error) {
-			_ = router.Shutdown()
-		})
 	}
 	{
-		ln, err := s.SSHDDialListener.Listen()
+		if wsln != nil {
+			ws := &WebsocketServer{
+				SSHDDialListener:    sshdDialListener,
+				SessionDialListener: sessionDialListener,
+				Logger:              s.Logger.WithField("component", "ws-server"),
+			}
+			g.Add(func() error {
+				return ws.Serve(wsln)
+			}, func(err error) {
+				_ = ws.Shutdown()
+			})
+		}
+	}
+	{
+		ln, err := sshdDialListener.Listen()
 		if err != nil {
 			return err
 		}
@@ -173,7 +195,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		sshd := SSHD{
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
-			SessionDialListener: s.SessionDialListener,
+			SessionDialListener: sessionDialListener,
 			Logger:              s.Logger.WithField("componet", "sshd"),
 		}
 		g.Add(func() error {

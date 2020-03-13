@@ -56,7 +56,7 @@ func testHostSessionCreatedCallback(t *testing.T, testServer TestServer) {
 			if want, got := []string{"vim"}, session.ForceCommand; !cmp.Equal(want, got) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
-			if want, got := "ssh://"+testServer.Addr(), session.Host; !cmp.Equal(want, got) {
+			if want, got := "ssh://"+testServer.SSHAddr(), session.Host; !cmp.Equal(want, got) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
 			if want, got := testServer.NodeAddr(), session.NodeAddr; !cmp.Equal(want, got) {
@@ -70,7 +70,7 @@ func testHostSessionCreatedCallback(t *testing.T, testServer TestServer) {
 		},
 	}
 
-	if err := h.Share(testServer.Addr()); err != nil {
+	if err := h.Share(testServer.SSHAddr()); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
@@ -80,7 +80,7 @@ func testHostFailToShareWithoutPrivateKey(t *testing.T, testServer TestServer) {
 	h := &Host{
 		Command: []string{"bash"},
 	}
-	err := h.Share(testServer.Addr())
+	err := h.Share(testServer.SSHAddr())
 	if err == nil {
 		t.Fatal("expect error")
 	}
