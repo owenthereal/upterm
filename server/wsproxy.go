@@ -20,7 +20,7 @@ func WrapWSConn(ws *websocket.Conn) net.Conn {
 	return chshare.NewWebSocketConn(ws)
 }
 
-type WebsocketServer struct {
+type WebSocketProxy struct {
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
 	Logger              log.FieldLogger
@@ -29,7 +29,7 @@ type WebsocketServer struct {
 	mux sync.Mutex
 }
 
-func (s *WebsocketServer) Serve(ln net.Listener) error {
+func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
 	h := &wsHandler{
 		sshdDialListener:    s.SSHDDialListener,
@@ -44,7 +44,7 @@ func (s *WebsocketServer) Serve(ln net.Listener) error {
 	return s.srv.Serve(ln)
 }
 
-func (s *WebsocketServer) Shutdown() error {
+func (s *WebSocketProxy) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
