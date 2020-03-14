@@ -42,16 +42,19 @@ func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
 	return l.Listener, nil
 }
 
-func Test_WebSocketProxy(t *testing.T) {
+func Test_WebSocketProxy_Host(t *testing.T) {
+	cd := connDialer{
+		SSHDDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
+		SessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
+		Logger:              log.New(),
+	}
 	wsh := &wsHandler{
-		sshdDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
-		sessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
-		logger:              log.New(),
+		ConnDialer: cd,
 	}
 	ts := httptest.NewServer(wsh)
 	defer ts.Close()
 
-	auth := "bphugjdgrkrrks2cso1g:MTAuMC40Ni4zMjoyMg=="
+	auth := "bphugjdgrkrrks2cso1g:"
 	eauth := base64.StdEncoding.EncodeToString([]byte(auth))
 
 	u, err := url.Parse(ts.URL)
@@ -85,7 +88,7 @@ func Test_WebSocketProxy(t *testing.T) {
 		}
 	}(wsc, rw)
 
-	ln, err := wsh.sshdDialListener.Listen()
+	ln, err := cd.SSHDDialListener.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +116,6 @@ func Test_WebSocketProxy(t *testing.T) {
 	if diff := cmp.Diff("write", scan(ws)); diff != "" {
 		t.Fatal(diff)
 	}
-
 }
 
 func scan(s *bufio.Scanner) string {

@@ -21,10 +21,7 @@ func WrapWSConn(ws *websocket.Conn) net.Conn {
 }
 
 type WebSocketProxy struct {
-	SSHDDialListener    SSHDDialListener
-	SessionDialListener SessionDialListener
-	DialNodeAddrFunc    DialNodeAddrFunc
-	Logger              log.FieldLogger
+	ConnDialer connDialer
 
 	srv *http.Server
 	mux sync.Mutex
@@ -32,14 +29,10 @@ type WebSocketProxy struct {
 
 func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
-	h := &wsHandler{
-		sshdDialListener:    s.SSHDDialListener,
-		sessionDialListener: s.SessionDialListener,
-		dialNodeAddrFunc:    s.DialNodeAddrFunc,
-		logger:              s.Logger,
-	}
 	s.srv = &http.Server{
-		Handler: h,
+		Handler: &wsHandler{
+			ConnDialer: s.ConnDialer,
+		},
 	}
 	s.mux.Unlock()
 
@@ -60,10 +53,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type wsHandler struct {
-	sshdDialListener    SSHDDialListener
-	sessionDialListener SessionDialListener
-	dialNodeAddrFunc    DialNodeAddrFunc
-	logger              log.FieldLogger
+	ConnDialer connDialer
 }
 
 // ssh://user:pass@uptermd.upterm.dev (port 22)
@@ -96,13 +86,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var conn net.Conn
-	// TODO: dial different host
-	if id.Type == api.Identifier_HOST {
-		conn, err = h.sshdDialListener.Dial()
-	} else {
-		conn, err = h.sessionDialListener.Dial(id.Id)
-	}
+	conn, err := h.ConnDialer.Dial(id)
 	if err != nil {
 		wsError(ws, err, "error dialing")
 		return

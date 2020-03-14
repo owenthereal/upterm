@@ -13,7 +13,7 @@ import (
 
 type SSHProxy struct {
 	HostSigners     []ssh.Signer
-	ConnDialer      *connDialer
+	ConnDialer      connDialer
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
