@@ -31,7 +31,7 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 	proxyAddr := proxyLn.Addr().String()
 	cd := connDialer{
 		NodeAddr:         proxyAddr,
-		DialNodeAddrFunc: func(addr string) (net.Conn, error) { return net.Dial("tcp", addr) },
+		DialNodeAddrFunc: func(id api.Identifier) (net.Conn, error) { return net.Dial("tcp", id.NodeAddr) },
 		Logger:           logger,
 	}
 	proxy := &SSHProxy{
