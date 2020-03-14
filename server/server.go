@@ -174,7 +174,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 	{
 		if wsln != nil {
-			ws := &WebsocketServer{
+			ws := &WebSocketProxy{
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
 				Logger:              s.Logger.WithField("component", "ws-server"),

@@ -40,7 +40,7 @@ func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
 	return l.Listener, nil
 }
 
-func Test_WebsocketServer(t *testing.T) {
+func Test_WebSocketProxy(t *testing.T) {
 	wsh := &wsHandler{
 		sshdDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
 		sessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
