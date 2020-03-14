@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -67,11 +68,11 @@ func Test_WebSocketProxy(t *testing.T) {
 
 	rr, rw := io.Pipe()
 	rs := bufio.NewScanner(rr)
-	go func(t *testing.T, conn *websocket.Conn, w io.Writer) {
+	go func(conn *websocket.Conn, w io.Writer) {
 		for {
 			wt, b, err := conn.ReadMessage()
 			if err != nil {
-				t.Fatal(err)
+				fmt.Println(err)
 			}
 
 			if wt != websocket.BinaryMessage {
@@ -80,7 +81,7 @@ func Test_WebSocketProxy(t *testing.T) {
 
 			_, _ = rw.Write(b)
 		}
-	}(t, wsc, rw)
+	}(wsc, rw)
 
 	ln, err := wsh.sshdDialListener.Listen()
 	if err != nil {
@@ -93,10 +94,12 @@ func Test_WebSocketProxy(t *testing.T) {
 
 	wr, ww := io.Pipe()
 	ws := bufio.NewScanner(wr)
-	go io.Copy(ww, conn)
+	go func() {
+		_, _ = io.Copy(ww, conn)
+	}()
 
 	// test read
-	conn.Write([]byte("read\n")) // need CR because func scan scans by line
+	_, _ = conn.Write([]byte("read\n")) // need CR because func scan scans by line
 	if diff := cmp.Diff("read", scan(rs)); diff != "" {
 		t.Fatal(diff)
 	}
