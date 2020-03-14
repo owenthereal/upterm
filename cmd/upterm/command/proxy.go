@@ -1,17 +1,15 @@
 package command
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/server"
-	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	"github.com/spf13/cobra"
 )
@@ -42,12 +40,8 @@ func proxyRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	auth := base64.StdEncoding.EncodeToString([]byte(u.User.String()))
-
-	header := make(http.Header)
-	header.Add("Authorization", "Basic "+auth)
-	header.Add("Upterm-Client-Version", upterm.ClientSSHClientVersion)
-
+	pass, _ := u.User.Password()
+	header := utils.WebSocketDialHeader(u.User.Username(), pass, false)
 	u.User = nil // remove user & pass from the URL because they are not supported in the WebSocket spec
 	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
 	if err != nil {

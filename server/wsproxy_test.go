@@ -2,18 +2,16 @@ package server
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
-	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -54,18 +52,13 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	ts := httptest.NewServer(wsh)
 	defer ts.Close()
 
-	auth := "bphugjdgrkrrks2cso1g:"
-	eauth := base64.StdEncoding.EncodeToString([]byte(auth))
-
 	u, err := url.Parse(ts.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	u.Scheme = "ws"
 
-	header := make(http.Header)
-	header.Add("Authorization", "Basic "+eauth)
-	header.Add("Upterm-Client-Version", upterm.HostSSHClientVersion)
+	header := utils.WebSocketDialHeader("owen", "", false)
 	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
 	if err != nil {
 		t.Fatal(err)
