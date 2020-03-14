@@ -25,7 +25,7 @@ type SSHProxy struct {
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
-	routing *Routing
+	routing *SSHRouting
 	mux     sync.Mutex
 }
 
@@ -42,7 +42,7 @@ func (r *SSHProxy) Shutdown() error {
 
 func (r *SSHProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
-	r.routing = &Routing{
+	r.routing = &SSHRouting{
 		HostSigners:      r.HostSigners,
 		Logger:           r.Logger,
 		FindUpstreamFunc: r.findUpstream,
