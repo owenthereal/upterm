@@ -55,7 +55,7 @@ func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
-	c, err := r.ConnDialer.Dial(id)
+	c, err := r.ConnDialer.Dial(*id)
 	if err != nil {
 		return nil, nil, err
 	}

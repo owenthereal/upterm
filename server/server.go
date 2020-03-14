@@ -2,14 +2,18 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
@@ -20,7 +24,7 @@ const (
 	tcpDialTimeout = 1 * time.Second
 )
 
-type DialNodeAddrFunc func(addr string) (net.Conn, error)
+type DialNodeAddrFunc func(id api.Identifier) (net.Conn, error)
 
 type Opt struct {
 	SSHAddr    string
@@ -79,12 +83,22 @@ func Start(opt Opt) error {
 	{
 		var dialNodeAddrFunc DialNodeAddrFunc
 		if sshln != nil {
-			dialNodeAddrFunc = func(addr string) (net.Conn, error) {
-				return net.DialTimeout("tcp", addr, tcpDialTimeout)
+			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
+				return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
 			}
 		} else {
-			dialNodeAddrFunc = func(addr string) (net.Conn, error) {
-				return net.DialTimeout("tcp", addr, tcpDialTimeout)
+			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
+				auth := id.Id + ":" + id.NodeAddr
+				authHeader := base64.StdEncoding.EncodeToString([]byte(auth))
+				header := make(http.Header)
+				header.Add("Authorization", "Basic "+authHeader)
+				header.Add("Upterm-Client-Version", upterm.ClientSSHClientVersion)
+				wsc, _, err := websocket.DefaultDialer.Dial("ws://"+id.NodeAddr, header)
+				if err != nil {
+					return nil, err
+				}
+
+				return WrapWSConn(wsc), nil
 			}
 		}
 
@@ -241,7 +255,7 @@ type connDialer struct {
 	Logger              log.FieldLogger
 }
 
-func (cd connDialer) Dial(id *api.Identifier) (net.Conn, error) {
+func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
 		cd.Logger.WithField("user", id.Id).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
@@ -259,6 +273,6 @@ func (cd connDialer) Dial(id *api.Identifier) (net.Conn, error) {
 
 		// route to neighbour nodes
 		cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
-		return cd.DialNodeAddrFunc(addr)
+		return cd.DialNodeAddrFunc(id)
 	}
 }
