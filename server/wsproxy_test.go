@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"net"
 	"net/http/httptest"
@@ -10,8 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/gorilla/websocket"
-	"github.com/jingweno/upterm/utils"
+	"github.com/jingweno/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -57,28 +55,17 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.Scheme = "ws"
+	u.User = url.UserPassword("owen", "")
 
-	header := utils.WebSocketDialHeader("owen", "", false)
-	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	wsc, err := ws.NewWSConn(u, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	rr, rw := io.Pipe()
 	rs := bufio.NewScanner(rr)
-	go func(conn *websocket.Conn, w io.Writer) {
-		for {
-			wt, b, err := conn.ReadMessage()
-			if err != nil {
-				fmt.Println(err)
-			}
-
-			if wt != websocket.BinaryMessage {
-				continue
-			}
-
-			_, _ = rw.Write(b)
-		}
+	go func(wsc net.Conn, w io.Writer) {
+		_, _ = io.Copy(w, wsc)
 	}(wsc, rw)
 
 	ln, err := cd.SSHDDialListener.Listen()
@@ -103,7 +90,7 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	}
 
 	// test write
-	if err := wsc.WriteMessage(websocket.BinaryMessage, []byte("write\n")); err != nil { // need CR because func scan scans by line
+	if _, err := wsc.Write([]byte("write\n")); err != nil { // need CR because func scan scans by line
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff("write", scan(ws)); diff != "" {

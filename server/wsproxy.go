@@ -8,17 +8,12 @@ import (
 	"net/http"
 	"sync"
 
-	chshare "github.com/jpillora/chisel/share"
-
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 )
-
-func WrapWSConn(ws *websocket.Conn) net.Conn {
-	return chshare.NewWebSocketConn(ws)
-}
 
 type WebSocketProxy struct {
 	ConnDialer connDialer
@@ -73,26 +68,25 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := upgrader.Upgrade(w, r, nil)
+	wsc, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		httpError(w, fmt.Errorf("ws upgrade failed"))
 		return
 	}
-	defer ws.Close()
+	wsconn := ws.WrapWSConn(wsc)
+	defer wsconn.Close()
 
 	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
 	if err != nil {
-		wsError(ws, err, "error decoding id")
+		wsError(wsconn, err, "error decoding id")
 		return
 	}
 
 	conn, err := h.ConnDialer.Dial(*id)
 	if err != nil {
-		wsError(ws, err, "error dialing")
+		wsError(wsconn, err, "error dialing")
 		return
 	}
-
-	wsconn := WrapWSConn(ws)
 
 	var o sync.Once
 	close := func() {
@@ -119,7 +113,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.Run(); err != nil {
-		wsError(ws, err, "error piping")
+		wsError(wsconn, err, "error piping")
 	}
 }
 
@@ -129,7 +123,7 @@ func httpError(w http.ResponseWriter, err error) {
 	_, _ = w.Write([]byte(err.Error()))
 }
 
-func wsError(ws *websocket.Conn, err error, msg string) {
+func wsError(conn net.Conn, err error, msg string) {
 	log.WithError(err).Error(msg)
-	_ = ws.WriteMessage(websocket.TextMessage, []byte(err.Error()))
+	_, _ = conn.Write([]byte(err.Error()))
 }

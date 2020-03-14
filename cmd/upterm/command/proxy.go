@@ -7,9 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/gorilla/websocket"
-	"github.com/jingweno/upterm/server"
-	"github.com/jingweno/upterm/utils"
+	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
 	"github.com/spf13/cobra"
 )
@@ -40,15 +38,10 @@ func proxyRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	pass, _ := u.User.Password()
-	header := utils.WebSocketDialHeader(u.User.Username(), pass, false)
-	u.User = nil // remove user & pass from the URL because they are not supported in the WebSocket spec
-	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	conn, err := ws.NewWSConn(u, true)
 	if err != nil {
 		return err
 	}
-
-	conn := server.WrapWSConn(wsc)
 
 	var o sync.Once
 	close := func() {
@@ -73,8 +66,5 @@ func proxyRunE(c *cobra.Command, args []string) error {
 		})
 	}
 
-	err = g.Run()
-	fmt.Println(err)
-
-	return err
+	return g.Run()
 }

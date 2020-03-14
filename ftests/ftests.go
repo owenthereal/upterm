@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,6 +25,7 @@ import (
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
+	"github.com/jingweno/upterm/ws"
 	"github.com/pborman/ansi"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -56,13 +59,12 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----`
 )
 
-var TestCases = []func(*testing.T, TestServer){
+var TestCases = []func(t *testing.T, hostURL, nodeAddr string){
 	testClientNonExistingSession,
 	testClientAttachHostWithSameCommand,
 	testClientAttachHostWithDifferentCommand,
 	testHostFailToShareWithoutPrivateKey,
 	testHostSessionCreatedCallback,
-	testWebsocketHost,
 }
 
 var (
@@ -70,13 +72,18 @@ var (
 	ClientPrivateKey string
 )
 
-func RunServerTest(t *testing.T, name string, ts TestServer, tc []func(*testing.T, TestServer)) {
+func RunServerTest(t *testing.T, ts TestServer, tc []func(*testing.T, string, string)) {
 	for _, test := range tc {
 		testLocal := test
 
-		t.Run(funcName(testLocal)+"/"+name, func(t *testing.T) {
+		t.Run("ssh/"+funcName(testLocal), func(t *testing.T) {
 			t.Parallel()
-			testLocal(t, ts)
+			testLocal(t, "ssh://"+ts.SSHAddr(), ts.NodeAddr())
+		})
+
+		t.Run("ws/"+funcName(testLocal), func(t *testing.T) {
+			t.Parallel()
+			testLocal(t, "ws://"+ts.WSAddr(), ts.NodeAddr())
 		})
 	}
 }
@@ -205,7 +212,7 @@ func (c *Host) init() {
 	c.outputCh = make(chan string)
 }
 
-func (c *Host) Share(addr string) error {
+func (c *Host) Share(url string) error {
 	c.init()
 
 	stdinr, stdinw, err := os.Pipe()
@@ -251,7 +258,7 @@ func (c *Host) Share(addr string) error {
 	logger.Level = log.DebugLevel
 
 	c.Host = &host.Host{
-		Host:                   addr,
+		Host:                   url,
 		Command:                c.Command,
 		ForceCommand:           c.ForceCommand,
 		Signers:                signers,
@@ -339,7 +346,7 @@ func (c *Client) Close() {
 	c.sshClient.Close()
 }
 
-func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error {
+func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
 	c.init()
 
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
@@ -358,8 +365,19 @@ func (c *Client) Join(session *models.APIGetSessionResponse, addr string) error 
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	// TODO: add websocket
-	c.sshClient, err = ssh.Dial("tcp", addr, config)
+	u, err := url.Parse(hostURL)
+	if err != nil {
+		return err
+	}
+
+	if u.Scheme == "ws" || u.Scheme == "wss" {
+		encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(session.NodeAddr))
+		u, _ = url.Parse(u.String())
+		u.User = url.UserPassword(session.SessionID, encodedNodeAddr)
+		c.sshClient, err = ws.NewSSHClient(u, config, true)
+	} else {
+		c.sshClient, err = ssh.Dial("tcp", u.Host, config)
+	}
 	if err != nil {
 		return err
 	}
