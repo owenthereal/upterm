@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/upterm"
+	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -45,6 +46,7 @@ func Test_WebSocketProxy(t *testing.T) {
 	wsh := &wsHandler{
 		sshdDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
 		sessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
+		logger:              log.New(),
 	}
 	ts := httptest.NewServer(wsh)
 	defer ts.Close()

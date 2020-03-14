@@ -23,6 +23,7 @@ func WrapWSConn(ws *websocket.Conn) net.Conn {
 type WebSocketProxy struct {
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
+	DialNodeAddrFunc    DialNodeAddrFunc
 	Logger              log.FieldLogger
 
 	srv *http.Server
@@ -34,6 +35,7 @@ func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	h := &wsHandler{
 		sshdDialListener:    s.SSHDDialListener,
 		sessionDialListener: s.SessionDialListener,
+		dialNodeAddrFunc:    s.DialNodeAddrFunc,
 		logger:              s.Logger,
 	}
 	s.srv = &http.Server{
@@ -60,6 +62,7 @@ var upgrader = websocket.Upgrader{
 type wsHandler struct {
 	sshdDialListener    SSHDDialListener
 	sessionDialListener SessionDialListener
+	dialNodeAddrFunc    DialNodeAddrFunc
 	logger              log.FieldLogger
 }
 
