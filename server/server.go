@@ -166,7 +166,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
 
-	cd := &connDialer{
+	cd := connDialer{
 		NodeAddr:            s.NodeAddr,
 		SSHDDialListener:    sshdDialListener,
 		SessionDialListener: sessionDialListener,
@@ -202,9 +202,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	{
 		if wsln != nil {
 			ws := &WebSocketProxy{
-				SSHDDialListener:    sshdDialListener,
-				SessionDialListener: sessionDialListener,
-				Logger:              s.Logger.WithField("component", "ws-proxy"),
+				ConnDialer: cd,
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)
@@ -243,7 +241,7 @@ type connDialer struct {
 	Logger              log.FieldLogger
 }
 
-func (cd *connDialer) Dial(id *api.Identifier) (net.Conn, error) {
+func (cd connDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
 		cd.Logger.WithField("user", id.Id).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
