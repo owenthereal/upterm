@@ -2,30 +2,13 @@ package utils
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
 	"fmt"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"path/filepath"
 
-	"github.com/jingweno/upterm/upterm"
 	"golang.org/x/crypto/ssh"
 )
-
-func WebSocketDialHeader(user, pass string, isClient bool) http.Header {
-	auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
-	header := make(http.Header)
-	header.Add("Authorization", "Basic "+auth)
-
-	ver := upterm.HostSSHClientVersion
-	if isClient {
-		ver = upterm.ClientSSHClientVersion
-	}
-	header.Add("Upterm-Client-Version", ver)
-
-	return header
-}
 
 func UptermDir() (string, error) {
 	homedir, err := os.UserHomeDir()

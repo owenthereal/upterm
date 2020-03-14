@@ -10,11 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
-	"github.com/jingweno/upterm/utils"
+	"github.com/jingweno/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -72,17 +71,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 	}
 
 	if c.Host.Scheme == "ws" || c.Host.Scheme == "wss" {
-		header := utils.WebSocketDialHeader(encodedID, "", false)
-		wsc, _, err := websocket.DefaultDialer.Dial(c.Host.String(), header)
-		if err != nil {
-			return nil, err
-		}
-		// pass in addr without shceme for ssh
-		cc, chans, reqs, err := ssh.NewClientConn(server.WrapWSConn(wsc), c.Host.Host, config)
-		if err != nil {
-			return nil, err
-		}
-		c.Client = ssh.NewClient(cc, chans, reqs)
+		u, _ := url.Parse(c.Host.String())
+		u.User = url.UserPassword(encodedID, "")
+		c.Client, err = ws.NewSSHClient(u, config, false)
 	} else {
 		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
 	}
