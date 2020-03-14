@@ -29,7 +29,7 @@ const (
 
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
 
-type Routing struct {
+type SSHRouting struct {
 	HostSigners      []ssh.Signer
 	FindUpstreamFunc FindUpstreamFunc
 	Logger           log.FieldLogger
@@ -48,7 +48,7 @@ type routingInstruments struct {
 	connectionTimeouts metrics.Counter
 }
 
-func newRoutingInstruments(p provider.Provider) *routingInstruments {
+func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 	return &routingInstruments{
 		connections:        p.NewCounter("routing_connections_count"),
 		errors:             p.NewCounter("routing_errors_count"),
@@ -58,7 +58,7 @@ func newRoutingInstruments(p provider.Provider) *routingInstruments {
 	}
 }
 
-func (p *Routing) Serve(ln net.Listener) error {
+func (p *SSHRouting) Serve(ln net.Listener) error {
 	p.listener = ln
 
 	piper := &ssh.PiperConfig{
@@ -69,7 +69,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 		piper.AddHostKey(signer)
 	}
 
-	inst := newRoutingInstruments(p.MetricsProvider)
+	inst := newSSHRoutingInstruments(p.MetricsProvider)
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
@@ -148,7 +148,7 @@ func (p *Routing) Serve(ln net.Listener) error {
 	}
 }
 
-func (p *Routing) Shutdown() error {
+func (p *SSHRouting) Shutdown() error {
 	p.mux.Lock()
 	lnerr := p.closeListenersLocked()
 	p.closeDoneChanLocked()
@@ -157,14 +157,14 @@ func (p *Routing) Shutdown() error {
 	return lnerr
 }
 
-func (p *Routing) getDoneChan() <-chan struct{} {
+func (p *SSHRouting) getDoneChan() <-chan struct{} {
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
 	return p.getDoneChanLocked()
 }
 
-func (p *Routing) getDoneChanLocked() chan struct{} {
+func (p *SSHRouting) getDoneChanLocked() chan struct{} {
 	if p.doneChan == nil {
 		p.doneChan = make(chan struct{})
 	}
@@ -172,7 +172,7 @@ func (p *Routing) getDoneChanLocked() chan struct{} {
 	return p.doneChan
 }
 
-func (p *Routing) closeDoneChanLocked() {
+func (p *SSHRouting) closeDoneChanLocked() {
 	ch := p.getDoneChanLocked()
 	select {
 	case <-ch:
@@ -184,7 +184,7 @@ func (p *Routing) closeDoneChanLocked() {
 	}
 }
 
-func (p *Routing) closeListenersLocked() error {
+func (p *SSHRouting) closeListenersLocked() error {
 	return p.listener.Close()
 }
 
