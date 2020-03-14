@@ -6,13 +6,21 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
+
+const (
+	tcpDialTimeout = 1 * time.Second
+)
+
+type DialNodeAddrFunc func(addr string) (net.Conn, error)
 
 type Opt struct {
 	SSHAddr    string
@@ -69,12 +77,24 @@ func Start(opt Opt) error {
 
 	var g run.Group
 	{
+		var dialNodeAddrFunc DialNodeAddrFunc
+		if sshln != nil {
+			dialNodeAddrFunc = func(addr string) (net.Conn, error) {
+				return net.DialTimeout("tcp", addr, tcpDialTimeout)
+			}
+		} else {
+			dialNodeAddrFunc = func(addr string) (net.Conn, error) {
+				return net.DialTimeout("tcp", addr, tcpDialTimeout)
+			}
+		}
+
 		s := &Server{
-			NodeAddr:        nodeAddr,
-			HostSigners:     signers,
-			NetworkProvider: network,
-			Logger:          logger.WithField("component", "server"),
-			MetricsProvider: mp,
+			NodeAddr:         nodeAddr,
+			HostSigners:      signers,
+			NetworkProvider:  network,
+			DialNodeAddrFunc: dialNodeAddrFunc,
+			Logger:           logger.WithField("component", "server"),
+			MetricsProvider:  mp,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
@@ -105,11 +125,12 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	NodeAddr        string
-	HostSigners     []ssh.Signer
-	NetworkProvider NetworkProvider
-	MetricsProvider provider.Provider
-	Logger          log.FieldLogger
+	NodeAddr         string
+	HostSigners      []ssh.Signer
+	NetworkProvider  NetworkProvider
+	MetricsProvider  provider.Provider
+	DialNodeAddrFunc DialNodeAddrFunc
+	Logger           log.FieldLogger
 
 	sshln net.Listener
 	wsln  net.Listener
@@ -145,6 +166,14 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
 
+	cd := &connDialer{
+		NodeAddr:            s.NodeAddr,
+		SSHDDialListener:    sshdDialListener,
+		SessionDialListener: sessionDialListener,
+		DialNodeAddrFunc:    s.DialNodeAddrFunc,
+		Logger:              s.Logger.WithField("compoent", "conn-dialer"),
+	}
+
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -157,12 +186,10 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	{
 		if sshln != nil {
 			sshProxy := &SSHProxy{
-				HostSigners:         s.HostSigners,
-				SSHDDialListener:    sshdDialListener,
-				SessionDialListener: sessionDialListener,
-				NodeAddr:            s.NodeAddr,
-				Logger:              s.Logger.WithField("componet", "proxy"),
-				MetricsProvider:     s.MetricsProvider,
+				HostSigners:     s.HostSigners,
+				ConnDialer:      cd,
+				Logger:          s.Logger.WithField("componet", "ssh-proxy"),
+				MetricsProvider: s.MetricsProvider,
 			}
 			g.Add(func() error {
 				return sshProxy.Serve(sshln)
@@ -177,7 +204,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			ws := &WebSocketProxy{
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
-				Logger:              s.Logger.WithField("component", "ws-server"),
+				Logger:              s.Logger.WithField("component", "ws-proxy"),
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)
@@ -206,4 +233,34 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 
 	return g.Run()
+}
+
+type connDialer struct {
+	NodeAddr            string
+	SSHDDialListener    SSHDDialListener
+	SessionDialListener SessionDialListener
+	DialNodeAddrFunc    DialNodeAddrFunc
+	Logger              log.FieldLogger
+}
+
+func (cd *connDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	if id.Type == api.Identifier_HOST {
+		cd.Logger.WithField("user", id.Id).Info("dialing sshd")
+		return cd.SSHDDialListener.Dial()
+	} else {
+		host, port, ee := net.SplitHostPort(id.NodeAddr)
+		if ee != nil {
+			return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, ee)
+		}
+		addr := net.JoinHostPort(host, port)
+
+		if cd.NodeAddr == addr {
+			cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("dialing session")
+			return cd.SessionDialListener.Dial(id.Id)
+		}
+
+		// route to neighbour nodes
+		cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
+		return cd.DialNodeAddrFunc(addr)
+	}
 }
