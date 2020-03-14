@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
@@ -88,11 +85,7 @@ func Start(opt Opt) error {
 			}
 		} else {
 			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
-				auth := id.Id + ":" + id.NodeAddr
-				authHeader := base64.StdEncoding.EncodeToString([]byte(auth))
-				header := make(http.Header)
-				header.Add("Authorization", "Basic "+authHeader)
-				header.Add("Upterm-Client-Version", upterm.ClientSSHClientVersion)
+				header := utils.WebSocketDialHeader(id.Id, id.NodeAddr, true)
 				wsc, _, err := websocket.DefaultDialer.Dial("ws://"+id.NodeAddr, header)
 				if err != nil {
 					return nil, err

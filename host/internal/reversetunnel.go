@@ -2,11 +2,9 @@ package internal
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"os/user"
 	"strings"
@@ -16,6 +14,7 @@ import (
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -73,10 +72,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 	}
 
 	if c.Host.Scheme == "ws" || c.Host.Scheme == "wss" {
-		auth := base64.StdEncoding.EncodeToString([]byte(encodedID + ":"))
-		header := make(http.Header)
-		header.Add("Authorization", "Basic "+auth)
-		header.Add("Upterm-Client-Version", upterm.HostSSHClientVersion)
+		header := utils.WebSocketDialHeader(encodedID, "", false)
 		wsc, _, err := websocket.DefaultDialer.Dial(c.Host.String(), header)
 		if err != nil {
 			return nil, err
