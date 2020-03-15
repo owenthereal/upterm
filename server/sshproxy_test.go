@@ -29,9 +29,14 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 	defer proxyLn.Close()
 
 	proxyAddr := proxyLn.Addr().String()
+	cd := connDialer{
+		NodeAddr:         proxyAddr,
+		DialNodeAddrFunc: func(id api.Identifier) (net.Conn, error) { return net.Dial("tcp", id.NodeAddr) },
+		Logger:           logger,
+	}
 	proxy := &SSHProxy{
 		HostSigners:     []ssh.Signer{signer},
-		NodeAddr:        proxyAddr,
+		ConnDialer:      cd,
 		Logger:          logger,
 		MetricsProvider: provider.NewDiscardProvider(),
 	}

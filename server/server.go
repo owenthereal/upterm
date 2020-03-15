@@ -2,20 +2,32 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/utils"
+	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	tcpDialTimeout = 1 * time.Second
+)
+
+type DialNodeAddrFunc func(id api.Identifier) (net.Conn, error)
+
 type Opt struct {
-	Addr       string
+	SSHAddr    string
+	WSAddr     string
 	KeyFiles   []string
 	Network    string
 	NetworkOpt []string
@@ -38,25 +50,66 @@ func Start(opt Opt) error {
 		return err
 	}
 
-	var g run.Group
-	{
-		mp := provider.NewPrometheusProvider("upterm", "uptermd")
-		ln, err := net.Listen("tcp", opt.Addr)
+	mp := provider.NewPrometheusProvider("upterm", "uptermd")
+	logger := log.New().WithField("app", "uptermd")
+
+	// default node addr to ssh addr or ws addr
+	nodeAddr := opt.SSHAddr
+	if nodeAddr == "" {
+		nodeAddr = opt.WSAddr
+	}
+
+	var (
+		sshln net.Listener
+		wsln  net.Listener
+	)
+
+	if opt.SSHAddr != "" {
+		sshln, err = net.Listen("tcp", opt.SSHAddr)
 		if err != nil {
 			return err
 		}
+	}
+
+	if opt.WSAddr != "" {
+		wsln, err = net.Listen("tcp", opt.WSAddr)
+		if err != nil {
+			return err
+		}
+	}
+
+	var g run.Group
+	{
+		var dialNodeAddrFunc DialNodeAddrFunc
+		if sshln != nil {
+			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
+				return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
+			}
+		} else {
+			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
+				u, err := url.Parse("ws://" + id.NodeAddr)
+				if err != nil {
+					return nil, err
+				}
+				encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(id.NodeAddr))
+				u.User = url.UserPassword(id.Id, encodedNodeAddr)
+
+				return ws.NewWSConn(u, true)
+			}
+		}
+
 		s := &Server{
-			HostSigners:     signers,
-			NodeAddr:        opt.Addr,
-			NetworkProvider: network,
-			Logger:          log.New().WithField("app", "uptermd"),
-			MetricsProvider: mp,
+			NodeAddr:         nodeAddr,
+			HostSigners:      signers,
+			NetworkProvider:  network,
+			DialNodeAddrFunc: dialNodeAddrFunc,
+			Logger:           logger.WithField("component", "server"),
+			MetricsProvider:  mp,
 		}
 		g.Add(func() error {
-			return s.Serve(ln)
+			return s.ServeWithContext(context.Background(), sshln, wsln)
 		}, func(err error) {
 			s.Shutdown()
-			ln.Close()
 		})
 	}
 	{
@@ -82,11 +135,15 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	HostSigners     []ssh.Signer
-	NodeAddr        string
-	NetworkProvider NetworkProvider
-	Logger          log.FieldLogger
-	MetricsProvider provider.Provider
+	NodeAddr         string
+	HostSigners      []ssh.Signer
+	NetworkProvider  NetworkProvider
+	MetricsProvider  provider.Provider
+	DialNodeAddrFunc DialNodeAddrFunc
+	Logger           log.FieldLogger
+
+	sshln net.Listener
+	wsln  net.Listener
 
 	mux    sync.Mutex
 	ctx    context.Context
@@ -100,15 +157,32 @@ func (s *Server) Shutdown() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+
+	if s.sshln != nil {
+		s.sshln.Close()
+	}
+
+	if s.wsln != nil {
+		s.wsln.Close()
+	}
 }
 
-func (s *Server) Serve(ln net.Listener) error {
+func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
+	s.mux.Lock()
+	s.sshln, s.wsln = sshln, wsln
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.mux.Unlock()
+
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
 
-	s.mux.Lock()
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.mux.Unlock()
+	cd := connDialer{
+		NodeAddr:            s.NodeAddr,
+		SSHDDialListener:    sshdDialListener,
+		SessionDialListener: sessionDialListener,
+		DialNodeAddrFunc:    s.DialNodeAddrFunc,
+		Logger:              s.Logger.WithField("compoent", "conn-dialer"),
+	}
 
 	var g run.Group
 	{
@@ -120,19 +194,32 @@ func (s *Server) Serve(ln net.Listener) error {
 		})
 	}
 	{
-		router := SSHProxy{
-			HostSigners:         s.HostSigners,
-			SSHDDialListener:    sshdDialListener,
-			SessionDialListener: sessionDialListener,
-			NodeAddr:            s.NodeAddr,
-			Logger:              s.Logger.WithField("componet", "proxy"),
-			MetricsProvider:     s.MetricsProvider,
+		if sshln != nil {
+			sshProxy := &SSHProxy{
+				HostSigners:     s.HostSigners,
+				ConnDialer:      cd,
+				Logger:          s.Logger.WithField("componet", "ssh-proxy"),
+				MetricsProvider: s.MetricsProvider,
+			}
+			g.Add(func() error {
+				return sshProxy.Serve(sshln)
+			}, func(err error) {
+				_ = sshProxy.Shutdown()
+			})
 		}
-		g.Add(func() error {
-			return router.Serve(ln)
-		}, func(err error) {
-			_ = router.Shutdown()
-		})
+	}
+	{
+		if wsln != nil {
+			ws := &WebSocketProxy{
+				ConnDialer: cd,
+				Logger:     s.Logger.WithField("componet", "ws-proxy"),
+			}
+			g.Add(func() error {
+				return ws.Serve(wsln)
+			}, func(err error) {
+				_ = ws.Shutdown()
+			})
+		}
 	}
 	{
 		ln, err := sshdDialListener.Listen()
@@ -154,4 +241,34 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 
 	return g.Run()
+}
+
+type connDialer struct {
+	NodeAddr            string
+	SSHDDialListener    SSHDDialListener
+	SessionDialListener SessionDialListener
+	DialNodeAddrFunc    DialNodeAddrFunc
+	Logger              log.FieldLogger
+}
+
+func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
+	if id.Type == api.Identifier_HOST {
+		cd.Logger.WithField("user", id.Id).Info("dialing sshd")
+		return cd.SSHDDialListener.Dial()
+	} else {
+		host, port, ee := net.SplitHostPort(id.NodeAddr)
+		if ee != nil {
+			return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, ee)
+		}
+		addr := net.JoinHostPort(host, port)
+
+		if cd.NodeAddr == addr {
+			cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("dialing session")
+			return cd.SessionDialListener.Dial(id.Id)
+		}
+
+		// route to neighbour nodes
+		cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
+		return cd.DialNodeAddrFunc(id)
+	}
 }

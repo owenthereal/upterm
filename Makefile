@@ -52,7 +52,7 @@ docker: docker_build
 	docker push jingweno/uptermd
 
 test:
-	go test ./... -mod=vendor -count=1 -race -v
+	go test ./... -timeout=60s -coverprofile=c.out -covermode=atomic -mod=vendor -count=1 -race -v
 
 vet:
-	docker run --rm -v $$(pwd):/app -w /app golangci/golangci-lint:v1.21.0 golangci-lint run -v
+	docker run --rm -v $$(pwd):/app -w /app golangci/golangci-lint:v1.23.8 golangci-lint run -v
