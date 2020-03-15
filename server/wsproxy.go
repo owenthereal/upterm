@@ -19,6 +19,7 @@ import (
 
 type WebSocketProxy struct {
 	ConnDialer connDialer
+	Logger     log.FieldLogger
 
 	srv *http.Server
 	mux sync.Mutex
@@ -29,6 +30,7 @@ func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	s.srv = &http.Server{
 		Handler: &wsHandler{
 			ConnDialer: s.ConnDialer,
+			Logger:     s.Logger,
 		},
 	}
 	s.mux.Unlock()
@@ -41,7 +43,7 @@ func (s *WebSocketProxy) Shutdown() error {
 	defer s.mux.Unlock()
 
 	if s.srv != nil {
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
 		defer cancel()
 
 		return s.srv.Shutdown(ctx)
@@ -58,28 +60,28 @@ var upgrader = websocket.Upgrader{
 
 type wsHandler struct {
 	ConnDialer connDialer
+	Logger     log.FieldLogger
 }
 
-// ssh://user:pass@uptermd.upterm.dev (port 22)
-// ws(s)://uptermd.upterm.dev (port 80 or 443)
-// Authorization: Basic user:pass
-// Upterm-Client-Version: SSH-2.0-upterm-host-client
+// ServeHTTP checks the following header:
+// * Authorization
+// * Upterm-Client-Version
 func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientVersion := r.Header.Get("Upterm-Client-Version")
 	if clientVersion == "" {
-		httpError(w, fmt.Errorf("missing upterm client version"))
+		h.httpError(w, fmt.Errorf("missing upterm client version"))
 		return
 	}
 
 	user, pass, ok := r.BasicAuth()
 	if !ok {
-		httpError(w, fmt.Errorf("basic auth failed"))
+		h.httpError(w, fmt.Errorf("basic auth failed"))
 		return
 	}
 
 	wsc, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		httpError(w, fmt.Errorf("ws upgrade failed"))
+		h.httpError(w, fmt.Errorf("ws upgrade failed"))
 		return
 	}
 	wsconn := ws.WrapWSConn(wsc)
@@ -87,13 +89,13 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
 	if err != nil {
-		wsError(wsconn, err, "error decoding id")
+		h.wsError(wsconn, err, "error decoding id")
 		return
 	}
 
 	conn, err := h.ConnDialer.Dial(*id)
 	if err != nil {
-		wsError(wsconn, err, "error dialing")
+		h.wsError(wsconn, err, "error dialing")
 		return
 	}
 
@@ -122,21 +124,21 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := g.Run(); err != nil && !isWSIgnoredError(err) {
-		wsError(wsconn, err, "error piping")
+		h.wsError(wsconn, err, "error piping")
 	}
 }
 
-func isWSIgnoredError(err error) bool {
-	return strings.Contains(err.Error(), "unexpected EOF")
-}
-
-func httpError(w http.ResponseWriter, err error) {
-	log.WithError(err).Error("http error")
+func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
+	h.Logger.WithError(err).Error("http error")
 	w.WriteHeader(400)
 	_, _ = w.Write([]byte(err.Error()))
 }
 
-func wsError(conn net.Conn, err error, msg string) {
-	log.WithError(err).Error(msg)
+func (h *wsHandler) wsError(conn net.Conn, err error, msg string) {
+	h.Logger.WithError(err).Error(msg)
 	_, _ = conn.Write([]byte(err.Error()))
+}
+
+func isWSIgnoredError(err error) bool {
+	return strings.Contains(err.Error(), "unexpected EOF")
 }

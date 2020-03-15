@@ -13,6 +13,10 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
+var (
+	serverShutDownDeadline = 2 * time.Second
+)
+
 type ServerInfo struct {
 	NodeAddr string
 }
@@ -32,7 +36,7 @@ func (s *SSHD) Shutdown() error {
 	defer s.mux.Unlock()
 
 	if s.server != nil {
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
 		defer cancel()
 
 		return s.server.Shutdown(ctx)
