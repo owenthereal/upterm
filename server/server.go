@@ -263,12 +263,12 @@ func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
 		addr := net.JoinHostPort(host, port)
 
 		if cd.NodeAddr == addr {
-			cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("dialing session")
+			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing session")
 			return cd.SessionDialListener.Dial(id.Id)
 		}
 
 		// route to neighbour nodes
-		cd.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
+		cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("routing session")
 		return cd.DialNodeAddrFunc(id)
 	}
 }
