@@ -72,7 +72,7 @@ func Start(opt Opt) error {
 	}
 
 	if opt.WSAddr != "" {
-		wsln, err = net.Listen("tcp", opt.SSHAddr)
+		wsln, err = net.Listen("tcp", opt.WSAddr)
 		if err != nil {
 			return err
 		}
