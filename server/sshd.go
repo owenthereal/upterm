@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	serverShutDownDeadline = 2 * time.Second
+	serverShutDownDeadline = 1 * time.Second
 )
 
 type ServerInfo struct {

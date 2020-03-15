@@ -59,7 +59,9 @@ func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 }
 
 func (p *SSHRouting) Serve(ln net.Listener) error {
+	p.mux.Lock()
 	p.listener = ln
+	p.mux.Unlock()
 
 	piper := &ssh.PiperConfig{
 		FindUpstream:  p.FindUpstreamFunc,

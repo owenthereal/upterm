@@ -115,14 +115,6 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	hostInputCh, hostOutputCh := h.InputOutput()
 	hostScanner := scanner(hostOutputCh)
 
-	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
@@ -133,15 +125,24 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
 
-	// remote stdout should receive the last output of host when joining
-	if want, got := "hello", scan(remoteScanner); want != got {
-		// HACK: sometimes the last output include more than the previous line.
-		// Try the next line if that's the case
-		if want, got := "hello", scan(remoteScanner); want != got {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
+	// host input
+	hostInputCh <- "echo hello"
+	if want, got := "echo hello", scan(hostScanner); want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := "hello", scan(hostScanner); want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 	}
 
+	// client output
+	if want, got := "echo hello", scan(remoteScanner); want != got {
+		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := "hello", scan(remoteScanner); want != got {
+		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
+	}
+
+	// client input
 	remoteInputCh <- "echo hello again"
 	if want, got := "echo hello again", scan(remoteScanner); want != got {
 		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
@@ -150,6 +151,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
 	}
 
+	// host output
 	// host should link to remote with the same input/output
 	if want, got := "echo hello again", scan(hostScanner); want != got {
 		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
