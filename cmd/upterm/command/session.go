@@ -196,7 +196,7 @@ func displaySession(session *models.APIGetSessionResponse) error {
 			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
 		}
 	} else {
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s", u.Scheme, user, u.Host, host)
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", u.Scheme, user, u.Host, user, host)
 	}
 	data := [][]string{
 		[]string{"Command:", strings.Join(session.Command, " ")},
