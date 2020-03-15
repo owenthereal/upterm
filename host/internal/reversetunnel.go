@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os/user"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -23,7 +25,7 @@ const (
 type ReverseTunnel struct {
 	*ssh.Client
 
-	Host      string
+	Host      *url.URL
 	SessionID string
 	Signers   []ssh.Signer
 	KeepAlive time.Duration
@@ -68,9 +70,16 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	c.Client, err = ssh.Dial("tcp", c.Host, config)
+	if c.Host.Scheme == "ws" || c.Host.Scheme == "wss" {
+		u, _ := url.Parse(c.Host.String())
+		u.User = url.UserPassword(encodedID, "")
+		c.Client, err = ws.NewSSHClient(u, config, false)
+	} else {
+		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
+	}
+
 	if err != nil {
-		return nil, sshDialError(c.Host, err)
+		return nil, sshDialError(c.Host.String(), err)
 	}
 
 	c.ln, err = c.Client.Listen("unix", c.SessionID)

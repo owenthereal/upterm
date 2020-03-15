@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
+)
+
+var (
+	serverShutDownDeadline = 1 * time.Second
 )
 
 type ServerInfo struct {
@@ -31,7 +36,10 @@ func (s *SSHD) Shutdown() error {
 	defer s.mux.Unlock()
 
 	if s.server != nil {
-		return s.server.Shutdown(context.Background())
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
+		defer cancel()
+
+		return s.server.Shutdown(ctx)
 	}
 
 	return nil
@@ -64,11 +72,14 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// This function is never executed and it's as an indicator
-			// to crypto/ssh that public key auth is enabled.
-			// This allows the Router to convert the public key auth to
-			// password auth with public key as the password in authorized
-			// key format.
+			// This function is never executed when the protocol is ssh.
+			// It acts as an indicator to crypto/ssh that public key auth
+			// is enabled. This allows the ssh router to convert the public
+			// key auth to password auth with public key as the password in
+			// authorized key format.
+			//
+			// However, this function needs to return true to allow publickey
+			// auth when the protocol is websocket.
 
 			// TODO: validate publickey
 			return true

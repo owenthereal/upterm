@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host/api"
@@ -12,20 +11,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const (
-	tcpDialTimeout = 1 * time.Second
-)
-
 type SSHProxy struct {
-	HostSigners         []ssh.Signer
-	SSHDDialListener    SSHDDialListener
-	SessionDialListener SessionDialListener
-	NodeAddr            string
-
+	HostSigners     []ssh.Signer
+	ConnDialer      connDialer
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
-	routing *Routing
+	routing *SSHRouting
 	mux     sync.Mutex
 }
 
@@ -42,7 +34,7 @@ func (r *SSHProxy) Shutdown() error {
 
 func (r *SSHProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
-	r.routing = &Routing{
+	r.routing = &SSHRouting{
 		HostSigners:      r.HostSigners,
 		Logger:           r.Logger,
 		FindUpstreamFunc: r.findUpstream,
@@ -55,8 +47,6 @@ func (r *SSHProxy) Serve(ln net.Listener) error {
 
 func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error) {
 	var (
-		c    net.Conn
-		err  error
 		user = conn.User()
 	)
 
@@ -65,25 +55,7 @@ func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
-	if id.Type == api.Identifier_HOST {
-		r.Logger.WithField("user", id.Id).Info("dialing sshd")
-		c, err = r.SSHDDialListener.Dial()
-	} else {
-		host, port, ee := net.SplitHostPort(id.NodeAddr)
-		if ee != nil {
-			return nil, nil, fmt.Errorf("host address %s is malformed: %w", user, ee)
-		}
-		addr := net.JoinHostPort(host, port)
-
-		if r.NodeAddr == addr {
-			r.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("dialing session")
-			c, err = r.SessionDialListener.Dial(id.Id)
-		} else {
-			// route to neighbour nodes
-			r.Logger.WithFields(log.Fields{"session": id.Id, "addr": addr}).Info("routing session")
-			c, err = net.DialTimeout("tcp", addr, tcpDialTimeout)
-		}
-	}
+	c, err := r.ConnDialer.Dial(*id)
 	if err != nil {
 		return nil, nil, err
 	}

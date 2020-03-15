@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,6 +48,14 @@ func (c *Host) createAdminSocketDir(sessionID string) (string, error) {
 }
 
 func (c *Host) Run(ctx context.Context) error {
+	u, err := url.Parse(c.Host)
+	if err != nil {
+		u, err = url.Parse("ssh://" + c.Host)
+		if err != nil {
+			return fmt.Errorf("error parsing host url: %s", err)
+		}
+	}
+
 	if c.SessionID == "" {
 		c.SessionID = xid.New().String()
 	}
@@ -67,7 +76,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	rt := internal.ReverseTunnel{
-		Host:      c.Host,
+		Host:      u,
 		SessionID: c.SessionID,
 		Signers:   c.Signers,
 		KeepAlive: c.KeepAlive,
@@ -81,7 +90,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 	session := &models.APIGetSessionResponse{
 		SessionID:    c.SessionID,
-		Host:         c.Host,
+		Host:         u.String(),
 		NodeAddr:     info.NodeAddr,
 		Command:      c.Command,
 		ForceCommand: c.ForceCommand,

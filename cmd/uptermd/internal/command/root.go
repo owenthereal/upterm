@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	flagHost        string
-	flagHostKeys    []string
+	flagSSHAddr     string
+	flagWSAddr      string
+	flagPrivateKeys []string
 	flagNetwork     string
 	flagNetworkOpts []string
 	flagMetricAddr  string
@@ -23,8 +24,9 @@ func Root(logger log.FieldLogger) *cobra.Command {
 		RunE:  rootCmd.Run,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagHost, "host", "", utils.DefaultLocalhost("2222"), "host (required)")
-	cmd.PersistentFlags().StringSliceVarP(&flagHostKeys, "host-key", "", nil, "host private key")
+	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", "", "ssh server address")
+	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
 
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
@@ -39,16 +41,22 @@ type rootCmd struct {
 }
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
+	if flagSSHAddr == "" && flagWSAddr == "" {
+		flagSSHAddr = utils.DefaultLocalhost("2222")
+	}
+
 	opt := server.Opt{
-		Addr:       flagHost,
-		KeyFiles:   flagHostKeys,
+		SSHAddr:    flagSSHAddr,
+		WSAddr:     flagWSAddr,
+		KeyFiles:   flagPrivateKeys,
 		Network:    flagNetwork,
 		NetworkOpt: flagNetworkOpts,
 		MetricAddr: flagMetricAddr,
 	}
 
 	logger := cmd.logger.WithFields(log.Fields{
-		"host":         flagHost,
+		"ssh-host":     flagSSHAddr,
+		"ws-host":      flagWSAddr,
 		"metric-addr":  flagMetricAddr,
 		"network":      flagNetwork,
 		"network-opts": flagNetworkOpts,
