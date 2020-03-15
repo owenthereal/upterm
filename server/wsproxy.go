@@ -38,7 +38,11 @@ func (s *WebSocketProxy) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
-	return s.srv.Shutdown(context.Background())
+	if s.srv != nil {
+		return s.srv.Shutdown(context.Background())
+	}
+
+	return nil
 }
 
 var upgrader = websocket.Upgrader{
