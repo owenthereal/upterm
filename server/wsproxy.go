@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -116,9 +117,13 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := g.Run(); err != nil {
+	if err := g.Run(); err != nil && !isWSIgnoredError(err) {
 		wsError(wsconn, err, "error piping")
 	}
+}
+
+func isWSIgnoredError(err error) bool {
+	return strings.Contains(err.Error(), "unexpected EOF")
 }
 
 func httpError(w http.ResponseWriter, err error) {
