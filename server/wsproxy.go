@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jingweno/upterm/host/api"
@@ -40,7 +41,10 @@ func (s *WebSocketProxy) Shutdown() error {
 	defer s.mux.Unlock()
 
 	if s.srv != nil {
-		return s.srv.Shutdown(context.Background())
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
+		defer cancel()
+
+		return s.srv.Shutdown(ctx)
 	}
 
 	return nil

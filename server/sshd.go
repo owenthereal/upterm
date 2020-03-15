@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/upterm"
@@ -31,7 +32,10 @@ func (s *SSHD) Shutdown() error {
 	defer s.mux.Unlock()
 
 	if s.server != nil {
-		return s.server.Shutdown(context.Background())
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
+		defer cancel()
+
+		return s.server.Shutdown(ctx)
 	}
 
 	return nil
