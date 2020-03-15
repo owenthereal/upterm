@@ -212,6 +212,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		if wsln != nil {
 			ws := &WebSocketProxy{
 				ConnDialer: cd,
+				Logger:     s.Logger.WithField("componet", "ws-proxy"),
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)

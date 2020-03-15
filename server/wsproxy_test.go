@@ -46,6 +46,7 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	}
 	wsh := &wsHandler{
 		ConnDialer: cd,
+		Logger:     log.New(),
 	}
 	ts := httptest.NewServer(wsh)
 	defer ts.Close()

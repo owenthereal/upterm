@@ -24,8 +24,6 @@ func Root(logger log.FieldLogger) *cobra.Command {
 		RunE:  rootCmd.Run,
 	}
 
-	// uptermd --ssh-addr 127.0.0.1:2222 --ws-addr 127.0.0.1:2223
-
 	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", "", "ssh server address")
 	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
