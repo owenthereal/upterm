@@ -154,16 +154,16 @@ func (s *Server) Shutdown() {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	if s.cancel != nil {
+		s.cancel()
+	}
+
 	if s.sshln != nil {
 		s.sshln.Close()
 	}
 
 	if s.wsln != nil {
 		s.wsln.Close()
-	}
-
-	if s.cancel != nil {
-		s.cancel()
 	}
 }
 
@@ -206,7 +206,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			}, func(err error) {
 				_ = sshProxy.Shutdown()
 			})
-
 		}
 	}
 	{
