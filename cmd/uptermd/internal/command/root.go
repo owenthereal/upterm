@@ -31,7 +31,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
-	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", utils.DefaultLocalhost("9090"), "metric server address (required)")
+	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", "", "metric server address")
 
 	return cmd
 }
