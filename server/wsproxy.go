@@ -25,13 +25,30 @@ type WebSocketProxy struct {
 	mux sync.Mutex
 }
 
+func webHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/getting-started") {
+			h.ServeHTTP(w, r)
+			return
+		}
+
+		w.Header().Add("Content-Type", "text/plain")
+		// TODO: better getting-started guide
+		data := `1. Install the upterm CLI by following https://github.com/jingweno/upterm#installation.
+2. On your machine, host a session with "upterm host --server %s -- YOUR_COMMAND". More details in https://github.com/jingweno/upterm#quick-start.
+3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s:443' TOKEN@%s".
+`
+		fmt.Fprint(w, fmt.Sprintf(data, r.Host, r.Host, r.Host))
+	})
+}
+
 func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
 	s.srv = &http.Server{
-		Handler: &wsHandler{
+		Handler: webHandler(&wsHandler{
 			ConnDialer: s.ConnDialer,
 			Logger:     s.Logger,
-		},
+		}),
 	}
 	s.mux.Unlock()
 

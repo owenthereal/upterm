@@ -1,3 +1,6 @@
+// +heroku goVersion 1.14
+// +heroku install ./cmd/uptermd/...
+
 module github.com/jingweno/upterm
 
 go 1.13
