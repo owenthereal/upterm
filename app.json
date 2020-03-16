@@ -5,5 +5,5 @@
     "success_url": "/getting-started",
     "description": "Secure Terminal Sharing",
     "repository": "https://github.com/jingweno/upterm",
-    "buildpacks": [ "heroku/go" ]
+    "buildpacks": [ { "url": "heroku/go" } ]
 } 
