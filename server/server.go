@@ -50,7 +50,6 @@ func Start(opt Opt) error {
 		return err
 	}
 
-	mp := provider.NewPrometheusProvider("upterm", "uptermd")
 	logger := log.New().WithField("app", "uptermd")
 
 	// default node addr to ssh addr or ws addr
@@ -98,6 +97,13 @@ func Start(opt Opt) error {
 			}
 		}
 
+		var mp provider.Provider
+		if opt.MetricAddr == "" {
+			mp = provider.NewDiscardProvider()
+		} else {
+			mp = provider.NewPrometheusProvider("upterm", "uptermd")
+		}
+
 		s := &Server{
 			NodeAddr:         nodeAddr,
 			HostSigners:      signers,
@@ -113,12 +119,14 @@ func Start(opt Opt) error {
 		})
 	}
 	{
-		m := &MetricsServer{}
-		g.Add(func() error {
-			return m.ListenAndServe(opt.MetricAddr)
-		}, func(err error) {
-			_ = m.Shutdown(context.Background())
-		})
+		if opt.MetricAddr != "" {
+			m := &MetricsServer{}
+			g.Add(func() error {
+				return m.ListenAndServe(opt.MetricAddr)
+			}, func(err error) {
+				_ = m.Shutdown(context.Background())
+			})
+		}
 	}
 
 	return g.Run()
