@@ -1,0 +1,8 @@
+{
+    "name": "Upterm",
+    "keywords": ["golang", "terminal", "upterm", "uptermd"],
+    "website": "https://upterm.dev",
+    "description": "Secure Terminal Sharing",
+    "repository": "https://github.com/jingweno/upterm",
+    "buildpacks": [ "heroku/go" ]
+} 
