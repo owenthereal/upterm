@@ -73,6 +73,7 @@ Clients connect to your terminal session over the public internet via `uptermd` 
 A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
 ![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg)
+<img src="https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg">
 
 ## License
 
