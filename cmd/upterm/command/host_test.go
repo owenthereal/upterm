@@ -37,8 +37,8 @@ func Test_parseURL(t *testing.T) {
 		},
 		{
 			name:       "no port",
-			url:        "https://foo.com",
-			wantScheme: "https",
+			url:        "wss://foo.com",
+			wantScheme: "wss",
 			wantHost:   "foo.com",
 			wantPort:   "443",
 		},

@@ -191,9 +191,9 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 		switch u.Scheme {
 		case "ssh":
 			port = "22"
-		case "ws", "http":
+		case "ws":
 			port = "80"
-		case "wss", "https":
+		case "wss":
 			port = "443"
 		}
 	}
