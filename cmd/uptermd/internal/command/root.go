@@ -62,7 +62,7 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 		"network-opts": flagNetworkOpts,
 	})
 	logger.Info("starting server")
-	defer logger.Info("shutting down sterver")
+	defer logger.Info("shutting down server")
 
 	return server.Start(opt)
 }
