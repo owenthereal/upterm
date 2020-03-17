@@ -14,6 +14,7 @@ function _upterm {
     commands=(
       "help:Help about any command"
       "host:Host a terminal session"
+      "proxy:Proxy a terminal session over WebSocket"
       "session:Display session"
       "version:Show version"
     )
@@ -27,6 +28,9 @@ function _upterm {
     ;;
   host)
     _upterm_host
+    ;;
+  proxy)
+    _upterm_proxy
     ;;
   session)
     _upterm_session
@@ -47,7 +51,12 @@ function _upterm_host {
     '(-f --force-command)'{-f,--force-command}'[force execution of a command and attach its input/output to client'\''s.]:' \
     '(-h --help)'{-h,--help}'[help for host]' \
     '(*-i *--private-key)'{\*-i,\*--private-key}'[private key for public key authentication against the upterm server (required).]:' \
-    '--server[upterm server address (required)]:'
+    '--server[upterm server address (required), supported protocols are shh, ws, or wss.]:'
+}
+
+function _upterm_proxy {
+  _arguments \
+    '(-h --help)'{-h,--help}'[help for proxy]'
 }
 
 
