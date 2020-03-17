@@ -173,35 +173,66 @@ func displaySessionFromAdminSocketPath(path string) error {
 	return displaySession(session)
 }
 
+func parseURL(str string) (u *url.URL, scheme string, host string, port string, err error) {
+	u, err = url.Parse(str)
+	if err != nil {
+		return
+	}
+
+	scheme = u.Scheme
+	host, port, err = net.SplitHostPort(u.Host)
+	if err != nil {
+		if !strings.Contains(err.Error(), "missing port in address") {
+			return
+		}
+
+		err = nil
+		host = u.Host
+		switch u.Scheme {
+		case "ssh":
+			port = "22"
+		case "ws":
+			port = "80"
+		case "wss":
+			port = "443"
+		}
+	}
+
+	return
+}
+
 func displaySession(session *models.APIGetSessionResponse) error {
 	user, err := api.EncodeIdentifierSession(session)
 	if err != nil {
 		return err
 	}
 
-	u, err := url.Parse(session.Host)
+	u, scheme, host, port, err := parseURL(session.Host)
 	if err != nil {
 		return err
 	}
 
-	host, port, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return err
+	var hostPort string
+	if port == "" || port == "80" || port == "443" {
+		hostPort = host
+	} else {
+		hostPort = host + ":" + port
 	}
 
 	var sshCmd string
-	if u.Scheme == "ssh" {
+	if scheme == "ssh" {
 		sshCmd = fmt.Sprintf("ssh %s@%s", user, host)
 		if port != "22" {
 			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
 		}
 	} else {
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", u.Scheme, user, u.Host, user, host)
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", scheme, user, hostPort, user, host+":"+port)
 	}
+
 	data := [][]string{
 		[]string{"Command:", strings.Join(session.Command, " ")},
 		[]string{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
-		[]string{"Host:", session.Host},
+		[]string{"Host:", u.Scheme + "://" + hostPort},
 		[]string{"SSH Session:", sshCmd},
 	}
 

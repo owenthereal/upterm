@@ -50,10 +50,7 @@ func (c *Host) createAdminSocketDir(sessionID string) (string, error) {
 func (c *Host) Run(ctx context.Context) error {
 	u, err := url.Parse(c.Host)
 	if err != nil {
-		u, err = url.Parse("ssh://" + c.Host)
-		if err != nil {
-			return fmt.Errorf("error parsing host url: %s", err)
-		}
+		return fmt.Errorf("error parsing host url: %s", err)
 	}
 
 	if c.SessionID == "" {

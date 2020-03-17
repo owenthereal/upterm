@@ -3,13 +3,15 @@ package command
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/eiannone/keyboard"
 	"github.com/google/shlex"
+	"github.com/hashicorp/go-multierror"
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/rs/xid"
@@ -46,7 +48,7 @@ func hostCmd() *cobra.Command {
 		RunE:    shareRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are ssh://, ws:// or wss://.")
+	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are shh, ws, or wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", nil, "private key for public key authentication against the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
@@ -55,9 +57,26 @@ func hostCmd() *cobra.Command {
 }
 
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
-	missingFlagNames := []string{}
+	var result error
+
 	if flagServer == "" {
-		missingFlagNames = append(missingFlagNames, "server")
+		result = multierror.Append(result, fmt.Errorf("missing flag --server"))
+	} else {
+		u, err := url.Parse(flagServer)
+		if err != nil {
+			result = multierror.Append(result, fmt.Errorf("error pasring server URL: %w", err))
+		}
+
+		if u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
+			result = multierror.Append(result, fmt.Errorf("unsupport server protocol %s", u.Scheme))
+		}
+
+		if u.Scheme == "ssh" {
+			_, _, err := net.SplitHostPort(u.Host)
+			if err != nil {
+				result = multierror.Append(result, err)
+			}
+		}
 	}
 
 	if len(flagPrivateKeys) == 0 {
@@ -68,15 +87,11 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 
 		flagPrivateKeys = defaultPrivateKeys(homeDir)
 		if len(flagPrivateKeys) == 0 {
-			missingFlagNames = append(missingFlagNames, "private-key")
-
+			result = multierror.Append(result, fmt.Errorf("missing flag --private-key"))
 		}
 	}
-	if len(missingFlagNames) > 0 {
-		return fmt.Errorf(`required flag(s) "%s" not set`, strings.Join(missingFlagNames, ", "))
-	}
 
-	return nil
+	return result
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
