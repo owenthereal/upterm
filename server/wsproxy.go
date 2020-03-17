@@ -35,8 +35,8 @@ func webHandler(h http.Handler) http.Handler {
 		w.Header().Add("Content-Type", "text/plain")
 		// TODO: better getting-started guide
 		data := `1. Install the upterm CLI by following https://github.com/jingweno/upterm#installation.
-2. On your machine, host a session with "upterm host --server %s -- YOUR_COMMAND". More details in https://github.com/jingweno/upterm#quick-start.
-3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s:443' TOKEN@%s".
+2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/jingweno/upterm#quick-start.
+3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
 `
 		fmt.Fprint(w, fmt.Sprintf(data, r.Host, r.Host, r.Host))
 	})

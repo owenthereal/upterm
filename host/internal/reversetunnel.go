@@ -70,8 +70,8 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	if c.Host.Scheme == "ws" || c.Host.Scheme == "wss" {
-		u, _ := url.Parse(c.Host.String())
+	if isWSScheme(c.Host.Scheme) {
+		u, _ := url.Parse(c.Host.String()) // clone
 		u.User = url.UserPassword(encodedID, "")
 		c.Client, err = ws.NewSSHClient(u, config, false)
 	} else {
@@ -126,6 +126,10 @@ func keepAlive(ctx context.Context, d time.Duration, fn func()) {
 			fn()
 		}
 	}
+}
+
+func isWSScheme(scheme string) bool {
+	return scheme == "ws" || scheme == "wss"
 }
 
 type PermissionDeniedError struct {
