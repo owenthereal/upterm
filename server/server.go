@@ -29,6 +29,7 @@ type DialNodeAddrFunc func(id api.Identifier) (net.Conn, error)
 type Opt struct {
 	SSHAddr    string
 	WSAddr     string
+	NodeAddr   string
 	KeyFiles   []string
 	Network    string
 	NetworkOpt []string
@@ -62,8 +63,11 @@ func Start(opt Opt) error {
 
 	logger := log.New().WithField("app", "uptermd")
 
-	// default node addr to ssh addr or ws addr
-	nodeAddr := opt.SSHAddr
+	// fallback node addr to ssh addr or ws addr if empty
+	nodeAddr := opt.NodeAddr
+	if nodeAddr == "" {
+		nodeAddr = opt.SSHAddr
+	}
 	if nodeAddr == "" {
 		nodeAddr = opt.WSAddr
 	}
