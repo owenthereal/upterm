@@ -1,1 +1,1 @@
-web: bin/uptermd --ws-addr ${HEROKU_DNS_DYNO_NAME:-0.0.0.0}:$PORT --network mem
+web: bin/uptermd --ws-addr ${HEROKU_PRIVATE_IP:-0.0.0.0}:$PORT --network mem
