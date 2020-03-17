@@ -11,13 +11,16 @@
 * Remote debugging
 * \<insert your creative use cases\>
 
+## Demo
+
+[![asciicast](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm.svg)](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm)
+
 ## Installation
 
 ### Mac
 
 ```
-brew tap jingweno/upterm
-brew install upterm
+brew install jingweno/upterm/upterm
 ```
 
 ### Standalone
@@ -29,7 +32,7 @@ brew install upterm
 ```
 git clone git@github.com:jingweno/upterm.git
 cd upterm
-GO111MODULE=on go install ./cmd/upterm/...
+go install ./cmd/upterm/...
 ```
 
 ## Quick Start
@@ -62,18 +65,14 @@ $ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t p
 
 More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/docs/upterm.md).
 
-## Demo
-
-[![asciicast](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm.svg)](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm)
-
 ## How it works
 
 You run the `upterm` program and specify the command for your terminal session.
 Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
-Clients connect to your terminal session over the public internet via `uptermd` using `ssh`.
+Clients connect to your terminal session over the public internet via `uptermd` using `ssh` via TCP or WebSocket.
 A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
-![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.png)
+![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg)
 
 ## License
 
