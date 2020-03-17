@@ -72,8 +72,8 @@ Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a re
 Clients connect to your terminal session over the public internet via `uptermd` using `ssh` via TCP or WebSocket.
 A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
-![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg)
-<img src="https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg">
+![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
+<img src="https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg?sanitize=true">
 
 ## License
 
