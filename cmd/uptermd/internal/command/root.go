@@ -10,6 +10,7 @@ import (
 var (
 	flagSSHAddr     string
 	flagWSAddr      string
+	flagNodeAddr    string
 	flagPrivateKeys []string
 	flagNetwork     string
 	flagNetworkOpts []string
@@ -26,6 +27,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 
 	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", "", "ssh server address")
 	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
+	cmd.PersistentFlags().StringVarP(&flagNodeAddr, "node-addr", "", "", "node address")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
 
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
@@ -48,6 +50,7 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	opt := server.Opt{
 		SSHAddr:    flagSSHAddr,
 		WSAddr:     flagWSAddr,
+		NodeAddr:   flagNodeAddr,
 		KeyFiles:   flagPrivateKeys,
 		Network:    flagNetwork,
 		NetworkOpt: flagNetworkOpts,
@@ -55,8 +58,9 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	}
 
 	logger := cmd.logger.WithFields(log.Fields{
-		"ssh-host":     flagSSHAddr,
-		"ws-host":      flagWSAddr,
+		"ssh-addr":     flagSSHAddr,
+		"ws-addr":      flagWSAddr,
+		"node-addr":    flagNodeAddr,
 		"metric-addr":  flagMetricAddr,
 		"network":      flagNetwork,
 		"network-opts": flagNetworkOpts,
