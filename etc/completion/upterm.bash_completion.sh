@@ -284,6 +284,29 @@ _upterm_host()
     noun_aliases=()
 }
 
+_upterm_proxy()
+{
+    last_command="upterm_proxy"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_session_current()
 {
     last_command="upterm_session_current"
@@ -426,6 +449,7 @@ _upterm_root_command()
 
     commands=()
     commands+=("host")
+    commands+=("proxy")
     commands+=("session")
     if [[ -z "${BASH_VERSION}" || "${BASH_VERSINFO[0]}" -gt 3 ]]; then
         command_aliases+=("se")
