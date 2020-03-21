@@ -62,7 +62,7 @@ resource "heroku_formation" "uptermd" {
   app        = heroku_app.uptermd.id
   type       = "web"
   quantity   = var.heroku_space == "" ? 1 : 2
-  size       = var.heroku_space == "" ? "standard-1x" : "private-s"
+  size       = var.heroku_space == "" ? "free" : "private-s"
   depends_on = [ heroku_build.uptermd ]
 }
 
