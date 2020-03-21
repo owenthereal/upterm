@@ -18,10 +18,10 @@ func proxyCmd() *cobra.Command {
 		Short: "Proxy a terminal session over WebSocket",
 		Long:  "Proxy a terminal session over WebSocket. This must be used in conjunction with SSH ProxyCommand.",
 		Example: `  # The host shares a session by running $SHELL over WebSocket
-  upterm host --server wss://uptermd.upterm.dev
+  upterm host --server wss://uptermd.upterm.dev -- YOUR_COMMAND
 
-  # Join the shared terminal session over WebSocket
-  ssh -o ProxyCommand='upterm proxy wss://bpi81h5grkrhrmuogp3g:MTI3LjAuMC4xOjIyMjI=@uptermd.upterm.dev' uptermd.uptermd.dev`,
+  # A client connects to the host session via WebSocket
+  ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN:uptermd.uptermd.dev:443`,
 		RunE: proxyRunE,
 	}
 
