@@ -32,18 +32,20 @@ func hostCmd() *cobra.Command {
 		Use:   "host",
 		Short: "Host a terminal session",
 		Long:  "Host a terminal session via a reverse SSH tunnel to the upterm server. By default, the command authenticates against the upterm server using the private keys located at `~/.ssh/id_dsa`, `~/.ssh/id_ecdsa`, `~/.ssh/id_ed25519`, and `~/.ssh/id_rsa`. The host can permit a list of client public keys by specifying an authorized_keys file. By default, the input/output of the host attaches to the input/output of the client's. The host can force the execution of a command after the client joins, and attach the input/output of this command to the client's.",
-		Example: `  # Host a session by running $SHELL.
-  # The client's input/output is attached to the host's.
+		Example: `  # Host a terminal session that runs $SHELL with
+  # client's input/output attaching to the host's
   upterm host
 
   # Host a session with a custom command.
-  # The client's input/output is attached to the host's.
   upterm host -- docker run --rm -ti ubuntu bash
 
-  # Host a session by running 'tmux new -t pair-programming'.
-  # The host runs 'tmux attach -t pair-programming' after the client joins the session.
-  # The client's input/output is attached to this command's.
-  upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming`,
+  # Host a session that runs 'tmux new -t pair-programming' and
+  # force clients to join with 'tmux attach -t pair-programming'.
+  # This is similar to tmate.
+  upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
+
+  # Use a different Uptermd server and host a session via WebSocket
+  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
