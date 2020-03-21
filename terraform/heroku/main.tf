@@ -27,7 +27,7 @@ resource "heroku_app" "uptermd" {
   region = var.heroku_region
   buildpacks = [ "heroku/go" ]
   space = var.heroku_space
-  acm = true
+  acm = false
 
   sensitive_config_vars = {
     PRIVATE_KEY = "${tls_private_key.private_key.private_key_pem}"
@@ -66,6 +66,10 @@ resource "heroku_formation" "uptermd" {
   depends_on = [ heroku_build.uptermd ]
 }
 
-output "app_url" {
-  value = "https://${heroku_app.uptermd.name}.herokuapp.com"
+output "step_1_share_session" {
+  value = "upterm host --server wss://${heroku_app.uptermd.name}.herokuapp.com -- YOUR_COMMAND"
+}
+
+output "step_2_join_session" {
+  value = "ssh -o ProxyCommand='upterm proxy wss://TOKEN@${heroku_app.uptermd.name}.herokuapp.com' TOKEN@${heroku_app.uptermd.name}.herokuapp.com:443"
 }
