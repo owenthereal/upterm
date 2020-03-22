@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type DialNodeAddrFunc func(id api.Identifier) (net.Conn, error)
 type Opt struct {
 	SSHAddr    string
 	WSAddr     string
+	NodeAddr   string
 	KeyFiles   []string
 	Network    string
 	NetworkOpt []string
@@ -50,10 +52,22 @@ func Start(opt Opt) error {
 		return err
 	}
 
+	if pp := os.Getenv("PRIVATE_KEY"); pp != "" {
+		ss, err := utils.CreateSigners([][]byte{[]byte(pp)})
+		if err != nil {
+			return err
+		}
+
+		signers = append(signers, ss...)
+	}
+
 	logger := log.New().WithField("app", "uptermd")
 
-	// default node addr to ssh addr or ws addr
-	nodeAddr := opt.SSHAddr
+	// fallback node addr to ssh addr or ws addr if empty
+	nodeAddr := opt.NodeAddr
+	if nodeAddr == "" {
+		nodeAddr = opt.SSHAddr
+	}
 	if nodeAddr == "" {
 		nodeAddr = opt.WSAddr
 	}
