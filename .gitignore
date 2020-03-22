@@ -1,3 +1,6 @@
 build
 c.out
 release
+.terraform
+*.tfstate
+*.tfstate.backup
