@@ -81,7 +81,7 @@ More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/doc
 ## Deploy Uptermd
 
 The easiest and the cheapest way to deploy a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
-Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most cacusal uses.
+Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
 
 You can deploy with one click of the following button:
 
