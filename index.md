@@ -69,11 +69,11 @@ $ upterm host -- docker run --rm -ti ubuntu bash
 # This is similar to tmate.
 $ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming`,
 
-# Use a different Uptermd server and host a session via WebSocket
-$ upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
+# Connect to uptermd.upterm.dev via WebSocket
+$ upterm host --server wss://uptermd.upterm.dev -- bash
 
 # A client connects to the host session via WebSocket
-$ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_UPTERMD_SERVER' TOKEN@YOUR_UPTERMD_SERVER:443
+$ ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
 
 More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/docs/upterm.md).
