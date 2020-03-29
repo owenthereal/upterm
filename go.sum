@@ -156,8 +156,8 @@ github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d h1:/WZ
 github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d/go.mod h1:qj24IKcXYK6Iy9ceXlo3Tc+vtHo9lIhSX5JddghvEPo=
 github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e h1:WvkDZCg+0LuA5oO/dUHsV52qki/ujbmMYXzblQz1Uj0=
 github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e/go.mod h1:QspPsSERl+wcCuwAmGoCSw1HctaGQ74qIt/t+P+tC2Q=
-github.com/jingweno/upterm.crypto v0.0.0-20200126213837-9c017ed1a05e h1:mlRfxZbDFtesIDfC96g1gSzFoSRv/SS+FbRB0DvQ6EI=
-github.com/jingweno/upterm.crypto v0.0.0-20200126213837-9c017ed1a05e/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+github.com/jingweno/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c h1:YaF0pza2kanOdpOnqJAW2ceIB/SX3HmGfQqEOKncw2w=
+github.com/jingweno/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
 github.com/jpillora/ansi v0.0.0-20170202005112-f496b27cd669/go.mod h1:kOeLNvjNBGSV3uYtFjvb72+fnZCMFJF1XDvRIjdom0g=
 github.com/jpillora/backoff v0.0.0-20180909062703-3050d21c67d7/go.mod h1:2iMrUgbbvHEiQClaW2NsSzMyGHqN+rDFqY705q49KG0=
 github.com/jpillora/chisel v0.0.0-20190724232113-f3a8df20e389 h1:K3JsoRqX6C4gmTvY4jqtFGCfK8uToj9DMahciJaoWwE=

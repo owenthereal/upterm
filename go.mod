@@ -47,5 +47,5 @@ require (
 
 replace (
 	github.com/gliderlabs/ssh => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
-	golang.org/x/crypto => github.com/jingweno/upterm.crypto v0.0.0-20200126213837-9c017ed1a05e
+	golang.org/x/crypto => github.com/jingweno/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
 )
