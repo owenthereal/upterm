@@ -3,7 +3,7 @@
 
 module github.com/jingweno/upterm
 
-go 1.13
+go 1.14
 
 require (
 	github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
