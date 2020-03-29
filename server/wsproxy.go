@@ -18,7 +18,7 @@ import (
 )
 
 type WebSocketProxy struct {
-	ConnDialer connDialer
+	ConnDialer ConnDialer
 	Logger     log.FieldLogger
 
 	srv *http.Server
@@ -76,7 +76,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type wsHandler struct {
-	ConnDialer connDialer
+	ConnDialer ConnDialer
 	Logger     log.FieldLogger
 }
 

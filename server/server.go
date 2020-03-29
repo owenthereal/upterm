@@ -24,8 +24,6 @@ const (
 	tcpDialTimeout = 1 * time.Second
 )
 
-type DialNodeAddrFunc func(id api.Identifier) (net.Conn, error)
-
 type Opt struct {
 	SSHAddr    string
 	WSAddr     string
@@ -93,24 +91,6 @@ func Start(opt Opt) error {
 
 	var g run.Group
 	{
-		var dialNodeAddrFunc DialNodeAddrFunc
-		if sshln != nil {
-			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
-				return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
-			}
-		} else {
-			dialNodeAddrFunc = func(id api.Identifier) (net.Conn, error) {
-				u, err := url.Parse("ws://" + id.NodeAddr)
-				if err != nil {
-					return nil, err
-				}
-				encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(id.NodeAddr))
-				u.User = url.UserPassword(id.Id, encodedNodeAddr)
-
-				return ws.NewWSConn(u, true)
-			}
-		}
-
 		var mp provider.Provider
 		if opt.MetricAddr == "" {
 			mp = provider.NewDiscardProvider()
@@ -119,12 +99,11 @@ func Start(opt Opt) error {
 		}
 
 		s := &Server{
-			NodeAddr:         nodeAddr,
-			HostSigners:      signers,
-			NetworkProvider:  network,
-			DialNodeAddrFunc: dialNodeAddrFunc,
-			Logger:           logger.WithField("component", "server"),
-			MetricsProvider:  mp,
+			NodeAddr:        nodeAddr,
+			HostSigners:     signers,
+			NetworkProvider: network,
+			Logger:          logger.WithField("component", "server"),
+			MetricsProvider: mp,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
@@ -157,12 +136,11 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	NodeAddr         string
-	HostSigners      []ssh.Signer
-	NetworkProvider  NetworkProvider
-	MetricsProvider  provider.Provider
-	DialNodeAddrFunc DialNodeAddrFunc
-	Logger           log.FieldLogger
+	NodeAddr        string
+	HostSigners     []ssh.Signer
+	NetworkProvider NetworkProvider
+	MetricsProvider provider.Provider
+	Logger          log.FieldLogger
 
 	sshln net.Listener
 	wsln  net.Listener
@@ -198,14 +176,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
 
-	cd := connDialer{
-		NodeAddr:            s.NodeAddr,
-		SSHDDialListener:    sshdDialListener,
-		SessionDialListener: sessionDialListener,
-		DialNodeAddrFunc:    s.DialNodeAddrFunc,
-		Logger:              s.Logger.WithField("compoent", "conn-dialer"),
-	}
-
 	var g run.Group
 	{
 		g.Add(func() error {
@@ -217,6 +187,13 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 	{
 		if sshln != nil {
+			cd := connDialer{
+				NodeAddr:            s.NodeAddr,
+				SSHDDialListener:    sshdDialListener,
+				SessionDialListener: sessionDialListener,
+				NeighbourDialer:     tcpConnDialer{},
+				Logger:              s.Logger.WithField("compoent", "ssh-conn-dialer"),
+			}
 			sshProxy := &SSHProxy{
 				HostSigners:     s.HostSigners,
 				ConnDialer:      cd,
@@ -232,6 +209,25 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 	{
 		if wsln != nil {
+			var cd ConnDialer
+			if sshln == nil {
+				cd = connDialer{
+					NodeAddr:            s.NodeAddr,
+					SSHDDialListener:    sshdDialListener,
+					SessionDialListener: sessionDialListener,
+					NeighbourDialer:     wsConnDialer{},
+					Logger:              s.Logger.WithField("compoent", "ws-conn-dialer"),
+				}
+			} else {
+				// If sshln is not nil, always dial to SSHProxy.
+				// So Host/Client -> WSProxy -> SSHProxy -> SSHD/Session
+				// This makes sure that SSHProxy terminates all SSH requests
+				// which provides a consistent authentication machanism.
+				cd = sshProxyDialer{
+					sshProxyAddr: sshln.Addr().String(),
+					Logger:       s.Logger.WithField("compoent", "ws-sshproxy-dialer"),
+				}
+			}
 			ws := &WebSocketProxy{
 				ConnDialer: cd,
 				Logger:     s.Logger.WithField("componet", "ws-proxy"),
@@ -265,17 +261,59 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	return g.Run()
 }
 
+type ConnDialer interface {
+	Dial(id api.Identifier) (net.Conn, error)
+}
+
+type sshProxyDialer struct {
+	sshProxyAddr string
+	Logger       log.FieldLogger
+}
+
+func (d sshProxyDialer) Dial(id api.Identifier) (net.Conn, error) {
+	// If it's a host request, dial to SSHProxy in the same node.
+	// Otherwise, dial to the specified SSHProxy.
+	if id.Type == api.Identifier_HOST {
+		d.Logger.WithFields(log.Fields{"host": id.Id, "sshproxy-addr": d.sshProxyAddr}).Info("dialing sshproxy sshd")
+		return net.DialTimeout("tcp", d.sshProxyAddr, tcpDialTimeout)
+	}
+
+	d.Logger.WithFields(log.Fields{"session": id.Id, "sshproxy-addr": d.sshProxyAddr, "addr": id.NodeAddr}).Info("dialing sshproxy session")
+	return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
+}
+
+type tcpConnDialer struct {
+}
+
+func (d tcpConnDialer) Dial(id api.Identifier) (net.Conn, error) {
+	return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
+}
+
+type wsConnDialer struct {
+}
+
+func (d wsConnDialer) Dial(id api.Identifier) (net.Conn, error) {
+	u, err := url.Parse("ws://" + id.NodeAddr)
+	if err != nil {
+		return nil, err
+	}
+	encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(id.NodeAddr))
+	u.User = url.UserPassword(id.Id, encodedNodeAddr)
+
+	return ws.NewWSConn(u, true)
+}
+
 type connDialer struct {
 	NodeAddr            string
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
-	DialNodeAddrFunc    DialNodeAddrFunc
+	NeighbourDialer     ConnDialer
 	Logger              log.FieldLogger
 }
 
 func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
-		cd.Logger.WithField("user", id.Id).Info("dialing sshd")
+		cd.Logger.WithFields(log.Fields{"host": id.Id, "ndoe": cd.NodeAddr}).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
 	} else {
 		host, port, ee := net.SplitHostPort(id.NodeAddr)
@@ -284,13 +322,14 @@ func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
 		}
 		addr := net.JoinHostPort(host, port)
 
+		// if current node is matching, dial to session.
+		// Otherwise, dial to neighbour node
 		if cd.NodeAddr == addr {
 			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing session")
 			return cd.SessionDialListener.Dial(id.Id)
 		}
 
-		// route to neighbour nodes
-		cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("routing session")
-		return cd.DialNodeAddrFunc(id)
+		cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing neighbour")
+		return cd.NeighbourDialer.Dial(id)
 	}
 }
