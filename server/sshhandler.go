@@ -145,7 +145,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 
 		go func(sessionID string) {
 			if err := g.Run(); err != nil {
-				h.logger.WithError(err).Debug("error handling ssh session")
+				h.logger.WithError(err).WithField("session-id", sessionID).Debug("error handling ssh session")
 			}
 		}(sessionID)
 

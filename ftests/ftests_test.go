@@ -286,7 +286,7 @@ func (c *Host) Share(url string) error {
 		AuthorizedKeys:         authorizedKeys,
 		AdminSocketFile:        c.AdminSocketFile,
 		SessionCreatedCallback: c.SessionCreatedCallback,
-		KeepAlive:              time.Duration(10),
+		KeepAliveDuration:      10 * time.Second,
 		Logger:                 logger,
 		Stdin:                  stdinr,
 		Stdout:                 stdoutw,

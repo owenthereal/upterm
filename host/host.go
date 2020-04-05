@@ -21,7 +21,7 @@ import (
 type Host struct {
 	Host                   string
 	SessionID              string
-	KeepAlive              time.Duration
+	KeepAliveDuration      time.Duration
 	Command                []string
 	ForceCommand           []string
 	Signers                []ssh.Signer
@@ -73,11 +73,11 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	rt := internal.ReverseTunnel{
-		Host:      u,
-		SessionID: c.SessionID,
-		Signers:   c.Signers,
-		KeepAlive: c.KeepAlive,
-		Logger:    log.WithField("component", "reverse-tunnel"),
+		Host:              u,
+		SessionID:         c.SessionID,
+		Signers:           c.Signers,
+		KeepAliveDuration: c.KeepAliveDuration,
+		Logger:            log.WithField("component", "reverse-tunnel"),
 	}
 	info, err := rt.Establish(ctx)
 	if err != nil {
@@ -115,14 +115,15 @@ func (c *Host) Run(ctx context.Context) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := internal.Server{
-			Command:        c.Command,
-			CommandEnv:     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
-			ForceCommand:   c.ForceCommand,
-			Signers:        c.Signers,
-			AuthorizedKeys: c.AuthorizedKeys,
-			Stdin:          c.Stdin,
-			Stdout:         c.Stdout,
-			Logger:         c.Logger,
+			Command:           c.Command,
+			CommandEnv:        []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
+			ForceCommand:      c.ForceCommand,
+			Signers:           c.Signers,
+			AuthorizedKeys:    c.AuthorizedKeys,
+			KeepAliveDuration: c.KeepAliveDuration,
+			Stdin:             c.Stdin,
+			Stdout:            c.Stdout,
+			Logger:            c.Logger,
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())
