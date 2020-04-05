@@ -69,11 +69,11 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 			result = multierror.Append(result, fmt.Errorf("error pasring server URL: %w", err))
 		}
 
-		if u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
+		if u != nil && u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
 			result = multierror.Append(result, fmt.Errorf("unsupport server protocol %s", u.Scheme))
 		}
 
-		if u.Scheme == "ssh" {
+		if u != nil && u.Scheme == "ssh" {
 			_, _, err := net.SplitHostPort(u.Host)
 			if err != nil {
 				result = multierror.Append(result, err)
@@ -136,7 +136,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ForceCommand:           forceCommand,
 		Signers:                signers,
 		AuthorizedKeys:         authorizedKeys,
-		KeepAlive:              time.Duration(30),
+		KeepAliveDuration:      50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
 		SessionCreatedCallback: displaySessionCallback,
 		Logger:                 log.New(),
 	}

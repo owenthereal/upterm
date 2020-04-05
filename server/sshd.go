@@ -94,7 +94,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			streamlocalForwardChannelType:       sh.Handler,
 			cancelStreamlocalForwardChannelType: sh.Handler,
 			upterm.ServerServerInfoRequestType:  s.serverInfoRequestHandler,
-			upterm.ServerPingRequestType:        pingRequestHandler,
+			upterm.ServerPingRequestType:        pingRequestHandler, // TODO: deprecate
 		},
 	}
 	s.mux.Unlock()
