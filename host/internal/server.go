@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"time"
 
 	gssh "github.com/gliderlabs/ssh"
 	"github.com/jingweno/upterm/upterm"
@@ -19,14 +20,15 @@ import (
 )
 
 type Server struct {
-	Command        []string
-	CommandEnv     []string
-	ForceCommand   []string
-	Signers        []ssh.Signer
-	AuthorizedKeys []ssh.PublicKey
-	Stdin          *os.File
-	Stdout         *os.File
-	Logger         log.FieldLogger
+	Command           []string
+	CommandEnv        []string
+	ForceCommand      []string
+	Signers           []ssh.Signer
+	AuthorizedKeys    []ssh.PublicKey
+	KeepAliveDuration time.Duration
+	Stdin             *os.File
+	Stdout            *os.File
+	Logger            log.FieldLogger
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -71,12 +73,13 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		sh := sessionHandler{
-			forceCommand: s.ForceCommand,
-			ptmx:         ptmx,
-			em:           em,
-			writers:      writers,
-			ctx:          ctx,
-			logger:       s.Logger,
+			forceCommand:      s.ForceCommand,
+			ptmx:              ptmx,
+			em:                em,
+			writers:           writers,
+			keepAliveDuration: s.KeepAliveDuration,
+			ctx:               ctx,
+			logger:            s.Logger,
 		}
 		ph := passwordHandler{
 			authorizedKeys: s.AuthorizedKeys,
@@ -141,12 +144,13 @@ func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool
 }
 
 type sessionHandler struct {
-	forceCommand []string
-	ptmx         *pty
-	em           *eventManager
-	writers      *uio.MultiWriter
-	ctx          context.Context
-	logger       log.FieldLogger
+	forceCommand      []string
+	ptmx              *pty
+	em                *eventManager
+	writers           *uio.MultiWriter
+	keepAliveDuration time.Duration
+	ctx               context.Context
+	logger            log.FieldLogger
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
@@ -161,6 +165,29 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		err  error
 		ptmx = h.ptmx
 	)
+
+	// simulate openssh keepalive
+	{
+		ctx, cancel := context.WithCancel(h.ctx)
+		g.Add(func() error {
+			ticker := time.NewTicker(h.keepAliveDuration)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					if _, err := sess.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil); err != nil {
+						h.logger.WithError(err).Debug("error pinging client to keepalive")
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}, func(err error) {
+			cancel()
+		})
+	}
+
 	if len(h.forceCommand) > 0 {
 		var cmd *exec.Cmd
 

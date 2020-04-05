@@ -25,11 +25,11 @@ const (
 type ReverseTunnel struct {
 	*ssh.Client
 
-	Host      *url.URL
-	SessionID string
-	Signers   []ssh.Signer
-	KeepAlive time.Duration
-	Logger    log.FieldLogger
+	Host              *url.URL
+	SessionID         string
+	Signers           []ssh.Signer
+	KeepAliveDuration time.Duration
+	Logger            log.FieldLogger
 
 	ln net.Listener
 }
@@ -88,8 +88,8 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 	}
 
 	// make sure connection is alive
-	go keepAlive(ctx, c.KeepAlive*time.Second, func() {
-		_, _, err := c.Client.SendRequest(upterm.ServerPingRequestType, true, nil)
+	go keepAlive(ctx, c.KeepAliveDuration, func() {
+		_, _, err := c.Client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		if err != nil {
 			c.Logger.WithError(err).Error("error pinging server")
 		}
