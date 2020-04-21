@@ -29,6 +29,7 @@ type Server struct {
 	Stdin             *os.File
 	Stdout            *os.File
 	Logger            log.FieldLogger
+	ReadOnly          bool
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -80,6 +81,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			keepAliveDuration: s.KeepAliveDuration,
 			ctx:               ctx,
 			logger:            s.Logger,
+			readonly:          s.ReadOnly,
 		}
 		ph := passwordHandler{
 			authorizedKeys: s.AuthorizedKeys,
@@ -151,6 +153,7 @@ type sessionHandler struct {
 	keepAliveDuration time.Duration
 	ctx               context.Context
 	logger            log.FieldLogger
+	readonly          bool
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
@@ -242,7 +245,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			cancel()
 		})
 	}
-	{
+
+	// if a readonly session has been requested, don't connect stdin
+	if !h.readonly {
 		// input
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
@@ -251,6 +256,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}, func(err error) {
 			cancel()
 		})
+	} else {
+		// write to client to notify them that they have connected to a read-only session
+		io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
 	}
 
 	if err := g.Run(); err != nil {
