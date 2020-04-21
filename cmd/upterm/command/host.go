@@ -25,6 +25,7 @@ var (
 	flagForceCommand   string
 	flagPrivateKeys    []string
 	flagAuthorizedKeys string
+	flagReadOnly       bool
 )
 
 func hostCmd() *cobra.Command {
@@ -54,6 +55,7 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", nil, "private key for public key authentication against the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
 	return cmd
 }
@@ -139,6 +141,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		KeepAliveDuration:      50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
 		SessionCreatedCallback: displaySessionCallback,
 		Logger:                 log.New(),
+		ReadOnly:               flagReadOnly,
 	}
 
 	return h.Run(context.Background())
