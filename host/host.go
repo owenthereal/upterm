@@ -13,7 +13,6 @@ import (
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
-	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -54,7 +53,11 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	if c.SessionID == "" {
-		c.SessionID = xid.New().String()
+		c.SessionID, err = utils.GenerateRandomString(20)
+
+		if err != nil {
+			return fmt.Errorf("unable to generate secure sessionid: %w", err)
+		}
 	}
 	if c.Stdin == nil {
 		c.Stdin = os.Stdin

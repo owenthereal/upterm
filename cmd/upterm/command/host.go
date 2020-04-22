@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api/swagger/models"
-	"github.com/rs/xid"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -128,10 +128,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
+	sessionid, err := utils.GenerateRandomString(20)
+
+	if err != nil {
+		return fmt.Errorf("unable to generate secure sessionid: %w", err)
+	}
 
 	h := &host.Host{
 		Host:                   flagServer,
-		SessionID:              xid.New().String(),
+		SessionID:              sessionid,
 		Command:                args,
 		ForceCommand:           forceCommand,
 		Signers:                signers,

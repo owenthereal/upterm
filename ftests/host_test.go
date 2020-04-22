@@ -6,11 +6,16 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/host/api/swagger/models"
-	"github.com/rs/xid"
+	"github.com/jingweno/upterm/utils"
 )
 
 func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
-	sessionID := xid.New().String()
+	sessionID, e := utils.GenerateRandomString(20)
+
+	if e != nil {
+		t.Fatal(e)
+	}
+
 	h := &Host{
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
