@@ -31,6 +31,7 @@ type Host struct {
 	Logger                 log.FieldLogger
 	Stdin                  *os.File
 	Stdout                 *os.File
+	ReadOnly               bool
 }
 
 func (c *Host) createAdminSocketDir(sessionID string) (string, error) {
@@ -124,6 +125,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,
 			Logger:            c.Logger,
+			ReadOnly:          c.ReadOnly,
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())
