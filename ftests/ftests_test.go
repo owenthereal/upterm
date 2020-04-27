@@ -91,6 +91,7 @@ func Test_ftest(t *testing.T) {
 		testClientNonExistingSession,
 		testClientAttachHostWithSameCommand,
 		testClientAttachHostWithDifferentCommand,
+		testClientAttachReadOnly,
 		testHostFailToShareWithoutPrivateKey,
 		testHostSessionCreatedCallback,
 	}
@@ -216,11 +217,11 @@ type Host struct {
 	AdminSocketFile          string
 	SessionCreatedCallback   func(*models.APIGetSessionResponse) error
 	PermittedClientPublicKey string
-
-	inputCh  chan string
-	outputCh chan string
-	ctx      context.Context
-	cancel   func()
+	ReadOnly                 bool
+	inputCh                  chan string
+	outputCh                 chan string
+	ctx                      context.Context
+	cancel                   func()
 }
 
 func (c *Host) Close() {
@@ -291,6 +292,7 @@ func (c *Host) Share(url string) error {
 		Stdin:                  stdinr,
 		Stdout:                 stdoutw,
 		SessionID:              c.SessionID,
+		ReadOnly:               c.ReadOnly,
 	}
 
 	errCh := make(chan error)
