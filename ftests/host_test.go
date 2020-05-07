@@ -10,8 +10,7 @@ import (
 )
 
 func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
-	sessionID, e := utils.GenerateRandomString(20)
-
+	sessionID, e := utils.GenerateSessionID()
 	if e != nil {
 		t.Fatal(e)
 	}
