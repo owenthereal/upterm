@@ -83,6 +83,10 @@ func readFiles(paths []string) ([][]byte, error) {
 	return files, nil
 }
 
+func GenerateSessionID() (string, error) {
+	return GenerateRandomString(20)
+}
+
 func GenerateRandomBytes(n int) ([]byte, error) {
 	b := make([]byte, n)
 	_, err := rand.Read(b)
