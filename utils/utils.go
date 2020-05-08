@@ -2,6 +2,7 @@ package utils
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -80,4 +81,26 @@ func readFiles(paths []string) ([][]byte, error) {
 	}
 
 	return files, nil
+}
+
+func GenerateSessionID() (string, error) {
+	return GenerateRandomString(20)
+}
+
+func GenerateRandomBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	return b, err
+}
+
+func GenerateRandomString(n int) (string, error) {
+	const namespace = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	bytes, err := GenerateRandomBytes(n)
+	if err != nil {
+		return "", err
+	}
+	for i, b := range bytes {
+		bytes[i] = namespace[b%byte(len(namespace))]
+	}
+	return string(bytes), nil
 }
