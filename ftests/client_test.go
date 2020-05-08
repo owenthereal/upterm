@@ -2,7 +2,6 @@ package ftests
 
 import (
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/host"
+	log "github.com/sirupsen/logrus"
 )
 
 func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
@@ -324,22 +324,12 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
 	}
 
-	// host output
-	// host should link to remote with the same input/output
-	// scan will timeout as there shouldn't be anything to scan
-	// client didn't insert anything
-	go func() {
-		if want, got := "", scan(hostScanner); want != got {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-		if want, got := "hello again", scan(hostScanner); want != got {
-			t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-		}
-	}()
-
 	select {
-	case <-time.After(time.Second * 1):
-		log.Println("Timeout hit..")
+	// host shouldn't receive anything from client and because client input is disabled
+	case str := <-hostOutputCh:
+		t.Fatalf("host shouldn't receive client input: receive=%s", str)
+	case <-time.After(time.Second * 3):
+		log.Info("Timeout hit..")
 		return
 	}
 
