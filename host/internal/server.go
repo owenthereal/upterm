@@ -258,7 +258,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	} else {
 		// write to client to notify them that they have connected to a read-only session
-		io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
 	}
 
 	if err := g.Run(); err != nil {
