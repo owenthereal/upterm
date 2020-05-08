@@ -31,7 +31,7 @@ func Test_ContextReader(t *testing.T) {
 		t.Parallel()
 
 		r := readFunc(func(p []byte) (int, error) {
-			t.Fatal("should never get here")
+			t.Error("should never get here")
 			return 0, nil
 		})
 		w := bytes.NewBuffer(nil)
@@ -51,7 +51,7 @@ func Test_ContextReader(t *testing.T) {
 
 		r := readFunc(func(p []byte) (int, error) {
 			time.Sleep(5 * time.Second) // simulate slow read
-			t.Fatal("should never get here")
+			t.Error("should never get here")
 			return 0, nil
 		})
 		w := bytes.NewBuffer(nil)
