@@ -130,15 +130,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	sessionid, err := utils.GenerateSessionID()
-
-	if err != nil {
-		return fmt.Errorf("unable to generate secure sessionid: %w", err)
-	}
-
 	h := &host.Host{
 		Host:                   flagServer,
-		SessionID:              sessionid,
+		SessionID:              utils.GenerateSessionID(),
 		Command:                args,
 		ForceCommand:           forceCommand,
 		Signers:                signers,
