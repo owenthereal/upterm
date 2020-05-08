@@ -25,6 +25,9 @@ github.com/creack/pty
 # github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a
 ## explicit
 github.com/dchest/bcrypt_pbkdf
+# github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
+## explicit
+github.com/dchest/uniuri
 # github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
 ## explicit
 github.com/eiannone/keyboard
