@@ -54,10 +54,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	if c.SessionID == "" {
-		c.SessionID, err = utils.GenerateSessionID()
-		if err != nil {
-			return fmt.Errorf("unable to generate secure sessionid: %w", err)
-		}
+		c.SessionID = utils.GenerateSessionID()
 	}
 	if c.Stdin == nil {
 		c.Stdin = os.Stdin

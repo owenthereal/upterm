@@ -10,11 +10,7 @@ import (
 )
 
 func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
-	sessionID, e := utils.GenerateSessionID()
-	if e != nil {
-		t.Fatal(e)
-	}
-
+	sessionID := utils.GenerateSessionID()
 	h := &Host{
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
