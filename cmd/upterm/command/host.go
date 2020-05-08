@@ -105,6 +105,10 @@ func shareRunE(c *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+
+		if len(args) == 0 {
+			return fmt.Errorf("no command is specified")
+		}
 	}
 
 	var forceCommand []string
