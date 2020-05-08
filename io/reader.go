@@ -26,7 +26,8 @@ func (r contextReader) Read(p []byte) (n int, err error) {
 	c := make(chan readResult, 1)
 
 	go func() {
-		defer func() { close(c) }()
+		// close by the sender
+		defer close(c)
 
 		// return early if context is done
 		select {
@@ -36,12 +37,7 @@ func (r contextReader) Read(p []byte) (n int, err error) {
 		}
 
 		n, err := r.Reader.Read(p)
-		select {
-		case c <- readResult{n, err}:
-		// return if context is done before sending back the result
-		case <-r.ctx.Done():
-			return
-		}
+		c <- readResult{n, err}
 	}()
 
 	select {
