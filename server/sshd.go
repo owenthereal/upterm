@@ -23,7 +23,7 @@ type ServerInfo struct {
 	NodeAddr string
 }
 
-type SSHD struct {
+type sshd struct {
 	SessionRepo         *SessionRepo
 	HostSigners         []gossh.Signer
 	NodeAddr            string
@@ -34,7 +34,7 @@ type SSHD struct {
 	mux    sync.Mutex
 }
 
-func (s *SSHD) Shutdown() error {
+func (s *sshd) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
@@ -48,7 +48,7 @@ func (s *SSHD) Shutdown() error {
 	return nil
 }
 
-func (s *SSHD) Serve(ln net.Listener) error {
+func (s *sshd) Serve(ln net.Listener) error {
 	var signers []ssh.Signer
 	for _, signer := range s.HostSigners {
 		signers = append(signers, signer)
@@ -107,7 +107,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 }
 
 // TODO: Remove it. SessionService should take care of routing by session
-func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+func (s *sshd) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	info := ServerInfo{
 		NodeAddr: s.NodeAddr,
 	}
@@ -120,7 +120,7 @@ func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *g
 	return true, b
 }
 
-func (s *SSHD) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	var sessReq CreateSessionRequest
 	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {
 		return false, []byte(err.Error())

@@ -225,7 +225,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				}
 			} else {
 				// If sshln is not nil, always dial to SSHProxy.
-				// So Host/Client -> WSProxy -> SSHProxy -> SSHD/Session
+				// So Host/Client -> WSProxy -> SSHProxy -> sshd/Session
 				// This makes sure that SSHProxy terminates all SSH requests
 				// which provides a consistent authentication machanism.
 				cd = sshProxyDialer{
@@ -250,7 +250,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			return err
 		}
 
-		sshd := SSHD{
+		sshd := sshd{
 			SessionRepo:         sessRepo,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,

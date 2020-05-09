@@ -56,7 +56,7 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 	defer sshLn.Close()
 
 	sshdAddr := sshLn.Addr().String()
-	sshd := &SSHD{
+	sshd := &sshd{
 		HostSigners: []ssh.Signer{signer},
 		NodeAddr:    sshdAddr,
 		Logger:      logger,
