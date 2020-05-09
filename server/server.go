@@ -188,7 +188,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 	{
 		if sshln != nil {
-			cd := connDialer{
+			cd := sidewayConnDialer{
 				NodeAddr:            s.NodeAddr,
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
@@ -214,9 +214,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	}
 	{
 		if wsln != nil {
-			var cd ConnDialer
+			var cd connDialer
 			if sshln == nil {
-				cd = connDialer{
+				cd = sidewayConnDialer{
 					NodeAddr:            s.NodeAddr,
 					SSHDDialListener:    sshdDialListener,
 					SessionDialListener: sessionDialListener,
@@ -267,7 +267,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	return g.Run()
 }
 
-type ConnDialer interface {
+type connDialer interface {
 	Dial(id api.Identifier) (net.Conn, error)
 }
 
@@ -309,15 +309,15 @@ func (d wsConnDialer) Dial(id api.Identifier) (net.Conn, error) {
 	return ws.NewWSConn(u, true)
 }
 
-type connDialer struct {
+type sidewayConnDialer struct {
 	NodeAddr            string
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
-	NeighbourDialer     ConnDialer
+	NeighbourDialer     connDialer
 	Logger              log.FieldLogger
 }
 
-func (cd connDialer) Dial(id api.Identifier) (net.Conn, error) {
+func (cd sidewayConnDialer) Dial(id api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
 		cd.Logger.WithFields(log.Fields{"host": id.Id, "ndoe": cd.NodeAddr}).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()

@@ -29,7 +29,7 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 	defer proxyLn.Close()
 
 	proxyAddr := proxyLn.Addr().String()
-	cd := connDialer{
+	cd := sidewayConnDialer{
 		NodeAddr:        proxyAddr,
 		NeighbourDialer: tcpConnDialer{},
 		Logger:          logger,
