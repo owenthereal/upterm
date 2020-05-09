@@ -195,7 +195,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				NeighbourDialer:     tcpConnDialer{},
 				Logger:              s.Logger.WithField("compoent", "ssh-conn-dialer"),
 			}
-			sshProxy := &SSHProxy{
+			sp := &sshProxy{
 				HostSigners: s.HostSigners,
 				ConnDialer:  cd,
 				authPiper: authPiper{
@@ -206,9 +206,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				MetricsProvider: s.MetricsProvider,
 			}
 			g.Add(func() error {
-				return sshProxy.Serve(sshln)
+				return sp.Serve(sshln)
 			}, func(err error) {
-				_ = sshProxy.Shutdown()
+				_ = sp.Shutdown()
 			})
 		}
 	}

@@ -11,7 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type SSHProxy struct {
+type sshProxy struct {
 	HostSigners     []ssh.Signer
 	ConnDialer      ConnDialer
 	authPiper       authPiper
@@ -22,7 +22,7 @@ type SSHProxy struct {
 	mux     sync.Mutex
 }
 
-func (r *SSHProxy) Shutdown() error {
+func (r *sshProxy) Shutdown() error {
 	r.mux.Lock()
 	defer r.mux.Unlock()
 
@@ -33,7 +33,7 @@ func (r *SSHProxy) Shutdown() error {
 	return nil
 }
 
-func (r *SSHProxy) Serve(ln net.Listener) error {
+func (r *sshProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
 	r.routing = &SSHRouting{
 		HostSigners:      r.HostSigners,
@@ -46,7 +46,7 @@ func (r *SSHProxy) Serve(ln net.Listener) error {
 	return r.routing.Serve(ln)
 }
 
-func (r *SSHProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error) {
+func (r *sshProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error) {
 	var (
 		user = conn.User()
 	)

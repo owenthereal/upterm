@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func Test_SSHProxy_findUpstream(t *testing.T) {
+func Test_sshProxy_findUpstream(t *testing.T) {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
@@ -34,7 +34,7 @@ func Test_SSHProxy_findUpstream(t *testing.T) {
 		NeighbourDialer: tcpConnDialer{},
 		Logger:          logger,
 	}
-	proxy := &SSHProxy{
+	proxy := &sshProxy{
 		HostSigners:     []ssh.Signer{signer},
 		ConnDialer:      cd,
 		Logger:          logger,
