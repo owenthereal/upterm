@@ -23,7 +23,7 @@ type SessionRepo struct {
 	mutex    sync.Mutex
 }
 
-func (s *SessionRepo) Store(sess Session) error {
+func (s *SessionRepo) Add(sess Session) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -46,4 +46,11 @@ func (s *SessionRepo) Get(id string) (*Session, error) {
 	}
 
 	return &sess, nil
+}
+
+func (s *SessionRepo) Delete(id string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	delete(s.sessions, id)
 }
