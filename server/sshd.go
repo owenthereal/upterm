@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/gliderlabs/ssh"
+	proto "github.com/golang/protobuf/proto"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -22,6 +24,7 @@ type ServerInfo struct {
 }
 
 type SSHD struct {
+	SessionRepo         *SessionRepo
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
@@ -80,8 +83,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			//
 			// However, this function needs to return true to allow publickey
 			// auth when the protocol is websocket.
-
-			// TODO: validate publickey
+			// TODO: validate publickey when it's websocket.
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
@@ -91,10 +93,11 @@ func (s *SSHD) Serve(ln net.Listener) error {
 		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
-			streamlocalForwardChannelType:       sh.Handler,
-			cancelStreamlocalForwardChannelType: sh.Handler,
-			upterm.ServerServerInfoRequestType:  s.serverInfoRequestHandler,
-			upterm.ServerPingRequestType:        pingRequestHandler, // TODO: deprecate
+			streamlocalForwardChannelType:         sh.Handler,
+			cancelStreamlocalForwardChannelType:   sh.Handler,
+			upterm.ServerCreateSessionRequestType: s.createSessionHandler,
+			upterm.ServerServerInfoRequestType:    s.serverInfoRequestHandler, // TODO: deprecate
+			upterm.ServerPingRequestType:          pingRequestHandler,         // TODO: deprecate
 		},
 	}
 	s.mux.Unlock()
@@ -109,6 +112,36 @@ func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *g
 	}
 
 	b, err := json.Marshal(info)
+	if err != nil {
+		return false, []byte(err.Error())
+	}
+
+	return true, b
+}
+
+func (s *SSHD) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	var sessReq CreateSessionRequest
+	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {
+		return false, []byte(err.Error())
+	}
+
+	sess := Session{
+		ID:                   utils.GenerateSessionID(),
+		HostUser:             sessReq.HostUser,
+		HostPublicKeys:       sessReq.HostPublicKeys,
+		ClientAuthorizedKeys: sessReq.ClientAuthorizedKeys,
+	}
+
+	if err := s.SessionRepo.Store(sess); err != nil {
+		return false, []byte(err.Error())
+	}
+
+	sessResp := &CreateSessionResponse{
+		SessionID: sess.ID,
+		NodeAddr:  s.NodeAddr,
+	}
+
+	b, err := proto.Marshal(sessResp)
 	if err != nil {
 		return false, []byte(err.Error())
 	}

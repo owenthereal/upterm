@@ -19,7 +19,6 @@ import (
 
 type Host struct {
 	Host                   string
-	SessionID              string
 	KeepAliveDuration      time.Duration
 	Command                []string
 	ForceCommand           []string
@@ -53,17 +52,28 @@ func (c *Host) Run(ctx context.Context) error {
 		return fmt.Errorf("error parsing host url: %s", err)
 	}
 
-	if c.SessionID == "" {
-		c.SessionID = utils.GenerateSessionID()
-	}
 	if c.Stdin == nil {
 		c.Stdin = os.Stdin
 	}
 	if c.Stdout == nil {
 		c.Stdout = os.Stdout
 	}
+
+	rt := internal.ReverseTunnel{
+		Host:              u,
+		Signers:           c.Signers,
+		AuthorizedKeys:    c.AuthorizedKeys,
+		KeepAliveDuration: c.KeepAliveDuration,
+		Logger:            log.WithField("component", "reverse-tunnel"),
+	}
+	sessResp, err := rt.Establish(ctx)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+
 	if c.AdminSocketFile == "" {
-		adminSocketDir, err := c.createAdminSocketDir(c.SessionID)
+		adminSocketDir, err := c.createAdminSocketDir(sessResp.SessionID)
 		if err != nil {
 			return err
 		}
@@ -72,23 +82,10 @@ func (c *Host) Run(ctx context.Context) error {
 		c.AdminSocketFile = AdminSocketFile(adminSocketDir)
 	}
 
-	rt := internal.ReverseTunnel{
-		Host:              u,
-		SessionID:         c.SessionID,
-		Signers:           c.Signers,
-		KeepAliveDuration: c.KeepAliveDuration,
-		Logger:            log.WithField("component", "reverse-tunnel"),
-	}
-	info, err := rt.Establish(ctx)
-	if err != nil {
-		return err
-	}
-	defer rt.Close()
-
 	session := &models.APIGetSessionResponse{
-		SessionID:    c.SessionID,
+		SessionID:    sessResp.SessionID,
 		Host:         u.String(),
-		NodeAddr:     info.NodeAddr,
+		NodeAddr:     sessResp.NodeAddr,
 		Command:      c.Command,
 		ForceCommand: c.ForceCommand,
 	}

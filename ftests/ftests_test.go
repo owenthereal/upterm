@@ -27,7 +27,6 @@ import (
 	"github.com/jingweno/upterm/utils"
 	"github.com/jingweno/upterm/ws"
 	"github.com/pborman/ansi"
-	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -213,7 +212,6 @@ type Host struct {
 	Command                  []string
 	ForceCommand             []string
 	PrivateKeys              []string
-	SessionID                string
 	AdminSocketFile          string
 	SessionCreatedCallback   func(*models.APIGetSessionResponse) error
 	PermittedClientPublicKey string
@@ -272,10 +270,6 @@ func (c *Host) Share(url string) error {
 		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
 	}
 
-	if c.SessionID == "" {
-		c.SessionID = xid.New().String()
-	}
-
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
@@ -291,7 +285,6 @@ func (c *Host) Share(url string) error {
 		Logger:                 logger,
 		Stdin:                  stdinr,
 		Stdout:                 stdoutw,
-		SessionID:              c.SessionID,
 		ReadOnly:               c.ReadOnly,
 	}
 

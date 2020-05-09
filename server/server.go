@@ -175,6 +175,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
+	sessRepo := newSessionRepo()
 
 	var g run.Group
 	{
@@ -246,6 +247,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		}
 
 		sshd := SSHD{
+			SessionRepo:         sessRepo,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
