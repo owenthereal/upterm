@@ -196,8 +196,12 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.WithField("compoent", "ssh-conn-dialer"),
 			}
 			sshProxy := &SSHProxy{
-				HostSigners:     s.HostSigners,
-				ConnDialer:      cd,
+				HostSigners: s.HostSigners,
+				ConnDialer:  cd,
+				authPiper: authPiper{
+					SessionRepo: sessRepo,
+					NodeAddr:    s.NodeAddr,
+				},
 				Logger:          s.Logger.WithField("componet", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}

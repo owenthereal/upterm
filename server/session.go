@@ -3,13 +3,56 @@ package server
 import (
 	"fmt"
 	"sync"
+
+	gssh "github.com/gliderlabs/ssh"
+	"golang.org/x/crypto/ssh"
 )
 
 type Session struct {
 	ID                   string
 	HostUser             string
-	HostPublicKeys       [][]byte
-	ClientAuthorizedKeys [][]byte
+	HostPublicKeys       []ssh.PublicKey
+	ClientAuthorizedKeys []ssh.PublicKey
+}
+
+func (s Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
+	for _, k := range s.ClientAuthorizedKeys {
+		if gssh.KeysEqual(k, key) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*Session, error) {
+	var (
+		hpk []ssh.PublicKey
+		cak []ssh.PublicKey
+	)
+
+	for _, k := range hostPublicKeys {
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(k)
+		if err != nil {
+			return nil, err
+		}
+		hpk = append(hpk, pk)
+	}
+
+	for _, k := range clientAuthorizedKeys {
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(k)
+		if err != nil {
+			return nil, err
+		}
+		cak = append(cak, pk)
+	}
+
+	return &Session{
+		ID:                   id,
+		HostUser:             hostUser,
+		HostPublicKeys:       hpk,
+		ClientAuthorizedKeys: cak,
+	}, nil
 }
 
 func newSessionRepo() *SessionRepo {
