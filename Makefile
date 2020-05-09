@@ -11,6 +11,11 @@ docs:
 
 proto:
 	protoc \
+		-I server \
+		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
+		--go_out=plugins=grpc:server \
+		./server/server.proto
+	protoc \
 		-I host/api \
 		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
 		--go_out=plugins=grpc:host/api \

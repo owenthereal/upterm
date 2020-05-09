@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
@@ -26,8 +26,8 @@ type ReverseTunnel struct {
 	*ssh.Client
 
 	Host              *url.URL
-	SessionID         string
 	Signers           []ssh.Signer
+	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
 	Logger            log.FieldLogger
 
@@ -43,15 +43,23 @@ func (c *ReverseTunnel) Listener() net.Listener {
 	return c.ln
 }
 
-func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, error) {
+func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionResponse, error) {
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
 	}
 
-	var auths []ssh.AuthMethod
+	var (
+		auths          []ssh.AuthMethod
+		publicKeys     [][]byte
+		authorizedKeys [][]byte
+	)
 	for _, signer := range c.Signers {
 		auths = append(auths, ssh.PublicKeys(signer))
+		publicKeys = append(publicKeys, ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	}
+	for _, ak := range c.AuthorizedKeys {
+		authorizedKeys = append(authorizedKeys, ssh.MarshalAuthorizedKey(ak))
 	}
 
 	id := &api.Identifier{
@@ -82,36 +90,53 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.ServerInfo, erro
 		return nil, sshDialError(c.Host.String(), err)
 	}
 
-	c.ln, err = c.Client.Listen("unix", c.SessionID)
+	sessResp, err := c.createSession(user.Username, publicKeys, authorizedKeys)
+	if err != nil {
+		return nil, fmt.Errorf("error creating session: %w", err)
+	}
+
+	c.ln, err = c.Client.Listen("unix", sessResp.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
 
 	// make sure connection is alive
 	go keepAlive(ctx, c.KeepAliveDuration, func() {
+		// TODO: ping with session ID
 		_, _, err := c.Client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		if err != nil {
 			c.Logger.WithError(err).Error("error pinging server")
 		}
 	})
 
-	return c.serverInfo()
+	return sessResp, nil
 }
 
-func (c *ReverseTunnel) serverInfo() (*server.ServerInfo, error) {
-	ok, body, err := c.Client.SendRequest(upterm.ServerServerInfoRequestType, true, nil)
+func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clientAuthorizedKeys [][]byte) (*server.CreateSessionResponse, error) {
+	req := &server.CreateSessionRequest{
+		HostUser:             user,
+		HostPublicKeys:       hostPublicKeys,
+		ClientAuthorizedKeys: clientAuthorizedKeys,
+	}
+	b, err := proto.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching server info: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("error fetching server info")
-	}
-	var info *server.ServerInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("error unmarshaling server info: %w", err)
+		return nil, err
 	}
 
-	return info, nil
+	ok, body, err := c.Client.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
+	if err != nil {
+		return nil, fmt.Errorf("error creating session: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("error creating session: %s", body)
+	}
+
+	var resp server.CreateSessionResponse
+	if err := proto.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("error unmarshaling created session: %w", err)
+	}
+
+	return &resp, nil
 }
 
 func keepAlive(ctx context.Context, d time.Duration, fn func()) {
