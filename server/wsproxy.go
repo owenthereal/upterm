@@ -17,7 +17,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type WebSocketProxy struct {
+type webSocketProxy struct {
 	ConnDialer ConnDialer
 	Logger     log.FieldLogger
 
@@ -42,7 +42,7 @@ func webHandler(h http.Handler) http.Handler {
 	})
 }
 
-func (s *WebSocketProxy) Serve(ln net.Listener) error {
+func (s *webSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
 	s.srv = &http.Server{
 		Handler: webHandler(&wsHandler{
@@ -55,7 +55,7 @@ func (s *WebSocketProxy) Serve(ln net.Listener) error {
 	return s.srv.Serve(ln)
 }
 
-func (s *WebSocketProxy) Shutdown() error {
+func (s *webSocketProxy) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
