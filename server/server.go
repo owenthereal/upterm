@@ -113,7 +113,7 @@ func Start(opt Opt) error {
 	}
 	{
 		if opt.MetricAddr != "" {
-			m := &MetricsServer{}
+			m := &metricServer{}
 			g.Add(func() error {
 				return m.ListenAndServe(opt.MetricAddr)
 			}, func(err error) {
