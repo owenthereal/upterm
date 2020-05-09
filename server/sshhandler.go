@@ -27,7 +27,7 @@ type forwardedStreamlocalPayload struct {
 }
 
 func newStreamlocalForwardHandler(
-	sessionRepo *SessionRepo,
+	sessionRepo *sessionRepo,
 	sessionDialListener SessionDialListener,
 	logger log.FieldLogger,
 ) *streamlocalForwardHandler {
@@ -40,7 +40,7 @@ func newStreamlocalForwardHandler(
 }
 
 type streamlocalForwardHandler struct {
-	sessionRepo         *SessionRepo
+	sessionRepo         *sessionRepo
 	sessionDialListener SessionDialListener
 	forwards            map[string]net.Listener
 	logger              log.FieldLogger
