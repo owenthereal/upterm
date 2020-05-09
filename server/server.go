@@ -35,6 +35,11 @@ type Opt struct {
 }
 
 func Start(opt Opt) error {
+	// must always have a ssh addr
+	if opt.SSHAddr == "" {
+		return fmt.Errorf("must specify a ssh address")
+	}
+
 	network := networks.Get(opt.Network)
 	if network == nil {
 		return fmt.Errorf("unsupport network provider %q", opt.Network)
@@ -59,16 +64,7 @@ func Start(opt Opt) error {
 		signers = append(signers, ss...)
 	}
 
-	logger := log.New().WithField("app", "uptermd")
-
-	// fallback node addr to ssh addr or ws addr if empty
-	nodeAddr := opt.NodeAddr
-	if nodeAddr == "" {
-		nodeAddr = opt.SSHAddr
-	}
-	if nodeAddr == "" {
-		nodeAddr = opt.WSAddr
-	}
+	logger := log.New().WithFields(log.Fields{"app": "uptermd", "network": opt.Network, "network-opt": opt.NetworkOpt})
 
 	var (
 		sshln net.Listener
@@ -80,6 +76,7 @@ func Start(opt Opt) error {
 		if err != nil {
 			return err
 		}
+		logger = logger.WithField("ssh-addr", sshln.Addr())
 	}
 
 	if opt.WSAddr != "" {
@@ -87,7 +84,22 @@ func Start(opt Opt) error {
 		if err != nil {
 			return err
 		}
+		logger = logger.WithField("ws-addr", wsln.Addr())
 	}
+
+	// fallback node addr to ssh addr or ws addr if empty
+	nodeAddr := opt.NodeAddr
+	if nodeAddr == "" && sshln != nil {
+		nodeAddr = sshln.Addr().String()
+	}
+	if nodeAddr == "" && wsln != nil {
+		nodeAddr = wsln.Addr().String()
+	}
+	if nodeAddr == "" {
+		return fmt.Errorf("node address can't by empty")
+	}
+
+	logger = logger.WithField("node-addr", nodeAddr)
 
 	var g run.Group
 	{
@@ -102,7 +114,7 @@ func Start(opt Opt) error {
 			NodeAddr:        nodeAddr,
 			HostSigners:     signers,
 			NetworkProvider: network,
-			Logger:          logger.WithField("component", "server"),
+			Logger:          logger.WithField("com", "server"),
 			MetricsProvider: mp,
 		}
 		g.Add(func() error {
@@ -113,6 +125,8 @@ func Start(opt Opt) error {
 	}
 	{
 		if opt.MetricAddr != "" {
+			logger = logger.WithField("metric-addr", opt.MetricAddr)
+
 			m := &metricServer{}
 			g.Add(func() error {
 				return m.ListenAndServe(opt.MetricAddr)
@@ -121,6 +135,9 @@ func Start(opt Opt) error {
 			})
 		}
 	}
+
+	logger.Info("starting server")
+	defer logger.Info("shutting down server")
 
 	return g.Run()
 }
@@ -193,7 +210,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
 				NeighbourDialer:     tcpConnDialer{},
-				Logger:              s.Logger.WithField("compoent", "ssh-conn-dialer"),
+				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
 				HostSigners: s.HostSigners,
@@ -202,7 +219,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					SessionRepo: sessRepo,
 					NodeAddr:    s.NodeAddr,
 				},
-				Logger:          s.Logger.WithField("componet", "ssh-proxy"),
+				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}
 			g.Add(func() error {
@@ -221,7 +238,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					SSHDDialListener:    sshdDialListener,
 					SessionDialListener: sessionDialListener,
 					NeighbourDialer:     wsConnDialer{},
-					Logger:              s.Logger.WithField("compoent", "ws-conn-dialer"),
+					Logger:              s.Logger.WithField("com", "ws-conn-dialer"),
 				}
 			} else {
 				// If sshln is not nil, always dial to SSHProxy.
@@ -230,12 +247,12 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				// which provides a consistent authentication machanism.
 				cd = sshProxyDialer{
 					sshProxyAddr: sshln.Addr().String(),
-					Logger:       s.Logger.WithField("compoent", "ws-sshproxy-dialer"),
+					Logger:       s.Logger.WithField("com", "ws-sshproxy-dialer"),
 				}
 			}
 			ws := &webSocketProxy{
 				ConnDialer: cd,
-				Logger:     s.Logger.WithField("componet", "ws-proxy"),
+				Logger:     s.Logger.WithField("com", "ws-proxy"),
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)
@@ -255,7 +272,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
-			Logger:              s.Logger.WithField("componet", "sshd"),
+			Logger:              s.Logger.WithField("com", "sshd"),
 		}
 		g.Add(func() error {
 			return sshd.Serve(ln)
