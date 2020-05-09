@@ -87,7 +87,8 @@ func TestMain(m *testing.M) {
 
 func Test_ftest(t *testing.T) {
 	testCases := []func(t *testing.T, hostURL, nodeAddr string){
-		testClientAuthorizedKey,
+		testHostNoAuthorizedKeyAnyClientJoin,
+		testClientAuthorizedKeyNotMatching,
 		testClientNonExistingSession,
 		testClientAttachHostWithSameCommand,
 		testClientAttachHostWithDifferentCommand,
