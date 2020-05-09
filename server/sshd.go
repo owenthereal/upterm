@@ -126,14 +126,17 @@ func (s *SSHD) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		return false, []byte(err.Error())
 	}
 
-	sess := Session{
-		ID:                   utils.GenerateSessionID(),
-		HostUser:             sessReq.HostUser,
-		HostPublicKeys:       sessReq.HostPublicKeys,
-		ClientAuthorizedKeys: sessReq.ClientAuthorizedKeys,
+	sess, err := newSession(
+		utils.GenerateSessionID(),
+		sessReq.HostUser,
+		sessReq.HostPublicKeys,
+		sessReq.ClientAuthorizedKeys,
+	)
+	if err != nil {
+		return false, []byte(err.Error())
 	}
 
-	if err := s.SessionRepo.Add(sess); err != nil {
+	if err := s.SessionRepo.Add(*sess); err != nil {
 		return false, []byte(err.Error())
 	}
 
