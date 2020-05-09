@@ -16,6 +16,10 @@ type Session struct {
 }
 
 func (s Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
+	if len(s.ClientAuthorizedKeys) == 0 {
+		return true
+	}
+
 	for _, k := range s.ClientAuthorizedKeys {
 		if gssh.KeysEqual(k, key) {
 			return true

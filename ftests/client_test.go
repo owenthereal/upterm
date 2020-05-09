@@ -14,7 +14,44 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func testClientAuthorizedKey(t *testing.T, hostURL, nodeAddr string) {
+func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string) {
+	adminSockDir, err := newAdminSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(adminSockDir)
+
+	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+
+	h := &Host{
+		Command:         []string{"bash", "-c", "PS1='' bash --norc"},
+		PrivateKeys:     []string{HostPrivateKey},
+		AdminSocketFile: adminSocketFile,
+	}
+	if err := h.Share(hostURL); err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	// verify admin server
+	adminClient := host.AdminClient(adminSocketFile)
+	resp, err := adminClient.GetSession(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := resp.GetPayload()
+	checkSessionPayload(t, session, hostURL, nodeAddr)
+
+	c := &Client{
+		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
+	}
+
+	if err := c.Join(session, hostURL); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
