@@ -55,6 +55,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
+		s.SessionRepo,
 		s.SessionDialListener,
 		s.Logger.WithField("component", "stream-local-handler"),
 	)
@@ -132,7 +133,7 @@ func (s *SSHD) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		ClientAuthorizedKeys: sessReq.ClientAuthorizedKeys,
 	}
 
-	if err := s.SessionRepo.Store(sess); err != nil {
+	if err := s.SessionRepo.Add(sess); err != nil {
 		return false, []byte(err.Error())
 	}
 
