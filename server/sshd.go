@@ -57,7 +57,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	sh := newStreamlocalForwardHandler(
 		s.SessionRepo,
 		s.SessionDialListener,
-		s.Logger.WithField("component", "stream-local-handler"),
+		s.Logger.WithField("com", "stream-local-handler"),
 	)
 	s.mux.Lock()
 	s.server = &ssh.Server{
