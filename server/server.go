@@ -233,7 +233,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					Logger:       s.Logger.WithField("compoent", "ws-sshproxy-dialer"),
 				}
 			}
-			ws := &WebSocketProxy{
+			ws := &webSocketProxy{
 				ConnDialer: cd,
 				Logger:     s.Logger.WithField("componet", "ws-proxy"),
 			}
