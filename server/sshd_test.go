@@ -21,7 +21,7 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----`
 )
 
-func Test_SSHD_DisallowSession(t *testing.T) {
+func Test_sshd_DisallowSession(t *testing.T) {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
@@ -37,7 +37,7 @@ func Test_SSHD_DisallowSession(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr().String()
-	sshd := &SSHD{
+	sshd := &sshd{
 		HostSigners: []ssh.Signer{signer},
 		NodeAddr:    addr,
 		Logger:      logger,
