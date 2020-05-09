@@ -68,7 +68,7 @@ func (r *sshProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 
 type authPiper struct {
 	NodeAddr    string
-	SessionRepo *SessionRepo
+	SessionRepo *sessionRepo
 }
 
 func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {

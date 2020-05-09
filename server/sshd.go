@@ -24,7 +24,7 @@ type ServerInfo struct {
 }
 
 type sshd struct {
-	SessionRepo         *SessionRepo
+	SessionRepo         *sessionRepo
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener

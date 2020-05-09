@@ -8,14 +8,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type Session struct {
+type session struct {
 	ID                   string
 	HostUser             string
 	HostPublicKeys       []ssh.PublicKey
 	ClientAuthorizedKeys []ssh.PublicKey
 }
 
-func (s Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
+func (s session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	if len(s.ClientAuthorizedKeys) == 0 {
 		return true
 	}
@@ -29,7 +29,7 @@ func (s Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	return false
 }
 
-func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*Session, error) {
+func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*session, error) {
 	var (
 		hpk []ssh.PublicKey
 		cak []ssh.PublicKey
@@ -51,7 +51,7 @@ func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]by
 		cak = append(cak, pk)
 	}
 
-	return &Session{
+	return &session{
 		ID:                   id,
 		HostUser:             hostUser,
 		HostPublicKeys:       hpk,
@@ -59,18 +59,18 @@ func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]by
 	}, nil
 }
 
-func newSessionRepo() *SessionRepo {
-	return &SessionRepo{
-		sessions: make(map[string]Session),
+func newSessionRepo() *sessionRepo {
+	return &sessionRepo{
+		sessions: make(map[string]session),
 	}
 }
 
-type SessionRepo struct {
-	sessions map[string]Session
+type sessionRepo struct {
+	sessions map[string]session
 	mutex    sync.Mutex
 }
 
-func (s *SessionRepo) Add(sess Session) error {
+func (s *sessionRepo) Add(sess session) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -83,7 +83,7 @@ func (s *SessionRepo) Add(sess Session) error {
 	return nil
 }
 
-func (s *SessionRepo) Get(id string) (*Session, error) {
+func (s *sessionRepo) Get(id string) (*session, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -95,7 +95,7 @@ func (s *SessionRepo) Get(id string) (*Session, error) {
 	return &sess, nil
 }
 
-func (s *SessionRepo) Delete(id string) {
+func (s *sessionRepo) Delete(id string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
