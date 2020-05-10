@@ -19,12 +19,6 @@ var (
 	pipeEstablishingTimeout = 5 * time.Second
 )
 
-const (
-	errReadConnectionResetByPeer = "read: connection reset by peer"
-	errSshDisconnectReason11     = "ssh: disconnect, reason 11:"
-	errUnknownClient             = "unknown client:"
-)
-
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
 
 type SSHRouting struct {
