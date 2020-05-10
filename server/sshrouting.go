@@ -2,9 +2,7 @@ package server
 
 import (
 	"errors"
-	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -188,11 +186,4 @@ func (p *SSHRouting) closeDoneChanLocked() {
 
 func (p *SSHRouting) closeListenersLocked() error {
 	return p.listener.Close()
-}
-
-func isIgnoredErr(err error) bool {
-	return errors.Is(err, io.EOF) ||
-		strings.Contains(err.Error(), errReadConnectionResetByPeer) ||
-		strings.Contains(err.Error(), errSshDisconnectReason11) ||
-		strings.Contains(err.Error(), errUnknownClient)
 }
