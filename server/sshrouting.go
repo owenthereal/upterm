@@ -118,7 +118,6 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 			go func() {
 				p, err := ssh.NewSSHPiperConn(c, piper)
-
 				if err != nil {
 					errorc <- err
 					return
@@ -127,24 +126,20 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 				pipec <- p
 			}()
 
-			var pc *ssh.PiperConn
 			select {
-			case pc = <-pipec:
+			case pc := <-pipec:
+				defer pc.Close()
+
+				if err := pc.Wait(); err != nil {
+					logger.WithError(err).Debug("error waiting for pipe")
+					inst.errors.Add(1)
+				}
 			case err := <-errorc:
 				logger.WithError(err).Debug("connection establishing failed")
 				inst.errors.Add(1)
-				return
 			case <-time.After(pipeEstablishingTimeout):
 				logger.Debug("pipe establishing timeout")
 				inst.connectionTimeouts.Add(1)
-				return
-			}
-
-			defer pc.Close()
-
-			if err := pc.Wait(); err != nil && !isIgnoredErr(err) {
-				logger.WithError(err).Error("error waiting for pipe")
-				inst.errors.Add(1)
 			}
 		}(conn, inst, logger)
 	}
