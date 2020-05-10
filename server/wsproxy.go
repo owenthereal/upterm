@@ -140,7 +140,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := g.Run(); err != nil && !isWSIgnoredError(err) {
+	if err := g.Run(); err != nil {
 		h.wsError(wsc, err, "error piping")
 	}
 }
@@ -154,8 +154,4 @@ func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
 func (h *wsHandler) wsError(ws *websocket.Conn, err error, msg string) {
 	h.Logger.WithError(err).Error(msg)
 	_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
-}
-
-func isWSIgnoredError(err error) bool {
-	return strings.Contains(err.Error(), "unexpected EOF")
 }
