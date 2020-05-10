@@ -50,18 +50,18 @@ func Start(opt Opt) error {
 		return fmt.Errorf("network provider option error: %s", err)
 	}
 
-	signers, err := utils.CreateSignersFromFiles(opt.KeyFiles)
+	privateKeys, err := utils.ReadFiles(opt.KeyFiles)
 	if err != nil {
-		return err
+		return nil
 	}
 
 	if pp := os.Getenv("PRIVATE_KEY"); pp != "" {
-		ss, err := utils.CreateSigners([][]byte{[]byte(pp)})
-		if err != nil {
-			return err
-		}
+		privateKeys = append(privateKeys, []byte(pp))
+	}
 
-		signers = append(signers, ss...)
+	signers, err := utils.CreateSigners(privateKeys)
+	if err != nil {
+		return err
 	}
 
 	l := log.New()

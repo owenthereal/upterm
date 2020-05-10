@@ -29,15 +29,6 @@ func DefaultLocalhost(defaultPort string) string {
 	return fmt.Sprintf("127.0.0.1:%s", port)
 }
 
-func CreateSignersFromFiles(paths []string) ([]ssh.Signer, error) {
-	files, err := readFiles(paths)
-	if err != nil {
-		return nil, err
-	}
-
-	return CreateSigners(files)
-}
-
 func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 	var signers []ssh.Signer
 
@@ -68,7 +59,7 @@ func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 	return signers, nil
 }
 
-func readFiles(paths []string) ([][]byte, error) {
+func ReadFiles(paths []string) ([][]byte, error) {
 	var files [][]byte
 
 	for _, p := range paths {
