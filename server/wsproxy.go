@@ -106,18 +106,18 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
 	if err != nil {
-		h.wsError(wsconn, err, "error decoding id")
+		h.wsError(wsc, err, "error decoding id")
 		return
 	}
 
 	conn, err := h.ConnDialer.Dial(*id)
 	if err != nil {
-		h.wsError(wsconn, err, "error dialing")
+		h.wsError(wsc, err, "error dialing")
 		return
 	}
 
 	var o sync.Once
-	close := func() {
+	cl := func() {
 		wsconn.Close()
 		conn.Close()
 	}
@@ -128,7 +128,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, err := io.Copy(wsconn, conn)
 			return err
 		}, func(err error) {
-			o.Do(close)
+			o.Do(cl)
 		})
 	}
 	{
@@ -136,12 +136,12 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, err := io.Copy(conn, wsconn)
 			return err
 		}, func(err error) {
-			o.Do(close)
+			o.Do(cl)
 		})
 	}
 
 	if err := g.Run(); err != nil && !isWSIgnoredError(err) {
-		h.wsError(wsconn, err, "error piping")
+		h.wsError(wsc, err, "error piping")
 	}
 }
 
@@ -151,9 +151,9 @@ func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
 	_, _ = w.Write([]byte(err.Error()))
 }
 
-func (h *wsHandler) wsError(conn net.Conn, err error, msg string) {
+func (h *wsHandler) wsError(ws *websocket.Conn, err error, msg string) {
 	h.Logger.WithError(err).Error(msg)
-	_, _ = conn.Write([]byte(err.Error()))
+	_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 }
 
 func isWSIgnoredError(err error) bool {

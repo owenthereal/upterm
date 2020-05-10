@@ -117,6 +117,11 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 			errorc := make(chan error)
 
 			go func() {
+				defer func() {
+					close(pipec)
+					close(errorc)
+				}()
+
 				p, err := ssh.NewSSHPiperConn(c, piper)
 				if err != nil {
 					errorc <- err
