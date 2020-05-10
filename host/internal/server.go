@@ -37,7 +37,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 
 	emCtx, emCancel := context.WithCancel(ctx)
 	defer emCancel()
-	em := newEventManager(emCtx, s.Logger.WithField("component", "event-manager"))
+	em := newEventManager(emCtx, s.Logger.WithField("com", "event-manager"))
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()

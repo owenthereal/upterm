@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/gliderlabs/ssh"
+	proto "github.com/golang/protobuf/proto"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -21,7 +23,8 @@ type ServerInfo struct {
 	NodeAddr string
 }
 
-type SSHD struct {
+type sshd struct {
+	SessionRepo         *sessionRepo
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
@@ -31,7 +34,7 @@ type SSHD struct {
 	mux    sync.Mutex
 }
 
-func (s *SSHD) Shutdown() error {
+func (s *sshd) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
@@ -45,15 +48,16 @@ func (s *SSHD) Shutdown() error {
 	return nil
 }
 
-func (s *SSHD) Serve(ln net.Listener) error {
+func (s *sshd) Serve(ln net.Listener) error {
 	var signers []ssh.Signer
 	for _, signer := range s.HostSigners {
 		signers = append(signers, signer)
 	}
 
 	sh := newStreamlocalForwardHandler(
+		s.SessionRepo,
 		s.SessionDialListener,
-		s.Logger.WithField("component", "stream-local-handler"),
+		s.Logger.WithField("com", "stream-local-handler"),
 	)
 	s.mux.Lock()
 	s.server = &ssh.Server{
@@ -80,8 +84,7 @@ func (s *SSHD) Serve(ln net.Listener) error {
 			//
 			// However, this function needs to return true to allow publickey
 			// auth when the protocol is websocket.
-
-			// TODO: validate publickey
+			// TODO: validate publickey when it's websocket.
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
@@ -91,10 +94,11 @@ func (s *SSHD) Serve(ln net.Listener) error {
 		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
-			streamlocalForwardChannelType:       sh.Handler,
-			cancelStreamlocalForwardChannelType: sh.Handler,
-			upterm.ServerServerInfoRequestType:  s.serverInfoRequestHandler,
-			upterm.ServerPingRequestType:        pingRequestHandler, // TODO: deprecate
+			streamlocalForwardChannelType:         sh.Handler,
+			cancelStreamlocalForwardChannelType:   sh.Handler,
+			upterm.ServerCreateSessionRequestType: s.createSessionHandler,
+			upterm.ServerServerInfoRequestType:    s.serverInfoRequestHandler, // TODO: deprecate
+			upterm.ServerPingRequestType:          pingRequestHandler,         // TODO: deprecate
 		},
 	}
 	s.mux.Unlock()
@@ -103,12 +107,45 @@ func (s *SSHD) Serve(ln net.Listener) error {
 }
 
 // TODO: Remove it. SessionService should take care of routing by session
-func (s *SSHD) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+func (s *sshd) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
 	info := ServerInfo{
 		NodeAddr: s.NodeAddr,
 	}
 
 	b, err := json.Marshal(info)
+	if err != nil {
+		return false, []byte(err.Error())
+	}
+
+	return true, b
+}
+
+func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	var sessReq CreateSessionRequest
+	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {
+		return false, []byte(err.Error())
+	}
+
+	sess, err := newSession(
+		utils.GenerateSessionID(),
+		sessReq.HostUser,
+		sessReq.HostPublicKeys,
+		sessReq.ClientAuthorizedKeys,
+	)
+	if err != nil {
+		return false, []byte(err.Error())
+	}
+
+	if err := s.SessionRepo.Add(*sess); err != nil {
+		return false, []byte(err.Error())
+	}
+
+	sessResp := &CreateSessionResponse{
+		SessionID: sess.ID,
+		NodeAddr:  s.NodeAddr,
+	}
+
+	b, err := proto.Marshal(sessResp)
 	if err != nil {
 		return false, []byte(err.Error())
 	}

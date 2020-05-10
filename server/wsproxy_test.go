@@ -39,7 +39,7 @@ func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
 }
 
 func Test_WebSocketProxy_Host(t *testing.T) {
-	cd := connDialer{
+	cd := sidewayConnDialer{
 		SSHDDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
 		SessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
 		Logger:              log.New(),

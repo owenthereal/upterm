@@ -10,8 +10,89 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/host/api/swagger/models"
 	log "github.com/sirupsen/logrus"
 )
+
+func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string) {
+	adminSockDir, err := newAdminSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(adminSockDir)
+
+	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+
+	h := &Host{
+		Command:         []string{"bash", "-c", "PS1='' bash --norc"},
+		PrivateKeys:     []string{HostPrivateKey},
+		AdminSocketFile: adminSocketFile,
+	}
+	if err := h.Share(hostURL); err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	// verify admin server
+	adminClient := host.AdminClient(adminSocketFile)
+	resp, err := adminClient.GetSession(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := resp.GetPayload()
+	checkSessionPayload(t, session, hostURL, nodeAddr)
+
+	c := &Client{
+		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
+	}
+
+	if err := c.Join(session, hostURL); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) {
+	adminSockDir, err := newAdminSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(adminSockDir)
+
+	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+
+	h := &Host{
+		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}
+	if err := h.Share(hostURL); err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	// verify admin server
+	adminClient := host.AdminClient(adminSocketFile)
+	resp, err := adminClient.GetSession(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := resp.GetPayload()
+	checkSessionPayload(t, session, hostURL, nodeAddr)
+
+	c := &Client{
+		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
+	}
+
+	err = c.Join(session, hostURL)
+
+	// Unfortunately there is no explicit error to the client.
+	// SSH handshake should fail with the connection closed.
+	// And there should be error like "public key not allowed" in the log
+	if want, got := "ssh: handshake failed:", err.Error(); !strings.Contains(got, want) {
+		t.Fatalf("Unexpected error, want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+}
 
 func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 	adminSockDir, err := newAdminSocketDir()
@@ -40,15 +121,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 		t.Fatal(err)
 	}
 	session := resp.GetPayload()
-	if want, got := h.SessionID, session.SessionID; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := hostURL, session.Host; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := nodeAddr, session.NodeAddr; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	checkSessionPayload(t, session, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -102,15 +175,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 		t.Fatal(err)
 	}
 	session := resp.GetPayload()
-	if want, got := h.SessionID, session.SessionID; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := hostURL, session.Host; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := nodeAddr, session.NodeAddr; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	checkSessionPayload(t, session, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -190,15 +255,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 		t.Fatal(err)
 	}
 	session := resp.GetPayload()
-	if want, got := h.SessionID, session.SessionID; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := hostURL, session.Host; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := nodeAddr, session.NodeAddr; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	checkSessionPayload(t, session, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -269,15 +326,7 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 		t.Fatal(err)
 	}
 	session := resp.GetPayload()
-	if want, got := h.SessionID, session.SessionID; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := hostURL, session.Host; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := nodeAddr, session.NodeAddr; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	checkSessionPayload(t, session, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -333,6 +382,18 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 		return
 	}
 
+}
+
+func checkSessionPayload(t *testing.T, sess *models.APIGetSessionResponse, wantHostURL, wantNodeURL string) {
+	if sess.SessionID == "" {
+		t.Fatalf("session ID is empty")
+	}
+	if want, got := wantHostURL, sess.Host; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
+	if want, got := wantNodeURL, sess.NodeAddr; want != got {
+		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
+	}
 }
 
 func newAdminSocketDir() (string, error) {
