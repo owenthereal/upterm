@@ -64,7 +64,7 @@ func (c *Host) Run(ctx context.Context) error {
 		Signers:           c.Signers,
 		AuthorizedKeys:    c.AuthorizedKeys,
 		KeepAliveDuration: c.KeepAliveDuration,
-		Logger:            log.WithField("component", "reverse-tunnel"),
+		Logger:            log.WithField("com", "reverse-tunnel"),
 	}
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
