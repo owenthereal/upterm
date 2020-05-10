@@ -64,7 +64,12 @@ func Start(opt Opt) error {
 		signers = append(signers, ss...)
 	}
 
-	logger := log.New().WithFields(log.Fields{"app": "uptermd", "network": opt.Network, "network-opt": opt.NetworkOpt})
+	l := log.New()
+	if os.Getenv("DEBUG") != "" {
+		l.SetLevel(log.DebugLevel)
+	}
+
+	logger := l.WithFields(log.Fields{"app": "uptermd", "network": opt.Network, "network-opt": opt.NetworkOpt})
 
 	var (
 		sshln net.Listener
