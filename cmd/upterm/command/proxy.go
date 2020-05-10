@@ -1,12 +1,13 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
-	"sync"
 
+	uio "github.com/jingweno/upterm/io"
 	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
 	"github.com/spf13/cobra"
@@ -43,26 +44,26 @@ func proxyRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	var o sync.Once
-	close := func() {
-		conn.Close()
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var g run.Group
 	{
 		g.Add(func() error {
-			_, err := io.Copy(conn, os.Stdin)
+			_, err := io.Copy(conn, uio.NewContextReader(ctx, os.Stdin))
 			return err
 		}, func(err error) {
-			o.Do(close)
+			conn.Close()
+			cancel()
 		})
 	}
 	{
 		g.Add(func() error {
-			_, err := io.Copy(os.Stdout, conn)
+			_, err := io.Copy(os.Stdout, uio.NewContextReader(ctx, conn))
 			return err
 		}, func(err error) {
-			o.Do(close)
+			conn.Close()
+			cancel()
 		})
 	}
 
