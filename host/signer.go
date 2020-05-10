@@ -86,16 +86,25 @@ func SignersFromSSHAgent(socket string, privateKeys []string) (signers []ssh.Sig
 		return nil, cancel, err
 	}
 
-	// fallback to read from files if ssh-agent doesn't match number of keys
-	if len(keys) != len(privateKeys) {
-		signers, err = SignersFromFiles(privateKeys)
-		if err != nil {
-			return nil, cancel, err
+	var useAgent bool
+	for _, key := range keys {
+		for _, pk := range privateKeys {
+			if key.Comment == pk {
+				useAgent = true
+				break
+			}
 		}
-	} else {
+	}
+
+	if useAgent {
 		signers, err = agentClient.Signers()
 		if err != nil {
 			return signers, cancel, err
+		}
+	} else {
+		signers, err = SignersFromFiles(privateKeys)
+		if err != nil {
+			return nil, cancel, err
 		}
 	}
 

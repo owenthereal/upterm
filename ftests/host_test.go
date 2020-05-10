@@ -6,16 +6,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/host/api/swagger/models"
-	"github.com/jingweno/upterm/utils"
 )
 
 func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
-	sessionID := utils.GenerateSessionID()
 	h := &Host{
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
 		PrivateKeys:  []string{HostPrivateKey},
-		SessionID:    sessionID,
 		SessionCreatedCallback: func(session *models.APIGetSessionResponse) error {
 			if want, got := []string{"bash", "--norc"}, session.Command; !cmp.Equal(want, got) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
@@ -23,16 +20,8 @@ func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
 			if want, got := []string{"vim"}, session.ForceCommand; !cmp.Equal(want, got) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
-			if want, got := hostURL, session.Host; !cmp.Equal(want, got) {
-				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
-			if want, got := nodeAddr, session.NodeAddr; !cmp.Equal(want, got) {
-				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
-			if want, got := sessionID, session.SessionID; !cmp.Equal(want, got) {
-				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
 
+			checkSessionPayload(t, session, hostURL, nodeAddr)
 			return nil
 		},
 	}

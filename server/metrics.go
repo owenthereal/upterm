@@ -8,12 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type MetricsServer struct {
+type metricServer struct {
 	server *http.Server
 	mux    sync.Mutex
 }
 
-func (m *MetricsServer) Shutdown(ctx context.Context) error {
+func (m *metricServer) Shutdown(ctx context.Context) error {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
@@ -24,7 +24,7 @@ func (m *MetricsServer) Shutdown(ctx context.Context) error {
 	return m.server.Shutdown(ctx)
 }
 
-func (m *MetricsServer) ListenAndServe(addr string) error {
+func (m *metricServer) ListenAndServe(addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 

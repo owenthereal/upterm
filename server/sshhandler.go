@@ -27,10 +27,12 @@ type forwardedStreamlocalPayload struct {
 }
 
 func newStreamlocalForwardHandler(
+	sessionRepo *sessionRepo,
 	sessionDialListener SessionDialListener,
 	logger log.FieldLogger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
+		sessionRepo:         sessionRepo,
 		sessionDialListener: sessionDialListener,
 		forwards:            make(map[string]net.Listener),
 		logger:              logger,
@@ -38,6 +40,7 @@ func newStreamlocalForwardHandler(
 }
 
 type streamlocalForwardHandler struct {
+	sessionRepo         *sessionRepo
 	sessionDialListener SessionDialListener
 	forwards            map[string]net.Listener
 	logger              log.FieldLogger
@@ -118,6 +121,11 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		sessionID := reqPayload.SocketPath
 		logger := h.logger.WithFields(log.Fields{"session-id": sessionID})
 
+		// validate session exists
+		if _, err := h.sessionRepo.Get(sessionID); err != nil {
+			return false, []byte(err.Error())
+		}
+
 		ln, err := h.sessionDialListener.Listen(sessionID)
 		if err != nil {
 			logger.WithError(err).Error("error listening socketing")
@@ -183,4 +191,6 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 	}
 
 	delete(h.forwards, sessionID)
+
+	h.sessionRepo.Delete(sessionID)
 }

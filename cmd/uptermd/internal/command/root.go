@@ -18,14 +18,14 @@ var (
 )
 
 func Root(logger log.FieldLogger) *cobra.Command {
-	rootCmd := &rootCmd{logger}
+	rootCmd := &rootCmd{}
 	cmd := &cobra.Command{
 		Use:   "uptermd",
 		Short: "Upterm daemon",
 		RunE:  rootCmd.Run,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", "", "ssh server address")
+	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringVarP(&flagNodeAddr, "node-addr", "", "", "node address")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
@@ -39,14 +39,9 @@ func Root(logger log.FieldLogger) *cobra.Command {
 }
 
 type rootCmd struct {
-	logger log.FieldLogger
 }
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
-	if flagSSHAddr == "" && flagWSAddr == "" {
-		flagSSHAddr = utils.DefaultLocalhost("2222")
-	}
-
 	opt := server.Opt{
 		SSHAddr:    flagSSHAddr,
 		WSAddr:     flagWSAddr,
@@ -56,17 +51,6 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 		NetworkOpt: flagNetworkOpts,
 		MetricAddr: flagMetricAddr,
 	}
-
-	logger := cmd.logger.WithFields(log.Fields{
-		"ssh-addr":     flagSSHAddr,
-		"ws-addr":      flagWSAddr,
-		"node-addr":    flagNodeAddr,
-		"metric-addr":  flagMetricAddr,
-		"network":      flagNetwork,
-		"network-opts": flagNetworkOpts,
-	})
-	logger.Info("starting server")
-	defer logger.Info("shutting down server")
 
 	return server.Start(opt)
 }
