@@ -36,6 +36,9 @@ func hostCmd() *cobra.Command {
   # client's input/output attaching to the host's
   upterm host
 
+  # Host a terminal session that only allows specified public key(s) to connect
+  $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
+
   # Host a session with a custom command.
   upterm host -- docker run --rm -ti ubuntu bash
 

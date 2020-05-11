@@ -61,6 +61,9 @@ SSH Session:            ssh TOKEN@uptermd.upterm.dev
 # A client connects to the host session with ssh
 $ ssh TOKEN@uptermd.upterm.dev
 
+# Host a terminal session that only allows specified public key(s) to connect
+$ upterm host --authorized-key PATH_TO_PUBLIC_KEY
+
 # Host a session with a custom command
 $ upterm host -- docker run --rm -ti ubuntu bash
 
