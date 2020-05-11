@@ -51,6 +51,7 @@ function _upterm_host {
     '(-f --force-command)'{-f,--force-command}'[force execution of a command and attach its input/output to client'\''s.]:' \
     '(-h --help)'{-h,--help}'[help for host]' \
     '(*-i *--private-key)'{\*-i,\*--private-key}'[private key for public key authentication against the upterm server (required).]:' \
+    '(-r --read-only)'{-r,--read-only}'[host a read-only session. Clients won'\''t be able to interact.]' \
     '--server[upterm server address (required), supported protocols are shh, ws, or wss.]:'
 }
 

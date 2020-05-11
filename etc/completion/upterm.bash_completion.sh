@@ -276,6 +276,8 @@ _upterm_host()
     flags+=("--private-key=")
     two_word_flags+=("--private-key")
     two_word_flags+=("-i")
+    flags+=("--read-only")
+    flags+=("-r")
     flags+=("--server=")
     two_word_flags+=("--server")
 
