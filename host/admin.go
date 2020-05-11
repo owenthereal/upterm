@@ -20,7 +20,7 @@ func AdminSocketFile(dir ...string) string {
 	return filepath.Join(p...)
 }
 
-func AdminClient(socket string) *admin_service.Client {
+func AdminClient(socket string) admin_service.ClientService {
 	cfg := client.DefaultTransportConfig()
 	t := httptransport.New(cfg.Host, cfg.BasePath, cfg.Schemes)
 	t.Transport = &http.Transport{
