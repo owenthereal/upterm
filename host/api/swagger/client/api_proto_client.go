@@ -8,8 +8,7 @@ package client
 import (
 	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
-
-	strfmt "github.com/go-openapi/strfmt"
+	"github.com/go-openapi/strfmt"
 
 	"github.com/jingweno/upterm/host/api/swagger/client/admin_service"
 )
@@ -56,9 +55,7 @@ func New(transport runtime.ClientTransport, formats strfmt.Registry) *APIProto {
 
 	cli := new(APIProto)
 	cli.Transport = transport
-
 	cli.AdminService = admin_service.New(transport, formats)
-
 	return cli
 }
 
@@ -103,7 +100,7 @@ func (cfg *TransportConfig) WithSchemes(schemes []string) *TransportConfig {
 
 // APIProto is a client for API proto
 type APIProto struct {
-	AdminService *admin_service.Client
+	AdminService admin_service.ClientService
 
 	Transport runtime.ClientTransport
 }
@@ -111,7 +108,5 @@ type APIProto struct {
 // SetTransport changes the transport on the client and all its subresources
 func (c *APIProto) SetTransport(transport runtime.ClientTransport) {
 	c.Transport = transport
-
 	c.AdminService.SetTransport(transport)
-
 }

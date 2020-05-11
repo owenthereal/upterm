@@ -9,12 +9,11 @@ import (
 	"fmt"
 
 	"github.com/go-openapi/runtime"
-
-	strfmt "github.com/go-openapi/strfmt"
+	"github.com/go-openapi/strfmt"
 )
 
 // New creates a new admin service API client.
-func New(transport runtime.ClientTransport, formats strfmt.Registry) *Client {
+func New(transport runtime.ClientTransport, formats strfmt.Registry) ClientService {
 	return &Client{transport: transport, formats: formats}
 }
 
@@ -26,8 +25,15 @@ type Client struct {
 	formats   strfmt.Registry
 }
 
+// ClientService is the interface for Client methods
+type ClientService interface {
+	GetSession(params *GetSessionParams) (*GetSessionOK, error)
+
+	SetTransport(transport runtime.ClientTransport)
+}
+
 /*
-GetSession get session API
+  GetSession get session API
 */
 func (a *Client) GetSession(params *GetSessionParams) (*GetSessionOK, error) {
 	// TODO: Validate the params before sending

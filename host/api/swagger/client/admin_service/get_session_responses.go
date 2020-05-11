@@ -10,10 +10,9 @@ import (
 	"io"
 
 	"github.com/go-openapi/runtime"
+	"github.com/go-openapi/strfmt"
 
-	strfmt "github.com/go-openapi/strfmt"
-
-	models "github.com/jingweno/upterm/host/api/swagger/models"
+	"github.com/jingweno/upterm/host/api/swagger/models"
 )
 
 // GetSessionReader is a Reader for the GetSession structure.
