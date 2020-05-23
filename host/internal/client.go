@@ -28,6 +28,16 @@ func (c *ClientRepo) Delete(clientId string) {
 	c.clients.Delete(clientId)
 }
 
+func (c *ClientRepo) Get(clientId string) *api.Client {
+	val, _ := c.clients.Load(clientId)
+	if val != nil {
+		c := val.(api.Client)
+		return &c
+	}
+
+	return nil
+}
+
 func (c *ClientRepo) Clients() []*api.Client {
 	var clients []*api.Client
 

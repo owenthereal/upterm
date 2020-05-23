@@ -162,7 +162,7 @@ func (h *passwordHandler) emitClientJoinEvent(ctx gssh.Context, pk ssh.PublicKey
 		Addr:                 ctx.RemoteAddr().String(),
 		PublicKeyFingerprint: fingerprintSHA256(pk),
 	}
-	h.eventEmmiter.Emit(upterm.EventClientJoin, c)
+	h.eventEmmiter.Emit(upterm.EventClientJoined, c)
 }
 
 type sessionHandler struct {
@@ -179,7 +179,7 @@ type sessionHandler struct {
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID)
-	defer h.eventEmmiter.Emit(upterm.EventClientLeave, sessionID)
+	defer h.eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 
 	ptyReq, winCh, isPty := sess.Pty()
 	if !isPty {
