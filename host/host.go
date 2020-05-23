@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
+	"github.com/olebedev/emitter"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -97,6 +99,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	clientRepo := internal.NewClientRepo()
+	eventEmitter := emitter.New(1)
 
 	var g run.Group
 	{
@@ -113,6 +116,44 @@ func (c *Host) Run(ctx context.Context) error {
 		})
 	}
 	{
+		g.Add(func() error {
+			for evt := range eventEmitter.On(upterm.EventClientJoin) {
+				args := evt.Args
+				if len(args) == 0 {
+					continue
+				}
+
+				c, ok := args[0].(api.Client)
+				if ok {
+					clientRepo.Add(c)
+				}
+			}
+
+			return nil
+		}, func(err error) {
+			eventEmitter.Off("*")
+		})
+	}
+	{
+		g.Add(func() error {
+			for evt := range eventEmitter.On(upterm.EventClientLeave) {
+				args := evt.Args
+				if len(args) == 0 {
+					continue
+				}
+
+				cid, ok := args[0].(string)
+				if ok {
+					clientRepo.Delete(cid)
+				}
+			}
+
+			return nil
+		}, func(err error) {
+			eventEmitter.Off("*")
+		})
+	}
+	{
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := internal.Server{
 			Command:           c.Command,
@@ -120,7 +161,7 @@ func (c *Host) Run(ctx context.Context) error {
 			ForceCommand:      c.ForceCommand,
 			Signers:           c.Signers,
 			AuthorizedKeys:    c.AuthorizedKeys,
-			ClientRepo:        clientRepo,
+			EventEmitter:      eventEmitter,
 			KeepAliveDuration: c.KeepAliveDuration,
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,
