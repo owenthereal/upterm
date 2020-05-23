@@ -157,6 +157,9 @@ github.com/mitchellh/mapstructure
 # github.com/oklog/run v1.0.0
 ## explicit
 github.com/oklog/run
+# github.com/olebedev/emitter v0.0.0-20190110104742-e8d1457e6aee
+## explicit
+github.com/olebedev/emitter
 # github.com/olekukonko/tablewriter v0.0.4
 ## explicit
 github.com/olekukonko/tablewriter

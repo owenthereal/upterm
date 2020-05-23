@@ -1,0 +1,5 @@
+bin/
+src/
+pkg/
+coverage.html
+Makefile
