@@ -29,6 +29,20 @@
     }
   },
   "definitions": {
+    "apiClient": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "addr": {
+          "type": "string"
+        },
+        "public_key_fingerprint": {
+          "type": "string"
+        }
+      }
+    },
     "apiGetSessionResponse": {
       "type": "object",
       "properties": {
@@ -52,6 +66,12 @@
         },
         "node_addr": {
           "type": "string"
+        },
+        "connected_clients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/apiClient"
+          }
         }
       }
     }

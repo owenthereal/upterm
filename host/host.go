@@ -96,11 +96,14 @@ func (c *Host) Run(ctx context.Context) error {
 		}
 	}
 
+	clientRepo := internal.NewClientRepo()
+
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := adminServer{
-			Session: session,
+		s := internal.AdminServer{
+			Session:    session,
+			ClientRepo: clientRepo,
 		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)
@@ -117,6 +120,7 @@ func (c *Host) Run(ctx context.Context) error {
 			ForceCommand:      c.ForceCommand,
 			Signers:           c.Signers,
 			AuthorizedKeys:    c.AuthorizedKeys,
+			ClientRepo:        clientRepo,
 			KeepAliveDuration: c.KeepAliveDuration,
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,
