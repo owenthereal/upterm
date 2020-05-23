@@ -28,6 +28,8 @@ type Host struct {
 	AuthorizedKeys         []ssh.PublicKey
 	AdminSocketFile        string
 	SessionCreatedCallback func(*models.APIGetSessionResponse) error
+	ClientJoinedCallback   func(api.Client)
+	ClientLeftCallback     func(api.Client)
 	Logger                 log.FieldLogger
 	Stdin                  *os.File
 	Stdout                 *os.File
@@ -117,15 +119,18 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientJoin) {
+			for evt := range eventEmitter.On(upterm.EventClientJoined) {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
 				}
 
-				c, ok := args[0].(api.Client)
+				client, ok := args[0].(api.Client)
 				if ok {
-					clientRepo.Add(c)
+					_ = clientRepo.Add(client)
+					if c.ClientJoinedCallback != nil {
+						c.ClientJoinedCallback(client)
+					}
 				}
 			}
 
@@ -136,7 +141,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientLeave) {
+			for evt := range eventEmitter.On(upterm.EventClientLeft) {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
@@ -144,7 +149,11 @@ func (c *Host) Run(ctx context.Context) error {
 
 				cid, ok := args[0].(string)
 				if ok {
+					client := clientRepo.Get(cid)
 					clientRepo.Delete(cid)
+					if c.ClientLeftCallback != nil && client != nil {
+						c.ClientLeftCallback(*client)
+					}
 				}
 			}
 
