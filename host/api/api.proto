@@ -21,6 +21,13 @@ message GetSessionResponse {
     repeated string force_command = 3;
     string host = 4;
     string node_addr = 5;
+    repeated Client connected_clients = 6;
+}
+
+message Client {
+    string id = 1;
+    string addr = 2;
+    string public_key_fingerprint = 3;
 }
 
 message Identifier {

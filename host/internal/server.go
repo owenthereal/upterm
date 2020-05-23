@@ -2,14 +2,18 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/upterm"
 
 	uio "github.com/jingweno/upterm/io"
@@ -25,6 +29,7 @@ type Server struct {
 	ForceCommand      []string
 	Signers           []ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
+	ClientRepo        *ClientRepo
 	KeepAliveDuration time.Duration
 	Stdin             *os.File
 	Stdout            *os.File
@@ -77,6 +82,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			forceCommand:      s.ForceCommand,
 			ptmx:              ptmx,
 			em:                em,
+			clientRepo:        s.ClientRepo,
 			writers:           writers,
 			keepAliveDuration: s.KeepAliveDuration,
 			ctx:               ctx,
@@ -85,6 +91,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 		ph := passwordHandler{
 			authorizedKeys: s.AuthorizedKeys,
+			clientRepo:     s.ClientRepo,
 		}
 
 		var ss []gssh.Signer
@@ -124,16 +131,23 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 
 type passwordHandler struct {
 	authorizedKeys []ssh.PublicKey
+	clientRepo     *ClientRepo
 }
 
 func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool {
-	if len(h.authorizedKeys) == 0 {
-		return true
-	}
-
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
 	if err != nil {
 		return false
+	}
+
+	h.clientRepo.Add(api.Client{
+		Id:                   ctx.SessionID(),
+		Addr:                 ctx.RemoteAddr().String(),
+		PublicKeyFingerprint: fingerprintSHA256(pk),
+	})
+
+	if len(h.authorizedKeys) == 0 {
+		return true
 	}
 
 	for _, k := range h.authorizedKeys {
@@ -149,6 +163,7 @@ type sessionHandler struct {
 	forceCommand      []string
 	ptmx              *pty
 	em                *eventManager
+	clientRepo        *ClientRepo
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
@@ -157,6 +172,9 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
+	sessionID := sess.Context().Value(gssh.ContextKeySessionID)
+	defer h.clientRepo.Delete(sessionID.(string))
+
 	ptyReq, winCh, isPty := sess.Pty()
 	if !isPty {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
@@ -278,4 +296,10 @@ func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *p
 	pty, err := startPty(cmd)
 
 	return cmd, pty, err
+}
+
+func fingerprintSHA256(key ssh.PublicKey) string {
+	hash := sha256.Sum256(key.Marshal())
+	b64hash := base64.StdEncoding.EncodeToString(hash[:])
+	return fmt.Sprintf("SHA256:%s", strings.TrimRight(b64hash, "="))
 }

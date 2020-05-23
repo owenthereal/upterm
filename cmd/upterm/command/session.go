@@ -236,11 +236,22 @@ func displaySession(session *models.APIGetSessionResponse) error {
 		[]string{"SSH Session:", sshCmd},
 	}
 
+	isFirst := true
+	for _, c := range session.ConnectedClients {
+		var header string
+		if isFirst {
+			header = "Connected Client(s):"
+			isFirst = false
+		}
+		data = append(data, []string{header, fmt.Sprintf("%s %s", firstN(c.ID, 12), c.PublicKeyFingerprint)})
+	}
+
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"=== " + session.SessionID})
 	table.SetHeaderLine(false)
-	table.SetColWidth(len(sshCmd)) // set to the longest text
+	table.SetAutoWrapText(false)
 	table.SetBorder(false)
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	table.SetRowSeparator("")
 	table.SetCenterSeparator("")
@@ -250,6 +261,13 @@ func displaySession(session *models.APIGetSessionResponse) error {
 	table.Render()
 
 	return nil
+}
+
+func firstN(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 func currentAdminSocketFile() string {
