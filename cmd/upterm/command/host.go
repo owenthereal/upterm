@@ -156,15 +156,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 }
 
 func clientJoinedCallback(c api.Client) {
-	_ = beeep.Notify("Upterm: New Client Joined", clientDesc(c.Id, c.PublicKeyFingerprint), "")
+	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), "")
 }
 
 func clientLeftCallback(c api.Client) {
-	_ = beeep.Notify("Upterm: Client Left", clientDesc(c.Id, c.PublicKeyFingerprint), "")
+	_ = beeep.Notify("Upterm Client Left", notifyBody(c), "")
 }
 
-func clientDesc(id, fingerprint string) string {
-	return fmt.Sprintf("%s - %s", firstN(id, 12), fingerprint)
+func notifyBody(c api.Client) string {
+	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
 func displaySessionCallback(session *models.APIGetSessionResponse) error {

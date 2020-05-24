@@ -35,6 +35,9 @@
         "id": {
           "type": "string"
         },
+        "version": {
+          "type": "string"
+        },
         "addr": {
           "type": "string"
         },
