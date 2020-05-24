@@ -35,6 +35,9 @@ github.com/eiannone/keyboard
 ## explicit
 # github.com/fsnotify/fsnotify v1.4.7
 github.com/fsnotify/fsnotify
+# github.com/gen2brain/beeep v0.0.0-20200420150314-13046a26d502
+## explicit
+github.com/gen2brain/beeep
 # github.com/gliderlabs/ssh v0.2.2 => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
 ## explicit
 github.com/gliderlabs/ssh
@@ -90,6 +93,10 @@ github.com/go-openapi/swag
 github.com/go-openapi/validate
 # github.com/go-stack/stack v1.8.0
 github.com/go-stack/stack
+# github.com/go-toast/toast v0.0.0-20190211030409-01e6764cf0a4
+github.com/go-toast/toast
+# github.com/godbus/dbus v4.1.0+incompatible
+github.com/godbus/dbus
 # github.com/golang/protobuf v1.3.2
 ## explicit
 github.com/golang/protobuf/descriptor
@@ -112,6 +119,10 @@ github.com/google/go-cmp/cmp/internal/value
 # github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 ## explicit
 github.com/google/shlex
+# github.com/gopherjs/gopherjs v0.0.0-20180825215210-0210a2f0f73c
+github.com/gopherjs/gopherjs/js
+# github.com/gopherjs/gopherwasm v1.1.0
+github.com/gopherjs/gopherwasm/js
 # github.com/gorilla/websocket v1.4.1
 ## explicit
 github.com/gorilla/websocket
@@ -154,6 +165,8 @@ github.com/mattn/go-runewidth
 github.com/matttproud/golang_protobuf_extensions/pbutil
 # github.com/mitchellh/mapstructure v1.1.2
 github.com/mitchellh/mapstructure
+# github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d
+github.com/nu7hatch/gouuid
 # github.com/oklog/run v1.0.0
 ## explicit
 github.com/oklog/run
@@ -199,6 +212,8 @@ github.com/spf13/cobra/doc
 # github.com/spf13/pflag v1.0.5
 ## explicit
 github.com/spf13/pflag
+# github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af
+github.com/tadvi/systray
 # go.mongodb.org/mongo-driver v1.1.1
 go.mongodb.org/mongo-driver/bson
 go.mongodb.org/mongo-driver/bson/bsoncodec
@@ -226,11 +241,11 @@ golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sys v0.0.0-20200117145432-59e60aa80a0c
-## explicit
+# golang.org/x/sys v0.0.0-20200302150141-5c8b2ff67527
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
+golang.org/x/sys/windows/registry
 # golang.org/x/text v0.3.2
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
