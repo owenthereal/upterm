@@ -26,8 +26,9 @@ message GetSessionResponse {
 
 message Client {
     string id = 1;
-    string addr = 2;
-    string public_key_fingerprint = 3;
+    string version = 2;
+    string addr = 3;
+    string public_key_fingerprint = 4;
 }
 
 message Identifier {

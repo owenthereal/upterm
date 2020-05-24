@@ -13,7 +13,9 @@ import (
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
+	"github.com/golang/protobuf/proto"
 	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
 
 	uio "github.com/jingweno/upterm/io"
@@ -136,33 +138,29 @@ type passwordHandler struct {
 }
 
 func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool {
-	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
+	var auth server.AuthRequest
+	if err := proto.Unmarshal([]byte(password), &auth); err != nil {
+		return false
+	}
+
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 	if err != nil {
 		return false
 	}
 
 	if len(h.authorizedKeys) == 0 {
-		h.emitClientJoinEvent(ctx, pk)
+		emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
 		return true
 	}
 
 	for _, k := range h.authorizedKeys {
 		if gssh.KeysEqual(k, pk) {
-			h.emitClientJoinEvent(ctx, pk)
+			emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
 			return true
 		}
 	}
 
 	return false
-}
-
-func (h *passwordHandler) emitClientJoinEvent(ctx gssh.Context, pk ssh.PublicKey) {
-	c := api.Client{
-		Id:                   ctx.SessionID(),
-		Addr:                 ctx.RemoteAddr().String(),
-		PublicKeyFingerprint: fingerprintSHA256(pk),
-	}
-	h.eventEmmiter.Emit(upterm.EventClientJoined, c)
 }
 
 type sessionHandler struct {
@@ -178,8 +176,7 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
-	sessionID := sess.Context().Value(gssh.ContextKeySessionID)
-	defer h.eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
+	defer emitClientLeftEvent(sess.Context(), h.eventEmmiter)
 
 	ptyReq, winCh, isPty := sess.Pty()
 	if !isPty {
@@ -294,6 +291,21 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	} else {
 		_ = sess.Exit(0)
 	}
+}
+
+func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth server.AuthRequest, pk ssh.PublicKey) {
+	c := api.Client{
+		Id:                   sessionID,
+		Version:              auth.ClientVersion,
+		Addr:                 auth.RemoteAddr,
+		PublicKeyFingerprint: fingerprintSHA256(pk),
+	}
+	eventEmmiter.Emit(upterm.EventClientJoined, c)
+}
+
+func emitClientLeftEvent(ctx context.Context, eventEmmiter *emitter.Emitter) {
+	sessionID := ctx.Value(gssh.ContextKeySessionID)
+	eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 }
 
 func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *pty, error) {

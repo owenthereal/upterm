@@ -243,7 +243,7 @@ func displaySession(session *models.APIGetSessionResponse) error {
 			header = "Connected Client(s):"
 			isFirst = false
 		}
-		data = append(data, []string{header, clientDesc(c.ID, c.PublicKeyFingerprint)})
+		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
@@ -263,11 +263,8 @@ func displaySession(session *models.APIGetSessionResponse) error {
 	return nil
 }
 
-func firstN(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
+func clientDesc(addr, clientVer, fingerprint string) string {
+	return fmt.Sprintf("%s %s %s", addr, clientVer, fingerprint)
 }
 
 func currentAdminSocketFile() string {

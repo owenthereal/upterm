@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/go-kit/kit/metrics/provider"
+	proto "github.com/golang/protobuf/proto"
 	"github.com/jingweno/upterm/host/api"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -82,16 +83,48 @@ func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {
 }
 
 func (a authPiper) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	pk, _, _, _, err := ssh.ParseAuthorizedKey(password)
+	var auth AuthRequest
+	if err := proto.Unmarshal(password, &auth); err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error authenticating client in password callback: %w", err)
+	}
+
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 	if err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, err
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing authorized key: %w", err)
 	}
 
 	if err := a.validateClientAuthorizedKey(conn, pk); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key: %w", err)
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key in password callback: %w", err)
 	}
 
 	return ssh.AuthPipeTypePassThrough, nil, nil
+}
+
+func (a authPiper) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key in public callback: %w", err)
+	}
+
+	// Can't auth with the public key against session upstream in the Host
+	// because we don't have the Client private key to re-sign the request.
+	// Public key auth is converted to password key auth with public key as
+	// the password so that session upstream in the host can at least validate it.
+	// The password is in the format of authorized key of the public key.
+	auth := &AuthRequest{
+		ClientVersion: string(conn.ClientVersion()),
+		RemoteAddr:    conn.RemoteAddr().String(),
+		AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+	}
+	b, err := proto.Marshal(auth)
+	if err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error authenticating client in public key callback: %w", err)
+	}
+
+	return ssh.AuthPipeTypeMap, ssh.Password(string(b)), nil
+}
+
+func (a authPiper) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	return ssh.AuthPipeTypeNone, nil, nil
 }
 
 func (a authPiper) validateClientAuthorizedKey(conn ssh.ConnMetadata, key ssh.PublicKey) error {
@@ -115,22 +148,4 @@ func (a authPiper) validateClientAuthorizedKey(conn ssh.ConnMetadata, key ssh.Pu
 	}
 
 	return nil
-}
-
-func (a authPiper) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key: %w", err)
-	}
-
-	// Can't auth with the public key against session upstream in the Host
-	// because we don't have the Client private key to re-sign the request.
-	// Public key auth is converted to password key auth with public key as
-	// the password so that session upstream in the host can at least validate it.
-	// The password is in the format of authorized key of the public key.
-	authorizedKey := ssh.MarshalAuthorizedKey(key)
-	return ssh.AuthPipeTypeMap, ssh.Password(string(authorizedKey)), nil
-}
-
-func (a authPiper) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	return ssh.AuthPipeTypeNone, nil, nil
 }

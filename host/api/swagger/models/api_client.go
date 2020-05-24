@@ -23,6 +23,9 @@ type APIClient struct {
 
 	// public key fingerprint
 	PublicKeyFingerprint string `json:"public_key_fingerprint,omitempty"`
+
+	// version
+	Version string `json:"version,omitempty"`
 }
 
 // Validate validates this api client
