@@ -243,7 +243,7 @@ func displaySession(session *models.APIGetSessionResponse) error {
 			header = "Connected Client(s):"
 			isFirst = false
 		}
-		data = append(data, []string{header, fmt.Sprintf("%s %s", firstN(c.ID, 12), c.PublicKeyFingerprint)})
+		data = append(data, []string{header, clientDesc(c.ID, c.PublicKeyFingerprint)})
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
