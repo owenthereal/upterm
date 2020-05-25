@@ -22,11 +22,12 @@ import (
 )
 
 var (
-	flagServer         string
-	flagForceCommand   string
-	flagPrivateKeys    []string
-	flagAuthorizedKeys string
-	flagReadOnly       bool
+	flagServer             string
+	flagForceCommand       string
+	flagPrivateKeys        []string
+	flagKnownHostsFilename string
+	flagAuthorizedKeys     string
+	flagReadOnly           bool
 )
 
 func hostCmd() *cobra.Command {
@@ -55,9 +56,15 @@ func hostCmd() *cobra.Command {
 		RunE:    shareRunE,
 	}
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are shh, ws, or wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", nil, "private key for public key authentication against the upterm server (required).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "private key for public key authentication against the upterm server (required).")
+	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "a file contains the known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
@@ -88,15 +95,11 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	}
 
 	if len(flagPrivateKeys) == 0 {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
+		result = multierror.Append(result, fmt.Errorf("missing flag --private-key"))
+	}
 
-		flagPrivateKeys = defaultPrivateKeys(homeDir)
-		if len(flagPrivateKeys) == 0 {
-			result = multierror.Append(result, fmt.Errorf("missing flag --private-key"))
-		}
+	if flagKnownHostsFilename == "" {
+		result = multierror.Append(result, fmt.Errorf("missing flag --known-hosts"))
 	}
 
 	return result
@@ -138,16 +141,25 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
+
+	hkcb, err := host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename)
+	if err != nil {
+		return err
+	}
+
 	h := &host.Host{
 		Host:                   flagServer,
 		Command:                args,
 		ForceCommand:           forceCommand,
 		Signers:                signers,
+		HostKeyCallback:        hkcb,
 		AuthorizedKeys:         authorizedKeys,
 		KeepAliveDuration:      50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
 		SessionCreatedCallback: displaySessionCallback,
 		ClientJoinedCallback:   clientJoinedCallback,
 		ClientLeftCallback:     clientLeftCallback,
+		Stdin:                  os.Stdin,
+		Stdout:                 os.Stdout,
 		Logger:                 log.New(),
 		ReadOnly:               flagReadOnly,
 	}
@@ -207,4 +219,8 @@ func defaultPrivateKeys(homeDir string) []string {
 	}
 
 	return pks
+}
+
+func defaultKnownHost(homeDir string) string {
+	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }

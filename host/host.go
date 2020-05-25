@@ -1,11 +1,15 @@
 package host
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jingweno/upterm/host/api"
@@ -17,7 +21,110 @@ import (
 	"github.com/olebedev/emitter"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
+	cb, err := knownhosts.New(knownHostsFilename)
+	if err != nil {
+		return nil, err
+	}
+
+	hkcb := hostKeyCallback{
+		stdin:           stdin,
+		stdout:          stdout,
+		file:            knownHostsFilename,
+		HostKeyCallback: cb,
+	}
+
+	return hkcb.checkHostKey, nil
+}
+
+const (
+	errKeyMismatch = `
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the %s key sent by the remote host is
+%s.
+Please contact your system administrator.
+Add correct host key in %s to get rid of this message.
+Offending %s key in %s:%d`
+)
+
+type hostKeyCallback struct {
+	stdin  io.Reader
+	stdout io.Writer
+	file   string
+	ssh.HostKeyCallback
+}
+
+func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
+		kerr, ok := err.(*knownhosts.KeyError)
+		if !ok {
+			return err
+		}
+
+		// If keer.Want is non-empty, there was a mismatch, which can signify a MITM attack
+		if len(kerr.Want) != 0 {
+			kk := kerr.Want[0] // TODO: take care of multiple key mismatches
+			fp := utils.FingerprintSHA256(kk.Key)
+			kt := keyType(kk.Key.Type())
+			return fmt.Errorf(errKeyMismatch, kt, fp, kk.Filename, kt, kk.Filename, kk.Line)
+		}
+
+		return cb.promptForConfirmation(hostname, remote, key)
+
+	}
+
+	return nil
+}
+
+func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	fp := utils.FingerprintSHA256(key)
+	fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
+	fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
+	fmt.Fprintf(cb.stdout, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
+
+	reader := bufio.NewReader(cb.stdin)
+	for {
+		confirm, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+
+		confirm = strings.TrimSpace(confirm)
+
+		if confirm == "yes" || confirm == fp {
+			return cb.appendHostLine(hostname, key)
+		}
+
+		if confirm == "no" {
+			return fmt.Errorf("Host key verification failed.")
+		}
+
+		fmt.Fprintf(cb.stdout, "Please type 'yes', 'no' or the fingerprint: ")
+	}
+}
+
+func (cb hostKeyCallback) appendHostLine(hostname string, key ssh.PublicKey) error {
+	f, err := os.OpenFile(cb.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	line := knownhosts.Line([]string{hostname}, key)
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		return err
+	}
+
+	return nil
+}
 
 type Host struct {
 	Host                   string
@@ -25,6 +132,7 @@ type Host struct {
 	Command                []string
 	ForceCommand           []string
 	Signers                []ssh.Signer
+	HostKeyCallback        ssh.HostKeyCallback
 	AuthorizedKeys         []ssh.PublicKey
 	AdminSocketFile        string
 	SessionCreatedCallback func(*models.APIGetSessionResponse) error
@@ -66,6 +174,7 @@ func (c *Host) Run(ctx context.Context) error {
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
+		HostKeyCallback:   c.HostKeyCallback,
 		AuthorizedKeys:    c.AuthorizedKeys,
 		KeepAliveDuration: c.KeepAliveDuration,
 		Logger:            log.WithField("com", "reverse-tunnel"),
@@ -185,4 +294,8 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	return g.Run()
+}
+
+func keyType(t string) string {
+	return strings.ToUpper(strings.TrimPrefix(t, "ssh-"))
 }

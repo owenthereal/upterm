@@ -290,6 +290,7 @@ func (c *Host) Share(url string) error {
 		ClientLeftCallback:     c.ClientLeftCallback,
 		KeepAliveDuration:      10 * time.Second,
 		Logger:                 logger,
+		HostKeyCallback:        ssh.InsecureIgnoreHostKey(),
 		Stdin:                  stdinr,
 		Stdout:                 stdoutw,
 		ReadOnly:               c.ReadOnly,
