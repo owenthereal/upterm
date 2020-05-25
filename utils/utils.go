@@ -2,10 +2,13 @@ package utils
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dchest/uniuri"
 	"golang.org/x/crypto/ssh"
@@ -76,4 +79,10 @@ func ReadFiles(paths []string) ([][]byte, error) {
 
 func GenerateSessionID() string {
 	return uniuri.NewLen(uniuri.UUIDLen)
+}
+
+func FingerprintSHA256(key ssh.PublicKey) string {
+	hash := sha256.Sum256(key.Marshal())
+	b64hash := base64.StdEncoding.EncodeToString(hash[:])
+	return fmt.Sprintf("SHA256:%s", strings.TrimRight(b64hash, "="))
 }
