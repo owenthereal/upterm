@@ -2,14 +2,11 @@ package internal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
@@ -17,6 +14,7 @@ import (
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
@@ -298,7 +296,7 @@ func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth s
 		Id:                   sessionID,
 		Version:              auth.ClientVersion,
 		Addr:                 auth.RemoteAddr,
-		PublicKeyFingerprint: fingerprintSHA256(pk),
+		PublicKeyFingerprint: utils.FingerprintSHA256(pk),
 	}
 	eventEmmiter.Emit(upterm.EventClientJoined, c)
 }
@@ -314,10 +312,4 @@ func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *p
 	pty, err := startPty(cmd)
 
 	return cmd, pty, err
-}
-
-func fingerprintSHA256(key ssh.PublicKey) string {
-	hash := sha256.Sum256(key.Marshal())
-	b64hash := base64.StdEncoding.EncodeToString(hash[:])
-	return fmt.Sprintf("SHA256:%s", strings.TrimRight(b64hash, "="))
 }
