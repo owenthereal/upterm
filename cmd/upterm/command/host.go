@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/eiannone/keyboard"
+	"github.com/gen2brain/beeep"
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
 	"github.com/jingweno/upterm/host"
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -144,11 +146,25 @@ func shareRunE(c *cobra.Command, args []string) error {
 		AuthorizedKeys:         authorizedKeys,
 		KeepAliveDuration:      50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
 		SessionCreatedCallback: displaySessionCallback,
+		ClientJoinedCallback:   clientJoinedCallback,
+		ClientLeftCallback:     clientLeftCallback,
 		Logger:                 log.New(),
 		ReadOnly:               flagReadOnly,
 	}
 
 	return h.Run(context.Background())
+}
+
+func clientJoinedCallback(c api.Client) {
+	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), "")
+}
+
+func clientLeftCallback(c api.Client) {
+	_ = beeep.Notify("Upterm Client Left", notifyBody(c), "")
+}
+
+func notifyBody(c api.Client) string {
+	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
 func displaySessionCallback(session *models.APIGetSessionResponse) error {

@@ -1,0 +1,18 @@
+box: golang
+build:
+  steps:
+    - setup-go-workspace
+    - wercker/golint
+    - script:
+      name: go get
+      code: |
+        cd $WERCKER_SOURCE_DIR
+        go version
+        go get golang.org/x/tools/cmd/cover
+        go get github.com/mattn/goveralls
+    - script:
+        name: go test
+        code: |
+          go test . -v -race
+          go test . -v -covermode=count -coverprofile=profile.cov
+          goveralls -coverprofile=profile.cov -service=wercker -repotoken=$COVERALLS_TOKEN

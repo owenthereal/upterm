@@ -6,6 +6,9 @@ package models
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"strconv"
+
+	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
 )
@@ -17,6 +20,9 @@ type APIGetSessionResponse struct {
 
 	// command
 	Command []string `json:"command"`
+
+	// connected clients
+	ConnectedClients []*APIClient `json:"connected_clients"`
 
 	// force command
 	ForceCommand []string `json:"force_command"`
@@ -33,6 +39,40 @@ type APIGetSessionResponse struct {
 
 // Validate validates this api get session response
 func (m *APIGetSessionResponse) Validate(formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.validateConnectedClients(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
+	return nil
+}
+
+func (m *APIGetSessionResponse) validateConnectedClients(formats strfmt.Registry) error {
+
+	if swag.IsZero(m.ConnectedClients) { // not required
+		return nil
+	}
+
+	for i := 0; i < len(m.ConnectedClients); i++ {
+		if swag.IsZero(m.ConnectedClients[i]) { // not required
+			continue
+		}
+
+		if m.ConnectedClients[i] != nil {
+			if err := m.ConnectedClients[i].Validate(formats); err != nil {
+				if ve, ok := err.(*errors.Validation); ok {
+					return ve.ValidateName("connected_clients" + "." + strconv.Itoa(i))
+				}
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 

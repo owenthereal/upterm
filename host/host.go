@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/oklog/run"
+	"github.com/olebedev/emitter"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -26,6 +28,8 @@ type Host struct {
 	AuthorizedKeys         []ssh.PublicKey
 	AdminSocketFile        string
 	SessionCreatedCallback func(*models.APIGetSessionResponse) error
+	ClientJoinedCallback   func(api.Client)
+	ClientLeftCallback     func(api.Client)
 	Logger                 log.FieldLogger
 	Stdin                  *os.File
 	Stdout                 *os.File
@@ -96,17 +100,66 @@ func (c *Host) Run(ctx context.Context) error {
 		}
 	}
 
+	clientRepo := internal.NewClientRepo()
+	eventEmitter := emitter.New(1)
+
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := adminServer{
-			Session: session,
+		s := internal.AdminServer{
+			Session:    session,
+			ClientRepo: clientRepo,
 		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)
 		}, func(err error) {
 			_ = s.Shutdown(ctx)
 			cancel()
+		})
+	}
+	{
+		g.Add(func() error {
+			for evt := range eventEmitter.On(upterm.EventClientJoined) {
+				args := evt.Args
+				if len(args) == 0 {
+					continue
+				}
+
+				client, ok := args[0].(api.Client)
+				if ok {
+					_ = clientRepo.Add(client)
+					if c.ClientJoinedCallback != nil {
+						c.ClientJoinedCallback(client)
+					}
+				}
+			}
+
+			return nil
+		}, func(err error) {
+			eventEmitter.Off("*")
+		})
+	}
+	{
+		g.Add(func() error {
+			for evt := range eventEmitter.On(upterm.EventClientLeft) {
+				args := evt.Args
+				if len(args) == 0 {
+					continue
+				}
+
+				cid, ok := args[0].(string)
+				if ok {
+					client := clientRepo.Get(cid)
+					clientRepo.Delete(cid)
+					if c.ClientLeftCallback != nil && client != nil {
+						c.ClientLeftCallback(*client)
+					}
+				}
+			}
+
+			return nil
+		}, func(err error) {
+			eventEmitter.Off("*")
 		})
 	}
 	{
@@ -117,6 +170,7 @@ func (c *Host) Run(ctx context.Context) error {
 			ForceCommand:      c.ForceCommand,
 			Signers:           c.Signers,
 			AuthorizedKeys:    c.AuthorizedKeys,
+			EventEmitter:      eventEmitter,
 			KeepAliveDuration: c.KeepAliveDuration,
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,

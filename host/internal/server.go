@@ -10,10 +10,15 @@ import (
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
+	"github.com/golang/protobuf/proto"
+	"github.com/jingweno/upterm/host/api"
+	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/upterm"
+	"github.com/jingweno/upterm/utils"
 
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
+	"github.com/olebedev/emitter"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -25,6 +30,7 @@ type Server struct {
 	ForceCommand      []string
 	Signers           []ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
+	EventEmitter      *emitter.Emitter
 	KeepAliveDuration time.Duration
 	Stdin             *os.File
 	Stdout            *os.File
@@ -77,6 +83,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			forceCommand:      s.ForceCommand,
 			ptmx:              ptmx,
 			em:                em,
+			eventEmmiter:      s.EventEmitter,
 			writers:           writers,
 			keepAliveDuration: s.KeepAliveDuration,
 			ctx:               ctx,
@@ -85,6 +92,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 		ph := passwordHandler{
 			authorizedKeys: s.AuthorizedKeys,
+			eventEmmiter:   s.EventEmitter,
 		}
 
 		var ss []gssh.Signer
@@ -124,20 +132,28 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 
 type passwordHandler struct {
 	authorizedKeys []ssh.PublicKey
+	eventEmmiter   *emitter.Emitter
 }
 
 func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool {
-	if len(h.authorizedKeys) == 0 {
-		return true
+	var auth server.AuthRequest
+	if err := proto.Unmarshal([]byte(password), &auth); err != nil {
+		return false
 	}
 
-	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 	if err != nil {
 		return false
 	}
 
+	if len(h.authorizedKeys) == 0 {
+		emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
+		return true
+	}
+
 	for _, k := range h.authorizedKeys {
 		if gssh.KeysEqual(k, pk) {
+			emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
 			return true
 		}
 	}
@@ -149,6 +165,7 @@ type sessionHandler struct {
 	forceCommand      []string
 	ptmx              *pty
 	em                *eventManager
+	eventEmmiter      *emitter.Emitter
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
@@ -157,6 +174,8 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
+	defer emitClientLeftEvent(sess.Context(), h.eventEmmiter)
+
 	ptyReq, winCh, isPty := sess.Pty()
 	if !isPty {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
@@ -270,6 +289,21 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	} else {
 		_ = sess.Exit(0)
 	}
+}
+
+func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth server.AuthRequest, pk ssh.PublicKey) {
+	c := api.Client{
+		Id:                   sessionID,
+		Version:              auth.ClientVersion,
+		Addr:                 auth.RemoteAddr,
+		PublicKeyFingerprint: utils.FingerprintSHA256(pk),
+	}
+	eventEmmiter.Emit(upterm.EventClientJoined, c)
+}
+
+func emitClientLeftEvent(ctx context.Context, eventEmmiter *emitter.Emitter) {
+	sessionID := ctx.Value(gssh.ContextKeySessionID)
+	eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 }
 
 func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *pty, error) {
