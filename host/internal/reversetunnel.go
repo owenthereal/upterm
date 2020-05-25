@@ -29,6 +29,7 @@ type ReverseTunnel struct {
 	Signers           []ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
+	HostKeyCallback   ssh.HostKeyCallback
 	Logger            log.FieldLogger
 
 	ln net.Listener
@@ -72,10 +73,18 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	config := &ssh.ClientConfig{
-		User:            encodedID,
-		Auth:            auths,
-		ClientVersion:   upterm.HostSSHClientVersion,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:          encodedID,
+		Auth:          auths,
+		ClientVersion: upterm.HostSSHClientVersion,
+		// Enforce a restricted set of algorithms for security
+		// TODO: make this configurable if necessary
+		HostKeyAlgorithms: []string{
+			ssh.CertAlgoRSAv01,
+			ssh.CertAlgoED25519v01,
+			ssh.KeyAlgoED25519,
+			ssh.KeyAlgoRSA,
+		},
+		HostKeyCallback: c.HostKeyCallback,
 	}
 
 	if isWSScheme(c.Host.Scheme) {
