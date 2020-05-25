@@ -95,6 +95,7 @@ func Test_ftest(t *testing.T) {
 		testClientAttachReadOnly,
 		testHostFailToShareWithoutPrivateKey,
 		testHostSessionCreatedCallback,
+		testHostClientCallback,
 	}
 
 	for _, test := range testCases {
@@ -216,6 +217,8 @@ type Host struct {
 	PrivateKeys              []string
 	AdminSocketFile          string
 	SessionCreatedCallback   func(*models.APIGetSessionResponse) error
+	ClientJoinedCallback     func(api.Client)
+	ClientLeftCallback       func(api.Client)
 	PermittedClientPublicKey string
 	ReadOnly                 bool
 	inputCh                  chan string
@@ -283,6 +286,8 @@ func (c *Host) Share(url string) error {
 		AuthorizedKeys:         authorizedKeys,
 		AdminSocketFile:        c.AdminSocketFile,
 		SessionCreatedCallback: c.SessionCreatedCallback,
+		ClientJoinedCallback:   c.ClientJoinedCallback,
+		ClientLeftCallback:     c.ClientLeftCallback,
 		KeepAliveDuration:      10 * time.Second,
 		Logger:                 logger,
 		Stdin:                  stdinr,
