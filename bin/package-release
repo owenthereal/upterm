@@ -34,7 +34,7 @@ compress() {
   ls -all
 }
 
-OSARCH="darwin/amd64 linux/amd64 linux/386 linux/arm freebsd/amd64"
+OSARCH="darwin/amd64 linux/amd64 linux/386 linux/arm"
 
 echo "Packaging upterm $(version)"
 echo
