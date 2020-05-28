@@ -88,8 +88,14 @@ func (s *sshd) Serve(ln net.Listener) error {
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
-			_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(password))
+			var auth AuthRequest
+			if err := proto.Unmarshal([]byte(password), &auth); err != nil {
+				return false
+			}
+
+			_, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 			// TODO: validate publickey
+
 			return err == nil
 		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
