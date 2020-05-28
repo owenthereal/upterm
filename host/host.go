@@ -25,6 +25,10 @@ import (
 )
 
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
+	if err := createFileIfNotExist(knownHostsFilename); err != nil {
+		return nil, err
+	}
+
 	cb, err := knownhosts.New(knownHostsFilename)
 	if err != nil {
 		return nil, err
@@ -298,4 +302,18 @@ func (c *Host) Run(ctx context.Context) error {
 
 func keyType(t string) string {
 	return strings.ToUpper(strings.TrimPrefix(t, "ssh-"))
+}
+
+func createFileIfNotExist(file string) error {
+	_, err := os.Stat(file)
+	if os.IsNotExist(err) {
+		file, err := os.Create(file)
+		if err != nil {
+			return err
+		}
+
+		defer file.Close()
+	}
+
+	return nil
 }
