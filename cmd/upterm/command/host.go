@@ -82,14 +82,26 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 			result = multierror.Append(result, fmt.Errorf("error pasring server URL: %w", err))
 		}
 
-		if u != nil && u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
-			result = multierror.Append(result, fmt.Errorf("unsupport server protocol %s", u.Scheme))
-		}
+		if u != nil {
+			if u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
+				result = multierror.Append(result, fmt.Errorf("unsupport server protocol %s", u.Scheme))
+			}
 
-		if u != nil && u.Scheme == "ssh" {
-			_, _, err := net.SplitHostPort(u.Host)
-			if err != nil {
-				result = multierror.Append(result, err)
+			if u.Scheme == "ssh" {
+				_, _, err := net.SplitHostPort(u.Host)
+				if err != nil {
+					result = multierror.Append(result, err)
+				}
+			}
+
+			// set default ports for ws or wss
+			if u.Scheme == "ws" && u.Port() == "" {
+				u.Host = u.Host + ":80"
+				flagServer = u.String()
+			}
+			if u.Scheme == "wss" && u.Port() == "" {
+				u.Host = u.Host + ":443"
+				flagServer = u.String()
 			}
 		}
 	}
