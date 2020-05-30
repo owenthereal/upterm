@@ -1,0 +1,9 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - go get -t ./...
+  build:
+    commands:
+      - go test -cover -v ./...
