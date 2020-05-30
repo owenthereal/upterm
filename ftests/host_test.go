@@ -1,6 +1,7 @@
 package ftests
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,10 +55,13 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	session := resp.GetPayload()
 	checkSessionPayload(t, session, hostURL, nodeAddr)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, hostURL); err != nil {
+	if err := c.JoinWithContext(ctx, session, hostURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,6 +91,7 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	}
 
 	// client leaves
+	cancel()
 	c.Close()
 
 	select {
