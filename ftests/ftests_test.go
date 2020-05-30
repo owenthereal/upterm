@@ -372,7 +372,7 @@ func (c *Client) Close() {
 	c.sshClient.Close()
 }
 
-func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
+func (c *Client) JoinWithContext(ctx context.Context, session *models.APIGetSessionResponse, hostURL string) error {
 	c.init()
 
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
@@ -432,7 +432,7 @@ func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) err
 	}
 
 	var g run.Group
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	{
 		// output
 		g.Add(func() error {
@@ -479,6 +479,10 @@ func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) err
 	}()
 
 	return nil
+}
+
+func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
+	return c.JoinWithContext(context.Background(), session, hostURL)
 }
 
 func scanner(ch chan string) *bufio.Scanner {
