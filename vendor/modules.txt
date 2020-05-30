@@ -11,10 +11,21 @@ github.com/VividCortex/gohistogram
 # github.com/anmitsu/go-shlex v0.0.0-20161002113705-648efa622239
 ## explicit
 github.com/anmitsu/go-shlex
+# github.com/apex/log v1.3.0
+## explicit
+github.com/apex/log
 # github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a
 github.com/asaskevich/govalidator
 # github.com/beorn7/perks v1.0.1
 github.com/beorn7/perks/quantile
+# github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8
+## explicit
+# github.com/buger/goterm v0.0.0-20200322175922-2f3e71b85129
+## explicit
+github.com/buger/goterm
+# github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c
+## explicit
+github.com/c4milo/unpackit
 # github.com/cespare/xxhash/v2 v2.1.1
 github.com/cespare/xxhash/v2
 # github.com/cpuguy83/go-md2man v1.0.10
@@ -28,6 +39,14 @@ github.com/dchest/bcrypt_pbkdf
 # github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 ## explicit
 github.com/dchest/uniuri
+# github.com/dsnet/compress v0.0.1
+## explicit
+github.com/dsnet/compress
+github.com/dsnet/compress/bzip2
+github.com/dsnet/compress/bzip2/internal/sais
+github.com/dsnet/compress/internal
+github.com/dsnet/compress/internal/errors
+github.com/dsnet/compress/internal/prefix
 # github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
 ## explicit
 github.com/eiannone/keyboard
@@ -116,6 +135,12 @@ github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
+# github.com/google/go-github v17.0.0+incompatible
+## explicit
+github.com/google/go-github/github
+# github.com/google/go-querystring v1.0.0
+## explicit
+github.com/google/go-querystring/query
 # github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 ## explicit
 github.com/google/shlex
@@ -126,6 +151,10 @@ github.com/gopherjs/gopherwasm/js
 # github.com/gorilla/websocket v1.4.1
 ## explicit
 github.com/gorilla/websocket
+# github.com/gosuri/uilive v0.0.4
+## explicit
+# github.com/gosuri/uiprogress v0.0.1
+## explicit
 # github.com/grpc-ecosystem/grpc-gateway v1.12.1
 ## explicit
 github.com/grpc-ecosystem/grpc-gateway/internal
@@ -139,6 +168,8 @@ github.com/hashicorp/go-multierror
 # github.com/heroku/rollrus v0.1.1
 ## explicit
 github.com/heroku/rollrus
+# github.com/hooklift/assert v0.0.0-20170704181755-9d1defd6d214
+## explicit
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
 # github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d
@@ -151,6 +182,13 @@ github.com/influxdata/influxdb1-client/v2
 github.com/jpillora/chisel/share
 # github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9
 github.com/jpillora/sizestr
+# github.com/klauspost/compress v1.4.1
+github.com/klauspost/compress/flate
+# github.com/klauspost/cpuid v1.2.0
+github.com/klauspost/cpuid
+# github.com/klauspost/pgzip v1.2.4
+## explicit
+github.com/klauspost/pgzip
 # github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515
@@ -159,6 +197,8 @@ github.com/kr/logfmt
 github.com/mailru/easyjson/buffer
 github.com/mailru/easyjson/jlexer
 github.com/mailru/easyjson/jwriter
+# github.com/mattn/go-isatty v0.0.8
+github.com/mattn/go-isatty
 # github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
 # github.com/matttproud/golang_protobuf_extensions v1.0.1
@@ -179,6 +219,8 @@ github.com/olekukonko/tablewriter
 # github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
 ## explicit
 github.com/pborman/ansi
+# github.com/pkg/errors v0.8.2-0.20190227000051-27936f6d90f9
+github.com/pkg/errors
 # github.com/prometheus/client_golang v1.3.0
 ## explicit
 github.com/prometheus/client_golang/prometheus
@@ -214,6 +256,24 @@ github.com/spf13/cobra/doc
 github.com/spf13/pflag
 # github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af
 github.com/tadvi/systray
+# github.com/tj/assert v0.0.0-20190920132354-ee03d75cd160
+## explicit
+# github.com/tj/go v1.8.6
+## explicit
+github.com/tj/go/term
+# github.com/tj/go-progress v0.0.0-20200222111227-c485e791f8d6
+## explicit
+github.com/tj/go-progress
+# github.com/tj/go-update v2.2.4+incompatible
+## explicit
+github.com/tj/go-update
+github.com/tj/go-update/stores/github
+# github.com/ulikunitz/xz v0.5.7
+## explicit
+github.com/ulikunitz/xz
+github.com/ulikunitz/xz/internal/hash
+github.com/ulikunitz/xz/internal/xlog
+github.com/ulikunitz/xz/lzma
 # go.mongodb.org/mongo-driver v1.1.1
 go.mongodb.org/mongo-driver/bson
 go.mongodb.org/mongo-driver/bson/bsoncodec

@@ -40,7 +40,7 @@ echo "Packaging upterm $(version)"
 echo
 
 rm -rf release
-gox -osarch="$OSARCH" -output="release/{{.OS}}-{{.Arch}}-$(version)/{{.Dir}}" ./cmd/upterm/...
+gox -osarch="$OSARCH" -output="release/{{.OS}}-{{.Arch}}-v$(version)/{{.Dir}}" ./cmd/upterm/...
 echo
 
 compress
