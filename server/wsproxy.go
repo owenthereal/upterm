@@ -38,7 +38,7 @@ func webHandler(h http.Handler) http.Handler {
 2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/jingweno/upterm#quick-start.
 3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
 `
-		fmt.Fprint(w, fmt.Sprintf(data, r.Host, r.Host, r.Host))
+		fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
 	})
 }
 
