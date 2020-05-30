@@ -11,6 +11,7 @@ import (
 
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
+	"github.com/olebedev/emitter"
 	crytoterm "golang.org/x/crypto/ssh/terminal"
 )
 
@@ -20,17 +21,17 @@ func newCommand(
 	env []string,
 	stdin *os.File,
 	stdout *os.File,
-	em *eventManager,
+	eventEmitter *emitter.Emitter,
 	writers *uio.MultiWriter,
 ) *command {
 	return &command{
-		name:    name,
-		args:    args,
-		env:     env,
-		stdin:   stdin,
-		stdout:  stdout,
-		em:      em,
-		writers: writers,
+		name:         name,
+		args:         args,
+		env:          env,
+		stdin:        stdin,
+		stdout:       stdout,
+		eventEmitter: eventEmitter,
+		writers:      writers,
 	}
 }
 
@@ -45,8 +46,9 @@ type command struct {
 	stdin  *os.File
 	stdout *os.File
 
-	em      *eventManager
 	writers *uio.MultiWriter
+
+	eventEmitter *emitter.Emitter
 
 	ctx context.Context
 }
@@ -83,8 +85,8 @@ func (c *command) Run() error {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGWINCH)
 		ch <- syscall.SIGWINCH // Initial resize.
-		te := c.em.TerminalEvent("local", c.ptmx)
 		ctx, cancel := context.WithCancel(c.ctx)
+		tee := terminalEventEmitter{c.eventEmitter}
 		g.Add(func() error {
 			for {
 				select {
@@ -96,12 +98,11 @@ func (c *command) Run() error {
 					if err != nil {
 						return err
 					}
-
-					te.TerminalWindowChanged(w, h)
+					tee.TerminalWindowChanged("local", c.ptmx, w, h)
 				}
 			}
 		}, func(err error) {
-			te.TerminalDetached()
+			tee.TerminalDetached("local", c.ptmx)
 			cancel()
 		})
 	}

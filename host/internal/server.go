@@ -19,7 +19,6 @@ import (
 	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
-	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -41,10 +40,6 @@ type Server struct {
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	writers := uio.NewMultiWriter()
 
-	emCtx, emCancel := context.WithCancel(ctx)
-	defer emCancel()
-	em := newEventManager(emCtx, s.Logger.WithField("com", "event-manager"))
-
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
 	cmd := newCommand(
@@ -53,7 +48,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.CommandEnv,
 		s.Stdin,
 		s.Stdout,
-		em,
+		s.EventEmitter,
 		writers,
 	)
 	ptmx, err := cmd.Start(cmdCtx)
@@ -63,11 +58,12 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 
 	var g run.Group
 	{
+		ctx, cancel := context.WithCancel(ctx)
+		teh := terminalEventHandler{s.EventEmitter}
 		g.Add(func() error {
-			em.HandleEvent()
-			return nil
+			return teh.Handle(ctx)
 		}, func(err error) {
-			emCancel()
+			cancel()
 		})
 	}
 	{
@@ -82,7 +78,6 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		sh := sessionHandler{
 			forceCommand:      s.ForceCommand,
 			ptmx:              ptmx,
-			em:                em,
 			eventEmmiter:      s.EventEmitter,
 			writers:           writers,
 			keepAliveDuration: s.KeepAliveDuration,
@@ -164,7 +159,6 @@ func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool
 type sessionHandler struct {
 	forceCommand      []string
 	ptmx              *pty
-	em                *eventManager
 	eventEmmiter      *emitter.Emitter
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
@@ -174,7 +168,8 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
-	defer emitClientLeftEvent(sess.Context(), h.eventEmmiter)
+	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
+	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 
 	ptyReq, winCh, isPty := sess.Pty()
 	if !isPty {
@@ -246,21 +241,22 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		_ = h.writers.Append(sess)
 		defer h.writers.Remove(sess)
 	}
+
 	{
 		// pty
 		ctx, cancel := context.WithCancel(h.ctx)
-		tm := h.em.TerminalEvent(xid.New().String(), ptmx)
+		tee := terminalEventEmitter{h.eventEmmiter}
 		g.Add(func() error {
 			for {
 				select {
 				case win := <-winCh:
-					tm.TerminalWindowChanged(win.Width, win.Height)
+					tee.TerminalWindowChanged(sessionID, ptmx, win.Width, win.Height)
 				case <-ctx.Done():
 					return ctx.Err()
 				}
 			}
 		}, func(err error) {
-			tm.TerminalDetached()
+			tee.TerminalDetached(sessionID, ptmx)
 			cancel()
 		})
 	}
@@ -301,8 +297,7 @@ func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth s
 	eventEmmiter.Emit(upterm.EventClientJoined, c)
 }
 
-func emitClientLeftEvent(ctx context.Context, eventEmmiter *emitter.Emitter) {
-	sessionID := ctx.Value(gssh.ContextKeySessionID)
+func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 	eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 }
 

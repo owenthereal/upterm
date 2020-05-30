@@ -249,7 +249,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 			return nil
 		}, func(err error) {
-			eventEmitter.Off("*")
+			eventEmitter.Off(upterm.EventClientJoined)
 		})
 	}
 	{
@@ -272,7 +272,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 			return nil
 		}, func(err error) {
-			eventEmitter.Off("*")
+			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}
 	{

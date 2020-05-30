@@ -2,23 +2,13 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"io"
 
+	"github.com/jingweno/upterm/upterm"
+	"github.com/olebedev/emitter"
 	log "github.com/sirupsen/logrus"
 )
-
-const (
-	eventTerminalAttached eventType = iota
-	eventTerminalDetached
-	eventTerminalWindowChanged
-)
-
-type eventType int
-
-type event struct {
-	Type     eventType
-	Terminal terminal
-}
 
 type terminal struct {
 	ID     string
@@ -31,124 +21,107 @@ type window struct {
 	Height int
 }
 
-func newEventManager(ctx context.Context, logger log.FieldLogger) *eventManager {
-	return &eventManager{
-		tmCh:   make(chan event),
-		ctx:    ctx,
-		logger: logger,
+type terminalEventEmitter struct {
+	eventEmitter *emitter.Emitter
+}
+
+func (t terminalEventEmitter) TerminalWindowChanged(id string, pty *pty, w, h int) {
+	tt := terminal{
+		ID:  id,
+		Pty: pty,
+		Window: window{
+			Width:  w,
+			Height: h,
+		},
 	}
+	t.eventEmitter.Emit(upterm.EventTerminalWindowChanged, tt)
 }
 
-type eventManager struct {
-	tmCh   chan event
-	ctx    context.Context
-	logger log.FieldLogger
+func (t terminalEventEmitter) TerminalDetached(id string, pty *pty) {
+	tt := terminal{
+		ID:  id,
+		Pty: pty,
+	}
+	t.eventEmitter.Emit(upterm.EventTerminalDetached, tt)
 }
 
-func (em *eventManager) HandleEvent() {
+type terminalEventHandler struct {
+	eventEmitter *emitter.Emitter
+}
+
+func (t terminalEventHandler) Handle(ctx context.Context) error {
+	winCh := t.eventEmitter.On(upterm.EventTerminalWindowChanged, emitter.Sync, emitter.Skip)
+	dtCh := t.eventEmitter.On(upterm.EventTerminalDetached, emitter.Sync, emitter.Skip)
+
+	defer func() {
+		t.eventEmitter.Off(upterm.EventTerminalWindowChanged, winCh)
+		t.eventEmitter.Off(upterm.EventTerminalDetached, dtCh)
+	}()
+
 	m := make(map[io.ReadWriteCloser]map[string]terminal)
 	for {
 		select {
-		case <-em.ctx.Done():
-			close(em.tmCh)
-			return
-		case evt := <-em.tmCh:
-			switch evt.Type {
-			case eventTerminalAttached, eventTerminalWindowChanged:
-				pty := evt.Terminal.Pty
-				ts, ok := m[pty]
-				if !ok {
-					ts = make(map[string]terminal)
-					m[pty] = ts
-				}
-				ts[evt.Terminal.ID] = evt.Terminal
-				if err := resizeWindow(evt.Terminal.Pty, ts); err != nil {
-					log.WithError(err).Error("error resizing window")
-				}
-			case eventTerminalDetached:
-				pty := evt.Terminal.Pty
-				ts, ok := m[pty]
-				if ok {
-					delete(ts, evt.Terminal.ID)
-				}
-
-				if len(ts) == 0 {
-					delete(m, pty)
-				}
+		case evt := <-winCh:
+			if err := t.handleWindowChanged(evt, m); err != nil {
+				log.WithError(err).Error("error handling window changed")
 			}
+		case evt := <-dtCh:
+			if err := t.handleTerminalDetached(evt, m); err != nil {
+				log.WithError(err).Error("error handling terminal detached")
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
 
-func (em *eventManager) TerminalEvent(id string, pty *pty) *terminalEventManager {
-	return &terminalEventManager{
-		id:  id,
-		pty: pty,
-		ch:  em.tmCh,
-		ctx: em.ctx,
-	}
-}
-
-type terminalEventManager struct {
-	id  string
-	pty *pty
-	ch  chan event
-	ctx context.Context
-}
-
-func (em *terminalEventManager) send(evt event) {
-	// exit early
-	select {
-	case <-em.ctx.Done():
-		return
-	default:
+func (t terminalEventHandler) handleWindowChanged(evt emitter.Event, m map[io.ReadWriteCloser]map[string]terminal) error {
+	args := evt.Args
+	if len(args) == 0 {
+		return fmt.Errorf("expect terminal window change event to have at least one argument")
 	}
 
-	select {
-	case <-em.ctx.Done():
-		return
-	case em.ch <- evt:
-	default: // if channel is closed
-		return
+	tt, ok := args[0].(terminal)
+	if !ok {
+		return fmt.Errorf("expect terminal window change event to receive a terminal")
 	}
+
+	pty := tt.Pty
+	ts, ok := m[pty]
+	if !ok {
+		ts = make(map[string]terminal)
+		m[pty] = ts
+	}
+	ts[tt.ID] = tt
+	if err := resizeWindow(pty, ts); err != nil {
+		return fmt.Errorf("error resizing window: %w", err)
+	}
+
+	return nil
 }
 
-func (em *terminalEventManager) TerminalAttached(width, height int) {
-	em.send(event{
-		Type: eventTerminalAttached,
-		Terminal: terminal{
-			ID:  em.id,
-			Pty: em.pty,
-			Window: window{
-				Width:  width,
-				Height: height,
-			},
-		},
-	})
-}
+func (t terminalEventHandler) handleTerminalDetached(evt emitter.Event, m map[io.ReadWriteCloser]map[string]terminal) error {
+	args := evt.Args
+	if len(args) == 0 {
+		return fmt.Errorf("expect terminal window change event to have at least one argument")
+	}
 
-func (em *terminalEventManager) TerminalDetached() {
-	em.send(event{
-		Type: eventTerminalDetached,
-		Terminal: terminal{
-			ID:  em.id,
-			Pty: em.pty,
-		},
-	})
-}
+	tt, ok := args[0].(terminal)
+	if !ok {
+		return fmt.Errorf("expect terminal window change event to receive a terminal")
+	}
 
-func (em *terminalEventManager) TerminalWindowChanged(width, height int) {
-	em.send(event{
-		Type: eventTerminalWindowChanged,
-		Terminal: terminal{
-			ID:  em.id,
-			Pty: em.pty,
-			Window: window{
-				Width:  width,
-				Height: height,
-			},
-		},
-	})
+	pty := tt.Pty
+	ts, ok := m[pty]
+	if ok {
+		delete(ts, tt.ID)
+	}
+
+	if len(ts) == 0 {
+		delete(m, pty)
+	}
+
+	return nil
 }
 
 func resizeWindow(ptmx *pty, ts map[string]terminal) error {
