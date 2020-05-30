@@ -38,6 +38,7 @@ jobs:
       run: make test
       env:
         BASH_SILENCE_DEPRECATION_WARNING: 1 # See https://www.loekvandenouweland.com/content/the-default-interactive-shell-is-now-zsh.html
+        MUTE_FLAKY_TESTS: 1
   vet:
     name: Vet
     runs-on: ubuntu-latest
