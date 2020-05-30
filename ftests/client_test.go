@@ -347,13 +347,7 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 	// \n
 	// === Attached to read-only session ===
 	// \n
-	if want, got := "", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
 	if want, got := "=== Attached to read-only session ===", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "", scan(remoteScanner); want != got {
 		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
 	}
 

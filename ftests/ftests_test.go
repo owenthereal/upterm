@@ -497,7 +497,12 @@ func scanner(ch chan string) *bufio.Scanner {
 
 func scan(s *bufio.Scanner) string {
 	for s.Scan() {
-		return strings.TrimSpace(s.Text())
+		text := strings.TrimSpace(s.Text())
+		if text == "" {
+			continue
+		}
+
+		return text
 	}
 
 	return s.Err().Error()
