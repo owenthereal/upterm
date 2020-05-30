@@ -23,9 +23,11 @@ import (
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
+	uio "github.com/jingweno/upterm/io"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
 	"github.com/jingweno/upterm/ws"
+	"github.com/oklog/run"
 	"github.com/pborman/ansi"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -370,7 +372,7 @@ func (c *Client) Close() {
 	c.sshClient.Close()
 }
 
-func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
+func (c *Client) JoinWithContext(ctx context.Context, session *models.APIGetSessionResponse, hostURL string) error {
 	c.init()
 
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
@@ -429,38 +431,58 @@ func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) err
 		return err
 	}
 
-	var remoteWg sync.WaitGroup
-	remoteWg.Add(2)
+	var g run.Group
+	ctx, cancel := context.WithCancel(ctx)
+	{
+		// output
+		g.Add(func() error {
+			w := writeFunc(func(pp []byte) (int, error) {
+				b, err := ansi.Strip(pp)
+				if err != nil {
+					return 0, err
+				}
+				c.outputCh <- string(b)
+				return len(pp), nil
+			})
+			_, err := io.Copy(w, uio.NewContextReader(ctx, c.sshStdout))
 
-	// output
-	go func() {
-		remoteWg.Done()
-		w := writeFunc(func(pp []byte) (int, error) {
-			b, err := ansi.Strip(pp)
-			if err != nil {
-				return 0, err
-			}
-			c.outputCh <- string(b)
-			return len(pp), nil
+			return err
+		}, func(err error) {
+			cancel()
 		})
-		if _, err := io.Copy(w, c.sshStdout); err != nil {
-			log.WithError(err).Error("error copying from stdout")
-		}
-	}()
 
-	// input
-	go func() {
-		remoteWg.Done()
-		for s := range c.inputCh {
-			if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
-				log.WithError(err).Error("error copying to stdin")
+	}
+	{
+		// input
+		g.Add(func() error {
+			for {
+				select {
+				case s := <-c.inputCh:
+					if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
+						return err
+					}
+
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
+		}, func(err error) {
+			cancel()
+		})
+	}
+
+	go func() {
+		if err := g.Run(); err != nil {
+			log.WithError(err).Error("error joining host")
+
 		}
 	}()
-
-	remoteWg.Wait()
 
 	return nil
+}
+
+func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
+	return c.JoinWithContext(context.Background(), session, hostURL)
 }
 
 func scanner(ch chan string) *bufio.Scanner {
@@ -479,7 +501,12 @@ func scanner(ch chan string) *bufio.Scanner {
 
 func scan(s *bufio.Scanner) string {
 	for s.Scan() {
-		return strings.TrimSpace(s.Text())
+		text := strings.TrimSpace(s.Text())
+		if text == "" {
+			continue
+		}
+
+		return text
 	}
 
 	return s.Err().Error()

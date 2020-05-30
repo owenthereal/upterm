@@ -18,6 +18,8 @@ const (
 	// misc
 	OpenSSHKeepAliveRequestType = "keepalive@openssh.com"
 
-	EventClientJoined = "client-joined"
-	EventClientLeft   = "client-left"
+	EventClientJoined          = "client-joined"
+	EventClientLeft            = "client-left"
+	EventTerminalWindowChanged = "terminal-window-changed"
+	EventTerminalDetached      = "terminal-detached"
 )
