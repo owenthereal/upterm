@@ -422,6 +422,29 @@ _upterm_session()
     noun_aliases=()
 }
 
+_upterm_upgrade()
+{
+    last_command="upterm_upgrade"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_version()
 {
     last_command="upterm_version"
@@ -459,6 +482,7 @@ _upterm_root_command()
         command_aliases+=("se")
         aliashash["se"]="session"
     fi
+    commands+=("upgrade")
     commands+=("version")
 
     flags=()
