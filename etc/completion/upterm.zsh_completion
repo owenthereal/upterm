@@ -16,6 +16,7 @@ function _upterm {
       "host:Host a terminal session"
       "proxy:Proxy a terminal session over WebSocket"
       "session:Display session"
+      "upgrade:Upgrade the CLI"
       "version:Show version"
     )
     _describe "command" commands
@@ -34,6 +35,9 @@ function _upterm {
     ;;
   session)
     _upterm_session
+    ;;
+  upgrade)
+    _upterm_upgrade
     ;;
   version)
     _upterm_version
@@ -116,6 +120,11 @@ function _upterm_session_info {
 function _upterm_session_list {
   _arguments \
     '(-h --help)'{-h,--help}'[help for list]'
+}
+
+function _upterm_upgrade {
+  _arguments \
+    '(-h --help)'{-h,--help}'[help for upgrade]'
 }
 
 function _upterm_version {
