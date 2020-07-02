@@ -1,26 +1,37 @@
 # Upterm
 
-[Upterm](https://github.com/jingweno/upterm) is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.
-
-## What it's good for
+[Upterm](https://github.com/jingweno/upterm) is an open-source solution for sharing terminal sessions instantly over the public internet via secure tunnels.
+Upterm is good for
 
 * Remote pair programming
 * Access remote computers behind NATs and firewalls
 * Remote debugging
 * \<insert your creative use cases\>
 
-## How it works
+## Usage
 
-You run the `upterm` program and specify the command for your terminal session.
-Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
-Clients connect to your terminal session over the public internet via `uptermd` using `ssh` via TCP or WebSocket.
-A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
+The host starts a terminal session:
 
-![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
+```bash
+$ upterm host -- bash
+```
 
-## Demo
+The host displays the ssh connection string:
 
-[![asciicast](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm.svg)](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm)
+```bash
+$ upterm session current
+=== IQKSFOICLSNNXQZTDKOJ
+Command:                bash
+Force Command:          n/a
+Host:                   ssh://uptermd.upterm.dev:22
+SSH Session:            ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
+```
+
+The client opens a terminal and connects to the host's session:
+
+```bash
+$ ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
+```
 
 ## Installation
 
@@ -42,7 +53,23 @@ cd upterm
 go install ./cmd/upterm/...
 ```
 
-## Quick Start
+## Upgrade
+
+`upterm` comes with a command to upgrade
+
+```bash
+$ upterm upgrade # upgrade to the latest version
+
+$ upterm upgrade VERSION # upgrade to a version
+```
+
+### Mac
+
+```
+brew upgrade upterm
+```
+
+## Quick Reference
 
 ```bash
 # Host a terminal session that runs $SHELL with
@@ -61,7 +88,7 @@ SSH Session:            ssh TOKEN@uptermd.upterm.dev
 # A client connects to the host session with ssh
 $ ssh TOKEN@uptermd.upterm.dev
 
-# Host a terminal session that only allows specified public key(s) to connect
+# Host a terminal session that only allows specified client public key(s) to connect
 $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
 
 # Host a session with a custom command
@@ -69,7 +96,7 @@ $ upterm host -- docker run --rm -ti ubuntu bash
 
 # Host a session that runs 'tmux new -t pair-programming' and
 # force clients to join with 'tmux attach -t pair-programming'.
-# This is similar to tmate.
+# This is similar to what tmate offers.
 $ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming`,
 
 # Connect to uptermd.upterm.dev via WebSocket
@@ -80,6 +107,41 @@ $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@upterm
 ```
 
 More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/docs/upterm.md).
+
+## Tips
+
+**Why doesn't `upterm session current` show current session in Tmux?**
+
+`upterm session current` needs the `UPTERM_ADMIN_SOCKET` environment variable to function.
+And this env var is set in the specified command.
+Unfotunately, Tmux doesn't carry over environment variables that are not in its default list to any Tmux session unless you tell it to ([Ref](http://man.openbsd.org/i386/tmux.1#GLOBAL_AND_SESSION_ENVIRONMENT)).
+So to get `upterm session current` to work, add the following line to your `~/.tmux.conf`
+
+```conf
+set-option -ga update-environment " UPTERM_ADMIN_SOCKET"
+```
+
+**How to make it obvious that I am in an upterm session?**
+
+It can be confusing whether your shell command is running in an upterm session or not, especially if the shell command is `bash` or `zsh`.
+Add the following line to your `~/.bashrc` or `~/.zshrc` and decorate your prompt to show a sign if the shell command is in a terminal session:
+
+```bash
+export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 ')$PS1" # Add an emoji to the prompt if `UPTERM_ADMIN_SOCKET` exists
+```
+
+## Demo
+
+[![asciicast](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7.svg)](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7)
+
+## How it works
+
+You run the `upterm` program by specifying the command for your terminal session.
+Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
+Clients connect to your terminal session over the public internet via `uptermd` using `ssh` using TCP or WebSocket.
+A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
+
+![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
 
 ## Deploy Uptermd
 
@@ -107,7 +169,8 @@ $ bin/uptermd-install
 $ TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/uptermd-install
 ```
 
-You must use WebScoket as the protocol for a Heroku-deployed Uptermd server. This is how you host a session and join a session:
+You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
+This is how you host a session and join a session:
 
 ```
 # Use the Heroku-deployed Uptermd server via WebSocket
