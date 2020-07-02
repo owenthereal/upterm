@@ -59,7 +59,10 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	var g run.Group
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		teh := terminalEventHandler{s.EventEmitter}
+		teh := terminalEventHandler{
+			eventEmitter: s.EventEmitter,
+			logger:       s.Logger,
+		}
 		g.Add(func() error {
 			return teh.Handle(ctx)
 		}, func(err error) {
