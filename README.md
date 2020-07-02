@@ -132,7 +132,7 @@ export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 
 
 ## Demo
 
-[![asciicast](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm.svg)](https://asciinema.org/a/AnXTj0pOOtvSWALjUIQ63OKDm)
+[![asciicast](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7.svg)](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7)
 
 ## How it works
 
