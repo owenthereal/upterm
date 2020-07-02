@@ -2,18 +2,21 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
-	"path/filepath"
 
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/jingweno/upterm/host/api/swagger/client"
 	"github.com/jingweno/upterm/host/api/swagger/client/admin_service"
 )
 
-func AdminSocketFile(dir ...string) string {
-	p := append(dir, "admin.sock")
-	return filepath.Join(p...)
+const (
+	AdminSockExt = ".sock"
+)
+
+func AdminSocketFile(sessionID string) string {
+	return fmt.Sprintf("%s%s", sessionID, AdminSockExt)
 }
 
 func AdminClient(socket string) admin_service.ClientService {

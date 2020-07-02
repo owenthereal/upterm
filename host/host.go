@@ -148,20 +148,6 @@ type Host struct {
 	ReadOnly               bool
 }
 
-func (c *Host) createAdminSocketDir(sessionID string) (string, error) {
-	uptermDir, err := utils.UptermDir()
-	if err != nil {
-		return "", err
-	}
-
-	socketDir := filepath.Join(uptermDir, sessionID)
-	if err := os.MkdirAll(socketDir, 0755); err != nil {
-		return "", err
-	}
-
-	return socketDir, nil
-}
-
 func (c *Host) Run(ctx context.Context) error {
 	u, err := url.Parse(c.Host)
 	if err != nil {
@@ -175,13 +161,16 @@ func (c *Host) Run(ctx context.Context) error {
 		c.Stdout = os.Stdout
 	}
 
+	logger := c.Logger.WithField("server", u)
+
+	logger.Info("Etablishing reverse tunnel")
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
 		HostKeyCallback:   c.HostKeyCallback,
 		AuthorizedKeys:    c.AuthorizedKeys,
 		KeepAliveDuration: c.KeepAliveDuration,
-		Logger:            log.WithField("com", "reverse-tunnel"),
+		Logger:            c.Logger.WithField("com", "reverse-tunnel"),
 	}
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
@@ -190,14 +179,18 @@ func (c *Host) Run(ctx context.Context) error {
 	defer rt.Close()
 
 	if c.AdminSocketFile == "" {
-		adminSocketDir, err := c.createAdminSocketDir(sessResp.SessionID)
+		dir, err := utils.CreateUptermDir()
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(adminSocketDir)
 
-		c.AdminSocketFile = AdminSocketFile(adminSocketDir)
+		c.AdminSocketFile = filepath.Join(dir, AdminSocketFile(sessResp.SessionID))
+
+		defer os.Remove(c.AdminSocketFile)
 	}
+
+	logger = logger.WithField("session", sessResp.SessionID)
+	logger.Info("Established reverse tunnel")
 
 	session := &models.APIGetSessionResponse{
 		SessionID:    sessResp.SessionID,
@@ -215,6 +208,8 @@ func (c *Host) Run(ctx context.Context) error {
 
 	clientRepo := internal.NewClientRepo()
 	eventEmitter := emitter.New(1)
+
+	logger = logger.WithFields(log.Fields{"cmd": c.Command, "force-cmd": c.ForceCommand})
 
 	var g run.Group
 	{
@@ -241,6 +236,7 @@ func (c *Host) Run(ctx context.Context) error {
 				client, ok := args[0].(api.Client)
 				if ok {
 					_ = clientRepo.Add(client)
+					logger.WithField("client", client.Addr).Info("Client joined")
 					if c.ClientJoinedCallback != nil {
 						c.ClientJoinedCallback(client)
 					}
@@ -263,6 +259,7 @@ func (c *Host) Run(ctx context.Context) error {
 				cid, ok := args[0].(string)
 				if ok {
 					client := clientRepo.Get(cid)
+					logger.WithField("client", client.Addr).Info("Client left")
 					clientRepo.Delete(cid)
 					if c.ClientLeftCallback != nil && client != nil {
 						c.ClientLeftCallback(*client)
@@ -276,6 +273,9 @@ func (c *Host) Run(ctx context.Context) error {
 		})
 	}
 	{
+		logger.Info("Starting sshd server")
+		defer logger.Info("Finishing sshd server")
+
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := internal.Server{
 			Command:           c.Command,
@@ -287,7 +287,7 @@ func (c *Host) Run(ctx context.Context) error {
 			KeepAliveDuration: c.KeepAliveDuration,
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,
-			Logger:            c.Logger,
+			Logger:            c.Logger.WithField("com", "server"),
 			ReadOnly:          c.ReadOnly,
 		}
 		g.Add(func() error {
