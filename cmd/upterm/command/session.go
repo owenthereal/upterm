@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jingweno/upterm/host"
@@ -82,7 +83,7 @@ func current() *cobra.Command {
 }
 
 func listRunE(c *cobra.Command, args []string) error {
-	uptermDir, err := utils.UptermDir()
+	uptermDir, err := utils.CreateUptermDir()
 	if err != nil {
 		return err
 	}
@@ -118,7 +119,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	return displaySessionFromAdminSocketPath(host.AdminSocketFile(uptermDir, args[0]))
+	return displaySessionFromAdminSocketPath(filepath.Join(uptermDir, host.AdminSocketFile(args[0])))
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
@@ -135,11 +136,12 @@ func listSessions(dir string) ([][]string, error) {
 
 	currentAdminSocket := currentAdminSocketFile()
 	for _, file := range files {
-		if !file.IsDir() {
+		// continue if the file is not SESSION.sock
+		if filepath.Ext(file.Name()) != host.AdminSockExt {
 			continue
 		}
 
-		adminSocket := host.AdminSocketFile(dir, file.Name())
+		adminSocket := filepath.Join(dir, file.Name())
 		session, err := session(adminSocket)
 		if err != nil {
 			continue

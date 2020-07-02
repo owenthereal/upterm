@@ -52,6 +52,7 @@ func (t terminalEventEmitter) TerminalDetached(id string, pty *pty) {
 
 type terminalEventHandler struct {
 	eventEmitter *emitter.Emitter
+	logger       log.FieldLogger
 }
 
 func (t terminalEventHandler) Handle(ctx context.Context) error {
@@ -68,11 +69,11 @@ func (t terminalEventHandler) Handle(ctx context.Context) error {
 		select {
 		case evt := <-winCh:
 			if err := t.handleWindowChanged(evt, m); err != nil {
-				log.WithError(err).Error("error handling window changed")
+				t.logger.WithError(err).Error("error handling window changed")
 			}
 		case evt := <-dtCh:
 			if err := t.handleTerminalDetached(evt, m); err != nil {
-				log.WithError(err).Error("error handling terminal detached")
+				t.logger.WithError(err).Error("error handling terminal detached")
 			}
 		case <-ctx.Done():
 			return ctx.Err()

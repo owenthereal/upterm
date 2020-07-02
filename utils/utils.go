@@ -14,6 +14,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	logFile = "upterm.log"
+)
+
 func UptermDir() (string, error) {
 	homedir, err := os.UserHomeDir()
 	if err != nil {
@@ -21,6 +25,28 @@ func UptermDir() (string, error) {
 	}
 
 	return filepath.Join(homedir, ".upterm"), nil
+}
+
+func CreateUptermDir() (string, error) {
+	dir, err := UptermDir()
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+
+	return dir, nil
+}
+
+func OpenHostLogFile() (*os.File, error) {
+	dir, err := CreateUptermDir()
+	if err != nil {
+		return nil, err
+	}
+
+	return os.OpenFile(filepath.Join(dir, logFile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755)
 }
 
 func DefaultLocalhost(defaultPort string) string {
