@@ -16,6 +16,7 @@ import (
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
 	"github.com/jingweno/upterm/host/api/swagger/models"
+	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -159,6 +160,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
+	lf, err := utils.OpenHostLogFile()
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+
+	logger := log.New()
+	logger.SetOutput(lf)
+
 	h := &host.Host{
 		Host:                   flagServer,
 		Command:                args,
@@ -172,7 +182,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ClientLeftCallback:     clientLeftCallback,
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
-		Logger:                 log.New(),
+		Logger:                 logger,
 		ReadOnly:               flagReadOnly,
 	}
 
