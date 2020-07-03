@@ -50,6 +50,7 @@ type SSHDDialListener interface {
 
 type MemoryProvider struct {
 	SocketPath string
+	memln      *memlistener.MemoryListener
 }
 
 func (p *MemoryProvider) Name() string {
@@ -62,38 +63,41 @@ func (p *MemoryProvider) Opts() string {
 
 func (p *MemoryProvider) SetOpts(opts NetworkOptions) error {
 	p.SocketPath = xid.New().String()
+	p.memln = memlistener.New()
 	return nil
 }
 
 func (p *MemoryProvider) Session() SessionDialListener {
-	return &memorySessionDialListener{}
+	return &memorySessionDialListener{memln: p.memln}
 }
 
 func (p *MemoryProvider) SSHD() SSHDDialListener {
-	return &memorySSHDDialListener{socketPath: p.SocketPath}
+	return &memorySSHDDialListener{socketPath: p.SocketPath, memln: p.memln}
 }
 
 type memorySSHDDialListener struct {
 	socketPath string
+	memln      *memlistener.MemoryListener
 }
 
 func (l *memorySSHDDialListener) Listen() (net.Listener, error) {
-	return memlistener.Listen("mem", l.socketPath)
+	return l.memln.Listen("mem", l.socketPath)
 }
 
 func (l *memorySSHDDialListener) Dial() (net.Conn, error) {
-	return memlistener.Dial("mem", l.socketPath)
+	return l.memln.Dial("mem", l.socketPath)
 }
 
 type memorySessionDialListener struct {
+	memln *memlistener.MemoryListener
 }
 
 func (d *memorySessionDialListener) Listen(sessionID string) (net.Listener, error) {
-	return memlistener.Listen("mem", sessionID)
+	return d.memln.Listen("mem", sessionID)
 }
 
 func (d *memorySessionDialListener) Dial(sessionID string) (net.Conn, error) {
-	return memlistener.Dial("mem", sessionID)
+	return d.memln.Dial("mem", sessionID)
 }
 
 type UnixProvider struct {
