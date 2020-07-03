@@ -211,10 +211,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	if len(h.forceCommand) > 0 {
 		var cmd *exec.Cmd
 
-		cmdCtx, cmdCancel := context.WithCancel(h.ctx)
-		defer cmdCancel()
+		ctx, cancel := context.WithCancel(h.ctx)
+		defer cancel()
 
-		cmd, ptmx, err = startAttachCmd(cmdCtx, h.forceCommand, ptyReq.Term)
+		cmd, ptmx, err = startAttachCmd(ctx, h.forceCommand, ptyReq.Term)
 		if err != nil {
 			h.logger.WithError(err).Error("error starting force command")
 			_ = sess.Exit(1)
@@ -223,25 +223,29 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 		{
 			// reattach output
-			ctx, cancel := context.WithCancel(h.ctx)
 			g.Add(func() error {
 				_, err := io.Copy(sess, uio.NewContextReader(ctx, ptmx))
 				return ptyError(err)
 			}, func(err error) {
 				cancel()
+				ptmx.Close()
 			})
 		}
 		{
 			g.Add(func() error {
 				return cmd.Wait()
 			}, func(err error) {
-				cmdCancel()
+				cancel()
 				ptmx.Close()
 			})
 		}
 	} else {
 		// output
-		_ = h.writers.Append(sess)
+		if err := h.writers.Append(sess); err != nil {
+			_ = sess.Exit(1)
+			return
+		}
+
 		defer h.writers.Remove(sess)
 	}
 
@@ -265,7 +269,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 
 	// if a readonly session has been requested, don't connect stdin
-	if !h.readonly {
+	if h.readonly {
+		// write to client to notify them that they have connected to a read-only session
+		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+	} else {
 		// input
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
@@ -274,9 +281,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}, func(err error) {
 			cancel()
 		})
-	} else {
-		// write to client to notify them that they have connected to a read-only session
-		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
 	}
 
 	if err := g.Run(); err != nil {
