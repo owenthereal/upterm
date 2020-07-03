@@ -241,7 +241,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	} else {
 		// output
-		_ = h.writers.Append(sess)
+		if err := h.writers.Append(sess); err != nil {
+			_ = sess.Exit(1)
+			return
+		}
+
 		defer h.writers.Remove(sess)
 	}
 
@@ -265,7 +269,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 
 	// if a readonly session has been requested, don't connect stdin
-	if !h.readonly {
+	if h.readonly {
+		// write to client to notify them that they have connected to a read-only session
+		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+	} else {
 		// input
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
@@ -274,9 +281,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}, func(err error) {
 			cancel()
 		})
-	} else {
-		// write to client to notify them that they have connected to a read-only session
-		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
 	}
 
 	if err := g.Run(); err != nil {
