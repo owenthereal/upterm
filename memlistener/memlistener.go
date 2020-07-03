@@ -10,8 +10,6 @@ import (
 )
 
 var (
-	listeners sync.Map
-
 	errMissingAddress = errors.New("missing address")
 )
 
@@ -40,11 +38,19 @@ func (e errListenerNotFound) Error() string {
 	return fmt.Sprintf("listener with address %s not found", e.addr)
 }
 
-func Listen(network, address string) (net.Listener, error) {
-	return ListenMem(network, address, defaultBufferSize)
+func New() *MemoryListener {
+	return &MemoryListener{}
 }
 
-func ListenMem(network, address string, sz int) (net.Listener, error) {
+type MemoryListener struct {
+	listeners sync.Map
+}
+
+func (l *MemoryListener) Listen(network, address string) (net.Listener, error) {
+	return l.ListenMem(network, address, defaultBufferSize)
+}
+
+func (l *MemoryListener) ListenMem(network, address string, sz int) (net.Listener, error) {
 	switch network {
 	case "mem", "memory":
 	default:
@@ -58,9 +64,9 @@ func ListenMem(network, address string, sz int) (net.Listener, error) {
 	ln := &memlistener{
 		Listener:  bufconn.Listen(sz),
 		addr:      address,
-		closeFunc: removeListener,
+		closeFunc: l.removeListener,
 	}
-	actual, loaded := listeners.LoadOrStore(address, ln)
+	actual, loaded := l.listeners.LoadOrStore(address, ln)
 	if loaded {
 		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: addr{}, Err: errListenerAlreadyExist{address}}
 	}
@@ -68,7 +74,7 @@ func ListenMem(network, address string, sz int) (net.Listener, error) {
 	return actual.(net.Listener), nil
 }
 
-func Dial(network, address string) (net.Conn, error) {
+func (l *MemoryListener) Dial(network, address string) (net.Conn, error) {
 	switch network {
 	case "mem", "memory":
 	default:
@@ -79,7 +85,7 @@ func Dial(network, address string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Net: network, Source: addr{}, Addr: addr{}, Err: errMissingAddress}
 	}
 
-	val, exist := listeners.Load(address)
+	val, exist := l.listeners.Load(address)
 	if !exist {
 		return nil, &net.OpError{Op: "dial", Net: network, Source: addr{}, Addr: addr{}, Err: errListenerNotFound{address}}
 	}
@@ -89,8 +95,8 @@ func Dial(network, address string) (net.Conn, error) {
 	return ln.Dial()
 }
 
-func removeListener(address string) {
-	listeners.Delete(address)
+func (l *MemoryListener) removeListener(address string) {
+	l.listeners.Delete(address)
 }
 
 type memlistener struct {
@@ -100,6 +106,6 @@ type memlistener struct {
 }
 
 func (m *memlistener) Close() error {
-	m.closeFunc(m.addr)
+	defer m.closeFunc(m.addr)
 	return m.Listener.Close()
 }
