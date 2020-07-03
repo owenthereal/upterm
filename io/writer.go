@@ -28,8 +28,6 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.writers = append(t.writers, writers...)
-
 	// write last cache to new writers
 	b := t.cache.Bytes()
 	if len(b) > 0 {
@@ -40,6 +38,8 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 			}
 		}
 	}
+
+	t.writers = append(t.writers, writers...)
 
 	return nil
 }
