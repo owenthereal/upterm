@@ -189,9 +189,9 @@ You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://h
 ```
 $ helm repo add upterm 'https://raw.githubusercontent.com/jingweno/upterm/master/'
 $ helm repo update
-$ helm search upterm
-NAME            VERSION	DESCRIPTION
-upterm/uptermd  0.4.1  	Secure Terminal Sharing
+$ helm search repo upterm
+NAME            CHART VERSION   APP VERSION     DESCRIPTION
+upterm/uptermd  0.1.0           0.4.1           Secure Terminal Sharing
 $ helm install upterm/uptermd
 ```
 
