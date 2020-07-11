@@ -3,14 +3,20 @@
 set -e
 
 current_branch=$(git rev-parse --abbrev-ref HEAD)
-
 tmp_dir=$(mktemp -d -t upterm-XXXXXXXXXX)
-cp README.md $tmp_dir
+upterm_dir=$(PWD)
+
+pushd  $tmp_dir
+helm package $upterm_dir/charts/uptermd && helm repo index .
+cp $upterm_dir/README.md index.md
+popd > /dev/null
 
 git checkout gh-pages
-cp $tmp_dir/README.md index.md
-git add index.md
-git commit -m "Sync with READMD.md"
+cp $tmp_dir/* .
+
+git add .
+git commit -m "Generated website"
 git push origin gh-pages
 
 git checkout $current_branch
+

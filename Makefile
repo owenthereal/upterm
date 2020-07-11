@@ -1,6 +1,6 @@
 SHELL=/bin/bash -o pipefail
 
-.PHONY: docs build proto client install test vet
+.PHONY: docs build proto client install test vet chart
 
 generate: proto client
 
