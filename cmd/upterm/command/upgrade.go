@@ -44,7 +44,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 	var r release
 	if len(args) > 0 {
-		rr, err := m.GetRelease(args[0])
+		rr, err := m.GetRelease(trimVPrefix(args[0]))
 		if err != nil {
 			return fmt.Errorf("error fetching release: %s", err)
 		}
@@ -84,8 +84,12 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error installing: %s", err)
 	}
 
-	fmt.Printf("Upgraded upterm %s to %s\n", Version, r.Version)
+	fmt.Printf("Upgraded upterm %s to %s\n", Version, trimVPrefix(r.Version))
 	return nil
+}
+
+func trimVPrefix(s string) string {
+	return strings.TrimPrefix(s, "v")
 }
 
 type release struct {
