@@ -145,43 +145,6 @@ A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points
 
 ## Deploy Uptermd
 
-### Heroku
-
-The easiest and the cheapest way to deploy a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
-Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
-
-You can deploy with one click of the following button:
-
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
-
-You can also automate the deployment with [Heroku Terraform](https://devcenter.heroku.com/articles/using-terraform-with-heroku).
-The Heroku Terraform scripts are in the [terraform/heroku folder](./terraform/heroku).
-A [util script](./bin/uptermd-install) is provided for your convenience to automate everything:
-
-```
-$ git clone https://github.com/jingweno/upterm
-$ cd upterm
-
-# Provinsion uptermd in Heroku Common Runtime.
-# Follow instructions
-$ bin/uptermd-install 
-
-# Provinsion uptermd in Heroku Private Spaces.
-# Follow instructions
-$ TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/uptermd-install
-```
-
-You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
-This is how you host a session and join a session:
-
-```
-# Use the Heroku-deployed Uptermd server via WebSocket
-$ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
-
-# A client connects to the host session via WebSocket
-$ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
-```
-
 ### Kubernetes
 
 You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
@@ -193,6 +156,43 @@ $ helm search repo upterm
 NAME            CHART VERSION   APP VERSION     DESCRIPTION
 upterm/uptermd  0.1.0           0.4.1           Secure Terminal Sharing
 $ helm install uptermd upterm/uptermd
+```
+
+### Heroku
+
+The cheapest way to deploy a worry-free [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
+Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
+
+You can deploy with one click of the following button:
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+
+You can also automate the deployment with [Heroku Terraform](https://devcenter.heroku.com/articles/using-terraform-with-heroku).
+The Heroku Terraform scripts are in the [terraform/heroku folder](./terraform/heroku).
+A [util script](./bin/heroku-install) is provided for your convenience to automate everything:
+
+```
+$ git clone https://github.com/jingweno/upterm
+$ cd upterm
+
+# Provinsion uptermd in Heroku Common Runtime.
+# Follow instructions
+$ bin/heroku-install
+
+# Provinsion uptermd in Heroku Private Spaces.
+# Follow instructions
+$ TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/heroku-install
+```
+
+You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
+This is how you host a session and join a session:
+
+```
+# Use the Heroku-deployed Uptermd server via WebSocket
+$ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
+
+# A client connects to the host session via WebSocket
+$ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
 ```
 
 ## License
