@@ -53,7 +53,6 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tj/assert v0.0.0-20190920132354-ee03d75cd160 // indirect
 	github.com/tj/go v1.8.6
-	github.com/tj/go-progress v0.0.0-20200222111227-c485e791f8d6
 	github.com/tj/go-update v2.2.4+incompatible
 	github.com/ulikunitz/xz v0.5.7 // indirect
 	golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf
