@@ -2,16 +2,14 @@ package command
 
 import (
 	"fmt"
-	"io"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/tj/go-progress"
 	"github.com/tj/go-update"
+	"github.com/tj/go-update/progress"
 	"github.com/tj/go-update/stores/github"
 	"github.com/tj/go/term"
 )
@@ -46,7 +44,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 	var r release
 	if len(args) > 0 {
-		rr, err := m.GetRelease(args[0])
+		rr, err := m.GetRelease(trimVPrefix(args[0]))
 		if err != nil {
 			return fmt.Errorf("error fetching release: %s", err)
 		}
@@ -76,7 +74,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	}
 
 	// download tarball to a tmp dir
-	tarball, err := a.DownloadProxy(newProgressBarReader)
+	tarball, err := a.DownloadProxy(progress.Reader)
 	if err != nil {
 		return fmt.Errorf("error downloading: %s", err)
 	}
@@ -86,9 +84,12 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error installing: %s", err)
 	}
 
-	term.ClearAll()
-	fmt.Printf("Updated upterm %s to %s\n", Version, r.Version)
+	fmt.Printf("Upgraded upterm %s to %s\n", Version, trimVPrefix(r.Version))
 	return nil
+}
+
+func trimVPrefix(s string) string {
+	return strings.TrimPrefix(s, "v")
 }
 
 type release struct {
@@ -105,44 +106,4 @@ func (r *release) FindTarballWithVersion(os, arch, ver string) *update.Asset {
 	}
 
 	return nil
-}
-
-// progressReader wrapping a progress bar.
-type progressReader struct {
-	io.ReadCloser
-	p       *progress.Bar
-	render  func(string)
-	written int
-	sync.Once
-}
-
-// Read implementation.
-func (r *progressReader) Read(b []byte) (int, error) {
-	r.Do(term.ClearAll)
-	n, err := r.ReadCloser.Read(b)
-	r.written += n
-	r.p.ValueInt(r.written)
-	r.render(term.CenterLine(r.p.String()))
-	return n, err
-}
-
-// newProgressBarReader returns a progress bar reader.
-func newProgressBarReader(size int, r io.ReadCloser) io.ReadCloser {
-	return &progressReader{
-		ReadCloser: r,
-		p:          newProgressInt(size),
-		render:     term.Renderer(),
-	}
-}
-
-// newProgressInt with the given total.
-func newProgressInt(total int) *progress.Bar {
-	b := progress.NewInt(total)
-	b.Template(`{{.Bar}} {{.Percent | printf "%0.0f"}}% {{.Text}}`)
-	b.Width = 35
-	b.StartDelimiter = "|"
-	b.EndDelimiter = "|"
-	b.Filled = "█"
-	b.Empty = "░"
-	return b
 }

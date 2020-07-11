@@ -153,8 +153,11 @@ github.com/gopherjs/gopherwasm/js
 github.com/gorilla/websocket
 # github.com/gosuri/uilive v0.0.4
 ## explicit
+github.com/gosuri/uilive
 # github.com/gosuri/uiprogress v0.0.1
 ## explicit
+github.com/gosuri/uiprogress
+github.com/gosuri/uiprogress/util/strutil
 # github.com/grpc-ecosystem/grpc-gateway v1.12.1
 ## explicit
 github.com/grpc-ecosystem/grpc-gateway/internal
@@ -261,12 +264,10 @@ github.com/tadvi/systray
 # github.com/tj/go v1.8.6
 ## explicit
 github.com/tj/go/term
-# github.com/tj/go-progress v0.0.0-20200222111227-c485e791f8d6
-## explicit
-github.com/tj/go-progress
 # github.com/tj/go-update v2.2.4+incompatible
 ## explicit
 github.com/tj/go-update
+github.com/tj/go-update/progress
 github.com/tj/go-update/stores/github
 # github.com/ulikunitz/xz v0.5.7
 ## explicit
