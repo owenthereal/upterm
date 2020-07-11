@@ -11,6 +11,8 @@ fi
 
 version="$(grep -w 'Version =' "$version_file" | cut -d'"' -f2)"
 
+sed -i '' "s/appVersion: .*/appVersion: $version/g" charts/uptermd/Chart.yaml
+
 make docs
 git commit -m "Release Upterm $version" -- "$version_file" "docs/*" "etc/*"
 
