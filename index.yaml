@@ -1,0 +1,21 @@
+apiVersion: v1
+entries:
+  uptermd:
+  - apiVersion: v2
+    appVersion: 0.4.1
+    created: "2020-07-11T11:43:12.50226-07:00"
+    description: Secure Terminal Sharing
+    digest: 818836f531ed35d75556fdf4fe4592a167c56d93cb253054d7b14e60cef05af5
+    home: https://upterm.dev
+    maintainers:
+    - email: o@owenou.com
+      name: Owen Ou
+      url: https://github.com/jingweno
+    name: uptermd
+    sources:
+    - https://github.com/jingweno/upterm
+    type: application
+    urls:
+    - uptermd-0.1.0.tgz
+    version: 0.1.0
+generated: "2020-07-11T11:43:12.500581-07:00"
