@@ -187,12 +187,12 @@ $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_
 You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
 
 ```
-$ helm repo add upterm 'https://raw.githubusercontent.com/jingweno/upterm/master/'
+$ helm repo add upterm https://upterm.dev
 $ helm repo update
 $ helm search repo upterm
 NAME            CHART VERSION   APP VERSION     DESCRIPTION
 upterm/uptermd  0.1.0           0.4.1           Secure Terminal Sharing
-$ helm install upterm/uptermd
+$ helm install uptermd upterm/uptermd
 ```
 
 ## License
