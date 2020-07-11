@@ -1,0 +1,14 @@
+apiVersion: v2
+name: uptermd
+description: Secure Terminal Sharing
+type: application
+version: 0.1.0
+appVersion: 0.4.1
+home: https://upterm.dev
+sources:
+  - https://github.com/jingweno/upterm
+dependencies:
+maintainers:
+  - name: Owen Ou
+    email: o@owenou.com
+    url: https://github.com/jingweno

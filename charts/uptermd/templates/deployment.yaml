@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "upterm.fullname" . }}
+  labels:
+    {{- include "upterm.labels" . | nindent 4 }}
+spec:
+{{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "upterm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+    {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      labels:
+        {{- include "upterm.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "upterm.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --ssh-addr
+            - $(POD_IP):22
+            - --ws-addr
+            - $(POD_IP):80
+            - --node-addr
+            - $(POD_IP):22
+            {{- range $key, $val := .Values.host_keys }}
+            {{ if hasSuffix ".pub" $key }}
+            {{ else }}
+            - --private-key
+            - /host-keys/{{ $key }}
+            {{- end }}
+            {{- end }}
+            - --network
+            - mem
+            - --metric-addr
+            - $(POD_IP):9090
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - containerPort: 22
+              name: sshd
+            - containerPort: 80
+              name: ws
+            - containerPort: 9090
+              name: exporter
+          readinessProbe:
+            tcpSocket:
+              port: 22
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 22
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /host-keys
+              name: host-keys
+      volumes:
+        - name: host-keys
+          secret:
+            secretName: {{ include "upterm.fullname" . }}
+            defaultMode: 0600
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
