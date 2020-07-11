@@ -145,6 +145,8 @@ A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points
 
 ## Deploy Uptermd
 
+### Heroku
+
 The easiest and the cheapest way to deploy a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
 Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
 
@@ -178,6 +180,19 @@ $ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
 
 # A client connects to the host session via WebSocket
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
+```
+
+### Kubernetes
+
+You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
+
+```
+$ helm repo add upterm 'https://raw.githubusercontent.com/jingweno/upterm/master/'
+$ helm repo update
+$ helm search upterm
+NAME            VERSION	DESCRIPTION
+upterm/uptermd  0.4.1  	Secure Terminal Sharing
+$ helm install upterm/uptermd
 ```
 
 ## License

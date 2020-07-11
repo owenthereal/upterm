@@ -8,9 +8,7 @@ home: https://upterm.dev
 sources:
   - https://github.com/jingweno/upterm
 dependencies:
-  #- name: stable/nginx-ingress
 maintainers:
   - name: Owen Ou
     email: o@owenou.com
     url: https://github.com/jingweno
-
