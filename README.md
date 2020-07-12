@@ -211,7 +211,7 @@ This opens up a door for securely sharing a terminal session using containers (I
 Upterm is written in Go.
 It is more friendly hackable than Tmate that is written in C because Tmux is C.
 The Upterm CLI and server (`uptermd`) are compiled into a single binary.
-You can quickly [spawn up your pairing server](#deploy-upterm) in any cloud environment with zero dependencies.
+You can quickly [spawn up your pairing server](#deploy-uptermd) in any cloud environment with zero dependencies.
 
 ## License
 
