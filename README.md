@@ -8,6 +8,8 @@ Upterm is good for
 * Remote debugging
 * \<insert your creative use cases\>
 
+This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
+
 ## Usage
 
 The host starts a terminal session:
@@ -206,7 +208,7 @@ For example, you must [bind the same keys twice with a condition](https://github
 Upterm is designed from the group up not to be a fork of anything.
 It builds around the concept of linking the input & output of any shell command between a host and its clients.
 As you see above, you can share any command besides `tmux`.
-This opens up a door for securely sharing a terminal session using containers (I will explain more in a future post).
+This opens up a door for securely sharing a terminal session using containers.
 
 Upterm is written in Go.
 It is more friendly hackable than Tmate that is written in C because Tmux is C.
