@@ -8,6 +8,8 @@ Upterm is good for
 * Remote debugging
 * \<insert your creative use cases\>
 
+This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
+
 ## Usage
 
 The host starts a terminal session:
@@ -194,6 +196,24 @@ $ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
 # A client connects to the host session via WebSocket
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
 ```
+
+## How is Upterm compared to prior arts?
+
+Upterm is an alternative to [Tmate](https://tmate.io).
+
+Tmate is a fork of an older version of Tmux. It adds terminal sharing capability on top of Tmux 2.x.
+Tmate doesn't intend to catch up with the latest Tmux, so any Tmate & Tmux users must maintain two versions of the configuration.
+For example, you must [bind the same keys twice with a condition](https://github.com/tmate-io/tmate/issues/108).
+
+Upterm is designed from the group up not to be a fork of anything.
+It builds around the concept of linking the input & output of any shell command between a host and its clients.
+As you see above, you can share any command besides `tmux`.
+This opens up a door for securely sharing a terminal session using containers.
+
+Upterm is written in Go.
+It is more friendly hackable than Tmate that is written in C because Tmux is C.
+The Upterm CLI and server (`uptermd`) are compiled into a single binary.
+You can quickly [spawn up your pairing server](#deploy-uptermd) in any cloud environment with zero dependencies.
 
 ## License
 
