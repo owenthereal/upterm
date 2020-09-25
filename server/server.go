@@ -341,7 +341,7 @@ type sidewayConnDialer struct {
 
 func (cd sidewayConnDialer) Dial(id api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
-		cd.Logger.WithFields(log.Fields{"host": id.Id, "ndoe": cd.NodeAddr}).Info("dialing sshd")
+		cd.Logger.WithFields(log.Fields{"host": id.Id, "node": cd.NodeAddr}).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
 	} else {
 		host, port, ee := net.SplitHostPort(id.NodeAddr)
