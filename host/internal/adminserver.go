@@ -49,7 +49,12 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 	s.Lock()
 	defer s.Unlock()
 
-	return s.srv.Shutdown(ctx)
+	if s.srv != nil {
+		return s.srv.Shutdown(ctx)
+	}
+
+	return nil
+
 }
 
 type adminServiceServer struct {
