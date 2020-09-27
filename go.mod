@@ -22,19 +22,14 @@ require (
 	github.com/gen2brain/beeep v0.0.0-20200420150314-13046a26d502
 	github.com/gliderlabs/ssh v0.2.2
 	github.com/go-kit/kit v0.9.0
-	github.com/go-openapi/errors v0.19.2
-	github.com/go-openapi/runtime v0.19.5
-	github.com/go-openapi/strfmt v0.19.3
-	github.com/go-openapi/swag v0.19.5
-	github.com/golang/protobuf v1.3.2
-	github.com/google/go-cmp v0.3.1
+	github.com/golang/protobuf v1.3.3
+	github.com/google/go-cmp v0.4.0
 	github.com/google/go-github v17.0.0+incompatible // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 	github.com/gorilla/websocket v1.4.1
 	github.com/gosuri/uilive v0.0.4 // indirect
 	github.com/gosuri/uiprogress v0.0.1 // indirect
-	github.com/grpc-ecosystem/grpc-gateway v1.12.1
 	github.com/hashicorp/go-multierror v1.0.0
 	github.com/heroku/rollrus v0.1.1
 	github.com/hooklift/assert v0.0.0-20170704181755-9d1defd6d214 // indirect
@@ -57,8 +52,8 @@ require (
 	github.com/ulikunitz/xz v0.5.7 // indirect
 	golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf
 	golang.org/x/net v0.0.0-20191209160850-c0dbc17a3553 // indirect
-	google.golang.org/genproto v0.0.0-20191206224255-0243a4be9c8f
-	google.golang.org/grpc v1.25.1
+	google.golang.org/genproto v0.0.0-20191206224255-0243a4be9c8f // indirect
+	google.golang.org/grpc v1.32.0
 	gopkg.in/yaml.v2 v2.2.7 // indirect
 )
 

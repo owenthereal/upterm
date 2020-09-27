@@ -3,18 +3,16 @@ package internal
 import (
 	"context"
 	"net"
-	"net/http"
 	"sync"
 
-	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
+	"google.golang.org/grpc"
 )
 
 type AdminServer struct {
-	Session    *models.APIGetSessionResponse
+	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
-	srv        *http.Server
+	srv        *grpc.Server
 	sync.Mutex
 }
 
@@ -24,22 +22,12 @@ func (s *AdminServer) Serve(ctx context.Context, sock string) error {
 		return err
 	}
 
-	mux := runtime.NewServeMux()
-	if err := api.RegisterAdminServiceHandlerServer(
-		ctx,
-		mux,
-		&adminServiceServer{
-			Session:    s.Session,
-			ClientRepo: s.ClientRepo,
-		},
-	); err != nil {
-		return err
-	}
-
 	s.Lock()
-	s.srv = &http.Server{
-		Handler: mux,
-	}
+	s.srv = grpc.NewServer()
+	api.RegisterAdminServiceServer(s.srv, &adminServiceServer{
+		Session:    s.Session,
+		ClientRepo: s.ClientRepo,
+	})
 	s.Unlock()
 
 	return s.srv.Serve(ln)
@@ -50,21 +38,20 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 	defer s.Unlock()
 
 	if s.srv != nil {
-		return s.srv.Shutdown(ctx)
+		s.srv.GracefulStop()
 	}
 
 	return nil
-
 }
 
 type adminServiceServer struct {
-	Session    *models.APIGetSessionResponse
+	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
 	return &api.GetSessionResponse{
-		SessionId:        s.Session.SessionID,
+		SessionId:        s.Session.SessionId,
 		Host:             s.Session.Host,
 		NodeAddr:         s.Session.NodeAddr,
 		Command:          s.Session.Command,

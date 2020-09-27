@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
 	"github.com/olekukonko/tablewriter"
@@ -156,7 +156,7 @@ func listSessions(dir string) ([][]string, error) {
 			result,
 			[]string{
 				current,
-				session.SessionID,
+				session.SessionId,
 				strings.Join(session.Command, " "),
 				naIfEmpty(strings.Join(session.ForceCommand, " ")),
 				session.Host,
@@ -203,7 +203,7 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 	return
 }
 
-func displaySession(session *models.APIGetSessionResponse) error {
+func displaySession(session *api.GetSessionResponse) error {
 	user, err := api.EncodeIdentifierSession(session)
 	if err != nil {
 		return err
@@ -249,7 +249,7 @@ func displaySession(session *models.APIGetSessionResponse) error {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"=== " + session.SessionID})
+	table.SetHeader([]string{"=== " + session.SessionId})
 	table.SetHeaderLine(false)
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
@@ -273,14 +273,13 @@ func currentAdminSocketFile() string {
 	return os.Getenv(upterm.HostAdminSocketEnvVar)
 }
 
-func session(adminSocket string) (*models.APIGetSessionResponse, error) {
-	client := host.AdminClient(adminSocket)
-	resp, err := client.GetSession(nil)
+func session(adminSocket string) (*api.GetSessionResponse, error) {
+	c, err := host.AdminClient(adminSocket)
 	if err != nil {
 		return nil, err
 	}
 
-	return resp.GetPayload(), nil
+	return c.GetSession(context.Background(), &api.GetSessionRequest{})
 }
 
 func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/host/internal"
 	"github.com/jingweno/upterm/upterm"
 	"github.com/jingweno/upterm/utils"
@@ -139,7 +138,7 @@ type Host struct {
 	HostKeyCallback        ssh.HostKeyCallback
 	AuthorizedKeys         []ssh.PublicKey
 	AdminSocketFile        string
-	SessionCreatedCallback func(*models.APIGetSessionResponse) error
+	SessionCreatedCallback func(*api.GetSessionResponse) error
 	ClientJoinedCallback   func(api.Client)
 	ClientLeftCallback     func(api.Client)
 	Logger                 log.FieldLogger
@@ -192,8 +191,8 @@ func (c *Host) Run(ctx context.Context) error {
 	logger = logger.WithField("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
 
-	session := &models.APIGetSessionResponse{
-		SessionID:    sessResp.SessionID,
+	session := &api.GetSessionResponse{
+		SessionId:    sessResp.SessionID,
 		Host:         u.String(),
 		NodeAddr:     sessResp.NodeAddr,
 		Command:      c.Command,

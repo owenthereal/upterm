@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -48,13 +46,7 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -127,7 +119,7 @@ func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
 		PrivateKeys:  []string{HostPrivateKey},
-		SessionCreatedCallback: func(session *models.APIGetSessionResponse) error {
+		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
 			if want, got := []string{"bash", "--norc"}, session.Command; !cmp.Equal(want, got) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
