@@ -4,13 +4,12 @@ import (
 	"encoding/base64"
 	"strings"
 
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/upterm"
 )
 
-func EncodeIdentifierSession(session *models.APIGetSessionResponse) (string, error) {
+func EncodeIdentifierSession(session *GetSessionResponse) (string, error) {
 	id := &Identifier{
-		Id:       session.SessionID,
+		Id:       session.SessionId,
 		Type:     Identifier_CLIENT,
 		NodeAddr: session.NodeAddr,
 	}

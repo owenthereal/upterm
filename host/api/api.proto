@@ -1,15 +1,9 @@
 syntax = "proto3";
 
-import "google/api/annotations.proto";
-
 package api;
 
 service AdminService {
-    rpc GetSession (GetSessionRequest) returns (GetSessionResponse) {
-        option (google.api.http) = {
-          get: "/session"
-        };
-    }
+    rpc GetSession (GetSessionRequest) returns (GetSessionResponse) {}
 }
 
 message GetSessionRequest {

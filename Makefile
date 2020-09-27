@@ -10,26 +10,8 @@ docs:
 	go run cmd/gendoc/main.go
 
 proto:
-	protoc \
-		-I server \
-		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		--go_out=plugins=grpc:server \
-		./server/server.proto
-	protoc \
-		-I host/api \
-		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		--go_out=plugins=grpc:host/api \
-		./host/api/api.proto
-	protoc \
-		-I host/api \
-		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		--grpc-gateway_out=logtostderr=true:host/api \
-		./host/api/api.proto
-	protoc \
-		-I host/api \
-		-I $$(go env GOPATH)/src/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
-		--swagger_out=logtostderr=true:host/api \
-		./host/api/api.proto
+	docker run -v `pwd`/server:/defs namely/protoc-all -f server.proto -l go -o .
+	docker run -v `pwd`/host/api:/defs namely/protoc-all -f api.proto -l go -o .
 
 client:
 	rm -rf host/api/swagger

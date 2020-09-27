@@ -1,6 +1,7 @@
 package ftests
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/jingweno/upterm/host"
-	"github.com/jingweno/upterm/host/api/swagger/models"
+	"github.com/jingweno/upterm/host/api"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -34,13 +35,7 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	c := &Client{
 		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
@@ -72,13 +67,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) 
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	c := &Client{
 		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
@@ -115,13 +104,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -138,7 +121,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	session.SessionID = "not-existance" // set session ID to non-existance
+	session.SessionId = "not-existance" // set session ID to non-existance
 	err = c.Join(session, hostURL)
 
 	// Unfortunately there is no explicit error to the client.
@@ -169,13 +152,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -249,13 +226,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -320,13 +291,7 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 	defer h.Close()
 
 	// verify admin server
-	adminClient := host.AdminClient(adminSocketFile)
-	resp, err := adminClient.GetSession(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := resp.GetPayload()
-	checkSessionPayload(t, session, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -378,8 +343,24 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 
 }
 
-func checkSessionPayload(t *testing.T, sess *models.APIGetSessionResponse, wantHostURL, wantNodeURL string) {
-	if sess.SessionID == "" {
+func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, wantNodeURL string) *api.GetSessionResponse {
+	adminClient, err := host.AdminClient(adminSocketFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := adminClient.GetSession(context.Background(), &api.GetSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkSessionPayload(t, sess, wantHostURL, wantNodeURL)
+
+	return sess
+}
+
+func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL, wantNodeURL string) {
+	if sess.SessionId == "" {
 		t.Fatalf("session ID is empty")
 	}
 	if want, got := wantHostURL, sess.Host; want != got {

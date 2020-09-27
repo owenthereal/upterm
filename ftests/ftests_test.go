@@ -22,7 +22,6 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	uio "github.com/jingweno/upterm/io"
 	"github.com/jingweno/upterm/server"
 	"github.com/jingweno/upterm/utils"
@@ -218,7 +217,7 @@ type Host struct {
 	ForceCommand             []string
 	PrivateKeys              []string
 	AdminSocketFile          string
-	SessionCreatedCallback   func(*models.APIGetSessionResponse) error
+	SessionCreatedCallback   func(*api.GetSessionResponse) error
 	ClientJoinedCallback     func(api.Client)
 	ClientLeftCallback       func(api.Client)
 	PermittedClientPublicKey string
@@ -372,7 +371,7 @@ func (c *Client) Close() {
 	c.sshClient.Close()
 }
 
-func (c *Client) JoinWithContext(ctx context.Context, session *models.APIGetSessionResponse, hostURL string) error {
+func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionResponse, hostURL string) error {
 	c.init()
 
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
@@ -399,7 +398,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *models.APIGetSess
 	if u.Scheme == "ws" || u.Scheme == "wss" {
 		encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(session.NodeAddr))
 		u, _ = url.Parse(u.String())
-		u.User = url.UserPassword(session.SessionID, encodedNodeAddr)
+		u.User = url.UserPassword(session.SessionId, encodedNodeAddr)
 		c.sshClient, err = ws.NewSSHClient(u, config, true)
 	} else {
 		c.sshClient, err = ssh.Dial("tcp", u.Host, config)
@@ -481,7 +480,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *models.APIGetSess
 	return nil
 }
 
-func (c *Client) Join(session *models.APIGetSessionResponse, hostURL string) error {
+func (c *Client) Join(session *api.GetSessionResponse, hostURL string) error {
 	return c.JoinWithContext(context.Background(), session, hostURL)
 }
 

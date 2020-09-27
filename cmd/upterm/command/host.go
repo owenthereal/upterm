@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/jingweno/upterm/host"
 	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/host/api/swagger/models"
 	"github.com/jingweno/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -201,7 +200,7 @@ func notifyBody(c api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
-func displaySessionCallback(session *models.APIGetSessionResponse) error {
+func displaySessionCallback(session *api.GetSessionResponse) error {
 	if err := displaySession(session); err != nil {
 		return err
 	}
