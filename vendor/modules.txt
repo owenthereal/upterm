@@ -30,7 +30,7 @@ github.com/c4milo/unpackit
 github.com/cespare/xxhash/v2
 # github.com/cpuguy83/go-md2man v1.0.10
 github.com/cpuguy83/go-md2man/md2man
-# github.com/creack/pty v1.1.9
+# github.com/creack/pty v1.1.12-0.20200804180658-a6c0a376f1d0
 ## explicit
 github.com/creack/pty
 # github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a
