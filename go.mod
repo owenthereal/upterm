@@ -1,9 +1,9 @@
-// +heroku goVersion 1.14
+// +heroku goVersion 1.15
 // +heroku install ./cmd/uptermd/...
 
 module github.com/jingweno/upterm
 
-go 1.14
+go 1.15
 
 require (
 	github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
