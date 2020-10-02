@@ -215,36 +215,6 @@ It is more friendly hackable than Tmate that is written in C because Tmux is C.
 The Upterm CLI and server (`uptermd`) are compiled into a single binary.
 You can quickly [spawn up your pairing server](#deploy-uptermd) in any cloud environment with zero dependencies.
 
-## Contributors
-
-### Code Contributors
-
-This project exists thanks to all the people who contribute. [[Contribute](CONTRIBUTING.md)].
-<a href="https://github.com/jingweno/upterm/graphs/contributors"><img src="https://opencollective.com/upterm/contributors.svg?width=890&button=false" /></a>
-
-### Financial Contributors
-
-Become a financial contributor and help us sustain our community. [[Contribute](https://opencollective.com/upterm/contribute)]
-
-#### Individuals
-
-<a href="https://opencollective.com/upterm"><img src="https://opencollective.com/upterm/individuals.svg?width=890"></a>
-
-#### Organizations
-
-Support this project with your organization. Your logo will show up here with a link to your website. [[Contribute](https://opencollective.com/upterm/contribute)]
-
-<a href="https://opencollective.com/upterm/organization/0/website"><img src="https://opencollective.com/upterm/organization/0/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/1/website"><img src="https://opencollective.com/upterm/organization/1/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/2/website"><img src="https://opencollective.com/upterm/organization/2/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/3/website"><img src="https://opencollective.com/upterm/organization/3/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/4/website"><img src="https://opencollective.com/upterm/organization/4/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/5/website"><img src="https://opencollective.com/upterm/organization/5/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/6/website"><img src="https://opencollective.com/upterm/organization/6/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/7/website"><img src="https://opencollective.com/upterm/organization/7/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/8/website"><img src="https://opencollective.com/upterm/organization/8/avatar.svg"></a>
-<a href="https://opencollective.com/upterm/organization/9/website"><img src="https://opencollective.com/upterm/organization/9/avatar.svg"></a>
-
 ## License
 
 [Apache 2.0](https://github.com/jingweno/upterm/blob/master/LICENSE)
