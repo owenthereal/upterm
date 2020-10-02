@@ -1,0 +1,6 @@
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 5
+websocket:
+  enabled: true
+  ingress_nginx_ingress_class: upterm-nginx # Must match ingress_nginx_ingress_class.yml
