@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+import "google/api/annotations.proto";
+
+package api;
+
+service AdminService {
+    rpc GetSession (GetSessionRequest) returns (GetSessionResponse) {
+        option (google.api.http) = {
+          get: "/session"
+        };
+    }
+}
+
+message GetSessionRequest {
+}
+
+message GetSessionResponse {
+    string session_id = 1;
+    repeated string command = 2;
+    repeated string force_command = 3;
+    string host = 4;
+    string node_addr = 5;
+    repeated Client connected_clients = 6;
+}
+
+message Client {
+    string id = 1;
+    string version = 2;
+    string addr = 3;
+    string public_key_fingerprint = 4;
+}
+
+message Identifier {
+    string id = 1;
+    Type type = 2;
+    string node_addr = 3;
+
+    enum Type {
+      HOST = 0;
+      CLIENT = 1;
+    }
+}

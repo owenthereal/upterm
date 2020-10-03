@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package server;
+
+message CreateSessionRequest {
+    string hostUser = 1;
+    repeated bytes hostPublicKeys = 2;
+    repeated bytes clientAuthorizedKeys = 3;
+}
+
+message CreateSessionResponse {
+    string sessionID = 1;
+    string nodeAddr = 2;
+}
+
+message AuthRequest {
+    string client_version = 1;
+    string remote_addr = 2;
+    bytes authorized_key = 3;
+}
