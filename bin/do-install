@@ -19,7 +19,7 @@ HOST_KEYS+="}"
 TERRAFORM_STATES_DIR=$(PWD)/terraform_states
 mkdir -p $TERRAFORM_STATES_DIR
 
-pushd  ./terraform/digitalocean
+pushd  ./terraform/digitalocean > /dev/null
 
 echo "Initializing terraform..."
 terraform init
