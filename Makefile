@@ -13,11 +13,11 @@ proto:
 	docker run -v `pwd`/server:/defs namely/protoc-all -f server.proto -l go -o .
 	docker run -v `pwd`/host/api:/defs namely/protoc-all -f api.proto -l go -o .
 
-build: generate
+build:
 	go build -o build/upterm -mod=vendor ./cmd/upterm
 	go build -o build/uptermd -mod=vendor ./cmd/uptermd
 
-install: generate
+install:
 	go install ./cmd/... 
 
 docker_build:
