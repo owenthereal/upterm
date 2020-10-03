@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -e
+
+function join { local IFS="$1"; shift; echo "$*";  }
+
+SECRETS=($(ls -d $TF_VAR_uptermd_host_keys_dir))
+
+ARRAY=()
+for f in ${SECRETS[@]}
+do
+  ARRAY+=("\"$(basename $f)\"=\"$(cat $f | base64 -w 0)\"")
+done
+
+HOST_KEYS="{"
+HOST_KEYS+=$(join , ${ARRAY[@]})
+HOST_KEYS+="}"
+
+TERRAFORM_STATES_DIR=$(PWD)/terraform_states
+mkdir -p $TERRAFORM_STATES_DIR
+
+pushd  ./terraform/digitalocean
+
+echo "Initializing terraform..."
+terraform init
+
+echo "Applying terraform..."
+terraform apply \
+  -state $TERRAFORM_STATES_DIR/digitalocean.tfstate \
+  -var uptermd_host_keys="$HOST_KEYS"
+
+popd > /dev/null
