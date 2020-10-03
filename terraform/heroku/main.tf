@@ -74,7 +74,7 @@ resource "heroku_build" "uptermd" {
   app = local.app_id
 
   source = {
-    url     = "https://github.com/jingweno/upterm/archive/${var.git_commit_sha}.tar.gz"
+    url     = "https://github.com/owenthereal/upterm/archive/${var.git_commit_sha}.tar.gz"
     version = var.git_commit_sha
   }
 }

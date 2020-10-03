@@ -7,8 +7,8 @@ import (
 	"net/url"
 
 	"github.com/gorilla/websocket"
-	"github.com/jingweno/upterm/upterm"
 	chshare "github.com/jpillora/chisel/share"
+	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
 )
 

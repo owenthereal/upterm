@@ -1,6 +1,6 @@
 FROM golang:latest as builder
 
-WORKDIR $GOPATH/src/github.com/jingweno/upterm
+WORKDIR $GOPATH/src/github.com/owenthereal/upterm
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN go install -mod=vendor ./cmd/uptermd/...

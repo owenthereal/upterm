@@ -1,8 +1,8 @@
 package command
 
 import (
-	"github.com/jingweno/upterm/server"
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )

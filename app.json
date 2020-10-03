@@ -1,9 +1,18 @@
 {
     "name": "Upterm",
-    "keywords": ["golang", "terminal", "upterm", "uptermd"],
+    "keywords": [
+        "golang",
+        "terminal",
+        "upterm",
+        "uptermd"
+    ],
     "website": "https://upterm.dev",
     "success_url": "/getting-started",
     "description": "Secure Terminal Sharing",
-    "repository": "https://github.com/jingweno/upterm",
-    "buildpacks": [ { "url": "heroku/go" } ]
-} 
+    "repository": "https://github.com/owenthereal/upterm",
+    "buildpacks": [
+        {
+            "url": "heroku/go"
+        }
+    ]
+}

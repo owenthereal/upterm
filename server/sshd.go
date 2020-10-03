@@ -9,8 +9,8 @@ import (
 
 	"github.com/gliderlabs/ssh"
 	proto "github.com/golang/protobuf/proto"
-	"github.com/jingweno/upterm/upterm"
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )

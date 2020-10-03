@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/jingweno/upterm/host/api"
+	"github.com/owenthereal/upterm/host/api"
 )
 
 func NewClientRepo() *ClientRepo {

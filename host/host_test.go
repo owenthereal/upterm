@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 

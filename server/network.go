@@ -6,7 +6,7 @@ import (
 	"net"
 	"path/filepath"
 
-	"github.com/jingweno/upterm/memlistener"
+	"github.com/owenthereal/upterm/memlistener"
 	"github.com/rs/xid"
 )
 

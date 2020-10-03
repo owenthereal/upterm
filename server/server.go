@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
-	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/utils"
-	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/utils"
+	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

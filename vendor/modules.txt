@@ -1,23 +1,24 @@
-# github.com/PuerkitoBio/purell v1.1.1
-github.com/PuerkitoBio/purell
-# github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
-github.com/PuerkitoBio/urlesc
 # github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
 ## explicit
 github.com/ScaleFT/sshkeys
 # github.com/VividCortex/gohistogram v1.0.0
+## explicit
 github.com/VividCortex/gohistogram
-# github.com/anmitsu/go-shlex v0.0.0-20161002113705-648efa622239
+# github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
+## explicit
 github.com/anmitsu/go-shlex
-# github.com/apex/log v1.3.0
+# github.com/apex/log v1.9.0
+## explicit
 github.com/apex/log
-# github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a
-github.com/asaskevich/govalidator
 # github.com/beorn7/perks v1.0.1
 github.com/beorn7/perks/quantile
+# github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8
+## explicit
 # github.com/buger/goterm v0.0.0-20200322175922-2f3e71b85129
+## explicit
 github.com/buger/goterm
 # github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c
+## explicit
 github.com/c4milo/unpackit
 # github.com/cespare/xxhash/v2 v2.1.1
 github.com/cespare/xxhash/v2
@@ -27,11 +28,13 @@ github.com/cpuguy83/go-md2man/md2man
 ## explicit
 github.com/creack/pty
 # github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a
+## explicit
 github.com/dchest/bcrypt_pbkdf
 # github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 ## explicit
 github.com/dchest/uniuri
 # github.com/dsnet/compress v0.0.1
+## explicit
 github.com/dsnet/compress
 github.com/dsnet/compress/bzip2
 github.com/dsnet/compress/bzip2/internal/sais
@@ -67,52 +70,17 @@ github.com/go-kit/kit/metrics/statsd
 github.com/go-kit/kit/util/conn
 # github.com/go-logfmt/logfmt v0.4.0
 github.com/go-logfmt/logfmt
-# github.com/go-openapi/analysis v0.19.5
-github.com/go-openapi/analysis
-github.com/go-openapi/analysis/internal
-# github.com/go-openapi/errors v0.19.2
-github.com/go-openapi/errors
-# github.com/go-openapi/jsonpointer v0.19.3
-github.com/go-openapi/jsonpointer
-# github.com/go-openapi/jsonreference v0.19.2
-github.com/go-openapi/jsonreference
-# github.com/go-openapi/loads v0.19.3
-github.com/go-openapi/loads
-# github.com/go-openapi/runtime v0.19.5
-github.com/go-openapi/runtime
-github.com/go-openapi/runtime/client
-github.com/go-openapi/runtime/logger
-github.com/go-openapi/runtime/middleware
-github.com/go-openapi/runtime/middleware/denco
-github.com/go-openapi/runtime/middleware/header
-github.com/go-openapi/runtime/middleware/untyped
-github.com/go-openapi/runtime/security
-# github.com/go-openapi/spec v0.19.3
-github.com/go-openapi/spec
-# github.com/go-openapi/strfmt v0.19.3
-github.com/go-openapi/strfmt
-# github.com/go-openapi/swag v0.19.5
-github.com/go-openapi/swag
-# github.com/go-openapi/validate v0.19.3
-github.com/go-openapi/validate
-# github.com/go-stack/stack v1.8.0
-github.com/go-stack/stack
 # github.com/go-toast/toast v0.0.0-20190211030409-01e6764cf0a4
 github.com/go-toast/toast
 # github.com/godbus/dbus v4.1.0+incompatible
 github.com/godbus/dbus
 # github.com/golang/protobuf v1.3.3
 ## explicit
-github.com/golang/protobuf/descriptor
-github.com/golang/protobuf/jsonpb
 github.com/golang/protobuf/proto
-github.com/golang/protobuf/protoc-gen-go/descriptor
 github.com/golang/protobuf/ptypes
 github.com/golang/protobuf/ptypes/any
 github.com/golang/protobuf/ptypes/duration
-github.com/golang/protobuf/ptypes/struct
 github.com/golang/protobuf/ptypes/timestamp
-github.com/golang/protobuf/ptypes/wrappers
 # github.com/google/go-cmp v0.4.0
 ## explicit
 github.com/google/go-cmp/cmp
@@ -121,8 +89,10 @@ github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
 # github.com/google/go-github v17.0.0+incompatible
+## explicit
 github.com/google/go-github/github
 # github.com/google/go-querystring v1.0.0
+## explicit
 github.com/google/go-querystring/query
 # github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 ## explicit
@@ -135,14 +105,12 @@ github.com/gopherjs/gopherwasm/js
 ## explicit
 github.com/gorilla/websocket
 # github.com/gosuri/uilive v0.0.4
+## explicit
 github.com/gosuri/uilive
 # github.com/gosuri/uiprogress v0.0.1
+## explicit
 github.com/gosuri/uiprogress
 github.com/gosuri/uiprogress/util/strutil
-# github.com/grpc-ecosystem/grpc-gateway v1.12.1
-github.com/grpc-ecosystem/grpc-gateway/internal
-github.com/grpc-ecosystem/grpc-gateway/runtime
-github.com/grpc-ecosystem/grpc-gateway/utilities
 # github.com/hashicorp/errwrap v1.0.0
 github.com/hashicorp/errwrap
 # github.com/hashicorp/go-multierror v1.0.0
@@ -151,29 +119,15 @@ github.com/hashicorp/go-multierror
 # github.com/heroku/rollrus v0.1.1
 ## explicit
 github.com/heroku/rollrus
+# github.com/hooklift/assert v0.1.0
+## explicit
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
-# github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d
+# github.com/influxdata/influxdb1-client v0.0.0-20200827194710-b269163b24ab
+## explicit
 github.com/influxdata/influxdb1-client/models
 github.com/influxdata/influxdb1-client/pkg/escape
 github.com/influxdata/influxdb1-client/v2
-# github.com/jingweno/upterm v0.4.4
-## explicit
-github.com/jingweno/upterm/cmd/upterm/command
-github.com/jingweno/upterm/cmd/uptermd/internal/command
-github.com/jingweno/upterm/host
-github.com/jingweno/upterm/host/api
-github.com/jingweno/upterm/host/api/swagger/client
-github.com/jingweno/upterm/host/api/swagger/client/admin_service
-github.com/jingweno/upterm/host/api/swagger/models
-github.com/jingweno/upterm/host/internal
-github.com/jingweno/upterm/io
-github.com/jingweno/upterm/memlistener
-github.com/jingweno/upterm/metrics
-github.com/jingweno/upterm/server
-github.com/jingweno/upterm/upterm
-github.com/jingweno/upterm/utils
-github.com/jingweno/upterm/ws
 # github.com/jpillora/chisel v0.0.0-20190724232113-f3a8df20e389
 ## explicit
 github.com/jpillora/chisel/share
@@ -183,24 +137,20 @@ github.com/jpillora/sizestr
 github.com/klauspost/compress/flate
 # github.com/klauspost/cpuid v1.2.0
 github.com/klauspost/cpuid
-# github.com/klauspost/pgzip v1.2.4
+# github.com/klauspost/pgzip v1.2.5
+## explicit
 github.com/klauspost/pgzip
 # github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515
 github.com/kr/logfmt
-# github.com/mailru/easyjson v0.0.0-20190626092158-b2ccc519800e
-github.com/mailru/easyjson/buffer
-github.com/mailru/easyjson/jlexer
-github.com/mailru/easyjson/jwriter
-# github.com/mattn/go-isatty v0.0.8
+# github.com/mattn/go-isatty v0.0.12
+## explicit
 github.com/mattn/go-isatty
 # github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
 # github.com/matttproud/golang_protobuf_extensions v1.0.1
 github.com/matttproud/golang_protobuf_extensions/pbutil
-# github.com/mitchellh/mapstructure v1.1.2
-github.com/mitchellh/mapstructure
 # github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d
 github.com/nu7hatch/gouuid
 # github.com/oklog/run v1.0.0
@@ -232,7 +182,7 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/rollbar/rollbar-go v1.2.0
+# github.com/rollbar/rollbar-go v1.0.2
 github.com/rollbar/rollbar-go
 # github.com/rs/xid v1.2.1
 ## explicit
@@ -246,7 +196,7 @@ github.com/sirupsen/logrus
 ## explicit
 github.com/spf13/cobra
 github.com/spf13/cobra/doc
-# github.com/spf13/pflag v1.0.5
+# github.com/spf13/pflag v1.0.3
 github.com/spf13/pflag
 # github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af
 github.com/tadvi/systray
@@ -258,18 +208,12 @@ github.com/tj/go/term
 github.com/tj/go-update
 github.com/tj/go-update/progress
 github.com/tj/go-update/stores/github
-# github.com/ulikunitz/xz v0.5.7
+# github.com/ulikunitz/xz v0.5.8
+## explicit
 github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
 github.com/ulikunitz/xz/lzma
-# go.mongodb.org/mongo-driver v1.1.1
-go.mongodb.org/mongo-driver/bson
-go.mongodb.org/mongo-driver/bson/bsoncodec
-go.mongodb.org/mongo-driver/bson/bsonrw
-go.mongodb.org/mongo-driver/bson/bsontype
-go.mongodb.org/mongo-driver/bson/primitive
-go.mongodb.org/mongo-driver/x/bsonx/bsoncore
 # golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
 ## explicit
 golang.org/x/crypto/blowfish
@@ -283,7 +227,7 @@ golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/knownhosts
 golang.org/x/crypto/ssh/terminal
-# golang.org/x/net v0.0.0-20191209160850-c0dbc17a3553
+# golang.org/x/net v0.0.0-20190620200207-3b0461eec859
 golang.org/x/net/http/httpguts
 golang.org/x/net/http2
 golang.org/x/net/http2/hpack
@@ -300,12 +244,8 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-golang.org/x/text/width
-# google.golang.org/genproto v0.0.0-20191206224255-0243a4be9c8f
-google.golang.org/genproto/googleapis/api/annotations
-google.golang.org/genproto/googleapis/api/httpbody
+# google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55
 google.golang.org/genproto/googleapis/rpc/status
-google.golang.org/genproto/protobuf/field_mask
 # google.golang.org/grpc v1.32.0
 ## explicit
 google.golang.org/grpc
@@ -349,7 +289,7 @@ google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
 google.golang.org/grpc/test/bufconn
-# gopkg.in/yaml.v2 v2.2.7
+# gopkg.in/yaml.v2 v2.2.2
 gopkg.in/yaml.v2
 # github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e
 # golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c

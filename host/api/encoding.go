@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 
-	"github.com/jingweno/upterm/upterm"
+	"github.com/owenthereal/upterm/upterm"
 )
 
 func EncodeIdentifierSession(session *GetSessionResponse) (string, error) {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

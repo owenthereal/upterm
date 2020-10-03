@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/jingweno/upterm/host"
-	"github.com/jingweno/upterm/host/api"
+	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/host/api"
 	log "github.com/sirupsen/logrus"
 )
 

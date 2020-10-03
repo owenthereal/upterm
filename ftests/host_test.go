@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

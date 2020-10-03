@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jingweno/upterm/host"
-	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/upterm"
-	"github.com/jingweno/upterm/utils"
 	"github.com/olekukonko/tablewriter"
+	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 )
 
