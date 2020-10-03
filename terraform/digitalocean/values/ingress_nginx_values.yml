@@ -1,0 +1,8 @@
+controller:
+  ingressClass: uptermd-nginx
+  service:
+    annotations:
+      service.beta.kubernetes.io/do-loadbalancer-name: "uptermd-lb"
+      service.beta.kubernetes.io/do-loadbalancer-protocol: "tcp"
+tcp:
+  22: "uptermd/uptermd:22"

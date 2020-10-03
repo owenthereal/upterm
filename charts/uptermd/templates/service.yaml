@@ -15,9 +15,11 @@ spec:
       protocol: TCP
       targetPort: 22
       name: sshd
+    {{- if .Values.websocket.enabled }}
     - port: 80
       protocol: TCP
       targetPort: 80
       name: ws
+    {{- end }}
   selector:
     {{- include "upterm.selectorLabels" . | nindent 4 }}

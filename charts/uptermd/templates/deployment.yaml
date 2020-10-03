@@ -36,8 +36,10 @@ spec:
           args:
             - --ssh-addr
             - $(POD_IP):22
+            {{- if .Values.websocket.enabled }}
             - --ws-addr
             - $(POD_IP):80
+            {{- end }}
             - --node-addr
             - $(POD_IP):22
             {{- range $key, $val := .Values.host_keys }}
@@ -59,8 +61,10 @@ spec:
           ports:
             - containerPort: 22
               name: sshd
+            {{- if .Values.websocket.enabled }}
             - containerPort: 80
               name: ws
+            {{- end }}
             - containerPort: 9090
               name: exporter
           readinessProbe:
