@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/server"
-	"github.com/jingweno/upterm/upterm"
-	"github.com/jingweno/upterm/ws"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

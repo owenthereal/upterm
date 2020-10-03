@@ -9,9 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	uio "github.com/jingweno/upterm/io"
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	uio "github.com/owenthereal/upterm/io"
 	crytoterm "golang.org/x/crypto/ssh/terminal"
 )
 

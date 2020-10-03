@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/go-kit/kit/metrics/provider"
-	"github.com/jingweno/upterm/host/api"
-	"github.com/jingweno/upterm/utils"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"

@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jingweno/upterm/upterm"
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 )
 

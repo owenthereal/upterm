@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/jingweno/upterm/upterm"
+	"github.com/owenthereal/upterm/upterm"
 )
 
 func Test_EncodeDecodeIdentifier(t *testing.T) {

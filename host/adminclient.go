@@ -3,7 +3,7 @@ package host
 import (
 	"fmt"
 
-	"github.com/jingweno/upterm/host/api"
+	"github.com/owenthereal/upterm/host/api"
 	"google.golang.org/grpc"
 )
 

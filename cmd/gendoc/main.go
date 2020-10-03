@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/jingweno/upterm/cmd/upterm/command"
+	"github.com/owenthereal/upterm/cmd/upterm/command"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra/doc"
 )

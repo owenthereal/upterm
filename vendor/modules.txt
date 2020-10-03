@@ -4,10 +4,10 @@ github.com/ScaleFT/sshkeys
 # github.com/VividCortex/gohistogram v1.0.0
 ## explicit
 github.com/VividCortex/gohistogram
-# github.com/anmitsu/go-shlex v0.0.0-20161002113705-648efa622239
+# github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
 ## explicit
 github.com/anmitsu/go-shlex
-# github.com/apex/log v1.3.0
+# github.com/apex/log v1.9.0
 ## explicit
 github.com/apex/log
 # github.com/beorn7/perks v1.0.1
@@ -44,14 +44,12 @@ github.com/dsnet/compress/internal/prefix
 # github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
 ## explicit
 github.com/eiannone/keyboard
-# github.com/flynn/go-shlex v0.0.0-20150515145356-3f9db97f8568
-## explicit
 # github.com/fsnotify/fsnotify v1.4.7
 github.com/fsnotify/fsnotify
 # github.com/gen2brain/beeep v0.0.0-20200420150314-13046a26d502
 ## explicit
 github.com/gen2brain/beeep
-# github.com/gliderlabs/ssh v0.2.2 => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
+# github.com/gliderlabs/ssh v0.2.2 => github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e
 ## explicit
 github.com/gliderlabs/ssh
 # github.com/go-kit/kit v0.9.0
@@ -121,11 +119,11 @@ github.com/hashicorp/go-multierror
 # github.com/heroku/rollrus v0.1.1
 ## explicit
 github.com/heroku/rollrus
-# github.com/hooklift/assert v0.0.0-20170704181755-9d1defd6d214
+# github.com/hooklift/assert v0.1.0
 ## explicit
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
-# github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d
+# github.com/influxdata/influxdb1-client v0.0.0-20200827194710-b269163b24ab
 ## explicit
 github.com/influxdata/influxdb1-client/models
 github.com/influxdata/influxdb1-client/pkg/escape
@@ -139,14 +137,15 @@ github.com/jpillora/sizestr
 github.com/klauspost/compress/flate
 # github.com/klauspost/cpuid v1.2.0
 github.com/klauspost/cpuid
-# github.com/klauspost/pgzip v1.2.4
+# github.com/klauspost/pgzip v1.2.5
 ## explicit
 github.com/klauspost/pgzip
 # github.com/konsorten/go-windows-terminal-sequences v1.0.2
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515
 github.com/kr/logfmt
-# github.com/mattn/go-isatty v0.0.8
+# github.com/mattn/go-isatty v0.0.12
+## explicit
 github.com/mattn/go-isatty
 # github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
@@ -183,8 +182,7 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/rollbar/rollbar-go v1.2.0
-## explicit
+# github.com/rollbar/rollbar-go v1.0.2
 github.com/rollbar/rollbar-go
 # github.com/rs/xid v1.2.1
 ## explicit
@@ -198,13 +196,10 @@ github.com/sirupsen/logrus
 ## explicit
 github.com/spf13/cobra
 github.com/spf13/cobra/doc
-# github.com/spf13/pflag v1.0.5
-## explicit
+# github.com/spf13/pflag v1.0.3
 github.com/spf13/pflag
 # github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af
 github.com/tadvi/systray
-# github.com/tj/assert v0.0.0-20190920132354-ee03d75cd160
-## explicit
 # github.com/tj/go v1.8.6
 ## explicit
 github.com/tj/go/term
@@ -213,13 +208,13 @@ github.com/tj/go/term
 github.com/tj/go-update
 github.com/tj/go-update/progress
 github.com/tj/go-update/stores/github
-# github.com/ulikunitz/xz v0.5.7
+# github.com/ulikunitz/xz v0.5.8
 ## explicit
 github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
 github.com/ulikunitz/xz/lzma
-# golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/jingweno/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
+# golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
 ## explicit
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -232,8 +227,7 @@ golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/knownhosts
 golang.org/x/crypto/ssh/terminal
-# golang.org/x/net v0.0.0-20191209160850-c0dbc17a3553
-## explicit
+# golang.org/x/net v0.0.0-20190620200207-3b0461eec859
 golang.org/x/net/http/httpguts
 golang.org/x/net/http2
 golang.org/x/net/http2/hpack
@@ -250,8 +244,7 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-# google.golang.org/genproto v0.0.0-20191206224255-0243a4be9c8f
-## explicit
+# google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55
 google.golang.org/genproto/googleapis/rpc/status
 # google.golang.org/grpc v1.32.0
 ## explicit
@@ -296,8 +289,7 @@ google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
 google.golang.org/grpc/test/bufconn
-# gopkg.in/yaml.v2 v2.2.7
-## explicit
+# gopkg.in/yaml.v2 v2.2.2
 gopkg.in/yaml.v2
-# github.com/gliderlabs/ssh => github.com/jingweno/ssh v0.2.3-0.20191221201824-4cd54473e34e
-# golang.org/x/crypto => github.com/jingweno/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
+# github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e
+# golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c

@@ -2,20 +2,19 @@ package rollbar
 
 import (
 	"context"
+	"fmt"
+	"hash/adler32"
 	"net/http"
 	"net/url"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 )
 
 // Build the main JSON structure that will be sent to Rollbar with the
 // appropriate metadata.
-func buildBody(ctx context.Context, configuration configuration, diagnostic diagnostic,
-	level, title string, extras map[string]interface{}) map[string]interface{} {
-
+func buildBody(ctx context.Context, configuration configuration, level, title string, extras map[string]interface{}) map[string]interface{} {
 	timestamp := time.Now().Unix()
 
 	data := map[string]interface{}{
@@ -33,10 +32,6 @@ func buildBody(ctx context.Context, configuration configuration, diagnostic diag
 		"notifier": map[string]interface{}{
 			"name":    NAME,
 			"version": VERSION,
-			"diagnostic": map[string]interface{}{
-				"languageVersion": diagnostic.languageVersion,
-				"configuredOptions": diagnostic.configuredOptions,
-			},
 		},
 	}
 
@@ -104,23 +99,8 @@ func requestDetails(configuration configuration, r *http.Request) map[string]int
 
 		// POST / PUT params
 		"POST":    filterFlatten(configuration.scrubFields, r.Form, nil),
-		"user_ip": filterIp(remoteIP(r), configuration.captureIp),
+		"user_ip": filterIp(r.RemoteAddr, configuration.captureIp),
 	}
-}
-
-// remoteIP attempts to extract the real remote IP address by looking first at the headers X-Real-IP
-// and X-Forwarded-For, and then falling back to RemoteAddr defined in http.Request
-func remoteIP(req *http.Request) string {
-	realIP := req.Header.Get("X-Real-IP")
-	if realIP != "" {
-		return realIP
-	}
-	forwardedIPs := req.Header.Get("X-Forwarded-For")
-	if forwardedIPs != "" {
-		ips := strings.Split(forwardedIPs, ", ")
-		return ips[0]
-	}
-	return req.RemoteAddr
 }
 
 // filterFlatten filters sensitive information like passwords from being sent to Rollbar, and
@@ -211,17 +191,16 @@ func filterIp(ip string, captureIp captureIp) string {
 // method, the causes will be traversed until nil.
 func errorBody(configuration configuration, err error, skip int) (map[string]interface{}, string) {
 	var parent error
-	// allocate the slice at all times since it will get marshaled into JSON later
 	traceChain := []map[string]interface{}{}
 	fingerprint := ""
 	for {
-		stack := buildStack(getOrBuildFrames(err, parent, 1+skip, configuration.stackTracer))
+		stack := getOrBuildStack(err, parent, skip)
 		traceChain = append(traceChain, buildTrace(err, stack))
 		if configuration.fingerprint {
 			fingerprint = fingerprint + stack.Fingerprint()
 		}
 		parent = err
-		err = configuration.unwrapper(err)
+		err = getCause(err)
 		if err == nil {
 			break
 		}
@@ -231,7 +210,7 @@ func errorBody(configuration configuration, err error, skip int) (map[string]int
 }
 
 // builds one trace element in trace_chain
-func buildTrace(err error, stack stack) map[string]interface{} {
+func buildTrace(err error, stack Stack) map[string]interface{} {
 	message := nilErrTitle
 	if err != nil {
 		message = err.Error()
@@ -245,42 +224,27 @@ func buildTrace(err error, stack stack) map[string]interface{} {
 	}
 }
 
-// getOrBuildFrames gets stack frames from errors that provide one of their own
-// otherwise, it builds a new stack trace. It returns the stack frames if the error
-// is of a compatible type. If the error is not, but the parent error is, it assumes
-// the parent error will be processed later and therefore returns nil.
-func getOrBuildFrames(err error, parent error, skip int, tracer StackTracerFunc) []runtime.Frame {
-	if st, ok := tracer(err); ok && st != nil {
-		return st
+func getCause(err error) error {
+	if cs, ok := err.(CauseStacker); ok {
+		return cs.Cause()
 	}
-	if _, ok := tracer(parent); ok {
-		return nil
-	}
-
-	return getCallersFrames(1 + skip)
+	return nil
 }
 
-func getCallersFrames(skip int) []runtime.Frame {
-	pc := make([]uintptr, 100)
-	runtime.Callers(2+skip, pc)
-	fr := runtime.CallersFrames(pc)
-
-	return framesToSlice(fr)
-}
-
-// framesToSlice extracts all the runtime.Frame from runtime.Frames.
-func framesToSlice(fr *runtime.Frames) []runtime.Frame {
-	frames := make([]runtime.Frame, 0)
-
-	for frame, more := fr.Next(); frame != (runtime.Frame{}); frame, more = fr.Next() {
-		frames = append(frames, frame)
-
-		if !more {
-			break
+// gets Stack from errors that provide one of their own
+// otherwise, builds a new stack
+func getOrBuildStack(err error, parent error, skip int) Stack {
+	if cs, ok := err.(CauseStacker); ok {
+		if s := cs.Stack(); s != nil {
+			return s
+		}
+	} else {
+		if _, ok := parent.(CauseStacker); !ok {
+			return BuildStack(4 + skip)
 		}
 	}
 
-	return frames
+	return make(Stack, 0)
 }
 
 // Build a message inner-body for the given message string.
@@ -300,6 +264,9 @@ func errorClass(err error) string {
 	class := reflect.TypeOf(err).String()
 	if class == "" {
 		return "panic"
+	} else if class == "*errors.errorString" {
+		checksum := adler32.Checksum([]byte(err.Error()))
+		return fmt.Sprintf("{%x}", checksum)
 	} else {
 		return strings.TrimPrefix(class, "*")
 	}

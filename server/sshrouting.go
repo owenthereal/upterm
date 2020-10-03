@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
-	libmetrics "github.com/jingweno/upterm/metrics"
-	"github.com/jingweno/upterm/upterm"
+	libmetrics "github.com/owenthereal/upterm/metrics"
+	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

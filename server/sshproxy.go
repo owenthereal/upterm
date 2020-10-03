@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	proto "github.com/golang/protobuf/proto"
-	"github.com/jingweno/upterm/host/api"
+	"github.com/owenthereal/upterm/host/api"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )

@@ -20,8 +20,8 @@ client:
 		run \
 		--rm \
 		-e GOPATH=/go \
-		--volume $(CURDIR):/go/src/github.com/jingweno/upterm \
-		-w /go/src/github.com/jingweno/upterm quay.io/goswagger/swagger \
+		--volume $(CURDIR):/go/src/github.com/owenthereal/upterm \
+		-w /go/src/github.com/owenthereal/upterm quay.io/goswagger/swagger \
 		generate client -t host/api/swagger -f ./host/api/api.swagger.json
 
 

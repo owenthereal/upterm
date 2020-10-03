@@ -1,6 +1,6 @@
 # Upterm
 
-[Upterm](https://github.com/jingweno/upterm) is an open-source solution for sharing terminal sessions instantly over the public internet via secure tunnels.
+[Upterm](https://github.com/owenthereal/upterm) is an open-source solution for sharing terminal sessions instantly over the public internet via secure tunnels.
 Upterm is good for
 
 * Remote pair programming
@@ -45,7 +45,7 @@ brew install jingweno/upterm/upterm
 
 ### Standalone
 
-`upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/jingweno/upterm/releases) and put it in your executable path.
+`upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/owenthereal/upterm/releases) and put it in your executable path.
 
 ### From source
 
@@ -108,7 +108,7 @@ $ upterm host --server wss://uptermd.upterm.dev -- bash
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
 
-More advanced usage is [here](https://github.com/jingweno/upterm/blob/master/docs/upterm.md).
+More advanced usage is [here](https://github.com/owenthereal/upterm/blob/master/docs/upterm.md).
 
 ## Tips
 
@@ -139,7 +139,7 @@ export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 
 ## How it works
 
 You run the `upterm` program by specifying the command for your terminal session.
-Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
+Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
 Clients connect to your terminal session over the public internet via `uptermd` using `ssh` using TCP or WebSocket.
 A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
@@ -162,7 +162,7 @@ $ helm install uptermd upterm/uptermd
 
 ### Heroku
 
-The cheapest way to deploy a worry-free [Upterm server](https://github.com/jingweno/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
+The cheapest way to deploy a worry-free [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
 Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
 
 You can deploy with one click of the following button:
@@ -174,7 +174,7 @@ The Heroku Terraform scripts are in the [terraform/heroku folder](./terraform/he
 A [util script](./bin/heroku-install) is provided for your convenience to automate everything:
 
 ```
-$ git clone https://github.com/jingweno/upterm
+$ git clone https://github.com/owenthereal/upterm
 $ cd upterm
 
 # Provinsion uptermd in Heroku Common Runtime.
@@ -217,4 +217,4 @@ You can quickly [spawn up your pairing server](#deploy-uptermd) in any cloud env
 
 ## License
 
-[Apache 2.0](https://github.com/jingweno/upterm/blob/master/LICENSE)
+[Apache 2.0](https://github.com/owenthereal/upterm/blob/master/LICENSE)

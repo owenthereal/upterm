@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"reflect"
 	"regexp"
 	"runtime"
 )
@@ -26,7 +25,6 @@ type Client struct {
 	// implementation of the Transport interface is used.
 	Transport     Transport
 	configuration configuration
-	diagnostic    diagnostic
 }
 
 // New returns the default implementation of a Client.
@@ -39,11 +37,9 @@ func New(token, environment, codeVersion, serverHost, serverRoot string) *Client
 func NewAsync(token, environment, codeVersion, serverHost, serverRoot string) *Client {
 	configuration := createConfiguration(token, environment, codeVersion, serverHost, serverRoot)
 	transport := NewTransport(token, configuration.endpoint)
-	diagnostic := createDiagnostic()
 	return &Client{
 		Transport:     transport,
 		configuration: configuration,
-		diagnostic:    diagnostic,
 	}
 }
 
@@ -51,11 +47,9 @@ func NewAsync(token, environment, codeVersion, serverHost, serverRoot string) *C
 func NewSync(token, environment, codeVersion, serverHost, serverRoot string) *Client {
 	configuration := createConfiguration(token, environment, codeVersion, serverHost, serverRoot)
 	transport := NewSyncTransport(token, configuration.endpoint)
-	diagnostic := createDiagnostic()
 	return &Client{
 		Transport:     transport,
 		configuration: configuration,
-		diagnostic:    diagnostic,
 	}
 }
 
@@ -78,39 +72,33 @@ func (c *Client) SetToken(token string) {
 
 // SetEnvironment sets the environment under which all errors and messages will be submitted.
 func (c *Client) SetEnvironment(environment string) {
-	c.diagnostic.configuredOptions["environment"] = environment
 	c.configuration.environment = environment
 }
 
 // SetEndpoint sets the endpoint to post items to. This also configures the underlying Transport.
 func (c *Client) SetEndpoint(endpoint string) {
-	c.diagnostic.configuredOptions["endpoint"] = endpoint
 	c.configuration.endpoint = endpoint
 	c.Transport.SetEndpoint(endpoint)
 }
 
 // SetPlatform sets the platform to be reported for all items.
 func (c *Client) SetPlatform(platform string) {
-	c.diagnostic.configuredOptions["platform"] = platform
 	c.configuration.platform = platform
 }
 
 // SetCodeVersion sets the string describing the running code version on the server.
 func (c *Client) SetCodeVersion(codeVersion string) {
-	c.diagnostic.configuredOptions["codeVersion"] = codeVersion
 	c.configuration.codeVersion = codeVersion
 }
 
 // SetServerHost sets the hostname sent with each item. This value will be indexed.
 func (c *Client) SetServerHost(serverHost string) {
-	c.diagnostic.configuredOptions["serverHost"] = serverHost
 	c.configuration.serverHost = serverHost
 }
 
 // SetServerRoot sets the path to the application code root, not including the final slash.
 // This is used to collapse non-project code when displaying tracebacks.
 func (c *Client) SetServerRoot(serverRoot string) {
-	c.diagnostic.configuredOptions["serverRoot"] = serverRoot
 	c.configuration.serverRoot = serverRoot
 }
 
@@ -123,33 +111,22 @@ func (c *Client) SetCustom(custom map[string]interface{}) {
 // any subsequent errors or messages. Only id is required to be
 // non-empty.
 func (c *Client) SetPerson(id, username, email string) {
-	person := Person{
+	c.configuration.person = Person{
 		Id:       id,
 		Username: username,
 		Email:    email,
 	}
-
-	c.diagnostic.configuredOptions["person"] = map[string]string{
-		"Id": id,
-		"Username": username,
-		"Email": email,
-	}
-	c.configuration.person = person
 }
 
 // ClearPerson clears any previously set person information. See `SetPerson` for more
 // information.
 func (c *Client) ClearPerson() {
-	person := Person{}
-
-	c.diagnostic.configuredOptions["person"] = map[string]string{}
-	c.configuration.person = person
+	c.configuration.person = Person{}
 }
 
 // SetFingerprint sets whether or not to use a custom client-side fingerprint. The default value is
 // false.
 func (c *Client) SetFingerprint(fingerprint bool) {
-	c.diagnostic.configuredOptions["fingerprint"] = fingerprint
 	c.configuration.fingerprint = fingerprint
 }
 
@@ -161,14 +138,12 @@ func (c *Client) SetLogger(logger ClientLogger) {
 // SetScrubHeaders sets the regular expression used to match headers for scrubbing.
 // The default value is regexp.MustCompile("Authorization")
 func (c *Client) SetScrubHeaders(headers *regexp.Regexp) {
-	c.diagnostic.configuredOptions["scrubHeaders"] = headers
 	c.configuration.scrubHeaders = headers
 }
 
 // SetScrubFields sets the regular expression to match keys in the item payload for scrubbing.
 // The default vlaue is regexp.MustCompile("password|secret|token"),
 func (c *Client) SetScrubFields(fields *regexp.Regexp) {
-	c.diagnostic.configuredOptions["scrubFields"] = fields
 	c.configuration.scrubFields = fields
 }
 
@@ -184,33 +159,7 @@ func (c *Client) SetScrubFields(fields *regexp.Regexp) {
 // make before it is finally sent. Be careful with the modifications you make as they could lead to
 // the payload being malformed from the perspective of the API.
 func (c *Client) SetTransform(transform func(map[string]interface{})) {
-	c.diagnostic.configuredOptions["transform"] = functionToString(transform)
 	c.configuration.transform = transform
-}
-
-// SetUnwrapper sets the UnwrapperFunc used by the client. The unwrapper function
-// is used to extract wrapped errors from enhanced error types. This feature can be used to add
-// support for custom error types that do not yet implement the Unwrap method specified in Go 1.13.
-// See the documentation of UnwrapperFunc for more details.
-//
-// In order to preserve the default unwrapping behavior, callers of SetUnwrapper may wish to include
-// a call to DefaultUnwrapper in their custom unwrapper function. See the example on the SetUnwrapper function.
-func (c *Client) SetUnwrapper(unwrapper UnwrapperFunc) {
-	c.diagnostic.configuredOptions["unwrapper"] = functionToString(unwrapper)
-	c.configuration.unwrapper = unwrapper
-}
-
-// SetStackTracer sets the StackTracerFunc used by the client. The stack tracer
-// function is used to extract the stack trace from enhanced error types. This feature can be used
-// to add support for custom error types that do not implement the Stacker interface.
-// See the documentation of StackTracerFunc for more details.
-//
-// In order to preserve the default stack tracing behavior, callers of SetStackTracer may wish
-// to include a call to DefaultStackTracer in their custom tracing function. See the example
-// on the SetStackTracer function.
-func (c *Client) SetStackTracer(stackTracer StackTracerFunc) {
-	c.diagnostic.configuredOptions["stackTracer"] = functionToString(stackTracer)
-	c.configuration.stackTracer = stackTracer
 }
 
 // SetCheckIgnore sets the checkIgnore function which is called during the recovery
@@ -220,7 +169,6 @@ func (c *Client) SetStackTracer(stackTracer StackTracerFunc) {
 // this function is called with the result of calling Error(), otherwise
 // the string representation of the value is passed to this function.
 func (c *Client) SetCheckIgnore(checkIgnore func(string) bool) {
-	c.diagnostic.configuredOptions["checkIgnore"] = functionToString(checkIgnore)
 	c.configuration.checkIgnore = checkIgnore
 }
 
@@ -229,7 +177,6 @@ func (c *Client) SetCheckIgnore(checkIgnore func(string) bool) {
 // CaptureIpAnonymize means apply a pseudo-anonymization.
 // CaptureIpNone means do not capture anything.
 func (c *Client) SetCaptureIp(captureIp captureIp) {
-	c.diagnostic.configuredOptions["captureIp"] = captureIp
 	c.configuration.captureIp = captureIp
 }
 
@@ -464,114 +411,60 @@ func (c *Client) RequestMessageWithExtrasAndContext(ctx context.Context, level s
 
 // -- Panics
 
-// LogPanic accepts an error value returned by recover() and
-// handles logging to Rollbar with stack info.
-func (c *Client) LogPanic(err interface{}, wait bool) {
-	switch val := err.(type) {
-	case nil:
-		return
-	case error:
-		if c.configuration.checkIgnore(val.Error()) {
-			return
-		}
-		c.ErrorWithStackSkip(CRIT, val, 2)
-	default:
-		str := fmt.Sprint(val)
-		if c.configuration.checkIgnore(str) {
-			return
-		}
-		errValue := errors.New(str)
-		c.ErrorWithStackSkip(CRIT, errValue, 2)
-	}
-	if wait {
-		c.Wait()
-	}
-}
-
-// WrapWithArgs calls f with the supplied args and reports a panic to Rollbar if it occurs.
-// If wait is true, this also waits before returning to ensure the message was reported.
-// If an error is captured it is subsequently returned.
-// WrapWithArgs is compatible with any return type for f, but does not return its return value(s).
-func (c *Client) WrapWithArgs(f interface{}, wait bool, inArgs ...interface{}) (err interface{}) {
-	if f == nil {
-		err = fmt.Errorf("function is nil")
-		return
-	}
-	funcType := reflect.TypeOf(f)
-	funcValue := reflect.ValueOf(f)
-
-	if funcType.Kind() != reflect.Func {
-		err = fmt.Errorf("function kind %s is not %s", funcType.Kind(), reflect.Func)
-		return
-	}
-
-	argValues := make([]reflect.Value, len(inArgs))
-	for i, v := range inArgs {
-		argValues[i] = reflect.ValueOf(v)
-	}
-
-	handler := func(args []reflect.Value) []reflect.Value {
-		defer func() {
-			err = recover()
-			c.LogPanic(err, wait)
-		}()
-
-		return funcValue.Call(args)
-	}
-
-	handler(argValues)
-
-	return
-}
-
 // Wrap calls f and then recovers and reports a panic to Rollbar if it occurs.
-// If an error is captured it is subsequently returned.
-func (c *Client) Wrap(f interface{}, args ...interface{}) (err interface{}) {
-	return c.WrapWithArgs(f, false, args...)
+// If an error is captured it is subsequently returned
+func (c *Client) Wrap(f func()) (err interface{}) {
+	defer func() {
+		err = recover()
+		switch val := err.(type) {
+		case nil:
+			return
+		case error:
+			if c.configuration.checkIgnore(val.Error()) {
+				return
+			}
+			c.ErrorWithStackSkip(CRIT, val, 2)
+		default:
+			str := fmt.Sprint(val)
+			if c.configuration.checkIgnore(str) {
+				return
+			}
+			errValue := errors.New(str)
+			c.ErrorWithStackSkip(CRIT, errValue, 2)
+		}
+	}()
+
+	f()
+	return
 }
 
 // WrapAndWait calls f, and recovers and reports a panic to Rollbar if it occurs.
 // This also waits before returning to ensure the message was reported
 // If an error is captured it is subsequently returned.
-func (c *Client) WrapAndWait(f interface{}, args ...interface{}) (err interface{}) {
-	return c.WrapWithArgs(f, true, args...)
-}
-
-// LambdaWrapper calls handlerFunc with arguments, and recovers and reports a
-// panic to Rollbar if it occurs. This functions as a passthrough wrapper for
-// lambda.Start(). This also waits before returning to ensure all messages completed.
-func (c *Client) LambdaWrapper(handlerFunc interface{}) interface{} {
-	if handlerFunc == nil {
-		return lambdaErrorHandler(fmt.Errorf("handler is nil"))
-	}
-	handlerType := reflect.TypeOf(handlerFunc)
-	handlerValue := reflect.ValueOf(handlerFunc)
-
-	if handlerType.Kind() != reflect.Func {
-		return lambdaErrorHandler(fmt.Errorf("handler kind %s is not %s", handlerType.Kind(), reflect.Func))
-	}
-
-	handler := func(args []reflect.Value) []reflect.Value {
-		defer func() {
-			err := recover()
-			c.LogPanic(err, true)
-		}()
-
-		ret := handlerValue.Call(args)
+func (c *Client) WrapAndWait(f func()) (err interface{}) {
+	defer func() {
+		err = recover()
+		switch val := err.(type) {
+		case nil:
+			return
+		case error:
+			if c.configuration.checkIgnore(val.Error()) {
+				return
+			}
+			c.ErrorWithStackSkip(CRIT, val, 2)
+		default:
+			str := fmt.Sprint(val)
+			if c.configuration.checkIgnore(str) {
+				return
+			}
+			errValue := errors.New(str)
+			c.ErrorWithStackSkip(CRIT, errValue, 2)
+		}
 		c.Wait()
-		return ret
-	}
+	}()
 
-	fn := reflect.MakeFunc(handlerValue.Type(), handler).Interface()
-	return fn
-}
-
-type lambdaHandler func(context.Context, []byte) (interface{}, error)
-
-func lambdaErrorHandler(e error) lambdaHandler {
-	return func(ctx context.Context, payload []byte) (interface{}, error) {
-		return nil, e
-	}
+	f()
+	return
 }
 
 // Wait will call the Wait method of the Transport. If using an asynchronous
@@ -590,7 +483,7 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) buildBody(ctx context.Context, level, title string, extras map[string]interface{}) map[string]interface{} {
-	return buildBody(ctx, c.configuration, c.diagnostic, level, title, extras)
+	return buildBody(ctx, c.configuration, level, title, extras)
 }
 
 func (c *Client) requestDetails(r *http.Request) map[string]interface{} {
@@ -650,8 +543,6 @@ type configuration struct {
 	scrubFields  *regexp.Regexp
 	checkIgnore  func(string) bool
 	transform    func(map[string]interface{})
-	unwrapper    UnwrapperFunc
-	stackTracer  StackTracerFunc
 	person       Person
 	captureIp    captureIp
 }
@@ -675,22 +566,8 @@ func createConfiguration(token, environment, codeVersion, serverHost, serverRoot
 		fingerprint:  false,
 		checkIgnore:  func(_s string) bool { return false },
 		transform:    func(_d map[string]interface{}) {},
-		unwrapper:    DefaultUnwrapper,
-		stackTracer:  DefaultStackTracer,
 		person:       Person{},
 		captureIp:    CaptureIpFull,
-	}
-}
-
-type diagnostic struct {
-	languageVersion string
-	configuredOptions map[string]interface{}
-}
-
-func createDiagnostic() diagnostic {
-	return diagnostic{
-		languageVersion: runtime.Version(),
-		configuredOptions: map[string]interface{}{},
 	}
 }
 
@@ -757,8 +634,4 @@ func isTemporary(err error) bool {
 		return err.Timeout()
 	}
 	return false
-}
-
-func functionToString(function interface{}) string {
-	return runtime.FuncForPC(reflect.ValueOf(function).Pointer()).Name()
 }

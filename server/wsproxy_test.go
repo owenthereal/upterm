@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/jingweno/upterm/ws"
+	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/test/bufconn"
 )

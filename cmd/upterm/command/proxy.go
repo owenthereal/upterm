@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"os"
 
-	uio "github.com/jingweno/upterm/io"
-	"github.com/jingweno/upterm/ws"
 	"github.com/oklog/run"
+	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/ws"
 	"github.com/spf13/cobra"
 )
 
