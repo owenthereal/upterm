@@ -1,2 +1,0 @@
-args:
-  - "--kubelet-preferred-address-types=InternalIP"
