@@ -2,7 +2,7 @@ SHELL=/bin/bash -o pipefail
 
 .PHONY: docs build proto client install test vet chart
 
-generate: proto client
+generate: proto
 
 docs:
 	rm -rf docs && mkdir docs
@@ -13,23 +13,11 @@ proto:
 	docker run -v `pwd`/server:/defs namely/protoc-all -f server.proto -l go -o .
 	docker run -v `pwd`/host/api:/defs namely/protoc-all -f api.proto -l go -o .
 
-client:
-	rm -rf host/api/swagger
-	mkdir -p host/api/swagger
-	docker \
-		run \
-		--rm \
-		-e GOPATH=/go \
-		--volume $(CURDIR):/go/src/github.com/owenthereal/upterm \
-		-w /go/src/github.com/owenthereal/upterm quay.io/goswagger/swagger \
-		generate client -t host/api/swagger -f ./host/api/api.swagger.json
-
-
-build:
+build: generate
 	go build -o build/upterm -mod=vendor ./cmd/upterm
 	go build -o build/uptermd -mod=vendor ./cmd/uptermd
 
-install:
+install: generate
 	go install ./cmd/... 
 
 docker_build:
