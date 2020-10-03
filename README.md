@@ -40,7 +40,7 @@ $ ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
 ### Mac
 
 ```
-brew install jingweno/upterm/upterm
+brew install owenthereal/upterm/upterm
 ```
 
 ### Standalone
@@ -50,7 +50,7 @@ brew install jingweno/upterm/upterm
 ### From source
 
 ```
-git clone git@github.com:jingweno/upterm.git
+git clone git@github.com:owenthereal/upterm.git
 cd upterm
 go install ./cmd/upterm/...
 ```
@@ -143,7 +143,7 @@ Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a re
 Clients connect to your terminal session over the public internet via `uptermd` using `ssh` using TCP or WebSocket.
 A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points to this server by default.
 
-![upterm flowchart](https://raw.githubusercontent.com/jingweno/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
+![upterm flowchart](https://raw.githubusercontent.com/owenthereal/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
 
 ## Deploy Uptermd
 

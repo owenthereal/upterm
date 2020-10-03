@@ -2,7 +2,7 @@
 
 set -e
 
-project_name="jingweno/upterm"
+project_name="owenthereal/upterm"
 tag_name="${1?}"
 [[ $tag_name == *-* ]] && pre=1 || pre=
 

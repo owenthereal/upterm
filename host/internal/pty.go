@@ -40,8 +40,8 @@ func wrapPty(f *os.File) *pty {
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
 // This is to prevent data race that might happen for reszing, reading and closing.
 // See ftests failure:
-// * https://travis-ci.org/jingweno/upterm/jobs/632489866
-// * https://travis-ci.org/jingweno/upterm/jobs/632458125
+// * https://travis-ci.org/owenthereal/upterm/jobs/632489866
+// * https://travis-ci.org/owenthereal/upterm/jobs/632458125
 type pty struct {
 	*os.File
 	sync.RWMutex

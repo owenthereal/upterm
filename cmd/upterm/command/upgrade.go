@@ -36,7 +36,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	m := &update.Manager{
 		Command: "upterm",
 		Store: &github.Store{
-			Owner:   "jingweno",
+			Owner:   "owenthereal",
 			Repo:    "upterm",
 			Version: Version,
 		},
