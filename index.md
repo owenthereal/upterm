@@ -197,6 +197,19 @@ $ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
 ```
 
+### Digital Ocean
+
+There is an util script that makes provinsioning [Digital Ocean Kubernetes](https://www.digitalocean.com/products/kubernetes) and an Upterm server easier:
+
+```
+TF_VAR_do_token=$DO_PAT \
+TF_VAR_uptermd_host=uptermd.upterm.dev \
+TF_VAR_uptermd_acme_email=YOUR_EMAIL \
+TF_VAR_uptermd_helm_repo=http://localhost:8080 \
+TF_VAR_uptermd_host_keys_dir=PATH_TO_HOST_KEYS \
+bin/do-install
+```
+
 ## How is Upterm compared to prior arts?
 
 Upterm is an alternative to [Tmate](https://tmate.io).
