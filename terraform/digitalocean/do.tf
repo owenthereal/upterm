@@ -27,7 +27,7 @@ variable "do_node_size" {
 
 variable "write_kubeconfig" {
   type    = bool
-  default = true
+  default = false
 }
 
 provider "digitalocean" {
@@ -56,7 +56,7 @@ resource "digitalocean_kubernetes_cluster" "upterm" {
 resource "local_file" "kubeconfig" {
   count                = var.write_kubeconfig ? 1 : 0
   content              = digitalocean_kubernetes_cluster.upterm.kube_config[0].raw_config
-  filename             = "./kubeconfig_upterm"
+  filename             = "~/.kube/config"
   file_permission      = "0644"
   directory_permission = "0755"
 }
