@@ -30,6 +30,11 @@ variable "write_kubeconfig" {
   default = false
 }
 
+variable "kubeconfig_path" {
+  type    = string
+  default = "~/.kube/config"
+}
+
 provider "digitalocean" {
   token = var.do_token
 }
@@ -56,7 +61,7 @@ resource "digitalocean_kubernetes_cluster" "upterm" {
 resource "local_file" "kubeconfig" {
   count                = var.write_kubeconfig ? 1 : 0
   content              = digitalocean_kubernetes_cluster.upterm.kube_config[0].raw_config
-  filename             = "~/.kube/config"
+  filename             = var.kubeconfig_path
   file_permission      = "0644"
   directory_permission = "0755"
 }
