@@ -74,7 +74,7 @@ provider "helm" {
 }
 
 resource "helm_release" "ingress_nginx" {
-  depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kube_config]
+  depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name             = "ingress-nginx"
   chart            = "ingress-nginx"
   repository       = "https://kubernetes.github.io/ingress-nginx"
