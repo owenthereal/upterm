@@ -67,7 +67,6 @@ locals {
 
 provider "helm" {
   kubernetes {
-    config_path            = ""
     host                   = digitalocean_kubernetes_cluster.upterm.endpoint
     token                  = digitalocean_kubernetes_cluster.upterm.kube_config[0].token
     cluster_ca_certificate = base64decode(digitalocean_kubernetes_cluster.upterm.kube_config[0].cluster_ca_certificate)
