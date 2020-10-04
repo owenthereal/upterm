@@ -86,7 +86,7 @@ resource "helm_release" "ingress_nginx" {
 }
 
 resource "helm_release" "cert_manager" {
-  depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kube_config]
+  depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name             = "cert-manager"
   chart            = "cert-manager"
   repository       = "https://charts.jetstack.io"
@@ -98,7 +98,7 @@ resource "helm_release" "cert_manager" {
 }
 
 resource "helm_release" "metrics_server" {
-  depends_on = [digitalocean_kubernetes_cluster.upterm, local_file.kube_config]
+  depends_on = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name       = "metrics-server"
   chart      = "metrics-server"
   repository = "https://kubernetes-charts.storage.googleapis.com"
