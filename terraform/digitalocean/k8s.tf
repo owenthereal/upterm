@@ -28,7 +28,7 @@ locals {
       ingressClass = "upterm-nginx"
       service = {
         annotations = {
-          "service.beta.kubernetes.io/do-loadbalancer-name"     = "uptermd-lb"
+          "service.beta.kubernetes.io/do-loadbalancer-name"     = "${var.do_k8s_name}-lb"
           "service.beta.kubernetes.io/do-loadbalancer-protocol" = "tcp"
         }
       }
