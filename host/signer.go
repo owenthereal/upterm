@@ -86,10 +86,11 @@ func SignersFromSSHAgent(socket string, privateKeys []string) (signers []ssh.Sig
 		return nil, cancel, err
 	}
 
+	pks := readPublicKeysBestEfforts(privateKeys)
 	var useAgent bool
 	for _, key := range keys {
-		for _, pk := range privateKeys {
-			if key.Comment == pk {
+		for _, pk := range pks {
+			if bytes.Equal(key.Blob, pk.Marshal()) {
 				useAgent = true
 				break
 			}
@@ -121,6 +122,7 @@ func signerFromFile(file string, promptForPassphrase func(file string) ([]byte, 
 	if err == nil {
 		return s, err
 	}
+
 	var e *ssh.PassphraseMissingError
 	if !errors.As(err, &e) && !strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys) {
 		return nil, err
@@ -146,6 +148,25 @@ func signerFromFile(file string, promptForPassphrase func(file string) ([]byte, 
 	}
 
 	return nil, &errDescryptingPrivateKey{file}
+}
+
+func readPublicKeysBestEfforts(privateKeys []string) []ssh.PublicKey {
+	var pks []ssh.PublicKey
+	for _, file := range privateKeys {
+		pb, err := ioutil.ReadFile(file + ".pub")
+		if err != nil {
+			continue
+		}
+
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(pb)
+		if err != nil {
+			continue
+		}
+
+		pks = append(pks, pk)
+	}
+
+	return pks
 }
 
 func promptForPassphrase(file string) ([]byte, error) {
