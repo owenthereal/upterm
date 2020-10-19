@@ -99,7 +99,7 @@ $ upterm host -- docker run --rm -ti ubuntu bash
 # Host a session that runs 'tmux new -t pair-programming' and
 # force clients to join with 'tmux attach -t pair-programming'.
 # This is similar to what tmate offers.
-$ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming`,
+$ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming,
 
 # Connect to uptermd.upterm.dev via WebSocket
 $ upterm host --server wss://uptermd.upterm.dev -- bash
