@@ -86,17 +86,6 @@ func (s *sshd) Serve(ln net.Listener) error {
 			// TODO: validate publickey when it's websocket.
 			return true
 		},
-		PasswordHandler: func(ctx ssh.Context, password string) bool {
-			var auth AuthRequest
-			if err := proto.Unmarshal([]byte(password), &auth); err != nil {
-				return false
-			}
-
-			_, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
-			// TODO: validate publickey
-
-			return err == nil
-		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:         sh.Handler,

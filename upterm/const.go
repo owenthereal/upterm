@@ -17,6 +17,8 @@ const (
 	// misc
 	OpenSSHKeepAliveRequestType = "keepalive@openssh.com"
 
+	SSHCertExtension = "upterm-auth-request"
+
 	EventClientJoined          = "client-joined"
 	EventClientLeft            = "client-left"
 	EventTerminalWindowChanged = "terminal-window-changed"

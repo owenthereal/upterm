@@ -107,6 +107,10 @@ func GenerateSessionID() string {
 	return uniuri.NewLen(uniuri.UUIDLen)
 }
 
+func GenerateNonce() string {
+	return uniuri.NewLen(32)
+}
+
 func FingerprintSHA256(key ssh.PublicKey) string {
 	hash := sha256.Sum256(key.Marshal())
 	b64hash := base64.StdEncoding.EncodeToString(hash[:])

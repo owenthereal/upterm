@@ -219,12 +219,10 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				HostSigners: s.HostSigners,
-				ConnDialer:  cd,
-				authPiper: authPiper{
-					SessionRepo: sessRepo,
-					NodeAddr:    s.NodeAddr,
-				},
+				HostSigners:     s.HostSigners,
+				NodeAddr:        s.NodeAddr,
+				ConnDialer:      cd,
+				SessionRepo:     sessRepo,
 				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}

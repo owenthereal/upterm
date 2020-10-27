@@ -36,6 +36,7 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 	}
 	proxy := &sshProxy{
 		HostSigners:     []ssh.Signer{signer},
+		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
 		MetricsProvider: provider.NewDiscardProvider(),

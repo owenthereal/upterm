@@ -264,10 +264,12 @@ func (c *Host) Run(ctx context.Context) error {
 				cid, ok := args[0].(string)
 				if ok {
 					client := clientRepo.Get(cid)
-					logger.WithField("client", client.Addr).Info("Client left")
-					clientRepo.Delete(cid)
-					if c.ClientLeftCallback != nil && client != nil {
-						c.ClientLeftCallback(*client)
+					if client != nil {
+						logger.WithField("client", client.Addr).Info("Client left")
+						clientRepo.Delete(cid)
+						if c.ClientLeftCallback != nil && client != nil {
+							c.ClientLeftCallback(*client)
+						}
 					}
 				}
 			}
