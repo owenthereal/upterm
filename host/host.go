@@ -103,7 +103,7 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 		confirm = strings.TrimSpace(confirm)
 
 		if confirm == "yes" || confirm == fp {
-			return cb.appendHostLine(hostname, key)
+			return cb.appendHostLine(hostname, remote.String(), key)
 		}
 
 		if confirm == "no" {
@@ -114,14 +114,14 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	}
 }
 
-func (cb hostKeyCallback) appendHostLine(hostname string, key ssh.PublicKey) error {
+func (cb hostKeyCallback) appendHostLine(hostname, remote string, key ssh.PublicKey) error {
 	f, err := os.OpenFile(cb.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	line := knownhosts.Line([]string{hostname}, key)
+	line := knownhosts.Line([]string{hostname, remote}, key)
 	if _, err := f.WriteString(line + "\n"); err != nil {
 		return err
 	}
