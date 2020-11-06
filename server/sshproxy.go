@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
+	gssh "github.com/gliderlabs/ssh"
 	"github.com/go-kit/kit/metrics/provider"
 	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/upterm"
-	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -98,18 +98,64 @@ func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {
 // There is no way to pass the client public key directly to host
 // because we don't have the Client private key to re-sign the request.
 func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key in public callback: %w", err)
+	var (
+		auth *AuthRequest
+		err  error
+	)
+
+	cert, ok := key.(*ssh.Certificate)
+	// If public key is a cert (it happens due to sideway routing), parse auth request and public key from it
+	if ok && a.isUserAuthority(cert.SignatureKey) {
+		auth, err = ParseAuthRequestFromCert(conn.User(), cert)
+		if err != nil {
+			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing auth request from cert: %w", err)
+		}
+
+		key, _, _, _, err = ssh.ParseAuthorizedKey(auth.AuthorizedKey)
+		if err != nil {
+			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing authorized key from auth request: %w", err)
+		}
 	}
 
-	auth := &AuthRequest{
-		ClientVersion: string(conn.ClientVersion()),
-		RemoteAddr:    conn.RemoteAddr().String(),
-		AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key: %w", err)
 	}
+
+	if auth == nil {
+		auth = &AuthRequest{
+			ClientVersion: string(conn.ClientVersion()),
+			RemoteAddr:    conn.RemoteAddr().String(),
+			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+		}
+	}
+
+	signers, err := a.newCertSigners(conn, auth)
+	if err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error creating cert signers: %w", err)
+	}
+
+	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
+}
+
+func (a authPiper) isUserAuthority(key ssh.PublicKey) bool {
+	for _, s := range a.HostSigners {
+		fmt.Println(s.PublicKey().Marshal())
+		fmt.Println(key.Marshal())
+
+		if gssh.KeysEqual(s.PublicKey(), key) {
+			return true
+		}
+	}
+
+	fmt.Println("oh no")
+
+	return false
+}
+
+func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
 	b, err := proto.Marshal(auth)
 	if err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error authenticating client in public key callback: %w", err)
+		return nil, fmt.Errorf("error marshaling auth request: %w", err)
 	}
 
 	var certSigners []ssh.Signer
@@ -118,32 +164,30 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 		at := time.Now()
 		bt := at.Add(1 * time.Minute) // cert valid for 1 min
 		cert := &ssh.Certificate{
-			Nonce:           []byte(utils.GenerateNonce()),
 			Key:             hs.PublicKey(),
-			CertType:        ssh.HostCert,
+			CertType:        ssh.UserCert,
 			KeyId:           string(conn.SessionID()),
 			ValidPrincipals: []string{conn.User()},
 			ValidAfter:      uint64(at.Unix()),
 			ValidBefore:     uint64(bt.Unix()),
-			SignatureKey:    hs.PublicKey(), // TODO: use different key
 			Permissions: ssh.Permissions{
 				Extensions: map[string]string{upterm.SSHCertExtension: string(b)},
 			},
 		}
-		// TODO: use differnt key
+		// TODO: use differnt key to sign
 		if err := cert.SignCert(rand.Reader, hs); err != nil {
-			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error signing host cert: %w", err)
+			return nil, fmt.Errorf("error signing host cert: %w", err)
 		}
 
 		cs, err := ssh.NewCertSigner(cert, hs)
 		if err != nil {
-			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error generating host signer: %w", err)
+			return nil, fmt.Errorf("error generating host signer: %w", err)
 		}
 
 		certSigners = append(certSigners, cs)
 	}
 
-	return ssh.AuthPipeTypeMap, ssh.PublicKeys(certSigners...), err
+	return certSigners, nil
 }
 
 func (a authPiper) passwordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {

@@ -2,6 +2,8 @@ package utils
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -72,17 +74,25 @@ func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 
 	// generate one if no signer
 	if len(signers) == 0 {
-		_, private, err := ed25519.GenerateKey(nil)
+		_, epk, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			return nil, err
 		}
 
-		signer, err := ssh.NewSignerFromKey(private)
+		rpk, err := rsa.GenerateKey(rand.Reader, 4096)
 		if err != nil {
 			return nil, err
 		}
 
-		signers = append(signers, signer)
+		for _, pk := range []interface{}{epk, rpk} {
+			signer, err := ssh.NewSignerFromKey(pk)
+			if err != nil {
+				return nil, err
+			}
+
+			signers = append(signers, signer)
+		}
+
 	}
 
 	return signers, nil
@@ -105,10 +115,6 @@ func ReadFiles(paths []string) ([][]byte, error) {
 
 func GenerateSessionID() string {
 	return uniuri.NewLen(uniuri.UUIDLen)
-}
-
-func GenerateNonce() string {
-	return uniuri.NewLen(32)
 }
 
 func FingerprintSHA256(key ssh.PublicKey) string {

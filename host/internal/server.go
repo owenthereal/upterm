@@ -10,7 +10,6 @@ import (
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
-	"github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
@@ -131,23 +130,9 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 		return false
 	}
 
-	now := time.Now()
-	at := time.Unix(int64(cert.ValidAfter), 0)
-	bt := time.Unix(int64(cert.ValidBefore), 0)
-	if now.Before(at) || now.After(bt) {
-		h.Logger.WithFields(log.Fields{"before": bt, "after": at}).Info("cert expires")
-		return false
-	}
-
-	ext, ok := cert.Permissions.Extensions[upterm.SSHCertExtension]
-	if !ok {
-		h.Logger.Error("cert missing upterm ssh cert ext")
-		return false
-	}
-
-	var auth server.AuthRequest
-	if err := proto.Unmarshal([]byte(ext), &auth); err != nil {
-		h.Logger.WithError(err).Error("cert ext unmarshal failed")
+	auth, err := server.ParseAuthRequestFromCert(ctx.User(), cert)
+	if err != nil {
+		h.Logger.WithError(err).Info("error parsing auth request from cert")
 		return false
 	}
 
@@ -157,16 +142,16 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 		return false
 	}
 
-	// TODO: sshproxy already reject unauthorized keys
+	// TODO: sshproxy already rejects unauthorized keys
 	// Does host still need to check them?
 	if len(h.AuthorizedKeys) == 0 {
-		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
 		return true
 	}
 
 	for _, k := range h.AuthorizedKeys {
 		if gssh.KeysEqual(k, pk) {
-			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
 			return true
 		}
 	}
