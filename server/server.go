@@ -32,6 +32,7 @@ type Opt struct {
 	Network    string
 	NetworkOpt []string
 	MetricAddr string
+	Debug      bool
 }
 
 func Start(opt Opt) error {
@@ -65,7 +66,7 @@ func Start(opt Opt) error {
 	}
 
 	l := log.New()
-	if os.Getenv("DEBUG") != "" {
+	if opt.Debug {
 		l.SetLevel(log.DebugLevel)
 	}
 
