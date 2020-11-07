@@ -121,7 +121,13 @@ func (cb hostKeyCallback) appendHostLine(hostname, remote string, key ssh.Public
 	}
 	defer f.Close()
 
-	line := knownhosts.Line([]string{hostname, remote}, key)
+	// hostname and remote can be both IPs
+	addr := []string{hostname}
+	if hostname != remote {
+		addr = append(addr, remote)
+	}
+
+	line := knownhosts.Line(addr, key)
 	if _, err := f.WriteString(line + "\n"); err != nil {
 		return err
 	}
