@@ -130,7 +130,9 @@ func Test_signersFromSSHAgent(t *testing.T) {
 
 		client := agent.NewClient(c1)
 
-		go agent.ServeAgent(agent.NewKeyring(), c2)
+		go func() {
+			_ = agent.ServeAgent(agent.NewKeyring(), c2)
+		}()
 
 		dir := t.TempDir()
 		tmpfn := filepath.Join(dir, "private_key")
