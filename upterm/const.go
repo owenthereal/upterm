@@ -11,7 +11,6 @@ const (
 
 	// server
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
-	ServerPingRequestType          = "upterm-ping@upterm.dev" // TODO: deprecate
 	ServerServerInfoRequestType    = "upterm-server-info@upterm.dev"
 	ServerCreateSessionRequestType = "upterm-create-session@upterm.dev"
 
