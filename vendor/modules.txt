@@ -1,6 +1,3 @@
-# github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
-## explicit
-github.com/ScaleFT/sshkeys
 # github.com/VividCortex/gohistogram v1.0.0
 ## explicit
 github.com/VividCortex/gohistogram
@@ -27,9 +24,6 @@ github.com/cpuguy83/go-md2man/md2man
 # github.com/creack/pty v1.1.12-0.20200804180658-a6c0a376f1d0
 ## explicit
 github.com/creack/pty
-# github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a
-## explicit
-github.com/dchest/bcrypt_pbkdf
 # github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 ## explicit
 github.com/dchest/uniuri
@@ -214,7 +208,7 @@ github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
 github.com/ulikunitz/xz/lzma
-# golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
+# golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59 => github.com/owenthereal/upterm.crypto v0.0.0-20201107051956-5b1abbdea36d
 ## explicit
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -225,6 +219,7 @@ golang.org/x/crypto/internal/subtle
 golang.org/x/crypto/poly1305
 golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
+golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/knownhosts
 golang.org/x/crypto/ssh/terminal
 # golang.org/x/net v0.0.0-20190620200207-3b0461eec859
@@ -292,4 +287,4 @@ google.golang.org/grpc/test/bufconn
 # gopkg.in/yaml.v2 v2.2.2
 gopkg.in/yaml.v2
 # github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e
-# golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c
+# golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20201107051956-5b1abbdea36d

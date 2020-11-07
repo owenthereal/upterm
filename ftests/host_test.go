@@ -28,7 +28,7 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,

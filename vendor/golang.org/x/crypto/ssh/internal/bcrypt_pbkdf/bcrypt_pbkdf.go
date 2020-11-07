@@ -1,27 +1,23 @@
-// Copyright 2014 Dmitry Chestnykh. All rights reserved.
+// Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package bcrypt_pbkdf implements password-based key derivation function based
-// on bcrypt compatible with bcrypt_pbkdf(3) from OpenBSD.
+// Package bcrypt_pbkdf implements bcrypt_pbkdf(3) from OpenBSD.
+//
+// See https://flak.tedunangst.com/post/bcrypt-pbkdf and
+// https://cvsweb.openbsd.org/cgi-bin/cvsweb/src/lib/libutil/bcrypt_pbkdf.c.
 package bcrypt_pbkdf
 
 import (
 	"crypto/sha512"
 	"errors"
-
-	// NOTE! Requires blowfish package version from Aug 1, 2014 or later.
-	// Will produce incorrect results if the package is older.
-	// See commit message for details: http://goo.gl/wx6g8O
 	"golang.org/x/crypto/blowfish"
 )
 
+const blockSize = 32
+
 // Key derives a key from the password, salt and rounds count, returning a
 // []byte of length keyLen that can be used as cryptographic key.
-//
-// Remember to get a good random salt of at least 16 bytes.  Using a higher
-// rounds count will increase the cost of an exhaustive search but will also
-// make derivation proportionally slower.
 func Key(password, salt []byte, rounds, keyLen int) ([]byte, error) {
 	if rounds < 1 {
 		return nil, errors.New("bcrypt_pbkdf: number of rounds is too small")
@@ -35,17 +31,16 @@ func Key(password, salt []byte, rounds, keyLen int) ([]byte, error) {
 	if keyLen > 1024 {
 		return nil, errors.New("bcrypt_pbkdf: keyLen is too large")
 	}
-	var shapass, shasalt [sha512.Size]byte
-	var out, tmp [32]byte
-	var cnt [4]byte
 
-	numBlocks := (keyLen + len(out) - 1) / len(out)
-	key := make([]byte, numBlocks*len(out))
+	numBlocks := (keyLen + blockSize - 1) / blockSize
+	key := make([]byte, numBlocks*blockSize)
 
 	h := sha512.New()
 	h.Write(password)
-	h.Sum(shapass[:0])
+	shapass := h.Sum(nil)
 
+	shasalt := make([]byte, 0, sha512.Size)
+	cnt, tmp := make([]byte, 4), make([]byte, blockSize)
 	for block := 1; block <= numBlocks; block++ {
 		h.Reset()
 		h.Write(salt)
@@ -53,14 +48,15 @@ func Key(password, salt []byte, rounds, keyLen int) ([]byte, error) {
 		cnt[1] = byte(block >> 16)
 		cnt[2] = byte(block >> 8)
 		cnt[3] = byte(block)
-		h.Write(cnt[:])
-		bcryptHash(tmp[:], shapass[:], h.Sum(shasalt[:0]))
-		copy(out[:], tmp[:])
+		h.Write(cnt)
+		bcryptHash(tmp, shapass, h.Sum(shasalt))
 
+		out := make([]byte, blockSize)
+		copy(out, tmp)
 		for i := 2; i <= rounds; i++ {
 			h.Reset()
-			h.Write(tmp[:])
-			bcryptHash(tmp[:], shapass[:], h.Sum(shasalt[:0]))
+			h.Write(tmp)
+			bcryptHash(tmp, shapass, h.Sum(shasalt))
 			for j := 0; j < len(out); j++ {
 				out[j] ^= tmp[j]
 			}
@@ -84,7 +80,7 @@ func bcryptHash(out, shapass, shasalt []byte) {
 		blowfish.ExpandKey(shasalt, c)
 		blowfish.ExpandKey(shapass, c)
 	}
-	copy(out[:], magic)
+	copy(out, magic)
 	for i := 0; i < 32; i += 8 {
 		for j := 0; j < 64; j++ {
 			c.Encrypt(out[i:i+8], out[i:i+8])
