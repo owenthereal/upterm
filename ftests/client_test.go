@@ -25,7 +25,7 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:         []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:         []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
@@ -56,7 +56,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -93,7 +93,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -141,7 +141,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -214,8 +214,8 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
-		ForceCommand:             []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		ForceCommand:             []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -279,7 +279,7 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' bash --norc"},
+		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,

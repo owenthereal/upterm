@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -10,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ScaleFT/sshkeys"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/terminal"
@@ -70,6 +70,7 @@ func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
 	var signers []ssh.Signer
 	for _, file := range privateKeys {
 		s, err := signerFromFile(file, promptForPassphrase)
+		fmt.Println(err)
 		if err == nil {
 			signers = append(signers, s)
 		}
@@ -166,9 +167,9 @@ func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) (
 		return nil, err
 	}
 
-	s, err := ssh.ParsePrivateKey(pb)
+	key, err := ssh.ParseRawPrivateKey(pb)
 	if err == nil {
-		return s, err
+		return key, err
 	}
 
 	var e *ssh.PassphraseMissingError
@@ -183,14 +184,12 @@ func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) (
 			return nil, err
 		}
 
-		// TODO: crypto/ssh can't properly parse openssh private key with passphrase
-		// Contribute https://github.com/ScaleFT/sshkeys upstream
-		s, err := sshkeys.ParseEncryptedRawPrivateKey(pb, bytes.TrimSpace(pass))
+		key, err := ssh.ParseRawPrivateKeyWithPassphrase(pb, bytes.TrimSpace(pass))
 		if err == nil {
-			return s, err
+			return key, nil
 		}
 
-		if !errors.Is(err, sshkeys.ErrIncorrectPassword) {
+		if !errors.Is(err, x509.IncorrectPasswordError) {
 			return nil, err
 		}
 	}

@@ -6,7 +6,6 @@ module github.com/owenthereal/upterm
 go 1.15
 
 require (
-	github.com/ScaleFT/sshkeys v0.0.0-20181112160850-82451a803681
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/apex/log v1.9.0 // indirect
@@ -14,7 +13,6 @@ require (
 	github.com/buger/goterm v0.0.0-20200322175922-2f3e71b85129 // indirect
 	github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c // indirect
 	github.com/creack/pty v1.1.12-0.20200804180658-a6c0a376f1d0
-	github.com/dchest/bcrypt_pbkdf v0.0.0-20150205184540-83f37f9c154a // indirect
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
@@ -47,7 +45,7 @@ require (
 	github.com/tj/go v1.8.6
 	github.com/tj/go-update v2.2.4+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
-	golang.org/x/crypto v0.0.0-20191029031824-8986dd9e96cf
+	golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59
 	google.golang.org/grpc v1.32.0
 )
 
