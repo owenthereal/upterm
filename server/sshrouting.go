@@ -16,7 +16,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 5 * time.Second
+	pipeEstablishingTimeout = 60 * time.Second
 )
 
 type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)

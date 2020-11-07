@@ -1,6 +1,8 @@
 package command
 
 import (
+	"os"
+
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -15,6 +17,7 @@ var (
 	flagNetwork     string
 	flagNetworkOpts []string
 	flagMetricAddr  string
+	flagDebug       bool
 )
 
 func Root(logger log.FieldLogger) *cobra.Command {
@@ -34,6 +37,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
 	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", "", "metric server address")
+	cmd.PersistentFlags().BoolVarP(&flagDebug, "debug", "", os.Getenv("DEBUG") != "", "debug")
 
 	return cmd
 }
@@ -50,6 +54,7 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 		Network:    flagNetwork,
 		NetworkOpt: flagNetworkOpts,
 		MetricAddr: flagMetricAddr,
+		Debug:      flagDebug,
 	}
 
 	return server.Start(opt)
