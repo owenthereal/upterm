@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"sync"
 	"time"
@@ -103,27 +102,11 @@ func (s *sshd) Serve(ln net.Listener) error {
 			streamlocalForwardChannelType:         sh.Handler,
 			cancelStreamlocalForwardChannelType:   sh.Handler,
 			upterm.ServerCreateSessionRequestType: s.createSessionHandler,
-			upterm.ServerServerInfoRequestType:    s.serverInfoRequestHandler, // TODO: deprecate
-			upterm.ServerPingRequestType:          pingRequestHandler,         // TODO: deprecate
 		},
 	}
 	s.mux.Unlock()
 
 	return s.server.Serve(ln)
-}
-
-// TODO: Remove it. SessionService should take care of routing by session
-func (s *sshd) serverInfoRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
-	info := ServerInfo{
-		NodeAddr: s.NodeAddr,
-	}
-
-	b, err := json.Marshal(info)
-	if err != nil {
-		return false, []byte(err.Error())
-	}
-
-	return true, b
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
@@ -157,8 +140,4 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	}
 
 	return true, b
-}
-
-func pingRequestHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
-	return true, nil
 }
