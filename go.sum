@@ -188,8 +188,8 @@ github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+W
 github.com/onsi/gomega v1.5.0/go.mod h1:ex+gbHU/CVuBBDIJjb2X0qEXbFg53c61hWP/1CpauHY=
 github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e h1:isB4Umj1S5+vyMuHQ9xufQHEYu9TGtNuc1i3dYO5hKc=
 github.com/owenthereal/ssh v0.2.3-0.20191221201824-4cd54473e34e/go.mod h1:TkSrcPW4FyNB2blKWkDzWb2ZIEkDM0PU3wE+KdF2fpw=
-github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c h1:UGFuGKpMPSNeWdelgW+Elim8hcJgCxmyTgTaJYCmZsk=
-github.com/owenthereal/upterm.crypto v0.0.0-20200329195556-a90c3995fb1c/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+github.com/owenthereal/upterm.crypto v0.0.0-20201107051956-5b1abbdea36d h1:4jfHfh8RtkSKZEGpQmX1UdA17B6uuShRAB3/Sz+UPq0=
+github.com/owenthereal/upterm.crypto v0.0.0-20201107051956-5b1abbdea36d/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
 github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a h1:Yw/M+CoU75So9ZUQpRGOdwWvS9fHKSmhT+e+np+oF90=
 github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a/go.mod h1:SgWzwMAx1X/Ez7i90VqF8LRiQtx52pWDiQP+x3iGnzw=
 github.com/pelletier/go-toml v1.2.0/go.mod h1:5z9KED0ma1S8pY6P1sdut58dfprrGBbd/94hg7ilaic=

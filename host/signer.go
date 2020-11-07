@@ -48,17 +48,22 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 	return authorizedKeys, nil
 }
 
-func Signers(privateKeys []string) (signers []ssh.Signer, cleanup func(), err error) {
-	cleanup = func() {}
-
+func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
 	socket := os.Getenv("SSH_AUTH_SOCK")
+	cleanup := func() {}
+
 	if socket == "" {
-		signers, err = SignersFromFiles(privateKeys)
-	} else {
-		signers, cleanup, err = SignersFromSSHAgent(socket, privateKeys)
+		signers, err := SignersFromFiles(privateKeys)
+		return signers, cleanup, err
 	}
 
-	return signers, cleanup, err
+	signers, cleanup, err := SignersFromSSHAgent(socket, privateKeys)
+	if err != nil {
+		signers, err = SignersFromFiles(privateKeys)
+		return signers, cleanup, err
+	}
+
+	return signers, cleanup, nil
 }
 
 func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
@@ -73,46 +78,89 @@ func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
 	return signers, nil
 }
 
-func SignersFromSSHAgent(socket string, privateKeys []string) (signers []ssh.Signer, cancel func(), err error) {
+func SignersFromSSHAgent(socket string, privateKeys []string) ([]ssh.Signer, func(), error) {
+	cleanup := func() {}
+
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error connecting to ssh-agent %s: %w", socket, err)
+		return nil, cleanup, err
 	}
-	cancel = func() { conn.Close() }
 
-	agentClient := agent.NewClient(conn)
-	keys, err := agentClient.List()
+	cleanup = func() { conn.Close() }
+	signers, err := signersFromSSHAgent(agent.NewClient(conn), privateKeys, promptForPassphrase)
+
+	return signers, cleanup, err
+}
+
+func signersFromSSHAgent(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) ([]ssh.Signer, error) {
+	keys, err := client.List()
 	if err != nil {
-		return nil, cancel, err
+		return nil, err
 	}
+	publicKeys := readPublicKeysBestEfforts(privateKeys)
 
-	pks := readPublicKeysBestEfforts(privateKeys)
-	var useAgent bool
-	for _, key := range keys {
-		for _, pk := range pks {
+	var agentKeysIdx []int
+	for i, key := range keys {
+		for _, pk := range publicKeys {
 			if bytes.Equal(key.Blob, pk.Marshal()) {
-				useAgent = true
-				break
+				agentKeysIdx = append(agentKeysIdx, i)
 			}
 		}
 	}
 
-	if useAgent {
-		signers, err = agentClient.Signers()
+	if len(agentKeysIdx) > 0 {
+		signers, err := client.Signers()
 		if err != nil {
-			return signers, cancel, err
+			return nil, err
 		}
-	} else {
-		signers, err = SignersFromFiles(privateKeys)
+
+		var matchedSigners []ssh.Signer
+		for _, idx := range agentKeysIdx {
+			matchedSigners = append(matchedSigners, signers[idx])
+		}
+
+		if len(matchedSigners) == 0 {
+			return nil, fmt.Errorf("No matching signers from SSH agent")
+		}
+
+		return matchedSigners, nil
+	}
+
+	// Add key if there is no match keys
+	if err := addPrivateKeysToAgent(client, privateKeys, promptForPassphrase); err != nil {
+		return nil, err
+	}
+
+	return signersFromSSHAgent(client, privateKeys, promptForPassphrase)
+}
+
+func addPrivateKeysToAgent(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) error {
+	for _, pk := range privateKeys {
+		key, err := readPrivateKeyFromFile(pk, promptForPassphrase)
 		if err != nil {
-			return nil, cancel, err
+			return err
+		}
+
+		if err := client.Add(agent.AddedKey{
+			PrivateKey: key,
+		}); err != nil {
+			return err
 		}
 	}
 
-	return signers, cancel, nil
+	return nil
 }
 
 func signerFromFile(file string, promptForPassphrase func(file string) ([]byte, error)) (ssh.Signer, error) {
+	key, err := readPrivateKeyFromFile(file, promptForPassphrase)
+	if err != nil {
+		return nil, err
+	}
+
+	return ssh.NewSignerFromKey(key)
+}
+
+func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) ([]byte, error)) (interface{}, error) {
 	pb, err := ioutil.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -137,7 +185,7 @@ func signerFromFile(file string, promptForPassphrase func(file string) ([]byte, 
 
 		// TODO: crypto/ssh can't properly parse openssh private key with passphrase
 		// Contribute https://github.com/ScaleFT/sshkeys upstream
-		s, err := sshkeys.ParseEncryptedPrivateKey(pb, bytes.TrimSpace(pass))
+		s, err := sshkeys.ParseEncryptedRawPrivateKey(pb, bytes.TrimSpace(pass))
 		if err == nil {
 			return s, err
 		}
