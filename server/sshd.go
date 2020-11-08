@@ -75,15 +75,6 @@ func (s *sshd) Serve(ln net.Listener) error {
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// This function is never executed when the protocol is ssh.
-			// It acts as an indicator to crypto/ssh that public key auth
-			// is enabled. This allows the ssh router to convert the public
-			// key auth to password auth with public key as the password in
-			// authorized key format.
-			//
-			// However, this function needs to return true to allow publickey
-			// auth when the protocol is websocket.
-			// TODO: validate publickey when it's websocket.
 			return true
 		},
 		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell

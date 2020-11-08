@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	gssh "github.com/gliderlabs/ssh"
 	"github.com/go-kit/kit/metrics/provider"
 	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
@@ -104,19 +103,15 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	)
 
 	cert, ok := key.(*ssh.Certificate)
-	// If public key is a cert (it happens due to sideway routing), parse auth request and public key from it
-	if ok && a.isUserAuthority(cert.SignatureKey) {
-		auth, err = ParseAuthRequestFromCert(conn.User(), cert)
+	// If public key is a cert, try to parse auth request and public key from it
+	if ok {
+		auth, key, err = ParseAuthRequestFromCert(conn.User(), cert)
 		if err != nil {
-			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing auth request from cert: %w", err)
-		}
-
-		key, _, _, _, err = ssh.ParseAuthorizedKey(auth.AuthorizedKey)
-		if err != nil {
-			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing authorized key from auth request: %w", err)
+			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing cert: %w", err)
 		}
 	}
 
+	// TODO: simplify auth key validation by moving it to host validation only
 	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
 		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key: %w", err)
 	}
@@ -137,21 +132,6 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
 }
 
-func (a authPiper) isUserAuthority(key ssh.PublicKey) bool {
-	for _, s := range a.HostSigners {
-		fmt.Println(s.PublicKey().Marshal())
-		fmt.Println(key.Marshal())
-
-		if gssh.KeysEqual(s.PublicKey(), key) {
-			return true
-		}
-	}
-
-	fmt.Println("oh no")
-
-	return false
-}
-
 func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
 	b, err := proto.Marshal(auth)
 	if err != nil {
@@ -165,7 +145,7 @@ func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]s
 		bt := at.Add(1 * time.Minute) // cert valid for 1 min
 		cert := &ssh.Certificate{
 			Key:             hs.PublicKey(),
-			CertType:        ssh.UserCert,
+			CertType:        ssh.HostCert,
 			KeyId:           string(conn.SessionID()),
 			ValidPrincipals: []string{conn.User()},
 			ValidAfter:      uint64(at.Unix()),

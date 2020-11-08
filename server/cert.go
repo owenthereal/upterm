@@ -8,22 +8,35 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// TODO: check cert comes from a public key
-func ParseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthRequest, error) {
+var (
+	errCertNotSignedByHost = fmt.Errorf("ssh cert not signed by host")
+)
+
+// ParseAuthRequestFromCert parses auth request and public key from a cert
+func ParseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthRequest, ssh.PublicKey, error) {
 	checker := &ssh.CertChecker{}
 	if err := checker.CheckCert(principal, cert); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	if cert.Permissions.Extensions == nil {
+		return nil, nil, errCertNotSignedByHost
 	}
 
 	ext, ok := cert.Permissions.Extensions[upterm.SSHCertExtension]
 	if !ok {
-		return nil, fmt.Errorf("cert missing upterm ssh cert ext")
+		return nil, nil, errCertNotSignedByHost
 	}
 
 	var auth AuthRequest
 	if err := proto.Unmarshal([]byte(ext), &auth); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &auth, nil
+	key, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing public key from auth request: %w", err)
+	}
+
+	return &auth, key, nil
 }

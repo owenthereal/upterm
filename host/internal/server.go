@@ -130,15 +130,9 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 		return false
 	}
 
-	auth, err := server.ParseAuthRequestFromCert(ctx.User(), cert)
+	auth, pk, err := server.ParseAuthRequestFromCert(ctx.User(), cert)
 	if err != nil {
-		h.Logger.WithError(err).Info("error parsing auth request from cert")
-		return false
-	}
-
-	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
-	if err != nil {
-		h.Logger.WithError(err).Error("authroized key parsing failed")
+		h.Logger.WithError(err).Error("error parsing auth request from cert")
 		return false
 	}
 
