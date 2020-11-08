@@ -103,6 +103,12 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	// If public key is a cert, try to parse auth request and public key from it
 	if ok {
 		auth, key, err = ParseAuthRequestFromCert(conn.User(), cert)
+		// The cert is not a upterm cert
+		// Get the public key from cert signature
+		if err == errCertNotSignedByHost {
+			key = cert.SignatureKey
+			err = nil
+		}
 		if err != nil {
 			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing cert: %w", err)
 		}
