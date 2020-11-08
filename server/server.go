@@ -30,6 +30,7 @@ type Opt struct {
 	WSAddr     string
 	NodeAddr   string
 	KeyFiles   []string
+	Hostnames  []string
 	Network    string
 	NetworkOpt []string
 	MetricAddr string
@@ -66,6 +67,24 @@ func Start(opt Opt) error {
 	signers, err := utils.CreateSigners(privateKeys)
 	if err != nil {
 		return err
+	}
+
+	var hostSigners []ssh.Signer
+	for _, s := range signers {
+		hs := HostCertSigner{
+			Hostnames: opt.Hostnames,
+		}
+		ss, err := hs.SignCert(s)
+		if err != nil {
+			return err
+		}
+
+		hostSigners = append(hostSigners, ss)
+	}
+
+	// Use private-key signers if there is no cert principal
+	if len(hostSigners) == 0 {
+		hostSigners = signers
 	}
 
 	l := log.New()
@@ -121,7 +140,8 @@ func Start(opt Opt) error {
 
 		s := &Server{
 			NodeAddr:        nodeAddr,
-			HostSigners:     signers,
+			HostSigners:     hostSigners,
+			Signers:         signers,
 			NetworkProvider: network,
 			Logger:          logger.WithField("com", "server"),
 			MetricsProvider: mp,
@@ -164,6 +184,7 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 type Server struct {
 	NodeAddr        string
 	HostSigners     []ssh.Signer
+	Signers         []ssh.Signer
 	NetworkProvider NetworkProvider
 	MetricsProvider provider.Provider
 	Logger          log.FieldLogger
@@ -223,6 +244,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			}
 			sp := &sshProxy{
 				HostSigners:     s.HostSigners,
+				Signers:         s.Signers,
 				NodeAddr:        s.NodeAddr,
 				ConnDialer:      cd,
 				SessionRepo:     sessRepo,

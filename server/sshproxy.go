@@ -13,6 +13,7 @@ import (
 
 type sshProxy struct {
 	HostSigners     []ssh.Signer
+	Signers         []ssh.Signer
 	NodeAddr        string
 	ConnDialer      connDialer
 	SessionRepo     *sessionRepo
@@ -38,7 +39,7 @@ func (r *sshProxy) Shutdown() error {
 func (r *sshProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
 	r.authPiper = &authPiper{
-		HostSigners: r.HostSigners,
+		Signers:     r.Signers,
 		SessionRepo: r.SessionRepo,
 		NodeAddr:    r.NodeAddr,
 	}
@@ -76,7 +77,7 @@ func (r *sshProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 type authPiper struct {
 	NodeAddr    string
 	SessionRepo *sessionRepo
-	HostSigners []ssh.Signer
+	Signers     []ssh.Signer
 }
 
 func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {
@@ -120,7 +121,7 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 		}
 	}
 
-	signers, err := a.newCertSigners(conn, *auth)
+	signers, err := a.newUserCertSigners(conn, *auth)
 	if err != nil {
 		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
@@ -128,16 +129,16 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
 }
 
-func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth AuthRequest) ([]ssh.Signer, error) {
+func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth AuthRequest) ([]ssh.Signer, error) {
 	var certSigners []ssh.Signer
-	for _, hs := range a.HostSigners {
-		s := CertSigner{
+	for _, s := range a.Signers {
+		ucs := UserCertSigner{
 			SessionID:   string(conn.SessionID()),
 			User:        conn.User(),
 			AuthRequest: auth,
 		}
 
-		cs, err := s.SignCert(hs)
+		cs, err := ucs.SignCert(s)
 		if err != nil {
 			return nil, err
 		}

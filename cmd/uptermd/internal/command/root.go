@@ -14,6 +14,7 @@ var (
 	flagWSAddr      string
 	flagNodeAddr    string
 	flagPrivateKeys []string
+	flagHostnames   []string
 	flagNetwork     string
 	flagNetworkOpts []string
 	flagMetricAddr  string
@@ -24,7 +25,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	rootCmd := &rootCmd{}
 	cmd := &cobra.Command{
 		Use:   "uptermd",
-		Short: "Upterm daemon",
+		Short: "Upterm Daemon",
 		RunE:  rootCmd.Run,
 	}
 
@@ -32,6 +33,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringVarP(&flagNodeAddr, "node-addr", "", "", "node address")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
+	cmd.PersistentFlags().StringSliceVarP(&flagHostnames, "hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
@@ -51,6 +53,7 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 		WSAddr:     flagWSAddr,
 		NodeAddr:   flagNodeAddr,
 		KeyFiles:   flagPrivateKeys,
+		Hostnames:  flagHostnames,
 		Network:    flagNetwork,
 		NetworkOpt: flagNetworkOpts,
 		MetricAddr: flagMetricAddr,

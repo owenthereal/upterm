@@ -55,13 +55,13 @@ func ParseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthReq
 	return &auth, key, nil
 }
 
-type CertSigner struct {
+type UserCertSigner struct {
 	SessionID   string
 	User        string
 	AuthRequest AuthRequest
 }
 
-func (g *CertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
+func (g *UserCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 	b, err := proto.Marshal(&g.AuthRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling auth request: %w", err)
@@ -92,4 +92,24 @@ func (g *CertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 	}
 
 	return cs, nil
+}
+
+type HostCertSigner struct {
+	Hostnames []string
+}
+
+func (s *HostCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
+	cert := &ssh.Certificate{
+		Key:             signer.PublicKey(),
+		CertType:        ssh.HostCert,
+		KeyId:           "uptermd",
+		ValidPrincipals: s.Hostnames,
+		ValidBefore:     ssh.CertTimeInfinity,
+	}
+
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		return nil, err
+	}
+
+	return ssh.NewCertSigner(cert, signer)
 }

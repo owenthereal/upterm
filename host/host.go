@@ -45,6 +45,8 @@ func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFi
 }
 
 const (
+	markerCert = "@cert-authority"
+
 	errKeyMismatch = `
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
@@ -57,6 +59,7 @@ The fingerprint for the %s key sent by the remote host is
 Please contact your system administrator.
 Add correct host key in %s to get rid of this message.
 Offending %s key in %s:%d`
+	errNoAuthoritiesHostname = "ssh: no authorities for hostname"
 )
 
 type hostKeyCallback struct {
@@ -69,12 +72,13 @@ type hostKeyCallback struct {
 func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
 		kerr, ok := err.(*knownhosts.KeyError)
-		if !ok {
+		// Return err if it's neither key error or no authrorities hostname error
+		if !ok && !strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 			return err
 		}
 
 		// If keer.Want is non-empty, there was a mismatch, which can signify a MITM attack
-		if len(kerr.Want) != 0 {
+		if kerr != nil && len(kerr.Want) != 0 {
 			kk := kerr.Want[0] // TODO: take care of multiple key mismatches
 			fp := utils.FingerprintSHA256(kk.Key)
 			kt := keyType(kk.Key.Type())
@@ -82,13 +86,17 @@ func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh
 		}
 
 		return cb.promptForConfirmation(hostname, remote, key)
-
 	}
 
 	return nil
 }
 
 func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	cert, isCert := key.(*ssh.Certificate)
+	if isCert {
+		key = cert.SignatureKey
+	}
+
 	fp := utils.FingerprintSHA256(key)
 	fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
 	fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
@@ -104,7 +112,7 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 		confirm = strings.TrimSpace(confirm)
 
 		if confirm == "yes" || confirm == fp {
-			return cb.appendHostLine(hostname, remote.String(), key)
+			return cb.appendHostLine(isCert, hostname, remote.String(), key)
 		}
 
 		if confirm == "no" {
@@ -115,7 +123,7 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	}
 }
 
-func (cb hostKeyCallback) appendHostLine(hostname, remote string, key ssh.PublicKey) error {
+func (cb hostKeyCallback) appendHostLine(isCert bool, hostname, remote string, key ssh.PublicKey) error {
 	f, err := os.OpenFile(cb.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -129,6 +137,11 @@ func (cb hostKeyCallback) appendHostLine(hostname, remote string, key ssh.Public
 	}
 
 	line := knownhosts.Line(addr, key)
+
+	if isCert {
+		line = fmt.Sprintf("%s %s", markerCert, line)
+	}
+
 	if _, err := f.WriteString(line + "\n"); err != nil {
 		return err
 	}

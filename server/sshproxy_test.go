@@ -22,6 +22,14 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cs := HostCertSigner{
+		Hostnames: []string{"127.0.0.1"},
+	}
+	hostSigner, err := cs.SignCert(signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +43,8 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		Logger:          logger,
 	}
 	proxy := &sshProxy{
-		HostSigners:     []ssh.Signer{signer},
+		HostSigners:     []ssh.Signer{hostSigner},
+		Signers:         []ssh.Signer{signer},
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,

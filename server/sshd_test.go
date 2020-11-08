@@ -40,7 +40,7 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	}
 
 	// Set up cert signer for sshd public key validation
-	cs := CertSigner{
+	cs := UserCertSigner{
 		SessionID: "1234",
 		User:      "owen",
 		AuthRequest: AuthRequest{
