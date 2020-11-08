@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -25,11 +26,6 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
-	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +33,27 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr().String()
+
+	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up cert signer for sshd public key validation
+	cs := CertSigner{
+		SessionID: "1234",
+		User:      "owen",
+		AuthRequest: AuthRequest{
+			ClientVersion: upterm.HostSSHClientVersion,
+			RemoteAddr:    addr,
+			AuthorizedKey: []byte(TestPublicKeyContent),
+		},
+	}
+	certSigner, err := cs.SignCert(signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	sshd := &sshd{
 		HostSigners: []ssh.Signer{signer},
 		NodeAddr:    addr,
@@ -52,7 +69,7 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	}
 
 	config := &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
 		User:            "owen",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}

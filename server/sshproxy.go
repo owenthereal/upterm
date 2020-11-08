@@ -1,16 +1,12 @@
 package server
 
 import (
-	"crypto/rand"
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
-	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
-	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -124,7 +120,7 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 		}
 	}
 
-	signers, err := a.newCertSigners(conn, auth)
+	signers, err := a.newCertSigners(conn, *auth)
 	if err != nil {
 		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
@@ -132,36 +128,18 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (
 	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
 }
 
-func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
-	b, err := proto.Marshal(auth)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling auth request: %w", err)
-	}
-
+func (a authPiper) newCertSigners(conn ssh.ConnMetadata, auth AuthRequest) ([]ssh.Signer, error) {
 	var certSigners []ssh.Signer
 	for _, hs := range a.HostSigners {
-		// Ref: https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.certkeys
-		at := time.Now()
-		bt := at.Add(1 * time.Minute) // cert valid for 1 min
-		cert := &ssh.Certificate{
-			Key:             hs.PublicKey(),
-			CertType:        ssh.HostCert,
-			KeyId:           string(conn.SessionID()),
-			ValidPrincipals: []string{conn.User()},
-			ValidAfter:      uint64(at.Unix()),
-			ValidBefore:     uint64(bt.Unix()),
-			Permissions: ssh.Permissions{
-				Extensions: map[string]string{upterm.SSHCertExtension: string(b)},
-			},
-		}
-		// TODO: use differnt key to sign
-		if err := cert.SignCert(rand.Reader, hs); err != nil {
-			return nil, fmt.Errorf("error signing host cert: %w", err)
+		s := CertSigner{
+			SessionID:   string(conn.SessionID()),
+			User:        conn.User(),
+			AuthRequest: auth,
 		}
 
-		cs, err := ssh.NewCertSigner(cert, hs)
+		cs, err := s.SignCert(hs)
 		if err != nil {
-			return nil, fmt.Errorf("error generating host signer: %w", err)
+			return nil, err
 		}
 
 		certSigners = append(certSigners, cs)
