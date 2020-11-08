@@ -82,11 +82,6 @@ func Start(opt Opt) error {
 		hostSigners = append(hostSigners, ss)
 	}
 
-	// Use private-key signers if there is no cert principal
-	if len(hostSigners) == 0 {
-		hostSigners = signers
-	}
-
 	l := log.New()
 	if opt.Debug {
 		l.SetLevel(log.DebugLevel)
