@@ -164,7 +164,7 @@ func (a authPiper) validateClientAuthorizedKey(conn ssh.ConnMetadata, key ssh.Pu
 		return fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
-	// Don't vdalite authorized key if:
+	// Don't validate authorized key if:
 	// 1. This is not a client request
 	// 2. The node does not match the request that routing is needed
 	if id.Type != api.Identifier_CLIENT || a.NodeAddr != id.NodeAddr {

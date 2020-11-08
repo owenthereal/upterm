@@ -2,8 +2,6 @@ package utils
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -79,12 +77,7 @@ func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 			return nil, err
 		}
 
-		rpk, err := rsa.GenerateKey(rand.Reader, 4096)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, pk := range []interface{}{epk, rpk} {
+		for _, pk := range []interface{}{epk} {
 			signer, err := ssh.NewSignerFromKey(pk)
 			if err != nil {
 				return nil, err
