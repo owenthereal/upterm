@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -154,6 +155,8 @@ type Host struct {
 }
 
 func (c *Host) Run(ctx context.Context) error {
+	rand.Seed(time.Now().UTC().UnixNano())
+
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)

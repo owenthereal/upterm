@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -36,6 +37,8 @@ type Opt struct {
 }
 
 func Start(opt Opt) error {
+	rand.Seed(time.Now().UTC().UnixNano())
+
 	// must always have a ssh addr
 	if opt.SSHAddr == "" {
 		return fmt.Errorf("must specify a ssh address")
