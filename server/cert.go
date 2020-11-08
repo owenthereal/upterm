@@ -71,7 +71,7 @@ func (g *CertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 	bt := at.Add(1 * time.Minute) // cert valid for 1 min
 	cert := &ssh.Certificate{
 		Key:             signer.PublicKey(),
-		CertType:        ssh.HostCert,
+		CertType:        ssh.UserCert,
 		KeyId:           g.SessionID,
 		ValidPrincipals: []string{g.User},
 		ValidAfter:      uint64(at.Unix()),
