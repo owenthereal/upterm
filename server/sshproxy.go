@@ -93,25 +93,23 @@ func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {
 // publicKeyCallback turns client public key into server cert before passing it to host
 // There is no way to pass the client public key directly to host
 // because we don't have the Client private key to re-sign the request.
-func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	var (
-		auth *AuthRequest
-		err  error
-	)
+func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	checker := UserCertChecker{
+		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
+			return key, nil
+		},
+	}
+	auth, key, err := checker.Authenticate(conn.User(), pk)
+	if err == errCertNotSignedByHost {
+		err = nil
+	}
+	if err != nil {
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error checking user cert: %w", err)
+	}
 
-	cert, ok := key.(*ssh.Certificate)
-	// If public key is a cert, try to parse auth request and public key from it
-	if ok {
-		auth, key, err = ParseAuthRequestFromCert(conn.User(), cert)
-		// The cert is not a upterm cert
-		// Get the public key from cert signature
-		if err == errCertNotSignedByHost {
-			key = cert.SignatureKey
-			err = nil
-		}
-		if err != nil {
-			return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing cert: %w", err)
-		}
+	// Use the public-key if a key can't be parsed from cert
+	if key == nil {
+		key = pk
 	}
 
 	// TODO: simplify auth key validation by moving it to host validation only

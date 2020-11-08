@@ -75,7 +75,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			checker := CertChecker{}
+			checker := UserCertChecker{}
 			_, _, err := checker.Authenticate(ctx.User(), key)
 			if err != nil {
 				s.Logger.WithError(err).Error("error parsing auth request from cert")

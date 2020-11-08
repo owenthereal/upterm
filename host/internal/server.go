@@ -124,7 +124,7 @@ type publicKeyHandler struct {
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
-	checker := server.CertChecker{}
+	checker := server.UserCertChecker{}
 	auth, pk, err := checker.Authenticate(ctx.User(), key)
 	if err != nil {
 		h.Logger.WithError(err).Error("error parsing auth request from cert")

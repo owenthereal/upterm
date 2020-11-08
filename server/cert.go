@@ -14,42 +14,57 @@ var (
 	errCertNotSignedByHost = fmt.Errorf("ssh cert not signed by host")
 )
 
-type CertChecker struct {
+type UserCertChecker struct {
+	UserKeyFallback func(user string, key ssh.PublicKey) (ssh.PublicKey, error)
 }
 
-func (c *CertChecker) Authenticate(user string, key ssh.PublicKey) (*AuthRequest, ssh.PublicKey, error) {
+// Authenticate tries to pass auth request and public key from a cert.
+// If the public key is not a cert, it calls the UserKeyFallback func. Otherwise it returns an error.
+func (c *UserCertChecker) Authenticate(user string, key ssh.PublicKey) (*AuthRequest, ssh.PublicKey, error) {
 	cert, ok := key.(*ssh.Certificate)
 	if !ok {
+		if c.UserKeyFallback != nil {
+			key, err := c.UserKeyFallback(user, key)
+			return nil, key, err
+		}
+
 		return nil, nil, fmt.Errorf("public key not a cert")
 	}
 
-	return ParseAuthRequestFromCert(user, cert)
+	return parseAuthRequestFromCert(user, cert)
 }
 
-// ParseAuthRequestFromCert parses auth request and public key from a cert
-func ParseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthRequest, ssh.PublicKey, error) {
+// parseAuthRequestFromCert parses auth request and public key from a cert.
+// The public key is always the signature key of the cert.
+func parseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthRequest, ssh.PublicKey, error) {
+	key := cert.SignatureKey
+
+	if cert.CertType != ssh.UserCert {
+		return nil, key, fmt.Errorf("ssh: cert has type %d", cert.CertType)
+	}
+
 	checker := &ssh.CertChecker{}
 	if err := checker.CheckCert(principal, cert); err != nil {
-		return nil, nil, err
+		return nil, key, err
 	}
 
 	if cert.Permissions.Extensions == nil {
-		return nil, nil, errCertNotSignedByHost
+		return nil, key, errCertNotSignedByHost
 	}
 
 	ext, ok := cert.Permissions.Extensions[upterm.SSHCertExtension]
 	if !ok {
-		return nil, nil, errCertNotSignedByHost
+		return nil, key, errCertNotSignedByHost
 	}
 
 	var auth AuthRequest
 	if err := proto.Unmarshal([]byte(ext), &auth); err != nil {
-		return nil, nil, err
+		return nil, key, err
 	}
 
 	key, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error parsing public key from auth request: %w", err)
+		return nil, key, fmt.Errorf("error parsing public key from auth request: %w", err)
 	}
 
 	return &auth, key, nil
