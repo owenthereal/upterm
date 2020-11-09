@@ -72,17 +72,20 @@ func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 
 	// generate one if no signer
 	if len(signers) == 0 {
-		_, private, err := ed25519.GenerateKey(nil)
+		_, epk, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			return nil, err
 		}
 
-		signer, err := ssh.NewSignerFromKey(private)
-		if err != nil {
-			return nil, err
+		for _, pk := range []interface{}{epk} {
+			signer, err := ssh.NewSignerFromKey(pk)
+			if err != nil {
+				return nil, err
+			}
+
+			signers = append(signers, signer)
 		}
 
-		signers = append(signers, signer)
 	}
 
 	return signers, nil

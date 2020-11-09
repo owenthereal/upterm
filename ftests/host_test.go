@@ -89,6 +89,10 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 
 	select {
 	case cc := <-lch:
+		if cc.Id == "" {
+			t.Fatal("client id can't be empty")
+		}
+
 		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 		if err != nil {
 			t.Fatal(err)

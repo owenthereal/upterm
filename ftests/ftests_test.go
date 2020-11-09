@@ -177,6 +177,19 @@ func (s *Server) start() error {
 		return err
 	}
 
+	var hostSigners []ssh.Signer
+	for _, s := range signers {
+		cs := server.HostCertSigner{
+			Hostnames: []string{"127.0.0.1"},
+		}
+		hostSigner, err := cs.SignCert(s)
+		if err != nil {
+			return err
+		}
+
+		hostSigners = append(hostSigners, hostSigner)
+	}
+
 	network := &server.MemoryProvider{}
 	_ = network.SetOpts(nil)
 
@@ -185,7 +198,8 @@ func (s *Server) start() error {
 
 	s.Server = &server.Server{
 		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
-		HostSigners:     signers,
+		HostSigners:     hostSigners,
+		Signers:         signers,
 		NetworkProvider: network,
 		MetricsProvider: provider.NewDiscardProvider(),
 		Logger:          logger,

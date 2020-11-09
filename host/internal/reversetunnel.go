@@ -79,9 +79,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		// Enforce a restricted set of algorithms for security
 		// TODO: make this configurable if necessary
 		HostKeyAlgorithms: []string{
-			ssh.CertAlgoRSAv01,
 			ssh.CertAlgoED25519v01,
 			ssh.KeyAlgoED25519,
+			ssh.CertAlgoRSAv01,
 			ssh.KeyAlgoRSA,
 		},
 		HostKeyCallback: c.HostKeyCallback,

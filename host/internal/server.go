@@ -10,7 +10,6 @@ import (
 	"time"
 
 	gssh "github.com/gliderlabs/ssh"
-	"github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
@@ -88,9 +87,10 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			logger:            s.Logger,
 			readonly:          s.ReadOnly,
 		}
-		ph := passwordHandler{
-			authorizedKeys: s.AuthorizedKeys,
-			eventEmmiter:   s.EventEmitter,
+		ph := publicKeyHandler{
+			AuthorizedKeys: s.AuthorizedKeys,
+			EventEmmiter:   s.EventEmitter,
+			Logger:         s.Logger,
 		}
 
 		var ss []gssh.Signer
@@ -99,21 +99,10 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 
 		server := gssh.Server{
-			HostSigners:     ss,
-			Handler:         sh.HandleSession,
-			PasswordHandler: ph.HandlePassword,
-			Version:         upterm.HostSSHServerVersion,
-			PublicKeyHandler: func(ctx gssh.Context, key gssh.PublicKey) bool {
-				// This function is never executed when the protocol is ssh.
-				// It acts as an indicator to crypto/ssh that public key auth
-				// is enabled. This allows the ssh router to convert the public
-				// key auth to password auth with public key as the password in
-				// authorized key format.
-				//
-				// However, this function needs to return true to allow publickey
-				// auth when the protocol is websocket.
-				return true
-			},
+			HostSigners:      ss,
+			Handler:          sh.HandleSession,
+			Version:          upterm.HostSSHServerVersion,
+			PublicKeyHandler: ph.HandlePublicKey,
 		}
 		g.Add(func() error {
 			return server.Serve(l)
@@ -128,34 +117,35 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	return g.Run()
 }
 
-type passwordHandler struct {
-	authorizedKeys []ssh.PublicKey
-	eventEmmiter   *emitter.Emitter
+type publicKeyHandler struct {
+	AuthorizedKeys []ssh.PublicKey
+	EventEmmiter   *emitter.Emitter
+	Logger         log.FieldLogger
 }
 
-func (h *passwordHandler) HandlePassword(ctx gssh.Context, password string) bool {
-	var auth server.AuthRequest
-	if err := proto.Unmarshal([]byte(password), &auth); err != nil {
-		return false
-	}
-
-	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
+func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
+	checker := server.UserCertChecker{}
+	auth, pk, err := checker.Authenticate(ctx.User(), key)
 	if err != nil {
+		h.Logger.WithError(err).Error("error parsing auth request from cert")
 		return false
 	}
 
-	if len(h.authorizedKeys) == 0 {
-		emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
+	// TODO: sshproxy already rejects unauthorized keys
+	// Does host still need to check them?
+	if len(h.AuthorizedKeys) == 0 {
+		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
 		return true
 	}
 
-	for _, k := range h.authorizedKeys {
+	for _, k := range h.AuthorizedKeys {
 		if gssh.KeysEqual(k, pk) {
-			emitClientJoinEvent(h.eventEmmiter, ctx.SessionID(), auth, pk)
+			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
 			return true
 		}
 	}
 
+	h.Logger.Info("unauthorized public key")
 	return false
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/rand"
 	"net"
 	"strings"
 	"testing"
@@ -22,6 +23,14 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cs := HostCertSigner{
+		Hostnames: []string{"127.0.0.1"},
+	}
+	hostSigner, err := cs.SignCert(signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +44,9 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		Logger:          logger,
 	}
 	proxy := &sshProxy{
-		HostSigners:     []ssh.Signer{signer},
+		HostSigners:     []ssh.Signer{hostSigner},
+		Signers:         []ssh.Signer{signer},
+		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
 		MetricsProvider: provider.NewDiscardProvider(),
@@ -80,17 +91,58 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	client, err := ssh.Dial("tcp", proxyAddr, config) // proxy to sshd
+	ucs, err := testCertSigner(user, signer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.NewSession()
-	if err == nil || !strings.Contains(err.Error(), "unsupported channel type") {
-		t.Fatalf("expect unsupported channle type error but got %v", err)
+
+	cases := []struct {
+		Name   string
+		Signer ssh.Signer
+	}{
+		{
+			Name:   "public-key auth",
+			Signer: signer,
+		},
+		{
+			Name:   "public-key user cert auth",
+			Signer: ucs,
+		},
 	}
+
+	for _, c := range cases {
+		cc := c
+
+		t.Run(c.Name, func(t *testing.T) {
+			config := &ssh.ClientConfig{
+				User:            user,
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(cc.Signer)},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			}
+			client, err := ssh.Dial("tcp", proxyAddr, config) // proxy to sshd
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.NewSession()
+			if err == nil || !strings.Contains(err.Error(), "unsupported channel type") {
+				t.Fatalf("expect unsupported channle type error but got %v", err)
+			}
+		})
+	}
+}
+
+func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {
+	cert := &ssh.Certificate{
+		Key:             signer.PublicKey(),
+		CertType:        ssh.UserCert,
+		KeyId:           "1234",
+		ValidPrincipals: []string{user},
+		ValidBefore:     ssh.CertTimeInfinity,
+	}
+
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		return nil, err
+	}
+
+	return ssh.NewCertSigner(cert, signer)
 }

@@ -70,7 +70,6 @@ func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
 	var signers []ssh.Signer
 	for _, file := range privateKeys {
 		s, err := signerFromFile(file, promptForPassphrase)
-		fmt.Println(err)
 		if err == nil {
 			signers = append(signers, s)
 		}

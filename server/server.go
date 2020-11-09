@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ type Opt struct {
 	WSAddr     string
 	NodeAddr   string
 	KeyFiles   []string
+	Hostnames  []string
 	Network    string
 	NetworkOpt []string
 	MetricAddr string
@@ -36,6 +38,8 @@ type Opt struct {
 }
 
 func Start(opt Opt) error {
+	rand.Seed(time.Now().UTC().UnixNano())
+
 	// must always have a ssh addr
 	if opt.SSHAddr == "" {
 		return fmt.Errorf("must specify a ssh address")
@@ -63,6 +67,19 @@ func Start(opt Opt) error {
 	signers, err := utils.CreateSigners(privateKeys)
 	if err != nil {
 		return err
+	}
+
+	var hostSigners []ssh.Signer
+	for _, s := range signers {
+		hs := HostCertSigner{
+			Hostnames: opt.Hostnames,
+		}
+		ss, err := hs.SignCert(s)
+		if err != nil {
+			return err
+		}
+
+		hostSigners = append(hostSigners, ss)
 	}
 
 	l := log.New()
@@ -118,7 +135,8 @@ func Start(opt Opt) error {
 
 		s := &Server{
 			NodeAddr:        nodeAddr,
-			HostSigners:     signers,
+			HostSigners:     hostSigners,
+			Signers:         signers,
 			NetworkProvider: network,
 			Logger:          logger.WithField("com", "server"),
 			MetricsProvider: mp,
@@ -161,6 +179,7 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 type Server struct {
 	NodeAddr        string
 	HostSigners     []ssh.Signer
+	Signers         []ssh.Signer
 	NetworkProvider NetworkProvider
 	MetricsProvider provider.Provider
 	Logger          log.FieldLogger
@@ -219,12 +238,11 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				HostSigners: s.HostSigners,
-				ConnDialer:  cd,
-				authPiper: authPiper{
-					SessionRepo: sessRepo,
-					NodeAddr:    s.NodeAddr,
-				},
+				HostSigners:     s.HostSigners,
+				Signers:         s.Signers,
+				NodeAddr:        s.NodeAddr,
+				ConnDialer:      cd,
+				SessionRepo:     sessRepo,
 				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}

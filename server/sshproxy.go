@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/go-kit/kit/metrics/provider"
-	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/host/api"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -14,13 +13,16 @@ import (
 
 type sshProxy struct {
 	HostSigners     []ssh.Signer
+	Signers         []ssh.Signer
+	NodeAddr        string
 	ConnDialer      connDialer
-	authPiper       authPiper
+	SessionRepo     *sessionRepo
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
-	routing *SSHRouting
-	mux     sync.Mutex
+	authPiper *authPiper
+	routing   *SSHRouting
+	mux       sync.Mutex
 }
 
 func (r *sshProxy) Shutdown() error {
@@ -36,6 +38,11 @@ func (r *sshProxy) Shutdown() error {
 
 func (r *sshProxy) Serve(ln net.Listener) error {
 	r.mux.Lock()
+	r.authPiper = &authPiper{
+		Signers:     r.Signers,
+		SessionRepo: r.SessionRepo,
+		NodeAddr:    r.NodeAddr,
+	}
 	r.routing = &SSHRouting{
 		HostSigners:      r.HostSigners,
 		Logger:           r.Logger,
@@ -70,60 +77,87 @@ func (r *sshProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 type authPiper struct {
 	NodeAddr    string
 	SessionRepo *sessionRepo
+	Signers     []ssh.Signer
 }
 
 func (a authPiper) AuthPipe(user string) *ssh.AuthPipe {
 	return &ssh.AuthPipe{
 		User:                    user, // TODO: look up client user by public key
-		NoneAuthCallback:        a.noneCallback,
-		PasswordCallback:        a.passThroughPasswordCallback, // password needs to be passed through for sideway routing. Otherwise, it can be discarded
-		PublicKeyCallback:       a.convertToPasswordPublicKeyCallback,
+		NoneAuthCallback:        a.noneAuthCallback,
+		PasswordCallback:        a.passwordCallback,
+		PublicKeyCallback:       a.publicKeyCallback,
 		UpstreamHostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: validate host's public key
 	}
 }
 
-func (a authPiper) passThroughPasswordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
-	var auth AuthRequest
-	if err := proto.Unmarshal(password, &auth); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error authenticating client in password callback: %w", err)
+// publicKeyCallback turns client public key into server cert before passing it to host
+// There is no way to pass the client public key directly to host
+// because we don't have the Client private key to re-sign the request.
+func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	checker := UserCertChecker{
+		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
+			return key, nil
+		},
 	}
-
-	pk, _, _, _, err := ssh.ParseAuthorizedKey(auth.AuthorizedKey)
+	auth, key, err := checker.Authenticate(conn.User(), pk)
+	if err == errCertNotSignedByHost {
+		err = nil
+	}
 	if err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error parsing authorized key: %w", err)
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error checking user cert: %w", err)
 	}
 
-	if err := a.validateClientAuthorizedKey(conn, pk); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key in password callback: %w", err)
+	// Use the public-key if a key can't be parsed from cert
+	if key == nil {
+		key = pk
 	}
 
-	return ssh.AuthPipeTypePassThrough, nil, nil
-}
-
-func (a authPiper) convertToPasswordPublicKeyCallback(conn ssh.ConnMetadata, key ssh.PublicKey) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	// TODO: simplify auth key validation by moving it to host validation only
 	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key in public callback: %w", err)
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error validating client authorized key: %w", err)
 	}
 
-	// Can't auth with the public key against session upstream in the Host
-	// because we don't have the Client private key to re-sign the request.
-	// Public key auth is converted to password key auth with public key as
-	// the password so that session upstream in the host can at least validate it.
-	// The password is in the format of authorized key of the public key.
-	auth := &AuthRequest{
-		ClientVersion: string(conn.ClientVersion()),
-		RemoteAddr:    conn.RemoteAddr().String(),
-		AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+	if auth == nil {
+		auth = &AuthRequest{
+			ClientVersion: string(conn.ClientVersion()),
+			RemoteAddr:    conn.RemoteAddr().String(),
+			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+		}
 	}
-	b, err := proto.Marshal(auth)
+
+	signers, err := a.newUserCertSigners(conn, *auth)
 	if err != nil {
-		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error authenticating client in public key callback: %w", err)
+		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
 
-	return ssh.AuthPipeTypeMap, ssh.Password(string(b)), nil
+	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
 }
 
-func (a authPiper) noneCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth AuthRequest) ([]ssh.Signer, error) {
+	var certSigners []ssh.Signer
+	for _, s := range a.Signers {
+		ucs := UserCertSigner{
+			SessionID:   string(conn.SessionID()),
+			User:        conn.User(),
+			AuthRequest: auth,
+		}
+
+		cs, err := ucs.SignCert(s)
+		if err != nil {
+			return nil, err
+		}
+
+		certSigners = append(certSigners, cs)
+	}
+
+	return certSigners, nil
+}
+
+func (a authPiper) passwordCallback(conn ssh.ConnMetadata, password []byte) (ssh.AuthPipeType, ssh.AuthMethod, error) {
+	return ssh.AuthPipeTypeNone, nil, nil
+}
+
+func (a authPiper) noneAuthCallback(conn ssh.ConnMetadata) (ssh.AuthPipeType, ssh.AuthMethod, error) {
 	return ssh.AuthPipeTypeNone, nil, nil
 }
 
@@ -134,6 +168,9 @@ func (a authPiper) validateClientAuthorizedKey(conn ssh.ConnMetadata, key ssh.Pu
 		return fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
+	// Don't validate authorized key if:
+	// 1. This is not a client request
+	// 2. The node does not match the request that routing is needed
 	if id.Type != api.Identifier_CLIENT || a.NodeAddr != id.NodeAddr {
 		return nil
 	}

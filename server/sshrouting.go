@@ -59,8 +59,9 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 		FindUpstream:  p.FindUpstreamFunc,
 		ServerVersion: upterm.ServerSSHServerVersion,
 	}
-	for _, signer := range p.HostSigners {
-		piper.AddHostKey(signer)
+
+	for _, s := range p.HostSigners {
+		piper.AddHostKey(s)
 	}
 
 	inst := newSSHRoutingInstruments(p.MetricsProvider)
