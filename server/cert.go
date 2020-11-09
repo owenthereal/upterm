@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -73,11 +73,11 @@ func parseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthReq
 type UserCertSigner struct {
 	SessionID   string
 	User        string
-	AuthRequest AuthRequest
+	AuthRequest *AuthRequest
 }
 
 func (g *UserCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
-	b, err := proto.Marshal(&g.AuthRequest)
+	b, err := proto.Marshal(g.AuthRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling auth request: %w", err)
 	}

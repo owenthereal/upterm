@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/gliderlabs/ssh"
-	proto "github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 var (

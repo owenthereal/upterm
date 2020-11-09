@@ -110,7 +110,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := h.ConnDialer.Dial(*id)
+	conn, err := h.ConnDialer.Dial(id)
 	if err != nil {
 		h.wsError(wsc, err, "error dialing")
 		return

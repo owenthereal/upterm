@@ -3,8 +3,8 @@ package api
 import (
 	"testing"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/owenthereal/upterm/upterm"
+	"google.golang.org/protobuf/proto"
 )
 
 func Test_EncodeDecodeIdentifier(t *testing.T) {

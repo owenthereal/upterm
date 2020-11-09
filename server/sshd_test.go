@@ -43,7 +43,7 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	cs := UserCertSigner{
 		SessionID: "1234",
 		User:      "owen",
-		AuthRequest: AuthRequest{
+		AuthRequest: &AuthRequest{
 			ClientVersion: upterm.HostSSHClientVersion,
 			RemoteAddr:    addr,
 			AuthorizedKey: []byte(TestPublicKeyContent),

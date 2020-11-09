@@ -134,13 +134,13 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 	// TODO: sshproxy already rejects unauthorized keys
 	// Does host still need to check them?
 	if len(h.AuthorizedKeys) == 0 {
-		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
+		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
 		return true
 	}
 
 	for _, k := range h.AuthorizedKeys {
 		if gssh.KeysEqual(k, pk) {
-			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), *auth, pk)
+			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
 			return true
 		}
 	}
@@ -284,8 +284,8 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 }
 
-func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth server.AuthRequest, pk ssh.PublicKey) {
-	c := api.Client{
+func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {
+	c := &api.Client{
 		Id:                   sessionID,
 		Version:              auth.ClientVersion,
 		Addr:                 auth.RemoteAddr,

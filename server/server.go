@@ -309,7 +309,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 }
 
 type connDialer interface {
-	Dial(id api.Identifier) (net.Conn, error)
+	Dial(id *api.Identifier) (net.Conn, error)
 }
 
 type sshProxyDialer struct {
@@ -317,7 +317,7 @@ type sshProxyDialer struct {
 	Logger       log.FieldLogger
 }
 
-func (d sshProxyDialer) Dial(id api.Identifier) (net.Conn, error) {
+func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	// If it's a host request, dial to SSHProxy in the same node.
 	// Otherwise, dial to the specified SSHProxy.
 	if id.Type == api.Identifier_HOST {
@@ -332,14 +332,14 @@ func (d sshProxyDialer) Dial(id api.Identifier) (net.Conn, error) {
 type tcpConnDialer struct {
 }
 
-func (d tcpConnDialer) Dial(id api.Identifier) (net.Conn, error) {
+func (d tcpConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
 }
 
 type wsConnDialer struct {
 }
 
-func (d wsConnDialer) Dial(id api.Identifier) (net.Conn, error) {
+func (d wsConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	u, err := url.Parse("ws://" + id.NodeAddr)
 	if err != nil {
 		return nil, err
@@ -358,7 +358,7 @@ type sidewayConnDialer struct {
 	Logger              log.FieldLogger
 }
 
-func (cd sidewayConnDialer) Dial(id api.Identifier) (net.Conn, error) {
+func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	if id.Type == api.Identifier_HOST {
 		cd.Logger.WithFields(log.Fields{"host": id.Id, "node": cd.NodeAddr}).Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
