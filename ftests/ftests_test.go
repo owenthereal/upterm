@@ -232,8 +232,8 @@ type Host struct {
 	PrivateKeys              []string
 	AdminSocketFile          string
 	SessionCreatedCallback   func(*api.GetSessionResponse) error
-	ClientJoinedCallback     func(api.Client)
-	ClientLeftCallback       func(api.Client)
+	ClientJoinedCallback     func(*api.Client)
+	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
 	ReadOnly                 bool
 	inputCh                  chan string

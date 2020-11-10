@@ -19,8 +19,7 @@ require (
 	github.com/gen2brain/beeep v0.0.0-20200420150314-13046a26d502
 	github.com/gliderlabs/ssh v0.2.2
 	github.com/go-kit/kit v0.9.0
-	github.com/golang/protobuf v1.3.3
-	github.com/google/go-cmp v0.4.0
+	github.com/google/go-cmp v0.5.0
 	github.com/google/go-github v17.0.0+incompatible // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
@@ -47,6 +46,7 @@ require (
 	github.com/ulikunitz/xz v0.5.8 // indirect
 	golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59
 	google.golang.org/grpc v1.32.0
+	google.golang.org/protobuf v1.25.0
 )
 
 replace (

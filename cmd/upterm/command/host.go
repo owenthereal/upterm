@@ -188,15 +188,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 	return h.Run(context.Background())
 }
 
-func clientJoinedCallback(c api.Client) {
+func clientJoinedCallback(c *api.Client) {
 	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), "")
 }
 
-func clientLeftCallback(c api.Client) {
+func clientLeftCallback(c *api.Client) {
 	_ = beeep.Notify("Upterm Client Left", notifyBody(c), "")
 }
 
-func notifyBody(c api.Client) string {
+func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 

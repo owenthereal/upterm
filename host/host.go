@@ -159,8 +159,8 @@ type Host struct {
 	AuthorizedKeys         []ssh.PublicKey
 	AdminSocketFile        string
 	SessionCreatedCallback func(*api.GetSessionResponse) error
-	ClientJoinedCallback   func(api.Client)
-	ClientLeftCallback     func(api.Client)
+	ClientJoinedCallback   func(*api.Client)
+	ClientLeftCallback     func(*api.Client)
 	Logger                 log.FieldLogger
 	Stdin                  *os.File
 	Stdout                 *os.File
@@ -254,7 +254,7 @@ func (c *Host) Run(ctx context.Context) error {
 					continue
 				}
 
-				client, ok := args[0].(api.Client)
+				client, ok := args[0].(*api.Client)
 				if ok {
 					_ = clientRepo.Add(client)
 					logger.WithField("client", client.Addr).Info("Client joined")
@@ -284,7 +284,7 @@ func (c *Host) Run(ctx context.Context) error {
 						logger.WithField("client", client.Addr).Info("Client left")
 						clientRepo.Delete(cid)
 						if c.ClientLeftCallback != nil && client != nil {
-							c.ClientLeftCallback(*client)
+							c.ClientLeftCallback(client)
 						}
 					}
 				}

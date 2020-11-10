@@ -64,7 +64,7 @@ func (r *sshProxy) findUpstream(conn ssh.ConnMetadata, challengeCtx ssh.Addition
 		return nil, nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
-	c, err := r.ConnDialer.Dial(*id)
+	c, err := r.ConnDialer.Dial(id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,7 +125,7 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey) (s
 		}
 	}
 
-	signers, err := a.newUserCertSigners(conn, *auth)
+	signers, err := a.newUserCertSigners(conn, auth)
 	if err != nil {
 		return ssh.AuthPipeTypeDiscard, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
@@ -133,7 +133,7 @@ func (a authPiper) publicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey) (s
 	return ssh.AuthPipeTypeMap, ssh.PublicKeys(signers...), err
 }
 
-func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth AuthRequest) ([]ssh.Signer, error) {
+func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
 	var certSigners []ssh.Signer
 	for _, s := range a.Signers {
 		ucs := UserCertSigner{

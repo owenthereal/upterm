@@ -16,8 +16,8 @@ import (
 )
 
 func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
-	jch := make(chan api.Client)
-	lch := make(chan api.Client)
+	jch := make(chan *api.Client)
+	lch := make(chan *api.Client)
 
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
@@ -32,10 +32,10 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
-		ClientJoinedCallback: func(c api.Client) {
+		ClientJoinedCallback: func(c *api.Client) {
 			jch <- c
 		},
-		ClientLeftCallback: func(c api.Client) {
+		ClientLeftCallback: func(c *api.Client) {
 			lch <- c
 		},
 	}
