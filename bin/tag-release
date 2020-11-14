@@ -2,7 +2,7 @@
 
 set -e
 
-version_file="cmd/upterm/command/version.go"
+version_file="upterm/version.go"
 
 if git diff --exit-code >/dev/null -- "$version_file"; then
   echo "Update the version in $version_file and try again." >&2

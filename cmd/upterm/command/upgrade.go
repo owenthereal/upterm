@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
@@ -38,7 +39,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		Store: &github.Store{
 			Owner:   "owenthereal",
 			Repo:    "upterm",
-			Version: Version,
+			Version: upterm.Version,
 		},
 	}
 
@@ -84,7 +85,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error installing: %s", err)
 	}
 
-	fmt.Printf("Upgraded upterm %s to %s\n", Version, trimVPrefix(r.Version))
+	fmt.Printf("Upgraded upterm %s to %s\n", upterm.Version, trimVPrefix(r.Version))
 	return nil
 }
 

@@ -3,7 +3,7 @@
 set -e
 
 version() {
-  ver_file="cmd/upterm/command/version.go"
+  ver_file="upterm/version.go"
   ver="$(git describe --tags HEAD 2>/dev/null || true)"
 
   if [ -z "$ver" ]; then
