@@ -13,10 +13,10 @@ metadata:
 spec:
     tls:
       - hosts:
-        - {{ .Values.websocket.host }}
-        secretName: {{ .Values.websocket.host | replace "." "-" }}-tls
+        - {{ .Values.hostname }}
+        secretName: {{ .Values.hostname | replace "." "-" }}-tls
     rules:
-      - host: {{ .Values.websocket.host }}
+      - host: {{ .Values.hostname }}
         http:
           paths:
           - backend:

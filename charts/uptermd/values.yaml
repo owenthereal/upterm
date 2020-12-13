@@ -63,9 +63,10 @@ affinity: {}
 
 host_keys: {}
 
+hostname: my-upterm-host
+
 # Require ingress-nginx & cert-manager
 websocket:
   enabled: false
-  host: my-upterm-host
   cert_manager_acme_email: your_email
   ingress_nginx_ingress_class: nginx
