@@ -102,7 +102,7 @@ resource "helm_release" "metrics_server" {
   depends_on = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name       = "metrics-server"
   chart      = "metrics-server"
-  repository = "https://kubernetes-charts.storage.googleapis.com"
+  repository = "https://charts.helm.sh/stable"
   version    = "2.11.4"
   namespace  = "kube-system"
   wait       = var.wait_for_k8s_resources
