@@ -134,10 +134,10 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 
 	ok, body, err := c.Client.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
 	if err != nil {
-		return nil, fmt.Errorf("error creating session: %w", err)
+		return nil, fmt.Errorf("error initializing session: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("error creating session: %s", body)
+		return nil, fmt.Errorf("could not initialize session: %s", body)
 	}
 
 	var resp server.CreateSessionResponse
