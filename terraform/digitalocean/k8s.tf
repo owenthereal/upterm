@@ -52,10 +52,10 @@ locals {
       minReplicas = 2
       maxReplicas = 5
     }
+    hostname = var.uptermd_host
     websocket = {
       enabled                     = true
       ingress_nginx_ingress_class = "upterm-nginx"
-      host                        = var.uptermd_host
       cert_manager_acme_email     = var.uptermd_acme_email
     }
     host_keys = {

@@ -42,6 +42,8 @@ spec:
             {{- end }}
             - --node-addr
             - $(POD_IP):22
+            - --hostname
+            - {{ .Values.hostname }}
             {{- range $key, $val := .Values.host_keys }}
             {{ if hasSuffix ".pub" $key }}
             {{ else }}
