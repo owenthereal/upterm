@@ -44,7 +44,7 @@ data "digitalocean_kubernetes_versions" "k8s_version" {}
 resource "digitalocean_kubernetes_cluster" "upterm" {
   name         = var.do_k8s_name
   region       = var.do_region
-  auto_upgrade = true
+  auto_upgrade = false
   version      = data.digitalocean_kubernetes_versions.k8s_version.latest_version
 
   node_pool {
