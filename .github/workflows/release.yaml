@@ -1,0 +1,19 @@
+name: Release
+on:
+  push:
+    tags: 'v*'
+jobs:
+  homebrew:
+    name: Bump Homebrew formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@v1
+        if: "!contains(github.ref, '-')" # skip prereleases
+        with:
+          formula-name: candy
+          homebrew-tap: owenthereal/homebrew-upterm
+          base-branch: master
+          commit-message: |
+            {{formulaName}} {{version}}
+        env:
+          COMMITTER_TOKEN: ${{ secrets.GH_TOKEN }}
