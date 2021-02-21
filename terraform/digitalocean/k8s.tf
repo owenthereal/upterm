@@ -99,20 +99,20 @@ resource "helm_release" "cert_manager" {
   values           = [yamlencode(local.cert_manager_values)]
 }
 
-# resource "helm_release" "upterm_metrics_server" {
-  # depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
-  # name             = "metrics-server"
-  # chart            = "metrics-server"
-  # repository       = "https://charts.bitnami.com/bitnami"
-  # version          = "5.5.1"
-  # namespace        = "metrics-server"
-  # wait             = var.wait_for_k8s_resources
-  # create_namespace = true
-  # values           = [yamlencode(local.metrics_server_values)]
-# }
+resource "helm_release" "metrics_server" {
+  depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
+  name             = "metrics-server"
+  chart            = "metrics-server"
+  repository       = "https://charts.bitnami.com/bitnami"
+  version          = "5.5.1"
+  namespace        = "metrics-server"
+  wait             = var.wait_for_k8s_resources
+  create_namespace = true
+  values           = [yamlencode(local.metrics_server_values)]
+}
 
 resource "helm_release" "uptermd" {
-  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager]
+  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager, helm_release.metrics_server]
   name             = "uptermd"
   chart            = "uptermd"
   repository       = var.uptermd_helm_repo
