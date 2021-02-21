@@ -35,6 +35,8 @@ jobs:
       id: go
     - name: Check out code into the Go module directory
       uses: actions/checkout@v2
+    - name: Setup upterm session
+      uses: owenthereal/action-upterm@master
     - name: Test
       run: make test
       env:
