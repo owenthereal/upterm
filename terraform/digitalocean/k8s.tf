@@ -105,7 +105,7 @@ resource "helm_release" "metrics_server" {
   chart      = "metrics-server"
   repository = "https://charts.bitnami.com/bitnami"
   version    = "5.5.1"
-  namespace  = "kube-system"
+  namespace  = "metrics-server"
   wait       = var.wait_for_k8s_resources
   values     = [yamlencode(local.metrics_server_values)]
 }
