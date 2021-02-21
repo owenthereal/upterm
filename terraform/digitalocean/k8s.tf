@@ -44,7 +44,9 @@ locals {
   }
 
   metrics_server_values = {
-    args = ["--kubelet-preferred-address-types=InternalIP"]
+    extraArgs = {
+      "kubelet-preferred-address-types" = "InternalIP"
+    }
   }
 
   uptermd_values = {
@@ -78,7 +80,7 @@ resource "helm_release" "ingress_nginx" {
   name             = "ingress-nginx"
   chart            = "ingress-nginx"
   repository       = "https://kubernetes.github.io/ingress-nginx"
-  version          = "3.15.2"
+  version          = "3.23.0"
   namespace        = "upterm-ingress-nginx"
   wait             = var.wait_for_k8s_resources
   create_namespace = true
@@ -90,7 +92,7 @@ resource "helm_release" "cert_manager" {
   name             = "cert-manager"
   chart            = "cert-manager"
   repository       = "https://charts.jetstack.io"
-  version          = "1.1.0"
+  version          = "1.2.0"
   namespace        = "cert-manager"
   wait             = var.wait_for_k8s_resources
   create_namespace = true
@@ -101,8 +103,8 @@ resource "helm_release" "metrics_server" {
   depends_on = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name       = "metrics-server"
   chart      = "metrics-server"
-  repository = "https://charts.helm.sh/stable"
-  version    = "2.11.4"
+  repository = "https://charts.bitnami.com/bitnami"
+  version    = "5.5.1"
   namespace  = "kube-system"
   wait       = var.wait_for_k8s_resources
   values     = [yamlencode(local.metrics_server_values)]
