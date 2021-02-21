@@ -111,7 +111,7 @@ resource "helm_release" "cert_manager" {
 # }
 
 resource "helm_release" "uptermd" {
-  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager, helm_release.metrics_server]
+  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager]
   name             = "uptermd"
   chart            = "uptermd"
   repository       = var.uptermd_helm_repo
