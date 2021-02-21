@@ -99,7 +99,7 @@ resource "helm_release" "cert_manager" {
   values           = [yamlencode(local.cert_manager_values)]
 }
 
-resource "helm_release" "metrics_server" {
+resource "helm_release" "upterm_metrics_server" {
   depends_on       = [digitalocean_kubernetes_cluster.upterm, local_file.kubeconfig]
   name             = "metrics-server"
   chart            = "metrics-server"
@@ -112,7 +112,7 @@ resource "helm_release" "metrics_server" {
 }
 
 resource "helm_release" "uptermd" {
-  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager, helm_release.metrics_server]
+  depends_on       = [helm_release.ingress_nginx, helm_release.cert_manager, helm_release.upterm_metrics_server]
   name             = "uptermd"
   chart            = "uptermd"
   repository       = var.uptermd_helm_repo
