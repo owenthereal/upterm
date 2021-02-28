@@ -55,8 +55,8 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
 	var (
 		socket  = os.Getenv("SSH_AUTH_SOCK")
-		cleanup = func() {}
 		signers []ssh.Signer
+		cleanup func()
 		err     error
 	)
 
