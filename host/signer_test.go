@@ -79,7 +79,7 @@ CUI+b0Gxfqa/HSKlS23Iu7ZeWoMakwvcg5A5M8E/ihBLSDNsCJU8pgZ9FD
 	ed25519PublicKey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA9dIfLyILssYzKIVY7UQenn2Il6cUeeYppVwDSAiqPz jou@oou-ltm.internal.salesforce.com`
 )
 
-func Test_signersFromSSHAgent(t *testing.T) {
+func Test_signersFromSSHAgentForKeys(t *testing.T) {
 	type testCase struct {
 		name        string
 		publicKey   string
@@ -120,6 +120,10 @@ func Test_signersFromSSHAgent(t *testing.T) {
 			signerCount: 1,
 			passphrase:  "1234",
 		},
+		{
+			name:        "no private key",
+			signerCount: 0,
+		},
 	}
 
 	testSignersFromSSHAgent := func(t *testing.T, tc testCase) {
@@ -129,22 +133,30 @@ func Test_signersFromSSHAgent(t *testing.T) {
 		defer c2.Close()
 
 		client := agent.NewClient(c1)
-
 		go func() {
 			_ = agent.ServeAgent(agent.NewKeyring(), c2)
 		}()
 
-		dir := t.TempDir()
-		tmpfn := filepath.Join(dir, "private_key")
-		if err := ioutil.WriteFile(tmpfn, []byte(tc.privateKey), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := ioutil.WriteFile(filepath.Join(dir, "private_key.pub"), []byte(tc.publicKey), 0600); err != nil {
-			t.Fatal(err)
+		var (
+			privateKeys []string
+			privateKey  = ""
+		)
+
+		if tc.privateKey != "" && tc.publicKey != "" {
+			dir := t.TempDir()
+			privateKey = filepath.Join(dir, "private_key")
+			if err := ioutil.WriteFile(privateKey, []byte(tc.privateKey), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ioutil.WriteFile(filepath.Join(dir, "private_key.pub"), []byte(tc.publicKey), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			privateKeys = []string{privateKey}
 		}
 
-		signers, err := signersFromSSHAgent(client, []string{tmpfn}, func(file string) ([]byte, error) {
-			if want, got := tmpfn, file; want != got {
+		signers, err := signersFromSSHAgentForKeys(client, privateKeys, func(file string) ([]byte, error) {
+			if want, got := privateKey, file; want != got {
 				t.Fatalf("file mismatched, want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
 
