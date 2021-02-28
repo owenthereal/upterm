@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/terminal"
@@ -48,22 +49,32 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 	return authorizedKeys, nil
 }
 
+// Signers return signers based on the folllowing conditions:
+// If private key is not supplied, it returns signers from SSH agent; If SSH agent returns no signer, it generates a private key and returns the corresponding signer.
+// If private key is supplied, it returns signers from SSH agent with matching private keys and adds priavte keys to SSH agent where possible; If there is an error, it falls back to return signers from files
 func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
-	socket := os.Getenv("SSH_AUTH_SOCK")
-	cleanup := func() {}
+	var (
+		socket  = os.Getenv("SSH_AUTH_SOCK")
+		signers []ssh.Signer
+		cleanup func()
+		err     error
+	)
 
-	if socket == "" {
-		signers, err := SignersFromFiles(privateKeys)
+	if len(privateKeys) == 0 {
+		signers, cleanup, err = SignersFromSSHAgent(socket)
+		if err != nil {
+			signers, err = utils.CreateSigners(nil)
+		}
+
 		return signers, cleanup, err
 	}
 
-	signers, cleanup, err := SignersFromSSHAgent(socket, privateKeys)
+	signers, cleanup, err = SignersFromSSHAgentForKeys(socket, privateKeys)
 	if err != nil {
 		signers, err = SignersFromFiles(privateKeys)
-		return signers, cleanup, err
 	}
 
-	return signers, cleanup, nil
+	return signers, cleanup, err
 }
 
 func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
@@ -78,8 +89,18 @@ func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
 	return signers, nil
 }
 
-func SignersFromSSHAgent(socket string, privateKeys []string) ([]ssh.Signer, func(), error) {
+// SignersFromSSHAgent returns all signers from SSH agent
+func SignersFromSSHAgent(socket string) ([]ssh.Signer, func(), error) {
+	return SignersFromSSHAgentForKeys(socket, nil)
+}
+
+// SignersFromSSHAgentForKeys retruns signers from SSH agent for matching private keys.
+// It also adds private key to SSH agent where possbile which simulates the behavior of ssh
+func SignersFromSSHAgentForKeys(socket string, privateKeys []string) ([]ssh.Signer, func(), error) {
 	cleanup := func() {}
+	if socket == "" {
+		return nil, cleanup, fmt.Errorf("SSH Agent is not running")
+	}
 
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
@@ -87,12 +108,26 @@ func SignersFromSSHAgent(socket string, privateKeys []string) ([]ssh.Signer, fun
 	}
 
 	cleanup = func() { conn.Close() }
-	signers, err := signersFromSSHAgent(agent.NewClient(conn), privateKeys, promptForPassphrase)
+	signers, err := signersFromSSHAgentForKeys(agent.NewClient(conn), privateKeys, promptForPassphrase)
 
 	return signers, cleanup, err
 }
 
-func signersFromSSHAgent(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) ([]ssh.Signer, error) {
+func signersFromSSHAgentForKeys(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) ([]ssh.Signer, error) {
+	// Return all signers from SSH agent if no private key is specified
+	if len(privateKeys) == 0 {
+		signers, err := client.Signers()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(signers) == 0 {
+			return nil, fmt.Errorf("SSH Agent does not contain any identities")
+		}
+
+		return signers, nil
+	}
+
 	keys, err := client.List()
 	if err != nil {
 		return nil, err
@@ -131,7 +166,7 @@ func signersFromSSHAgent(client agent.Agent, privateKeys []string, promptForPass
 		return nil, err
 	}
 
-	return signersFromSSHAgent(client, privateKeys, promptForPassphrase)
+	return signersFromSSHAgentForKeys(client, privateKeys, promptForPassphrase)
 }
 
 func addPrivateKeysToAgent(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) error {
