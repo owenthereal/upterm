@@ -77,14 +77,12 @@ func CreateSigners(privateKeys [][]byte) ([]ssh.Signer, error) {
 			return nil, err
 		}
 
-		for _, pk := range []interface{}{epk} {
-			signer, err := ssh.NewSignerFromKey(pk)
-			if err != nil {
-				return nil, err
-			}
-
-			signers = append(signers, signer)
+		signer, err := ssh.NewSignerFromKey(epk)
+		if err != nil {
+			return nil, err
 		}
+
+		signers = append(signers, signer)
 
 	}
 
