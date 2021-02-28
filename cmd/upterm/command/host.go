@@ -106,10 +106,6 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		}
 	}
 
-	if len(flagPrivateKeys) == 0 {
-		result = multierror.Append(result, fmt.Errorf("missing flag --private-key"))
-	}
-
 	if flagKnownHostsFilename == "" {
 		result = multierror.Append(result, fmt.Errorf("missing flag --known-hosts"))
 	}
