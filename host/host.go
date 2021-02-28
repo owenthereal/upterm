@@ -330,6 +330,11 @@ func keyType(t string) string {
 func createFileIfNotExist(file string) error {
 	_, err := os.Stat(file)
 	if os.IsNotExist(err) {
+		dir := filepath.Dir(file)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+
 		file, err := os.Create(file)
 		if err != nil {
 			return err
