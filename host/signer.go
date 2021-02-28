@@ -116,7 +116,16 @@ func SignersFromSSHAgentForKeys(socket string, privateKeys []string) ([]ssh.Sign
 func signersFromSSHAgentForKeys(client agent.Agent, privateKeys []string, promptForPassphrase func(file string) ([]byte, error)) ([]ssh.Signer, error) {
 	// Return all signers from SSH agent if no private key is specified
 	if len(privateKeys) == 0 {
-		return client.Signers()
+		signers, err := client.Signers()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(signers) == 0 {
+			return nil, fmt.Errorf("SSH Agent does not contain any identities")
+		}
+
+		return signers, nil
 	}
 
 	keys, err := client.List()

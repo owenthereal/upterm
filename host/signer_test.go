@@ -123,6 +123,7 @@ func Test_signersFromSSHAgentForKeys(t *testing.T) {
 		{
 			name:        "no private key",
 			signerCount: 0,
+			errMsg:      "SSH Agent does not contain any identities",
 		},
 	}
 
