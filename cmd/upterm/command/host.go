@@ -34,13 +34,13 @@ func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host",
 		Short: "Host a terminal session",
-		Long:  "Host a terminal session via a reverse SSH tunnel to the upterm server. By default, the command authenticates against the upterm server using the private keys located at `~/.ssh/id_dsa`, `~/.ssh/id_ecdsa`, `~/.ssh/id_ed25519`, and `~/.ssh/id_rsa`. The host can permit a list of client public keys by specifying an authorized_keys file. By default, the input/output of the host attaches to the input/output of the client's. The host can force the execution of a command after the client joins, and attach the input/output of this command to the client's.",
+		Long:  `Host a terminal session over a reverse SSH tunnel to the Upterm server with the IO of the host and the client attaching to the IO of a command. By default, the command authenticates against the Upterm server using the private key files located at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, the command reads private keys from SSH Agent. If no private key is found from files or SSH Agent, the command falls back to generate one on the fly. To permit authorized clients to join, client public keys can be specified with --authorized-key.`,
 		Example: `  # Host a terminal session that runs $SHELL with
   # client's input/output attaching to the host's
   upterm host
 
   # Host a terminal session that only allows specified public key(s) to connect
-  $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
+  upterm host --authorized-key PATH_TO_PUBLIC_KEY
 
   # Host a session with a custom command.
   upterm host -- docker run --rm -ti ubuntu bash
@@ -63,7 +63,7 @@ func hostCmd() *cobra.Command {
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are shh, ws, or wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "private key for public key authentication against the upterm server (required).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "private key file for public key authentication against the upterm server")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "a file contains the known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
