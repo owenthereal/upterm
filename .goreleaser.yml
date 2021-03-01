@@ -24,6 +24,8 @@ brews:
     commit_author:
       name: Owen Ou
       email: o@owenou.com
+    homepage: https://upterm.dev
+    description: Secure terminal sharing
     install: |
       bin.install "upterm"
       prefix.install_metafiles
