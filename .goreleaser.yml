@@ -17,6 +17,21 @@ archives:
       - LICENSE
       - README.md
       - docs/*
+brews:
+  - tap:
+      owner: owenthereal
+      name: homebrew-upterm
+    commit_author:
+      name: Owen Ou
+      email: o@owenou.com
+    install: |
+      bin.install "upterm"
+      prefix.install_metafiles
+      bash_completion.install "etc/completion/upterm.bash_completion.sh"
+      zsh_completion.install "etc/completion/upterm.zsh_completion" => "_upterm"
+      man.install "etc/man/man1"
+    test: |
+      assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
 checksum:
   name_template: 'checksums.txt'
 snapshot:

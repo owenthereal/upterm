@@ -21,19 +21,3 @@ jobs:
           args: release --rm-dist
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-
-  homebrew:
-    name: Bump Homebrew formula
-    runs-on: ubuntu-latest
-    if: "!contains(github.ref, '-')" # skip prereleases
-    steps:
-      - name: Bump formula
-        uses: mislav/bump-homebrew-formula-action@v1
-        with:
-          formula-name: upterm
-          homebrew-tap: owenthereal/homebrew-upterm
-          base-branch: master
-          commit-message: |
-            {{formulaName}} {{version}}
-        env:
-          COMMITTER_TOKEN: ${{ secrets.GH_TOKEN }}
