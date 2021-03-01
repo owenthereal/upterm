@@ -55,7 +55,7 @@ function _upterm_host {
     '(-f --force-command)'{-f,--force-command}'[force execution of a command and attach its input/output to client'\''s.]:' \
     '(-h --help)'{-h,--help}'[help for host]' \
     '--known-hosts[a file contains the known keys for remote hosts (required).]:' \
-    '(*-i *--private-key)'{\*-i,\*--private-key}'[private key for public key authentication against the upterm server (required).]:' \
+    '(*-i *--private-key)'{\*-i,\*--private-key}'[private key file for public key authentication against the upterm server]:' \
     '(-r --read-only)'{-r,--read-only}'[host a read-only session. Clients won'\''t be able to interact.]' \
     '--server[upterm server address (required), supported protocols are shh, ws, or wss.]:'
 }
