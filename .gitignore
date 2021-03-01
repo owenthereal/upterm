@@ -4,3 +4,4 @@ release
 .terraform
 *.tfstate
 *.tfstate.backup
+dist
