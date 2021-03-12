@@ -26,7 +26,6 @@ brews:
       email: o@owenou.com
     homepage: https://upterm.dev
     description: Secure terminal sharing
-    folder: Formula
     license: "Apache 2.0"
     custom_block: |
       head "https://github.com/owenthereal/upterm.git"
