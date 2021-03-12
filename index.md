@@ -40,7 +40,7 @@ $ ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
 ### Mac
 
 ```
-brew install owenthereal/upterm
+brew install owenthereal/upterm/upterm
 ```
 
 ### Standalone
