@@ -1,9 +1,9 @@
-// +heroku goVersion 1.16
+// +heroku goVersion 1.17
 // +heroku install ./cmd/uptermd/...
 
 module github.com/owenthereal/upterm
 
-go 1.16
+go 1.17
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
@@ -47,6 +47,42 @@ require (
 	golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59
 	google.golang.org/grpc v1.32.0
 	google.golang.org/protobuf v1.25.0
+)
+
+require (
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.1.1 // indirect
+	github.com/cpuguy83/go-md2man v1.0.10 // indirect
+	github.com/fsnotify/fsnotify v1.4.7 // indirect
+	github.com/go-logfmt/logfmt v0.4.0 // indirect
+	github.com/go-toast/toast v0.0.0-20190211030409-01e6764cf0a4 // indirect
+	github.com/godbus/dbus v4.1.0+incompatible // indirect
+	github.com/golang/protobuf v1.4.1 // indirect
+	github.com/gopherjs/gopherjs v0.0.0-20180825215210-0210a2f0f73c // indirect
+	github.com/gopherjs/gopherwasm v1.1.0 // indirect
+	github.com/hashicorp/errwrap v1.0.0 // indirect
+	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9 // indirect
+	github.com/klauspost/compress v1.4.1 // indirect
+	github.com/klauspost/cpuid v1.2.0 // indirect
+	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515 // indirect
+	github.com/mattn/go-runewidth v0.0.7 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d // indirect
+	github.com/pkg/errors v0.8.2-0.20190227000051-27936f6d90f9 // indirect
+	github.com/prometheus/client_model v0.1.0 // indirect
+	github.com/prometheus/common v0.7.0 // indirect
+	github.com/prometheus/procfs v0.0.8 // indirect
+	github.com/rollbar/rollbar-go v1.0.2 // indirect
+	github.com/russross/blackfriday v1.5.2 // indirect
+	github.com/spf13/pflag v1.0.3 // indirect
+	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
+	golang.org/x/net v0.0.0-20190620200207-3b0461eec859 // indirect
+	golang.org/x/sys v0.0.0-20200302150141-5c8b2ff67527 // indirect
+	golang.org/x/text v0.3.2 // indirect
+	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
+	gopkg.in/yaml.v2 v2.2.2 // indirect
 )
 
 replace (
