@@ -25,8 +25,17 @@ variable "uptermd_helm_repo" {
 locals {
   ingress_nginx_values = {
     controller = {
-      ingressClass = "upterm-nginx"
+      ingressClassResource = {
+        name = "upterm-nginx"
+        controllerValue : "k8s.io/ingress-nginx"
+      }
+
+      admissionWebhooks = {
+        enabled = false
+      }
+
       service = {
+        type = "LoadBalancer"
         annotations = {
           "service.beta.kubernetes.io/do-loadbalancer-name"     = "${var.do_k8s_name}-lb"
           "service.beta.kubernetes.io/do-loadbalancer-protocol" = "tcp"
@@ -41,6 +50,11 @@ locals {
 
   cert_manager_values = {
     installCRDs = true
+    global = {
+      leaderElection = {
+        namespace = "cert-manager"
+      }
+    }
   }
 
   metrics_server_values = {
@@ -80,7 +94,7 @@ resource "helm_release" "ingress_nginx" {
   name             = "ingress-nginx"
   chart            = "ingress-nginx"
   repository       = "https://kubernetes.github.io/ingress-nginx"
-  version          = "3.23.0"
+  version          = "4.0.16"
   namespace        = "upterm-ingress-nginx"
   wait             = var.wait_for_k8s_resources
   create_namespace = true
@@ -92,7 +106,7 @@ resource "helm_release" "cert_manager" {
   name             = "cert-manager"
   chart            = "cert-manager"
   repository       = "https://charts.jetstack.io"
-  version          = "1.2.0"
+  version          = "1.7.0"
   namespace        = "cert-manager"
   wait             = var.wait_for_k8s_resources
   create_namespace = true
