@@ -9,6 +9,8 @@ metadata:
     kubernetes.io/ingress.class: {{ .Values.websocket.ingress_nginx_ingress_class }}
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/limit-connections: "4"
+    nginx.ingress.kubernetes.io/limit-rps: "5"
     cert-manager.io/issuer: {{ include "upterm.fullname" . }}-letsencrypt
 spec:
     tls:
