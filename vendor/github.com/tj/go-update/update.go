@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +86,15 @@ func (m *Manager) InstallTo(path, dir string) error {
 		return errors.Wrap(err, "copying")
 	}
 
-	log.Debugf("renaming %q to %q", bin, dst)
+	if runtime.GOOS == "windows" {
+		old := dst + ".old"
+		log.Debugf("windows workaround renaming %q to %q", dst, old)
+		if err := os.Rename(dst, old); err != nil {
+			return errors.Wrap(err, "windows renaming")
+		}
+	}
+
+	log.Debugf("renaming %q to %q", tmp, dst)
 	if err := os.Rename(tmp, dst); err != nil {
 		return errors.Wrap(err, "renaming")
 	}
@@ -110,6 +119,19 @@ func (r *Release) FindTarball(os, arch string) *Asset {
 	for _, a := range r.Assets {
 		ext := filepath.Ext(a.Name)
 		if strings.Contains(a.Name, s) && ext == ".gz" {
+			return a
+		}
+	}
+
+	return nil
+}
+
+// FindZip returns a zipfile matching os and arch, or nil.
+func (r *Release) FindZip(os, arch string) *Asset {
+	s := fmt.Sprintf("%s_%s", os, arch)
+	for _, a := range r.Assets {
+		ext := filepath.Ext(a.Name)
+		if strings.Contains(a.Name, s) && ext == ".zip" {
 			return a
 		}
 	}

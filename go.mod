@@ -42,7 +42,7 @@ require (
 	github.com/sirupsen/logrus v1.4.2
 	github.com/spf13/cobra v0.0.5
 	github.com/tj/go v1.8.6
-	github.com/tj/go-update v2.2.4+incompatible
+	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
 	golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59
 	google.golang.org/grpc v1.32.0

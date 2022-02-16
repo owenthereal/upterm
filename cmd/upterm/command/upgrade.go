@@ -1,11 +1,14 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	ggh "github.com/google/go-github/github"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
@@ -35,10 +38,12 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 	m := &update.Manager{
 		Command: "upterm",
-		Store: &github.Store{
-			Owner:   "owenthereal",
-			Repo:    "upterm",
-			Version: Version,
+		Store: &store{
+			Store: &github.Store{
+				Owner:   "owenthereal",
+				Repo:    "upterm",
+				Version: Version,
+			},
 		},
 	}
 
@@ -64,11 +69,15 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 		// latest release
 		r = release{releases[0]}
+	}
 
+	if fmt.Sprintf("v%s", Version) == r.Version {
+		fmt.Println("Upterm is up-to-date")
+		return nil
 	}
 
 	// find the tarball for this system
-	a := r.FindTarballWithVersion(runtime.GOOS, runtime.GOARCH, r.Version)
+	a := r.FindTarballWithVersion(runtime.GOOS, runtime.GOARCH)
 	if a == nil {
 		return fmt.Errorf("no binary for your system")
 	}
@@ -96,8 +105,8 @@ type release struct {
 	*update.Release
 }
 
-func (r *release) FindTarballWithVersion(os, arch, ver string) *update.Asset {
-	s := fmt.Sprintf("%s-%s-%s", os, arch, ver)
+func (r *release) FindTarballWithVersion(os, arch string) *update.Asset {
+	s := fmt.Sprintf("%s_%s", os, arch)
 	for _, a := range r.Assets {
 		ext := filepath.Ext(a.Name)
 		if strings.Contains(a.Name, s) && ext == ".gz" {
@@ -106,4 +115,29 @@ func (r *release) FindTarballWithVersion(os, arch, ver string) *update.Asset {
 	}
 
 	return nil
+}
+
+type store struct {
+	*github.Store
+}
+
+func (s *store) LatestReleases() ([]*update.Release, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gh := ggh.NewClient(nil)
+
+	r, _, err := gh.Repositories.GetLatestRelease(ctx, s.Owner, s.Repo)
+	if err != nil {
+		return nil, err
+	}
+
+	return []*update.Release{
+		{
+			Version:     r.GetTagName(),
+			Notes:       r.GetBody(),
+			PublishedAt: r.GetPublishedAt().Time,
+			URL:         r.GetURL(),
+		},
+	}, nil
 }
