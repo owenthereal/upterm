@@ -26,7 +26,7 @@ locals {
   ingress_nginx_values = {
     controller = {
       ingressClassResource = {
-        name = "upterm-nginx"
+        name = "nginx"
         controllerValue : "k8s.io/ingress-nginx"
       }
 
@@ -71,7 +71,7 @@ locals {
     hostname = var.uptermd_host
     websocket = {
       enabled                     = true
-      ingress_nginx_ingress_class = "upterm-nginx"
+      ingress_nginx_ingress_class = "nginx"
       cert_manager_acme_email     = var.uptermd_acme_email
     }
     host_keys = {
