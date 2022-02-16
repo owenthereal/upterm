@@ -6,10 +6,10 @@ google_analytics: UA-155365325-1
 github:
     public: true
     is_project_page: true
-    repository_url: https://github.com/jingweno/upterm
-    repository_nwo: jingweno/upterm
+    repository_url: https://github.com/owenthereal/upterm
+    repository_nwo: owenthereal/upterm
     is_user_page: false
-    owner_url: https://github.com/jingweno
-    owner_name: jingweno
-    zip_url: https://github.com/jingweno/upterm/releases
-    tar_url: https://github.com/jingweno/upterm/releases
+    owner_url: https://github.com/owenthereal
+    owner_name: owenthereal
+    zip_url: https://github.com/owenthereal/upterm/releases
+    tar_url: https://github.com/owenthereal/upterm/releases
