@@ -224,7 +224,7 @@ github.com/tadvi/systray
 # github.com/tj/go v1.8.6
 ## explicit
 github.com/tj/go/term
-# github.com/tj/go-update v2.2.4+incompatible
+# github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 ## explicit
 github.com/tj/go-update
 github.com/tj/go-update/progress
