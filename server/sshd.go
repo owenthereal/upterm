@@ -64,6 +64,9 @@ func (s *sshd) Serve(ln net.Listener) error {
 		Handler: func(s ssh.Session) {
 			_ = s.Exit(1) // disable ssh login
 		},
+		ConnectionFailedCallback: func(conn net.Conn, err error) {
+			s.Logger.WithError(err).Error("connection failed")
+		},
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			config := &gossh.ServerConfig{
 				ServerVersion: upterm.ServerSSHServerVersion,
