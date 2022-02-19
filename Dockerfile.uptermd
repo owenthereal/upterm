@@ -7,7 +7,9 @@ RUN go install -mod=vendor ./cmd/uptermd/...
 
 # Prepare for image
 FROM ubuntu:latest
+
 MAINTAINER Owen Ou
+LABEL org.opencontainers.image.source https://github.com/owenthereal/upterm
 
 RUN apt-get update && apt-get install -y less curl iputils-ping
 RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
