@@ -64,6 +64,9 @@ locals {
   }
 
   uptermd_values = {
+    image = {
+      tag = github_release.upterm.release_tag
+    }
     autoscaling = {
       minReplicas = 2
       maxReplicas = 5
@@ -79,6 +82,12 @@ locals {
       k => v
     }
   }
+}
+
+data "github_release" "upterm" {
+  owner       = "owenthereal"
+  repository  = "upterm"
+  retrieve_by = "latest"
 }
 
 provider "helm" {
