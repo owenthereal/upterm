@@ -21,10 +21,11 @@ install:
 	go install ./cmd/... 
 
 docker_build:
-	docker build -t jingweno/uptermd -f Dockerfile.uptermd .
+	docker build -t ghcr.io/owenthereal/upterm/uptermd -f Dockerfile.uptermd .
 
-docker: docker_build
-	docker push jingweno/uptermd
+TAG ?= latest
+docker_push: docker_build
+	docker push ghcr.io/owenthereal/upterm/uptermd:$(TAG)
 
 test:
 	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -mod=vendor -count=1 -race -v
