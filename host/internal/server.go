@@ -103,6 +103,9 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			Handler:          sh.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
+			ConnectionFailedCallback: func(conn net.Conn, err error) {
+				s.Logger.WithError(err).Error("connection failed")
+			},
 		}
 		g.Add(func() error {
 			return server.Serve(l)
