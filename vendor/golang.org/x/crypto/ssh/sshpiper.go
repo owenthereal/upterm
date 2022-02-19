@@ -103,10 +103,6 @@ type PiperConfig struct {
 	// "SSH-2.0-".
 	ServerVersion string
 
-	// ClientVersion contains the version identification string that will
-	// be used for the upstream connection. If empty, a reasonable default is used.
-	ClientVersion string
-
 	// BannerCallback, if present, is called and the return string is sent to
 	// the client after key exchange completed but before authentication.
 	BannerCallback func(conn ConnMetadata) string
@@ -280,13 +276,8 @@ func NewSSHPiperConn(conn net.Conn, piper *PiperConfig) (pipe *PiperConn, err er
 		mappedUser = d.user
 	}
 
-	clientVersion := piper.ClientVersion
-	if clientVersion == "" {
-		clientVersion = string(d.ClientVersion())
-	}
 	u, err := newUpstream(upconn, addr, &ClientConfig{
 		HostKeyCallback: pipeauth.UpstreamHostKeyCallback,
-		ClientVersion:   clientVersion,
 	})
 	if err != nil {
 		return nil, err
@@ -604,7 +595,7 @@ func piping(dst, src packetConn, hooker func(msg []byte) ([]byte, error)) error 
 }
 
 func (pipe *pipedConn) loop() error {
-	c := make(chan error)
+	c := make(chan error, 2)
 
 	go func() {
 		c <- piping(pipe.upstream.transport, pipe.downstream.transport, pipe.hookDownstreamMsg)
