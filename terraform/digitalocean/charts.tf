@@ -1,27 +1,3 @@
-variable "wait_for_k8s_resources" {
-  type    = bool
-  default = false
-}
-
-variable "uptermd_host" {
-  type = string
-}
-
-variable "uptermd_acme_email" {
-  type = string
-}
-
-variable "uptermd_host_keys" {
-  type        = map(string) # { filename=content }
-  description = "Host keys in the format of {\"rsa_key.pub\"=\"...\", \"rsa_key\"=\"...\"}"
-}
-
-variable "uptermd_helm_repo" {
-  type        = string
-  default     = "https://upterm.dev"
-  description = "Configurable for testing purpose"
-}
-
 locals {
   ingress_nginx_values = {
     controller = {
@@ -65,7 +41,8 @@ locals {
 
   uptermd_values = {
     image = {
-      tag = github_release.upterm.release_tag
+      repository = "ghcr.io/owenthereal/upterm/uptermd"
+      tag        = data.github_release.upterm.release_tag
     }
     autoscaling = {
       minReplicas = 2
