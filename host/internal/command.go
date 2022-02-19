@@ -12,7 +12,7 @@ import (
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
-	crytoterm "golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 func newCommand(
@@ -69,14 +69,14 @@ func (c *command) Start(ctx context.Context) (*pty, error) {
 
 func (c *command) Run() error {
 	// Set stdin in raw mode.
-	isTty := crytoterm.IsTerminal(int(c.stdin.Fd()))
+	isTty := term.IsTerminal(int(c.stdin.Fd()))
 
 	if isTty {
-		oldState, err := crytoterm.MakeRaw(int(c.stdin.Fd()))
+		oldState, err := term.MakeRaw(int(c.stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
 		}
-		defer func() { _ = crytoterm.Restore(int(c.stdin.Fd()), oldState) }()
+		defer func() { _ = term.Restore(int(c.stdin.Fd()), oldState) }()
 	}
 
 	var g run.Group

@@ -14,7 +14,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 const (
@@ -255,5 +255,5 @@ func promptForPassphrase(file string) ([]byte, error) {
 
 	fmt.Printf("Enter passphrase for key '%s': ", file)
 
-	return terminal.ReadPassword(int(syscall.Stdin))
+	return term.ReadPassword(int(syscall.Stdin))
 }
