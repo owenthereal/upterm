@@ -20,10 +20,10 @@ build:
 install:
 	go install ./cmd/... 
 
-docker_build:
-	docker build -t ghcr.io/owenthereal/upterm/uptermd -f Dockerfile.uptermd .
-
 TAG ?= latest
+docker_build:
+	docker build -t ghcr.io/owenthereal/upterm/uptermd:$(TAG) -f Dockerfile.uptermd .
+
 docker_push: docker_build
 	docker push ghcr.io/owenthereal/upterm/uptermd:$(TAG)
 
