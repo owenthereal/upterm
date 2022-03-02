@@ -61,7 +61,7 @@ func hostCmd() *cobra.Command {
 		log.Fatal(err)
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are shh, ws, or wss.")
+	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "upterm server address (required), supported protocols are ssh, ws, or wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "force execution of a command and attach its input/output to client's.")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "private key file for public key authentication against the upterm server")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "a file contains the known keys for remote hosts (required).")
@@ -84,7 +84,7 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 
 		if u != nil {
 			if u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
-				result = multierror.Append(result, fmt.Errorf("unsupport server protocol %s", u.Scheme))
+				result = multierror.Append(result, fmt.Errorf("unsupported server protocol %s", u.Scheme))
 			}
 
 			if u.Scheme == "ssh" {
