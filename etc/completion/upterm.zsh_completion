@@ -57,7 +57,7 @@ function _upterm_host {
     '--known-hosts[a file contains the known keys for remote hosts (required).]:' \
     '(*-i *--private-key)'{\*-i,\*--private-key}'[private key file for public key authentication against the upterm server]:' \
     '(-r --read-only)'{-r,--read-only}'[host a read-only session. Clients won'\''t be able to interact.]' \
-    '--server[upterm server address (required), supported protocols are shh, ws, or wss.]:'
+    '--server[upterm server address (required), supported protocols are ssh, ws, or wss.]:'
 }
 
 function _upterm_proxy {

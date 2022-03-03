@@ -41,7 +41,7 @@ upterm host [flags]
       --known-hosts string      a file contains the known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
   -i, --private-key strings     private key file for public key authentication against the upterm server (default [/Users/owen/.ssh/id_rsa])
   -r, --read-only               host a read-only session. Clients won't be able to interact.
-      --server string           upterm server address (required), supported protocols are shh, ws, or wss. (default "ssh://uptermd.upterm.dev:22")
+      --server string           upterm server address (required), supported protocols are ssh, ws, or wss. (default "ssh://uptermd.upterm.dev:22")
 ```
 
 ### SEE ALSO
