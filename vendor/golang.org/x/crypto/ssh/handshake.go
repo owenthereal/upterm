@@ -94,11 +94,35 @@ type handshakeTransport struct {
 
 	// The session ID or nil if first kex did not complete yet.
 	sessionID []byte
+
+	// Control whatever the extension info has been sent, to avoid
+	// sending duplicates.
+	extInfoSent bool
 }
 
 type pendingKex struct {
 	otherInit []byte
 	done      chan error
+}
+
+// These are string constants are defined by RFC8308, in order to support
+// sending list of accepted server signatures algorithms to be used for "publickey" authentication.
+const (
+	extInfoClient    = "ext-info-c"
+	extServerSigAlgs = "server-sig-algs"
+)
+
+// These signature algorithms are preffered order to be used for "publickey" auth.
+var serverSigAlgs = []string{
+	CertAlgoED25519v01,
+	CertAlgoECDSA521v01, CertAlgoECDSA384v01, CertAlgoECDSA256v01,
+	CertAlgoSKED25519v01, CertAlgoSKECDSA256v01,
+
+	KeyAlgoSKED25519, KeyAlgoSKECDSA256,
+	KeyAlgoED25519,
+	KeyAlgoECDSA521, KeyAlgoECDSA384, KeyAlgoECDSA256,
+
+	SigAlgoRSASHA2512, SigAlgoRSASHA2256, SigAlgoRSA,
 }
 
 func newHandshakeTransport(conn keyingTransport, config *Config, clientVersion, serverVersion []byte) *handshakeTransport {
@@ -613,6 +637,30 @@ func (t *handshakeTransport) enterKeyExchange(otherInitPacket []byte) error {
 		return err
 	} else if packet[0] != msgNewKeys {
 		return unexpectedMessageError(msgNewKeys, packet[0])
+	}
+
+	if !t.extInfoSent {
+		canDoExtensionExchange := false
+		for _, kexAlgo := range clientInit.KexAlgos {
+			if kexAlgo == extInfoClient {
+				canDoExtensionExchange = true
+				break
+			}
+		}
+
+		if canDoExtensionExchange {
+			// Send spported server signature algorithms.
+			if err := t.conn.writePacket(Marshal(&extInfoMsg{
+				Extension:     extServerSigAlgs,
+				Algorithms:    serverSigAlgs,
+				NumExtensions: 1,
+			})); err != nil {
+				return err
+			}
+			t.extInfoSent = true
+
+		}
+
 	}
 
 	return nil
