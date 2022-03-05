@@ -218,9 +218,11 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 func defaultPrivateKeys(homeDir string) []string {
 	var pks []string
 	for _, f := range []string{
-		"id_dsa",
-		"id_ecdsa",
 		"id_ed25519",
+		"id_ed25519_sk",
+		"id_ecdsa",
+		"id_ecdsa_sk",
+		"id_dsa",
 		"id_rsa",
 	} {
 		pk := filepath.Join(homeDir, ".ssh", f)
