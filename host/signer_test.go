@@ -2,13 +2,11 @@ package host
 
 import (
 	"io/ioutil"
-	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 const (
@@ -78,120 +76,6 @@ CUI+b0Gxfqa/HSKlS23Iu7ZeWoMakwvcg5A5M8E/ihBLSDNsCJU8pgZ9FD
 `
 	ed25519PublicKey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA9dIfLyILssYzKIVY7UQenn2Il6cUeeYppVwDSAiqPz jou@oou-ltm.internal.salesforce.com`
 )
-
-func Test_signersFromSSHAgentForKeys(t *testing.T) {
-	type testCase struct {
-		name        string
-		publicKey   string
-		privateKey  string
-		passphrase  string
-		signerCount int
-		errMsg      string
-	}
-
-	cases := []testCase{
-		{
-			name:        "rsa private key wrong passphrase",
-			publicKey:   rsaPublicKey,
-			privateKey:  rsaPrivateKey,
-			passphrase:  "wrong passphrase",
-			signerCount: 0,
-			errMsg:      "error decrypting private key",
-		},
-		{
-			name:        "rsa private key correct passphrase",
-			publicKey:   rsaPublicKey,
-			privateKey:  rsaPrivateKey,
-			signerCount: 1,
-			passphrase:  "1234",
-		},
-		{
-			name:        "ed25519 private key wrong passphrase",
-			publicKey:   ed25519PublicKey,
-			privateKey:  ed25519PriavteKey,
-			passphrase:  "wrong passphrase",
-			signerCount: 0,
-			errMsg:      "error decrypting private key",
-		},
-		{
-			name:        "ed25519 private key correct passphrase",
-			publicKey:   ed25519PublicKey,
-			privateKey:  ed25519PriavteKey,
-			signerCount: 1,
-			passphrase:  "1234",
-		},
-		{
-			name:        "no private key",
-			signerCount: 0,
-			errMsg:      "SSH Agent does not contain any identities",
-		},
-	}
-
-	testSignersFromSSHAgent := func(t *testing.T, tc testCase) {
-		c1, c2 := net.Pipe()
-
-		defer c1.Close()
-		defer c2.Close()
-
-		client := agent.NewClient(c1)
-		go func() {
-			_ = agent.ServeAgent(agent.NewKeyring(), c2)
-		}()
-
-		var (
-			privateKeys []string
-			privateKey  = ""
-		)
-
-		if tc.privateKey != "" && tc.publicKey != "" {
-			dir := t.TempDir()
-			privateKey = filepath.Join(dir, "private_key")
-			if err := ioutil.WriteFile(privateKey, []byte(tc.privateKey), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := ioutil.WriteFile(filepath.Join(dir, "private_key.pub"), []byte(tc.publicKey), 0600); err != nil {
-				t.Fatal(err)
-			}
-
-			privateKeys = []string{privateKey}
-		}
-
-		signers, err := signersFromSSHAgentForKeys(client, privateKeys, func(file string) ([]byte, error) {
-			if want, got := privateKey, file; want != got {
-				t.Fatalf("file mismatched, want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
-
-			return []byte(tc.passphrase), nil
-		})
-
-		if want, got := tc.signerCount, len(signers); want != got {
-			t.Fatalf("number of signers mismatch: want=%d got=%d", want, got)
-		}
-
-		if err == nil && tc.errMsg != "" {
-			t.Fatal("error shouldn't be nil")
-		}
-
-		if err != nil && tc.errMsg == "" {
-			t.Fatalf("error should be nil but it's %s", err.Error())
-		}
-
-		if err != nil && !strings.Contains(err.Error(), tc.errMsg) {
-			t.Fatalf("unexpected error message, want=%q, got=%q", tc.errMsg, err.Error())
-		}
-	}
-
-	for _, cc := range cases {
-		c := cc
-
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-
-			testSignersFromSSHAgent(t, c)
-		})
-	}
-
-}
 
 func Test_signerFromFile(t *testing.T) {
 	cases := []struct {
