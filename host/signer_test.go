@@ -62,6 +62,7 @@ XBcvbGIDxNBoIlPFRM+bqvIDC1sQi3MIh3l/NZQxxIkW/+I4uClYpmNGXPZaNZNhpdv1PJ
 a9rQ==
 -----END OPENSSH PRIVATE KEY-----
 `
+	// nolint
 	rsaPublicKey = `ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCt//y3H4heRi1+3bO+FsqKyGTw5YQnu6MChEaDJY2SJqFCHGEwBAWGsuaDZPb6P+V16I5u2H+MtKBWDbkVK9760DkAFimuQ4XTtIzPhyb+Jc95wvNW6pAYXoetVlZIbzNzMEykE41kOMq19SNS3snvE5mYzfd2B6AGw3T2SubfF6G0staxtEYwlsWP/N+YIR4yLz11bxwuuTee/eMldvKZfzQQXIuopANU2mnAmoOqsG0G+DKNuXw7F7zd7lxus8zBF3fszur7Sc9APbWab5phJXWzE81ME2Z0Rro3/l/5mD3YqmS6+jyIqlvqR150Uf/2rKawVgzxZWvQhe1+gGIktavL85dO9VnxA/BASYM0caqFY/KwVpAs/mZ18SpjgPaEzm3H5eeTJRFMrwRusyunPTDv8lmAAXsr/ZMhd1gBkDiGE/YuTfekv8rMbkZNeB2HuXavcRTuCqY8y44ehe+sRug9nwykPnfRqjIeAm9zh+zknfJGl5TONHKnEj5tudpUvTd38ZnOM+CTzMHbSDOwkSLAp9mCzrbWc6OIeVqsqibPmia4SxyP7wxnszfH1MOkuCmphiCzk4nicYDhMW6jjXhRKok4yNIU9wqj0MMEKS3RKblAzCu7VFVTDrLSJIzs7Ch0RIuGnVTQ5S4O156Kr9hL535k6c6/NUXbylXtuw==`
 
 	// Passphrase is "1234"
@@ -74,6 +75,7 @@ sSq5R8Qu+iqFOtgNFnPI1/wu22agUYxs3h6Su4Jv6WbySJpJhHhIN/6pZ4DZgj4zWGGSJl
 CUI+b0Gxfqa/HSKlS23Iu7ZeWoMakwvcg5A5M8E/ihBLSDNsCJU8pgZ9FD
 -----END OPENSSH PRIVATE KEY-----
 `
+	// nolint
 	ed25519PublicKey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA9dIfLyILssYzKIVY7UQenn2Il6cUeeYppVwDSAiqPz jou@oou-ltm.internal.salesforce.com`
 )
 

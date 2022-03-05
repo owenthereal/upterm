@@ -50,7 +50,7 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 }
 
 // Signers return signers based on the folllowing conditions:
-// If ssh agent is running and has keys, it returns signers from SSH agent, otherwise return signers from private keys;
+// If SSH agent is running and has keys, it returns signers from SSH agent, otherwise return signers from private keys;
 // If neither works, it generates a signer on the fly.
 func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
 	var (
@@ -144,25 +144,6 @@ func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) (
 	}
 
 	return nil, &errDescryptingPrivateKey{file}
-}
-
-func readPublicKeysBestEfforts(privateKeys []string) []ssh.PublicKey {
-	var pks []ssh.PublicKey
-	for _, file := range privateKeys {
-		pb, err := ioutil.ReadFile(file + ".pub")
-		if err != nil {
-			continue
-		}
-
-		pk, _, _, _, err := ssh.ParseAuthorizedKey(pb)
-		if err != nil {
-			continue
-		}
-
-		pks = append(pks, pk)
-	}
-
-	return pks
 }
 
 func promptForPassphrase(file string) ([]byte, error) {
