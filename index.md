@@ -163,19 +163,6 @@ $ find ~/.ssh/id_*.pub -exec ssh-keygen -l -f {} \;
 ```
 
 Until this is sorted out, you are recommended to use key with another algorithm, e.g. Ed25519.
-If you have a RSA key, you can work around by forcing on the `ssh-rsa` type:
-
-```
-ssh UPTERM_URL -o "PubkeyAcceptedKeyTypes +ssh-rsa" -o "HostKeyAlgorithms +ssh-rsa"
-```
-
-You can also put in your `~/.ssh/config` with the following to save you from adding the flags for every `ssh` command:
-
-```
-Host uptermd.upterm.dev
-    PubkeyAcceptedAlgorithms +ssh-rsa
-    HostkeyAlgorithms +ssh-rsa
-```
 
 If you're curious about the inner workings of this problem, have a look at:
 
