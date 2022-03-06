@@ -234,6 +234,17 @@ TF_VAR_uptermd_host_keys_dir=PATH_TO_HOST_KEYS \
 bin/do-install
 ```
 
+### systemd
+
+A hardened systemd service is provided in `systemd/uptermd.service`. You can use it to easily run a
+secured `uptermd` on your machine:
+
+```
+cp systemd/uptermd.service /etc/systemd/system/uptermd.service
+systemctl daemon-reload
+systemctl start uptermd
+```
+
 ## How is Upterm compared to prior arts?
 
 Upterm is an alternative to [Tmate](https://tmate.io).
