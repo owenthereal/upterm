@@ -5,8 +5,11 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -19,6 +22,8 @@ import (
 
 const (
 	errCannotDecodeEncryptedPrivateKeys = "cannot decode encrypted private keys"
+	gitHubKeysUrlFmt                    = "https://github.com/%s"
+	gitLabKeysUrlFmt                    = "https://gitlab.com/%s"
 )
 
 type errDescryptingPrivateKey struct {
@@ -29,24 +34,55 @@ func (e *errDescryptingPrivateKey) Error() string {
 	return fmt.Sprintf("error decrypting private key %s", e.file)
 }
 
+func parseKeys(keysBytes []byte) ([]ssh.PublicKey, error) {
+	var authorizedKeys []ssh.PublicKey
+	for len(keysBytes) > 0 {
+		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(keysBytes)
+		if err != nil {
+			return nil, err
+		}
+
+		authorizedKeys = append(authorizedKeys, pubKey)
+		keysBytes = rest
+	}
+
+	return authorizedKeys, nil
+}
+
 func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 	authorizedKeysBytes, err := ioutil.ReadFile(file)
 	if err != nil {
 		return nil, nil
 	}
 
-	var authorizedKeys []ssh.PublicKey
-	for len(authorizedKeysBytes) > 0 {
-		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
-		if err != nil {
-			return nil, err
-		}
+	return parseKeys(authorizedKeysBytes)
+}
 
-		authorizedKeys = append(authorizedKeys, pubKey)
-		authorizedKeysBytes = rest
+func getPublicKeys(urlFmt string, username string) ([]byte, error) {
+	path := url.PathEscape(fmt.Sprintf("%s.keys", username))
+	resp, err := http.Get(fmt.Sprintf(urlFmt, path))
+	if err != nil {
+		return nil, err
 	}
+	defer resp.Body.Close()
 
-	return authorizedKeys, nil
+	return io.ReadAll(resp.Body)
+}
+
+func GitHubUserKeys(username string) ([]ssh.PublicKey, error) {
+	keyBytes, err := getPublicKeys(gitHubKeysUrlFmt, username)
+	if err != nil {
+		return nil, err
+	}
+	return parseKeys(keyBytes)
+}
+
+func GitLabUserKeys(username string) ([]ssh.PublicKey, error) {
+	keyBytes, err := getPublicKeys(gitLabKeysUrlFmt, username)
+	if err != nil {
+		return nil, err
+	}
+	return parseKeys(keyBytes)
 }
 
 // Signers return signers based on the folllowing conditions:
