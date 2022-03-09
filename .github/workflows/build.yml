@@ -3,6 +3,7 @@ name: Build
 on:
   push:
   repository_dispatch:
+  pull_request:
 
 jobs:
   build:
