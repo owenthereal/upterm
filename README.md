@@ -93,6 +93,14 @@ $ ssh TOKEN@uptermd.upterm.dev
 # Host a terminal session that only allows specified client public key(s) to connect
 $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
 
+# Host a terminal session that only allows specified GitHub user client public key(s) to connect
+# This is compatible with --authorized-keys.
+$ upterm host --github-user username
+
+# Host a terminal session that only allows specified GitLab user client public key(s) to connect
+# This is compatible with --authorized-keys.
+$ upterm host --gitlab-user username
+
 # Host a session with a custom command
 $ upterm host -- docker run --rm -ti ubuntu bash
 
