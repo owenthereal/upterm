@@ -27,8 +27,8 @@ var (
 	flagPrivateKeys        []string
 	flagKnownHostsFilename string
 	flagAuthorizedKeys     string
-	flagGitHubUser         string
-	flagGitLabUser         string
+	flagGitHubUsers        []string
+	flagGitLabUsers        []string
 	flagReadOnly           bool
 )
 
@@ -68,8 +68,8 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "private key file for public key authentication against the upterm server")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "a file contains the known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
-	cmd.PersistentFlags().StringVarP(&flagGitHubUser, "github-user", "", "", "this GitHub user public keys are permitted to connect.")
-	cmd.PersistentFlags().StringVarP(&flagGitLabUser, "gitlab-user", "", "", "this GitLab user public keys are permitted to connect.")
+	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
+	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
 	return cmd
@@ -141,15 +141,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
-	if flagGitHubUser != "" {
-		gitHubUserKeys, err := host.GitHubUserKeys(flagGitHubUser)
+	if flagGitHubUsers != nil {
+		gitHubUserKeys, err := host.GitHubUserKeys(flagGitHubUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
 	}
-	if flagGitLabUser != "" {
-		gitLabUserKeys, err := host.GitLabUserKeys(flagGitLabUser)
+	if flagGitLabUsers != nil {
+		gitLabUserKeys, err := host.GitLabUserKeys(flagGitLabUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
 		}

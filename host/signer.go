@@ -58,7 +58,7 @@ func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
 	return parseKeys(authorizedKeysBytes)
 }
 
-func getPublicKeys(urlFmt string, username string) ([]byte, error) {
+func getUserPublicKeys(urlFmt string, username string) ([]byte, error) {
 	path := url.PathEscape(fmt.Sprintf("%s.keys", username))
 	resp, err := http.Get(fmt.Sprintf(urlFmt, path))
 	if err != nil {
@@ -69,20 +69,32 @@ func getPublicKeys(urlFmt string, username string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func GitHubUserKeys(username string) ([]ssh.PublicKey, error) {
-	keyBytes, err := getPublicKeys(gitHubKeysUrlFmt, username)
-	if err != nil {
-		return nil, err
+func getPublicKeys(urlFmt string, usernames []string) ([]ssh.PublicKey, error) {
+	var authorizedKeys []ssh.PublicKey
+	seen := make(map[string]bool)
+	for _, username := range usernames {
+		if _, found := seen[username]; !found {
+			seen[username] = true
+			keyBytes, err := getUserPublicKeys(urlFmt, username)
+			if err != nil {
+				return nil, fmt.Errorf("[%s]: %s", username, err)
+			}
+			userKeys, err := parseKeys(keyBytes)
+			if err != nil {
+				return nil, fmt.Errorf("[%s]: %s", username, err)
+			}
+			authorizedKeys = append(authorizedKeys, userKeys...)
+		}
 	}
-	return parseKeys(keyBytes)
+	return authorizedKeys, nil
 }
 
-func GitLabUserKeys(username string) ([]ssh.PublicKey, error) {
-	keyBytes, err := getPublicKeys(gitLabKeysUrlFmt, username)
-	if err != nil {
-		return nil, err
-	}
-	return parseKeys(keyBytes)
+func GitHubUserKeys(usernames []string) ([]ssh.PublicKey, error) {
+	return getPublicKeys(gitHubKeysUrlFmt, usernames)
+}
+
+func GitLabUserKeys(usernames []string) ([]ssh.PublicKey, error) {
+	return getPublicKeys(gitLabKeysUrlFmt, usernames)
 }
 
 // Signers return signers based on the folllowing conditions:
