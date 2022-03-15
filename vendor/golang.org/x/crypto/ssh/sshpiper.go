@@ -485,7 +485,7 @@ func (pipe *pipedConn) checkPublicKey(msg *userAuthRequestMsg, pubkey PublicKey,
 	if !isAcceptableAlgo(sig.Format) {
 		return false, fmt.Errorf("ssh: algorithm %q not accepted", sig.Format)
 	}
-	signedData := buildDataSignedForAuth(pipe.downstream.transport.getSessionID(), *msg, []byte(pubkey.Type()), pubkey.Marshal())
+	signedData := buildDataSignedForAuth(pipe.downstream.transport.getSessionID(), *msg, pubkey.Type(), pubkey.Marshal())
 
 	if err := pubkey.Verify(signedData, sig); err != nil {
 		return false, nil
@@ -506,7 +506,7 @@ func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Si
 		User:    user,
 		Service: serviceSSH,
 		Method:  "publickey",
-	}, []byte(upKey.Type()), upKeyData))
+	}, upKey.Type(), upKeyData))
 	if err != nil {
 		return nil, err
 	}
