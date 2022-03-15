@@ -235,7 +235,7 @@ github.com/ulikunitz/xz
 github.com/ulikunitz/xz/internal/hash
 github.com/ulikunitz/xz/internal/xlog
 github.com/ulikunitz/xz/lzma
-# golang.org/x/crypto v0.0.0-20210616213533-5ff15b29337e => github.com/owenthereal/upterm.crypto v0.0.0-20220305194929-d2a67c5c7b65
+# golang.org/x/crypto v0.0.0-20210616213533-5ff15b29337e => github.com/owenthereal/upterm.crypto v0.0.0-20220315031517-58c42c2cc0bb
 ## explicit; go 1.17
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -354,4 +354,4 @@ google.golang.org/protobuf/types/known/timestamppb
 ## explicit; go 1.15
 gopkg.in/yaml.v2
 # github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220217224334-0f0fc8cdc7dd
-# golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220305194929-d2a67c5c7b65
+# golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220315031517-58c42c2cc0bb
