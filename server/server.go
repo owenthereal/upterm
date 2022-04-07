@@ -19,6 +19,7 @@ import (
 	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -69,7 +70,7 @@ func Start(opt Opt) error {
 		return err
 	}
 
-	var hostSigners []ssh.Signer
+	hostSigners := slices.Clone(signers)
 	for _, s := range signers {
 		hs := HostCertSigner{
 			Hostnames: opt.Hostnames,

@@ -48,7 +48,10 @@ require (
 	google.golang.org/protobuf v1.28.0
 )
 
-require golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
+require (
+	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4
+	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
