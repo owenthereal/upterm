@@ -1,3 +1,4 @@
+//go:build windows && !linux && !freebsd && !netbsd && !openbsd && !darwin && !js
 // +build windows,!linux,!freebsd,!netbsd,!openbsd,!darwin,!js
 
 package beeep
@@ -102,7 +103,7 @@ func toastNotification(title, message, appIcon string) toast.Notification {
 
 func appID() string {
 	defID := "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-	cmd := exec.Command("powershell", "Get-StartApps")
+	cmd := exec.Command("powershell", "-NoProfile", "Get-StartApps")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {

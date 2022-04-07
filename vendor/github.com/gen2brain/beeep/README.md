@@ -11,6 +11,10 @@
 
     go get -u github.com/gen2brain/beeep
 
+### Build tags
+
+* `nodbus` - disable `godbus/dbus` and use only `notify-send`
+
 ### Examples
 
 ```go
@@ -34,11 +38,6 @@ if err != nil {
 }
 ```
 
-
-## macOS
-
-For icons to show up when using Alert() or Notify(), you will need to bundle your application
-with a app icon.
 
 ## More
 
