@@ -2,10 +2,6 @@
 
 Display session
 
-### Synopsis
-
-Display session
-
 ### Options
 
 ```

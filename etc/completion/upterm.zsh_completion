@@ -1,136 +1,177 @@
 #compdef _upterm upterm
 
+# zsh completion for upterm                               -*- shell-script -*-
 
-function _upterm {
-  local -a commands
-
-  _arguments -C \
-    '(-h --help)'{-h,--help}'[help for upterm]' \
-    "1: :->cmnds" \
-    "*::arg:->args"
-
-  case $state in
-  cmnds)
-    commands=(
-      "help:Help about any command"
-      "host:Host a terminal session"
-      "proxy:Proxy a terminal session over WebSocket"
-      "session:Display session"
-      "upgrade:Upgrade the CLI"
-      "version:Show version"
-    )
-    _describe "command" commands
-    ;;
-  esac
-
-  case "$words[1]" in
-  help)
-    _upterm_help
-    ;;
-  host)
-    _upterm_host
-    ;;
-  proxy)
-    _upterm_proxy
-    ;;
-  session)
-    _upterm_session
-    ;;
-  upgrade)
-    _upterm_upgrade
-    ;;
-  version)
-    _upterm_version
-    ;;
-  esac
+__upterm_debug()
+{
+    local file="$BASH_COMP_DEBUG_FILE"
+    if [[ -n ${file} ]]; then
+        echo "$*" >> "${file}"
+    fi
 }
 
-function _upterm_help {
-  _arguments
+_upterm()
+{
+    local shellCompDirectiveError=1
+    local shellCompDirectiveNoSpace=2
+    local shellCompDirectiveNoFileComp=4
+    local shellCompDirectiveFilterFileExt=8
+    local shellCompDirectiveFilterDirs=16
+
+    local lastParam lastChar flagPrefix requestComp out directive comp lastComp noSpace
+    local -a completions
+
+    __upterm_debug "\n========= starting completion logic =========="
+    __upterm_debug "CURRENT: ${CURRENT}, words[*]: ${words[*]}"
+
+    # The user could have moved the cursor backwards on the command-line.
+    # We need to trigger completion from the $CURRENT location, so we need
+    # to truncate the command-line ($words) up to the $CURRENT location.
+    # (We cannot use $CURSOR as its value does not work when a command is an alias.)
+    words=("${=words[1,CURRENT]}")
+    __upterm_debug "Truncated words[*]: ${words[*]},"
+
+    lastParam=${words[-1]}
+    lastChar=${lastParam[-1]}
+    __upterm_debug "lastParam: ${lastParam}, lastChar: ${lastChar}"
+
+    # For zsh, when completing a flag with an = (e.g., upterm -n=<TAB>)
+    # completions must be prefixed with the flag
+    setopt local_options BASH_REMATCH
+    if [[ "${lastParam}" =~ '-.*=' ]]; then
+        # We are dealing with a flag with an =
+        flagPrefix="-P ${BASH_REMATCH}"
+    fi
+
+    # Prepare the command to obtain completions
+    requestComp="${words[1]} __complete ${words[2,-1]}"
+    if [ "${lastChar}" = "" ]; then
+        # If the last parameter is complete (there is a space following it)
+        # We add an extra empty parameter so we can indicate this to the go completion code.
+        __upterm_debug "Adding extra empty parameter"
+        requestComp="${requestComp} \"\""
+    fi
+
+    __upterm_debug "About to call: eval ${requestComp}"
+
+    # Use eval to handle any environment variables and such
+    out=$(eval ${requestComp} 2>/dev/null)
+    __upterm_debug "completion output: ${out}"
+
+    # Extract the directive integer following a : from the last line
+    local lastLine
+    while IFS='\n' read -r line; do
+        lastLine=${line}
+    done < <(printf "%s\n" "${out[@]}")
+    __upterm_debug "last line: ${lastLine}"
+
+    if [ "${lastLine[1]}" = : ]; then
+        directive=${lastLine[2,-1]}
+        # Remove the directive including the : and the newline
+        local suffix
+        (( suffix=${#lastLine}+2))
+        out=${out[1,-$suffix]}
+    else
+        # There is no directive specified.  Leave $out as is.
+        __upterm_debug "No directive found.  Setting do default"
+        directive=0
+    fi
+
+    __upterm_debug "directive: ${directive}"
+    __upterm_debug "completions: ${out}"
+    __upterm_debug "flagPrefix: ${flagPrefix}"
+
+    if [ $((directive & shellCompDirectiveError)) -ne 0 ]; then
+        __upterm_debug "Completion received error. Ignoring completions."
+        return
+    fi
+
+    while IFS='\n' read -r comp; do
+        if [ -n "$comp" ]; then
+            # If requested, completions are returned with a description.
+            # The description is preceded by a TAB character.
+            # For zsh's _describe, we need to use a : instead of a TAB.
+            # We first need to escape any : as part of the completion itself.
+            comp=${comp//:/\\:}
+
+            local tab=$(printf '\t')
+            comp=${comp//$tab/:}
+
+            __upterm_debug "Adding completion: ${comp}"
+            completions+=${comp}
+            lastComp=$comp
+        fi
+    done < <(printf "%s\n" "${out[@]}")
+
+    if [ $((directive & shellCompDirectiveNoSpace)) -ne 0 ]; then
+        __upterm_debug "Activating nospace."
+        noSpace="-S ''"
+    fi
+
+    if [ $((directive & shellCompDirectiveFilterFileExt)) -ne 0 ]; then
+        # File extension filtering
+        local filteringCmd
+        filteringCmd='_files'
+        for filter in ${completions[@]}; do
+            if [ ${filter[1]} != '*' ]; then
+                # zsh requires a glob pattern to do file filtering
+                filter="\*.$filter"
+            fi
+            filteringCmd+=" -g $filter"
+        done
+        filteringCmd+=" ${flagPrefix}"
+
+        __upterm_debug "File filtering command: $filteringCmd"
+        _arguments '*:filename:'"$filteringCmd"
+    elif [ $((directive & shellCompDirectiveFilterDirs)) -ne 0 ]; then
+        # File completion for directories only
+        local subdir
+        subdir="${completions[1]}"
+        if [ -n "$subdir" ]; then
+            __upterm_debug "Listing directories in $subdir"
+            pushd "${subdir}" >/dev/null 2>&1
+        else
+            __upterm_debug "Listing directories in ."
+        fi
+
+        local result
+        _arguments '*:dirname:_files -/'" ${flagPrefix}"
+        result=$?
+        if [ -n "$subdir" ]; then
+            popd >/dev/null 2>&1
+        fi
+        return $result
+    else
+        __upterm_debug "Calling _describe"
+        if eval _describe "completions" completions $flagPrefix $noSpace; then
+            __upterm_debug "_describe found some completions"
+
+            # Return the success of having called _describe
+            return 0
+        else
+            __upterm_debug "_describe did not find completions."
+            __upterm_debug "Checking if we should do file completion."
+            if [ $((directive & shellCompDirectiveNoFileComp)) -ne 0 ]; then
+                __upterm_debug "deactivating file completion"
+
+                # We must return an error code here to let zsh know that there were no
+                # completions found by _describe; this is what will trigger other
+                # matching algorithms to attempt to find completions.
+                # For example zsh can match letters in the middle of words.
+                return 1
+            else
+                # Perform file completion
+                __upterm_debug "Activating file completion"
+
+                # We must return the result of this command, so it must be the
+                # last command, or else we must store its result to return it.
+                _arguments '*:filename:_files'" ${flagPrefix}"
+            fi
+        fi
+    fi
 }
 
-function _upterm_host {
-  _arguments \
-    '(-a --authorized-key)'{-a,--authorized-key}'[an authorized_keys file that lists public keys that are permitted to connect.]:' \
-    '(-f --force-command)'{-f,--force-command}'[force execution of a command and attach its input/output to client'\''s.]:' \
-    '*--github-user[this GitHub user public keys are permitted to connect.]:' \
-    '*--gitlab-user[this GitLab user public keys are permitted to connect.]:' \
-    '(-h --help)'{-h,--help}'[help for host]' \
-    '--known-hosts[a file contains the known keys for remote hosts (required).]:' \
-    '(*-i *--private-key)'{\*-i,\*--private-key}'[private key file for public key authentication against the upterm server]:' \
-    '(-r --read-only)'{-r,--read-only}'[host a read-only session. Clients won'\''t be able to interact.]' \
-    '--server[upterm server address (required), supported protocols are ssh, ws, or wss.]:'
-}
-
-function _upterm_proxy {
-  _arguments \
-    '(-h --help)'{-h,--help}'[help for proxy]'
-}
-
-
-function _upterm_session {
-  local -a commands
-
-  _arguments -C \
-    '(-h --help)'{-h,--help}'[help for session]' \
-    "1: :->cmnds" \
-    "*::arg:->args"
-
-  case $state in
-  cmnds)
-    commands=(
-      "current:Display the current session"
-      "help:Help about any command"
-      "info:Display session by name"
-      "list:List shared sessions"
-    )
-    _describe "command" commands
-    ;;
-  esac
-
-  case "$words[1]" in
-  current)
-    _upterm_session_current
-    ;;
-  help)
-    _upterm_session_help
-    ;;
-  info)
-    _upterm_session_info
-    ;;
-  list)
-    _upterm_session_list
-    ;;
-  esac
-}
-
-function _upterm_session_current {
-  _arguments \
-    '--admin-socket[admin unix domain socket (required)]:' \
-    '(-h --help)'{-h,--help}'[help for current]'
-}
-
-function _upterm_session_help {
-  _arguments
-}
-
-function _upterm_session_info {
-  _arguments \
-    '(-h --help)'{-h,--help}'[help for info]'
-}
-
-function _upterm_session_list {
-  _arguments \
-    '(-h --help)'{-h,--help}'[help for list]'
-}
-
-function _upterm_upgrade {
-  _arguments \
-    '(-h --help)'{-h,--help}'[help for upgrade]'
-}
-
-function _upterm_version {
-  _arguments \
-    '(-h --help)'{-h,--help}'[help for version]'
-}
-
+# don't run the completion function when being source-ed or eval-ed
+if [ "$funcstack[1]" = "_upterm" ]; then
+    _upterm
+fi

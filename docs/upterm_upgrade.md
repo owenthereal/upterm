@@ -2,10 +2,6 @@
 
 Upgrade the CLI
 
-### Synopsis
-
-Upgrade the CLI
-
 ```
 upterm upgrade [flags]
 ```

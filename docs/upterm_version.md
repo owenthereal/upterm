@@ -2,10 +2,6 @@
 
 Show version
 
-### Synopsis
-
-Show version
-
 ```
 upterm version [flags]
 ```
