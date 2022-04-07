@@ -58,6 +58,7 @@ locals {
       for k, v in var.uptermd_host_keys :
       k => v
     }
+    debug = true
   }
 }
 

@@ -55,6 +55,9 @@ spec:
             - mem
             - --metric-addr
             - $(POD_IP):9090
+            {{- if .Values.debug }}
+            - --debug
+            {{- end }}
           env:
             - name: POD_IP
               valueFrom:
