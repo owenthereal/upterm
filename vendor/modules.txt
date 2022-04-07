@@ -38,9 +38,6 @@ github.com/dsnet/compress/bzip2/internal/sais
 github.com/dsnet/compress/internal
 github.com/dsnet/compress/internal/errors
 github.com/dsnet/compress/internal/prefix
-# github.com/eiannone/keyboard v0.0.0-20190314115158-7169d0afeb4f
-## explicit
-github.com/eiannone/keyboard
 # github.com/fsnotify/fsnotify v1.4.7
 ## explicit
 github.com/fsnotify/fsnotify
