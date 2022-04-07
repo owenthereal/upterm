@@ -1,4 +1,5 @@
-// +build linux freebsd netbsd openbsd
+//go:build (linux && !nodbus) || (freebsd && !nodbus) || (netbsd && !nodbus) || (openbsd && !nodbus)
+// +build linux,!nodbus freebsd,!nodbus netbsd,!nodbus openbsd,!nodbus
 
 package beeep
 
@@ -6,7 +7,7 @@ import (
 	"errors"
 	"os/exec"
 
-	"github.com/godbus/dbus"
+	"github.com/godbus/dbus/v5"
 )
 
 // Notify sends desktop notification.
