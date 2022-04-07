@@ -1,0 +1,3 @@
+time="2022-04-07T20:27:48Z" level=info msg="dialing sshd" app=uptermd com=ssh-conn-dialer host=owen network=mem network-opt="[]" node="10.244.0.136:22" node-addr="10.244.0.136:22" ssh-addr="10.244.0.136:22" ws-addr="10.244.0.136:80"
+time="2022-04-07T20:27:48Z" level=info msg="attempt to bind" app=uptermd com=sshd network=mem network-opt="[]" node-addr="10.244.0.136:22" ssh-addr="10.244.0.136:22" tunnel-host=ssJVvU4oomLl7Rq4sWUQ tunnel-port=0 ws-addr="10.244.0.136:80"
+time="2022-04-07T20:27:58Z" level=info msg="dialing session" addr="10.244.0.136:22" app=uptermd com=ssh-conn-dialer network=mem network-opt="[]" node="10.244.0.136:22" node-addr="10.244.0.136:22" session=ssJVvU4oomLl7Rq4sWUQ ssh-addr="10.244.0.136:22" ws-addr="10.244.0.136:80"
