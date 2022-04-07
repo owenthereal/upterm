@@ -93,6 +93,14 @@ $ ssh TOKEN@uptermd.upterm.dev
 # Host a terminal session that only allows specified client public key(s) to connect
 $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
 
+# Host a terminal session that only allows specified GitHub user client public key(s) to connect
+# This is compatible with --authorized-keys.
+$ upterm host --github-user username
+
+# Host a terminal session that only allows specified GitLab user client public key(s) to connect
+# This is compatible with --authorized-keys.
+$ upterm host --gitlab-user username
+
 # Host a session with a custom command
 $ upterm host -- docker run --rm -ti ubuntu bash
 
@@ -232,6 +240,17 @@ TF_VAR_uptermd_acme_email=YOUR_EMAIL \
 TF_VAR_uptermd_helm_repo=http://localhost:8080 \
 TF_VAR_uptermd_host_keys_dir=PATH_TO_HOST_KEYS \
 bin/do-install
+```
+
+### Systemd
+
+A hardened systemd service is provided in `systemd/uptermd.service`. You can use it to easily run a
+secured `uptermd` on your machine:
+
+```
+cp systemd/uptermd.service /etc/systemd/system/uptermd.service
+systemctl daemon-reload
+systemctl start uptermd
 ```
 
 ## How is Upterm compared to prior arts?
