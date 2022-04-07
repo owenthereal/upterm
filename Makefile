@@ -27,8 +27,9 @@ docker_build:
 docker_push: docker_build
 	docker push ghcr.io/owenthereal/upterm/uptermd:$(TAG)
 
+GO_TEST_FLAGS ?= ""
 test:
-	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -mod=vendor -count=1 -race -v
+	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -mod=vendor -count=1 -race -v $(GO_TEST_FLAGS)
 
 vet:
 	docker run --rm -v $$(pwd):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v
