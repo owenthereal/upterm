@@ -10,8 +10,8 @@ docs:
 	go run cmd/gendoc/main.go
 
 proto:
-	docker run -v `pwd`/server:/defs namely/protoc-all -f server.proto -l go -o .
-	docker run -v `pwd`/host/api:/defs namely/protoc-all -f api.proto -l go -o .
+	docker run -v $(CURDIR)/server:/defs namely/protoc-all -f server.proto -l go --go-source-relative -o .
+	docker run -v $(CURDIR)/host/api:/defs namely/protoc-all -f api.proto -l go --go-source-relative -o .
 
 build:
 	go build -o build/upterm -mod=vendor ./cmd/upterm
