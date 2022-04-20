@@ -4,6 +4,8 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra/doc"
+
+	"github.com/owenthereal/upterm/upterm"
 )
 
 func main() {
@@ -16,7 +18,7 @@ func main() {
 	header := &doc.GenManHeader{
 		Title:   "UPTERM",
 		Section: "1",
-		Source:  "Upterm " + command.Version,
+		Source:  "Upterm " + upterm.Version,
 		Manual:  "Upterm Manual",
 	}
 	if err := doc.GenManTree(rootCmd, header, "./etc/man/man1"); err != nil {

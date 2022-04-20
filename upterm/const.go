@@ -1,5 +1,7 @@
 package upterm
 
+// Ppecify the upterm version by setting the following variables:
+// go build -ldflags "-X github.com/owenthereal/upterm/upterm.Version=0.8.4" -o build/upterm ./cmd/upterm
 var Version string = "0.8.2"
 
 const (
