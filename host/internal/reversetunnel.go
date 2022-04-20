@@ -126,6 +126,7 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 		HostUser:             user,
 		HostPublicKeys:       hostPublicKeys,
 		ClientAuthorizedKeys: clientAuthorizedKeys,
+		ClientVersion:        &upterm.Version,
 	}
 	b, err := proto.Marshal(req)
 	if err != nil {

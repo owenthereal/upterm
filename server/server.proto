@@ -8,6 +8,7 @@ message CreateSessionRequest {
     string hostUser = 1;
     repeated bytes hostPublicKeys = 2;
     repeated bytes clientAuthorizedKeys = 3;
+    optional string clientVersion = 4;
 }
 
 message CreateSessionResponse {

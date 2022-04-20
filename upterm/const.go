@@ -1,5 +1,7 @@
 package upterm
 
+var Version string = "0.8.2"
+
 const (
 	// host
 	HostSSHClientVersion  = "SSH-2.0-upterm-host-client"
