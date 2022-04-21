@@ -14,13 +14,13 @@ This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
 
 The host starts a terminal session:
 
-```bash
+```console
 $ upterm host -- bash
 ```
 
 The host displays the ssh connection string:
 
-```bash
+```console
 $ upterm session current
 === IQKSFOICLSNNXQZTDKOJ
 Command:                bash
@@ -31,7 +31,7 @@ SSH Session:            ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.up
 
 The client opens a terminal and connects to the host's session:
 
-```bash
+```console
 $ ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
 ```
 
@@ -39,8 +39,8 @@ $ ssh IqKsfoiclsNnxqztDKoj:MTAuMC40OS4xNjY6MjI=@uptermd.upterm.dev
 
 ### Mac
 
-```
-brew install owenthereal/upterm/upterm
+```console
+$ brew install owenthereal/upterm/upterm
 ```
 
 ### Standalone
@@ -49,70 +49,89 @@ brew install owenthereal/upterm/upterm
 
 ### From source
 
-```
-git clone git@github.com:owenthereal/upterm.git
-cd upterm
-go install ./cmd/upterm/...
+```console
+$ git clone git@github.com:owenthereal/upterm.git
+$ cd upterm
+$ go install ./cmd/upterm/...
 ```
 
 ## Upgrade
 
 `upterm` comes with a command to upgrade
 
-```bash
-$ upterm upgrade # upgrade to the latest version
+Upgrade to the latest version
+```console
+$ upterm upgrade
+```
 
-$ upterm upgrade VERSION # upgrade to a version
+Upgrade to a specific version
+```console
+$ upterm upgrade VERSION
 ```
 
 ### Mac
 
-```
-brew upgrade upterm
+```console
+$ brew upgrade upterm
 ```
 
 ## Quick Reference
 
-```bash
-# Host a terminal session that runs $SHELL with
-# client's input/output attaching to the host's
+Host a terminal session that runs `$SHELL` with client's input/output attaching to the host's
+```console
 $ upterm host
+```
 
-# Display the ssh connection string and share it with
-# the client(s)
+Display the ssh connection string and share it with the client(s)
+```console
 $ upterm session current
 === SESSION_ID
 Command:                /bin/bash
 Force Command:          n/a
 Host:                   ssh://uptermd.upterm.dev:22
 SSH Session:            ssh TOKEN@uptermd.upterm.dev
+```
 
-# A client connects to the host session with ssh
+A client connects to the host session with `ssh`
+```console
 $ ssh TOKEN@uptermd.upterm.dev
+```
 
-# Host a terminal session that only allows specified client public key(s) to connect
+Host a terminal session that only allows specified client public key(s) to connect
+```console
 $ upterm host --authorized-key PATH_TO_PUBLIC_KEY
+```
 
-# Host a terminal session that only allows specified GitHub user client public key(s) to connect
-# This is compatible with --authorized-keys.
+Host a terminal session that only allows specified GitHub user client public key(s) to connect.
+This is compatible with `--authorized-keys`.
+```console
 $ upterm host --github-user username
+```
 
-# Host a terminal session that only allows specified GitLab user client public key(s) to connect
-# This is compatible with --authorized-keys.
+Host a terminal session that only allows specified GitLab user client public key(s) to connect. 
+This is compatible with `--authorized-keys`.
+```console
 $ upterm host --gitlab-user username
+```
 
-# Host a session with a custom command
+Host a session with a custom command
+```console
 $ upterm host -- docker run --rm -ti ubuntu bash
+```
 
-# Host a session that runs 'tmux new -t pair-programming' and
-# force clients to join with 'tmux attach -t pair-programming'.
-# This is similar to what tmate offers.
+Host a session that runs 'tmux new -t pair-programming' and force clients to join with `tmux attach -t pair-programming`.
+This is similar to what tmate offers.
+```console
 $ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
+```
 
-# Connect to uptermd.upterm.dev via WebSocket
+Connect to uptermd.upterm.dev via WebSocket
+```console
 $ upterm host --server wss://uptermd.upterm.dev -- bash
+```
 
-# A client connects to the host session via WebSocket
+A client connects to the host session via WebSocket
+```console
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
 
@@ -160,13 +179,13 @@ Unfortunately, due to a shortcoming in Go’s `x/crypto/ssh` package, `upterm` d
 
 You can check your `openssh` version with the following:
 
-```
+```console
 $ ssh -V
 ```
 
 If you are not sure what type of keys you have, you can check with the following:
 
-```
+```console
 $ find ~/.ssh/id_*.pub -exec ssh-keygen -l -f {} \;
 ```
 
@@ -183,7 +202,7 @@ If you're curious about the inner workings of this problem, have a look at:
 
 You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
 
-```
+```console
 $ helm repo add upterm https://upterm.dev
 $ helm repo update
 $ helm search repo upterm
@@ -205,27 +224,31 @@ You can also automate the deployment with [Heroku Terraform](https://devcenter.h
 The Heroku Terraform scripts are in the [terraform/heroku folder](./terraform/heroku).
 A [util script](./bin/heroku-install) is provided for your convenience to automate everything:
 
-```
+```console
 $ git clone https://github.com/owenthereal/upterm
 $ cd upterm
+```
 
-# Provinsion uptermd in Heroku Common Runtime.
-# Follow instructions
+Provision uptermd in Heroku Common Runtime. Follow instructions.
+```console
 $ bin/heroku-install
+```
 
-# Provinsion uptermd in Heroku Private Spaces.
-# Follow instructions
+Provision uptermd in Heroku Private Spaces. Follow instructions.
+```console
 $ TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/heroku-install
 ```
 
 You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
 This is how you host a session and join a session:
 
-```
-# Use the Heroku-deployed Uptermd server via WebSocket
+Use the Heroku-deployed Uptermd server via WebSocket
+```console
 $ upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
+```
 
-# A client connects to the host session via WebSocket
+A client connects to the host session via WebSocket
+```console
 $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
 ```
 
@@ -233,7 +256,7 @@ $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_
 
 There is an util script that makes provinsioning [Digital Ocean Kubernetes](https://www.digitalocean.com/products/kubernetes) and an Upterm server easier:
 
-```
+```bash
 TF_VAR_do_token=$DO_PAT \
 TF_VAR_uptermd_host=uptermd.upterm.dev \
 TF_VAR_uptermd_acme_email=YOUR_EMAIL \
@@ -247,10 +270,10 @@ bin/do-install
 A hardened systemd service is provided in `systemd/uptermd.service`. You can use it to easily run a
 secured `uptermd` on your machine:
 
-```
-cp systemd/uptermd.service /etc/systemd/system/uptermd.service
-systemctl daemon-reload
-systemctl start uptermd
+```console
+$ cp systemd/uptermd.service /etc/systemd/system/uptermd.service
+$ systemctl daemon-reload
+$ systemctl start uptermd
 ```
 
 ## How is Upterm compared to prior arts?

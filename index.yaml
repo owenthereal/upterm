@@ -3,9 +3,9 @@ entries:
   uptermd:
   - apiVersion: v2
     appVersion: 0.8.2
-    created: "2022-04-07T15:04:42.175587-07:00"
+    created: "2022-04-21T12:18:31.560596-07:00"
     description: Secure Terminal Sharing
-    digest: 276ea97da03ae8a265d65bab97bc783fa53a0bdbbc57abfc847d93099a9c59db
+    digest: 8cec19d90f7b01c3006305318540fa76186f746526df1d27ceea121eaf3be683
     home: https://upterm.dev
     maintainers:
     - email: o@owenou.com
@@ -18,4 +18,4 @@ entries:
     urls:
     - uptermd-0.2.0.tgz
     version: 0.2.0
-generated: "2022-04-07T15:04:42.173374-07:00"
+generated: "2022-04-21T12:18:31.559813-07:00"
