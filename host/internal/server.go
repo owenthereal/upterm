@@ -99,14 +99,22 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 
 		server := gssh.Server{
-			HostSigners:      ss,
-			Handler:          sh.HandleSession,
-			Version:          upterm.HostSSHServerVersion,
-			PublicKeyHandler: ph.HandlePublicKey,
+			HostSigners: ss,
+			Handler:     sh.HandleSession,
+			Version:     upterm.HostSSHServerVersion,
+			LocalPortForwardingCallback: gssh.LocalPortForwardingCallback(func(ctx gssh.Context, dhost string, dport uint32) bool {
+				log.Println("Accepted forward", dhost, dport)
+				return true
+			}),
+
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.WithError(err).Error("connection failed")
 			},
 		}
+		if len(s.AuthorizedKeys) != 0 {
+			server.PublicKeyHandler = ph.HandlePublicKey
+		}
+
 		g.Add(func() error {
 			return server.Serve(l)
 		}, func(err error) {
