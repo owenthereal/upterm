@@ -27,6 +27,7 @@ type sshd struct {
 	SessionRepo         *sessionRepo
 	HostSigners         []gossh.Signer
 	NodeAddr            string
+	AdvisedUri          string
 	SessionDialListener SessionDialListener
 	Logger              log.FieldLogger
 
@@ -131,8 +132,15 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	}
 
 	sessResp := &CreateSessionResponse{
-		SessionID: sess.ID,
-		NodeAddr:  s.NodeAddr,
+		SessionID:  sess.ID,
+		NodeAddr:   s.NodeAddr,
+		AdvisedUri: s.AdvisedUri,
+	}
+
+	if s.AdvisedUri != "" {
+		sessResp.AdvisedUri = s.AdvisedUri
+	} else {
+		sessResp.AdvisedUri = *sessReq.ConnectedUri
 	}
 
 	b, err := proto.Marshal(sessResp)

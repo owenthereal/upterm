@@ -9,11 +9,13 @@ message CreateSessionRequest {
     repeated bytes hostPublicKeys = 2;
     repeated bytes clientAuthorizedKeys = 3;
     optional string clientVersion = 4;
+    optional string connectedUri = 5;
 }
 
 message CreateSessionResponse {
     string sessionID = 1;
-    string nodeAddr = 2;
+    string nodeAddr = 2; // .. deprecated: 2022-04-23 This field is confusing
+    string advisedUri = 3;
 }
 
 message AuthRequest {

@@ -26,6 +26,7 @@ type ReverseTunnel struct {
 	*ssh.Client
 
 	Host              *url.URL
+	ConnectedUri      string
 	Signers           []ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
@@ -94,6 +95,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	} else {
 		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
 	}
+	c.ConnectedUri = c.Host.String()
 
 	if err != nil {
 		return nil, sshDialError(c.Host.String(), err)
@@ -127,6 +129,7 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 		HostPublicKeys:       hostPublicKeys,
 		ClientAuthorizedKeys: clientAuthorizedKeys,
 		ClientVersion:        &upterm.Version,
+		ConnectedUri:         &c.ConnectedUri,
 	}
 	b, err := proto.Marshal(req)
 	if err != nil {
