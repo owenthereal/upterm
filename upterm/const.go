@@ -10,6 +10,8 @@ const (
 	HostSSHServerVersion  = "SSH-2.0-upterm-host-server"
 	HostAdminSocketEnvVar = "UPTERM_ADMIN_SOCKET"
 
+	MinVersion = "0.7.0"
+
 	// client
 	ClientSSHClientVersion = "SSH-2.0-upterm-client-client"
 

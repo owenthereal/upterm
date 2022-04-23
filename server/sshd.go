@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -105,6 +106,13 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	var sessReq CreateSessionRequest
 	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {
 		return false, []byte(err.Error())
+	}
+
+	if sessReq.ClientVersion != nil {
+		s.Logger.WithFields(log.Fields{"client-version": *sessReq.ClientVersion}).Info("attempt to create session")
+		if utils.CompareVersion(*sessReq.ClientVersion, upterm.MinVersion) < 0 {
+			return false, []byte(fmt.Sprintf("Please consider to upgrade upterm client version, at least: %s", upterm.MinVersion))
+		}
 	}
 
 	sess, err := newSession(
