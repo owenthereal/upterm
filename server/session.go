@@ -11,6 +11,7 @@ import (
 type session struct {
 	ID                   string
 	HostUser             string
+	NodeAddr             string
 	HostPublicKeys       []ssh.PublicKey
 	ClientAuthorizedKeys []ssh.PublicKey
 }
@@ -29,7 +30,7 @@ func (s session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	return false
 }
 
-func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*session, error) {
+func newSession(id, hostUser, NodeAddr string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*session, error) {
 	var (
 		hpk []ssh.PublicKey
 		cak []ssh.PublicKey
@@ -54,6 +55,7 @@ func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]by
 	return &session{
 		ID:                   id,
 		HostUser:             hostUser,
+		NodeAddr:             NodeAddr,
 		HostPublicKeys:       hpk,
 		ClientAuthorizedKeys: cak,
 	}, nil

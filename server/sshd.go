@@ -118,6 +118,7 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	sess, err := newSession(
 		utils.GenerateSessionID(),
 		sessReq.HostUser,
+		s.NodeAddr,
 		sessReq.HostPublicKeys,
 		sessReq.ClientAuthorizedKeys,
 	)

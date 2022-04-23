@@ -18,6 +18,7 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
+	sessRepo := newSessionRepo()
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,9 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 
 	proxyAddr := proxyLn.Addr().String()
 	cd := sidewayConnDialer{
+		baseDialer: baseDialer{
+			SessionRepo: sessRepo,
+		},
 		NodeAddr:        proxyAddr,
 		NeighbourDialer: tcpConnDialer{},
 		Logger:          logger,
@@ -49,6 +53,7 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
+		SessionRepo:     sessRepo,
 		MetricsProvider: provider.NewDiscardProvider(),
 	}
 
@@ -95,6 +100,14 @@ func Test_sshProxy_findUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sess, _ := newSession(
+		id.Id,
+		id.Id,
+		sshdAddr,
+		[][]byte{},
+		[][]byte{},
+	)
+	_ = sessRepo.Add(*sess)
 
 	cases := []struct {
 		Name   string

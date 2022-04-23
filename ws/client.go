@@ -36,8 +36,7 @@ func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
 	user := u.User
 	u.User = nil // ws spec doesn't support basic auth
 
-	encodedNodeAddr, _ := user.Password()
-	header := webSocketDialHeader(user.Username(), encodedNodeAddr, isUptermClient)
+	header := webSocketDialHeader(user.Username(), isUptermClient)
 	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
 	if err != nil {
 		return nil, err
@@ -50,8 +49,8 @@ func WrapWSConn(ws *websocket.Conn) net.Conn {
 	return chshare.NewWebSocketConn(ws)
 }
 
-func webSocketDialHeader(sessionID, encodedNodeAddr string, isClient bool) http.Header {
-	auth := base64.StdEncoding.EncodeToString([]byte(sessionID + ":" + encodedNodeAddr))
+func webSocketDialHeader(sessionID string, isClient bool) http.Header {
+	auth := base64.StdEncoding.EncodeToString([]byte(sessionID + ":" + "pass"))
 	header := make(http.Header)
 	header.Add("Authorization", "Basic "+auth)
 
