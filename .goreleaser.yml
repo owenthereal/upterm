@@ -8,36 +8,58 @@ builds:
     goos:
       - linux
       - darwin
+    id: "upterm"
+    binary: upterm
     main: ./cmd/upterm
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/upterm.Version={{.Version}}
+
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    id: "uptermd"
+    binary: uptermd
+    main: ./cmd/uptermd
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/upterm.Version={{.Version}}
+
 archives:
-  - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    files:
-      - etc/*
-      - LICENSE
-      - README.md
-      - docs/*
-brews:
-  - tap:
-      owner: owenthereal
-      name: homebrew-upterm
-    commit_author:
-      name: Owen Ou
-      email: o@owenou.com
-    homepage: https://upterm.dev
-    description: Secure terminal sharing
-    folder: Formula
-    license: "Apache 2.0"
-    custom_block: |
-      head "https://github.com/owenthereal/upterm.git"
-    install: |
-      bin.install "upterm"
-      prefix.install_metafiles
-      bash_completion.install "etc/completion/upterm.bash_completion.sh"
-      zsh_completion.install "etc/completion/upterm.zsh_completion" => "_upterm"
-      man.install "etc/man/man1"
-    test: |
-      assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
+  # - format: tar.gz
+  #   id: tar.gz
+  #   name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+  #   files:
+  #     - etc/*
+  #     - LICENSE
+  #     - README.md
+  #     - docs/*
+
+  - format: binary
+    id: binary
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
+
+# brews:
+#   - tap:
+#       owner: owenthereal
+#       name: homebrew-upterm
+#     commit_author:
+#       name: Owen Ou
+#       email: o@owenou.com
+#     homepage: https://upterm.dev
+#     description: Secure terminal sharing
+#     folder: Formula
+#     license: "Apache 2.0"
+#     custom_block: |
+#       head "https://github.com/owenthereal/upterm.git"
+#     install: |
+#       bin.install "upterm"
+#       prefix.install_metafiles
+#       bash_completion.install "etc/completion/upterm.bash_completion.sh"
+#       zsh_completion.install "etc/completion/upterm.zsh_completion" => "_upterm"
+#       man.install "etc/man/man1"
+#     test: |
+#       assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
 checksum:
   name_template: 'checksums.txt'
 snapshot:
