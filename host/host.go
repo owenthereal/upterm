@@ -220,6 +220,7 @@ func (c *Host) Run(ctx context.Context) error {
 		NodeAddr:     sessResp.NodeAddr,
 		Command:      c.Command,
 		ForceCommand: c.ForceCommand,
+		FaqMsg:       sessResp.FaqMsg,
 	}
 
 	if c.SessionCreatedCallback != nil {

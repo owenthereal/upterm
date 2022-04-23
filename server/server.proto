@@ -16,6 +16,7 @@ message CreateSessionResponse {
     string sessionID = 1;
     string nodeAddr = 2; // .. deprecated: 2022-04-23 This field is confusing
     string advisedUri = 3;
+    string faqMsg = 4;
 }
 
 message AuthRequest {

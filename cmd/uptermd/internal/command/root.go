@@ -13,7 +13,8 @@ var (
 	flagSSHAddr     string
 	flagWSAddr      string
 	flagNodeAddr    string
-	flagAdvisedUri  string
+	flagAdvisedMsg  string
+	flagFaqMsg      string
 	flagPrivateKeys []string
 	flagHostnames   []string
 	flagNetwork     string
@@ -33,7 +34,8 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagSSHAddr, "ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringVarP(&flagWSAddr, "ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringVarP(&flagNodeAddr, "node-addr", "", "", "node address")
-	cmd.PersistentFlags().StringVarP(&flagAdvisedUri, "advised-addr", "", "", "advised address for client, like ssh://upterm.dev:2222")
+	cmd.PersistentFlags().StringVarP(&flagAdvisedMsg, "advised-addr", "", "", "advised address for client, like ssh://upterm.dev:2222")
+	cmd.PersistentFlags().StringVarP(&flagFaqMsg, "faq-msg", "", "", "a url manual for uptermd")
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceVarP(&flagHostnames, "hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 
@@ -60,7 +62,8 @@ func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 		NetworkOpt: flagNetworkOpts,
 		MetricAddr: flagMetricAddr,
 		Debug:      flagDebug,
-		AdvisedUri: flagAdvisedUri,
+		AdvisedUri: flagAdvisedMsg,
+		FaqMsg:     flagFaqMsg,
 	}
 
 	return server.Start(opt)

@@ -236,13 +236,13 @@ func displaySession(session *api.GetSessionResponse) error {
 		var vscodeURI string
 		if scheme == "ssh" { // currently only support ssh protocol
 			vscodeURI = fmt.Sprintf("vscode://vscode-remote/ssh-remote+%s@%s:%s%s", user, host, port, flagVSCodeDir)
-			data = append(data, []string{"VSCode uri:", vscodeURI})
-			data = append(data, []string{"VSCode cmd start:", fmt.Sprintf("code --remote ssh-remote+%s@%s:%s", user, host, port)})
+			data = append(data, []string{"VSCode Uri:", vscodeURI})
+			data = append(data, []string{"VSCode Cmd Start:", fmt.Sprintf("code --remote ssh-remote+%s@%s:%s", user, host, port)})
 		} else {
 			vscodeURI = fmt.Sprintf("can't parse %s for vscode uri, pleate create ssh_config", u)
 			data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
 			data = append(data, []string{"SSH Session:", sshCmd})
-			data = append(data, []string{"VSCode uri:", vscodeURI})
+			data = append(data, []string{"VSCode Uri:", vscodeURI})
 		}
 	} else {
 		data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
@@ -256,6 +256,9 @@ func displaySession(session *api.GetSessionResponse) error {
 			isFirst = false
 		}
 		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
+	}
+	if session.FaqMsg != "" {
+		data = append(data, []string{"Faq Message:", session.FaqMsg})
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)

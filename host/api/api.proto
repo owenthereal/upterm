@@ -18,6 +18,7 @@ message GetSessionResponse {
     string host = 4;
     string node_addr = 5;
     repeated Client connected_clients = 6;
+    string faq_msg = 7;
 }
 
 message Client {

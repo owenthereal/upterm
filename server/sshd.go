@@ -28,6 +28,7 @@ type sshd struct {
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	AdvisedUri          string
+	FaqMsg              string
 	SessionDialListener SessionDialListener
 	Logger              log.FieldLogger
 
@@ -135,6 +136,7 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		SessionID:  sess.ID,
 		NodeAddr:   s.NodeAddr,
 		AdvisedUri: s.AdvisedUri,
+		FaqMsg:     s.FaqMsg,
 	}
 
 	if s.AdvisedUri != "" {
