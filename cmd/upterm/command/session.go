@@ -231,10 +231,23 @@ func displaySession(session *api.GetSessionResponse) error {
 	data := [][]string{
 		{"Command:", strings.Join(session.Command, " ")},
 		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
-		{"Host:", u.Scheme + "://" + hostPort},
-		{"SSH Session:", sshCmd},
 	}
-
+	if flagVSCode {
+		var vscodeURI string
+		if scheme == "ssh" { // currently only support ssh protocol
+			vscodeURI = fmt.Sprintf("vscode://vscode-remote/ssh-remote+%s@%s:%s%s", user, host, port, flagVSCodeDir)
+			data = append(data, []string{"VSCode uri:", vscodeURI})
+			data = append(data, []string{"VSCode cmd start:", fmt.Sprintf("code --remote ssh-remote+%s@%s:%s", user, host, port)})
+		} else {
+			vscodeURI = fmt.Sprintf("can't parse %s for vscode uri, pleate create ssh_config", u)
+			data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
+			data = append(data, []string{"SSH Session:", sshCmd})
+			data = append(data, []string{"VSCode uri:", vscodeURI})
+		}
+	} else {
+		data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
+		data = append(data, []string{"SSH Session:", sshCmd})
+	}
 	isFirst := true
 	for _, c := range session.ConnectedClients {
 		var header string

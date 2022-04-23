@@ -34,6 +34,7 @@ type Server struct {
 	Stdout            *os.File
 	Logger            log.FieldLogger
 	ReadOnly          bool
+	VSCode            bool
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -69,11 +70,14 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		})
 	}
 	{
-		g.Add(func() error {
-			return cmd.Run()
-		}, func(err error) {
-			cmdCancel()
-		})
+		if s.VSCode {
+		} else {
+			g.Add(func() error {
+				return cmd.Run()
+			}, func(err error) {
+				cmdCancel()
+			})
+		}
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
@@ -86,6 +90,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			ctx:               ctx,
 			logger:            s.Logger,
 			readonly:          s.ReadOnly,
+			vscode:            s.VSCode,
 		}
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
@@ -102,10 +107,6 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			HostSigners: ss,
 			Handler:     sh.HandleSession,
 			Version:     upterm.HostSSHServerVersion,
-			LocalPortForwardingCallback: gssh.LocalPortForwardingCallback(func(ctx gssh.Context, dhost string, dport uint32) bool {
-				log.Println("Accepted forward", dhost, dport)
-				return true
-			}),
 
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.WithError(err).Error("connection failed")
@@ -113,6 +114,16 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 		if len(s.AuthorizedKeys) != 0 {
 			server.PublicKeyHandler = ph.HandlePublicKey
+		}
+		if s.VSCode {
+			server.ChannelHandlers = map[string]gssh.ChannelHandler{
+				"session":      gssh.DefaultSessionHandler,
+				"direct-tcpip": gssh.DirectTCPIPHandler,
+			}
+			server.LocalPortForwardingCallback = gssh.LocalPortForwardingCallback(func(ctx gssh.Context, dhost string, dport uint32) bool {
+				s.Logger.Info("Accepting local port forwarding request", dhost, dport)
+				return true
+			})
 		}
 
 		g.Add(func() error {
@@ -169,6 +180,7 @@ type sessionHandler struct {
 	ctx               context.Context
 	logger            log.FieldLogger
 	readonly          bool
+	vscode            bool
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
@@ -176,6 +188,36 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 
 	ptyReq, winCh, isPty := sess.Pty()
+	if h.vscode {
+		if isPty {
+			_, _ = io.WriteString(sess, "[upterm] VSCode mode doesn't support PTY connect")
+			_ = sess.Exit(1)
+		}
+
+		cmds := sess.Command()
+		defer sess.Close()
+		if len(cmds) == 0 {
+			cmds = []string{"bash"}
+		}
+
+		cmd := exec.Command(cmds[0], cmds[1:]...)
+		cmd.Stdout = sess
+		cmd.Stderr = sess
+		cmd.Stdin = sess
+		err := cmd.Start()
+		if err != nil {
+			h.logger.Infof("could not start command (%s)", err)
+		}
+		fmt.Fprintf(os.Stdout, "[upterm] new vscode session start\n")
+
+		_, err = cmd.Process.Wait()
+		if err != nil {
+			h.logger.Infof("failed to exit bash (%s)", err)
+		}
+		h.logger.Infof("session closed")
+		return
+	}
+
 	if !isPty {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
 		_ = sess.Exit(1)
