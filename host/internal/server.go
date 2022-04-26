@@ -265,7 +265,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				cmd = exec.Command(cmds[0], cmds[1:]...)
 			} else {
 				cmds = []string{"-c", strings.Join(cmds, " ")}
-				cmd = exec.Command("/usr/bin/zsh", cmds...)
+				cmd = exec.Command("bash", cmds...)
 			}
 		}
 		cmd.Stdout = sess
