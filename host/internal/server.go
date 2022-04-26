@@ -223,9 +223,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			h.logger.Info("[upterm] new pty session start\n")
 			fmt.Fprintf(os.Stdout, "[upterm] new pty session start\n")
 			cmd := exec.Command("/bin/bash")
-			setWinsize := func(f *os.File, w, h int) {
-				syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCSWINSZ),
-					uintptr(unsafe.Pointer(&struct{ h, w, x, y uint16 }{uint16(h), uint16(w), 0, 0})))
+			setWinsize := func(f *os.File, width, height int) {
+				_, _, err := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCSWINSZ),
+					uintptr(unsafe.Pointer(&struct{ h, w, x, y uint16 }{uint16(height), uint16(width), 0, 0})))
+				if err != 0 {
+					h.logger.Errorf("failed to set window size: %v", err)
+				}
 			}
 			f, err := ptylib.Start(cmd)
 			if err != nil {
