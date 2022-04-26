@@ -237,10 +237,18 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				}
 			}()
 			go func() {
-				io.Copy(f, sess) // stdin
+				if _, err = io.Copy(f, sess); err != nil {
+					h.logger.Errorf("[upterm] unknow error from io copy: %s\n", err)
+					fmt.Fprintf(os.Stdout, "[upterm] unknow err, %s, please contact the developer\n", err)
+				}
 			}()
-			io.Copy(sess, f) // stdout
-			cmd.Wait()
+			if io.Copy(sess, f); err != nil {
+				h.logger.Error("[upterm] unknow error from io copy: %s\n", err)
+				fmt.Fprintf(os.Stdout, "[upterm] unknow err, %s, please contact the developer\n", err)
+			}
+			if err := cmd.Wait(); err != nil {
+				h.logger.Error("failed to exit bash (%s)", err)
+			}
 			return
 		}
 		var cmd *exec.Cmd
