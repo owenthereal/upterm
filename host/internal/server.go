@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
+	ptylib "github.com/creack/pty"
 	gssh "github.com/gliderlabs/ssh"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/server"
@@ -18,6 +23,7 @@ import (
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/pkg/sftp"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -124,6 +130,9 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 				s.Logger.Info("Accepting local port forwarding request", dhost, dport)
 				return true
 			})
+			server.SubsystemHandlers = map[string]gssh.SubsystemHandler{
+				"sftp": sh.SftpHandler,
+			}
 		}
 
 		g.Add(func() error {
@@ -183,6 +192,27 @@ type sessionHandler struct {
 	vscode            bool
 }
 
+func (h *sessionHandler) SftpHandler(sess gssh.Session) {
+	debugStream := ioutil.Discard
+	serverOptions := []sftp.ServerOption{
+		sftp.WithDebug(debugStream),
+	}
+	server, err := sftp.NewServer(
+		sess,
+		serverOptions...,
+	)
+	if err != nil {
+		h.logger.Infof("sftp server init error: %s\n", err)
+		return
+	}
+	if err := server.Serve(); err == io.EOF {
+		server.Close()
+		h.logger.Info("sftp client exited session.")
+	} else if err != nil {
+		h.logger.Info("sftp server completed with error:", err)
+	}
+}
+
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
@@ -190,29 +220,59 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	ptyReq, winCh, isPty := sess.Pty()
 	if h.vscode {
 		if isPty {
-			_, _ = io.WriteString(sess, "[upterm] VSCode mode doesn't support PTY connect")
-			_ = sess.Exit(1)
+			h.logger.Info("[upterm] new pty session start\n")
+			fmt.Fprintf(os.Stdout, "[upterm] new pty session start\n")
+			cmd := exec.Command("/bin/bash")
+			setWinsize := func(f *os.File, w, h int) {
+				syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCSWINSZ),
+					uintptr(unsafe.Pointer(&struct{ h, w, x, y uint16 }{uint16(h), uint16(w), 0, 0})))
+			}
+			f, err := ptylib.Start(cmd)
+			if err != nil {
+				panic(err)
+			}
+			go func() {
+				for win := range winCh {
+					setWinsize(f, win.Width, win.Height)
+				}
+			}()
+			go func() {
+				io.Copy(f, sess) // stdin
+			}()
+			io.Copy(sess, f) // stdout
+			cmd.Wait()
+			return
 		}
-
+		var cmd *exec.Cmd
 		cmds := sess.Command()
-		defer sess.Close()
+
+		// vscode can't
+		// defer sess.Close()
+
 		if len(cmds) == 0 {
 			cmds = []string{"bash"}
+			cmd = exec.Command(cmds[0], cmds[1:]...)
+		} else {
+			if cmds[0] == "/usr/bin/zsh" || cmds[0] == "/bin/zsh" || cmds[0] == "/bin/bash" || cmds[0] == "/bin/sh" {
+				cmd = exec.Command(cmds[0], cmds[1:]...)
+			} else {
+				cmds = []string{"-c", strings.Join(cmds, " ")}
+				cmd = exec.Command("/usr/bin/zsh", cmds...)
+			}
 		}
-
-		cmd := exec.Command(cmds[0], cmds[1:]...)
 		cmd.Stdout = sess
 		cmd.Stderr = sess
 		cmd.Stdin = sess
 		err := cmd.Start()
 		if err != nil {
-			h.logger.Infof("could not start command (%s)", err)
+			h.logger.Errorf("could not start command (%s)", err)
+			return
 		}
 		fmt.Fprintf(os.Stdout, "[upterm] new vscode session start\n")
 
 		_, err = cmd.Process.Wait()
 		if err != nil {
-			h.logger.Infof("failed to exit bash (%s)", err)
+			h.logger.Error("failed to exit bash (%s)", err)
 		}
 		h.logger.Infof("session closed")
 		return
