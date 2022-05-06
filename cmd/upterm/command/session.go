@@ -235,9 +235,10 @@ func displaySession(session *api.GetSessionResponse) error {
 	if flagVSCode {
 		var vscodeURI string
 		if scheme == "ssh" { // currently only support ssh protocol
-			vscodeURI = fmt.Sprintf("vscode://vscode-remote/ssh-remote+%s@%s:%s%s", user, host, port, flagVSCodeDir)
+			vscodeURI = fmt.Sprintf("vscode://vscode-remote/ssh-remote+%s@%s:%s%s?windowId=_blank", user, host, port, flagVSCodeDir)
 			data = append(data, []string{"VSCode Uri:", vscodeURI})
 			data = append(data, []string{"VSCode Cmd Start:", fmt.Sprintf("code --remote ssh-remote+%s@%s:%s", user, host, port)})
+			data = append(data, []string{"SSH Session:", sshCmd})
 		} else {
 			vscodeURI = fmt.Sprintf("can't parse %s for vscode uri, pleate create ssh_config", u)
 			data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
