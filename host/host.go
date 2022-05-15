@@ -166,6 +166,7 @@ type Host struct {
 	Stdout                 *os.File
 	ReadOnly               bool
 	VSCode                 bool
+	VerifyHostKey          bool
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -186,10 +187,17 @@ func (c *Host) Run(ctx context.Context) error {
 	logger := c.Logger.WithField("server", u)
 
 	logger.Info("Etablishing reverse tunnel")
+	hostKeyCallback := c.HostKeyCallback
+	if !c.VerifyHostKey { // ignore the host key verify
+		hostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return nil
+		}
+	}
+
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
-		HostKeyCallback:   c.HostKeyCallback,
+		HostKeyCallback:   hostKeyCallback,
 		AuthorizedKeys:    c.AuthorizedKeys,
 		KeepAliveDuration: c.KeepAliveDuration,
 		Logger:            c.Logger.WithField("com", "reverse-tunnel"),

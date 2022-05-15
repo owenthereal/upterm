@@ -30,6 +30,7 @@ var (
 	flagGitLabUsers        []string
 	flagReadOnly           bool
 	flagVSCode             bool
+	flagVerifyHostKey      bool
 	flagVSCodeDir          string
 )
 
@@ -72,6 +73,7 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVar(&flagVSCode, "vscode", false, "allow vscode remote ssh connect")
+	cmd.PersistentFlags().BoolVar(&flagVerifyHostKey, "verify-host-key", true, "if verify the uptermd host key")
 	cmd.PersistentFlags().StringVar(&flagVSCodeDir, "vscode-dir", "/", "vscode remote ssh connect directory")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
@@ -209,6 +211,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Logger:                 logger,
 		ReadOnly:               flagReadOnly,
 		VSCode:                 flagVSCode,
+		VerifyHostKey:          flagVerifyHostKey,
 	}
 
 	return h.Run(context.Background())
