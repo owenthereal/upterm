@@ -5,6 +5,7 @@ import (
 
 	"github.com/owenthereal/upterm/host/api"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -17,7 +18,8 @@ func AdminSocketFile(sessionID string) string {
 
 func AdminClient(socket string) (api.AdminServiceClient, error) {
 	// Use mtls
-	conn, err := grpc.Dial("unix://"+socket, grpc.WithInsecure())
+	conn, err := grpc.Dial("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
 	if err != nil {
 		return nil, err
 	}

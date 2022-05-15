@@ -245,7 +245,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					fmt.Fprintf(os.Stdout, "[upterm] unknow err, %s, please contact the developer\n", err)
 				}
 			}()
-			if io.Copy(sess, f); err != nil {
+			if _, err = io.Copy(sess, f); err != nil {
 				h.logger.Error("[upterm] unknow error from io copy: %s\n", err)
 				fmt.Fprintf(os.Stdout, "[upterm] unknow err, %s, please contact the developer\n", err)
 			}
