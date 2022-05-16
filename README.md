@@ -120,9 +120,10 @@ $ upterm host -- docker run --rm -ti ubuntu bash
 ```
 
 Host a session that runs 'tmux new -t pair-programming' and force clients to join with `tmux attach -t pair-programming`.
+Copy the SSH Session url and press enter before sharing the url with your peer.
 This is similar to what tmate offers.
 ```console
-$ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
+$ upterm host --force-command 'tmux attach -t pair-programming' -- bash -c "read -p 'Press enter to continue ' && tmux new -t pair-programming"
 ```
 
 Connect to uptermd.upterm.dev via WebSocket
