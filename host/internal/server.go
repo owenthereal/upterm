@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -73,6 +74,16 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			return teh.Handle(ctx)
 		}, func(err error) {
 			cancel()
+		})
+	}
+	{
+		stopChan := make(chan os.Signal, 1)
+		signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+		g.Add(func() error {
+			<-stopChan // wait for SIGINT
+			return nil
+		}, func(err error) {
+			close(stopChan)
 		})
 	}
 	{
