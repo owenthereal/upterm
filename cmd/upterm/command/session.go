@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,38 +173,10 @@ func displaySessionFromAdminSocketPath(path string) error {
 	return displaySession(session)
 }
 
-func parseURL(str string) (u *url.URL, scheme string, host string, port string, err error) {
-	u, err = url.Parse(str)
-	if err != nil {
-		return
-	}
-
-	scheme = u.Scheme
-	host, port, err = net.SplitHostPort(u.Host)
-	if err != nil {
-		if !strings.Contains(err.Error(), "missing port in address") {
-			return
-		}
-
-		err = nil
-		host = u.Host
-		switch u.Scheme {
-		case "ssh":
-			port = "22"
-		case "ws":
-			port = "80"
-		case "wss":
-			port = "443"
-		}
-	}
-
-	return
-}
-
 func displaySession(session *api.GetSessionResponse) error {
 	user := session.SessionId
 
-	u, scheme, host, port, err := parseURL(session.Host)
+	u, scheme, host, port, err := utils.ParseURL(session.Host)
 	if err != nil {
 		return err
 	}
@@ -228,10 +198,7 @@ func displaySession(session *api.GetSessionResponse) error {
 		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s:nopass@%s' %s@%s", scheme, user, hostPort, user, host+":"+port)
 	}
 
-	data := [][]string{
-		{"Command:", strings.Join(session.Command, " ")},
-		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
-	}
+	data := [][]string{}
 	if flagVSCode {
 		var vscodeURI string
 		if scheme == "ssh" { // currently only support ssh protocol
@@ -246,6 +213,8 @@ func displaySession(session *api.GetSessionResponse) error {
 			data = append(data, []string{"VSCode Uri:", vscodeURI})
 		}
 	} else {
+		data = append(data, []string{"Command:", strings.Join(session.Command, " ")})
+		data = append(data, []string{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))})
 		data = append(data, []string{"Host:", u.Scheme + "://" + hostPort})
 		data = append(data, []string{"SSH Session:", sshCmd})
 	}
@@ -257,6 +226,9 @@ func displaySession(session *api.GetSessionResponse) error {
 			isFirst = false
 		}
 		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
+	}
+	if session.VscodeRedirectUrl != "" {
+		data = append(data, []string{"Vscode web:", session.VscodeRedirectUrl})
 	}
 	if session.FaqMsg != "" {
 		data = append(data, []string{"Faq Message:", session.FaqMsg})

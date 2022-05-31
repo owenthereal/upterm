@@ -49,6 +49,7 @@ require (
 )
 
 require (
+	github.com/cavaliergopher/grab/v3 v3.0.1
 	github.com/pkg/sftp v1.13.4
 	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
