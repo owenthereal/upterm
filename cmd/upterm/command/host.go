@@ -30,6 +30,8 @@ var (
 	flagGitLabUsers        []string
 	flagReadOnly           bool
 	flagVSCode             bool
+	flagVSCodeWeb          bool
+	flagVSCodeWebFront     string
 	flagVerifyHostKey      bool
 	flagVSCodeDir          string
 )
@@ -73,6 +75,8 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVar(&flagVSCode, "vscode", false, "allow vscode remote ssh connect")
+	cmd.PersistentFlags().BoolVar(&flagVSCodeWeb, "vscode-web", false, "allow host run vscode web server")
+	cmd.PersistentFlags().StringVar(&flagVSCodeWebFront, "vscode-web-front", "http://my.code-gz.corvo.fun", "vscode web server front host")
 	cmd.PersistentFlags().BoolVar(&flagVerifyHostKey, "verify-host-key", true, "if verify the uptermd host key")
 	cmd.PersistentFlags().StringVar(&flagVSCodeDir, "vscode-dir", "/", "vscode remote ssh connect directory")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
@@ -168,6 +172,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if _, err := os.Stat(flagVSCodeDir); err != nil {
 		return fmt.Errorf("error reading vscode dir: %w", err)
 	}
+	if flagVSCodeWeb {
+		flagVSCode = true // make sure VSCode is enabled
+	}
 
 	if flagVSCode && flagReadOnly {
 		return fmt.Errorf("can't mix --vscode with --read-only")
@@ -211,6 +218,8 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Logger:                 logger,
 		ReadOnly:               flagReadOnly,
 		VSCode:                 flagVSCode,
+		VSCodeWeb:              flagVSCodeWeb,
+		VSCodeWebFront:         flagVSCodeWebFront,
 		VerifyHostKey:          flagVerifyHostKey,
 	}
 

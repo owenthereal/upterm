@@ -18,6 +18,10 @@ github.com/buger/goterm
 # github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c
 ## explicit
 github.com/c4milo/unpackit
+# github.com/cavaliergopher/grab/v3 v3.0.1
+## explicit; go 1.14
+github.com/cavaliergopher/grab/v3
+github.com/cavaliergopher/grab/v3/pkg/bps
 # github.com/cespare/xxhash/v2 v2.1.2
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2

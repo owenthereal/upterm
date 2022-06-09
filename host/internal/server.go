@@ -42,6 +42,7 @@ type Server struct {
 	Logger            log.FieldLogger
 	ReadOnly          bool
 	VSCode            bool
+	VSCodeWeb         bool
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -292,9 +293,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 		fmt.Fprintf(os.Stdout, "[upterm] new vscode session start\n")
 
-		_, err = cmd.Process.Wait()
+		state, err := cmd.Process.Wait()
 		if err != nil {
-			h.logger.Error("failed to exit bash (%s)", err)
+			h.logger.Error("failed to wait cmd (%s)", err)
+		}
+		if state.String() != "exit status 0" && strings.Contains(strings.Join(cmds, " "), "ls") {
+			if err := sess.Exit(1); err != nil {
+				h.logger.Error("failed to exit cmd (%s)", err)
+			}
 		}
 		h.logger.Infof("session closed")
 		return

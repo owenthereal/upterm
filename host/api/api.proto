@@ -19,6 +19,7 @@ message GetSessionResponse {
     string node_addr = 5;
     repeated Client connected_clients = 6;
     string faq_msg = 7;
+    string vscode_redirect_url = 8;
 }
 
 message Client {
