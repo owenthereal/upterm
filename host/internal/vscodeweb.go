@@ -225,6 +225,14 @@ func (vw *VscodeWeb) PrepareVSCodeWeb() error {
 	vw.CodeServerPath = filepath.Join(codeBase, "bin", "code-server")
 	vw.VscodeWebSocketFile = filepath.Join(uptermDir, fmt.Sprintf("%s-vscode-web.sock", uniuri.NewLen(24)))
 
+	// reverse proxy for .upterm route
+	uptermFrontUrl, err := url.Parse(vw.VscodeWebFront)
+	if err != nil {
+		return err
+	}
+	loadingProxy := httputil.NewSingleHostReverseProxy(uptermFrontUrl)
+
+	// unix socket proxy
 	mux := http.NewServeMux()
 	remote, err := url.Parse("http://localhost")
 	if err != nil {
@@ -240,12 +248,16 @@ func (vw *VscodeWeb) PrepareVSCodeWeb() error {
 			return net.Dial("unix", vw.VscodeWebSocketFile)
 		},
 	}
-	handler := func(p *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
+	vscodeHandler := func(p *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
-			p.ServeHTTP(w, r)
+			if r.URL.Query().Get("upterm") == "true" {
+				loadingProxy.ServeHTTP(w, r)
+			} else {
+				p.ServeHTTP(w, r)
+			}
 		}
 	}
-	cors := func(fs http.Handler) http.HandlerFunc {
+	corsMiddleware := func(fs http.Handler) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -273,18 +285,12 @@ func (vw *VscodeWeb) PrepareVSCodeWeb() error {
 			fn(gzipResponseWriter{Writer: gz, ResponseWriter: w}, r)
 		}
 	}
-	mux.Handle("/static/", http.StripPrefix("/static/", makeGzipHandler(cors(http.FileServer(http.Dir(codeBase))))))
+	mux.Handle("/static/", http.StripPrefix("/static/", makeGzipHandler(corsMiddleware(http.FileServer(http.Dir(codeBase))))))
 
-	// reverse proxy for loading page
-	loadingUrl, err := url.Parse(vw.VscodeWebFront)
-	if err != nil {
-		return err
-	}
-	loadingProxy := httputil.NewSingleHostReverseProxy(loadingUrl)
 	mux.Handle("/.upterm/", loadingProxy)
 
 	// real server
-	mux.HandleFunc("/", handler(proxy))
+	mux.HandleFunc("/", vscodeHandler(proxy))
 
 	port := 0
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
