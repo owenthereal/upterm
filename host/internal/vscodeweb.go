@@ -5,10 +5,12 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -184,6 +186,10 @@ type gzipResponseWriter struct {
 	io.Writer
 	http.ResponseWriter
 }
+type vscodeProduct struct {
+	Quality string `json:"quality"`
+	Commit  string `json:"commit"`
+}
 
 // Use the Writer part of gzipResponseWriter to write the output.
 
@@ -285,6 +291,25 @@ func (vw *VscodeWeb) PrepareVSCodeWeb() error {
 			fn(gzipResponseWriter{Writer: gz, ResponseWriter: w}, r)
 		}
 	}
+	staticRoute, err := (func() (string, error) {
+		// Please refer to:
+		// https://github.com/microsoft/vscode/commit/41f49066bde4af7f70aa4d5d06816660074612f8
+		// src/vs/server/node/webClientServer.ts
+		jsonFile, err := os.Open(filepath.Join(codeBase, "product.json"))
+		if err != nil {
+			return "", err
+		}
+		defer jsonFile.Close()
+		var product vscodeProduct
+		byteValue, _ := ioutil.ReadAll(jsonFile)
+		json.Unmarshal([]byte(byteValue), &product)
+		return fmt.Sprintf("/%s-%s/static/", product.Quality, product.Commit), nil
+	}())
+
+	if err != nil {
+		return err
+	}
+	mux.Handle(staticRoute, http.StripPrefix(staticRoute, makeGzipHandler(corsMiddleware(http.FileServer(http.Dir(codeBase))))))
 	mux.Handle("/static/", http.StripPrefix("/static/", makeGzipHandler(corsMiddleware(http.FileServer(http.Dir(codeBase))))))
 
 	mux.Handle("/.upterm/", loadingProxy)
