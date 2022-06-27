@@ -1,4 +1,4 @@
-FROM golang:latest as builder
+FROM golang:alpine as builder
 
 WORKDIR $GOPATH/src/github.com/owenthereal/upterm
 COPY . .
@@ -6,18 +6,18 @@ ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN go install -mod=vendor ./cmd/uptermd/...
 
 # Prepare for image
-FROM ubuntu:latest
+FROM alpine:latest
 
 MAINTAINER Owen Ou
 LABEL org.opencontainers.image.source https://github.com/owenthereal/upterm
 
-RUN apt-get update && apt-get install -y less curl dnsutils ssh iputils-ping
-RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-COPY --from=builder /go/bin/uptermd /usr/bin/uptermd
-
-RUN useradd -m uptermd
+RUN adduser -D uptermd
 USER uptermd
+
+WORKDIR /app
+ENV PATH="/app:${PATH}"
+
+COPY --from=builder /go/bin/* /app
 
 # sshd
 EXPOSE 2222
