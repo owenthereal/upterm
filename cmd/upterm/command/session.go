@@ -262,7 +262,7 @@ func displaySession(session *api.GetSessionResponse) error {
 	table.AppendBulk(data)
 	table.Render()
 
-	fmt.Printf("\nType `upterm session current` to display this screen again.\n\n")
+	fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
 
 	return nil
 }
