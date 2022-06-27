@@ -1,0 +1,53 @@
+# fly.toml file generated for upterm on 2022-06-27T11:01:32-07:00
+
+app = "upterm"
+kill_signal = "SIGINT"
+kill_timeout = 5
+processes = []
+
+[build]
+  dockerfile = "Dockerfile.uptermd"
+
+[experimental]
+  cmd = ["uptermd --ssh-addr 0.0.0.0:2222 --ws-addr 0.0.0.0:8080 --node-addr $(echo ${FLY_ALLOC_ID} | cut -f1 -d '-').vm.${FLY_APP_NAME}.internal:2222 --hostname uptermd.upterm.dev"]
+  entrypoint = ["/bin/sh", "-c"]
+  allowed_public_ports = []
+  auto_rollback = true
+
+[[services]]
+  internal_port = 2222
+  processes = ["app"]
+  protocol = "tcp"
+
+  [services.concurrency]
+    hard_limit = 2500
+    soft_limit = 2000
+    type = "connections"
+
+  [[services.ports]]
+    port = 22
+
+  [[services.tcp_checks]]
+    grace_period = "5s"
+    interval = "15s"
+    restart_limit = 0
+    timeout = "2s"
+
+[[services]]
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+
+  [services.concurrency]
+    hard_limit = 2500
+    soft_limit = 2000
+    type = "connections"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    force_https = true
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443

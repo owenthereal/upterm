@@ -11,14 +11,18 @@ FROM ubuntu:latest
 MAINTAINER Owen Ou
 LABEL org.opencontainers.image.source https://github.com/owenthereal/upterm
 
-RUN apt-get update && apt-get install -y less curl iputils-ping
+RUN apt-get update && apt-get install -y less curl dnsutils ssh iputils-ping
 RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY --from=builder /go/bin/uptermd /usr/bin/uptermd
 
-# sshd
-EXPOSE 22
+RUN useradd -m uptermd
+USER uptermd
 
+# sshd
+EXPOSE 2222
+# ws
+EXPOSE 8080
 # Prometheus
 EXPOSE 9090
 
