@@ -15,7 +15,7 @@ require (
 	github.com/creack/pty v1.1.19-0.20220329111840-2e47437b1ffb
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/dsnet/compress v0.0.1 // indirect
-	github.com/gen2brain/beeep v0.0.0-20220402123239-6a3042f4b71a
+	github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
 	github.com/gliderlabs/ssh v0.2.2
 	github.com/go-kit/kit v0.12.0
 	github.com/google/go-cmp v0.5.5

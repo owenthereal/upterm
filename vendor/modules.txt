@@ -44,7 +44,7 @@ github.com/eiannone/keyboard
 # github.com/fsnotify/fsnotify v1.4.7
 ## explicit
 github.com/fsnotify/fsnotify
-# github.com/gen2brain/beeep v0.0.0-20220402123239-6a3042f4b71a
+# github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
 ## explicit; go 1.14
 github.com/gen2brain/beeep
 # github.com/gliderlabs/ssh v0.2.2 => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
