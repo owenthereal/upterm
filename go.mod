@@ -87,5 +87,5 @@ require (
 
 replace (
 	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220217224334-0f0fc8cdc7dd
-	golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220407183437-b85f04675752
+	golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220627151006-26fac2f27e49
 )
