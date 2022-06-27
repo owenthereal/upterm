@@ -215,12 +215,14 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 		return err
 	}
 
+	fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
+
 	if err := keyboard.Open(); err != nil {
 		return err
 	}
 	defer keyboard.Close()
 
-	fmt.Println("Press <q> or <ctrl-c> to allow connections...")
+	fmt.Println("Press <q> or <ctrl-c> to accept connections...")
 	for {
 		char, key, err := keyboard.GetKey()
 		if err != nil {
