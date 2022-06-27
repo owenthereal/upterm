@@ -38,10 +38,13 @@ github.com/dsnet/compress/bzip2/internal/sais
 github.com/dsnet/compress/internal
 github.com/dsnet/compress/internal/errors
 github.com/dsnet/compress/internal/prefix
+# github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
+## explicit; go 1.18
+github.com/eiannone/keyboard
 # github.com/fsnotify/fsnotify v1.4.7
 ## explicit
 github.com/fsnotify/fsnotify
-# github.com/gen2brain/beeep v0.0.0-20220402123239-6a3042f4b71a
+# github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
 ## explicit; go 1.14
 github.com/gen2brain/beeep
 # github.com/gliderlabs/ssh v0.2.2 => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
@@ -244,7 +247,7 @@ golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sys v0.0.0-20220319134239-a9b59b0215f8
+# golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a
 ## explicit; go 1.17
 golang.org/x/sys/cpu
 golang.org/x/sys/internal/unsafeheader

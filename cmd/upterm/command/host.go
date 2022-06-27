@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/eiannone/keyboard"
 	"github.com/gen2brain/beeep"
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
@@ -212,6 +213,23 @@ func notifyBody(c *api.Client) string {
 func displaySessionCallback(session *api.GetSessionResponse) error {
 	if err := displaySession(session); err != nil {
 		return err
+	}
+
+	fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
+
+	if err := keyboard.Open(); err != nil {
+		return err
+	}
+	defer keyboard.Close()
+
+	fmt.Println("Press <q> or <ctrl-c> to accept connections...")
+	for {
+		char, key, err := keyboard.GetKey()
+		if err != nil {
+			return err
+		} else if key == keyboard.KeyCtrlC || char == 'q' {
+			break
+		}
 	}
 
 	return nil

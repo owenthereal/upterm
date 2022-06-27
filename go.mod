@@ -15,7 +15,7 @@ require (
 	github.com/creack/pty v1.1.19-0.20220329111840-2e47437b1ffb
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/dsnet/compress v0.0.1 // indirect
-	github.com/gen2brain/beeep v0.0.0-20220402123239-6a3042f4b71a
+	github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
 	github.com/gliderlabs/ssh v0.2.2
 	github.com/go-kit/kit v0.12.0
 	github.com/google/go-cmp v0.5.5
@@ -49,6 +49,7 @@ require (
 )
 
 require (
+	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
 )
@@ -79,7 +80,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
 	golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2 // indirect
-	golang.org/x/sys v0.0.0-20220319134239-a9b59b0215f8 // indirect
+	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	golang.org/x/text v0.3.7 // indirect
 	google.golang.org/genproto v0.0.0-20210917145530-b395a37504d4 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
