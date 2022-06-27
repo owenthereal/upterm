@@ -254,7 +254,7 @@ $ ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_
 
 ### Digital Ocean
 
-There is an util script that makes provinsioning [Digital Ocean Kubernetes](https://www.digitalocean.com/products/kubernetes) and an Upterm server easier:
+There is an util script that makes provisioning [Digital Ocean Kubernetes](https://www.digitalocean.com/products/kubernetes) and an Upterm server easier:
 
 ```bash
 TF_VAR_do_token=$DO_PAT \
