@@ -115,7 +115,7 @@ type pipedConn struct {
 	upstream   *upstream
 	downstream *downstream
 
-	processAuthMsg func(msg *userAuthRequestMsg) (*userAuthRequestMsg, error)
+	processAuthMsg func(msg *userAuthRequestMsg, extensions map[string][]byte) (*userAuthRequestMsg, error)
 
 	hookUpstreamMsg   func(msg []byte) ([]byte, error)
 	hookDownstreamMsg func(msg []byte) ([]byte, error)
@@ -294,7 +294,7 @@ func NewSSHPiperConn(conn net.Conn, piper *PiperConfig) (pipe *PiperConn, err er
 		downstream: d,
 	}
 
-	p.processAuthMsg = func(msg *userAuthRequestMsg) (*userAuthRequestMsg, error) {
+	p.processAuthMsg = func(msg *userAuthRequestMsg, extensions map[string][]byte) (*userAuthRequestMsg, error) {
 
 		var authType = AuthPipeTypePassThrough
 		var authMethod AuthMethod
@@ -401,7 +401,7 @@ func NewSSHPiperConn(conn net.Conn, piper *PiperConfig) (pipe *PiperConn, err er
 			}
 
 			for _, signer := range signers {
-				msg, err = p.signAgain(mappedUser, msg, signer)
+				msg, err = p.signAgain(mappedUser, msg, signer, extensions)
 				if err != nil {
 					return nil, err
 				}
@@ -463,23 +463,6 @@ func (pipe *pipedConn) ack(key PublicKey) error {
 	return pipe.downstream.transport.writePacket(Marshal(&okMsg))
 }
 
-// not used after method to method map enable
-//func (pipe *pipedConn) validAndAck(user string, upKey, downKey PublicKey) (*userAuthRequestMsg, error) {
-//
-//	ok, err := validateKey(upKey, user, pipe.upstream.transport)
-//
-//	if ok {
-//
-//		if err = pipe.ack(downKey); err != nil {
-//			return nil, err
-//		}
-//
-//		return nil, nil
-//	}
-//
-//	return noneAuthMsg(user), nil
-//}
-
 func (pipe *pipedConn) checkPublicKey(msg *userAuthRequestMsg, pubkey PublicKey, sig *Signature) (bool, error) {
 
 	if !isAcceptableAlgo(sig.Format) {
@@ -494,7 +477,7 @@ func (pipe *pipedConn) checkPublicKey(msg *userAuthRequestMsg, pubkey PublicKey,
 	return true, nil
 }
 
-func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Signer) (*userAuthRequestMsg, error) {
+func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Signer, extensions map[string][]byte) (*userAuthRequestMsg, error) {
 
 	rand := pipe.upstream.transport.config.Rand
 	session := pipe.upstream.transport.getSessionID()
@@ -502,11 +485,15 @@ func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Si
 	upKey := signer.PublicKey()
 	upKeyData := upKey.Marshal()
 
-	sign, err := signer.Sign(rand, buildDataSignedForAuth(session, userAuthRequestMsg{
+	as, algo := pickSignatureAlgorithm(signer, extensions)
+
+	data := buildDataSignedForAuth(session, userAuthRequestMsg{
 		User:    user,
 		Service: serviceSSH,
 		Method:  "publickey",
-	}, upKey.Type(), upKeyData))
+	}, algo, upKeyData)
+
+	sign, err := as.SignWithAlgorithm(rand, data, underlyingAlgo(algo))
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +508,7 @@ func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Si
 		Service:  serviceSSH,
 		Method:   "publickey",
 		HasSig:   true,
-		Algoname: upKey.Type(),
+		Algoname: algo,
 		PubKey:   upKeyData,
 		Sig:      sig,
 	}
@@ -652,8 +639,45 @@ func (pipe *pipedConn) pipeAuthSkipBanner(packet []byte) (bool, error) {
 }
 
 func (pipe *pipedConn) pipeAuth(initUserAuthMsg *userAuthRequestMsg) error {
-	err := pipe.upstream.sendAuthReq()
+	if err := pipe.upstream.transport.writePacket(Marshal(&serviceRequestMsg{serviceUserAuth})); err != nil {
+		return err
+	}
+
+	packet, err := pipe.upstream.transport.readPacket()
 	if err != nil {
+		return err
+	}
+
+	// The server may choose to send a SSH_MSG_EXT_INFO at this point (if we
+	// advertised willingness to receive one, which we always do) or not. See
+	// RFC 8308, Section 2.4.
+	extensions := make(map[string][]byte)
+	if len(packet) > 0 && packet[0] == msgExtInfo {
+		var extInfo extInfoMsg
+		if err := Unmarshal(packet, &extInfo); err != nil {
+			return err
+		}
+		payload := extInfo.Payload
+		for i := uint32(0); i < extInfo.NumExtensions; i++ {
+			name, rest, ok := parseString(payload)
+			if !ok {
+				return parseError(msgExtInfo)
+			}
+			value, rest, ok := parseString(rest)
+			if !ok {
+				return parseError(msgExtInfo)
+			}
+			extensions[string(name)] = value
+			payload = rest
+		}
+		packet, err = pipe.upstream.transport.readPacket()
+		if err != nil {
+			return err
+		}
+	}
+
+	var serviceAccept serviceAcceptMsg
+	if err := Unmarshal(packet, &serviceAccept); err != nil {
 		return err
 	}
 
@@ -661,7 +685,7 @@ func (pipe *pipedConn) pipeAuth(initUserAuthMsg *userAuthRequestMsg) error {
 
 	for {
 		// hook msg
-		userAuthMsg, err = pipe.processAuthMsg(userAuthMsg)
+		userAuthMsg, err = pipe.processAuthMsg(userAuthMsg, extensions)
 
 		if err != nil {
 			return err
@@ -716,19 +740,6 @@ func (pipe *pipedConn) pipeAuth(initUserAuthMsg *userAuthRequestMsg) error {
 
 		userAuthMsg = &userAuthReq
 	}
-}
-
-func (u *upstream) sendAuthReq() error {
-	if err := u.transport.writePacket(Marshal(&serviceRequestMsg{serviceUserAuth})); err != nil {
-		return err
-	}
-
-	packet, err := u.transport.readPacket()
-	if err != nil {
-		return err
-	}
-	var serviceAccept serviceAcceptMsg
-	return Unmarshal(packet, &serviceAccept)
 }
 
 func newDownstream(c net.Conn, config *ServerConfig) (*downstream, error) {
