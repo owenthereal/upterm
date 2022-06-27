@@ -44,7 +44,7 @@ github.com/fsnotify/fsnotify
 # github.com/gen2brain/beeep v0.0.0-20220402123239-6a3042f4b71a
 ## explicit; go 1.14
 github.com/gen2brain/beeep
-# github.com/gliderlabs/ssh v0.2.2 => github.com/owenthereal/ssh v0.2.3-0.20220217224334-0f0fc8cdc7dd
+# github.com/gliderlabs/ssh v0.2.2 => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
 ## explicit; go 1.12
 github.com/gliderlabs/ssh
 # github.com/go-kit/kit v0.12.0
@@ -347,5 +347,5 @@ google.golang.org/protobuf/types/known/timestamppb
 # gopkg.in/yaml.v2 v2.4.0
 ## explicit; go 1.15
 gopkg.in/yaml.v2
-# github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220217224334-0f0fc8cdc7dd
+# github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
 # golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220627151006-26fac2f27e49
