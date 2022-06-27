@@ -4,7 +4,7 @@ set -e
 
 current_branch=$(git rev-parse --abbrev-ref HEAD)
 tmp_dir=$(mktemp -d -t upterm-XXXXXXXXXX)
-upterm_dir=$(PWD)
+upterm_dir=${PWD}
 
 pushd  $tmp_dir
 helm package $upterm_dir/charts/uptermd && helm repo index .
