@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/url"
 	"os"
@@ -587,7 +586,7 @@ func SetupKeyPairs() (func(), error) {
 }
 
 func writeTempFile(name, content string) (string, error) {
-	file, err := ioutil.TempFile("", name)
+	file, err := os.CreateTemp("", name)
 	if err != nil {
 		return "", err
 	}

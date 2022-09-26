@@ -2,7 +2,6 @@ package ftests
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,5 +371,5 @@ func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL
 }
 
 func newAdminSocketDir() (string, error) {
-	return ioutil.TempDir("", "upterm")
+	return os.MkdirTemp("", "upterm")
 }

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/url"
 	"os"
@@ -95,7 +94,7 @@ func ReadFiles(paths []string) ([][]byte, error) {
 	var files [][]byte
 
 	for _, p := range paths {
-		b, err := ioutil.ReadFile(p)
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file %s: %w", p, err)
 		}

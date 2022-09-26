@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -205,7 +204,7 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) SftpHandler(sess gssh.Session) {
-	debugStream := ioutil.Discard
+	debugStream := io.Discard
 	serverOptions := []sftp.ServerOption{
 		sftp.WithDebug(debugStream),
 	}

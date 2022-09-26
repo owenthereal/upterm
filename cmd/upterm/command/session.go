@@ -3,7 +3,6 @@ package command
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +126,7 @@ func currentRunE(c *cobra.Command, args []string) error {
 func listSessions(dir string) ([][]string, error) {
 	result := make([][]string, 0)
 
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}

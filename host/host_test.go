@@ -2,7 +2,6 @@ package host
 
 import (
 	"bytes"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,7 +17,7 @@ const (
 )
 
 func Test_hostKeyCallbackKnowHostsFileNotExist(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test")
+	dir, err := os.MkdirTemp("", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +52,7 @@ func Test_hostKeyCallbackKnowHostsFileNotExist(t *testing.T) {
 }
 
 func Test_hostKeyCallback(t *testing.T) {
-	tmpfile, err := ioutil.TempFile("", "known_hosts")
+	tmpfile, err := os.CreateTemp("", "known_hosts")
 	if err != nil {
 		t.Fatal(err)
 	}
