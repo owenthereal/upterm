@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -143,6 +142,7 @@ func getCodeServer() (string, string, string) {
 		// OS, ARCH, URL, zip, dir
 		{"linux", "amd64", "server-linux-x64-web", "tar.gz", "vscode-server-linux-x64-web"},
 		{"darwin", "amd64", "server-darwin-web", "zip", "vscode-server-darwin-x64-web"},
+		{"darwin", "arm64", "server-darwin-arm64-web", "zip", "vscode-server-darwin-arm64-web"},
 		// {"windows", "amd64", "server-win32-x64-web", "zip", "vscode-server-win32-x64-web"},
 	}
 	for _, k := range keys {
@@ -301,8 +301,11 @@ func (vw *VscodeWeb) PrepareVSCodeWeb() error {
 		}
 		defer jsonFile.Close()
 		var product vscodeProduct
-		byteValue, _ := ioutil.ReadAll(jsonFile)
-		json.Unmarshal([]byte(byteValue), &product)
+		byteValue, _ := io.ReadAll(jsonFile)
+		err = json.Unmarshal([]byte(byteValue), &product)
+		if err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("/%s-%s/static/", product.Quality, product.Commit), nil
 	}())
 
