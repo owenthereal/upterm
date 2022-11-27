@@ -68,13 +68,28 @@ type ServerConfig struct {
 
 	// NoClientAuth is true if clients are allowed to connect without
 	// authenticating.
+	// To determine NoClientAuth at runtime, set NoClientAuth to true
+	// and the optional NoClientAuthCallback to a non-nil value.
 	NoClientAuth bool
+
+	// NoClientAuthCallback, if non-nil, is called when a user
+	// attempts to authenticate with auth method "none".
+	// NoClientAuth must also be set to true for this be used, or
+	// this func is unused.
+	NoClientAuthCallback func(ConnMetadata) (*Permissions, error)
 
 	// MaxAuthTries specifies the maximum number of authentication attempts
 	// permitted per connection. If set to a negative number, the number of
 	// attempts are unlimited. If set to zero, the number of attempts are limited
 	// to 6.
 	MaxAuthTries int
+
+	// NonAuthCallback, if non-nil, is called if the client
+	// attempts to authenticate using "none" authentication
+	// this is typically when the client wants to query supported auth
+	// methods.
+	// NoClientAuth will be ignore if NonAuthCallback is set.
+	NonAuthCallback func(conn ConnMetadata) (*Permissions, error)
 
 	// PasswordCallback, if non-nil, is called when a user
 	// attempts to authenticate using a password.
@@ -283,15 +298,6 @@ func (s *connection) serverHandshake(config *ServerConfig) (*Permissions, error)
 	return perms, err
 }
 
-func isAcceptableAlgo(algo string) bool {
-	switch algo {
-	case KeyAlgoRSA, KeyAlgoRSASHA256, KeyAlgoRSASHA512, KeyAlgoDSA, KeyAlgoECDSA256, KeyAlgoECDSA384, KeyAlgoECDSA521, KeyAlgoSKECDSA256, KeyAlgoED25519, KeyAlgoSKED25519,
-		CertAlgoRSAv01, CertAlgoDSAv01, CertAlgoECDSA256v01, CertAlgoECDSA384v01, CertAlgoECDSA521v01, CertAlgoSKECDSA256v01, CertAlgoED25519v01, CertAlgoSKED25519v01:
-		return true
-	}
-	return false
-}
-
 func checkSourceAddress(addr net.Addr, sourceAddrs string) error {
 	if addr == nil {
 		return errors.New("ssh: no address known for client, but source-address match required")
@@ -454,8 +460,14 @@ userAuthLoop:
 
 		switch userAuthReq.Method {
 		case "none":
-			if config.NoClientAuth {
-				authErr = nil
+			if config.NonAuthCallback != nil {
+				perms, authErr = config.NonAuthCallback(s)
+			} else if config.NoClientAuth {
+				if config.NoClientAuthCallback != nil {
+					perms, authErr = config.NoClientAuthCallback(s)
+				} else {
+					authErr = nil
+				}
 			}
 
 			// allow initial attempt of 'none' without penalty
@@ -502,7 +514,7 @@ userAuthLoop:
 				return nil, parseError(msgUserAuthRequest)
 			}
 			algo := string(algoBytes)
-			if !isAcceptableAlgo(algo) {
+			if !contains(supportedPubKeyAuthAlgos, underlyingAlgo(algo)) {
 				authErr = fmt.Errorf("ssh: algorithm %q not accepted", algo)
 				break
 			}
@@ -560,7 +572,7 @@ userAuthLoop:
 				// algorithm name that corresponds to algo with
 				// sig.Format.  This is usually the same, but
 				// for certs, the names differ.
-				if !isAcceptableAlgo(sig.Format) {
+				if !contains(supportedPubKeyAuthAlgos, sig.Format) {
 					authErr = fmt.Errorf("ssh: algorithm %q not accepted", sig.Format)
 					break
 				}
@@ -666,6 +678,9 @@ userAuthLoop:
 		}
 
 		var failureMsg userAuthFailureMsg
+		if config.NonAuthCallback != nil {
+			failureMsg.Methods = append(failureMsg.Methods, "none")
+		}
 		if config.PasswordCallback != nil {
 			failureMsg.Methods = append(failureMsg.Methods, "password")
 		}
