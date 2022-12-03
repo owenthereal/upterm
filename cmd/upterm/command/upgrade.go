@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
-	ggh "github.com/google/go-github/github"
+	ggh "github.com/google/go-github/v48/github"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
 	"github.com/tj/go-update/progress"
-	"github.com/tj/go-update/stores/github"
 	"github.com/tj/go/term"
 )
 
@@ -39,11 +38,9 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	m := &update.Manager{
 		Command: "upterm",
 		Store: &store{
-			Store: &github.Store{
-				Owner:   "owenthereal",
-				Repo:    "upterm",
-				Version: Version,
-			},
+			Owner:   "owenthereal",
+			Repo:    "upterm",
+			Version: Version,
 		},
 	}
 
@@ -118,7 +115,28 @@ func (r *release) FindTarballWithVersion(os, arch string) *update.Asset {
 }
 
 type store struct {
-	*github.Store
+	Owner   string
+	Repo    string
+	Version string
+}
+
+func (s *store) GetRelease(version string) (*update.Release, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gh := ggh.NewClient(nil)
+
+	r, res, err := gh.Repositories.GetReleaseByTag(ctx, s.Owner, s.Repo, "v"+version)
+
+	if res.StatusCode == 404 {
+		return nil, update.ErrNotFound
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return githubRelease(r), nil
 }
 
 func (s *store) LatestReleases() ([]*update.Release, error) {
@@ -133,11 +151,26 @@ func (s *store) LatestReleases() ([]*update.Release, error) {
 	}
 
 	return []*update.Release{
-		{
-			Version:     r.GetTagName(),
-			Notes:       r.GetBody(),
-			PublishedAt: r.GetPublishedAt().Time,
-			URL:         r.GetURL(),
-		},
+		githubRelease(r),
 	}, nil
+}
+
+func githubRelease(r *ggh.RepositoryRelease) *update.Release {
+	out := &update.Release{
+		Version:     r.GetTagName(),
+		Notes:       r.GetBody(),
+		PublishedAt: r.GetPublishedAt().Time,
+		URL:         r.GetURL(),
+	}
+
+	for _, a := range r.Assets {
+		out.Assets = append(out.Assets, &update.Asset{
+			Name:      a.GetName(),
+			Size:      a.GetSize(),
+			URL:       a.GetBrowserDownloadURL(),
+			Downloads: a.GetDownloadCount(),
+		})
+	}
+
+	return out
 }
