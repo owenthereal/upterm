@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -50,7 +49,7 @@ func parseKeys(keysBytes []byte) ([]ssh.PublicKey, error) {
 }
 
 func AuthorizedKeys(file string) ([]ssh.PublicKey, error) {
-	authorizedKeysBytes, err := ioutil.ReadFile(file)
+	authorizedKeysBytes, err := os.ReadFile(file)
 	if err != nil {
 		return nil, nil
 	}
@@ -159,7 +158,7 @@ func signerFromFile(file string, promptForPassphrase func(file string) ([]byte, 
 }
 
 func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) ([]byte, error)) (interface{}, error) {
-	pb, err := ioutil.ReadFile(file)
+	pb, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}

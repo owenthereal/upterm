@@ -2,8 +2,8 @@ package server
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 	"path/filepath"
 
 	"github.com/owenthereal/upterm/memlistener"
@@ -113,7 +113,7 @@ func (p *UnixProvider) SetOpts(opts NetworkOptions) error {
 	var ok bool
 	p.sessionSocketDir, ok = opts["session-socket-dir"]
 	if !ok {
-		dir, err := ioutil.TempDir("", "uptermd")
+		dir, err := os.MkdirTemp("", "uptermd")
 		if err != nil {
 			return fmt.Errorf("missing \"session-socket-dir\" option for network provider %s", p.Name())
 		}
@@ -122,7 +122,7 @@ func (p *UnixProvider) SetOpts(opts NetworkOptions) error {
 	}
 	p.sshdSocketPath, ok = opts["sshd-socket-path"]
 	if !ok {
-		dir, err := ioutil.TempDir("", "uptermd")
+		dir, err := os.MkdirTemp("", "uptermd")
 		if err != nil {
 			return fmt.Errorf("missing \"sshd-socket-path\" option for network provider %s", p.Name())
 		}

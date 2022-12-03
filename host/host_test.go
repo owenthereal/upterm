@@ -2,7 +2,6 @@ package host
 
 import (
 	"bytes"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,11 +17,7 @@ const (
 )
 
 func Test_hostKeyCallbackKnowHostsFileNotExist(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	knownHostsFile := filepath.Join(dir, "known_hosts")
 
@@ -53,16 +48,10 @@ func Test_hostKeyCallbackKnowHostsFileNotExist(t *testing.T) {
 }
 
 func Test_hostKeyCallback(t *testing.T) {
-	tmpfile, err := ioutil.TempFile("", "known_hosts")
-	if err != nil {
+	tempfile := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(tempfile, []byte("[127.0.0.1]:23 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKpVcpc3t5GZHQFlbSLyj6sQY4wWLjNZsLTkfo9Cdjit\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpfile.Name())
-
-	if _, err := tmpfile.Write([]byte("[127.0.0.1]:23 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKpVcpc3t5GZHQFlbSLyj6sQY4wWLjNZsLTkfo9Cdjit\n")); err != nil {
-		t.Fatal(err)
-	}
-	tmpfile.Close()
 
 	stdin := bytes.NewBufferString("yes\n") // Simulate typing "yes" in stdin
 	stdout := bytes.NewBuffer(nil)
@@ -73,7 +62,7 @@ func Test_hostKeyCallback(t *testing.T) {
 	}
 	fp := utils.FingerprintSHA256(pk)
 
-	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tmpfile.Name())
+	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +88,7 @@ func Test_hostKeyCallback(t *testing.T) {
 	if err == nil {
 		t.Fatalf("key mismatched error is expected")
 	}
-	if !strings.Contains(err.Error(), "Offending ED25519 key in "+tmpfile.Name()) {
+	if !strings.Contains(err.Error(), "Offending ED25519 key in "+tempfile) {
 		t.Fatalf("unexpected error message: %s", err.Error())
 	}
 }
