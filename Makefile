@@ -14,8 +14,8 @@ proto:
 	docker run -v $(CURDIR)/host/api:/defs namely/protoc-all -f api.proto -l go --go-source-relative -o .
 
 build:
-	go build -o build/upterm -mod=vendor ./cmd/upterm
-	go build -o build/uptermd -mod=vendor ./cmd/uptermd
+	go build -o build/upterm ./cmd/upterm
+	go build -o build/uptermd ./cmd/uptermd
 
 install:
 	go install ./cmd/... 
@@ -29,7 +29,7 @@ docker_push: docker_build
 
 GO_TEST_FLAGS ?= ""
 test:
-	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -mod=vendor -count=1 -race -v $(GO_TEST_FLAGS)
+	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
 
 vet:
 	docker run --rm -v $$(pwd):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v
