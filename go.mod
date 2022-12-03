@@ -3,7 +3,7 @@
 
 module github.com/owenthereal/upterm
 
-go 1.18
+go 1.19
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
@@ -16,7 +16,7 @@ require (
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
-	github.com/gliderlabs/ssh v0.2.2
+	github.com/gliderlabs/ssh v0.3.5
 	github.com/go-kit/kit v0.12.0
 	github.com/google/go-cmp v0.5.5
 	github.com/google/go-github v17.0.0+incompatible
@@ -43,7 +43,7 @@ require (
 	github.com/tj/go v1.8.6
 	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
-	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
+	golang.org/x/crypto v0.0.0-20220826181053-bd7e27e6170d
 	google.golang.org/grpc v1.45.0
 	google.golang.org/protobuf v1.28.0
 )
@@ -87,6 +87,6 @@ require (
 )
 
 replace (
-	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
+	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20221202194937-0dfcd34433e3
 	golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20221127042128-bef2498e3f2b
 )
