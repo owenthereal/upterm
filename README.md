@@ -172,30 +172,6 @@ A community Upterm server is running at `uptermd.upterm.dev` and `upterm` points
 
 ![upterm flowchart](https://raw.githubusercontent.com/owenthereal/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
 
-## A note about RSA keys
-
-Since openssh 8.8 (2021-09-26), the host algorithm type SHA-1 (`ssh-rsa`) was retired in favor of SHA-2 (`rsa-sha2-256` or `rsa-sha2-512`) ([release note](https://www.openssh.com/txt/release-8.8)).
-Unfortunately, due to a shortcoming in Go’s `x/crypto/ssh` package, `upterm` does not completely support SSH clients using SHA-2 keys: only the old SHA-1 ones will work.
-
-You can check your `openssh` version with the following:
-
-```console
-$ ssh -V
-```
-
-If you are not sure what type of keys you have, you can check with the following:
-
-```console
-$ find ~/.ssh/id_*.pub -exec ssh-keygen -l -f {} \;
-```
-
-Until this is sorted out, you are recommended to use key with another algorithm, e.g. Ed25519.
-
-If you're curious about the inner workings of this problem, have a look at:
-
-- https://github.com/owenthereal/upterm/issues/93#issuecomment-1045387517
-- https://github.com/golang/go/issues/49952
-
 ## Deploy Uptermd
 
 ### Kubernetes
