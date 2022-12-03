@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func Test_sshProxy_findUpstream(t *testing.T) {
+func Test_sshProxy_dialUpstream(t *testing.T) {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 

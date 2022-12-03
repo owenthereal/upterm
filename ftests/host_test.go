@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
+func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	jch := make(chan *api.Client)
 	lch := make(chan *api.Client)
 
@@ -40,13 +40,13 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 		},
 	}
 
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -54,7 +54,7 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.JoinWithContext(ctx, session, hostURL); err != nil {
+	if err := c.JoinWithContext(ctx, session, clientJoinURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,7 +118,7 @@ func testHostClientCallback(t *testing.T, hostURL, nodeAddr string) {
 	}
 }
 
-func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
+func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	h := &Host{
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
@@ -131,22 +131,22 @@ func testHostSessionCreatedCallback(t *testing.T, hostURL, nodeAddr string) {
 				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
 			}
 
-			checkSessionPayload(t, session, hostURL, nodeAddr)
+			checkSessionPayload(t, session, hostShareURL, hostNodeAddr)
 			return nil
 		},
 	}
 
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 }
 
-func testHostFailToShareWithoutPrivateKey(t *testing.T, hostURL, nodeAddr string) {
+func testHostFailToShareWithoutPrivateKey(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	h := &Host{
 		Command: []string{"bash"},
 	}
-	err := h.Share(hostURL)
+	err := h.Share(hostShareURL)
 	if err == nil {
 		t.Fatal("expect error")
 	}
