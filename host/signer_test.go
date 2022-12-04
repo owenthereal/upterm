@@ -1,7 +1,7 @@
 package host
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -117,7 +117,7 @@ func Test_signerFromFile(t *testing.T) {
 
 			dir := t.TempDir()
 			tmpfn := filepath.Join(dir, "private_key")
-			if err := ioutil.WriteFile(tmpfn, []byte(c.privateKey), 0600); err != nil {
+			if err := os.WriteFile(tmpfn, []byte(c.privateKey), 0600); err != nil {
 				t.Fatal(err)
 			}
 

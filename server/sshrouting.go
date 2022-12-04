@@ -19,13 +19,11 @@ var (
 	pipeEstablishingTimeout = 60 * time.Second
 )
 
-type FindUpstreamFunc func(conn ssh.ConnMetadata, challengeCtx ssh.AdditionalChallengeContext) (net.Conn, *ssh.AuthPipe, error)
-
 type SSHRouting struct {
-	HostSigners      []ssh.Signer
-	FindUpstreamFunc FindUpstreamFunc
-	Logger           log.FieldLogger
-	MetricsProvider  provider.Provider
+	HostSigners     []ssh.Signer
+	AuthPiper       *authPiper
+	Logger          log.FieldLogger
+	MetricsProvider provider.Provider
 
 	listener net.Listener
 	mux      sync.Mutex
@@ -56,8 +54,8 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 	p.mux.Unlock()
 
 	piper := &ssh.PiperConfig{
-		FindUpstream:  p.FindUpstreamFunc,
-		ServerVersion: upterm.ServerSSHServerVersion,
+		PublicKeyCallback: p.AuthPiper.PublicKeyCallback,
+		ServerVersion:     upterm.ServerSSHServerVersion,
 	}
 
 	for _, s := range p.HostSigners {

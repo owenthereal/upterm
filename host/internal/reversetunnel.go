@@ -80,9 +80,11 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		// TODO: make this configurable if necessary
 		HostKeyAlgorithms: []string{
 			ssh.CertAlgoED25519v01,
+			ssh.CertAlgoRSASHA512v01,
+			ssh.CertAlgoRSASHA256v01,
 			ssh.KeyAlgoED25519,
-			ssh.CertAlgoRSAv01,
-			ssh.KeyAlgoRSA,
+			ssh.KeyAlgoRSASHA512,
+			ssh.KeyAlgoRSASHA256,
 		},
 		HostKeyCallback: c.HostKeyCallback,
 	}

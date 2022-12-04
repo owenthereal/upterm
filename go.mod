@@ -3,7 +3,7 @@
 
 module github.com/owenthereal/upterm
 
-go 1.18
+go 1.19
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
@@ -15,12 +15,11 @@ require (
 	github.com/creack/pty v1.1.19-0.20220329111840-2e47437b1ffb
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/dsnet/compress v0.0.1 // indirect
-	github.com/gen2brain/beeep v0.0.0-20220518085355-d7852edf42fc
-	github.com/gliderlabs/ssh v0.2.2
+	github.com/gen2brain/beeep v0.0.0-20220909211152-5a9ec94374f6
+	github.com/gliderlabs/ssh v0.3.5
 	github.com/go-kit/kit v0.12.0
-	github.com/google/go-cmp v0.5.5
-	github.com/google/go-github v17.0.0+incompatible
-	github.com/google/go-querystring v1.0.0 // indirect
+	github.com/google/go-cmp v0.5.9
+	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 	github.com/gorilla/websocket v1.5.0
 	github.com/gosuri/uilive v0.0.4 // indirect
@@ -39,25 +38,26 @@ require (
 	github.com/prometheus/client_golang v1.12.1
 	github.com/rs/xid v1.4.0
 	github.com/sirupsen/logrus v1.8.1
-	github.com/spf13/cobra v1.4.0
+	github.com/spf13/cobra v1.6.1
 	github.com/tj/go v1.8.6
 	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
-	golang.org/x/crypto v0.0.0-20210915214749-c084706c2272
-	google.golang.org/grpc v1.45.0
-	google.golang.org/protobuf v1.28.0
+	golang.org/x/crypto v0.0.0-20220826181053-bd7e27e6170d
+	google.golang.org/grpc v1.51.0
+	google.golang.org/protobuf v1.28.1
 )
 
 require (
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
+	github.com/google/go-github/v48 v48.1.0
 	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
+	golang.org/x/term v0.2.0
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
-	github.com/cpuguy83/go-md2man/v2 v2.0.1 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/fsnotify/fsnotify v1.4.7 // indirect
 	github.com/go-kit/log v0.2.0 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
@@ -65,7 +65,7 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
-	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/inconshreveable/mousetrap v1.0.1 // indirect
 	github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
@@ -79,14 +79,14 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
-	golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2 // indirect
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/net v0.2.0 // indirect
+	golang.org/x/sys v0.2.0 // indirect
+	golang.org/x/text v0.4.0 // indirect
 	google.golang.org/genproto v0.0.0-20210917145530-b395a37504d4 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace (
-	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20220627151847-686f8d2798bd
-	golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20220627151006-26fac2f27e49
+	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20221202194937-0dfcd34433e3
+	golang.org/x/crypto => github.com/owenthereal/upterm.crypto v0.0.0-20221127042128-bef2498e3f2b
 )

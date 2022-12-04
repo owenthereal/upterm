@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dchest/uniuri"
+	gssh "github.com/gliderlabs/ssh"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -93,7 +93,7 @@ func ReadFiles(paths []string) ([][]byte, error) {
 	var files [][]byte
 
 	for _, p := range paths {
-		b, err := ioutil.ReadFile(p)
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file %s: %w", p, err)
 		}
@@ -112,4 +112,17 @@ func FingerprintSHA256(key ssh.PublicKey) string {
 	hash := sha256.Sum256(key.Marshal())
 	b64hash := base64.StdEncoding.EncodeToString(hash[:])
 	return fmt.Sprintf("SHA256:%s", strings.TrimRight(b64hash, "="))
+}
+
+func KeysEqual(pk1 ssh.PublicKey, pk2 ssh.PublicKey) bool {
+	return gssh.KeysEqual(publicKey(pk1), publicKey(pk2))
+}
+
+func publicKey(pk ssh.PublicKey) ssh.PublicKey {
+	cert, ok := pk.(*ssh.Certificate)
+	if ok {
+		pk = cert.Key
+	}
+
+	return pk
 }

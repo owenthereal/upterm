@@ -2,7 +2,6 @@ package ftests
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string) {
+func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -29,24 +28,24 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostURL, nodeAddr string
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	c := &Client{
 		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
 	}
 
-	if err := c.Join(session, hostURL); err != nil {
+	if err := c.Join(session, clientJoinURL); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) {
+func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -61,19 +60,19 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) 
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	c := &Client{
 		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
 	}
 
-	err = c.Join(session, hostURL)
+	err = c.Join(session, clientJoinURL)
 
 	// Unfortunately there is no explicit error to the client.
 	// SSH handshake should fail with the connection closed.
@@ -83,7 +82,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostURL, nodeAddr string) 
 	}
 }
 
-func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
+func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -98,13 +97,13 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -122,7 +121,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 		PrivateKeys: []string{ClientPrivateKey},
 	}
 	session.SessionId = "not-existance" // set session ID to non-existance
-	err = c.Join(session, hostURL)
+	err = c.Join(session, clientJoinURL)
 
 	// Unfortunately there is no explicit error to the client.
 	// But ssh handshake fails with the connection closed
@@ -131,7 +130,7 @@ func testClientNonExistingSession(t *testing.T, hostURL, nodeAddr string) {
 	}
 }
 
-func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string) {
+func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -146,13 +145,13 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -161,7 +160,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, hostURL); err != nil {
+	if err := c.Join(session, clientJoinURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -204,7 +203,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostURL, nodeAddr string)
 	}
 }
 
-func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, nodeAddr string) {
+func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -220,13 +219,13 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -243,7 +242,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, hostURL); err != nil {
+	if err := c.Join(session, clientJoinURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +268,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostURL string, node
 	}
 }
 
-func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
+func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSockDir, err := newAdminSocketDir()
 	if err != nil {
 		t.Fatal(err)
@@ -285,13 +284,13 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		ReadOnly:                 true,
 	}
-	if err := h.Share(hostURL); err != nil {
+	if err := h.Share(hostShareURL); err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
 
 	// verify admin server
-	session := getAndVerifySession(t, adminSocketFile, hostURL, nodeAddr)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	// verify input/output
 	hostInputCh, hostOutputCh := h.InputOutput()
@@ -300,7 +299,7 @@ func testClientAttachReadOnly(t *testing.T, hostURL, nodeAddr string) {
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, hostURL); err != nil {
+	if err := c.Join(session, clientJoinURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -372,5 +371,5 @@ func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL
 }
 
 func newAdminSocketDir() (string, error) {
-	return ioutil.TempDir("", "upterm")
+	return os.MkdirTemp("", "upterm")
 }

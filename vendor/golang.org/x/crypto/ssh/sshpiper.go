@@ -1,8 +1,7 @@
-// Copyright 2014, 2015 tgic<farmer1992@gmail.com>. All rights reserved.
+// Copyright 2014 Boshi Lian<farmer1992@gmail.com>. All rights reserved.
 // this file is governed by MIT-license
 //
 // https://github.com/tg123/sshpiper
-
 package ssh
 
 import (
@@ -11,67 +10,17 @@ import (
 	"net"
 )
 
-// AuthPipeType declares how sshpiper handle piped auth message
-type AuthPipeType int
+type Upstream struct {
+	Conn net.Conn
 
-const (
-	// AuthPipeTypePassThrough does nothing but pass auth message to upstream
-	AuthPipeTypePassThrough AuthPipeType = iota
+	Address string
 
-	// AuthPipeTypeMap converts auth message to AuthMetod return by callback and pass it to upstream
-	AuthPipeTypeMap
-
-	// AuthPipeTypeDiscard discards auth message, do not pass it to uptream
-	AuthPipeTypeDiscard
-
-	// AuthPipeTypeNone converts auth message to NoneAuth and pass it to upstream
-	AuthPipeTypeNone
-)
-
-// AuthPipe contains the callbacks of auth msg mapping from downstream to upstream
-//
-// when AuthPipeType == AuthPipeTypeMap && AuthMethod == PublicKey
-// SSHPiper will sign the auth packet message using the returned Signer.
-// This func might be called twice, one is for query message, the other
-// is real auth packet message.
-// If any error occurs during this period, a NoneAuth packet will be sent to
-// upstream ssh server instead.
-// More info: https://github.com/tg123/sshpiper#publickey-sign-again
-type AuthPipe struct {
-	// Username to upstream
-	User string
-
-	// NoneAuthCallback, if non-nil, is called when downstream requests a none auth,
-	// typically the first auth msg from client to see what auth methods can be used..
-	NoneAuthCallback func(conn ConnMetadata) (AuthPipeType, AuthMethod, error)
-
-	// PublicKeyCallback, if non-nil, is called when downstream requests a password auth.
-	PasswordCallback func(conn ConnMetadata, password []byte) (AuthPipeType, AuthMethod, error)
-
-	// PublicKeyCallback, if non-nil, is called when downstream requests a publickey auth.
-	PublicKeyCallback func(conn ConnMetadata, key PublicKey) (AuthPipeType, AuthMethod, error)
-
-	// UpstreamHostKeyCallback is called during the cryptographic
-	// handshake to validate the uptream server's host key. The piper
-	// configuration must supply this callback for the connection
-	// to succeed. The functions InsecureIgnoreHostKey or
-	// FixedHostKey can be used for simplistic host key checks.
-	UpstreamHostKeyCallback HostKeyCallback
+	ClientConfig
 }
 
-// AdditionalChallengeContext is the context returned by AdditionalChallenge and will pass to FindUpstream for building
-// upstream AuthPipe
-type AdditionalChallengeContext interface {
-
-	// Chanllenger name
-	ChallengerName() string
-
-	// Meta info filled by chanllenger
-	// can be nil if no meta data
+type ChallengeContext interface {
 	Meta() interface{}
 
-	// Username used during the chanllenge
-	// Can be different from ConnMeta.User() and could be a useful hint in FindUpstream
 	ChallengedUsername() string
 }
 
@@ -81,20 +30,23 @@ type PiperConfig struct {
 
 	hostKeys []Signer
 
-	// AdditionalChallenge, if non-nil, is called before calling FindUpstream.
-	// This allows you do a KeyboardInteractiveChallenge before connecting to upstream.
-	// It must return non error if downstream passed the challenge, otherwise,
-	// the piped connection will be closed.
-	//
-	// AdditionalChallengeContext can be nil if challenger has no more information to provide.
-	AdditionalChallenge func(conn ConnMetadata, client KeyboardInteractiveChallenge) (AdditionalChallengeContext, error)
+	CreateChallengeContext func(conn ConnMetadata) (ChallengeContext, error)
 
-	// FindUpstream, must not be nil, is called when SSHPiper decided to establish a
-	// ssh connection to upstream server.  a connection, net.Conn, to upstream
-	// and upstream username should be returned.
-	// SSHPiper will use the username from downstream if empty username is returned.
-	// If any error occurs, the piped connection will be closed.
-	FindUpstream func(conn ConnMetadata, challengeCtx AdditionalChallengeContext) (net.Conn, *AuthPipe, error)
+	NextAuthMethods func(conn ConnMetadata, challengeCtx ChallengeContext) ([]string, error)
+
+	// NoneAuthCallback, if non-nil, is called when downstream requests a none auth,
+	// typically the first auth msg from client to see what auth methods can be used..
+	NoneAuthCallback func(conn ConnMetadata, challengeCtx ChallengeContext) (*Upstream, error)
+
+	// PublicKeyCallback, if non-nil, is called when downstream requests a password auth.
+	PasswordCallback func(conn ConnMetadata, password []byte, challengeCtx ChallengeContext) (*Upstream, error)
+
+	// PublicKeyCallback, if non-nil, is called when downstream requests a publickey auth.
+	PublicKeyCallback func(conn ConnMetadata, key PublicKey, challengeCtx ChallengeContext) (*Upstream, error)
+
+	KeyboardInteractiveCallback func(conn ConnMetadata, client KeyboardInteractiveChallenge, challengeCtx ChallengeContext) (*Upstream, error)
+
+	UpstreamAuthFailureCallback func(conn ConnMetadata, method string, err error, challengeCtx ChallengeContext)
 
 	// ServerVersion is the version identification string to announce in
 	// the public handshake.
@@ -105,70 +57,7 @@ type PiperConfig struct {
 
 	// BannerCallback, if present, is called and the return string is sent to
 	// the client after key exchange completed but before authentication.
-	BannerCallback func(conn ConnMetadata) string
-}
-
-type upstream struct{ *connection }
-type downstream struct{ *connection }
-
-type pipedConn struct {
-	upstream   *upstream
-	downstream *downstream
-
-	processAuthMsg func(msg *userAuthRequestMsg, extensions map[string][]byte) (*userAuthRequestMsg, error)
-
-	hookUpstreamMsg   func(msg []byte) ([]byte, error)
-	hookDownstreamMsg func(msg []byte) ([]byte, error)
-}
-
-// PiperConn is a piped SSH connection, linking upstream ssh server and
-// downstream ssh client together. After the piped connection was created,
-// The downstream ssh client is authenticated by upstream ssh server and
-// AdditionalChallenge from SSHPiper.
-type PiperConn struct {
-	*pipedConn
-
-	HookUpstreamMsg   func(conn ConnMetadata, msg []byte) ([]byte, error)
-	HookDownstreamMsg func(conn ConnMetadata, msg []byte) ([]byte, error)
-}
-
-// Wait blocks until the piped connection has shut down, and returns the
-// error causing the shutdown.
-func (p *PiperConn) Wait() error {
-
-	p.pipedConn.hookUpstreamMsg = func(msg []byte) ([]byte, error) {
-		if p.HookUpstreamMsg != nil {
-			// api always using p.downstream as conn meta
-			return p.HookUpstreamMsg(p.downstream, msg)
-		}
-
-		return msg, nil
-	}
-
-	p.pipedConn.hookDownstreamMsg = func(msg []byte) ([]byte, error) {
-		if p.HookDownstreamMsg != nil {
-			return p.HookDownstreamMsg(p.downstream, msg)
-		}
-
-		return msg, nil
-	}
-
-	return p.pipedConn.loop()
-}
-
-// Close the piped connection create by SSHPiper
-func (p *PiperConn) Close() {
-	p.pipedConn.Close()
-}
-
-// UpstreamConnMeta returns the ConnMetadata of the piper and upstream
-func (p *PiperConn) UpstreamConnMeta() ConnMetadata {
-	return p.pipedConn.upstream
-}
-
-// DownstreamConnMeta returns the ConnMetadata of the piper and downstream
-func (p *PiperConn) DownstreamConnMeta() ConnMetadata {
-	return p.pipedConn.downstream
+	BannerCallback func(conn ConnMetadata, challengeCtx ChallengeContext) string
 }
 
 // AddHostKey adds a private key as a SSHPiper host key. If an existing host
@@ -185,566 +74,291 @@ func (s *PiperConfig) AddHostKey(key Signer) {
 	s.hostKeys = append(s.hostKeys, key)
 }
 
-// NewSSHPiperConn starts a piped ssh connection witch conn as its downstream transport.
-// It handshake with downstream ssh client and upstream ssh server provicde by FindUpstream.
-// If either handshake is unsuccessful, the whole piped connection will be closed.
-func NewSSHPiperConn(conn net.Conn, piper *PiperConfig) (pipe *PiperConn, err error) {
+type upstream struct{ *connection }
+type downstream struct{ *connection }
 
-	if piper.FindUpstream == nil {
-		return nil, errors.New("sshpiper: must specify FindUpstream")
-	}
+// PiperConn is a piped SSH connection, linking upstream ssh server and
+// downstream ssh client together. After the piped connection was created,
+// The downstream ssh client is authenticated by upstream ssh server and
+// AdditionalChallenge from SSHPiper.
+type PiperConn struct {
+	upstream   *upstream
+	downstream *downstream
 
-	d, err := newDownstream(conn, &ServerConfig{
-		Config:        piper.Config,
-		hostKeys:      piper.hostKeys,
-		ServerVersion: piper.ServerVersion,
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if pipe == nil {
-			d.Close()
-		}
-	}()
-
-	userAuthReq, err := d.nextAuthMsg()
-	if err != nil {
-		return nil, err
-	}
-
-	d.user = userAuthReq.User
-
-	if piper.BannerCallback != nil {
-		msg := piper.BannerCallback(d)
-		if msg != "" {
-			bannerMsg := &userAuthBannerMsg{
-				Message: msg,
-			}
-			if err := d.transport.writePacket(Marshal(bannerMsg)); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	var challengeCtx AdditionalChallengeContext
-
-	// need additional challenge
-	if piper.AdditionalChallenge != nil {
-
-		for {
-			err := d.transport.writePacket(Marshal(&userAuthFailureMsg{
-				Methods: []string{"keyboard-interactive"},
-			}))
-
-			if err != nil {
-				return nil, err
-			}
-
-			userAuthReq, err := d.nextAuthMsg()
-
-			if err != nil {
-				return nil, err
-			}
-
-			if userAuthReq.Method == "keyboard-interactive" {
-				break
-			}
-		}
-
-		prompter := &sshClientKeyboardInteractive{d.connection}
-		challengeCtx, err = piper.AdditionalChallenge(d, prompter.Challenge)
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	upconn, pipeauth, err := piper.FindUpstream(d, challengeCtx)
-	if err != nil {
-		return nil, err
-	}
-
-	if pipeauth.UpstreamHostKeyCallback == nil {
-		return nil, errors.New("sshpiper: must specify UpstreamHostKeyCallback")
-	}
-
-	mappedUser := pipeauth.User
-	addr := upconn.RemoteAddr().String()
-
-	if mappedUser == "" {
-		mappedUser = d.user
-	}
-
-	u, err := newUpstream(upconn, addr, &ClientConfig{
-		HostKeyCallback: pipeauth.UpstreamHostKeyCallback,
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if pipe == nil {
-			u.Close()
-		}
-	}()
-	u.user = mappedUser
-
-	p := &pipedConn{
-		upstream:   u,
-		downstream: d,
-	}
-
-	p.processAuthMsg = func(msg *userAuthRequestMsg, extensions map[string][]byte) (*userAuthRequestMsg, error) {
-
-		var authType = AuthPipeTypePassThrough
-		var authMethod AuthMethod
-
-		switch msg.Method {
-		case "none":
-			if pipeauth.NoneAuthCallback == nil {
-				break
-			}
-
-			authType, authMethod, err = pipeauth.NoneAuthCallback(d)
-			if err != nil {
-				return nil, err
-			}
-
-		case "publickey":
-
-			if pipeauth.PublicKeyCallback == nil {
-				break
-			}
-
-			// pubKey MAP
-			downKey, isQuery, sig, err := parsePublicKeyMsg(msg)
-			if err != nil {
-				return nil, err
-			}
-
-			authType, authMethod, err = pipeauth.PublicKeyCallback(d, downKey)
-			if err != nil {
-				return nil, err
-			}
-
-			if isQuery {
-				// reply for query msg
-				// skip query from upstream
-				err = p.ack(downKey)
-				if err != nil {
-					return nil, err
-				}
-
-				// discard msg
-				return nil, nil
-			}
-
-			ok, err := p.checkPublicKey(msg, downKey, sig)
-
-			if err != nil {
-				return nil, err
-			}
-
-			if !ok {
-				return noneAuthMsg(mappedUser), nil
-			}
-
-		case "password":
-			if pipeauth.PasswordCallback == nil {
-				break
-			}
-
-			payload := msg.Payload
-			if len(payload) < 1 || payload[0] != 0 {
-				return nil, parseError(msgUserAuthRequest)
-			}
-			payload = payload[1:]
-			password, payload, ok := parseString(payload)
-			if !ok || len(payload) > 0 {
-				return nil, parseError(msgUserAuthRequest)
-			}
-
-			authType, authMethod, err = pipeauth.PasswordCallback(d, password)
-			if err != nil {
-				return nil, err
-			}
-
-		default:
-		}
-
-		switch authType {
-		case AuthPipeTypePassThrough:
-			msg.User = mappedUser
-			return msg, nil
-		case AuthPipeTypeDiscard:
-			return nil, nil
-		case AuthPipeTypeNone:
-			return noneAuthMsg(mappedUser), nil
-		case AuthPipeTypeMap:
-		}
-
-		// map publickey, password, etc to auth
-
-		switch authMethod.method() {
-		case "publickey":
-
-			f, ok := authMethod.(publicKeyCallback)
-
-			if !ok {
-				return nil, errors.New("sshpiper: publicKeyCallback type assertions failed")
-			}
-
-			signers, err := f()
-			// no mapped user change it to none or error occur
-			if err != nil || len(signers) == 0 {
-				return nil, err
-			}
-
-			for _, signer := range signers {
-				msg, err = p.signAgain(mappedUser, msg, signer, extensions)
-				if err != nil {
-					return nil, err
-				}
-				return msg, nil
-			}
-		case "password":
-
-			f, ok := authMethod.(passwordCallback)
-
-			if !ok {
-				return nil, errors.New("sshpiper: passwordCallback type assertions failed")
-			}
-
-			pw, err := f()
-			if err != nil {
-				return nil, err
-			}
-
-			type passwordAuthMsg struct {
-				User     string `sshtype:"50"`
-				Service  string
-				Method   string
-				Reply    bool
-				Password string
-			}
-
-			Unmarshal(Marshal(passwordAuthMsg{
-				User:     mappedUser,
-				Service:  serviceSSH,
-				Method:   "password",
-				Reply:    false,
-				Password: pw,
-			}), msg)
-
-			return msg, nil
-
-		default:
-
-		}
-
-		msg.User = mappedUser
-		return msg, nil
-	}
-
-	err = p.pipeAuth(userAuthReq)
-	if err != nil {
-		return nil, err
-	}
-
-	return &PiperConn{pipedConn: p}, nil
+	config         *PiperConfig
+	authOnlyConfig *ServerConfig
+	challengeCtx   ChallengeContext
 }
 
-func (pipe *pipedConn) ack(key PublicKey) error {
-	okMsg := userAuthPubKeyOkMsg{
-		Algo:   key.Type(),
-		PubKey: key.Marshal(),
-	}
-
-	return pipe.downstream.transport.writePacket(Marshal(&okMsg))
+// Wait blocks until the piped connection has shut down, and returns the
+// error causing the shutdown.
+func (p *PiperConn) Wait() error {
+	return p.WaitWithHook(nil, nil)
 }
 
-func (pipe *pipedConn) checkPublicKey(msg *userAuthRequestMsg, pubkey PublicKey, sig *Signature) (bool, error) {
-
-	if !isAcceptableAlgo(sig.Format) {
-		return false, fmt.Errorf("ssh: algorithm %q not accepted", sig.Format)
-	}
-	signedData := buildDataSignedForAuth(pipe.downstream.transport.getSessionID(), *msg, pubkey.Type(), pubkey.Marshal())
-
-	if err := pubkey.Verify(signedData, sig); err != nil {
-		return false, nil
-	}
-
-	return true, nil
-}
-
-func (pipe *pipedConn) signAgain(user string, msg *userAuthRequestMsg, signer Signer, extensions map[string][]byte) (*userAuthRequestMsg, error) {
-
-	rand := pipe.upstream.transport.config.Rand
-	session := pipe.upstream.transport.getSessionID()
-
-	upKey := signer.PublicKey()
-	upKeyData := upKey.Marshal()
-
-	as, algo := pickSignatureAlgorithm(signer, extensions)
-
-	data := buildDataSignedForAuth(session, userAuthRequestMsg{
-		User:    user,
-		Service: serviceSSH,
-		Method:  "publickey",
-	}, algo, upKeyData)
-
-	sign, err := as.SignWithAlgorithm(rand, data, underlyingAlgo(algo))
-	if err != nil {
-		return nil, err
-	}
-
-	// manually wrap the serialized signature in a string
-	s := Marshal(sign)
-	sig := make([]byte, stringLength(len(s)))
-	marshalString(sig, s)
-
-	pubkeyMsg := &publickeyAuthMsg{
-		User:     user,
-		Service:  serviceSSH,
-		Method:   "publickey",
-		HasSig:   true,
-		Algoname: algo,
-		PubKey:   upKeyData,
-		Sig:      sig,
-	}
-
-	Unmarshal(Marshal(pubkeyMsg), msg)
-
-	return msg, nil
-}
-
-func parsePublicKeyMsg(userAuthReq *userAuthRequestMsg) (PublicKey, bool, *Signature, error) {
-	if userAuthReq.Method != "publickey" {
-		return nil, false, nil, fmt.Errorf("not a publickey auth msg")
-	}
-
-	payload := userAuthReq.Payload
-	if len(payload) < 1 {
-		return nil, false, nil, parseError(msgUserAuthRequest)
-	}
-	isQuery := payload[0] == 0
-	payload = payload[1:]
-	algoBytes, payload, ok := parseString(payload)
-	if !ok {
-		return nil, false, nil, parseError(msgUserAuthRequest)
-	}
-	algo := string(algoBytes)
-	if !isAcceptableAlgo(algo) {
-		return nil, false, nil, fmt.Errorf("ssh: algorithm %q not accepted", algo)
-	}
-
-	pubKeyData, payload, ok := parseString(payload)
-	if !ok {
-		return nil, false, nil, parseError(msgUserAuthRequest)
-	}
-
-	pubKey, err := ParsePublicKey(pubKeyData)
-	if err != nil {
-		return nil, false, nil, err
-	}
-
-	var sig *Signature
-	if !isQuery {
-		sig, payload, ok = parseSignature(payload)
-		if !ok || len(payload) > 0 {
-			return nil, false, nil, parseError(msgUserAuthRequest)
-		}
-	}
-
-	return pubKey, isQuery, sig, nil
-}
-
-func piping(dst, src packetConn, hooker func(msg []byte) ([]byte, error)) error {
-	for {
-		p, err := src.readPacket()
-
-		if err != nil {
-			return err
-		}
-
-		p, err = hooker(p)
-
-		if err != nil {
-			return err
-		}
-
-		err = dst.writePacket(p)
-
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func (pipe *pipedConn) loop() error {
+func (p *PiperConn) WaitWithHook(uphook, downhook func(msg []byte) ([]byte, error)) error {
 	c := make(chan error, 2)
 
-	go func() {
-		c <- piping(pipe.upstream.transport, pipe.downstream.transport, pipe.hookDownstreamMsg)
-	}()
+	if downhook != nil {
+		go func() {
+			c <- pipingWithHook(p.upstream.transport, p.downstream.transport, downhook)
+		}()
+	} else {
+		go func() {
+			c <- piping(p.upstream.transport, p.downstream.transport)
+		}()
+	}
 
-	go func() {
-		c <- piping(pipe.downstream.transport, pipe.upstream.transport, pipe.hookUpstreamMsg)
-	}()
+	if uphook != nil {
+		go func() {
+			c <- pipingWithHook(p.downstream.transport, p.upstream.transport, uphook)
+		}()
+	} else {
+		go func() {
+			c <- piping(p.downstream.transport, p.upstream.transport)
+		}()
+	}
 
-	defer pipe.Close()
+	defer p.Close()
 
 	// wait until either connection closed
 	return <-c
 }
 
-func (pipe *pipedConn) Close() {
-	pipe.upstream.transport.Close()
-	pipe.downstream.transport.Close()
+// Close the piped connection create by SSHPiper
+func (p *PiperConn) Close() {
+	p.upstream.transport.Close()
+	p.downstream.transport.Close()
 }
 
-func (pipe *pipedConn) pipeAuthSkipBanner(packet []byte) (bool, error) {
-	// pipe to auth succ if not a authreq
-	// typically, authinfo see RFC 4256
-	// TODO support hook this msg
-	err := pipe.upstream.transport.writePacket(packet)
-	if err != nil {
-		return false, err
-	}
-
-	for {
-		packet, err := pipe.upstream.transport.readPacket()
-		if err != nil {
-			return false, err
-		}
-
-		msgType := packet[0]
-
-		if err = pipe.downstream.transport.writePacket(packet); err != nil {
-			return false, err
-		}
-
-		switch msgType {
-		case msgUserAuthSuccess:
-			return true, nil
-		case msgUserAuthBanner:
-			// should read another packet from upstream
-			continue
-		case msgUserAuthFailure:
-		default:
-		}
-
-		return false, nil
-	}
+// UpstreamConnMeta returns the ConnMetadata of the piper and upstream
+func (p *PiperConn) UpstreamConnMeta() ConnMetadata {
+	return p.upstream
 }
 
-func (pipe *pipedConn) pipeAuth(initUserAuthMsg *userAuthRequestMsg) error {
-	if err := pipe.upstream.transport.writePacket(Marshal(&serviceRequestMsg{serviceUserAuth})); err != nil {
+// DownstreamConnMeta returns the ConnMetadata of the piper and downstream
+func (p *PiperConn) DownstreamConnMeta() ConnMetadata {
+	return p.downstream
+}
+
+func (p *PiperConn) mapToUpstreamViaDownstreamAuth() error {
+	if err := p.updateAuthMethods(); err != nil {
 		return err
 	}
 
-	packet, err := pipe.upstream.transport.readPacket()
+	if _, err := p.downstream.serverAuthenticate(p.authOnlyConfig); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *PiperConn) authUpstream(downstream ConnMetadata, method string, upstream *Upstream) error {
+	if upstream == nil {
+		p.updateAuthMethods()
+		return fmt.Errorf("empty upstream") // here mean ignore this auth method, and the authmedthod may write something to chanllage context
+	}
+
+	if upstream.User == "" {
+		upstream.User = downstream.User()
+	}
+
+	config := &upstream.ClientConfig
+	addr := upstream.Address
+
+	u, err := newUpstream(upstream.Conn, addr, config)
 	if err != nil {
 		return err
 	}
 
-	// The server may choose to send a SSH_MSG_EXT_INFO at this point (if we
-	// advertised willingness to receive one, which we always do) or not. See
-	// RFC 8308, Section 2.4.
-	extensions := make(map[string][]byte)
-	if len(packet) > 0 && packet[0] == msgExtInfo {
-		var extInfo extInfoMsg
-		if err := Unmarshal(packet, &extInfo); err != nil {
-			return err
+	if err := u.clientAuthenticateReturnAllowed(config); err != nil {
+		if p.config.UpstreamAuthFailureCallback != nil {
+			p.config.UpstreamAuthFailureCallback(downstream, method, err, p.challengeCtx)
 		}
-		payload := extInfo.Payload
-		for i := uint32(0); i < extInfo.NumExtensions; i++ {
-			name, rest, ok := parseString(payload)
-			if !ok {
-				return parseError(msgExtInfo)
-			}
-			value, rest, ok := parseString(rest)
-			if !ok {
-				return parseError(msgExtInfo)
-			}
-			extensions[string(name)] = value
-			payload = rest
-		}
-		packet, err = pipe.upstream.transport.readPacket()
-		if err != nil {
-			return err
-		}
-	}
-
-	var serviceAccept serviceAcceptMsg
-	if err := Unmarshal(packet, &serviceAccept); err != nil {
+		p.updateAuthMethods()
 		return err
 	}
 
-	userAuthMsg := initUserAuthMsg
+	u.user = config.User
+	p.upstream = u
 
+	return nil
+}
+
+func (p *PiperConn) noneAuthCallback(conn ConnMetadata) (*Permissions, error) {
+	u, err := p.config.NoneAuthCallback(conn, p.challengeCtx)
+	if err != nil {
+		p.updateAuthMethods()
+		return nil, err
+	}
+
+	return nil, p.authUpstream(conn, "none", u)
+}
+
+func (p *PiperConn) passwordCallback(conn ConnMetadata, password []byte) (*Permissions, error) {
+	u, err := p.config.PasswordCallback(conn, password, p.challengeCtx)
+	if err != nil {
+		p.updateAuthMethods()
+		return nil, err
+	}
+
+	return nil, p.authUpstream(conn, "password", u)
+}
+
+func (p *PiperConn) publicKeyCallback(conn ConnMetadata, key PublicKey) (*Permissions, error) {
+	u, err := p.config.PublicKeyCallback(conn, key, p.challengeCtx)
+	if err != nil {
+		p.updateAuthMethods()
+		return nil, err
+	}
+
+	return nil, p.authUpstream(conn, "publickey", u)
+}
+
+func (p *PiperConn) keyboardInteractiveCallback(conn ConnMetadata, client KeyboardInteractiveChallenge) (*Permissions, error) {
+	u, err := p.config.KeyboardInteractiveCallback(conn, client, p.challengeCtx)
+	if err != nil {
+		p.updateAuthMethods()
+		return nil, err
+	}
+
+	return nil, p.authUpstream(conn, "keyboard-interactive", u)
+}
+
+func (p *PiperConn) bannerCallback(conn ConnMetadata) string {
+	return p.config.BannerCallback(conn, p.challengeCtx)
+}
+
+func (p *PiperConn) updateAuthMethods() error {
+	authMethods := []string{"none", "password", "publickey", "keyboard-interactive"}
+	if p.config.NextAuthMethods != nil {
+		var err error
+		authMethods, err = p.config.NextAuthMethods(p.downstream, p.challengeCtx)
+		if err != nil {
+			return err
+		}
+	}
+
+	p.authOnlyConfig.NonAuthCallback = nil
+	p.authOnlyConfig.PasswordCallback = nil
+	p.authOnlyConfig.PublicKeyCallback = nil
+	p.authOnlyConfig.KeyboardInteractiveCallback = nil
+
+	for _, authMethod := range authMethods {
+		switch authMethod {
+		case "none":
+			if p.config.NoneAuthCallback != nil {
+				p.authOnlyConfig.NonAuthCallback = p.noneAuthCallback
+			}
+		case "password":
+			if p.config.PasswordCallback != nil {
+				p.authOnlyConfig.PasswordCallback = p.passwordCallback
+			}
+		case "publickey":
+			if p.config.PublicKeyCallback != nil {
+				p.authOnlyConfig.PublicKeyCallback = p.publicKeyCallback
+			}
+		case "keyboard-interactive":
+			if p.config.KeyboardInteractiveCallback != nil {
+				p.authOnlyConfig.KeyboardInteractiveCallback = p.keyboardInteractiveCallback
+			}
+		}
+	}
+
+	return nil
+}
+
+// NewSSHPiperConn starts a piped ssh connection witch conn as its downstream transport.
+// It handshake with downstream ssh client and upstream ssh server provicde by FindUpstream.
+// If either handshake is unsuccessful, the whole piped connection will be closed.
+func NewSSHPiperConn(conn net.Conn, config *PiperConfig) (*PiperConn, error) {
+	d, err := newDownstream(conn, &ServerConfig{
+		Config:        config.Config,
+		hostKeys:      config.hostKeys,
+		ServerVersion: config.ServerVersion,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	p := &PiperConn{
+		downstream: d,
+		config:     config,
+		authOnlyConfig: &ServerConfig{
+			MaxAuthTries: -1,
+		},
+	}
+
+	if config.CreateChallengeContext != nil {
+		ctx, err := config.CreateChallengeContext(d)
+		if err != nil {
+			return nil, err
+		}
+		p.challengeCtx = ctx
+	}
+
+	if config.BannerCallback != nil {
+		p.authOnlyConfig.BannerCallback = p.bannerCallback
+	}
+
+	if err := p.mapToUpstreamViaDownstreamAuth(); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+func piping(dst, src packetConn) error {
 	for {
-		// hook msg
-		userAuthMsg, err = pipe.processAuthMsg(userAuthMsg, extensions)
-
+		p, err := src.readPacket()
 		if err != nil {
 			return err
 		}
 
-		// nil for ignore
-		if userAuthMsg != nil {
-			// send a mapped auth msg
-			succ, err := pipe.pipeAuthSkipBanner(Marshal(userAuthMsg))
-
-			if err != nil {
-				return err
-			}
-
-			if succ {
-				return nil
-			}
+		err = dst.writePacket(p)
+		if err != nil {
+			return err
 		}
+	}
+}
 
-		var packet []byte
-
-		for {
-
-			// find next msg which need to be hooked
-			if packet, err = pipe.downstream.transport.readPacket(); err != nil {
-				return err
-			}
-
-			// we can only handle auth req at the moment
-			if packet[0] == msgUserAuthRequest {
-				// should hook, deal with it
-				break
-			}
-
-			// pipe other auth msg
-			succ, err := pipe.pipeAuthSkipBanner(packet)
-
-			if err != nil {
-				return err
-			}
-
-			if succ {
-				return nil
-			}
-		}
-
-		var userAuthReq userAuthRequestMsg
-
-		if err = Unmarshal(packet, &userAuthReq); err != nil {
+func pipingWithHook(dst, src packetConn, hook func(msg []byte) ([]byte, error)) error {
+	for {
+		p, err := src.readPacket()
+		if err != nil {
 			return err
 		}
 
-		userAuthMsg = &userAuthReq
+		p, err = hook(p)
+		if err != nil {
+			return err
+		}
+
+		err = dst.writePacket(p)
+		if err != nil {
+			return err
+		}
 	}
 }
+
+func NoneAuth() AuthMethod {
+	return new(noneAuth)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// below are copy and modified ssh code
+// ---------------------------------------------------------------------------------------------------------------------
 
 func newDownstream(c net.Conn, config *ServerConfig) (*downstream, error) {
 	fullConf := *config
 	fullConf.SetDefaults()
+
+	// Check if the config contains any unsupported key exchanges
+	for _, kex := range fullConf.KeyExchanges {
+		if _, ok := serverForbiddenKexAlgos[kex]; ok {
+			return nil, fmt.Errorf("ssh: unsupported key exchange %s for server", kex)
+		}
+	}
 
 	s := &connection{
 		sshConn: sshConn{conn: c},
@@ -762,6 +376,10 @@ func newDownstream(c net.Conn, config *ServerConfig) (*downstream, error) {
 func newUpstream(c net.Conn, addr string, config *ClientConfig) (*upstream, error) {
 	fullConf := *config
 	fullConf.SetDefaults()
+	if fullConf.HostKeyCallback == nil {
+		c.Close()
+		return nil, errors.New("ssh: must specify HostKeyCallback")
+	}
 
 	conn := &connection{
 		sshConn: sshConn{conn: c},
@@ -769,34 +387,10 @@ func newUpstream(c net.Conn, addr string, config *ClientConfig) (*upstream, erro
 
 	if err := conn.clientHandshakeNoAuth(addr, &fullConf); err != nil {
 		c.Close()
-		return nil, err
+		return nil, fmt.Errorf("ssh: handshake failed: %v", err)
 	}
 
 	return &upstream{conn}, nil
-}
-
-func (d *downstream) nextAuthMsg() (*userAuthRequestMsg, error) {
-	var userAuthReq userAuthRequestMsg
-
-	if packet, err := d.transport.readPacket(); err != nil {
-		return nil, err
-	} else if err = Unmarshal(packet, &userAuthReq); err != nil {
-		return nil, err
-	}
-
-	if userAuthReq.Service != serviceSSH {
-		return nil, errors.New("ssh: client attempted to negotiate for unknown service: " + userAuthReq.Service)
-	}
-
-	return &userAuthReq, nil
-}
-
-func noneAuthMsg(user string) *userAuthRequestMsg {
-	return &userAuthRequestMsg{
-		User:    user,
-		Service: serviceSSH,
-		Method:  "none",
-	}
 }
 
 func (c *connection) clientHandshakeNoAuth(dialAddress string, config *ClientConfig) error {
@@ -868,4 +462,97 @@ func (c *connection) serverHandshakeNoAuth(config *ServerConfig) (*Permissions, 
 	}
 
 	return nil, nil
+}
+
+type NoMoreMethodsErr struct {
+	Tried   []string
+	Allowed []string
+}
+
+func (e NoMoreMethodsErr) Error() string {
+	return fmt.Sprintf("ssh: unable to authenticate, attempted methods %v, no supported methods remain, allowed methods %v", e.Tried, e.Allowed)
+}
+
+func (c *connection) clientAuthenticateReturnAllowed(config *ClientConfig) error {
+	// initiate user auth session
+	if err := c.transport.writePacket(Marshal(&serviceRequestMsg{serviceUserAuth})); err != nil {
+		return err
+	}
+	packet, err := c.transport.readPacket()
+	if err != nil {
+		return err
+	}
+	// The server may choose to send a SSH_MSG_EXT_INFO at this point (if we
+	// advertised willingness to receive one, which we always do) or not. See
+	// RFC 8308, Section 2.4.
+	extensions := make(map[string][]byte)
+	if len(packet) > 0 && packet[0] == msgExtInfo {
+		var extInfo extInfoMsg
+		if err := Unmarshal(packet, &extInfo); err != nil {
+			return err
+		}
+		payload := extInfo.Payload
+		for i := uint32(0); i < extInfo.NumExtensions; i++ {
+			name, rest, ok := parseString(payload)
+			if !ok {
+				return parseError(msgExtInfo)
+			}
+			value, rest, ok := parseString(rest)
+			if !ok {
+				return parseError(msgExtInfo)
+			}
+			extensions[string(name)] = value
+			payload = rest
+		}
+		packet, err = c.transport.readPacket()
+		if err != nil {
+			return err
+		}
+	}
+	var serviceAccept serviceAcceptMsg
+	if err := Unmarshal(packet, &serviceAccept); err != nil {
+		return err
+	}
+
+	// during the authentication phase the client first attempts the "none" method
+	// then any untried methods suggested by the server.
+	var tried []string
+	var lastMethods []string
+
+	sessionID := c.transport.getSessionID()
+	for auth := AuthMethod(new(noneAuth)); auth != nil; {
+		ok, methods, err := auth.auth(sessionID, config.User, c.transport, config.Rand, extensions)
+		if err != nil {
+			return err
+		}
+		if ok == authSuccess {
+			// success
+			return nil
+		} else if ok == authFailure {
+			if m := auth.method(); !contains(tried, m) {
+				tried = append(tried, m)
+			}
+		}
+		if methods == nil {
+			methods = lastMethods
+		}
+		lastMethods = methods
+
+		auth = nil
+
+	findNext:
+		for _, a := range config.Auth {
+			candidateMethod := a.method()
+			if contains(tried, candidateMethod) {
+				continue
+			}
+			for _, meth := range methods {
+				if meth == candidateMethod {
+					auth = a
+					break findNext
+				}
+			}
+		}
+	}
+	return NoMoreMethodsErr{Tried: tried, Allowed: lastMethods}
 }
