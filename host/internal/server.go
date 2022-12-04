@@ -142,7 +142,7 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 	}
 
 	for _, k := range h.AuthorizedKeys {
-		if gssh.KeysEqual(k, pk) {
+		if utils.KeysEqual(k, pk) {
 			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
 			return true
 		}

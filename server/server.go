@@ -70,6 +70,7 @@ func Start(opt Opt) error {
 		return err
 	}
 
+	// key signers + corresponding cert signers
 	hostSigners := slices.Clone(signers)
 	for _, s := range signers {
 		hs := HostCertSigner{

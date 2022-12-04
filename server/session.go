@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	gssh "github.com/gliderlabs/ssh"
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -21,7 +21,7 @@ func (s session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	}
 
 	for _, k := range s.ClientAuthorizedKeys {
-		if gssh.KeysEqual(k, key) {
+		if utils.KeysEqual(k, key) {
 			return true
 		}
 	}

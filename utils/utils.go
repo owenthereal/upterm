@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dchest/uniuri"
+	gssh "github.com/gliderlabs/ssh"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -111,4 +112,17 @@ func FingerprintSHA256(key ssh.PublicKey) string {
 	hash := sha256.Sum256(key.Marshal())
 	b64hash := base64.StdEncoding.EncodeToString(hash[:])
 	return fmt.Sprintf("SHA256:%s", strings.TrimRight(b64hash, "="))
+}
+
+func KeysEqual(pk1 ssh.PublicKey, pk2 ssh.PublicKey) bool {
+	return gssh.KeysEqual(publicKey(pk1), publicKey(pk2))
+}
+
+func publicKey(pk ssh.PublicKey) ssh.PublicKey {
+	cert, ok := pk.(*ssh.Certificate)
+	if ok {
+		pk = cert.Key
+	}
+
+	return pk
 }

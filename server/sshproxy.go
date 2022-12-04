@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
@@ -40,6 +41,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	r.routing = &SSHRouting{
 		HostSigners: r.HostSigners,
 		AuthPiper: &authPiper{
+			HostSigners: r.HostSigners,
 			Signers:     r.Signers,
 			SessionRepo: r.SessionRepo,
 			ConnDialer:  r.ConnDialer,
@@ -58,6 +60,7 @@ type authPiper struct {
 	SessionRepo *sessionRepo
 	ConnDialer  connDialer
 	Signers     []ssh.Signer
+	HostSigners []ssh.Signer
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
@@ -79,17 +82,21 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 		key = pk
 	}
 
-	// TODO: simplify auth key validation by moving it to host validation only
-	if err := a.validateClientAuthorizedKey(conn, key); err != nil {
-		return nil, fmt.Errorf("error validating client authorized key: %w", err)
-	}
-
 	if auth == nil {
 		auth = &AuthRequest{
 			ClientVersion: string(conn.ClientVersion()),
 			RemoteAddr:    conn.RemoteAddr().String(),
 			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
 		}
+	}
+
+	hostSess, err := a.hostSession(conn)
+	if err != nil {
+		return nil, err
+	}
+	// TODO: simplify auth key validation by moving it to host validation only
+	if hostSess != nil && !hostSess.IsClientKeyAllowed(key) {
+		return nil, fmt.Errorf("public key not allowed")
 	}
 
 	signers, err := a.newUserCertSigners(conn, auth)
@@ -102,11 +109,30 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 		return nil, fmt.Errorf("error dialing upstream: %w", err)
 	}
 
+	hostKeyCb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if hostSess == nil {
+			// check host keys for sideway connections
+			for _, s := range a.HostSigners {
+				if utils.KeysEqual(key, s.PublicKey()) {
+					return nil
+				}
+			}
+		} else {
+			for _, pk := range hostSess.HostPublicKeys {
+				if utils.KeysEqual(key, pk) {
+					return nil
+				}
+			}
+		}
+
+		return fmt.Errorf("ssh: host key mismatch")
+	}
+
 	return &ssh.Upstream{
 		Conn:    c,
 		Address: conn.RemoteAddr().String(),
 		ClientConfig: ssh.ClientConfig{
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: hostKeyCb,
 			Auth:            []ssh.AuthMethod{ssh.PublicKeys(signers...)},
 		},
 	}, nil
@@ -150,28 +176,21 @@ func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) 
 	return certSigners, nil
 }
 
-func (a authPiper) validateClientAuthorizedKey(conn ssh.ConnMetadata, key ssh.PublicKey) error {
+// hostSession returns the host session. It returns nil if the current node
+// is proxy node.
+func (a *authPiper) hostSession(conn ssh.ConnMetadata) (*session, error) {
 	user := conn.User()
 	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
 	if err != nil {
-		return fmt.Errorf("error decoding identifier from user %s: %w", user, err)
+		return nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
 	}
 
 	// Don't validate authorized key if:
 	// 1. This is not a client request
 	// 2. The node does not match the request that routing is needed
 	if id.Type != api.Identifier_CLIENT || a.NodeAddr != id.NodeAddr {
-		return nil
+		return nil, nil
 	}
 
-	sess, err := a.SessionRepo.Get(id.Id)
-	if err != nil {
-		return err
-	}
-
-	if !sess.IsClientKeyAllowed(key) {
-		return fmt.Errorf("public key not allowed")
-	}
-
-	return nil
+	return a.SessionRepo.Get(id.Id)
 }

@@ -508,8 +508,8 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	return nil
 }
 
-func (c *Client) Join(session *api.GetSessionResponse, hostURL string) error {
-	return c.JoinWithContext(context.Background(), session, hostURL)
+func (c *Client) Join(session *api.GetSessionResponse, clientJoinURL string) error {
+	return c.JoinWithContext(context.Background(), session, clientJoinURL)
 }
 
 func scanner(ch chan string) *bufio.Scanner {
