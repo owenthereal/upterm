@@ -209,8 +209,8 @@ github.com/spf13/pflag
 # github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af
 ## explicit
 github.com/tadvi/systray
-# github.com/tj/go v1.8.6
-## explicit
+# github.com/tj/go v1.8.7
+## explicit; go 1.12
 github.com/tj/go/term
 # github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 ## explicit
