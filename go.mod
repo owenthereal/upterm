@@ -37,7 +37,7 @@ require (
 	github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
 	github.com/prometheus/client_golang v1.12.1
 	github.com/rs/xid v1.4.0
-	github.com/sirupsen/logrus v1.8.1
+	github.com/sirupsen/logrus v1.9.0
 	github.com/spf13/cobra v1.6.1
 	github.com/tj/go v1.8.6
 	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
