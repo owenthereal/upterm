@@ -8,6 +8,8 @@ import (
 
 	"github.com/rollbar/rollbar-go"
 	"github.com/sirupsen/logrus"
+
+	"github.com/heroku/rollrus/internal/transport"
 )
 
 var _ logrus.Hook = &Hook{} //assert that *Hook is a logrus.Hook
@@ -26,8 +28,11 @@ type Hook struct {
 
 // NewHookForLevels provided by the caller. Otherwise works like NewHook.
 func NewHookForLevels(token string, env string, levels []logrus.Level) *Hook {
+	client := rollbar.NewSync(token, env, "", "", "")
+	client.Transport = transport.NewBuffered(client.Transport, rollbar.DefaultBuffer)
+
 	return &Hook{
-		Client:          rollbar.NewSync(token, env, "", "", ""),
+		Client:          client,
 		triggers:        levels,
 		ignoredErrors:   make([]error, 0),
 		ignoreErrorFunc: func(error) bool { return false },
