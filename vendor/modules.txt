@@ -117,9 +117,10 @@ github.com/hashicorp/errwrap
 # github.com/hashicorp/go-multierror v1.1.1
 ## explicit; go 1.13
 github.com/hashicorp/go-multierror
-# github.com/heroku/rollrus v0.1.1
+# github.com/heroku/rollrus v0.2.0
 ## explicit; go 1.13
 github.com/heroku/rollrus
+github.com/heroku/rollrus/internal/transport
 # github.com/hooklift/assert v0.1.0
 ## explicit; go 1.14
 # github.com/inconshreveable/mousetrap v1.0.1
