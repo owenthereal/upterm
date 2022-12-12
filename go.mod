@@ -49,7 +49,7 @@ require (
 
 require (
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
-	github.com/google/go-github/v48 v48.1.0
+	github.com/google/go-github/v48 v48.2.0
 	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4
 	golang.org/x/term v0.2.0
 )

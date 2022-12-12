@@ -7470,6 +7470,14 @@ func (i *Issue) GetState() string {
 	return *i.State
 }
 
+// GetStateReason returns the StateReason field if it's non-nil, zero value otherwise.
+func (i *Issue) GetStateReason() string {
+	if i == nil || i.StateReason == nil {
+		return ""
+	}
+	return *i.StateReason
+}
+
 // GetTitle returns the Title field if it's non-nil, zero value otherwise.
 func (i *Issue) GetTitle() string {
 	if i == nil || i.Title == nil {
@@ -12254,12 +12262,28 @@ func (p *Protection) GetAllowForcePushes() *AllowForcePushes {
 	return p.AllowForcePushes
 }
 
+// GetAllowForkSyncing returns the AllowForkSyncing field if it's non-nil, zero value otherwise.
+func (p *Protection) GetAllowForkSyncing() bool {
+	if p == nil || p.AllowForkSyncing == nil {
+		return false
+	}
+	return *p.AllowForkSyncing
+}
+
 // GetEnforceAdmins returns the EnforceAdmins field.
 func (p *Protection) GetEnforceAdmins() *AdminEnforcement {
 	if p == nil {
 		return nil
 	}
 	return p.EnforceAdmins
+}
+
+// GetLockBranch returns the LockBranch field if it's non-nil, zero value otherwise.
+func (p *Protection) GetLockBranch() bool {
+	if p == nil || p.LockBranch == nil {
+		return false
+	}
+	return *p.LockBranch
 }
 
 // GetRequiredConversationResolution returns the RequiredConversationResolution field.
@@ -13668,6 +13692,14 @@ func (p *PullRequestReviewsEnforcementUpdate) GetRequireCodeOwnerReviews() bool 
 		return false
 	}
 	return *p.RequireCodeOwnerReviews
+}
+
+// GetRequireLastPushApproval returns the RequireLastPushApproval field if it's non-nil, zero value otherwise.
+func (p *PullRequestReviewsEnforcementUpdate) GetRequireLastPushApproval() bool {
+	if p == nil || p.RequireLastPushApproval == nil {
+		return false
+	}
+	return *p.RequireLastPushApproval
 }
 
 // GetAction returns the Action field if it's non-nil, zero value otherwise.
@@ -15126,6 +15158,14 @@ func (r *Repository) GetGitURL() string {
 	return *r.GitURL
 }
 
+// GetHasDiscussions returns the HasDiscussions field if it's non-nil, zero value otherwise.
+func (r *Repository) GetHasDiscussions() bool {
+	if r == nil || r.HasDiscussions == nil {
+		return false
+	}
+	return *r.HasDiscussions
+}
+
 // GetHasDownloads returns the HasDownloads field if it's non-nil, zero value otherwise.
 func (r *Repository) GetHasDownloads() bool {
 	if r == nil || r.HasDownloads == nil {
@@ -15636,6 +15676,14 @@ func (r *Repository) GetWatchersCount() int {
 		return 0
 	}
 	return *r.WatchersCount
+}
+
+// GetAccessLevel returns the AccessLevel field if it's non-nil, zero value otherwise.
+func (r *RepositoryActionsAccessLevel) GetAccessLevel() string {
+	if r == nil || r.AccessLevel == nil {
+		return ""
+	}
+	return *r.AccessLevel
 }
 
 // GetAdvancedSecurityCommitters returns the AdvancedSecurityCommitters field if it's non-nil, zero value otherwise.
@@ -16356,6 +16404,14 @@ func (r *RepositoryRelease) GetID() int64 {
 		return 0
 	}
 	return *r.ID
+}
+
+// GetMakeLatest returns the MakeLatest field if it's non-nil, zero value otherwise.
+func (r *RepositoryRelease) GetMakeLatest() string {
+	if r == nil || r.MakeLatest == nil {
+		return ""
+	}
+	return *r.MakeLatest
 }
 
 // GetName returns the Name field if it's non-nil, zero value otherwise.
@@ -20596,6 +20652,14 @@ func (w *WorkflowJob) GetNodeID() string {
 		return ""
 	}
 	return *w.NodeID
+}
+
+// GetRunAttempt returns the RunAttempt field if it's non-nil, zero value otherwise.
+func (w *WorkflowJob) GetRunAttempt() int64 {
+	if w == nil || w.RunAttempt == nil {
+		return 0
+	}
+	return *w.RunAttempt
 }
 
 // GetRunID returns the RunID field if it's non-nil, zero value otherwise.
