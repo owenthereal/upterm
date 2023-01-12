@@ -7,20 +7,14 @@ import (
 )
 
 func NewMultiWriter(writers ...io.Writer) *MultiWriter {
-	cache := bytes.NewBuffer(nil)
-	writers = append(writers, cache)
-
-	w := make([]io.Writer, len(writers))
-	copy(w, append(writers, cache))
-
-	return &MultiWriter{writers: w, cache: cache}
+	return &MultiWriter{writers: writers, cache: bytes.NewBuffer(nil)}
 }
 
 // MultiWriter is a concurrent safe writer that allows appending/removing writers.
 // Newly appended writers get the last write to preserve last output.
 type MultiWriter struct {
-	writers []io.Writer
 	mu      sync.Mutex
+	writers []io.Writer
 	cache   *bytes.Buffer
 }
 
@@ -65,8 +59,18 @@ func (t *MultiWriter) Write(p []byte) (n int, err error) {
 	// reset cache
 	t.cache.Reset()
 
+	// cache last write
+	n, err = t.cache.Write(p)
+	if err != nil {
+		return n, err
+	}
+
+	// return a new copy
+	// and write to all writers
+	b := t.cache.Bytes()
+
 	for _, w := range t.writers {
-		n, err = w.Write(p)
+		n, err = w.Write(b)
 		if err != nil {
 			return
 		}
