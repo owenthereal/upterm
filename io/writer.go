@@ -1,13 +1,12 @@
 package io
 
 import (
-	"bytes"
 	"io"
 	"sync"
 )
 
 func NewMultiWriter(writers ...io.Writer) *MultiWriter {
-	return &MultiWriter{writers: writers, cache: bytes.NewBuffer(nil)}
+	return &MultiWriter{writers: writers}
 }
 
 // MultiWriter is a concurrent safe writer that allows appending/removing writers.
@@ -15,7 +14,7 @@ func NewMultiWriter(writers ...io.Writer) *MultiWriter {
 type MultiWriter struct {
 	mu      sync.Mutex
 	writers []io.Writer
-	cache   *bytes.Buffer
+	cache   []byte
 }
 
 func (t *MultiWriter) Append(writers ...io.Writer) error {
@@ -23,10 +22,9 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	defer t.mu.Unlock()
 
 	// write last cache to new writers
-	b := t.cache.Bytes()
-	if len(b) > 0 {
+	if len(t.cache) > 0 {
 		for _, w := range writers {
-			_, err := w.Write(b)
+			_, err := w.Write(t.cache)
 			if err != nil {
 				return err
 			}
@@ -57,20 +55,11 @@ func (t *MultiWriter) Write(p []byte) (n int, err error) {
 	defer t.mu.Unlock()
 
 	// reset cache
-	t.cache.Reset()
-
-	// cache last write
-	n, err = t.cache.Write(p)
-	if err != nil {
-		return n, err
-	}
-
-	// return a new copy
-	// and write to all writers
-	b := t.cache.Bytes()
+	t.cache = make([]byte, len(p))
+	copy(t.cache, p)
 
 	for _, w := range t.writers {
-		n, err = w.Write(b)
+		n, err = w.Write(p)
 		if err != nil {
 			return
 		}
