@@ -34,7 +34,7 @@ require (
 	github.com/oklog/run v1.1.1-0.20200508094559-c7096881717e
 	github.com/olebedev/emitter v0.0.0-20190110104742-e8d1457e6aee
 	github.com/olekukonko/tablewriter v0.0.5
-	github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a
+	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.14.0
 	github.com/rs/xid v1.4.0
 	github.com/sirupsen/logrus v1.9.0

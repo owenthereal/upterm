@@ -273,8 +273,8 @@ github.com/owenthereal/ssh v0.2.3-0.20221202194937-0dfcd34433e3 h1:DC1j24uONOue9
 github.com/owenthereal/ssh v0.2.3-0.20221202194937-0dfcd34433e3/go.mod h1:8XB4KraRrX39qHhT6yxPsHedjA08I/uBVwj4xC+/+z4=
 github.com/owenthereal/upterm.crypto v0.0.0-20221127042128-bef2498e3f2b h1:Rz4YuMW+nZTPQJbrc3Epf27H+yuePDnzVQ1bo0ZBn+k=
 github.com/owenthereal/upterm.crypto v0.0.0-20221127042128-bef2498e3f2b/go.mod h1:hebNnKkNXi2UzZN1eVRvBB7co0a+JxK6XbPiWVs/3J4=
-github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a h1:Yw/M+CoU75So9ZUQpRGOdwWvS9fHKSmhT+e+np+oF90=
-github.com/pborman/ansi v0.0.0-20160920233902-86f499584b0a/go.mod h1:SgWzwMAx1X/Ez7i90VqF8LRiQtx52pWDiQP+x3iGnzw=
+github.com/pborman/ansi v1.0.0 h1:OqjHMhvlSuCCV5JT07yqPuJPQzQl+WXsiZ14gZsqOrQ=
+github.com/pborman/ansi v1.0.0/go.mod h1:SgWzwMAx1X/Ez7i90VqF8LRiQtx52pWDiQP+x3iGnzw=
 github.com/pkg/browser v0.0.0-20180916011732-0a3d74bf9ce4/go.mod h1:4OwLy04Bl9Ef3GJJCoec+30X3LQs/0/m4HFRt/2LUSA=
 github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
