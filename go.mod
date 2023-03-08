@@ -28,7 +28,7 @@ require (
 	github.com/heroku/rollrus v0.2.0
 	github.com/hooklift/assert v0.1.0 // indirect
 	github.com/influxdata/influxdb1-client v0.0.0-20200827194710-b269163b24ab // indirect
-	github.com/jpillora/chisel v0.0.0-20190724232113-f3a8df20e389
+	github.com/jpillora/chisel v1.8.1
 	github.com/klauspost/pgzip v1.2.5 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/oklog/run v1.1.1-0.20200508094559-c7096881717e
@@ -55,10 +55,11 @@ require (
 )
 
 require (
+	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
-	github.com/fsnotify/fsnotify v1.4.7 // indirect
+	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/go-kit/log v0.2.0 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/go-toast/toast v0.0.0-20190211030409-01e6764cf0a4 // indirect
@@ -66,7 +67,7 @@ require (
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect
-	github.com/jpillora/sizestr v0.0.0-20160130011556-e2ea2fa42fb9 // indirect
+	github.com/jpillora/sizestr v1.0.0 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
@@ -80,6 +81,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
 	golang.org/x/net v0.5.0 // indirect
+	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4 // indirect
 	golang.org/x/sys v0.6.0 // indirect
 	golang.org/x/text v0.6.0 // indirect
 	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
