@@ -2,7 +2,7 @@
 
 set -e
 
-TERRAFORM_STATES_DIR=$(PWD)/terraform_states
+TERRAFORM_STATES_DIR=$(pwd)/terraform_states
 mkdir -p $TERRAFORM_STATES_DIR
 
 pushd  ./terraform/heroku

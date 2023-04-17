@@ -65,25 +65,25 @@ resource "tls_private_key" "private_key" {
 }
 
 resource "heroku_app_feature" "spaces-dns-discovery" {
-  app     = local.app_id
+  app_id  = local.app_id
   name    = "spaces-dns-discovery"
   enabled = var.heroku_space == "" ? false : true
 }
 
 resource "heroku_build" "uptermd" {
-  app = local.app_id
+  app_id = local.app_id
 
-  source = {
+  source {
     url     = "https://github.com/owenthereal/upterm/archive/${var.git_commit_sha}.tar.gz"
     version = var.git_commit_sha
   }
 }
 
 resource "heroku_formation" "uptermd" {
-  app        = local.app_id
+  app_id     = local.app_id
   type       = "web"
   quantity   = var.heroku_space == "" ? 1 : 2
-  size       = var.heroku_space == "" ? "free" : "private-s"
+  size       = var.heroku_space == "" ? "eco" : "private-s"
   depends_on = [heroku_build.uptermd]
 }
 
