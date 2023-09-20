@@ -39,6 +39,7 @@ upterm host [flags]
   -f, --force-command string    force execution of a command and attach its input/output to client's.
       --github-user strings     this GitHub user public keys are permitted to connect.
       --gitlab-user strings     this GitLab user public keys are permitted to connect.
+      --srht-user strings       this SourceHut user public keys are permitted to connect.
   -h, --help                    help for host
       --known-hosts string      a file contains the known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
   -i, --private-key strings     private key file for public key authentication against the upterm server (default [/Users/owen/.ssh/id_ed25519])

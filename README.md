@@ -114,6 +114,12 @@ This is compatible with `--authorized-keys`.
 $ upterm host --gitlab-user username
 ```
 
+Host a terminal session that only allows specified SourceHut user client public key(s) to connect.
+This is compatible with `--authorized-keys`.
+```console
+$ upterm host --srht-user username
+```
+
 Host a session with a custom command
 ```console
 $ upterm host -- docker run --rm -ti ubuntu bash

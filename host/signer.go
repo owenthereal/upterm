@@ -23,6 +23,7 @@ const (
 	errCannotDecodeEncryptedPrivateKeys = "cannot decode encrypted private keys"
 	gitHubKeysUrlFmt                    = "https://github.com/%s"
 	gitLabKeysUrlFmt                    = "https://gitlab.com/%s"
+	sourceHutKeysUrlFmt                 = "https://meta.sr.ht/~%s"
 )
 
 type errDescryptingPrivateKey struct {
@@ -94,6 +95,10 @@ func GitHubUserKeys(usernames []string) ([]ssh.PublicKey, error) {
 
 func GitLabUserKeys(usernames []string) ([]ssh.PublicKey, error) {
 	return getPublicKeys(gitLabKeysUrlFmt, usernames)
+}
+
+func SourceHutUserKeys(usernames []string) ([]ssh.PublicKey, error) {
+	return getPublicKeys(sourceHutKeysUrlFmt, usernames)
 }
 
 // Signers return signers based on the folllowing conditions:

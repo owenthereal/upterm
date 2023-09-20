@@ -29,6 +29,7 @@ var (
 	flagAuthorizedKeys     string
 	flagGitHubUsers        []string
 	flagGitLabUsers        []string
+	flagSourceHutUsers     []string
 	flagReadOnly           bool
 )
 
@@ -70,6 +71,7 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flagAuthorizedKeys, "authorized-key", "a", "", "an authorized_keys file that lists public keys that are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
+	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "this SourceHut user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
 	return cmd
@@ -154,6 +156,13 @@ func shareRunE(c *cobra.Command, args []string) error {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
+	}
+	if flagSourceHutUsers != nil {
+		sourceHutUserKeys, err := host.SourceHutUserKeys(flagSourceHutUsers)
+		if err != nil {
+			return fmt.Errorf("error reading SourceHut user keys: %w", err)
+		}
+		authorizedKeys = append(authorizedKeys, sourceHutUserKeys...)
 	}
 
 	signers, cleanup, err := host.Signers(flagPrivateKeys)
