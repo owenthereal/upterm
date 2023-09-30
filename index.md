@@ -35,7 +35,7 @@ go install ./cmd/upterm/...
 1. Host starts a terminal session:
 
 ```console
-upterm host bash
+upterm host
 ```
 
 2. Host retrieves and shares the SSH connection string:
