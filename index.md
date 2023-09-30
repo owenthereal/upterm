@@ -225,7 +225,7 @@ Tmate originates as a fork from an older iteration of Tmux, extending terminal s
 
 On the flip side, Upterm is architected from the ground up to be an independent solution, not a fork. It embodies the idea of connecting the input & output of any shell command between a host and its clients, transcending beyond merely `tmux`. This paves the way for securely sharing terminal sessions utilizing containers.
 
-Written in Go, Upterm is more hack-friendly compared to Tmate, which is crafted in C, akin to Tmux. The seamless compilation of Upterm CLI and server (`uptermd`) into a single binary facilitates swift [deployment of your pairing server](#kubernetes) across any cloud environment, devoid of dependencies.
+Written in Go, Upterm is more hack-friendly compared to Tmate, which is crafted in C, akin to Tmux. The seamless compilation of Upterm CLI and server (`uptermd`) into a single binary facilitates swift [deployment of your pairing server](#hammer_and_wrench-deployment) across any cloud environment, devoid of dependencies.
 
 ## License
 
