@@ -25,20 +25,20 @@ type readResult struct {
 func (r contextReader) Read(p []byte) (n int, err error) {
 	c := make(chan readResult, 1)
 
-	go func() {
+	go func(ctx context.Context, reader io.Reader) {
 		// close by the sender
 		defer close(c)
 
 		// return early if context is done
 		select {
-		case <-r.ctx.Done():
+		case <-ctx.Done():
 			return
 		default:
 		}
 
-		n, err := r.Reader.Read(p)
+		n, err := reader.Read(p)
 		c <- readResult{n, err}
-	}()
+	}(r.ctx, r.Reader)
 
 	select {
 	case rr := <-c:

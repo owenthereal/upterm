@@ -231,10 +231,10 @@ func displaySession(session *api.GetSessionResponse) error {
 	}
 
 	data := [][]string{
-		[]string{"Command:", strings.Join(session.Command, " ")},
-		[]string{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
-		[]string{"Host:", u.Scheme + "://" + hostPort},
-		[]string{"SSH Session:", sshCmd},
+		{"Command:", strings.Join(session.Command, " ")},
+		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
+		{"Host:", u.Scheme + "://" + hostPort},
+		{"SSH Session:", sshCmd},
 	}
 
 	isFirst := true

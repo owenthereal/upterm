@@ -11,8 +11,6 @@ import (
 )
 
 func Test_ContextReader(t *testing.T) {
-	t.Parallel()
-
 	t.Run("happy path", func(t *testing.T) {
 		t.Parallel()
 

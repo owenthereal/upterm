@@ -9,8 +9,6 @@ import (
 )
 
 func Test_MultiWriter(t *testing.T) {
-	t.Parallel()
-
 	w1 := bytes.NewBuffer(nil)
 	w := NewMultiWriter(w1)
 
