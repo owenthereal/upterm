@@ -5,21 +5,19 @@ import (
 	"io"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 )
 
 func Test_MultiWriter(t *testing.T) {
+	assert := assert.New(t)
+
 	w1 := bytes.NewBuffer(nil)
-	w := NewMultiWriter(w1)
+	w := NewMultiWriter(1, w1)
 
 	r := bytes.NewBufferString("hello1")
 	_, _ = io.Copy(w, r)
 
-	want := "hello1"
-	got := w1.String()
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("want=%s got=%s:\n%s", want, got, diff)
-	}
+	assert.Equal("hello1", w1.String())
 
 	// append w2
 	r = bytes.NewBufferString("hello2")
@@ -27,32 +25,25 @@ func Test_MultiWriter(t *testing.T) {
 	_ = w.Append(w2)
 	_, _ = io.Copy(w, r)
 
-	want = "hello1hello2"
-	got = w1.String()
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("want=%s got=%s:\n%s", want, got, diff)
-	}
+	assert.Equal("hello1hello2", w1.String())
+	assert.Equal("hello1hello2", w2.String())
 
-	want = "hello1hello2" // new writer has the last write
-	got = w2.String()
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("want=%s got=%s:\n%s", want, got, diff)
-	}
+	// append w3
+	r = bytes.NewBufferString("hello3")
+	w3 := bytes.NewBuffer(nil)
+	_ = w.Append(w3)
+	_, _ = io.Copy(w, r)
+
+	assert.Equal("hello1hello2hello3", w1.String())
+	assert.Equal("hello1hello2hello3", w2.String())
+	assert.Equal("hello2hello3", w3.String())
 
 	// remove w2
-	r = bytes.NewBufferString("hello3")
+	r = bytes.NewBufferString("hello4")
 	w.Remove(w2)
 	_, _ = io.Copy(w, r)
 
-	want = "hello1hello2hello3"
-	got = w1.String()
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("want=%s got=%s:\n%s", want, got, diff)
-	}
-
-	want = "hello1hello2" // removed writer doesn't have the latest write
-	got = w2.String()
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("want=%s got=%s:\n%s", want, got, diff)
-	}
+	assert.Equal("hello1hello2hello3hello4", w1.String())
+	assert.Equal("hello1hello2hello3", w2.String())
+	assert.Equal("hello2hello3hello4", w3.String())
 }
