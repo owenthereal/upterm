@@ -1,9 +1,9 @@
-// +heroku goVersion 1.18
+// +heroku goVersion 1.21
 // +heroku install ./cmd/uptermd/...
 
 module github.com/owenthereal/upterm
 
-go 1.19
+go 1.21
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect

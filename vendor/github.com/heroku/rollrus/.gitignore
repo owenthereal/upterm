@@ -1,4 +1,0 @@
-go-analysis
-/.tools/
-/.circleci/.processed.yml
-coverage.out
