@@ -6,7 +6,6 @@ jobs:
   release:
     name: Upload releases
     runs-on: ubuntu-latest
-    if: "!contains(github.ref, '-')" # skip prereleases
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
