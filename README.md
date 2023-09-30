@@ -6,7 +6,7 @@ This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
 
 ## :movie_camera: Quick Demo
 
-[![asciicast](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7.svg)](https://asciinema.org/a/LTwpMqvvV98eo3ueZHoifLHf7)
+[![demo](https://raw.githubusercontent.com/owenthereal/upterm/gh-pages/demo.gif)](https://asciinema.org/a/efeKPxxzKi3pkyu9LWs1yqdbB)
 
 ## :rocket: Getting Started
 
