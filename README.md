@@ -140,12 +140,9 @@ Clients connect to a terminal session over the public internet via `uptermd` usi
 You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
 
 ```console
-$ helm repo add upterm https://upterm.dev
-$ helm repo update
-$ helm search repo upterm
-NAME            CHART VERSION   APP VERSION     DESCRIPTION
-upterm/uptermd  0.1.0           0.4.1           Secure Terminal Sharing
-$ helm install uptermd upterm/uptermd
+helm repo add upterm https://upterm.dev
+helm repo update
+helm install uptermd upterm/uptermd
 ```
 
 ### Heroku
