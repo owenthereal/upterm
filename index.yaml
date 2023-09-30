@@ -1,21 +1,21 @@
 apiVersion: v1
 entries:
   uptermd:
-    - apiVersion: v2
-      appVersion: 0.11.0
-      created: "2023-09-30T13:06:42.732779-07:00"
-      description: Instant Terminal Sharing
-      digest: 7b41ad24cef83675bc7280829fd71506e04d455c8a9f425bc0f8ad28a267cbc6
-      home: https://upterm.dev
-      maintainers:
-        - email: o@owenou.com
-          name: Owen Ou
-          url: https://github.com/owenthereal
-      name: uptermd
-      sources:
-        - https://github.com/owenthereal/upterm
-      type: application
-      urls:
-        - uptermd-0.2.0.tgz
-      version: 0.2.0
-generated: "2023-09-30T13:06:42.732415-07:00"
+  - apiVersion: v2
+    appVersion: 0.11.0
+    created: "2023-09-30T13:16:38.270573-07:00"
+    description: Secure Terminal Sharing
+    digest: 14cc16df40d4ebf8ad7109334c45945bd304a0fe4bb221bb47bbaefbcc8548c4
+    home: https://upterm.dev
+    maintainers:
+    - email: o@owenou.com
+      name: Owen Ou
+      url: https://github.com/owenthereal
+    name: uptermd
+    sources:
+    - https://github.com/owenthereal/upterm
+    type: application
+    urls:
+    - uptermd-0.2.0.tgz
+    version: 0.2.0
+generated: "2023-09-30T13:16:38.269762-07:00"

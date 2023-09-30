@@ -1,4 +1,4 @@
-# Upterm: Instant Terminal Sharing
+# Upterm
 
 [Upterm](https://github.com/owenthereal/upterm) is an open-source tool enabling developers to share terminal sessions securely over the web. It’s perfect for remote pair programming, accessing computers behind NATs/firewalls, remote debugging, and more.
 
