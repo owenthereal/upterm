@@ -418,6 +418,8 @@ _upterm_host()
     flags+=("-r")
     flags+=("--server=")
     two_word_flags+=("--server")
+    flags+=("--srht-user=")
+    two_word_flags+=("--srht-user")
 
     must_have_one_flag=()
     must_have_one_noun=()
