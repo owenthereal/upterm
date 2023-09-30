@@ -32,4 +32,4 @@ test:
 	go test ./... -timeout=120s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
 
 vet:
-	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v
+	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m
