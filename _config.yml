@@ -1,6 +1,6 @@
 title: Upterm
 theme: jekyll-theme-tactile
-show_downloads: true
+show_downloads: false
 google_analytics: UA-155365325-1
 github:
     public: true
@@ -10,6 +10,5 @@ github:
     is_user_page: false
     owner_url: https://github.com/owenthereal
     owner_name: owenthereal
-    show_downloads: false
 plugins:
     - jemoji
