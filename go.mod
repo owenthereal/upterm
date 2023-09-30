@@ -87,6 +87,6 @@ require (
 )
 
 replace (
-	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20221202194937-0dfcd34433e3
+	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20230930050338-c49eb9cc924f
 	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.13.0-20230910
 )
