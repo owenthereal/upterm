@@ -37,7 +37,7 @@ type Server struct {
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
-	writers := uio.NewMultiWriter()
+	writers := uio.NewMultiWriter(5)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
