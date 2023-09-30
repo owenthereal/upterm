@@ -13,3 +13,5 @@ github:
     owner_name: owenthereal
     zip_url: https://github.com/owenthereal/upterm/releases
     tar_url: https://github.com/owenthereal/upterm/releases
+plugins:
+    - jemoji
