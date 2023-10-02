@@ -68,6 +68,11 @@ type hostKeyCallback struct {
 	ssh.HostKeyCallback
 }
 
+type GitHub struct {
+	API   *url.URL
+	Token string
+}
+
 func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
 		kerr, ok := err.(*knownhosts.KeyError)

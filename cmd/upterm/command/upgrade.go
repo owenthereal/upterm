@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	ggh "github.com/google/go-github/v48/github"
+	ggh "github.com/google/go-github/v55/github"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"

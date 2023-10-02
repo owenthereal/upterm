@@ -28,6 +28,8 @@ var (
 	flagKnownHostsFilename string
 	flagAuthorizedKeys     string
 	flagGitHubUsers        []string
+	flagGitHubAPI          string
+	flagGitHubToken        string
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
 	flagReadOnly           bool
@@ -73,6 +75,8 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "this SourceHut user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
+	cmd.PersistentFlags().StringVarP(&flagGitHubAPI, "github-api", "", "https://api.github.com/v3", "GitHub API - requires a github-token to be set.")
+	cmd.PersistentFlags().StringVarP(&flagGitHubToken, "github-token", "", "", "GitHub Token with scope read:public_key. Required if --github-user is set.")
 
 	return cmd
 }
@@ -136,6 +140,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
+	lf, err := utils.OpenHostLogFile()
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+
+	logger := log.New()
+	logger.SetOutput(lf)
+
 	var authorizedKeys []ssh.PublicKey
 	if flagAuthorizedKeys != "" {
 		authorizedKeys, err = host.AuthorizedKeys(flagAuthorizedKeys)
@@ -144,21 +157,35 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
 	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserKeys(flagGitHubUsers)
+		gitHub := host.GitHub{}
+
+		if flagGitHubToken != "" {
+			githubAPI, err := url.Parse(flagGitHubAPI)
+			if err != nil {
+				return fmt.Errorf("error parsing GitHub API URL: %w", err)
+			}
+
+			gitHub = host.GitHub{
+				API:   githubAPI,
+				Token: flagGitHubToken,
+			}
+		}
+
+		gitHubUserKeys, err := host.GitHubUserKeys(logger, gitHub, flagGitHubUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
 	}
 	if flagGitLabUsers != nil {
-		gitLabUserKeys, err := host.GitLabUserKeys(flagGitLabUsers)
+		gitLabUserKeys, err := host.GitLabUserKeys(logger, flagGitLabUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
 	}
 	if flagSourceHutUsers != nil {
-		sourceHutUserKeys, err := host.SourceHutUserKeys(flagSourceHutUsers)
+		sourceHutUserKeys, err := host.SourceHutUserKeys(logger, flagSourceHutUsers)
 		if err != nil {
 			return fmt.Errorf("error reading SourceHut user keys: %w", err)
 		}
@@ -177,15 +204,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	lf, err := utils.OpenHostLogFile()
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-
-	logger := log.New()
-	logger.SetOutput(lf)
 
 	h := &host.Host{
 		Host:                   flagServer,
