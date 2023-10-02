@@ -31,6 +31,7 @@ var (
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
 	flagReadOnly           bool
+	flagInteractive        bool
 )
 
 func hostCmd() *cobra.Command {
@@ -72,6 +73,7 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "this SourceHut user public keys are permitted to connect.")
+	cmd.PersistentFlags().BoolVarP(&flagInteractive, "interactive", "", true, "directly launch the given command without accepting input from the user.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
 	return cmd
@@ -224,20 +226,23 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 		return err
 	}
 
-	fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
+	if flagInteractive {
 
-	if err := keyboard.Open(); err != nil {
-		return err
-	}
-	defer keyboard.Close()
+		fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
 
-	fmt.Println("Press <q> or <ctrl-c> to accept connections...")
-	for {
-		char, key, err := keyboard.GetKey()
-		if err != nil {
+		if err := keyboard.Open(); err != nil {
 			return err
-		} else if key == keyboard.KeyCtrlC || char == 'q' {
-			break
+		}
+		defer keyboard.Close()
+
+		fmt.Println("Press <q> or <ctrl-c> to accept connections...")
+		for {
+			char, key, err := keyboard.GetKey()
+			if err != nil {
+				return err
+			} else if key == keyboard.KeyCtrlC || char == 'q' {
+				break
+			}
 		}
 	}
 
