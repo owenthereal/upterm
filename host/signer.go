@@ -105,6 +105,33 @@ func getPublicKeysFromGitHub(logger *log.Logger, gitHub GitHub, usernames []stri
 	return authorizedKeys, nil
 }
 
+func GetGitHubUsersFromTeam(logger *log.Logger, gitHub GitHub, teams []string) ([]string, error) {
+	logger.Info("Fetching GitHub team members")
+
+	var usernames []string
+
+	client := github.NewClient(nil).
+		WithAuthToken(gitHub.Token)
+
+	client.BaseURL = gitHub.API
+
+	for _, t := range teams {
+		logger.Info(fmt.Sprintf("Fetching GitHub team members for %s", t))
+		team := strings.Split(t, "/")
+
+		user, _, err := client.Teams.ListTeamMembersBySlug(context.Background(), team[0], team[1], nil)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, user := range user {
+			usernames = append(usernames, user.GetLogin())
+		}
+	}
+
+	return usernames, nil
+}
+
 func getPublicKeys(logger *log.Logger, urlFmt string, usernames []string) ([]ssh.PublicKey, error) {
 	var authorizedKeys []ssh.PublicKey
 	seen := make(map[string]bool)

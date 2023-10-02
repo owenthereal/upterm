@@ -28,6 +28,7 @@ var (
 	flagKnownHostsFilename string
 	flagAuthorizedKeys     string
 	flagGitHubUsers        []string
+	flagGitHubTeams        []string
 	flagGitHubAPI          string
 	flagGitHubToken        string
 	flagGitLabUsers        []string
@@ -76,7 +77,8 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "this SourceHut user public keys are permitted to connect.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 	cmd.PersistentFlags().StringVarP(&flagGitHubAPI, "github-api", "", "https://api.github.com/v3", "GitHub API - requires a github-token to be set.")
-	cmd.PersistentFlags().StringVarP(&flagGitHubToken, "github-token", "", "", "GitHub Token with scope read:public_key. Required if --github-user is set.")
+	cmd.PersistentFlags().StringVarP(&flagGitHubToken, "github-token", "", "", "GitHub Token with scope read:public_key. Required if --github-user is set. scope read:org is required if --github-team is set.")
+	cmd.PersistentFlags().StringSliceVar(&flagGitHubTeams, "github-team", nil, "this GitHub team users public keys are permitted to connect.")
 
 	return cmd
 }
@@ -156,10 +158,13 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
-	if flagGitHubUsers != nil {
+	if flagGitHubUsers != nil || flagGitHubTeams != nil {
 		gitHub := host.GitHub{}
 
-		if flagGitHubToken != "" {
+		switch {
+		case flagGitHubToken == "" && flagGitHubTeams != nil:
+			return fmt.Errorf("error: --github-token is required when --github-team is set")
+		case flagGitHubToken != "":
 			githubAPI, err := url.Parse(flagGitHubAPI)
 			if err != nil {
 				return fmt.Errorf("error parsing GitHub API URL: %w", err)
@@ -170,6 +175,12 @@ func shareRunE(c *cobra.Command, args []string) error {
 				Token: flagGitHubToken,
 			}
 		}
+
+		gitHubTeamUsers, err := host.GetGitHubUsersFromTeam(logger, gitHub, flagGitHubTeams)
+		if err != nil {
+			return fmt.Errorf("error reading GitHub team users: %w", err)
+		}
+		flagGitHubUsers = append(flagGitHubUsers, gitHubTeamUsers...)
 
 		gitHubUserKeys, err := host.GitHubUserKeys(logger, gitHub, flagGitHubUsers)
 		if err != nil {
