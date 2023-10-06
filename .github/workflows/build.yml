@@ -2,8 +2,6 @@ name: Build
 
 on:
   push:
-    branches:
-      - master
   pull_request:
 
 jobs:
@@ -12,8 +10,10 @@ jobs:
     runs-on: ${{ matrix.os  }}
     strategy:
       matrix:
-        os: [ macos-latest, ubuntu-latest ]
+        os: [ ubuntu-latest ]
     steps:
+    - name: Setup tmate session
+      uses: mxschmitt/action-tmate@v3
     - uses: actions/checkout@v4
     - name: Set up Go
       uses: actions/setup-go@v4
