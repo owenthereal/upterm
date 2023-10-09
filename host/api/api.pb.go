@@ -63,7 +63,7 @@ func (x Identifier_Type) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Identifier_Type.Descriptor instead.
 func (Identifier_Type) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{3, 0}
+	return file_api_proto_rawDescGZIP(), []int{4, 0}
 }
 
 type GetSessionRequest struct {
@@ -109,12 +109,13 @@ type GetSessionResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	SessionId        string    `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Command          []string  `protobuf:"bytes,2,rep,name=command,proto3" json:"command,omitempty"`
-	ForceCommand     []string  `protobuf:"bytes,3,rep,name=force_command,json=forceCommand,proto3" json:"force_command,omitempty"`
-	Host             string    `protobuf:"bytes,4,opt,name=host,proto3" json:"host,omitempty"`
-	NodeAddr         string    `protobuf:"bytes,5,opt,name=node_addr,json=nodeAddr,proto3" json:"node_addr,omitempty"`
-	ConnectedClients []*Client `protobuf:"bytes,6,rep,name=connected_clients,json=connectedClients,proto3" json:"connected_clients,omitempty"`
+	SessionId        string           `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Command          []string         `protobuf:"bytes,2,rep,name=command,proto3" json:"command,omitempty"`
+	ForceCommand     []string         `protobuf:"bytes,3,rep,name=force_command,json=forceCommand,proto3" json:"force_command,omitempty"`
+	Host             string           `protobuf:"bytes,4,opt,name=host,proto3" json:"host,omitempty"`
+	NodeAddr         string           `protobuf:"bytes,5,opt,name=node_addr,json=nodeAddr,proto3" json:"node_addr,omitempty"`
+	ConnectedClients []*Client        `protobuf:"bytes,6,rep,name=connected_clients,json=connectedClients,proto3" json:"connected_clients,omitempty"`
+	AuthorizedKeys   []*AuthorizedKey `protobuf:"bytes,7,rep,name=authorized_keys,json=authorizedKeys,proto3" json:"authorized_keys,omitempty"`
 }
 
 func (x *GetSessionResponse) Reset() {
@@ -191,6 +192,68 @@ func (x *GetSessionResponse) GetConnectedClients() []*Client {
 	return nil
 }
 
+func (x *GetSessionResponse) GetAuthorizedKeys() []*AuthorizedKey {
+	if x != nil {
+		return x.AuthorizedKeys
+	}
+	return nil
+}
+
+type AuthorizedKey struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	PublicKeyFingerprints []string `protobuf:"bytes,1,rep,name=public_key_fingerprints,json=publicKeyFingerprints,proto3" json:"public_key_fingerprints,omitempty"`
+	Comment               string   `protobuf:"bytes,2,opt,name=comment,proto3" json:"comment,omitempty"`
+}
+
+func (x *AuthorizedKey) Reset() {
+	*x = AuthorizedKey{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_api_proto_msgTypes[2]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *AuthorizedKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthorizedKey) ProtoMessage() {}
+
+func (x *AuthorizedKey) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[2]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthorizedKey.ProtoReflect.Descriptor instead.
+func (*AuthorizedKey) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *AuthorizedKey) GetPublicKeyFingerprints() []string {
+	if x != nil {
+		return x.PublicKeyFingerprints
+	}
+	return nil
+}
+
+func (x *AuthorizedKey) GetComment() string {
+	if x != nil {
+		return x.Comment
+	}
+	return ""
+}
+
 type Client struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -205,7 +268,7 @@ type Client struct {
 func (x *Client) Reset() {
 	*x = Client{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_api_proto_msgTypes[2]
+		mi := &file_api_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -218,7 +281,7 @@ func (x *Client) String() string {
 func (*Client) ProtoMessage() {}
 
 func (x *Client) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[2]
+	mi := &file_api_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -231,7 +294,7 @@ func (x *Client) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Client.ProtoReflect.Descriptor instead.
 func (*Client) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{2}
+	return file_api_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Client) GetId() string {
@@ -275,7 +338,7 @@ type Identifier struct {
 func (x *Identifier) Reset() {
 	*x = Identifier{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_api_proto_msgTypes[3]
+		mi := &file_api_proto_msgTypes[4]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -288,7 +351,7 @@ func (x *Identifier) String() string {
 func (*Identifier) ProtoMessage() {}
 
 func (x *Identifier) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[4]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -301,7 +364,7 @@ func (x *Identifier) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Identifier.ProtoReflect.Descriptor instead.
 func (*Identifier) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Identifier) GetId() string {
@@ -330,7 +393,7 @@ var File_api_proto protoreflect.FileDescriptor
 var file_api_proto_rawDesc = []byte{
 	0x0a, 0x09, 0x61, 0x70, 0x69, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x03, 0x61, 0x70, 0x69,
 	0x22, 0x13, 0x0a, 0x11, 0x47, 0x65, 0x74, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65,
-	0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0xdd, 0x01, 0x0a, 0x12, 0x47, 0x65, 0x74, 0x53, 0x65, 0x73,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0x9a, 0x02, 0x0a, 0x12, 0x47, 0x65, 0x74, 0x53, 0x65, 0x73,
 	0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x1d, 0x0a, 0x0a,
 	0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
 	0x52, 0x09, 0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x49, 0x64, 0x12, 0x18, 0x0a, 0x07, 0x63,
@@ -344,7 +407,17 @@ var file_api_proto_rawDesc = []byte{
 	0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x65, 0x64, 0x5f, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x73,
 	0x18, 0x06, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0b, 0x2e, 0x61, 0x70, 0x69, 0x2e, 0x43, 0x6c, 0x69,
 	0x65, 0x6e, 0x74, 0x52, 0x10, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x65, 0x64, 0x43, 0x6c,
-	0x69, 0x65, 0x6e, 0x74, 0x73, 0x22, 0x7c, 0x0a, 0x06, 0x43, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x12,
+	0x69, 0x65, 0x6e, 0x74, 0x73, 0x12, 0x3b, 0x0a, 0x0f, 0x61, 0x75, 0x74, 0x68, 0x6f, 0x72, 0x69,
+	0x7a, 0x65, 0x64, 0x5f, 0x6b, 0x65, 0x79, 0x73, 0x18, 0x07, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x12,
+	0x2e, 0x61, 0x70, 0x69, 0x2e, 0x41, 0x75, 0x74, 0x68, 0x6f, 0x72, 0x69, 0x7a, 0x65, 0x64, 0x4b,
+	0x65, 0x79, 0x52, 0x0e, 0x61, 0x75, 0x74, 0x68, 0x6f, 0x72, 0x69, 0x7a, 0x65, 0x64, 0x4b, 0x65,
+	0x79, 0x73, 0x22, 0x61, 0x0a, 0x0d, 0x41, 0x75, 0x74, 0x68, 0x6f, 0x72, 0x69, 0x7a, 0x65, 0x64,
+	0x4b, 0x65, 0x79, 0x12, 0x36, 0x0a, 0x17, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x5f, 0x6b, 0x65,
+	0x79, 0x5f, 0x66, 0x69, 0x6e, 0x67, 0x65, 0x72, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x73, 0x18, 0x01,
+	0x20, 0x03, 0x28, 0x09, 0x52, 0x15, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x4b, 0x65, 0x79, 0x46,
+	0x69, 0x6e, 0x67, 0x65, 0x72, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x73, 0x12, 0x18, 0x0a, 0x07, 0x63,
+	0x6f, 0x6d, 0x6d, 0x65, 0x6e, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x63, 0x6f,
+	0x6d, 0x6d, 0x65, 0x6e, 0x74, 0x22, 0x7c, 0x0a, 0x06, 0x43, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x12,
 	0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x69, 0x64, 0x12,
 	0x18, 0x0a, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
 	0x52, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x12, 0x0a, 0x04, 0x61, 0x64, 0x64,
@@ -384,24 +457,26 @@ func file_api_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_api_proto_goTypes = []interface{}{
 	(Identifier_Type)(0),       // 0: api.Identifier.Type
 	(*GetSessionRequest)(nil),  // 1: api.GetSessionRequest
 	(*GetSessionResponse)(nil), // 2: api.GetSessionResponse
-	(*Client)(nil),             // 3: api.Client
-	(*Identifier)(nil),         // 4: api.Identifier
+	(*AuthorizedKey)(nil),      // 3: api.AuthorizedKey
+	(*Client)(nil),             // 4: api.Client
+	(*Identifier)(nil),         // 5: api.Identifier
 }
 var file_api_proto_depIdxs = []int32{
-	3, // 0: api.GetSessionResponse.connected_clients:type_name -> api.Client
-	0, // 1: api.Identifier.type:type_name -> api.Identifier.Type
-	1, // 2: api.AdminService.GetSession:input_type -> api.GetSessionRequest
-	2, // 3: api.AdminService.GetSession:output_type -> api.GetSessionResponse
-	3, // [3:4] is the sub-list for method output_type
-	2, // [2:3] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	4, // 0: api.GetSessionResponse.connected_clients:type_name -> api.Client
+	3, // 1: api.GetSessionResponse.authorized_keys:type_name -> api.AuthorizedKey
+	0, // 2: api.Identifier.type:type_name -> api.Identifier.Type
+	1, // 3: api.AdminService.GetSession:input_type -> api.GetSessionRequest
+	2, // 4: api.AdminService.GetSession:output_type -> api.GetSessionResponse
+	4, // [4:5] is the sub-list for method output_type
+	3, // [3:4] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_init() }
@@ -435,7 +510,7 @@ func file_api_proto_init() {
 			}
 		}
 		file_api_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*Client); i {
+			switch v := v.(*AuthorizedKey); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -447,6 +522,18 @@ func file_api_proto_init() {
 			}
 		}
 		file_api_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*Client); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_api_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*Identifier); i {
 			case 0:
 				return &v.state
@@ -465,7 +552,7 @@ func file_api_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_api_proto_rawDesc,
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

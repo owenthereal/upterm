@@ -237,6 +237,7 @@ func displaySession(session *api.GetSessionResponse) error {
 		{"Command:", strings.Join(session.Command, " ")},
 		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
 		{"Host:", u.Scheme + "://" + hostPort},
+		{"Authorized Keys:", naIfEmpty(displayAuthorizedKeys(session.AuthorizedKeys))},
 		{"SSH Session:", sshCmd},
 	}
 
@@ -295,6 +296,19 @@ func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
+	var aks []string
+	for _, ak := range keys {
+		var fps []string
+		for _, fp := range ak.PublicKeyFingerprints {
+			fps = append(fps, fmt.Sprintf("- %s", fp))
+		}
+		aks = append(aks, fmt.Sprintf("%s:\n%s", ak.Comment, strings.Join(fps, "\n")))
+	}
+
+	return strings.Join(aks, "\n")
 }
 
 func naIfEmpty(s string) string {

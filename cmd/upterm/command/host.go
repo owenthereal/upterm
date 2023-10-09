@@ -18,7 +18,6 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -74,7 +73,7 @@ private key. To authorize client connections, specify a authorized_key file with
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
-	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "Authorize specified GitHub users by allowing their public keys to connect.")
+	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "Authorize specified GitLab users by allowing their public keys to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
@@ -142,29 +141,39 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	var authorizedKeys []ssh.PublicKey
-	if flagAuthorizedKeys != "" {
-		authorizedKeys, err = host.AuthorizedKeys(flagAuthorizedKeys)
-	}
+	lf, err := utils.OpenHostLogFile()
 	if err != nil {
-		return fmt.Errorf("error reading authorized keys: %w", err)
+		return err
+	}
+	defer lf.Close()
+
+	logger := log.New()
+	logger.SetOutput(lf)
+
+	var authorizedKeys []*host.AuthorizedKey
+	if flagAuthorizedKeys != "" {
+		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
+		if err != nil {
+			return fmt.Errorf("error reading authorized keys: %w", err)
+		}
+		authorizedKeys = append(authorizedKeys, aks)
 	}
 	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserKeys(flagGitHubUsers)
+		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
 	}
 	if flagGitLabUsers != nil {
-		gitLabUserKeys, err := host.GitLabUserKeys(flagGitLabUsers)
+		gitLabUserKeys, err := host.GitLabUserAuthorizedKeys(flagGitLabUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
 	}
 	if flagSourceHutUsers != nil {
-		sourceHutUserKeys, err := host.SourceHutUserKeys(flagSourceHutUsers)
+		sourceHutUserKeys, err := host.SourceHutUserAuthorizedKeys(flagSourceHutUsers)
 		if err != nil {
 			return fmt.Errorf("error reading SourceHut user keys: %w", err)
 		}
@@ -183,15 +192,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	lf, err := utils.OpenHostLogFile()
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-
-	logger := log.New()
-	logger.SetOutput(lf)
 
 	h := &host.Host{
 		Host:                   flagServer,

@@ -285,13 +285,13 @@ func (c *Host) Share(url string) error {
 	}
 
 	// permit client public key
-	var authorizedKeys []ssh.PublicKey
+	var authorizedKeys []*host.AuthorizedKey
 	if c.PermittedClientPublicKey != "" {
 		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(c.PermittedClientPublicKey))
 		if err != nil {
 			return err
 		}
-		authorizedKeys = append(authorizedKeys, pk)
+		authorizedKeys = append(authorizedKeys, &host.AuthorizedKey{PublicKeys: []ssh.PublicKey{pk}})
 	}
 
 	if c.AdminSocketFile == "" {

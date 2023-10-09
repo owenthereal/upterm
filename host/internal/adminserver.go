@@ -56,6 +56,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		NodeAddr:         s.Session.NodeAddr,
 		Command:          s.Session.Command,
 		ForceCommand:     s.Session.ForceCommand,
+		AuthorizedKeys:   s.Session.AuthorizedKeys,
 		ConnectedClients: s.ClientRepo.Clients(),
 	}, nil
 }
