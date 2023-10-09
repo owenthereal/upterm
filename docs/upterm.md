@@ -4,7 +4,7 @@ Instant Terminal Sharing
 
 ### Synopsis
 
-Upterm is an open-source solution for sharing terminal sessions instantly over secure tunnels to the public internet.
+Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.
 
 ### Examples
 
