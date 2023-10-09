@@ -8,7 +8,7 @@ func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "upterm",
 		Short: "Instant Terminal Sharing",
-		Long:  "Upterm is an open-source solution for sharing terminal sessions instantly over secure tunnels to the public internet.",
+		Long:  "Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.",
 		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   $ upterm host
 

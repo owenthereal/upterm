@@ -4,7 +4,11 @@ Host a terminal session
 
 ### Synopsis
 
-Host a terminal session over a reverse SSH tunnel to the Upterm server with the IO of the host and the client attaching to the IO of a command. By default, the command authenticates against the Upterm server using the private key files located at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, the command reads private keys from SSH Agent. If no private key is found from files or SSH Agent, the command falls back to generate one on the fly. To permit authorized clients to join, client public keys can be specified with --authorized-key.
+Host a terminal session via a reverse SSH tunnel to the Upterm server, linking the IO of the host
+and client to a command's IO. Authentication against the Upterm server defaults to using private key files located
+at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, it resorts
+to reading private keys from the SSH Agent. Absence of private keys in files or SSH Agent generates an on-the-fly
+private key. To authorize client connections, specify a authorized_key file with public keys using --authorized-keys.
 
 ```
 upterm host [flags]
@@ -13,46 +17,43 @@ upterm host [flags]
 ### Examples
 
 ```
-  # Host a terminal session that runs $SHELL with
-  # client's input/output attaching to the host's
+  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   upterm host
 
-  # automatically accept client connections without prompting
+  # Accept client connections automatically without prompts:
   upterm host --accept
 
-  # Host a terminal session that only allows specified public key(s) to connect
-  upterm host --authorized-key PATH_TO_PUBLIC_KEY
+  # Host a terminal session allowing only specified public key(s) to connect:
+  upterm host --authorized-keys PATH_TO_AUTHORIZED_KEY_FILE
 
-  # Host a session with a custom command.
+  # Host a session executing a custom command:
   upterm host -- docker run --rm -ti ubuntu bash
 
-  # Host a session that runs 'tmux new -t pair-programming' and
-  # force clients to join with 'tmux attach -t pair-programming'.
-  # This is similar to tmate.
+  # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
-  # Use a different Uptermd server and host a session via WebSocket
+  # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
 ```
 
 ### Options
 
 ```
-      --accept                  automatically accept client connections without prompting.
-  -a, --authorized-key string   an authorized_keys file that lists public keys that are permitted to connect.
-  -f, --force-command string    force execution of a command and attach its input/output to client's.
-      --github-user strings     this GitHub user public keys are permitted to connect.
-      --gitlab-user strings     this GitLab user public keys are permitted to connect.
-  -h, --help                    help for host
-      --known-hosts string      a file contains the known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
-  -i, --private-key strings     private key file for public key authentication against the upterm server (default [/Users/owen/.ssh/id_ed25519])
-  -r, --read-only               host a read-only session. Clients won't be able to interact.
-      --server string           upterm server address (required), supported protocols are ssh, ws, or wss. (default "ssh://uptermd.upterm.dev:22")
-      --srht-user strings       this SourceHut user public keys are permitted to connect.
+      --accept                   Automatically accept client connections without prompts.
+      --authorized-keys string   Specify a authorize_keys file listing authorized public keys for connection.
+  -f, --force-command string     Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
+      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect.
+      --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect.
+  -h, --help                     help for host
+      --known-hosts string       Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
+  -i, --private-key strings      Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
+  -r, --read-only                Host a read-only session, preventing client interaction.
+      --server string            Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
+      --srht-user strings        Authorize specified SourceHut users by allowing their public keys to connect.
 ```
 
 ### SEE ALSO
 
-* [upterm](upterm.md)	 - Secure Terminal Sharing
+* [upterm](upterm.md)	 - Instant Terminal Sharing
 
 ###### Auto generated by spf13/cobra on 9-Oct-2023

@@ -40,7 +40,7 @@ func list() *cobra.Command {
 		Aliases: []string{"ls", "l"},
 		Short:   "List shared sessions",
 		Long:    `List shared sessions. Session admin sockets are located in ~/.upterm.`,
-		Example: `  # List shared sessions
+		Example: `  # List shared sessions:
   upterm session list`,
 		RunE: listRunE,
 	}
@@ -54,7 +54,7 @@ func show() *cobra.Command {
 		Aliases: []string{"i"},
 		Short:   "Display terminal session by name",
 		Long:    `Display terminal session by name.`,
-		Example: `  # Display session by name
+		Example: `  # Display session by name:
   upterm session info NAME`,
 		RunE: infoRunE,
 	}

@@ -1,10 +1,10 @@
 ## upterm session info
 
-Display session by name
+Display terminal session by name
 
 ### Synopsis
 
-Display session by name.
+Display terminal session by name.
 
 ```
 upterm session info [flags]
@@ -13,7 +13,7 @@ upterm session info [flags]
 ### Examples
 
 ```
-  # Display session by name
+  # Display session by name:
   upterm session info NAME
 ```
 

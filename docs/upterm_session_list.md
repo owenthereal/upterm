@@ -13,7 +13,7 @@ upterm session list [flags]
 ### Examples
 
 ```
-  # List shared sessions
+  # List shared sessions:
   upterm session list
 ```
 

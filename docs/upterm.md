@@ -1,20 +1,18 @@
 ## upterm
 
-Secure Terminal Sharing
+Instant Terminal Sharing
 
 ### Synopsis
 
-Upterm is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.
+Upterm is an open-source solution for sharing terminal sessions instantly over secure tunnels to the public internet.
 
 ### Examples
 
 ```
-  # Host a terminal session that runs $SHELL with
-  # client's input/output attaching to the host's
+  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   $ upterm host
 
-  # Display the ssh connection string and share it with
-  # the client(s)
+  # Display the SSH connection string for sharing with client(s):
   $ upterm session current
   === SESSION_ID
   Command:                /bin/bash
@@ -22,7 +20,7 @@ Upterm is an open-source solution for sharing terminal sessions instantly with t
   Host:                   ssh://uptermd.upterm.dev:22
   SSH Session:            ssh TOKEN@uptermd.upterm.dev
 
-  # A client connects to the host session with ssh
+  # A client connects to the host session via SSH:
   $ ssh TOKEN@uptermd.upterm.dev
 ```
 
@@ -35,7 +33,7 @@ Upterm is an open-source solution for sharing terminal sessions instantly with t
 ### SEE ALSO
 
 * [upterm host](upterm_host.md)	 - Host a terminal session
-* [upterm proxy](upterm_proxy.md)	 - Proxy a terminal session over WebSocket
+* [upterm proxy](upterm_proxy.md)	 - Proxy a terminal session via WebSocket
 * [upterm session](upterm_session.md)	 - Display session
 * [upterm upgrade](upterm_upgrade.md)	 - Upgrade the CLI
 * [upterm version](upterm_version.md)	 - Show version
