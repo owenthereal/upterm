@@ -395,6 +395,7 @@ _upterm_host()
     flags_with_completion=()
     flags_completion=()
 
+    flags+=("--accept")
     flags+=("--authorized-key=")
     two_word_flags+=("--authorized-key")
     two_word_flags+=("-a")
