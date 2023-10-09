@@ -42,7 +42,7 @@ upterm host [flags]
       --accept                   Automatically accept client connections without prompts.
       --authorized-keys string   Specify a authorize_keys file listing authorized public keys for connection.
   -f, --force-command string     Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
-      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect.
+      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
       --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect.
   -h, --help                     help for host
       --known-hosts string       Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
