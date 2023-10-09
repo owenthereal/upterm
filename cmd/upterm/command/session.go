@@ -52,8 +52,8 @@ func show() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "info",
 		Aliases: []string{"i"},
-		Short:   "Display session by name",
-		Long:    `Display session by name.`,
+		Short:   "Display terminal session by name",
+		Long:    `Display terminal session by name.`,
 		Example: `  # Display session by name
   upterm session info NAME`,
 		RunE: infoRunE,
@@ -66,11 +66,14 @@ func current() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "current",
 		Aliases: []string{"c"},
-		Short:   "Display the current session",
-		Long:    `Display the current session. By default, the command fetches the current session from the admin socket path defined in the UPTERM_ADMIN_SOCKET environment variable. The UPTERM_ADMIN_SOCKET environment variable is set after a session is shared with 'upterm host'.`,
-		Example: `  # Display the current session defined in $UPTERM_ADMIN_SOCKET
+		Short:   "Display the current terminal session",
+		Long: `Display the current terminal session. By default, this command retrieves the current session from
+the admin socket path specified in the UPTERM_ADMIN_SOCKET environment variable. This environment variable is set upon
+sharing a session with 'upterm host'.`,
+		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
-  # Display the current session with a custom path
+
+  # Display the session with a custom admin socket path:
   upterm session current --admin-socket ADMIN_SOCKET_PATH`,
 		PreRunE: validateCurrentRequiredFlags,
 		RunE:    currentRunE,
