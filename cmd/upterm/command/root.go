@@ -7,14 +7,12 @@ import (
 func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "upterm",
-		Short: "Secure Terminal Sharing",
-		Long:  "Upterm is an open-source solution for sharing terminal sessions instantly with the public internet over secure tunnels.",
-		Example: `  # Host a terminal session that runs $SHELL with
-  # client's input/output attaching to the host's
+		Short: "Instant Terminal Sharing",
+		Long:  "Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.",
+		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   $ upterm host
 
-  # Display the ssh connection string and share it with
-  # the client(s)
+  # Display the SSH connection string for sharing with client(s):
   $ upterm session current
   === SESSION_ID
   Command:                /bin/bash
@@ -22,7 +20,7 @@ func Root() *cobra.Command {
   Host:                   ssh://uptermd.upterm.dev:22
   SSH Session:            ssh TOKEN@uptermd.upterm.dev
 
-  # A client connects to the host session with ssh
+  # A client connects to the host session via SSH:
   $ ssh TOKEN@uptermd.upterm.dev`,
 	}
 

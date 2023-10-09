@@ -3,7 +3,7 @@
 
 .SH NAME
 .PP
-upterm-proxy - Proxy a terminal session over WebSocket
+upterm-proxy - Proxy a terminal session via WebSocket
 
 
 .SH SYNOPSIS
@@ -13,7 +13,7 @@ upterm-proxy - Proxy a terminal session over WebSocket
 
 .SH DESCRIPTION
 .PP
-Proxy a terminal session over WebSocket. This must be used in conjunction with SSH ProxyCommand.
+Proxy a terminal session via WebSocket, to be used alongside SSH ProxyCommand.
 
 
 .SH OPTIONS
@@ -27,10 +27,10 @@ Proxy a terminal session over WebSocket. This must be used in conjunction with S
 .RS
 
 .nf
-  # The host shares a session by running $SHELL over WebSocket
+  # Host shares a session running $SHELL over WebSocket:
   upterm host --server wss://uptermd.upterm.dev -- YOUR_COMMAND
 
-  # A client connects to the host session via WebSocket
+  # Client connects to the host session via WebSocket:
   ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN:uptermd.uptermd.dev:443
 
 .fi

@@ -1,10 +1,12 @@
 ## upterm session current
 
-Display the current session
+Display the current terminal session
 
 ### Synopsis
 
-Display the current session. By default, the command fetches the current session from the admin socket path defined in the UPTERM_ADMIN_SOCKET environment variable. The UPTERM_ADMIN_SOCKET environment variable is set after a session is shared with 'upterm host'.
+Display the current terminal session. By default, this command retrieves the current session from
+the admin socket path specified in the UPTERM_ADMIN_SOCKET environment variable. This environment variable is set upon
+sharing a session with 'upterm host'.
 
 ```
 upterm session current [flags]
@@ -13,9 +15,10 @@ upterm session current [flags]
 ### Examples
 
 ```
-  # Display the current session defined in $UPTERM_ADMIN_SOCKET
+  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
-  # Display the current session with a custom path
+
+  # Display the session with a custom admin socket path:
   upterm session current --admin-socket ADMIN_SOCKET_PATH
 ```
 
