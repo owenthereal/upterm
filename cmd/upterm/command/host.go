@@ -18,7 +18,6 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -151,12 +150,13 @@ func shareRunE(c *cobra.Command, args []string) error {
 	logger := log.New()
 	logger.SetOutput(lf)
 
-	var authorizedKeys []ssh.PublicKey
+	var authorizedKeys []*host.AuthorizedKey
 	if flagAuthorizedKeys != "" {
-		authorizedKeys, err = host.AuthorizedKeysFromFile(flagAuthorizedKeys)
-	}
-	if err != nil {
-		return fmt.Errorf("error reading authorized keys: %w", err)
+		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
+		if err != nil {
+			return fmt.Errorf("error reading authorized keys: %w", err)
+		}
+		authorizedKeys = append(authorizedKeys, aks)
 	}
 	if flagGitHubUsers != nil {
 		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)

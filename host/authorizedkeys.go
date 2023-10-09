@@ -20,18 +20,23 @@ const (
 	sourceHutKeysUrlFmt = "https://meta.sr.ht/~%s"
 )
 
-func AuthorizedKeysFromFile(file string) ([]ssh.PublicKey, error) {
+type AuthorizedKey struct {
+	PublicKeys []ssh.PublicKey
+	Comment    string
+}
+
+func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {
 	authorizedKeysBytes, err := os.ReadFile(file)
 	if err != nil {
 		return nil, nil
 	}
 
-	return parseAuthorizedKeys(authorizedKeysBytes)
+	return parseAuthorizedKeys(authorizedKeysBytes, file)
 }
 
-func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]ssh.PublicKey, error) {
+func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]*AuthorizedKey, error) {
 	var (
-		authorizedKeys []ssh.PublicKey
+		authorizedKeys []*AuthorizedKey
 		seen           = make(map[string]bool)
 	)
 	for _, username := range usernames {
@@ -43,27 +48,27 @@ func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]ssh.
 				return nil, err
 			}
 
-			aks, err := parseAuthorizedKeys(pks)
+			aks, err := parseAuthorizedKeys(pks, username)
 			if err != nil {
 				return nil, err
 			}
 
-			authorizedKeys = append(authorizedKeys, aks...)
+			authorizedKeys = append(authorizedKeys, aks)
 		}
 	}
 
 	return authorizedKeys, nil
 }
 
-func GitLabUserAuthorizedKeys(usernames []string) ([]ssh.PublicKey, error) {
+func GitLabUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
 	return usersPublicKeys(gitLabKeysUrlFmt, usernames)
 }
 
-func SourceHutUserAuthorizedKeys(usernames []string) ([]ssh.PublicKey, error) {
+func SourceHutUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
 	return usersPublicKeys(sourceHutKeysUrlFmt, usernames)
 }
 
-func parseAuthorizedKeys(keysBytes []byte) ([]ssh.PublicKey, error) {
+func parseAuthorizedKeys(keysBytes []byte, comment string) (*AuthorizedKey, error) {
 	var authorizedKeys []ssh.PublicKey
 	for len(keysBytes) > 0 {
 		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(keysBytes)
@@ -75,7 +80,10 @@ func parseAuthorizedKeys(keysBytes []byte) ([]ssh.PublicKey, error) {
 		keysBytes = rest
 	}
 
-	return authorizedKeys, nil
+	return &AuthorizedKey{
+		PublicKeys: authorizedKeys,
+		Comment:    comment,
+	}, nil
 }
 
 func githubUserPublicKeys(username string, logger *logrus.Logger) ([]byte, error) {
@@ -105,9 +113,9 @@ func githubUserPublicKeys(username string, logger *logrus.Logger) ([]byte, error
 	return []byte(strings.Join(authorizedKeys, "\n")), nil
 }
 
-func usersPublicKeys(urlFmt string, usernames []string) ([]ssh.PublicKey, error) {
+func usersPublicKeys(urlFmt string, usernames []string) ([]*AuthorizedKey, error) {
 	var (
-		authorizedKeys []ssh.PublicKey
+		authorizedKeys []*AuthorizedKey
 		seen           = make(map[string]bool)
 	)
 	for _, username := range usernames {
@@ -118,12 +126,12 @@ func usersPublicKeys(urlFmt string, usernames []string) ([]ssh.PublicKey, error)
 			if err != nil {
 				return nil, fmt.Errorf("[%s]: %s", username, err)
 			}
-			userKeys, err := parseAuthorizedKeys(keyBytes)
+			userKeys, err := parseAuthorizedKeys(keyBytes, username)
 			if err != nil {
 				return nil, fmt.Errorf("[%s]: %s", username, err)
 			}
 
-			authorizedKeys = append(authorizedKeys, userKeys...)
+			authorizedKeys = append(authorizedKeys, userKeys)
 		}
 	}
 	return authorizedKeys, nil
