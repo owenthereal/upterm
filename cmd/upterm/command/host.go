@@ -144,27 +144,27 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	var authorizedKeys []ssh.PublicKey
 	if flagAuthorizedKeys != "" {
-		authorizedKeys, err = host.AuthorizedKeys(flagAuthorizedKeys)
+		authorizedKeys, err = host.AuthorizedKeysFromFile(flagAuthorizedKeys)
 	}
 	if err != nil {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
 	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserKeys(flagGitHubUsers)
+		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
 	}
 	if flagGitLabUsers != nil {
-		gitLabUserKeys, err := host.GitLabUserKeys(flagGitLabUsers)
+		gitLabUserKeys, err := host.GitLabUserAuthorizedKeys(flagGitLabUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
 	}
 	if flagSourceHutUsers != nil {
-		sourceHutUserKeys, err := host.SourceHutUserKeys(flagSourceHutUsers)
+		sourceHutUserKeys, err := host.SourceHutUserAuthorizedKeys(flagSourceHutUsers)
 		if err != nil {
 			return fmt.Errorf("error reading SourceHut user keys: %w", err)
 		}
