@@ -142,6 +142,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
+	lf, err := utils.OpenHostLogFile()
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+
+	logger := log.New()
+	logger.SetOutput(lf)
+
 	var authorizedKeys []ssh.PublicKey
 	if flagAuthorizedKeys != "" {
 		authorizedKeys, err = host.AuthorizedKeysFromFile(flagAuthorizedKeys)
@@ -150,7 +159,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error reading authorized keys: %w", err)
 	}
 	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers)
+		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
@@ -183,15 +192,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	lf, err := utils.OpenHostLogFile()
-	if err != nil {
-		return err
-	}
-	defer lf.Close()
-
-	logger := log.New()
-	logger.SetOutput(lf)
 
 	h := &host.Host{
 		Host:                   flagServer,

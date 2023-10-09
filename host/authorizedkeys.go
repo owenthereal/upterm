@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -28,7 +29,7 @@ func AuthorizedKeysFromFile(file string) ([]ssh.PublicKey, error) {
 	return parseAuthorizedKeys(authorizedKeysBytes)
 }
 
-func GitHubUserAuthorizedKeys(usernames []string) ([]ssh.PublicKey, error) {
+func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]ssh.PublicKey, error) {
 	var (
 		authorizedKeys []ssh.PublicKey
 		seen           = make(map[string]bool)
@@ -37,7 +38,7 @@ func GitHubUserAuthorizedKeys(usernames []string) ([]ssh.PublicKey, error) {
 		if _, found := seen[username]; !found {
 			seen[username] = true
 
-			pks, err := githubUserPublicKeys(username)
+			pks, err := githubUserPublicKeys(username, logger)
 			if err != nil {
 				return nil, err
 			}
@@ -77,11 +78,12 @@ func parseAuthorizedKeys(keysBytes []byte) ([]ssh.PublicKey, error) {
 	return authorizedKeys, nil
 }
 
-func githubUserPublicKeys(username string) ([]byte, error) {
+func githubUserPublicKeys(username string, logger *logrus.Logger) ([]byte, error) {
 	client, err := api.DefaultRESTClient()
 	if err != nil {
 		if strings.Contains(err.Error(), "authentication token not found for host") {
 			// fallback to use the public GH API
+			logger.WithError(err).Warn("no GitHub token found, falling back to public API")
 			return userPublicKeys(gitHubKeysUrlFmt, username)
 		}
 
