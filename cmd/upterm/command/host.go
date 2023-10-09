@@ -31,6 +31,7 @@ var (
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
 	flagReadOnly           bool
+	flagAccept             bool
 )
 
 func hostCmd() *cobra.Command {
@@ -41,6 +42,9 @@ func hostCmd() *cobra.Command {
 		Example: `  # Host a terminal session that runs $SHELL with
   # client's input/output attaching to the host's
   upterm host
+
+  # automatically accept client connections without prompting
+  upterm host --accept
 
   # Host a terminal session that only allows specified public key(s) to connect
   upterm host --authorized-key PATH_TO_PUBLIC_KEY
@@ -72,6 +76,7 @@ func hostCmd() *cobra.Command {
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "this GitHub user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "this GitLab user public keys are permitted to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "this SourceHut user public keys are permitted to connect.")
+	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "automatically accept client connections without prompting.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "host a read-only session. Clients won't be able to interact.")
 
 	return cmd
@@ -224,20 +229,22 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 		return err
 	}
 
-	fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
+	if !flagAccept {
+		fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
 
-	if err := keyboard.Open(); err != nil {
-		return err
-	}
-	defer keyboard.Close()
-
-	fmt.Println("Press <q> or <ctrl-c> to accept connections...")
-	for {
-		char, key, err := keyboard.GetKey()
-		if err != nil {
+		if err := keyboard.Open(); err != nil {
 			return err
-		} else if key == keyboard.KeyCtrlC || char == 'q' {
-			break
+		}
+		defer keyboard.Close()
+
+		fmt.Println("Press <q> or <ctrl-c> to accept connections...")
+		for {
+			char, key, err := keyboard.GetKey()
+			if err != nil {
+				return err
+			} else if key == keyboard.KeyCtrlC || char == 'q' {
+				break
+			}
 		}
 	}
 
