@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	gokitprometheus "github.com/go-kit/kit/metrics/prometheus"
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
@@ -36,6 +37,8 @@ type Opt struct {
 	MetricAddr string
 	Debug      bool
 }
+
+var MetricsProvider provider.Provider
 
 func Start(opt Opt) error {
 	// must always have a ssh addr
@@ -125,11 +128,11 @@ func Start(opt Opt) error {
 
 	var g run.Group
 	{
-		var mp provider.Provider
+		//var mp provider.Provider
 		if opt.MetricAddr == "" {
-			mp = provider.NewDiscardProvider()
+			MetricsProvider = provider.NewDiscardProvider()
 		} else {
-			mp = provider.NewPrometheusProvider("upterm", "uptermd")
+			MetricsProvider = provider.NewPrometheusProvider("upterm", "uptermd")
 		}
 
 		s := &Server{
@@ -138,7 +141,7 @@ func Start(opt Opt) error {
 			Signers:         signers,
 			NetworkProvider: network,
 			Logger:          logger.WithField("com", "server"),
-			MetricsProvider: mp,
+			MetricsProvider: MetricsProvider,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
@@ -320,7 +323,7 @@ func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
 	// If it's a host request, dial to SSHProxy in the same node.
 	// Otherwise, dial to the specified SSHProxy.
 	if id.Type == api.Identifier_HOST {
-		d.Logger.WithFields(log.Fields{"host": id.Id, "sshproxy-addr": d.sshProxyAddr}).Info("dialing sshproxy sshd")
+		d.Logger.WithFields(log.Fields{"host": id.Id, "sshproxy-addr": d.sshProxyAddr, "label": id.Label}).Info("dialing sshproxy sshd")
 		return net.DialTimeout("tcp", d.sshProxyAddr, tcpDialTimeout)
 	}
 
@@ -372,6 +375,9 @@ func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 		// Otherwise, dial to neighbour node
 		if cd.NodeAddr == addr {
 			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing session")
+
+			gokitprometheus.NewGauge(ConnectedClients).With("session_id", id.Id).Add(1)
+
 			return cd.SessionDialListener.Dial(id.Id)
 		}
 

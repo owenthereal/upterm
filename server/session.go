@@ -13,6 +13,7 @@ type session struct {
 	HostUser             string
 	HostPublicKeys       []ssh.PublicKey
 	ClientAuthorizedKeys []ssh.PublicKey
+	Label                string
 }
 
 func (s session) IsClientKeyAllowed(key ssh.PublicKey) bool {
@@ -29,7 +30,7 @@ func (s session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	return false
 }
 
-func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*session, error) {
+func newSession(id, hostUser, label string, hostPublicKeys, clientAuthorizedKeys [][]byte) (*session, error) {
 	var (
 		hpk []ssh.PublicKey
 		cak []ssh.PublicKey
@@ -56,6 +57,7 @@ func newSession(id, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]by
 		HostUser:             hostUser,
 		HostPublicKeys:       hpk,
 		ClientAuthorizedKeys: cak,
+		Label:                label,
 	}, nil
 }
 

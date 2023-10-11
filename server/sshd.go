@@ -12,6 +12,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
+
+	gokitprometheus "github.com/go-kit/kit/metrics/prometheus"
 )
 
 var (
@@ -74,7 +76,10 @@ func (s *sshd) Serve(ln net.Listener) error {
 			return config
 		},
 		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
-			s.Logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port}).Info("attempt to bind")
+			s.Logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port, "label": "comario-dev"}).Info("attempt to bind")
+
+			//tbd: expose this as metric as well
+
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
@@ -110,6 +115,7 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	sess, err := newSession(
 		utils.GenerateSessionID(),
 		sessReq.HostUser,
+		sessReq.Label,
 		sessReq.HostPublicKeys,
 		sessReq.ClientAuthorizedKeys,
 	)
@@ -124,7 +130,10 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 	sessResp := &CreateSessionResponse{
 		SessionID: sess.ID,
 		NodeAddr:  s.NodeAddr,
+		Label:     sess.Label,
 	}
+
+	gokitprometheus.NewGauge(PreparedSession).With("label", sess.Label, "session_id", sess.ID).Set(1)
 
 	b, err := proto.Marshal(sessResp)
 	if err != nil {

@@ -12,6 +12,7 @@ func EncodeIdentifierSession(session *GetSessionResponse) (string, error) {
 		Id:       session.SessionId,
 		Type:     Identifier_CLIENT,
 		NodeAddr: session.NodeAddr,
+		Label:    session.Label,
 	}
 
 	return EncodeIdentifier(id)
