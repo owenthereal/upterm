@@ -26,15 +26,16 @@ const (
 )
 
 type Opt struct {
-	SSHAddr    string
-	WSAddr     string
-	NodeAddr   string
-	KeyFiles   []string
-	Hostnames  []string
-	Network    string
-	NetworkOpt []string
-	MetricAddr string
-	Debug      bool
+	SSHAddr              string
+	WSAddr               string
+	NodeAddr             string
+	KeyFiles             []string
+	Hostnames            []string
+	CustomAuthorizedKeys string
+	Network              string
+	NetworkOpt           []string
+	MetricAddr           string
+	Debug                bool
 }
 
 func Start(opt Opt) error {
@@ -133,12 +134,13 @@ func Start(opt Opt) error {
 		}
 
 		s := &Server{
-			NodeAddr:        nodeAddr,
-			HostSigners:     hostSigners,
-			Signers:         signers,
-			NetworkProvider: network,
-			Logger:          logger.WithField("com", "server"),
-			MetricsProvider: mp,
+			NodeAddr:             nodeAddr,
+			HostSigners:          hostSigners,
+			Signers:              signers,
+			NetworkProvider:      network,
+			Logger:               logger.WithField("com", "server"),
+			MetricsProvider:      mp,
+			CustomAuthorizedKeys: opt.CustomAuthorizedKeys,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
@@ -176,12 +178,13 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	NodeAddr        string
-	HostSigners     []ssh.Signer
-	Signers         []ssh.Signer
-	NetworkProvider NetworkProvider
-	MetricsProvider provider.Provider
-	Logger          log.FieldLogger
+	NodeAddr             string
+	HostSigners          []ssh.Signer
+	Signers              []ssh.Signer
+	NetworkProvider      NetworkProvider
+	MetricsProvider      provider.Provider
+	Logger               log.FieldLogger
+	CustomAuthorizedKeys string
 
 	sshln net.Listener
 	wsln  net.Listener
@@ -237,13 +240,14 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				HostSigners:     s.HostSigners,
-				Signers:         s.Signers,
-				NodeAddr:        s.NodeAddr,
-				ConnDialer:      cd,
-				SessionRepo:     sessRepo,
-				Logger:          s.Logger.WithField("com", "ssh-proxy"),
-				MetricsProvider: s.MetricsProvider,
+				HostSigners:          s.HostSigners,
+				Signers:              s.Signers,
+				NodeAddr:             s.NodeAddr,
+				ConnDialer:           cd,
+				SessionRepo:          sessRepo,
+				Logger:               s.Logger.WithField("com", "ssh-proxy"),
+				MetricsProvider:      s.MetricsProvider,
+				CustomAuthorizedKeys: s.CustomAuthorizedKeys,
 			}
 			g.Add(func() error {
 				return sp.Serve(sshln)
