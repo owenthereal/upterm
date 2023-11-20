@@ -12,7 +12,7 @@ require (
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8 // indirect
 	github.com/buger/goterm v0.0.0-20200322175922-2f3e71b85129 // indirect
 	github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c // indirect
-	github.com/creack/pty v1.1.20
+	github.com/creack/pty v1.1.21
 	github.com/dchest/uniuri v1.2.0
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/gen2brain/beeep v0.0.0-20220909211152-5a9ec94374f6
