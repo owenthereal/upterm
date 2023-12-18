@@ -43,7 +43,7 @@ require (
 	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
 	golang.org/x/crypto v0.14.0
-	google.golang.org/grpc v1.59.0
+	google.golang.org/grpc v1.60.0
 	google.golang.org/protobuf v1.31.0
 )
 
@@ -93,10 +93,10 @@ require (
 	github.com/tadvi/systray v0.0.0-20190226123456-11a2b8fa57af // indirect
 	github.com/thlib/go-timezone-local v0.0.0-20210907160436-ef149e42d28e // indirect
 	golang.org/x/net v0.17.0 // indirect
-	golang.org/x/sync v0.3.0 // indirect
+	golang.org/x/sync v0.4.0 // indirect
 	golang.org/x/sys v0.15.0 // indirect
 	golang.org/x/text v0.13.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20230822172742-b8732ec3820d // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20231002182017-d307bd883b97 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
