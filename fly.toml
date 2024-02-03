@@ -1,57 +1,54 @@
-# fly.toml app configuration file generated for upterm on 2023-09-17T09:40:01-07:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
 app = "upterm"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
 [experimental]
-  cmd = ["uptermd --ssh-addr 0.0.0.0:2222 --ws-addr 0.0.0.0:8080 --node-addr $(echo ${FLY_ALLOC_ID} | cut -f1 -d '-').vm.${FLY_APP_NAME}.internal:2222 --hostname uptermd.upterm.dev"]
-  entrypoint = ["/bin/sh", "-c"]
-  auto_rollback = true
+cmd = [
+  "uptermd --ssh-addr 0.0.0.0:2222 --ws-addr 0.0.0.0:8080 --node-addr $(echo ${FLY_ALLOC_ID} | cut -f1 -d '-').vm.${FLY_APP_NAME}.internal:2222 --hostname uptermd.upterm.dev",
+]
+entrypoint = ["/bin/sh", "-c"]
+auto_rollback = true
 
 [build]
-  dockerfile = "Dockerfile.uptermd"
+dockerfile = "Dockerfile.uptermd"
 
 [[services]]
-  protocol = "tcp"
-  internal_port = 2222
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 3
-  processes = ["app"]
+protocol = "tcp"
+internal_port = 2222
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 3
+processes = ["app"]
 
-  [[services.ports]]
-    port = 22
-  [services.concurrency]
-    type = "connections"
-    hard_limit = 2500
-    soft_limit = 2000
+[[services.ports]]
+port = 22
+[services.concurrency]
+type = "connections"
+hard_limit = 2500
+soft_limit = 2000
 
-  [[services.tcp_checks]]
-    interval = "15s"
-    timeout = "2s"
-    grace_period = "5s"
+[[services.tcp_checks]]
+interval = "15s"
+timeout = "2s"
+grace_period = "5s"
 
 [[services]]
-  protocol = "tcp"
-  internal_port = 8080
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 3
-  processes = ["app"]
+protocol = "tcp"
+internal_port = 8080
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 3
+processes = ["app"]
 
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-    force_https = true
+[[services.ports]]
+port = 80
+handlers = ["http"]
+force_https = true
 
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-  [services.concurrency]
-    type = "connections"
-    hard_limit = 2500
-    soft_limit = 2000
+[[services.ports]]
+port = 443
+handlers = ["tls", "http"]
+[services.concurrency]
+type = "connections"
+hard_limit = 2500
+soft_limit = 2000
