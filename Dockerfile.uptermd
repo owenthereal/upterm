@@ -1,23 +1,41 @@
-FROM golang:alpine as builder
+FROM golang:1.21 as builder
 
-WORKDIR $GOPATH/src/github.com/owenthereal/upterm
+RUN adduser \
+  --disabled-password \
+  --gecos "" \
+  --home "/nonexistent" \
+  --shell "/sbin/nologin" \
+  --no-create-home \
+  --uid 65532 \
+  noroot
+
+WORKDIR /build
+
+COPY go.mod .
+COPY go.sum .
+
+RUN go mod download
+RUN go mod verify
+
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-RUN go install ./cmd/uptermd/...
+RUN go build -o uptermd ./cmd/uptermd
 
 # Prepare for image
-FROM alpine:latest
+FROM scratch
 
 MAINTAINER Owen Ou
 LABEL org.opencontainers.image.source https://github.com/owenthereal/upterm
 
-RUN adduser -D uptermd
-USER uptermd
 
 WORKDIR /app
 ENV PATH="/app:${PATH}"
 
-COPY --from=builder /go/bin/* /app
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group /etc/group
+COPY --from=builder /build/uptermd .
 
 # sshd
 EXPOSE 2222
