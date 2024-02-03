@@ -1,3 +1,0 @@
-# Because changes to just the Dockerfile force a more or less total rebuild,
-# which doesn't need to be the case.
-Dockerfile.uptermd
