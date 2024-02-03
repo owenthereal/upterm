@@ -37,6 +37,8 @@ COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /etc/group /etc/group
 COPY --from=builder /build/uptermd .
 
+USER noroot:noroot
+
 # sshd
 EXPOSE 2222
 # ws
