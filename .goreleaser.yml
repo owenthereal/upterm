@@ -1,21 +1,23 @@
-# This is an example .goreleaser.yml file with some sane defaults.
-# Make sure to check the documentation at http://goreleaser.com
-before:
-  hooks:
 builds:
   - env:
       - CGO_ENABLED=0
     goos:
       - linux
       - darwin
+    goarch:
+      - "386"
+      - "amd64"
+      - "arm"
+      - "arm64"
     main: ./cmd/upterm
 archives:
   - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    wrap_in_directory: false
     files:
+      - LICENSE*
+      - README*
       - etc/*
-      - LICENSE
-      - README.md
       - docs/*
 brews:
   - tap:
@@ -25,26 +27,42 @@ brews:
       name: Owen Ou
       email: o@owenou.com
     homepage: https://upterm.dev
-    description: Secure terminal sharing
+    description: Instant Terminal Sharing
     folder: Formula
     license: "Apache 2.0"
     custom_block: |
       head "https://github.com/owenthereal/upterm.git"
     install: |
       bin.install "upterm"
-      prefix.install_metafiles
-      bash_completion.install "etc/completion/upterm.bash_completion.sh"
-      zsh_completion.install "etc/completion/upterm.zsh_completion" => "_upterm"
-      man.install "etc/man/man1"
+      man1.install Dir["etc/man/man1/upterm*.1"]
+      generate_completions_from_executable(bin/"upterm", "completion")
     test: |
       assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
 checksum:
-  name_template: 'checksums.txt'
+  name_template: "checksums.txt"
 snapshot:
-  name_template: "{{ .Tag }}-next"
+  name_template: "{{ incpatch .Version }}-snapshot"
+release:
+  prerelease: auto
+  name_template: "Upterm {{.Version}}"
+  mode: append
 changelog:
   sort: asc
+  use: github
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
+      - "^docs:"
+      - "^script:"
+      - "^go.mod:"
+      - "^.github:"
+      - Merge branch
+nfpms: #build:linux
+  - license: Apache-2.0
+    maintainer: Owen Ou <o@owenou.com>
+    homepage: https://github.com/owenthereal/upterm
+    bindir: /usr
+    description: Instant Terminal Sharing
+    file_name_template: '{{ .PackageName }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    formats:
+      - deb
+      - rpm
