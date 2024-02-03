@@ -42,7 +42,7 @@ require (
 	github.com/tj/go v1.8.7
 	github.com/tj/go-update v2.2.5-0.20200519121640-62b4b798fd68+incompatible
 	github.com/ulikunitz/xz v0.5.8 // indirect
-	golang.org/x/crypto v0.15.0
+	golang.org/x/crypto v0.17.0
 	google.golang.org/grpc v1.61.0
 	google.golang.org/protobuf v1.32.0
 )
@@ -101,6 +101,6 @@ require (
 )
 
 replace (
-	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20230930050338-c49eb9cc924f
-	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.13.0-20230910
+	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20240203193324-08f64a7e956e
+	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.17.0-sshpiper-20231218
 )
