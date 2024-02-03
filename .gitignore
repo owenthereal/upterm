@@ -5,3 +5,4 @@ release
 *.tfstate
 *.tfstate.backup
 dist
+bin
