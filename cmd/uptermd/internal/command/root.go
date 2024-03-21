@@ -10,15 +10,16 @@ import (
 )
 
 var (
-	flagSSHAddr     string
-	flagWSAddr      string
-	flagNodeAddr    string
-	flagPrivateKeys []string
-	flagHostnames   []string
-	flagNetwork     string
-	flagNetworkOpts []string
-	flagMetricAddr  string
-	flagDebug       bool
+	flagSSHAddr               string
+	flagWSAddr                string
+	flagNodeAddr              string
+	flagPrivateKeys           []string
+	flagHostnames             []string
+	flagsCustomAuthorizedKeys string
+	flagNetwork               string
+	flagNetworkOpts           []string
+	flagMetricAddr            string
+	flagDebug                 bool
 )
 
 func Root(logger log.FieldLogger) *cobra.Command {
@@ -36,6 +37,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringSliceVarP(&flagHostnames, "hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 
 	cmd.PersistentFlags().StringVarP(&flagNetwork, "network", "", "mem", "network provider")
+	cmd.PersistentFlags().StringVarP(&flagsCustomAuthorizedKeys, "custom-authorized-keys", "", "", "a custom authorized_keys file to protect the usage of the proxy")
 	cmd.PersistentFlags().StringSliceVarP(&flagNetworkOpts, "network-opt", "", nil, "network provider option")
 
 	cmd.PersistentFlags().StringVarP(&flagMetricAddr, "metric-addr", "", "", "metric server address")
@@ -49,15 +51,16 @@ type rootCmd struct {
 
 func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
 	opt := server.Opt{
-		SSHAddr:    flagSSHAddr,
-		WSAddr:     flagWSAddr,
-		NodeAddr:   flagNodeAddr,
-		KeyFiles:   flagPrivateKeys,
-		Hostnames:  flagHostnames,
-		Network:    flagNetwork,
-		NetworkOpt: flagNetworkOpts,
-		MetricAddr: flagMetricAddr,
-		Debug:      flagDebug,
+		SSHAddr:              flagSSHAddr,
+		WSAddr:               flagWSAddr,
+		NodeAddr:             flagNodeAddr,
+		KeyFiles:             flagPrivateKeys,
+		Hostnames:            flagHostnames,
+		CustomAuthorizedKeys: flagsCustomAuthorizedKeys,
+		Network:              flagNetwork,
+		NetworkOpt:           flagNetworkOpts,
+		MetricAddr:           flagMetricAddr,
+		Debug:                flagDebug,
 	}
 
 	return server.Start(opt)
