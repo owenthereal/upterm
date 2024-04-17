@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	gssh "github.com/charmbracelet/ssh"
 	"github.com/dchest/uniuri"
-	gssh "github.com/gliderlabs/ssh"
 	"golang.org/x/crypto/ssh"
 )
 

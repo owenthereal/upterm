@@ -1,9 +1,9 @@
-// +heroku goVersion 1.21
+// +heroku goVersion 1.22
 // +heroku install ./cmd/uptermd/...
 
 module github.com/owenthereal/upterm
 
-go 1.21
+go 1.22
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
@@ -16,7 +16,6 @@ require (
 	github.com/dchest/uniuri v1.2.0
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/gen2brain/beeep v0.0.0-20220909211152-5a9ec94374f6
-	github.com/gliderlabs/ssh v0.3.5
 	github.com/go-kit/kit v0.13.0
 	github.com/google/go-cmp v0.6.0
 	github.com/google/go-querystring v1.1.0 // indirect
@@ -48,6 +47,7 @@ require (
 )
 
 require (
+	github.com/charmbracelet/ssh v0.0.0-20240401141849-854cddfa2917
 	github.com/cli/go-gh/v2 v2.8.0
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
@@ -61,6 +61,8 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/charmbracelet/x/errors v0.0.0-20240117030013-d31dba354651 // indirect
+	github.com/charmbracelet/x/exp/term v0.0.0-20240328150354-ab9afc214dfd // indirect
 	github.com/cli/safeexec v1.0.0 // indirect
 	github.com/cli/shurcooL-graphql v0.0.4 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
@@ -98,7 +100,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace (
-	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20240203193324-08f64a7e956e
-	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.22.0-sshpiper-20240413
-)
+replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.22.0-sshpiper-20240413

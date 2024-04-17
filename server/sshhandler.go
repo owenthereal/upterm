@@ -5,7 +5,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/gliderlabs/ssh"
+	"github.com/charmbracelet/ssh"
 	"github.com/oklog/run"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
