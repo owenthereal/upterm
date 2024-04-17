@@ -100,5 +100,5 @@ require (
 
 replace (
 	github.com/gliderlabs/ssh => github.com/owenthereal/ssh v0.2.3-0.20240203193324-08f64a7e956e
-	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.17.0-sshpiper-20231218
+	golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.22.0-sshpiper-20240413
 )
