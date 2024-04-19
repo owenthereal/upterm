@@ -20,7 +20,7 @@ archives:
       - etc/*
       - docs/*
 brews:
-  - tap:
+  - repository:
       owner: owenthereal
       name: homebrew-upterm
     commit_author:
@@ -28,7 +28,7 @@ brews:
       email: o@owenou.com
     homepage: https://upterm.dev
     description: Instant Terminal Sharing
-    folder: Formula
+    directory: Formula
     license: "Apache 2.0"
     custom_block: |
       head "https://github.com/owenthereal/upterm.git"
@@ -60,9 +60,16 @@ nfpms: #build:linux
   - license: Apache-2.0
     maintainer: Owen Ou <o@owenou.com>
     homepage: https://github.com/owenthereal/upterm
-    bindir: /usr
+    bindir: /usr/bin
     description: Instant Terminal Sharing
     file_name_template: '{{ .PackageName }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     formats:
       - deb
       - rpm
+    contents:
+      - src: "./etc/man/man1/upterm*.1"
+        dst: "/usr/share/man/man1"
+      - src: "./etc/completion/upterm.bash_completion.sh"
+        dst: "/usr/share/bash-completion/completions/upterm"
+      - src: "./etc/completion/upterm.zsh_completion"
+        dst: "/usr/share/zsh/site-functions/_upterm"
