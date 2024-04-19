@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"time"
 
-	gssh "github.com/gliderlabs/ssh"
+	gssh "github.com/charmbracelet/ssh"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
