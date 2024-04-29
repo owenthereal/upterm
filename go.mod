@@ -48,7 +48,7 @@ require (
 
 require (
 	github.com/charmbracelet/ssh v0.0.0-20240401141849-854cddfa2917
-	github.com/cli/go-gh/v2 v2.8.0
+	github.com/cli/go-gh/v2 v2.9.0
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
 	github.com/stretchr/testify v1.9.0
@@ -62,7 +62,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/charmbracelet/x/errors v0.0.0-20240117030013-d31dba354651 // indirect
-	github.com/charmbracelet/x/exp/term v0.0.0-20240328150354-ab9afc214dfd // indirect
+	github.com/charmbracelet/x/exp/term v0.0.0-20240425164147-ba2a9512b05f // indirect
 	github.com/cli/safeexec v1.0.0 // indirect
 	github.com/cli/shurcooL-graphql v0.0.4 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
