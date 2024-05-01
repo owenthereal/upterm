@@ -3,7 +3,7 @@ name: uptermd
 description: Secure Terminal Sharing
 type: application
 version: 0.2.0
-appVersion: 0.13.3
+appVersion: 0.13.4
 home: https://upterm.dev
 sources:
   - https://github.com/owenthereal/upterm
