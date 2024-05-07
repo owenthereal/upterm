@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	codebergKeysUrlFmt  = "https://codeberg.org/%s"
 	gitHubKeysUrlFmt    = "https://github.com/%s"
 	gitLabKeysUrlFmt    = "https://gitlab.com/%s"
 	sourceHutKeysUrlFmt = "https://meta.sr.ht/~%s"
@@ -32,6 +33,10 @@ func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {
 	}
 
 	return parseAuthorizedKeys(authorizedKeysBytes, file)
+}
+
+func CodebergUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
+	return usersPublicKeys(codebergKeysUrlFmt, usernames)
 }
 
 func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]*AuthorizedKey, error) {
