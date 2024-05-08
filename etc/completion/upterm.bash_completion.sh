@@ -397,6 +397,8 @@ _upterm_host()
 
     flags+=("--accept")
     flags+=("--authorized-keys=")
+    flags+=("--codeberg-user=")
+    two_word_flags+=("--codeberg-user")
     two_word_flags+=("--authorized-keys")
     flags+=("--force-command=")
     two_word_flags+=("--force-command")

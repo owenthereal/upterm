@@ -71,9 +71,10 @@ Host a session with specified client public key(s) authorized to connect:
 upterm host --authorized-key PATH_TO_PUBLIC_KEY
 ```
 
-Authorize specified GitHub, GitLab, or SourceHut users with their corresponding public keys:
+Authorize specified Codeberg, GitHub, GitLab, or SourceHut users with their corresponding public keys:
 
 ```console
+upterm host --codeberg-user username
 upterm host --github-user username
 upterm host --gitlab-user username
 upterm host --srht-user username

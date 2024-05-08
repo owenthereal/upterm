@@ -26,6 +26,7 @@ var (
 	flagPrivateKeys        []string
 	flagKnownHostsFilename string
 	flagAuthorizedKeys     string
+	flagCodebergUsers      []string
 	flagGitHubUsers        []string
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
@@ -73,6 +74,7 @@ private key. To authorize client connections, specify a authorized_key file with
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
+	cmd.PersistentFlags().StringSliceVar(&flagCodebergUsers, "codeberg-user", nil, "Authorize specified Codeberg users by allowing their public keys to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "Authorize specified GitLab users by allowing their public keys to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
@@ -157,6 +159,13 @@ func shareRunE(c *cobra.Command, args []string) error {
 			return fmt.Errorf("error reading authorized keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, aks)
+	}
+	if flagCodebergUsers != nil {
+		codebergUserKeys, err := host.CodebergUserAuthorizedKeys(flagCodebergUsers)
+		if err != nil {
+			return fmt.Errorf("error reading Codeberg user keys: %w", err)
+		}
+		authorizedKeys = append(authorizedKeys, codebergUserKeys...)
 	}
 	if flagGitHubUsers != nil {
 		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)
