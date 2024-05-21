@@ -125,7 +125,6 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 					close(errorc)
 				}()
 
-				logger.Info("establishing ssh piper connection")
 				pconn, err := ssh.NewSSHPiperConn(dconn, piperCfg)
 				if err != nil {
 					errorc <- err
