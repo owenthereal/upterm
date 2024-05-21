@@ -1,23 +1,25 @@
-FROM golang:alpine as builder
+# syntax=docker/dockerfile:1
 
-WORKDIR $GOPATH/src/github.com/owenthereal/upterm
-COPY . .
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-RUN go install ./cmd/uptermd/...
+FROM golang:latest as builder
 
-# Prepare for image
-FROM alpine:latest
+ARG TARGETOS TARGETARCH
 
-MAINTAINER Owen Ou
-LABEL org.opencontainers.image.source https://github.com/owenthereal/upterm
+WORKDIR /src
+ENV CGO_ENABLED=0
+RUN --mount=target=. \
+    --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
+    ./cmd/...
 
-RUN adduser -D uptermd
-USER uptermd
+FROM gcr.io/distroless/static
+
+USER nonroot:nonroot
 
 WORKDIR /app
 ENV PATH="/app:${PATH}"
 
-COPY --from=builder /go/bin/* /app
+COPY --from=builder /go/bin/uptermd /app/
 
 # sshd
 EXPOSE 2222
@@ -27,3 +29,14 @@ EXPOSE 8080
 EXPOSE 9090
 
 ENTRYPOINT ["uptermd"]
+
+FROM gcr.io/distroless/static as uptermd-fly
+
+USER nonroot:nonroot
+
+WORKDIR /app
+ENV PATH="/app:${PATH}"
+
+COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
+
+ENTRYPOINT ["uptermd-fly"]

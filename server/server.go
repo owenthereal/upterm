@@ -26,15 +26,15 @@ const (
 )
 
 type Opt struct {
-	SSHAddr    string
-	WSAddr     string
-	NodeAddr   string
-	KeyFiles   []string
-	Hostnames  []string
-	Network    string
-	NetworkOpt []string
-	MetricAddr string
-	Debug      bool
+	SSHAddr     string   `mapstructure:"ssh-addr"`
+	WSAddr      string   `mapstructure:"ws-addr"`
+	NodeAddr    string   `mapstructure:"node-addr"`
+	PrivateKeys []string `mapstructure:"private-key"`
+	Hostnames   []string `mapstructure:"hostname"`
+	Network     string   `mapstructure:"network"`
+	NetworkOpts []string `mapstructure:"network-opt"`
+	MetricAddr  string   `mapstructure:"metric-addr"`
+	Debug       bool     `mapstructure:"debug"`
 }
 
 func Start(opt Opt) error {
@@ -48,12 +48,12 @@ func Start(opt Opt) error {
 		return fmt.Errorf("unsupport network provider %q", opt.Network)
 	}
 
-	opts := parseNetworkOpt(opt.NetworkOpt)
+	opts := parseNetworkOpt(opt.NetworkOpts)
 	if err := network.SetOpts(opts); err != nil {
 		return fmt.Errorf("network provider option error: %s", err)
 	}
 
-	privateKeys, err := utils.ReadFiles(opt.KeyFiles)
+	privateKeys, err := utils.ReadFiles(opt.PrivateKeys)
 	if err != nil {
 		return nil
 	}
@@ -86,7 +86,7 @@ func Start(opt Opt) error {
 		l.SetLevel(log.DebugLevel)
 	}
 
-	logger := l.WithFields(log.Fields{"app": "uptermd", "network": opt.Network, "network-opt": opt.NetworkOpt})
+	logger := l.WithFields(log.Fields{"app": "uptermd", "network": opt.Network, "network-opt": opt.NetworkOpts})
 
 	var (
 		sshln net.Listener
