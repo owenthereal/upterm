@@ -27,7 +27,8 @@ jobs:
           images: |
             ghcr.io/owenthereal/upterm/uptermd
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{raw}}
+            type=raw,value=latest
             type=sha,prefix=,suffix=,format=long
       - name: Docker build and push
         uses: docker/build-push-action@v5
