@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/host/api"
 	libmetrics "github.com/owenthereal/upterm/metrics"
 	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
@@ -56,6 +57,18 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 	piperCfg := &ssh.PiperConfig{
 		PublicKeyCallback: p.AuthPiper.PublicKeyCallback,
 		ServerVersion:     upterm.ServerSSHServerVersion,
+		NextAuthMethods: func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) ([]string, error) {
+			// Fail early if the user is not a valid identifier.
+			user := conn.User()
+			if user != "" {
+				_, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			return []string{"publickey"}, nil
+		},
 	}
 	for _, s := range p.HostSigners {
 		piperCfg.AddHostKey(s)

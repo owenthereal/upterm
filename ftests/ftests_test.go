@@ -424,7 +424,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	}
 
 	if u.Scheme == "ws" || u.Scheme == "wss" {
-		encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(session.NodeAddr))
+		encodedNodeAddr := base64.URLEncoding.EncodeToString([]byte(session.NodeAddr))
 		u, _ = url.Parse(u.String())
 		u.User = url.UserPassword(session.SessionId, encodedNodeAddr)
 		c.sshClient, err = ws.NewSSHClient(u, config, true)
