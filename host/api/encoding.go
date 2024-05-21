@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 
 	"github.com/owenthereal/upterm/upterm"
@@ -27,27 +28,28 @@ func EncodeIdentifier(id *Identifier) (string, error) {
 }
 
 func DecodeIdentifier(id, clientVersion string) (*Identifier, error) {
-	t := Identifier_HOST
-	if clientVersion != upterm.HostSSHClientVersion {
-		t = Identifier_CLIENT
+	// host
+	if clientVersion == upterm.HostSSHClientVersion {
+		return &Identifier{
+			Id:   id,
+			Type: Identifier_HOST,
+		}, nil
 	}
 
+	// client
 	split := strings.SplitN(id, ":", 2)
-	var (
-		nodeAddr []byte
-		err      error
-	)
+	if len(split) != 2 {
+		return nil, fmt.Errorf("invalid client session id: %s", id)
+	}
 
-	if len(split) == 2 {
-		nodeAddr, err = base64.URLEncoding.DecodeString(split[1])
-		if err != nil {
-			return nil, err
-		}
+	nodeAddr, err := base64.URLEncoding.DecodeString(split[1])
+	if err != nil {
+		return nil, err
 	}
 
 	return &Identifier{
 		Id:       split[0],
-		Type:     t,
+		Type:     Identifier_CLIENT,
 		NodeAddr: string(nodeAddr),
 	}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,20 +38,28 @@ func Test_EncodeDecodeIdentifier(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
+			assert := assert.New(t)
+
 			want := c.id
 			str, err := EncodeIdentifier(want)
-			if err != nil {
-				t.Fatal(err)
-			}
+			assert.NoError(err)
 
 			got, err := DecodeIdentifier(str, c.clientVersion)
-			if err != nil {
-				t.Fatal(err)
-			}
+			assert.NoError(err)
 
-			if !proto.Equal(want, got) {
-				t.Errorf("Encode/decode failed, want=%s got=%s", want, got)
-			}
+			assert.True(proto.Equal(want, got))
 		})
 	}
+}
+
+func TestDecodeIdentifier(t *testing.T) {
+	assert := assert.New(t)
+
+	_, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY:MTI3LjAuMC4xOjIyMjIIII=", "")
+	assert.Error(err)
+	assert.ErrorContains(err, "illegal base64 data")
+
+	_, err = DecodeIdentifier("10OLFAKZu4cxx2roOboaY", "")
+	assert.Error(err)
+	assert.ErrorContains(err, "invalid client session id")
 }
