@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/host/api"
 	libmetrics "github.com/owenthereal/upterm/metrics"
 	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
@@ -16,7 +17,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 60 * time.Second
+	pipeEstablishingTimeout = 3 * time.Second
 )
 
 type SSHRouting struct {
@@ -53,20 +54,31 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 	p.listener = ln
 	p.mux.Unlock()
 
-	piper := &ssh.PiperConfig{
+	piperCfg := &ssh.PiperConfig{
 		PublicKeyCallback: p.AuthPiper.PublicKeyCallback,
 		ServerVersion:     upterm.ServerSSHServerVersion,
-	}
+		NextAuthMethods: func(conn ssh.ConnMetadata, challengeCtx ssh.ChallengeContext) ([]string, error) {
+			// Fail early if the user is not a valid identifier.
+			user := conn.User()
+			if user != "" {
+				_, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
+				if err != nil {
+					return nil, err
+				}
+			}
 
+			return []string{"publickey"}, nil
+		},
+	}
 	for _, s := range p.HostSigners {
-		piper.AddHostKey(s)
+		piperCfg.AddHostKey(s)
 	}
 
 	inst := newSSHRoutingInstruments(p.MetricsProvider)
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
-		conn, err := ln.Accept()
+		dconn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-p.getDoneChan():
@@ -95,9 +107,9 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 		tempDelay = 0
 
-		logger := p.Logger.WithField("addr", conn.RemoteAddr())
-		go func(c net.Conn, inst *routingInstruments, logger log.FieldLogger) {
-			defer c.Close()
+		logger := p.Logger.WithField("addr", dconn.RemoteAddr())
+		go func(dconn net.Conn, inst *routingInstruments, logger log.FieldLogger) {
+			defer dconn.Close()
 
 			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
 			defer inst.activeConnections.Add(-1)
@@ -113,20 +125,21 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 					close(errorc)
 				}()
 
-				p, err := ssh.NewSSHPiperConn(c, piper)
+				logger.Info("establishing ssh piper connection")
+				pconn, err := ssh.NewSSHPiperConn(dconn, piperCfg)
 				if err != nil {
 					errorc <- err
 					return
 				}
 
-				pipec <- p
+				pipec <- pconn
 			}()
 
 			select {
-			case pc := <-pipec:
-				defer pc.Close()
+			case pconn := <-pipec:
+				defer pconn.Close()
 
-				if err := pc.Wait(); err != nil {
+				if err := pconn.Wait(); err != nil {
 					logger.WithError(err).Debug("error waiting for pipe")
 					inst.errors.Add(1)
 				}
@@ -137,7 +150,7 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 				logger.Debug("pipe establishing timeout")
 				inst.connectionTimeouts.Add(1)
 			}
-		}(conn, inst, logger)
+		}(dconn, inst, logger)
 	}
 }
 

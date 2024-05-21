@@ -95,9 +95,9 @@ require (
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
 	golang.org/x/sys v0.20.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.22.0-sshpiper-20240413
+replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.23.0-sshpiper-20240508
