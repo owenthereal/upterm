@@ -37,6 +37,7 @@ jobs:
           pull: true
           file: Dockerfile.uptermd
           tags: ${{ steps.meta.outputs.tags }}
+          platforms: amd64,arm64
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: |
             type=gha
