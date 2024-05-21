@@ -16,7 +16,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 60 * time.Second
+	pipeEstablishingTimeout = 3 * time.Second
 )
 
 type SSHRouting struct {
@@ -53,20 +53,19 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 	p.listener = ln
 	p.mux.Unlock()
 
-	piper := &ssh.PiperConfig{
+	piperCfg := &ssh.PiperConfig{
 		PublicKeyCallback: p.AuthPiper.PublicKeyCallback,
 		ServerVersion:     upterm.ServerSSHServerVersion,
 	}
-
 	for _, s := range p.HostSigners {
-		piper.AddHostKey(s)
+		piperCfg.AddHostKey(s)
 	}
 
 	inst := newSSHRoutingInstruments(p.MetricsProvider)
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
-		conn, err := ln.Accept()
+		dconn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-p.getDoneChan():
@@ -95,9 +94,9 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 		tempDelay = 0
 
-		logger := p.Logger.WithField("addr", conn.RemoteAddr())
-		go func(c net.Conn, inst *routingInstruments, logger log.FieldLogger) {
-			defer c.Close()
+		logger := p.Logger.WithField("addr", dconn.RemoteAddr())
+		go func(dconn net.Conn, inst *routingInstruments, logger log.FieldLogger) {
+			defer dconn.Close()
 
 			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
 			defer inst.activeConnections.Add(-1)
@@ -113,20 +112,21 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 					close(errorc)
 				}()
 
-				p, err := ssh.NewSSHPiperConn(c, piper)
+				logger.Info("establishing ssh piper connection")
+				pconn, err := ssh.NewSSHPiperConn(dconn, piperCfg)
 				if err != nil {
 					errorc <- err
 					return
 				}
 
-				pipec <- p
+				pipec <- pconn
 			}()
 
 			select {
-			case pc := <-pipec:
-				defer pc.Close()
+			case pconn := <-pipec:
+				defer pconn.Close()
 
-				if err := pc.Wait(); err != nil {
+				if err := pconn.Wait(); err != nil {
 					logger.WithError(err).Debug("error waiting for pipe")
 					inst.errors.Add(1)
 				}
@@ -137,7 +137,7 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 				logger.Debug("pipe establishing timeout")
 				inst.connectionTimeouts.Add(1)
 			}
-		}(conn, inst, logger)
+		}(dconn, inst, logger)
 	}
 }
 
