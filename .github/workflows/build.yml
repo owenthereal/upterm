@@ -49,10 +49,7 @@ jobs:
     - name: Vet
       run: make vet
   docker:
-    name: Docker
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v4
-    - name: Docker
-      run: make docker_build
+      name: Docker
+      needs: [build, test, vet]
+      uses: ./.github/workflows/docker.yaml
+      secrets: inherit
