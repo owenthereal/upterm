@@ -12,6 +12,16 @@ RUN --mount=target=. \
     GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
     ./cmd/...
 
+# For fly deployment only
+FROM gcr.io/distroless/static as uptermd-fly
+
+USER nonroot:nonroot
+
+WORKDIR /app
+ENV PATH="/app:${PATH}"
+
+COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
+
 FROM gcr.io/distroless/static
 
 USER nonroot:nonroot
@@ -29,14 +39,3 @@ EXPOSE 8080
 EXPOSE 9090
 
 ENTRYPOINT ["uptermd"]
-
-FROM gcr.io/distroless/static as uptermd-fly
-
-USER nonroot:nonroot
-
-WORKDIR /app
-ENV PATH="/app:${PATH}"
-
-COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
-
-ENTRYPOINT ["uptermd-fly"]
