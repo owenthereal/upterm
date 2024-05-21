@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/heroku/rollrus"
-	"github.com/owenthereal/upterm/cmd/uptermd/internal/command"
+	"github.com/owenthereal/upterm/cmd/uptermd/command"
 	log "github.com/sirupsen/logrus"
 )
 

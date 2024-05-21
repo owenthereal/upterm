@@ -2,15 +2,9 @@ app = "upterm"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
-[experimental]
-cmd = [
-  "uptermd --ssh-addr 0.0.0.0:2222 --ws-addr 0.0.0.0:8080 --node-addr $(echo ${FLY_ALLOC_ID} | cut -f1 -d '-').vm.${FLY_APP_NAME}.internal:2222 --hostname uptermd.upterm.dev",
-]
-entrypoint = ["/bin/sh", "-c"]
-auto_rollback = true
-
 [build]
 dockerfile = "Dockerfile.uptermd"
+build-target = "uptermd-fly"
 
 [[services]]
 protocol = "tcp"

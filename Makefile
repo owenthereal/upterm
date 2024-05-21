@@ -33,13 +33,11 @@ install:
 	go install ./cmd/...
 
 TAG ?= latest
+REPO ?= ghcr.io/owenthereal/upterm/uptermd
+DOCKER_BUILD_FLAGS ?= --load
 .PHONY: docker_build
 docker_build:
-	docker build -t ghcr.io/owenthereal/upterm/uptermd:$(TAG) -f Dockerfile.uptermd .
-
-.PHONY: docker_push
-docker_push: docker_build
-	docker push ghcr.io/owenthereal/upterm/uptermd:$(TAG)
+	docker buildx build -t $(REPO):$(TAG) -f Dockerfile.uptermd $(DOCKER_BUILD_FLAGS) .
 
 GO_TEST_FLAGS ?= ""
 .PHONY: test
