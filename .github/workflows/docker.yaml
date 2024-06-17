@@ -31,7 +31,7 @@ jobs:
             type=raw,value=latest
             type=sha,prefix=,suffix=,format=long
       - name: Docker build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           pull: true
