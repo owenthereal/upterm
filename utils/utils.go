@@ -27,6 +27,13 @@ func UptermDir() (string, error) {
 	return filepath.Join(homedir, ".upterm"), nil
 }
 
+func GetEnvWithDefault(envVar, defaultValue string) string {
+	if v, ok := os.LookupEnv(envVar); ok && len(v) > 0 {
+		return v
+	}
+	return defaultValue
+}
+
 func CreateUptermDir() (string, error) {
 	dir, err := UptermDir()
 	if err != nil {
