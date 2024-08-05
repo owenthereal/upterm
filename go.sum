@@ -116,8 +116,8 @@ github.com/influxdata/influxdb1-client v0.0.0-20200827194710-b269163b24ab/go.mod
 github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af/go.mod h1:Nht3zPeWKUH0NzdCt2Blrr5ys8VGpn0CEB0cQHVjt7k=
 github.com/jmespath/go-jmespath v0.3.0/go.mod h1:9QtRXoHjLGCJ5IBSaohpXITPlowMeeYCZ7fLUTSywik=
 github.com/jpillora/backoff v0.0.0-20180909062703-3050d21c67d7/go.mod h1:2iMrUgbbvHEiQClaW2NsSzMyGHqN+rDFqY705q49KG0=
-github.com/jpillora/chisel v1.9.1 h1:nGOF58+45WHlvDcq6AZu7En8nWOBCZHqj9boo5rB4qU=
-github.com/jpillora/chisel v1.9.1/go.mod h1:qvgGfFR9ZhiDoYJM4IM1omX1HLbQSkZag8miP9u4SsQ=
+github.com/jpillora/chisel v1.10.0 h1:qdA2YWr8FZoB/srgsuv+ALsm6Lk8NYef+zCfO0qUdVk=
+github.com/jpillora/chisel v1.10.0/go.mod h1:JwsnHmvXKfHGuu9kym97zq/9TMLBlTsS+Qpw4+/xE1U=
 github.com/jpillora/sizestr v1.0.0 h1:4tr0FLxs1Mtq3TnsLDV+GYUWG7Q26a6s+tV5Zfw2ygw=
 github.com/jpillora/sizestr v1.0.0/go.mod h1:bUhLv4ctkknatr6gR42qPxirmd5+ds1u7mzD+MZ33f0=
 github.com/klauspost/compress v1.4.1/go.mod h1:RyIbtBH6LamlWaDj8nUwkbUhJ87Yi3uG0guNDohfE1A=
