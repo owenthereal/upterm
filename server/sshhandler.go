@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/ssh"
 	"github.com/oklog/run"
+	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -153,6 +154,12 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 
 		go func(sessionID string) {
 			if err := g.Run(); err != nil {
+				PreparedSession.DeletePartialMatch(prometheus.Labels{
+					"session_id": sessionID,
+				})
+				ConnectedClients.DeletePartialMatch(prometheus.Labels{
+					"session_id": sessionID,
+				})
 				h.logger.WithError(err).WithField("session-id", sessionID).Debug("error handling ssh session")
 			}
 		}(sessionID)
