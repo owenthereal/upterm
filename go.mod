@@ -35,7 +35,7 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.20.2
-	github.com/rs/xid v1.5.0
+	github.com/rs/xid v1.6.0
 	github.com/sirupsen/logrus v1.9.0
 	github.com/spf13/cobra v1.8.1
 	github.com/tj/go v1.8.7
