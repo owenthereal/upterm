@@ -26,6 +26,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringP("ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringP("node-addr", "", "", "node address")
+	cmd.PersistentFlags().StringP("authorized-keys", "", "", "authorized_keys file to control proxy access")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 

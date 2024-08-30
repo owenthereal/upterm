@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/go-kit/kit/metrics/provider"
@@ -13,13 +14,14 @@ import (
 )
 
 type sshProxy struct {
-	HostSigners     []ssh.Signer
-	Signers         []ssh.Signer
-	NodeAddr        string
-	ConnDialer      connDialer
-	SessionRepo     *sessionRepo
-	Logger          log.FieldLogger
-	MetricsProvider provider.Provider
+	HostSigners        []ssh.Signer
+	Signers            []ssh.Signer
+	NodeAddr           string
+	AuthorizedKeysFile string
+	ConnDialer         connDialer
+	SessionRepo        *sessionRepo
+	Logger             log.FieldLogger
+	MetricsProvider    provider.Provider
 
 	routing *SSHRouting
 	mux     sync.Mutex
@@ -41,11 +43,13 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	r.routing = &SSHRouting{
 		HostSigners: r.HostSigners,
 		AuthPiper: &authPiper{
-			HostSigners: r.HostSigners,
-			Signers:     r.Signers,
-			SessionRepo: r.SessionRepo,
-			ConnDialer:  r.ConnDialer,
-			NodeAddr:    r.NodeAddr,
+			HostSigners:        r.HostSigners,
+			Signers:            r.Signers,
+			SessionRepo:        r.SessionRepo,
+			ConnDialer:         r.ConnDialer,
+			NodeAddr:           r.NodeAddr,
+			AuthorizedKeysFile: r.AuthorizedKeysFile,
+			Logger:             r.Logger.WithField("com", "auth"),
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
@@ -56,11 +60,51 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 }
 
 type authPiper struct {
-	NodeAddr    string
-	SessionRepo *sessionRepo
-	ConnDialer  connDialer
-	Signers     []ssh.Signer
-	HostSigners []ssh.Signer
+	NodeAddr           string
+	AuthorizedKeysFile string
+	SessionRepo        *sessionRepo
+	ConnDialer         connDialer
+	Signers            []ssh.Signer
+	HostSigners        []ssh.Signer
+
+	Logger log.FieldLogger
+}
+
+func (a authPiper) CheckAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) (ssh.PublicKey, error) {
+	if a.AuthorizedKeysFile == "" {
+		return pk, nil
+	}
+
+	user := conn.User()
+	id, _ := api.DecodeIdentifier(user, string(conn.ClientVersion()))
+
+	if id.Type != api.Identifier_HOST {
+		return pk, nil
+	}
+
+	var rest []byte
+	rest, err := os.ReadFile(a.AuthorizedKeysFile)
+	if err != nil {
+		a.Logger.WithField("path", a.AuthorizedKeysFile).Error("unable to load custom authorized_keys file")
+		return nil, err
+	}
+
+	var authedPubkey ssh.PublicKey
+	for len(rest) > 0 {
+		authedPubkey, _, _, rest, err = ssh.ParseAuthorizedKey(rest)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if utils.KeysEqual(authedPubkey, pk) {
+			a.Logger.WithField("fingerprint", utils.FingerprintSHA256(pk)).Info("access granted")
+			return pk, nil
+		}
+	}
+
+	a.Logger.WithField("fingerprint", utils.FingerprintSHA256(pk)).Info("access denied")
+	return nil, fmt.Errorf("public key is not authorized")
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
@@ -69,6 +113,13 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 			return key, nil
 		},
 	}
+
+	// Check for authorized_hosts to allow proxying.
+	_, err := a.CheckAuthorizedKeys(conn, pk)
+	if err != nil {
+		return nil, err
+	}
+
 	auth, key, err := checker.Authenticate(conn.User(), pk)
 	if err == errCertNotSignedByHost {
 		err = nil
