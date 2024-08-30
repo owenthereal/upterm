@@ -30,20 +30,21 @@ const (
 )
 
 type Opt struct {
-	SSHAddr          string       `mapstructure:"ssh-addr"`
-	SSHProxyProtocol bool         `mapstructure:"ssh-proxy-protocol"`
-	WSAddr           string       `mapstructure:"ws-addr"`
-	NodeAddr         string       `mapstructure:"node-addr"`
-	PrivateKeys      []string     `mapstructure:"private-key"`
-	Hostnames        []string     `mapstructure:"hostname"`
-	Network          string       `mapstructure:"network"`
-	NetworkOpts      []string     `mapstructure:"network-opt"`
-	MetricAddr       string       `mapstructure:"metric-addr"`
-	Debug            bool         `mapstructure:"debug"`
-	Routing          routing.Mode `mapstructure:"routing"`
-	ConsulURL        string       `mapstructure:"consul-url"`
-	ConsulSessionTTL string       `mapstructure:"consul-session-ttl"`
-	SentryDSN        string       `mapstructure:"sentry-dsn"`
+	SSHAddr            string       `mapstructure:"ssh-addr"`
+	SSHProxyProtocol   bool         `mapstructure:"ssh-proxy-protocol"`
+	WSAddr             string       `mapstructure:"ws-addr"`
+	NodeAddr           string       `mapstructure:"node-addr"`
+	AuthorizedKeysFile string       `mapstructure:"authorized-keys"`
+	PrivateKeys        []string     `mapstructure:"private-key"`
+	Hostnames          []string     `mapstructure:"hostname"`
+	Network            string       `mapstructure:"network"`
+	NetworkOpts        []string     `mapstructure:"network-opt"`
+	MetricAddr         string       `mapstructure:"metric-addr"`
+	Debug              bool         `mapstructure:"debug"`
+	Routing            routing.Mode `mapstructure:"routing"`
+	ConsulURL          string       `mapstructure:"consul-url"`
+	ConsulSessionTTL   string       `mapstructure:"consul-session-ttl"`
+	SentryDSN          string       `mapstructure:"sentry-dsn"`
 }
 
 // Validate validates the server configuration
@@ -240,13 +241,14 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		}
 
 		s := &Server{
-			NodeAddr:        nodeAddr,
-			HostSigners:     hostSigners,
-			Signers:         signers,
-			NetworkProvider: network,
-			SessionManager:  sessionManager,
-			Logger:          logger.With("component", "server"),
-			MetricsProvider: mp,
+			NodeAddr:           nodeAddr,
+			AuthorizedKeysFile: opt.AuthorizedKeysFile,
+			HostSigners:        hostSigners,
+			Signers:            signers,
+			NetworkProvider:    network,
+			SessionManager:     sessionManager,
+			Logger:             logger.With("component", "server"),
+			MetricsProvider:    mp,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(ctx, sshln, wsln)
@@ -286,13 +288,14 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	NodeAddr        string
-	HostSigners     []ssh.Signer
-	Signers         []ssh.Signer
-	NetworkProvider NetworkProvider
-	MetricsProvider provider.Provider
-	SessionManager  *SessionManager
-	Logger          *slog.Logger
+	NodeAddr           string
+	AuthorizedKeysFile string
+	HostSigners        []ssh.Signer
+	Signers            []ssh.Signer
+	NetworkProvider    NetworkProvider
+	MetricsProvider    provider.Provider
+	SessionManager     *SessionManager
+	Logger             *slog.Logger
 
 	sshln net.Listener
 	wsln  net.Listener
@@ -369,13 +372,14 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.With("component", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				HostSigners:     s.HostSigners,
-				Signers:         s.Signers,
-				NodeAddr:        s.NodeAddr,
-				ConnDialer:      cd,
-				SessionManager:  s.SessionManager,
-				Logger:          s.Logger.With("component", "ssh-proxy"),
-				MetricsProvider: s.MetricsProvider,
+				HostSigners:        s.HostSigners,
+				Signers:            s.Signers,
+				NodeAddr:           s.NodeAddr,
+				AuthorizedKeysFile: s.AuthorizedKeysFile,
+				ConnDialer:         cd,
+				SessionManager:     s.SessionManager,
+				Logger:             s.Logger.With("component", "ssh-proxy"),
+				MetricsProvider:    s.MetricsProvider,
 			}
 			g.Add(func() error {
 				return sp.Serve(sshln)
