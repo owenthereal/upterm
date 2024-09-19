@@ -76,14 +76,18 @@ func (a authPiper) CheckAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 	}
 
 	user := conn.User()
-	id, _ := api.DecodeIdentifier(user, string(conn.ClientVersion()))
+	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
+	if err != nil {
+		a.Logger.WithField("user", user).Error("unable to decode session identifier")
+		return nil, err
+	}
 
 	if id.Type != api.Identifier_HOST {
 		return pk, nil
 	}
 
 	var rest []byte
-	rest, err := os.ReadFile(a.AuthorizedKeysFile)
+	rest, err = os.ReadFile(a.AuthorizedKeysFile)
 	if err != nil {
 		a.Logger.WithField("path", a.AuthorizedKeysFile).Error("unable to load custom authorized_keys file")
 		return nil, err
