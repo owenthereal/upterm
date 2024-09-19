@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +13,21 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	HostPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOA+rMcwWFPJVE2g6EwRPkYmNJfaS/+gkyZ99aR/65uz`
+	HostPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubswAAAIiu5GOBruRj
+gQAAAAtzc2gtZWQyNTUxOQAAACDgPqzHMFhTyVRNoOhMET5GJjSX2kv/oJMmffWkf+ubsw
+AAAEDBHlsR95C/pGVHtQGpgrUi+Qwgkfnp9QlRKdEhhx4rxOA+rMcwWFPJVE2g6EwRPkYm
+NJfaS/+gkyZ99aR/65uzAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----`
 )
 
 func Test_sshProxy_dialUpstream(t *testing.T) {
@@ -147,4 +161,80 @@ func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {
 	}
 
 	return ssh.NewCertSigner(cert, signer)
+}
+
+func Test_sshProxy_CheckAuthorizedKeys(t *testing.T) {
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
+
+	proxySigner, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cs := HostCertSigner{
+		Hostnames: []string{"127.0.0.1"},
+	}
+	proxyCertSigner, err := cs.SignCert(proxySigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = proxyLn.Close()
+	}()
+
+	proxyAddr := proxyLn.Addr().String()
+	cd := sidewayConnDialer{
+		NodeAddr:         proxyAddr,
+		NeighbourDialer:  tcpConnDialer{},
+		Logger:           logger,
+		SSHDDialListener: networks.Get("mem").SSHD(),
+	}
+
+	tempfile := filepath.Join(t.TempDir(), "authorized_keys")
+	if err := os.WriteFile(tempfile, []byte(HostPublicKeyContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxy := &sshProxy{
+		HostSigners:        []ssh.Signer{proxyCertSigner},
+		Signers:            []ssh.Signer{proxySigner},
+		NodeAddr:           proxyAddr,
+		AuthorizedKeysFile: tempfile,
+		ConnDialer:         cd,
+		SessionManager:     newEmbeddedSessionManager(logger),
+		Logger:             logger,
+		MetricsProvider:    provider.NewDiscardProvider(),
+	}
+
+	go func() {
+		_ = proxy.Serve(proxyLn)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := utils.WaitForServer(ctx, proxyAddr); err != nil {
+		t.Fatal(err)
+	}
+
+	hostSigner, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// HOST connections identify themselves via the SSH client banner; the User
+	// field carries the session ID directly (no encoding).
+	config := &ssh.ClientConfig{
+		User:            xid.New().String(),
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(hostSigner)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		ClientVersion:   upterm.HostSSHClientVersion,
+	}
+	if _, err := ssh.Dial("tcp", proxyAddr, config); err != nil {
+		t.Fatal(err)
+	}
 }
