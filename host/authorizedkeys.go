@@ -10,20 +10,31 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
-)
-
-const (
-	codebergKeysUrlFmt  = "https://codeberg.org/%s"
-	gitHubKeysUrlFmt    = "https://github.com/%s"
-	gitLabKeysUrlFmt    = "https://gitlab.com/%s"
-	sourceHutKeysUrlFmt = "https://meta.sr.ht/~%s"
 )
 
 type AuthorizedKey struct {
 	PublicKeys []ssh.PublicKey
 	Comment    string
+}
+
+func GetUrlFmt(service string) string {
+	serviceAttrsMap := map[string][]string{
+		"Codeberg":  {"CODEBERG_HOST", "https://codeberg.org"},
+		"GitHub":    {"GITHUB_HOST", "https://github.com"},
+		"GitLab":    {"GITLAB_HOST", "https://gitlab.com"},
+		"SourceHut": {"SOURCEHUT_HOST", "https://meta.sr.ht"},
+	}
+
+	serviceUrl := utils.GetEnvWithDefault(serviceAttrsMap[service][0], serviceAttrsMap[service][1])
+
+	if service == "SourceHut" {
+		return (serviceUrl + "/~%s")
+	}
+
+	return (serviceUrl + "/%s")
 }
 
 func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {
@@ -36,7 +47,7 @@ func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {
 }
 
 func CodebergUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(codebergKeysUrlFmt, usernames)
+	return usersPublicKeys(GetUrlFmt("Codeberg"), usernames)
 }
 
 func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]*AuthorizedKey, error) {
@@ -66,11 +77,11 @@ func GitHubUserAuthorizedKeys(usernames []string, logger *logrus.Logger) ([]*Aut
 }
 
 func GitLabUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(gitLabKeysUrlFmt, usernames)
+	return usersPublicKeys(GetUrlFmt("GitLab"), usernames)
 }
 
 func SourceHutUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(sourceHutKeysUrlFmt, usernames)
+	return usersPublicKeys(GetUrlFmt("SourceHut"), usernames)
 }
 
 func parseAuthorizedKeys(keysBytes []byte, comment string) (*AuthorizedKey, error) {
@@ -97,7 +108,7 @@ func githubUserPublicKeys(username string, logger *logrus.Logger) ([]byte, error
 		if strings.Contains(err.Error(), "authentication token not found for host") {
 			// fallback to use the public GH API
 			logger.WithError(err).Warn("no GitHub token found, falling back to public API")
-			return userPublicKeys(gitHubKeysUrlFmt, username)
+			return userPublicKeys(GetUrlFmt("GitHub"), username)
 		}
 
 		return nil, err
