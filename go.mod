@@ -27,7 +27,7 @@ require (
 	github.com/heroku/rollrus v0.2.0
 	github.com/hooklift/assert v0.1.0 // indirect
 	github.com/influxdata/influxdb1-client v0.0.0-20200827194710-b269163b24ab // indirect
-	github.com/jpillora/chisel v1.10.0
+	github.com/jpillora/chisel v1.10.1
 	github.com/klauspost/pgzip v1.2.5 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oklog/run v1.1.1-0.20200508094559-c7096881717e
