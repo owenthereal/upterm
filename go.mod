@@ -48,7 +48,7 @@ require (
 
 require (
 	github.com/charmbracelet/ssh v0.0.0-20240401141849-854cddfa2917
-	github.com/cli/go-gh/v2 v2.10.0
+	github.com/cli/go-gh/v2 v2.11.0
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
 	github.com/spf13/pflag v1.0.5
