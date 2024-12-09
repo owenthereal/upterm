@@ -83,7 +83,7 @@ upterm host --codeberg-user username
 ### Force command
 
 Host a session initiating `tmux new -t pair-programming`, while ensuring clients join with `tmux attach -t pair-programming`.
-This mirrors functionarity provided by tmate:
+This mirrors functionality provided by tmate:
 
 ```console
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
@@ -198,7 +198,7 @@ Provision uptermd in Heroku Private Spaces. Follow instructions.
 TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/heroku-install
 ```
 
-You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
+You **must** use WebSocket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
 This is how you host a session and join a session:
 
 Use the Heroku-deployed Uptermd server via WebSocket
@@ -237,7 +237,7 @@ systemctl daemon-reload
 systemctl start uptermd
 ```
 
-## :balance_scale: Comparasion with Prior Arts
+## :balance_scale: Comparison with Prior Arts
 
 Upterm stands as a modern alternative to [Tmate](https://tmate.io).
 
