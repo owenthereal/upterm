@@ -26,15 +26,16 @@ const (
 )
 
 type Opt struct {
-	SSHAddr     string   `mapstructure:"ssh-addr"`
-	WSAddr      string   `mapstructure:"ws-addr"`
-	NodeAddr    string   `mapstructure:"node-addr"`
-	PrivateKeys []string `mapstructure:"private-key"`
-	Hostnames   []string `mapstructure:"hostname"`
-	Network     string   `mapstructure:"network"`
-	NetworkOpts []string `mapstructure:"network-opt"`
-	MetricAddr  string   `mapstructure:"metric-addr"`
-	Debug       bool     `mapstructure:"debug"`
+	SSHAddr            string   `mapstructure:"ssh-addr"`
+	WSAddr             string   `mapstructure:"ws-addr"`
+	NodeAddr           string   `mapstructure:"node-addr"`
+	AuthorizedKeysFile string   `mapstructure:"authorized-keys"`
+	PrivateKeys        []string `mapstructure:"private-key"`
+	Hostnames          []string `mapstructure:"hostname"`
+	Network            string   `mapstructure:"network"`
+	NetworkOpts        []string `mapstructure:"network-opt"`
+	MetricAddr         string   `mapstructure:"metric-addr"`
+	Debug              bool     `mapstructure:"debug"`
 }
 
 func Start(opt Opt) error {
@@ -133,12 +134,13 @@ func Start(opt Opt) error {
 		}
 
 		s := &Server{
-			NodeAddr:        nodeAddr,
-			HostSigners:     hostSigners,
-			Signers:         signers,
-			NetworkProvider: network,
-			Logger:          logger.WithField("com", "server"),
-			MetricsProvider: mp,
+			NodeAddr:           nodeAddr,
+			AuthorizedKeysFile: opt.AuthorizedKeysFile,
+			HostSigners:        hostSigners,
+			Signers:            signers,
+			NetworkProvider:    network,
+			Logger:             logger.WithField("com", "server"),
+			MetricsProvider:    mp,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
@@ -176,12 +178,13 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	NodeAddr        string
-	HostSigners     []ssh.Signer
-	Signers         []ssh.Signer
-	NetworkProvider NetworkProvider
-	MetricsProvider provider.Provider
-	Logger          log.FieldLogger
+	NodeAddr           string
+	AuthorizedKeysFile string
+	HostSigners        []ssh.Signer
+	Signers            []ssh.Signer
+	NetworkProvider    NetworkProvider
+	MetricsProvider    provider.Provider
+	Logger             log.FieldLogger
 
 	sshln net.Listener
 	wsln  net.Listener
@@ -237,13 +240,14 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				HostSigners:     s.HostSigners,
-				Signers:         s.Signers,
-				NodeAddr:        s.NodeAddr,
-				ConnDialer:      cd,
-				SessionRepo:     sessRepo,
-				Logger:          s.Logger.WithField("com", "ssh-proxy"),
-				MetricsProvider: s.MetricsProvider,
+				HostSigners:        s.HostSigners,
+				Signers:            s.Signers,
+				NodeAddr:           s.NodeAddr,
+				AuthorizedKeysFile: s.AuthorizedKeysFile,
+				ConnDialer:         cd,
+				SessionRepo:        sessRepo,
+				Logger:             s.Logger.WithField("com", "ssh-proxy"),
+				MetricsProvider:    s.MetricsProvider,
 			}
 			g.Add(func() error {
 				return sp.Serve(sshln)
