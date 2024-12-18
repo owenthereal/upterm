@@ -41,16 +41,16 @@ upterm host [flags]
 ```
       --accept                   Automatically accept client connections without prompts.
       --authorized-keys string   Specify a authorize_keys file listing authorized public keys for connection.
-      --codeberg-user strings    Authorize specified Codeberg users by allowing their public keys to connect.
+      --codeberg-user strings    Authorize specified Codeberg users by allowing their public keys to connect. For self-hosted installations, set CODEBERG_HOST, along with the protocol prefix (e.g., https://git.example.com).
   -f, --force-command string     Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
-      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
-      --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect.
+      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details. For self-hosted installations, set GITHUB_HOST, along with the protocol prefix (e.g., https://git.example.com).
+      --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect. For self-hosted installations, set GITLAB_HOST, along with the protocol prefix (e.g., https://git.example.com).
   -h, --help                     help for host
       --known-hosts string       Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
   -i, --private-key strings      Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
   -r, --read-only                Host a read-only session, preventing client interaction.
       --server string            Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
-      --srht-user strings        Authorize specified SourceHut users by allowing their public keys to connect.
+      --srht-user strings        Authorize specified SourceHut users by allowing their public keys to connect. For self-hosted installations, set SOURCEHUT_HOST, along with the protocol prefix (e.g., https://git.example.com).
 ```
 
 ### SEE ALSO
