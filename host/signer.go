@@ -28,7 +28,7 @@ func (e *errDescryptingPrivateKey) Error() string {
 	return fmt.Sprintf("error decrypting private key %s", e.file)
 }
 
-// Signers return signers based on the folllowing conditions:
+// Signers return signers based on the following conditions:
 // If SSH agent is running and has keys, it returns signers from SSH agent, otherwise return signers from private keys;
 // If neither works, it generates a signer on the fly.
 func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
