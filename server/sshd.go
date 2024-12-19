@@ -89,7 +89,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 
 			return true
 		},
-		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channl requests, e.g. shell
+		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channel requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:         sh.Handler,
 			cancelStreamlocalForwardChannelType:   sh.Handler,

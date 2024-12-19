@@ -71,7 +71,7 @@ type hostKeyCallback struct {
 func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
 		kerr, ok := err.(*knownhosts.KeyError)
-		// Return err if it's neither key error or no authrorities hostname error
+		// Return err if it's neither key error or no authorities hostname error
 		if !ok && !strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 			return err
 		}
@@ -186,7 +186,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 	logger := c.Logger.WithField("server", u)
 
-	logger.Info("Etablishing reverse tunnel")
+	logger.Info("Establishing reverse tunnel")
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
