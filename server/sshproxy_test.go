@@ -125,7 +125,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 			}
 			_, err = client.NewSession()
 			if err == nil || !strings.Contains(err.Error(), "unsupported channel type") {
-				t.Fatalf("expect unsupported channle type error but got %v", err)
+				t.Fatalf("expect unsupported channel type error but got %v", err)
 			}
 		})
 	}

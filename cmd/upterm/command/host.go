@@ -92,7 +92,7 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	} else {
 		u, err := url.Parse(flagServer)
 		if err != nil {
-			result = multierror.Append(result, fmt.Errorf("error pasring server URL: %w", err))
+			result = multierror.Append(result, fmt.Errorf("error parsing server URL: %w", err))
 		}
 
 		if u != nil {

@@ -96,7 +96,7 @@ func (g *UserCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 		},
 	}
 
-	// TODO: use differnt key to sign
+	// TODO: use different key to sign
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		return nil, fmt.Errorf("error signing host cert: %w", err)
 	}
