@@ -14,7 +14,7 @@ import (
 
 // NewSSHClient creates a ssh client via ws.
 // The url must include username as session id and password as encoded node address.
-// isUptermClient indicates whehter the client is host client or client client.
+// isUptermClient indicates whether the client is host client or client client.
 func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool) (*ssh.Client, error) {
 	conn, err := NewWSConn(u, isUptermClient)
 	if err != nil {
@@ -30,7 +30,7 @@ func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool) (*s
 
 // NewWSConn creates a ws net.Conn.
 // The url must include username as session id and password as encoded node address.
-// isUptermClient indicates whehter the client is host client or client client.
+// isUptermClient indicates whether the client is host client or client client.
 func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
 	u, _ = url.Parse(u.String()) // clone
 	user := u.User

@@ -45,7 +45,7 @@ func Start(opt Opt) error {
 
 	network := networks.Get(opt.Network)
 	if network == nil {
-		return fmt.Errorf("unsupport network provider %q", opt.Network)
+		return fmt.Errorf("unsupported network provider %q", opt.Network)
 	}
 
 	opts := parseNetworkOpt(opt.NetworkOpts)
@@ -267,7 +267,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				// If sshln is not nil, always dial to SSHProxy.
 				// So Host/Client -> WSProxy -> SSHProxy -> sshd/Session
 				// This makes sure that SSHProxy terminates all SSH requests
-				// which provides a consistent authentication machanism.
+				// which provides a consistent authentication mechanism.
 				cd = sshProxyDialer{
 					sshProxyAddr: sshln.Addr().String(),
 					Logger:       s.Logger.WithField("com", "ws-sshproxy-dialer"),
