@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"os/user"
 	"strings"
 	"time"
@@ -32,6 +33,8 @@ type ReverseTunnel struct {
 	HostKeyCallback   ssh.HostKeyCallback
 	Logger            log.FieldLogger
 
+	CustomLabel string
+
 	ln net.Listener
 }
 
@@ -48,6 +51,15 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
+	}
+
+	if c.CustomLabel == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return nil, err
+		}
+
+		c.CustomLabel = host
 	}
 
 	var (
@@ -101,7 +113,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		return nil, sshDialError(c.Host.String(), err)
 	}
 
-	sessResp, err := c.createSession(user.Username, publicKeys, authorizedKeys)
+	sessResp, err := c.createSession(user.Username, c.CustomLabel, publicKeys, authorizedKeys)
 	if err != nil {
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}
@@ -123,11 +135,12 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	return sessResp, nil
 }
 
-func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clientAuthorizedKeys [][]byte) (*server.CreateSessionResponse, error) {
+func (c *ReverseTunnel) createSession(user, host string, hostPublicKeys [][]byte, clientAuthorizedKeys [][]byte) (*server.CreateSessionResponse, error) {
 	req := &server.CreateSessionRequest{
 		HostUser:             user,
 		HostPublicKeys:       hostPublicKeys,
 		ClientAuthorizedKeys: clientAuthorizedKeys,
+		Label:                host,
 	}
 	b, err := proto.Marshal(req)
 	if err != nil {
