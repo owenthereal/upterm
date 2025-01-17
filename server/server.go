@@ -16,6 +16,7 @@ import (
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
+	"github.com/pires/go-proxyproto"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/exp/slices"
@@ -26,15 +27,16 @@ const (
 )
 
 type Opt struct {
-	SSHAddr     string   `mapstructure:"ssh-addr"`
-	WSAddr      string   `mapstructure:"ws-addr"`
-	NodeAddr    string   `mapstructure:"node-addr"`
-	PrivateKeys []string `mapstructure:"private-key"`
-	Hostnames   []string `mapstructure:"hostname"`
-	Network     string   `mapstructure:"network"`
-	NetworkOpts []string `mapstructure:"network-opt"`
-	MetricAddr  string   `mapstructure:"metric-addr"`
-	Debug       bool     `mapstructure:"debug"`
+	SSHAddr       string   `mapstructure:"ssh-addr"`
+	WSAddr        string   `mapstructure:"ws-addr"`
+	NodeAddr      string   `mapstructure:"node-addr"`
+	PrivateKeys   []string `mapstructure:"private-key"`
+	Hostnames     []string `mapstructure:"hostname"`
+	Network       string   `mapstructure:"network"`
+	NetworkOpts   []string `mapstructure:"network-opt"`
+	MetricAddr    string   `mapstructure:"metric-addr"`
+	ProxyProtocol bool     `mapstructure:"proxy-protocol"`
+	Debug         bool     `mapstructure:"debug"`
 }
 
 func Start(opt Opt) error {
@@ -99,6 +101,9 @@ func Start(opt Opt) error {
 			return err
 		}
 		logger = logger.WithField("ssh-addr", sshln.Addr())
+		if opt.ProxyProtocol {
+			sshln = &proxyproto.Listener{Listener: sshln}
+		}
 	}
 
 	if opt.WSAddr != "" {

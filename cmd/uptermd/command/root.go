@@ -33,6 +33,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringSliceP("network-opt", "", nil, "network provider option")
 
 	cmd.PersistentFlags().StringP("metric-addr", "", "", "metric server address")
+	cmd.PersistentFlags().BoolP("proxy-protocol", "", false, "enable proxy protocol support")
 	cmd.PersistentFlags().BoolP("debug", "", os.Getenv("DEBUG") != "", "debug")
 
 	return cmd
