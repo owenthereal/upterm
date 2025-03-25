@@ -17,7 +17,7 @@ import (
 
 var (
 	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 3 * time.Second
+	pipeEstablishingTimeout = 60 * time.Second
 )
 
 type SSHRouting struct {
