@@ -51,6 +51,7 @@ require (
 	github.com/cli/go-gh/v2 v2.10.0
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
+	github.com/pires/go-proxyproto v0.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.9.0

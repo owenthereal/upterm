@@ -237,6 +237,50 @@ systemctl daemon-reload
 systemctl start uptermd
 ```
 
+### Traefik
+
+An example `docker-compose` configuration for `uptermd` with [Traefik](https://doc.traefik.io/traefik/):
+
+```yaml
+services:
+upterm:
+  build: https://github.com/owenthereal/upterm
+  labels:
+    - "traefik.enable=true"
+    - "traefik.docker.network=web"
+    - "traefik.tcp.services.uptermd.loadbalancer.server.port=2222"
+    - "traefik.tcp.services.uptermd.loadbalancer.proxyProtocol.version=2" # required for real ip forwarding over tcp
+    - "traefik.tcp.routers.uptermd.service=uptermd"
+    - "traefik.tcp.routers.uptermd.rule=HostSNI(`*`)"
+    - "traefik.tcp.routers.uptermd.entrypoints=uptermd"
+    - "traefik.http.services.uptermd-wss.loadbalancer.server.port=8443"
+    - "traefik.http.routers.uptermd-wss.service=uptermd-wss"
+    - "traefik.http.routers.uptermd-wss.rule=Host(`upterm.example.com`)" # edit as needed
+    - "traefik.http.routers.uptermd-wss.entrypoints=websecure"
+    - "traefik.http.routers.uptermd-wss.tls.certresolver=<your cert resolver here>"
+
+  command:
+    # - --debug
+    - --ssh-addr=0.0.0.0:2222
+    - --ws-addr=0.0.0.0:8443
+    - --proxy-protocol
+  # environment:
+  #  - UPTERMD_SSH_ADDR=0.0.0.0:2222
+  #  - UPTERMD_WS_ADDR=0.0.0.0:8443
+  #  - UPTERMD_PROXY_PROTOCOL=true
+
+  networks:
+    - web
+
+networks:
+web:
+  external: true
+```
+
+Make sure to configure the appropriate [entrypoints](https://doc.traefik.io/traefik/routing/entrypoints/), this examples uses two separate entrypoints (`uptermd` on port `2222` and `websecure` on port `443`).
+
+Note that enabling the [proxy protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) is required to preserve the client's IP address when using ssh.
+
 ## :balance_scale: Comparison with Prior Arts
 
 Upterm stands as a modern alternative to [Tmate](https://tmate.io).
