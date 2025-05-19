@@ -65,6 +65,8 @@ affinity: {}
 
 host_keys: {}
 
+authorized_keys: []
+
 hostname: my-upterm-host
 
 # Require ingress-nginx & cert-manager

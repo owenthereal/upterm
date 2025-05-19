@@ -40,6 +40,10 @@ spec:
             - --ws-addr
             - $(POD_IP):80
             {{- end }}
+            {{- if gt (len .Values.authorized_keys) 0 }}
+            - --authorized-keys
+            - /etc/uptermd/authorized_keys
+            {{- end }}
             - --node-addr
             - $(POD_IP):22
             - --hostname
@@ -85,11 +89,20 @@ spec:
           volumeMounts:
             - mountPath: /host-keys
               name: host-keys
+            {{- if gt (len .Values.authorized_keys) 0 }}
+            - mountPath: /etc/uptermd
+              name: authorized-keys
+            {{- end }}
       volumes:
         - name: host-keys
           secret:
             secretName: {{ include "upterm.fullname" . }}
             defaultMode: 0600
+        {{- if gt (len .Values.authorized_keys) 0 }}
+        - name: authorized-keys
+          configMap:
+            name: uptermd
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
