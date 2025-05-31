@@ -264,7 +264,7 @@ services:
     command:
       - --ssh-addr=0.0.0.0:2222
       - --ws-addr=0.0.0.0:8443
-      - --proxy-protocol
+      - --ssh-proxy-protocol
 
     networks:
       - web
@@ -277,8 +277,8 @@ networks:
 **Important notes:**
 
 - **Proxy Protocol:**
-  The `--proxy-protocol` flag (or `UPTERMD_PROXY_PROTOCOL=true` environment variable) tells `uptermd` to expect the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header on incoming SSH connections. This is essential when using Traefik (or other TCP proxies like HAProxy or AWS ELB) to preserve the real client IP address.
-  **If you enable `--proxy-protocol`, all incoming SSH connections must come through a proxy that supports and is configured to use the PROXY protocol. Direct SSH connections will fail, as `uptermd` will expect the protocol header.**
+  The `--ssh-proxy-protocol` flag (or `UPTERMD_SSH_PROXY_PROTOCOL=true` environment variable) tells `uptermd` to expect the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header on incoming SSH connections. This is essential when using Traefik (or other TCP proxies like HAProxy or AWS ELB) to preserve the real client IP address.
+  **If you enable `--ssh-proxy-protocol`, all incoming SSH connections must come through a proxy that supports and is configured to use the PROXY protocol. Direct SSH connections will fail, as `uptermd` will expect the protocol header.**
 
 - **Entrypoints:**
   Make sure to configure the appropriate [Traefik entrypoints](https://doc.traefik.io/traefik/routing/entrypoints/). This example uses two: one for SSH (`uptermd` on port `2222`) and one for WebSocket/HTTPS (`websecure` on port `443`).

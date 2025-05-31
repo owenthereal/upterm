@@ -27,16 +27,16 @@ const (
 )
 
 type Opt struct {
-	SSHAddr       string   `mapstructure:"ssh-addr"`
-	WSAddr        string   `mapstructure:"ws-addr"`
-	NodeAddr      string   `mapstructure:"node-addr"`
-	PrivateKeys   []string `mapstructure:"private-key"`
-	Hostnames     []string `mapstructure:"hostname"`
-	Network       string   `mapstructure:"network"`
-	NetworkOpts   []string `mapstructure:"network-opt"`
-	MetricAddr    string   `mapstructure:"metric-addr"`
-	ProxyProtocol bool     `mapstructure:"proxy-protocol"`
-	Debug         bool     `mapstructure:"debug"`
+	SSHAddr          string   `mapstructure:"ssh-addr"`
+	SSHProxyProtocol bool     `mapstructure:"ssh-proxy-protocol"`
+	WSAddr           string   `mapstructure:"ws-addr"`
+	NodeAddr         string   `mapstructure:"node-addr"`
+	PrivateKeys      []string `mapstructure:"private-key"`
+	Hostnames        []string `mapstructure:"hostname"`
+	Network          string   `mapstructure:"network"`
+	NetworkOpts      []string `mapstructure:"network-opt"`
+	MetricAddr       string   `mapstructure:"metric-addr"`
+	Debug            bool     `mapstructure:"debug"`
 }
 
 func Start(opt Opt) error {
@@ -101,7 +101,7 @@ func Start(opt Opt) error {
 			return err
 		}
 		logger = logger.WithField("ssh-addr", sshln.Addr())
-		if opt.ProxyProtocol {
+		if opt.SSHProxyProtocol {
 			// Wrap the SSH listener with proxyproto.Listener to preserve the real client IP
 			// when connections are coming through a TCP proxy (e.g., AWS ELB, HAProxy).
 			sshln = &proxyproto.Listener{Listener: sshln}
