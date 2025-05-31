@@ -111,9 +111,9 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 		go func(dconn net.Conn, inst *routingInstruments, logger log.FieldLogger) {
 			defer func() {
 				_ = dconn.Close()
-				libmetrics.MeasureSince(inst.connectionDuration, time.Now())
-				inst.activeConnections.Add(-1)
 			}()
+			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
+			defer inst.activeConnections.Add(-1)
 
 			inst.connections.Add(1)
 			inst.activeConnections.Add(1)
