@@ -102,6 +102,8 @@ func Start(opt Opt) error {
 		}
 		logger = logger.WithField("ssh-addr", sshln.Addr())
 		if opt.ProxyProtocol {
+			// Wrap the SSH listener with proxyproto.Listener to preserve the real client IP
+			// when connections are coming through a TCP proxy (e.g., AWS ELB, HAProxy).
 			sshln = &proxyproto.Listener{Listener: sshln}
 		}
 	}
