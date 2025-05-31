@@ -299,7 +299,9 @@ func (c *Host) Share(url string) error {
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(adminSockDir)
+		defer func() {
+			_ = os.RemoveAll(adminSockDir)
+		}()
 
 		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
 	}
@@ -327,7 +329,7 @@ func (c *Host) Share(url string) error {
 
 	errCh := make(chan error)
 	go func() {
-		if err := c.Host.Run(c.ctx); err != nil {
+		if err := c.Run(c.ctx); err != nil {
 			log.WithError(err).Error("error running host")
 			errCh <- err
 		}
@@ -395,8 +397,8 @@ func (c *Client) InputOutput() (chan string, chan string) {
 }
 
 func (c *Client) Close() {
-	c.session.Close()
-	c.sshClient.Close()
+	_ = c.session.Close()
+	_ = c.sshClient.Close()
 }
 
 func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionResponse, clientJoinURL string) error {
@@ -593,8 +595,8 @@ func SetupKeyPairs() (func(), error) {
 	}
 
 	remove := func() {
-		os.Remove(HostPrivateKey)
-		os.Remove(ClientPrivateKey)
+		_ = os.Remove(HostPrivateKey)
+		_ = os.Remove(ClientPrivateKey)
 	}
 
 	return remove, nil
@@ -605,7 +607,9 @@ func writeTempFile(name, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	if _, err := file.Write([]byte(content)); err != nil {
 		return "", err

@@ -200,11 +200,11 @@ func (s *Server) Shutdown() {
 	}
 
 	if s.sshln != nil {
-		s.sshln.Close()
+		_ = s.sshln.Close()
 	}
 
 	if s.wsln != nil {
-		s.wsln.Close()
+		_ = s.wsln.Close()
 	}
 }
 

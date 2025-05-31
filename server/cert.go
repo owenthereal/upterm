@@ -48,11 +48,11 @@ func parseAuthRequestFromCert(principal string, cert *ssh.Certificate) (*AuthReq
 		return nil, key, err
 	}
 
-	if cert.Permissions.Extensions == nil {
+	if cert.Extensions == nil {
 		return nil, key, errCertNotSignedByHost
 	}
 
-	ext, ok := cert.Permissions.Extensions[upterm.SSHCertExtension]
+	ext, ok := cert.Extensions[upterm.SSHCertExtension]
 	if !ok {
 		return nil, key, errCertNotSignedByHost
 	}

@@ -23,7 +23,9 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 

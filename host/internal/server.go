@@ -221,7 +221,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				return ptyError(err)
 			}, func(err error) {
 				cancel()
-				ptmx.Close()
+				_ = ptmx.Close()
 			})
 		}
 		{
@@ -229,7 +229,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				return cmd.Wait()
 			}, func(err error) {
 				cancel()
-				ptmx.Close()
+				_ = ptmx.Close()
 			})
 		}
 	} else {

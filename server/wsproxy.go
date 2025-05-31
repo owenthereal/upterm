@@ -38,7 +38,7 @@ func webHandler(h http.Handler) http.Handler {
 2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.
 3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
 `
-		fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+		_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
 	})
 }
 
@@ -102,7 +102,9 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsconn := ws.WrapWSConn(wsc)
-	defer wsconn.Close()
+	defer func() {
+		_ = wsconn.Close()
+	}()
 
 	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
 	if err != nil {
@@ -118,8 +120,8 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var o sync.Once
 	cl := func() {
-		wsconn.Close()
-		conn.Close()
+		_ = wsconn.Close()
+		_ = conn.Close()
 	}
 
 	var g run.Group

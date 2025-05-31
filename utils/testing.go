@@ -25,7 +25,10 @@ func WaitForServer(addr string) error {
 			continue
 		}
 
-		conn.Close()
+		if err := conn.Close(); err != nil {
+			return fmt.Errorf("error closing connection to %s: %w", addr, err)
+		}
+
 		break
 	}
 

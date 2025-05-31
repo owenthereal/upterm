@@ -19,7 +19,9 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAd
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
@@ -50,7 +52,9 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
@@ -87,7 +91,9 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
@@ -135,7 +141,9 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
@@ -208,7 +216,9 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 
@@ -273,7 +283,9 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(adminSockDir)
+	defer func() {
+		_ = os.RemoveAll(adminSockDir)
+	}()
 
 	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
 

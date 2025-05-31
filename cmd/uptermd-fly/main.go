@@ -21,10 +21,10 @@ func main() {
 		logger.Fatal("FLY_MACHINE_ID is not set")
 	}
 
-	os.Setenv("UPTERMD_NODE_ADDR", fmt.Sprintf("%s.vm.%s.internal:2222", flyMachineID, flyAppName))
-	os.Setenv("UPTERMD_SSH_ADDR", "0.0.0.0:2222")
-	os.Setenv("UPTERMD_WS_ADDR", "0.0.0.0:8080")
-	os.Setenv("UPTERMD_HOSTNAME", "uptermd.upterm.dev")
+	_ = os.Setenv("UPTERMD_NODE_ADDR", fmt.Sprintf("%s.vm.%s.internal:2222", flyMachineID, flyAppName))
+	_ = os.Setenv("UPTERMD_SSH_ADDR", "0.0.0.0:2222")
+	_ = os.Setenv("UPTERMD_WS_ADDR", "0.0.0.0:8080")
+	_ = os.Setenv("UPTERMD_HOSTNAME", "uptermd.upterm.dev")
 
 	if err := command.Root(logger).Execute(); err != nil {
 		logger.Fatal(err)

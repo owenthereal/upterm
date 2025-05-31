@@ -53,7 +53,7 @@ func proxyRunE(c *cobra.Command, args []string) error {
 			_, err := io.Copy(conn, uio.NewContextReader(ctx, os.Stdin))
 			return err
 		}, func(err error) {
-			conn.Close()
+			_ = conn.Close()
 			cancel()
 		})
 	}
@@ -62,7 +62,7 @@ func proxyRunE(c *cobra.Command, args []string) error {
 			_, err := io.Copy(os.Stdout, uio.NewContextReader(ctx, conn))
 			return err
 		}, func(err error) {
-			conn.Close()
+			_ = conn.Close()
 			cancel()
 		})
 	}
