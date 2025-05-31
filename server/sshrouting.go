@@ -109,10 +109,12 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 		logger := p.Logger.WithField("addr", dconn.RemoteAddr())
 		go func(dconn net.Conn, inst *routingInstruments, logger log.FieldLogger) {
-			defer dconn.Close()
-
+			defer func() {
+				_ = dconn.Close()
+			}()
 			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
 			defer inst.activeConnections.Add(-1)
+
 			inst.connections.Add(1)
 			inst.activeConnections.Add(1)
 

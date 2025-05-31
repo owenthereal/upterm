@@ -35,7 +35,9 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxyLn.Close()
+	defer func() {
+		_ = proxyLn.Close()
+	}()
 
 	proxyAddr := proxyLn.Addr().String()
 	cd := sidewayConnDialer{
@@ -64,7 +66,9 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sshLn.Close()
+	defer func() {
+		_ = sshLn.Close()
+	}()
 
 	sshdAddr := sshLn.Addr().String()
 	sshd := &sshd{

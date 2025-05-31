@@ -1,41 +1,29 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:latest as builder
+FROM golang:latest AS builder
 
-ARG TARGETOS TARGETARCH
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 ENV CGO_ENABLED=0
 RUN --mount=target=. \
     --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
-    ./cmd/...
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go install ./cmd/...
 
-# For fly deployment only
-FROM gcr.io/distroless/static as uptermd-fly
-
-USER nonroot:nonroot
+FROM gcr.io/distroless/static:nonroot AS base
 
 WORKDIR /app
 ENV PATH="/app:${PATH}"
 
+# sshd ws & prometheus
+EXPOSE 2222 8080 9090
+
+FROM base AS uptermd-fly
 COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
+ENTRYPOINT ["uptermd-fly"]
 
-FROM gcr.io/distroless/static
-
-USER nonroot:nonroot
-
-WORKDIR /app
-ENV PATH="/app:${PATH}"
-
+FROM base
 COPY --from=builder /go/bin/uptermd /app/
-
-# sshd
-EXPOSE 2222
-# ws
-EXPOSE 8080
-# Prometheus
-EXPOSE 9090
-
 ENTRYPOINT ["uptermd"]

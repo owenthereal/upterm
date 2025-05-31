@@ -16,7 +16,9 @@ func Test_MemListener_Listen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sln.Close()
+	defer func() {
+		_ = sln.Close()
+	}()
 
 	// error on listener with the same address
 	_, err = l.Listen("mem", "path_foo")

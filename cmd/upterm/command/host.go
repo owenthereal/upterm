@@ -147,7 +147,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer lf.Close()
+	defer func() {
+		_ = lf.Close()
+	}()
 
 	logger := log.New()
 	logger.SetOutput(lf)
@@ -245,7 +247,9 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 		if err := keyboard.Open(); err != nil {
 			return err
 		}
-		defer keyboard.Close()
+		defer func() {
+			_ = keyboard.Close()
+		}()
 
 		fmt.Println("Press <q> or <ctrl-c> to accept connections...")
 		for {

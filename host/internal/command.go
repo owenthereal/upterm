@@ -135,7 +135,7 @@ func (c *command) Run() error {
 		g.Add(func() error {
 			return c.cmd.Wait()
 		}, func(err error) {
-			c.ptmx.Close()
+			_ = c.ptmx.Close()
 		})
 	}
 

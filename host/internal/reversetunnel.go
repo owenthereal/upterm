@@ -36,8 +36,8 @@ type ReverseTunnel struct {
 }
 
 func (c *ReverseTunnel) Close() {
-	c.ln.Close()
-	c.Client.Close()
+	_ = c.ln.Close()
+	_ = c.Client.Close()
 }
 
 func (c *ReverseTunnel) Listener() net.Listener {
@@ -106,7 +106,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}
 
-	c.ln, err = c.Client.Listen("unix", sessResp.SessionID)
+	c.ln, err = c.Listen("unix", sessResp.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
@@ -114,7 +114,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	// make sure connection is alive
 	go keepAlive(ctx, c.KeepAliveDuration, func() {
 		// TODO: ping with session ID
-		_, _, err := c.Client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+		_, _, err := c.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		if err != nil {
 			c.Logger.WithError(err).Error("error pinging server")
 		}
@@ -134,7 +134,7 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 		return nil, err
 	}
 
-	ok, body, err := c.Client.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
+	ok, body, err := c.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing session: %w", err)
 	}

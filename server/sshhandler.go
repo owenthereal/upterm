@@ -63,13 +63,13 @@ func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, ses
 			ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 			if err != nil {
 				logger.WithError(err).Error("error opening channel")
-				c.Close()
+				_ = c.Close()
 				return
 			}
 
 			closeAll := func() {
-				ch.Close()
-				c.Close()
+				_ = ch.Close()
+				_ = c.Close()
 			}
 
 			var g run.Group
@@ -187,7 +187,7 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 
 	ln, ok := h.forwards[sessionID]
 	if ok {
-		ln.Close()
+		_ = ln.Close()
 	}
 
 	delete(h.forwards, sessionID)

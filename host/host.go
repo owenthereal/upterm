@@ -97,9 +97,9 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	}
 
 	fp := utils.FingerprintSHA256(key)
-	fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
-	fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
-	fmt.Fprintf(cb.stdout, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
+	_, _ = fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
+	_, _ = fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
+	_, _ = fmt.Fprintf(cb.stdout, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
 
 	reader := bufio.NewReader(cb.stdin)
 	for {
@@ -115,10 +115,10 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 		}
 
 		if confirm == "no" {
-			return fmt.Errorf("Host key verification failed.")
+			return fmt.Errorf("Host key verification failed")
 		}
 
-		fmt.Fprintf(cb.stdout, "Please type 'yes', 'no' or the fingerprint: ")
+		_, _ = fmt.Fprintf(cb.stdout, "Please type 'yes', 'no' or the fingerprint: ")
 	}
 }
 
@@ -127,7 +127,9 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname, remote string, k
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	// hostname and remote can be both IPs
 	addr := []string{hostname}
@@ -209,7 +211,9 @@ func (c *Host) Run(ctx context.Context) error {
 
 		c.AdminSocketFile = filepath.Join(dir, AdminSocketFile(sessResp.SessionID))
 
-		defer os.Remove(c.AdminSocketFile)
+		defer func() {
+			_ = os.Remove(c.AdminSocketFile)
+		}()
 	}
 
 	logger = logger.WithField("session", sessResp.SessionID)
@@ -286,7 +290,7 @@ func (c *Host) Run(ctx context.Context) error {
 					if client != nil {
 						logger.WithField("client", client.Addr).Info("Client left")
 						clientRepo.Delete(cid)
-						if c.ClientLeftCallback != nil && client != nil {
+						if c.ClientLeftCallback != nil {
 							c.ClientLeftCallback(client)
 						}
 					}
@@ -343,7 +347,9 @@ func createFileIfNotExist(file string) error {
 			return err
 		}
 
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 	}
 
 	return nil

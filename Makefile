@@ -46,7 +46,7 @@ test:
 
 .PHONY: vet
 vet:
-	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m
+	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m --fix
 
 .PHONY: goreleaser
 goreleaser:

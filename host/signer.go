@@ -72,7 +72,7 @@ func signersFromSSHAgent(socket string) ([]ssh.Signer, func(), error) {
 	if err != nil {
 		return nil, cleanup, err
 	}
-	cleanup = func() { conn.Close() }
+	cleanup = func() { _ = conn.Close() }
 
 	client := agent.NewClient(conn)
 	signers, err := client.Signers()
