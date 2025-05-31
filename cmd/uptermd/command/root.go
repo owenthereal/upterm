@@ -28,6 +28,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().StringP("node-addr", "", "", "node address")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
+	cmd.PersistentFlags().BoolP("ssh-proxy-protocol", "", false, "enable PROXY protocol support for the SSH listener (for use behind TCP proxies like Traefik, HAProxy, or AWS ELB)")
 
 	cmd.PersistentFlags().StringP("network", "", "mem", "network provider")
 	cmd.PersistentFlags().StringSliceP("network-opt", "", nil, "network provider option")
