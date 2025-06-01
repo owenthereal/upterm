@@ -32,6 +32,7 @@ var (
 	flagSourceHutUsers     []string
 	flagReadOnly           bool
 	flagAccept             bool
+	flagCustomLabel        string
 )
 
 func hostCmd() *cobra.Command {
@@ -80,6 +81,7 @@ private key. To authorize client connections, specify a authorized_key file with
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction.")
+	cmd.PersistentFlags().StringVar(&flagCustomLabel, "label", "", "Custom label which appears on uptermd server in metrics and logs. Defaults to hostname.")
 
 	return cmd
 }
@@ -206,6 +208,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	h := &host.Host{
 		Host:                   flagServer,
+		CustomLabel:            flagCustomLabel,
 		Command:                args,
 		ForceCommand:           forceCommand,
 		Signers:                signers,
