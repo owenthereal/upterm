@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
 )
@@ -84,7 +85,7 @@ type wsHandler struct {
 // * Authorization
 // * Upterm-Client-Version
 func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	clientVersion := r.Header.Get("Upterm-Client-Version")
+	clientVersion := r.Header.Get(upterm.HeaderUptermClientVersion)
 	if clientVersion == "" {
 		h.httpError(w, fmt.Errorf("missing upterm client version"))
 		return
