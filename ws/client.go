@@ -59,7 +59,7 @@ func webSocketDialHeader(sessionID, encodedNodeAddr string, isClient bool) http.
 	if isClient {
 		ver = upterm.ClientSSHClientVersion
 	}
-	header.Add("Upterm-Client-Version", ver)
+	header.Add(upterm.HeaderUptermClientVersion, ver)
 
 	return header
 }

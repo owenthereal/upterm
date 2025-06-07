@@ -14,6 +14,9 @@ const (
 	ServerServerInfoRequestType    = "upterm-server-info@upterm.dev"
 	ServerCreateSessionRequestType = "upterm-create-session@upterm.dev"
 
+	// header
+	HeaderUptermClientVersion = "Upterm-Client-Version"
+
 	// misc
 	OpenSSHKeepAliveRequestType = "keepalive@openssh.com"
 
