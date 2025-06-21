@@ -152,6 +152,7 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname, remote string, k
 
 type Host struct {
 	Host                   string
+	CustomLabel            string
 	KeepAliveDuration      time.Duration
 	Command                []string
 	ForceCommand           []string
@@ -196,6 +197,7 @@ func (c *Host) Run(ctx context.Context) error {
 		AuthorizedKeys:    aks,
 		KeepAliveDuration: c.KeepAliveDuration,
 		Logger:            c.Logger.WithField("com", "reverse-tunnel"),
+		CustomLabel:       c.CustomLabel,
 	}
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
