@@ -17,7 +17,7 @@ type sshProxy struct {
 	Signers         []ssh.Signer
 	NodeAddr        string
 	ConnDialer      connDialer
-	SessionRepo     *sessionRepo
+	SessionStore    SessionStore
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
@@ -41,11 +41,11 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	r.routing = &SSHRouting{
 		HostSigners: r.HostSigners,
 		AuthPiper: &authPiper{
-			HostSigners: r.HostSigners,
-			Signers:     r.Signers,
-			SessionRepo: r.SessionRepo,
-			ConnDialer:  r.ConnDialer,
-			NodeAddr:    r.NodeAddr,
+			HostSigners:  r.HostSigners,
+			Signers:      r.Signers,
+			SessionStore: r.SessionStore,
+			ConnDialer:   r.ConnDialer,
+			NodeAddr:     r.NodeAddr,
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
@@ -56,11 +56,11 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 }
 
 type authPiper struct {
-	NodeAddr    string
-	SessionRepo *sessionRepo
-	ConnDialer  connDialer
-	Signers     []ssh.Signer
-	HostSigners []ssh.Signer
+	NodeAddr     string
+	SessionStore SessionStore
+	ConnDialer   connDialer
+	Signers      []ssh.Signer
+	HostSigners  []ssh.Signer
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
@@ -176,9 +176,9 @@ func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) 
 	return certSigners, nil
 }
 
-// hostSession returns the host session. It returns nil if the current node
+// hostSession returns a session if the routing is required to be done on client side and the current
 // is proxy node.
-func (a *authPiper) hostSession(conn ssh.ConnMetadata) (*session, error) {
+func (a *authPiper) hostSession(conn ssh.ConnMetadata) (*Session, error) {
 	user := conn.User()
 	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
 	if err != nil {
@@ -192,5 +192,5 @@ func (a *authPiper) hostSession(conn ssh.ConnMetadata) (*session, error) {
 		return nil, nil
 	}
 
-	return a.SessionRepo.Get(id.Id)
+	return a.SessionStore.Get(id.Id)
 }
