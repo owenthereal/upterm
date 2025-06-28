@@ -23,6 +23,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
@@ -216,6 +217,7 @@ func (s *Server) start() error {
 		Signers:         signers,
 		NetworkProvider: network,
 		MetricsProvider: provider.NewDiscardProvider(),
+		SessionManager:  server.NewSessionManager(server.NewMemorySessionStore(logger), routing.ModeEmbedded),
 		Logger:          logger,
 	}
 
@@ -409,9 +411,13 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		return err
 	}
 
-	user, err := api.EncodeIdentifierSession(session)
-	if err != nil {
-		return err
+	user := session.SshUser
+	if user == "" {
+		// Fallback to encoding for backward compatibility with older servers
+		user, err = api.EncodeIdentifierSession(session)
+		if err != nil {
+			return err
+		}
 	}
 
 	config := &ssh.ClientConfig{

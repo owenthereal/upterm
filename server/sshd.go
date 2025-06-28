@@ -24,7 +24,7 @@ type ServerInfo struct {
 }
 
 type sshd struct {
-	SessionStore        SessionStore
+	SessionManager      *SessionManager
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
@@ -55,7 +55,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
-		s.SessionStore,
+		s.SessionManager.GetStore(),
 		s.SessionDialListener,
 		s.Logger.WithField("com", "stream-local-handler"),
 	)
@@ -119,17 +119,19 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		sessReq.ClientAuthorizedKeys,
 	)
 
-	if err := s.SessionStore.Store(session); err != nil {
+	sshUser, err := s.SessionManager.CreateSession(session)
+	if err != nil {
 		s.Logger.WithError(err).WithFields(log.Fields{
 			"session": sessionID,
 			"node":    s.NodeAddr,
-		}).Error("failed to store session data")
-		return false, []byte(fmt.Sprintf("failed to store session data: %v", err))
+		}).Error("failed to create session")
+		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
 
 	sessResp := &CreateSessionResponse{
 		SessionID: sessionID,
 		NodeAddr:  s.NodeAddr,
+		SshUser:   sshUser,
 	}
 
 	b, err := proto.Marshal(sessResp)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -312,4 +313,44 @@ func NewSession(sessionID, nodeAddr, hostUser string, hostPublicKeys, clientAuth
 		HostPublicKeys:       hostKeys,
 		ClientAuthorizedKeys: clientKeys,
 	}
+}
+
+// SessionManager provides a high-level interface for session management,
+// combining session storage with connection ID encoding based on routing mode
+type SessionManager struct {
+	store       SessionStore
+	routingMode routing.Mode
+}
+
+// NewSessionManager creates a new SessionManager
+func NewSessionManager(store SessionStore, routingMode routing.Mode) *SessionManager {
+	return &SessionManager{
+		store:       store,
+		routingMode: routingMode,
+	}
+}
+
+// CreateSession stores the session and returns the encoded SSH user identifier
+func (sm *SessionManager) CreateSession(session *Session) (string, error) {
+	if err := sm.store.Store(session); err != nil {
+		return "", err
+	}
+
+	// Encode the SSH user identifier based on the routing mode using session's nodeAddr
+	return routing.EncodeSSHUser(session.ID, session.NodeAddr, sm.routingMode), nil
+}
+
+// GetSession retrieves a session by ID
+func (sm *SessionManager) GetSession(sessionID string) (*Session, error) {
+	return sm.store.Get(sessionID)
+}
+
+// DeleteSession removes a session by ID
+func (sm *SessionManager) DeleteSession(sessionID string) error {
+	return sm.store.Delete(sessionID)
+}
+
+// GetStore returns the underlying SessionStore for compatibility
+func (sm *SessionManager) GetStore() SessionStore {
+	return sm.store
 }

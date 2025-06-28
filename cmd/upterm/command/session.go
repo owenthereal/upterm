@@ -206,9 +206,14 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 }
 
 func displaySession(session *api.GetSessionResponse) error {
-	user, err := api.EncodeIdentifierSession(session)
-	if err != nil {
-		return err
+	user := session.SshUser
+	if user == "" {
+		// Fallback to encoding for backward compatibility with older servers
+		var err error
+		user, err = api.EncodeIdentifierSession(session)
+		if err != nil {
+			return err
+		}
 	}
 
 	u, scheme, host, port, err := parseURL(session.Host)

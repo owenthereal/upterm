@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -57,9 +58,10 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	}
 
 	sshd := &sshd{
-		HostSigners: []ssh.Signer{signer},
-		NodeAddr:    addr,
-		Logger:      logger,
+		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.ModeEmbedded),
+		HostSigners:    []ssh.Signer{signer},
+		NodeAddr:       addr,
+		Logger:         logger,
 	}
 
 	go func() {
