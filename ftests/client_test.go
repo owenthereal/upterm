@@ -12,6 +12,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 )
 
 func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -87,10 +88,11 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 }
 
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
+
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -103,9 +105,9 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
+
 	defer h.Close()
 
 	// verify admin server
@@ -116,24 +118,18 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	hostScanner := scanner(hostOutputCh)
 
 	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	require.Equal("echo hello", scan(hostScanner))
+	require.Equal("hello", scan(hostScanner))
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	session.SessionId = "not-existance" // set session ID to non-existance
+	session.SshUser = "non-existing-user" // set SSH user to non-existing
 	err = c.Join(session, clientJoinURL)
 
 	// Unfortunately there is no explicit error to the client.
 	// But ssh handshake fails with the connection closed
-	if want, got := "ssh: handshake failed:", err.Error(); !strings.Contains(got, want) {
-		t.Fatalf("Unexpected error, want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	require.ErrorContains(err, "ssh: handshake failed")
 }
 
 func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -371,15 +367,11 @@ func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, want
 }
 
 func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL, wantNodeURL string) {
-	if sess.SessionId == "" {
-		t.Fatalf("session ID is empty")
-	}
-	if want, got := wantHostURL, sess.Host; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := wantNodeURL, sess.NodeAddr; want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	require := require.New(t)
+	require.NotEmpty(sess.SessionId, "session ID should not be empty")
+	require.Equal(wantHostURL, sess.Host, "host URL mismatch")
+	require.Equal(wantNodeURL, sess.NodeAddr, "node URL mismatch")
+	require.NotEmpty(sess.SshUser, "SSH user should not be empty")
 }
 
 func newAdminSocketDir() (string, error) {

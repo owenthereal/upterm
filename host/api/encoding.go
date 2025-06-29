@@ -7,38 +7,21 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 )
 
-func EncodeIdentifierSession(session *GetSessionResponse) (string, error) {
-	id := &Identifier{
-		Id:       session.SessionId,
-		Type:     Identifier_CLIENT,
-		NodeAddr: session.NodeAddr,
-	}
-
-	return EncodeIdentifier(id)
-}
-
-func EncodeIdentifier(id *Identifier) (string, error) {
-	if id.Type == Identifier_CLIENT {
-		return routing.EncodeSSHUser(id.Id, id.NodeAddr, routing.ModeEmbedded), nil
-	}
-	return id.Id, nil
-}
-
-func DecodeIdentifier(id, clientVersion string) (*Identifier, error) {
-	// host
+func DecodeIdentifier(id, clientVersion string, decoder routing.Decoder) (*Identifier, error) {
+	// Check connection type based on client version
 	if clientVersion == upterm.HostSSHClientVersion {
+		// HOST connection
 		return &Identifier{
 			Id:   id,
 			Type: Identifier_HOST,
 		}, nil
 	}
 
-	// client
-	sessionID, nodeAddr, _, err := routing.DecodeSSHUser(id)
+	// CLIENT connection: decode the SSH user to get session ID and node address
+	sessionID, nodeAddr, err := decoder.Decode(id)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode identifier: %w", err)
+		return nil, fmt.Errorf("failed to decode SSH user: %w", err)
 	}
-
 	return &Identifier{
 		Id:       sessionID,
 		Type:     Identifier_CLIENT,

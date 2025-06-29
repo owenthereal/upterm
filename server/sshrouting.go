@@ -2,14 +2,15 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
-	"github.com/owenthereal/upterm/host/api"
 	libmetrics "github.com/owenthereal/upterm/metrics"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -23,6 +24,7 @@ var (
 type SSHRouting struct {
 	HostSigners     []ssh.Signer
 	AuthPiper       *authPiper
+	Decoder         routing.Decoder
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
@@ -61,9 +63,19 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 			// Fail early if the user is not a valid identifier.
 			user := conn.User()
 			if user != "" {
-				_, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
-				if err != nil {
-					return nil, err
+				clientVersion := string(conn.ClientVersion())
+
+				// HOST connections: just validate user is not empty
+				if clientVersion == upterm.HostSSHClientVersion {
+					if user == "" {
+						return nil, fmt.Errorf("empty session ID for host connection")
+					}
+				} else {
+					// CLIENT connections: validate SSH user format
+					_, _, err := p.Decoder.Decode(user)
+					if err != nil {
+						return nil, fmt.Errorf("invalid SSH user format: %w", err)
+					}
 				}
 			}
 

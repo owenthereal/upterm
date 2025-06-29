@@ -3,65 +3,22 @@ package api
 import (
 	"testing"
 
-	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/stretchr/testify/assert"
-	"google.golang.org/protobuf/proto"
 )
-
-func Test_EncodeDecodeIdentifier(t *testing.T) {
-	cases := []struct {
-		name          string
-		id            *Identifier
-		clientVersion string
-	}{
-		{
-			name: "client type",
-			id: &Identifier{
-				Id:       "client",
-				Type:     Identifier_CLIENT,
-				NodeAddr: "127.0.0.1:22",
-			},
-			clientVersion: "SSH-2.0-Go",
-		},
-		{
-			name: "host type",
-			id: &Identifier{
-				Id:   "host",
-				Type: Identifier_HOST,
-			},
-			clientVersion: upterm.HostSSHClientVersion,
-		},
-	}
-
-	for _, c := range cases {
-		c := c
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-
-			assert := assert.New(t)
-
-			want := c.id
-			str, err := EncodeIdentifier(want)
-			assert.NoError(err)
-
-			got, err := DecodeIdentifier(str, c.clientVersion)
-			assert.NoError(err)
-
-			assert.True(proto.Equal(want, got))
-		})
-	}
-}
 
 func TestDecodeIdentifier(t *testing.T) {
 	assert := assert.New(t)
 
 	// Test invalid base64 in embedded mode should fail
-	_, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY:MTI3LjAuMC4xOjIyMjIIII=", "")
+	embeddedDecoder := routing.NewDecoder(routing.ModeEmbedded)
+	_, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY:MTI3LjAuMC4xOjIyMjIIII=", "", embeddedDecoder)
 	assert.Error(err)
-	assert.ErrorContains(err, "failed to decode node address")
+	assert.ErrorContains(err, "failed to decode SSH user")
 
 	// Test plain session ID (Consul mode) should succeed
-	id, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY", "")
+	consulDecoder := routing.NewDecoder(routing.ModeConsul)
+	id, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY", "", consulDecoder)
 	assert.NoError(err)
 	assert.Equal("10OLFAKZu4cxx2roOboaY", id.Id)
 	assert.Equal(Identifier_CLIENT, id.Type)

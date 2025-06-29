@@ -54,6 +54,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		SessionId:        s.Session.SessionId,
 		Host:             s.Session.Host,
 		NodeAddr:         s.Session.NodeAddr,
+		SshUser:          s.Session.SshUser,
 		Command:          s.Session.Command,
 		ForceCommand:     s.Session.ForceCommand,
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
