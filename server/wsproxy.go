@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/oklog/run"
-	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
@@ -101,6 +100,11 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sshUser := user
+	if pass != "" {
+		sshUser = user + ":" + pass
+	}
+
 	wsc, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.httpError(w, fmt.Errorf("ws upgrade failed"))
@@ -111,9 +115,9 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = wsconn.Close()
 	}()
 
-	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion), h.Decoder)
+	id, err := routing.DecodeIdentifier(sshUser, string(clientVersion), h.Decoder)
 	if err != nil {
-		h.wsError(wsc, err, "error resolving SSH user")
+		h.wsError(wsc, err, "error decoding identifier")
 		return
 	}
 
