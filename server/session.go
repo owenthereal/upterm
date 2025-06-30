@@ -121,16 +121,16 @@ type SessionStore interface {
 	Delete(sessionID string) error
 }
 
-// ConsulSessionStore implements SessionStore using Consul KV
-type ConsulSessionStore struct {
+// consulSessionStore implements SessionStore using Consul KV
+type consulSessionStore struct {
 	client *api.Client
 	logger log.FieldLogger
 	prefix string
 	ttl    time.Duration
 }
 
-// NewConsulSessionStore creates a new ConsulSessionStore
-func NewConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger log.FieldLogger) (*ConsulSessionStore, error) {
+// newConsulSessionStore creates a new ConsulSessionStore
+func newConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger log.FieldLogger) (*consulSessionStore, error) {
 	config := api.DefaultConfig()
 	if consulAddr != "" {
 		config.Address = consulAddr
@@ -149,7 +149,7 @@ func NewConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 		ttl = DefaultSessionTTL
 	}
 
-	return &ConsulSessionStore{
+	return &consulSessionStore{
 		client: client,
 		logger: logger,
 		prefix: prefix,
@@ -158,7 +158,7 @@ func NewConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 }
 
 // Store complete session data in Consul
-func (c *ConsulSessionStore) Store(session *Session) error {
+func (c *consulSessionStore) Store(session *Session) error {
 	key := fmt.Sprintf("%s/%s", c.prefix, session.ID)
 
 	// Create a session for TTL support
@@ -205,7 +205,7 @@ func (c *ConsulSessionStore) Store(session *Session) error {
 }
 
 // Get complete session data from Consul
-func (c *ConsulSessionStore) Get(sessionID string) (*Session, error) {
+func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
 
 	pair, _, err := c.client.KV().Get(key, nil)
@@ -230,7 +230,7 @@ func (c *ConsulSessionStore) Get(sessionID string) (*Session, error) {
 }
 
 // Delete session data from Consul
-func (c *ConsulSessionStore) Delete(sessionID string) error {
+func (c *consulSessionStore) Delete(sessionID string) error {
 	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
 
 	_, err := c.client.KV().Delete(key, nil)
@@ -246,22 +246,22 @@ func (c *ConsulSessionStore) Delete(sessionID string) error {
 	return nil
 }
 
-// MemorySessionStore is a simple in-memory implementation for testing/fallback
-type MemorySessionStore struct {
+// memorySessionStore is a simple in-memory implementation for testing/fallback
+type memorySessionStore struct {
 	sessions map[string]*Session
 	logger   log.FieldLogger
 	mutex    sync.RWMutex
 }
 
-// NewMemorySessionStore creates a new MemorySessionStore
-func NewMemorySessionStore(logger log.FieldLogger) *MemorySessionStore {
-	return &MemorySessionStore{
+// newMemorySessionStore creates a new MemorySessionStore
+func newMemorySessionStore(logger log.FieldLogger) *memorySessionStore {
+	return &memorySessionStore{
 		sessions: make(map[string]*Session),
 		logger:   logger,
 	}
 }
 
-func (m *MemorySessionStore) Store(session *Session) error {
+func (m *memorySessionStore) Store(session *Session) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -273,7 +273,7 @@ func (m *MemorySessionStore) Store(session *Session) error {
 	return nil
 }
 
-func (m *MemorySessionStore) Get(sessionID string) (*Session, error) {
+func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
@@ -284,7 +284,7 @@ func (m *MemorySessionStore) Get(sessionID string) (*Session, error) {
 	return session, nil
 }
 
-func (m *MemorySessionStore) Delete(sessionID string) error {
+func (m *memorySessionStore) Delete(sessionID string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -327,12 +327,111 @@ type SessionManager struct {
 	encodeDecoder routing.EncodeDecoder
 }
 
-// NewSessionManager creates a new SessionManager
-func NewSessionManager(store SessionStore, encodeDecoder routing.EncodeDecoder) *SessionManager {
+// SessionManagerConfig holds configuration for creating a SessionManager
+type SessionManagerConfig struct {
+	Mode         routing.Mode
+	Logger       log.FieldLogger
+	ConsulAddr   string
+	ConsulPrefix string
+	ConsulTTL    time.Duration
+}
+
+// SessionManagerOption is a functional option for configuring SessionManager
+type SessionManagerOption func(*SessionManagerConfig)
+
+// WithSessionManagerLogger sets the logger for the session manager
+func WithSessionManagerLogger(logger log.FieldLogger) SessionManagerOption {
+	return func(c *SessionManagerConfig) {
+		c.Logger = logger
+	}
+}
+
+// WithSessionManagerConsulAddr sets the Consul address for consul mode
+func WithSessionManagerConsulAddr(addr string) SessionManagerOption {
+	return func(c *SessionManagerConfig) {
+		c.ConsulAddr = addr
+	}
+}
+
+// WithSessionManagerConsulPrefix sets the Consul key prefix for consul mode
+func WithSessionManagerConsulPrefix(prefix string) SessionManagerOption {
+	return func(c *SessionManagerConfig) {
+		c.ConsulPrefix = prefix
+	}
+}
+
+// WithSessionManagerConsulTTL sets the session TTL for consul mode
+func WithSessionManagerConsulTTL(ttl time.Duration) SessionManagerOption {
+	return func(c *SessionManagerConfig) {
+		c.ConsulTTL = ttl
+	}
+}
+
+// NewSessionManager creates a new SessionManager with the specified routing mode and options
+//
+// Examples:
+//
+//	// Embedded mode (simple, with default logger)
+//	sm, err := NewSessionManager(routing.ModeEmbedded)
+//
+//	// Embedded mode with custom logger
+//	sm, err := NewSessionManager(routing.ModeEmbedded, WithSessionManagerLogger(logger))
+//
+//	// Consul mode with minimal configuration
+//	sm, err := NewSessionManager(routing.ModeConsul, WithSessionManagerConsulAddr("localhost:8500"))
+//
+//	// Consul mode with full configuration
+//	sm, err := NewSessionManager(routing.ModeConsul,
+//	    WithSessionManagerLogger(logger),
+//	    WithSessionManagerConsulAddr("consul.example.com:8500"),
+//	    WithSessionManagerConsulPrefix("upterm/prod/sessions"),
+//	    WithSessionManagerConsulTTL(1*time.Hour))
+func NewSessionManager(mode routing.Mode, opts ...SessionManagerOption) (*SessionManager, error) {
+	config := &SessionManagerConfig{
+		Mode:         mode,
+		Logger:       log.StandardLogger(), // Default logger
+		ConsulTTL:    DefaultSessionTTL,
+		ConsulPrefix: DefaultConsulPrefix,
+	}
+
+	// Apply all options
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	switch mode {
+	case routing.ModeEmbedded:
+		return newEmbeddedSessionManager(config.Logger), nil
+	case routing.ModeConsul:
+		return newConsulSessionManager(config.ConsulAddr, config.ConsulPrefix, config.ConsulTTL, config.Logger)
+	default:
+		return nil, fmt.Errorf("unsupported routing mode: %s", mode)
+	}
+}
+
+// newSessionManagerWithStore creates a SessionManager with explicit store and encoder (for advanced testing)
+func newSessionManagerWithStore(store SessionStore, encodeDecoder routing.EncodeDecoder) *SessionManager {
 	return &SessionManager{
 		store:         store,
 		encodeDecoder: encodeDecoder,
 	}
+}
+
+// newEmbeddedSessionManager creates a SessionManager for embedded mode with memory storage
+func newEmbeddedSessionManager(logger log.FieldLogger) *SessionManager {
+	store := newMemorySessionStore(logger)
+	encodeDecoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
+	return newSessionManagerWithStore(store, encodeDecoder)
+}
+
+// newConsulSessionManager creates a SessionManager for consul mode with Consul storage
+func newConsulSessionManager(consulAddr, prefix string, ttl time.Duration, logger log.FieldLogger) (*SessionManager, error) {
+	store, err := newConsulSessionStore(consulAddr, prefix, ttl, logger)
+	if err != nil {
+		return nil, err
+	}
+	encodeDecoder := routing.NewEncodeDecoder(routing.ModeConsul)
+	return newSessionManagerWithStore(store, encodeDecoder), nil
 }
 
 // CreateSession stores the session and returns the encoded SSH user identifier

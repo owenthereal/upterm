@@ -58,10 +58,14 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	}
 
 	sshd := &sshd{
-		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
-		HostSigners:    []ssh.Signer{signer},
-		NodeAddr:       addr,
-		Logger:         logger,
+		SessionManager: func() *SessionManager {
+			sm, _ := NewSessionManager(routing.ModeEmbedded,
+				WithSessionManagerLogger(logger))
+			return sm
+		}(),
+		HostSigners: []ssh.Signer{signer},
+		NodeAddr:    addr,
+		Logger:      logger,
 	}
 
 	go func() {

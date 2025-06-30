@@ -48,7 +48,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	proxy := &sshProxy{
 		HostSigners:     []ssh.Signer{hostSigner},
 		Signers:         []ssh.Signer{signer},
-		SessionManager:  NewSessionManager(NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
+		SessionManager:  newEmbeddedSessionManager(logger),
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
@@ -73,7 +73,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 
 	sshdAddr := sshLn.Addr().String()
 	sshd := &sshd{
-		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
+		SessionManager: newEmbeddedSessionManager(logger),
 		HostSigners:    []ssh.Signer{signer},
 		NodeAddr:       sshdAddr,
 		Logger:         logger,

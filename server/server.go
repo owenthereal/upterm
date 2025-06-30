@@ -150,8 +150,8 @@ func Start(opt Opt) error {
 			sessionRouting = routing.ModeEmbedded // Default to embedded mode
 		}
 
-		// Create session store based on session routing mode
-		var sessionStore SessionStore
+		// Create session manager with the appropriate routing mode
+		var sessionManager *SessionManager
 		switch sessionRouting {
 		case routing.ModeConsul:
 			var consulTTL time.Duration
@@ -163,28 +163,28 @@ func Start(opt Opt) error {
 				}
 			}
 
-			store, err := NewConsulSessionStore(
-				opt.ConsulAddr,
-				opt.ConsulPrefix,
-				consulTTL,
-				logger.WithField("com", "consul-session-store"),
-			)
+			sm, err := NewSessionManager(routing.ModeConsul,
+				WithSessionManagerLogger(logger.WithField("com", "session-manager")),
+				WithSessionManagerConsulAddr(opt.ConsulAddr),
+				WithSessionManagerConsulPrefix(opt.ConsulPrefix),
+				WithSessionManagerConsulTTL(consulTTL))
 			if err != nil {
-				return fmt.Errorf("failed to create consul session store: %w", err)
+				return fmt.Errorf("failed to create consul session manager: %w", err)
 			}
-
-			sessionStore = store
+			sessionManager = sm
 
 			logger.Info("using consul session store for routing")
 		case routing.ModeEmbedded:
-			sessionStore = NewMemorySessionStore(logger.WithField("com", "memory-session-store"))
+			sm, err := NewSessionManager(routing.ModeEmbedded,
+				WithSessionManagerLogger(logger.WithField("com", "session-manager")))
+			if err != nil {
+				return fmt.Errorf("failed to create embedded session manager: %w", err)
+			}
+			sessionManager = sm
 			logger.Info("using embedded session routing (in-memory session store)")
 		default:
 			return fmt.Errorf("invalid session routing mode: %s (supported: %s, %s)", sessionRouting, routing.ModeEmbedded, routing.ModeConsul)
 		}
-
-		// Create session manager with the appropriate routing mode
-		sessionManager := NewSessionManager(sessionStore, routing.NewEncodeDecoder(routing.ModeConsul))
 
 		s := &Server{
 			NodeAddr:        nodeAddr,
