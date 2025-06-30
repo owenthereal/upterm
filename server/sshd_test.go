@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
@@ -72,7 +74,10 @@ func Test_sshd_DisallowSession(t *testing.T) {
 		_ = sshd.Serve(ln)
 	}()
 
-	if err := utils.WaitForServer(addr); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := utils.WaitForServer(ctx, addr); err != nil {
 		t.Fatal(err)
 	}
 
