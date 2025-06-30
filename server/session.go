@@ -13,6 +13,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	DefaultSessionTTL   = 30 * time.Minute   // Default TTL for session data in Consul
+	DefaultConsulPrefix = "uptermd/sessions" // Default prefix for Consul session keys
+)
+
 // Session represents the complete session information
 type Session struct {
 	ID                   string
@@ -137,11 +142,11 @@ func NewConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 	}
 
 	if prefix == "" {
-		prefix = "upterm/sessions"
+		prefix = DefaultConsulPrefix
 	}
 
 	if ttl == 0 {
-		ttl = 30 * time.Minute // Default TTL
+		ttl = DefaultSessionTTL
 	}
 
 	return &ConsulSessionStore{
@@ -318,15 +323,15 @@ func NewSession(sessionID, nodeAddr, hostUser string, hostPublicKeys, clientAuth
 // SessionManager provides a high-level interface for session management,
 // combining session storage with connection ID encoding based on routing mode
 type SessionManager struct {
-	store   SessionStore
-	encoder routing.EncodeDecoder
+	store         SessionStore
+	encodeDecoder routing.EncodeDecoder
 }
 
 // NewSessionManager creates a new SessionManager
-func NewSessionManager(store SessionStore, routingMode routing.Mode) *SessionManager {
+func NewSessionManager(store SessionStore, encodeDecoder routing.EncodeDecoder) *SessionManager {
 	return &SessionManager{
-		store:   store,
-		encoder: routing.NewEncodeDecoder(routingMode),
+		store:         store,
+		encodeDecoder: encodeDecoder,
 	}
 }
 
@@ -337,7 +342,7 @@ func (sm *SessionManager) CreateSession(session *Session) (string, error) {
 	}
 
 	// Encode the SSH user identifier using the encoder
-	return sm.encoder.Encode(session.ID, session.NodeAddr), nil
+	return sm.encodeDecoder.Encode(session.ID, session.NodeAddr), nil
 }
 
 // GetSession retrieves a session by ID
@@ -355,14 +360,14 @@ func (sm *SessionManager) DeleteSession(sessionID string) error {
 // In consul mode: decodes and validates (shared store across all nodes)
 func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr string, err error) {
 	// Decode the SSH user using our encoder
-	sessionID, nodeAddr, err = sm.encoder.Decode(sshUser)
+	sessionID, nodeAddr, err = sm.encodeDecoder.Decode(sshUser)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to decode SSH user: %w", err)
 	}
 
 	// Only validate session existence in Consul mode
 	// In embedded mode, the session might exist on another node
-	if sm.encoder.Mode() == routing.ModeConsul {
+	if sm.encodeDecoder.Mode() == routing.ModeConsul {
 		session, err := sm.store.Get(sessionID)
 		if err != nil {
 			return "", "", fmt.Errorf("session %s not found: %w", sessionID, err)
@@ -376,12 +381,12 @@ func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr st
 
 // GetEncodeDecoder returns the EncodeDecoder used by this session manager
 func (sm *SessionManager) GetEncodeDecoder() routing.EncodeDecoder {
-	return sm.encoder
+	return sm.encodeDecoder
 }
 
 // GetRoutingMode returns the routing mode of this session manager
 func (sm *SessionManager) GetRoutingMode() routing.Mode {
-	return sm.encoder.Mode()
+	return sm.encodeDecoder.Mode()
 }
 
 // GetStore returns the underlying SessionStore for compatibility

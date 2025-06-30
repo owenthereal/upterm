@@ -58,7 +58,7 @@ func Test_sshd_DisallowSession(t *testing.T) {
 	}
 
 	sshd := &sshd{
-		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.ModeEmbedded),
+		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
 		HostSigners:    []ssh.Signer{signer},
 		NodeAddr:       addr,
 		Logger:         logger,
