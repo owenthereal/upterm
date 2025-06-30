@@ -329,9 +329,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				}
 			}
 			ws := &webSocketProxy{
-				ConnDialer: cd,
-				Decoder:    s.SessionManager.GetEncodeDecoder(),
-				Logger:     s.Logger.WithField("com", "ws-proxy"),
+				ConnDialer:     cd,
+				SessionManager: s.SessionManager,
+				Logger:         s.Logger.WithField("com", "ws-proxy"),
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)
