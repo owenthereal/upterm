@@ -123,20 +123,24 @@ func (suite *FtestSuite) TestFtests() {
 	for _, test := range testCases {
 		testName := funcName(test)
 
-		suite.Run("ssh/singleNode/"+testName, func() {
-			test(suite.T(), "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts1.SSHAddr())
+		suite.T().Run("ssh/singleNode/"+testName, func(t *testing.T) {
+			t.Parallel()
+			test(t, "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts1.SSHAddr())
 		})
 
-		suite.Run("ws/singleNode/"+testName, func() {
-			test(suite.T(), "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts1.WSAddr())
+		suite.T().Run("ws/singleNode/"+testName, func(t *testing.T) {
+			t.Parallel()
+			test(t, "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts1.WSAddr())
 		})
 
-		suite.Run("ssh/multiNodes/"+testName, func() {
-			test(suite.T(), "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts2.SSHAddr())
+		suite.T().Run("ssh/multiNodes/"+testName, func(t *testing.T) {
+			t.Parallel()
+			test(t, "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts2.SSHAddr())
 		})
 
-		suite.Run("ws/multiNodes/"+testName, func() {
-			test(suite.T(), "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts2.WSAddr())
+		suite.T().Run("ws/multiNodes/"+testName, func(t *testing.T) {
+			t.Parallel()
+			test(t, "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts2.WSAddr())
 		})
 	}
 }
