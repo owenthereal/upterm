@@ -124,6 +124,10 @@ type SessionStore interface {
 	Get(sessionID string) (*Session, error)
 	// Delete session data
 	Delete(sessionID string) error
+	// BatchDelete multiple sessions efficiently
+	BatchDelete(sessionIDs []string) error
+	// List all sessions (for cleanup and management)
+	List() ([]*Session, error)
 }
 
 // consulSessionStore implements SessionStore using Consul KV
@@ -344,6 +348,107 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	return nil
 }
 
+// BatchDelete multiple sessions efficiently using Consul transactions
+func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+
+	// Consul transaction limit is typically 64 operations
+	const maxBatchSize = 50
+
+	for i := 0; i < len(sessionIDs); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(sessionIDs) {
+			end = len(sessionIDs)
+		}
+
+		if err := c.deleteBatch(sessionIDs[i:end]); err != nil {
+			return err
+		}
+	}
+
+	c.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from consul")
+	return nil
+}
+
+// deleteBatch deletes a batch of sessions using Consul transaction
+func (c *consulSessionStore) deleteBatch(sessionIDs []string) error {
+	ops := make([]*api.KVTxnOp, len(sessionIDs))
+	for i, sessionID := range sessionIDs {
+		key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+		ops[i] = &api.KVTxnOp{
+			Verb: api.KVDelete,
+			Key:  key,
+		}
+	}
+
+	return retry.Do(
+		func() error {
+			ok, response, _, err := c.client.KV().Txn(ops, nil)
+			if err != nil {
+				return fmt.Errorf("failed to execute batch delete transaction: %w", err)
+			}
+			if !ok {
+				return fmt.Errorf("batch delete transaction failed: %v", response.Errors)
+			}
+			return nil
+		},
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.WithFields(log.Fields{
+				"operation": "batch_delete",
+				"attempt":   n + 1,
+				"count":     len(sessionIDs),
+				"error":     err,
+			}).Debug("retrying consul batch delete operation")
+		}),
+	)
+}
+
+// List all sessions from Consul
+func (c *consulSessionStore) List() ([]*Session, error) {
+	var sessions []*Session
+
+	err := retry.Do(
+		func() error {
+			pairs, _, err := c.client.KV().List(c.prefix, nil)
+			if err != nil {
+				return fmt.Errorf("failed to list sessions: %w", err)
+			}
+
+			sessions = make([]*Session, 0, len(pairs))
+			for _, pair := range pairs {
+				var session Session
+				if err := json.Unmarshal(pair.Value, &session); err != nil {
+					// Skip invalid sessions but continue processing
+					c.logger.WithError(err).WithField("key", pair.Key).Warn("failed to unmarshal session, skipping")
+					continue
+				}
+				sessions = append(sessions, &session)
+			}
+			return nil
+		},
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.WithFields(log.Fields{
+				"operation": "list",
+				"attempt":   n + 1,
+				"error":     err,
+			}).Debug("retrying consul list operation")
+		}),
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	c.logger.WithField("count", len(sessions)).Debug("listed sessions from consul")
+	return sessions, nil
+}
+
 // memorySessionStore is a simple in-memory implementation for testing/fallback
 type memorySessionStore struct {
 	sessions map[string]*Session
@@ -391,6 +496,33 @@ func (m *memorySessionStore) Delete(sessionID string) error {
 		"session": sessionID,
 	}).Debug("deleted session data from memory")
 	return nil
+}
+
+// BatchDelete multiple sessions efficiently from memory
+func (m *memorySessionStore) BatchDelete(sessionIDs []string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	for _, sessionID := range sessionIDs {
+		delete(m.sessions, sessionID)
+	}
+
+	m.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from memory")
+	return nil
+}
+
+// List all sessions from memory
+func (m *memorySessionStore) List() ([]*Session, error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+
+	m.logger.WithField("count", len(sessions)).Debug("listed sessions from memory")
+	return sessions, nil
 }
 
 // NewSession creates Session from session parameters
@@ -589,4 +721,36 @@ func (sm *SessionManager) GetRoutingMode() routing.Mode {
 // GetStore returns the underlying SessionStore for compatibility
 func (sm *SessionManager) GetStore() SessionStore {
 	return sm.store
+}
+
+// Shutdown cleans up sessions created by this node during server shutdown
+func (sm *SessionManager) Shutdown(nodeAddr string) error {
+	// Get all sessions
+	sessions, err := sm.store.List()
+	if err != nil {
+		return fmt.Errorf("failed to list sessions for cleanup: %w", err)
+	}
+
+	if len(sessions) == 0 {
+		return nil
+	}
+
+	// Collect session IDs for this node
+	var sessionIDsToDelete []string
+	for _, session := range sessions {
+		if session.NodeAddr == nodeAddr {
+			sessionIDsToDelete = append(sessionIDsToDelete, session.ID)
+		}
+	}
+
+	if len(sessionIDsToDelete) == 0 {
+		return nil
+	}
+
+	// Batch delete sessions
+	if err := sm.store.BatchDelete(sessionIDsToDelete); err != nil {
+		return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
+	}
+
+	return nil
 }

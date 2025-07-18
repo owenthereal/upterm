@@ -301,6 +301,13 @@ func (s *Server) Shutdown() {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	// Clean up sessions created by this node
+	if err := s.SessionManager.Shutdown(s.NodeAddr); err != nil {
+		s.Logger.WithError(err).Error("failed to cleanup sessions during shutdown")
+	} else {
+		s.Logger.Debug("cleaned up sessions during shutdown")
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}
