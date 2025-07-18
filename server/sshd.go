@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -23,7 +24,7 @@ type ServerInfo struct {
 }
 
 type sshd struct {
-	SessionRepo         *sessionRepo
+	SessionStore        SessionStore
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
@@ -54,7 +55,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
-		s.SessionRepo,
+		s.SessionStore,
 		s.SessionDialListener,
 		s.Logger.WithField("com", "stream-local-handler"),
 	)
@@ -107,22 +108,27 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		return false, []byte(err.Error())
 	}
 
-	sess, err := newSession(
-		utils.GenerateSessionID(),
+	sessionID := utils.GenerateSessionID()
+
+	// Store complete session data for routing and session management
+	session := NewSession(
+		sessionID,
+		s.NodeAddr,
 		sessReq.HostUser,
 		sessReq.HostPublicKeys,
 		sessReq.ClientAuthorizedKeys,
 	)
-	if err != nil {
-		return false, []byte(err.Error())
-	}
 
-	if err := s.SessionRepo.Add(*sess); err != nil {
-		return false, []byte(err.Error())
+	if err := s.SessionStore.Store(session); err != nil {
+		s.Logger.WithError(err).WithFields(log.Fields{
+			"session": sessionID,
+			"node":    s.NodeAddr,
+		}).Error("failed to store session data")
+		return false, []byte(fmt.Sprintf("failed to store session data: %v", err))
 	}
 
 	sessResp := &CreateSessionResponse{
-		SessionID: sess.ID,
+		SessionID: sessionID,
 		NodeAddr:  s.NodeAddr,
 	}
 
