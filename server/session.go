@@ -187,43 +187,38 @@ func (c *consulSessionStore) Store(session *Session) error {
 	}
 
 	// Outside retry: deterministic operations
-	key := fmt.Sprintf("%s/%s", c.prefix, session.ID)
+	kvStoreKey := c.kvKey(session.ID)
 
 	// Serialize session data as JSON first to fail fast on marshaling errors
-	sessionBytes, err := json.Marshal(session)
+	sessionData, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session data: %w", err)
 	}
 
-	// Create a session for TTL support
-	sessionID_consul := &api.SessionEntry{
-		Name:      fmt.Sprintf("upterm-session-%s", session.ID),
-		TTL:       c.ttl.String(),
-		Behavior:  api.SessionBehaviorDelete,
-		LockDelay: time.Second,
-	}
+	// Create a Consul session for distributed locking and TTL management
+	consulLockSession := c.createConsulLockSession(session.ID)
 
 	// Inside retry: only network operations
 	err = retry.Do(
 		func() error {
-			consulSessionID, _, err := c.client.Session().Create(sessionID_consul, nil)
+			consulLockSessionID, _, err := c.client.Session().Create(consulLockSession, nil)
 			if err != nil {
-				return fmt.Errorf("failed to create consul session: %w", err)
+				return fmt.Errorf("failed to create consul lock session: %w", err)
 			}
 
-			// Store the complete session data with session-based TTL
-			pair := &api.KVPair{
-				Key:     key,
-				Value:   sessionBytes,
-				Session: consulSessionID,
+			// Store the complete session data with distributed lock and TTL
+			kvPair := &api.KVPair{
+				Key:     kvStoreKey,
+				Value:   sessionData,
+				Session: consulLockSessionID,
 			}
 
-			success, _, err := c.client.KV().Acquire(pair, nil)
+			lockAcquired, _, err := c.client.KV().Acquire(kvPair, nil)
 			if err != nil {
 				return fmt.Errorf("failed to store session data: %w", err)
 			}
-			if !success {
-				return fmt.Errorf("failed to acquire lock for session %s", session.ID)
+			if !lockAcquired {
+				return fmt.Errorf("failed to acquire distributed lock for session %s", session.ID)
 			}
 
 			return nil
@@ -247,7 +242,7 @@ func (c *consulSessionStore) Store(session *Session) error {
 	c.logger.WithFields(log.Fields{
 		"session": session.ID,
 		"node":    session.NodeAddr,
-		"key":     key,
+		"key":     kvStoreKey,
 	}).Debug("stored session data in consul")
 
 	return nil
@@ -260,22 +255,22 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	}
 
 	// Outside retry: deterministic operations
-	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+	kvStoreKey := c.kvKey(sessionID)
 	var session *Session
 
 	// Inside retry: only network operations
 	err := retry.Do(
 		func() error {
-			pair, _, err := c.client.KV().Get(key, nil)
+			kvPair, _, err := c.client.KV().Get(kvStoreKey, nil)
 			if err != nil {
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
-			if pair == nil {
+			if kvPair == nil {
 				return fmt.Errorf("session %s not found", sessionID)
 			}
 
 			session = &Session{}
-			if err := json.Unmarshal(pair.Value, session); err != nil {
+			if err := json.Unmarshal(kvPair.Value, session); err != nil {
 				return fmt.Errorf("failed to unmarshal session data: %w", err)
 			}
 
@@ -312,12 +307,12 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	}
 
 	// Outside retry: deterministic operations
-	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+	kvStoreKey := c.kvKey(sessionID)
 
 	// Inside retry: only network operations
 	err := retry.Do(
 		func() error {
-			_, err := c.client.KV().Delete(key, nil)
+			_, err := c.client.KV().Delete(kvStoreKey, nil)
 			if err != nil {
 				return fmt.Errorf("failed to delete session data: %w", err)
 			}
@@ -341,7 +336,7 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	// Log success only once, after all retries are done
 	c.logger.WithFields(log.Fields{
 		"session": sessionID,
-		"key":     key,
+		"key":     kvStoreKey,
 	}).Debug("deleted session data from consul")
 
 	return nil
@@ -372,10 +367,10 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 func (c *consulSessionStore) deleteBatch(sessionIDs []string) error {
 	ops := make([]*api.KVTxnOp, len(sessionIDs))
 	for i, sessionID := range sessionIDs {
-		key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+		kvStoreKey := c.kvKey(sessionID)
 		ops[i] = &api.KVTxnOp{
 			Verb: api.KVDelete,
-			Key:  key,
+			Key:  kvStoreKey,
 		}
 	}
 
@@ -443,6 +438,26 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 
 	c.logger.WithField("count", len(sessions)).Debug("listed sessions from consul")
 	return sessions, nil
+}
+
+// kvKey generates the Consul KV store key for a session
+func (c *consulSessionStore) kvKey(sessionID string) string {
+	return fmt.Sprintf("%s/%s", c.prefix, sessionID)
+}
+
+// consulSessionName generates the Consul session name for locking
+func (c *consulSessionStore) consulSessionName(sessionID string) string {
+	return fmt.Sprintf("upterm-lock-%s", sessionID)
+}
+
+// createConsulLockSession creates a Consul session for distributed locking
+func (c *consulSessionStore) createConsulLockSession(sessionID string) *api.SessionEntry {
+	return &api.SessionEntry{
+		Name:      c.consulSessionName(sessionID),
+		TTL:       c.ttl.String(),
+		Behavior:  api.SessionBehaviorDelete,
+		LockDelay: time.Second,
+	}
 }
 
 // memorySessionStore is a simple in-memory implementation for testing/fallback
