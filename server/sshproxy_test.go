@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/go-kit/kit/metrics/provider"
-	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
@@ -49,6 +48,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	proxy := &sshProxy{
 		HostSigners:     []ssh.Signer{hostSigner},
 		Signers:         []ssh.Signer{signer},
+		SessionManager:  NewSessionManager(NewMemorySessionStore(logger), routing.ModeEmbedded),
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
@@ -87,16 +87,8 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id := &api.Identifier{
-		Id:       xid.New().String(),
-		Type:     api.Identifier_CLIENT,
-		NodeAddr: sshdAddr,
-	}
-	user, err := api.EncodeIdentifier(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	encoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
+	user := encoder.Encode(xid.New().String(), sshdAddr)
 	ucs, err := testCertSigner(user, signer)
 	if err != nil {
 		t.Fatal(err)

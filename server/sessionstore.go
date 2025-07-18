@@ -318,15 +318,15 @@ func NewSession(sessionID, nodeAddr, hostUser string, hostPublicKeys, clientAuth
 // SessionManager provides a high-level interface for session management,
 // combining session storage with connection ID encoding based on routing mode
 type SessionManager struct {
-	store       SessionStore
-	routingMode routing.Mode
+	store   SessionStore
+	encoder routing.EncodeDecoder
 }
 
 // NewSessionManager creates a new SessionManager
 func NewSessionManager(store SessionStore, routingMode routing.Mode) *SessionManager {
 	return &SessionManager{
-		store:       store,
-		routingMode: routingMode,
+		store:   store,
+		encoder: routing.NewEncodeDecoder(routingMode),
 	}
 }
 
@@ -336,8 +336,8 @@ func (sm *SessionManager) CreateSession(session *Session) (string, error) {
 		return "", err
 	}
 
-	// Encode the SSH user identifier based on the routing mode using session's nodeAddr
-	return routing.EncodeSSHUser(session.ID, session.NodeAddr, sm.routingMode), nil
+	// Encode the SSH user identifier using the encoder
+	return sm.encoder.Encode(session.ID, session.NodeAddr), nil
 }
 
 // GetSession retrieves a session by ID
@@ -348,6 +348,40 @@ func (sm *SessionManager) GetSession(sessionID string) (*Session, error) {
 // DeleteSession removes a session by ID
 func (sm *SessionManager) DeleteSession(sessionID string) error {
 	return sm.store.Delete(sessionID)
+}
+
+// ResolveSSHUser resolves an SSH username by decoding it and conditionally validating session existence
+// In embedded mode: only decodes (session may be on another node)
+// In consul mode: decodes and validates (shared store across all nodes)
+func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr string, err error) {
+	// Decode the SSH user using our encoder
+	sessionID, nodeAddr, err = sm.encoder.Decode(sshUser)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to decode SSH user: %w", err)
+	}
+
+	// Only validate session existence in Consul mode
+	// In embedded mode, the session might exist on another node
+	if sm.encoder.Mode() == routing.ModeConsul {
+		session, err := sm.store.Get(sessionID)
+		if err != nil {
+			return "", "", fmt.Errorf("session %s not found: %w", sessionID, err)
+		}
+
+		return session.ID, session.NodeAddr, nil
+	}
+
+	return sessionID, nodeAddr, nil
+}
+
+// GetEncodeDecoder returns the EncodeDecoder used by this session manager
+func (sm *SessionManager) GetEncodeDecoder() routing.EncodeDecoder {
+	return sm.encoder
+}
+
+// GetRoutingMode returns the routing mode of this session manager
+func (sm *SessionManager) GetRoutingMode() routing.Mode {
+	return sm.encoder.Mode()
 }
 
 // GetStore returns the underlying SessionStore for compatibility

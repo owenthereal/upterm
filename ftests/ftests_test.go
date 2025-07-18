@@ -411,17 +411,8 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		return err
 	}
 
-	user := session.SshUser
-	if user == "" {
-		// Fallback to encoding for backward compatibility with older servers
-		user, err = api.EncodeIdentifierSession(session)
-		if err != nil {
-			return err
-		}
-	}
-
 	config := &ssh.ClientConfig{
-		User:            user,
+		User:            session.SshUser,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}

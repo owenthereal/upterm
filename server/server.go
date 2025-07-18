@@ -298,7 +298,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				NodeAddr:            s.NodeAddr,
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
-				SessionStore:        s.SessionManager.GetStore(),
 				NeighbourDialer:     tcpConnDialer{},
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
@@ -307,7 +306,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Signers:         s.Signers,
 				NodeAddr:        s.NodeAddr,
 				ConnDialer:      cd,
-				SessionStore:    s.SessionManager.GetStore(),
+				SessionManager:  s.SessionManager,
 				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}
@@ -326,7 +325,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					NodeAddr:            s.NodeAddr,
 					SSHDDialListener:    sshdDialListener,
 					SessionDialListener: sessionDialListener,
-					SessionStore:        s.SessionManager.GetStore(),
 					NeighbourDialer:     wsConnDialer{},
 					Logger:              s.Logger.WithField("com", "ws-conn-dialer"),
 				}
@@ -342,6 +340,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			}
 			ws := &webSocketProxy{
 				ConnDialer: cd,
+				Decoder:    s.SessionManager.GetEncodeDecoder(),
 				Logger:     s.Logger.WithField("com", "ws-proxy"),
 			}
 			g.Add(func() error {
@@ -420,54 +419,32 @@ type sidewayConnDialer struct {
 	NodeAddr            string
 	SSHDDialListener    SSHDDialListener
 	SessionDialListener SessionDialListener
-	SessionStore        SessionStore
 	NeighbourDialer     connDialer
 	Logger              log.FieldLogger
 }
 
 func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	logger := cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "type": api.Identifier_Type_name[int32(id.Type)]})
+
 	if id.Type == api.Identifier_HOST {
-		cd.Logger.WithFields(log.Fields{"host": id.Id, "node": cd.NodeAddr}).Info("dialing sshd")
+		logger.Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
 	} else {
-		// For client connections, look up the node address from SessionStore
-		var nodeAddr string
-
-		// Check if NodeAddr is already populated (legacy format)
-		if id.NodeAddr != "" {
-			nodeAddr = id.NodeAddr
-			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": nodeAddr}).Debug("using node address from legacy identifier")
-		} else {
-			// Look up node address from SessionStore
-			session, err := cd.SessionStore.Get(id.Id)
-			if err != nil {
-				return nil, fmt.Errorf("failed to find session location for %s: %w", id.Id, err)
-			}
-			nodeAddr = session.NodeAddr
-			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": nodeAddr}).Debug("found node address from session store")
-		}
-
-		host, port, ee := net.SplitHostPort(nodeAddr)
+		host, port, ee := net.SplitHostPort(id.NodeAddr)
 		if ee != nil {
-			return nil, fmt.Errorf("host address %s is malformed: %w", nodeAddr, ee)
+			return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, ee)
 		}
 		addr := net.JoinHostPort(host, port)
+		logger = logger.WithField("addr", addr)
 
 		// if current node is matching, dial to session.
 		// Otherwise, dial to neighbour node
 		if cd.NodeAddr == addr {
-			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing session")
+			logger.Info("dialing session")
 			return cd.SessionDialListener.Dial(id.Id)
 		}
 
-		cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing neighbour")
-
-		// For neighbour dialing, we need to update the identifier with the resolved node address
-		neighbourId := &api.Identifier{
-			Id:       id.Id,
-			Type:     id.Type,
-			NodeAddr: nodeAddr,
-		}
-		return cd.NeighbourDialer.Dial(neighbourId)
+		logger.Info("dialing neighbour")
+		return cd.NeighbourDialer.Dial(id)
 	}
 }

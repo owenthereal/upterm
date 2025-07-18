@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -17,7 +18,7 @@ type sshProxy struct {
 	Signers         []ssh.Signer
 	NodeAddr        string
 	ConnDialer      connDialer
-	SessionStore    SessionStore
+	SessionManager  *SessionManager
 	Logger          log.FieldLogger
 	MetricsProvider provider.Provider
 
@@ -41,12 +42,13 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	r.routing = &SSHRouting{
 		HostSigners: r.HostSigners,
 		AuthPiper: &authPiper{
-			HostSigners:  r.HostSigners,
-			Signers:      r.Signers,
-			SessionStore: r.SessionStore,
-			ConnDialer:   r.ConnDialer,
-			NodeAddr:     r.NodeAddr,
+			HostSigners:    r.HostSigners,
+			Signers:        r.Signers,
+			SessionManager: r.SessionManager,
+			ConnDialer:     r.ConnDialer,
+			NodeAddr:       r.NodeAddr,
 		},
+		Decoder:         r.SessionManager.GetEncodeDecoder(),
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
 	}
@@ -56,11 +58,11 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 }
 
 type authPiper struct {
-	NodeAddr     string
-	SessionStore SessionStore
-	ConnDialer   connDialer
-	Signers      []ssh.Signer
-	HostSigners  []ssh.Signer
+	NodeAddr       string
+	SessionManager *SessionManager
+	ConnDialer     connDialer
+	Signers        []ssh.Signer
+	HostSigners    []ssh.Signer
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
@@ -140,12 +142,30 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 
 func (a *authPiper) dialUpstream(conn ssh.ConnMetadata) (net.Conn, error) {
 	var (
-		user = conn.User()
+		user          = conn.User()
+		clientVersion = string(conn.ClientVersion())
 	)
 
-	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
-	if err != nil {
-		return nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
+	// Determine connection type and create identifier accordingly
+	var id *api.Identifier
+	if clientVersion == upterm.HostSSHClientVersion {
+		// HOST connection: user is the session ID
+		id = &api.Identifier{
+			Id:   user,
+			Type: api.Identifier_HOST,
+		}
+	} else {
+		// CLIENT connection: decode the SSH user
+		sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
+		if err != nil {
+			return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
+		}
+
+		id = &api.Identifier{
+			Id:       sessionID,
+			NodeAddr: nodeAddr,
+			Type:     api.Identifier_CLIENT,
+		}
 	}
 
 	c, err := a.ConnDialer.Dial(id)
@@ -180,17 +200,23 @@ func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) 
 // is proxy node.
 func (a *authPiper) hostSession(conn ssh.ConnMetadata) (*Session, error) {
 	user := conn.User()
-	id, err := api.DecodeIdentifier(user, string(conn.ClientVersion()))
-	if err != nil {
-		return nil, fmt.Errorf("error decoding identifier from user %s: %w", user, err)
-	}
+	clientVersion := string(conn.ClientVersion())
 
-	// Don't validate authorized key if:
-	// 1. This is not a client request
-	// 2. The node does not match the request that routing is needed
-	if id.Type != api.Identifier_CLIENT || a.NodeAddr != id.NodeAddr {
+	// HOST connections don't validate authorized keys
+	if clientVersion == upterm.HostSSHClientVersion {
 		return nil, nil
 	}
 
-	return a.SessionStore.Get(id.Id)
+	// CLIENT connection: decode the SSH user to get session ID and node address
+	sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding SSH user %s: %w", user, err)
+	}
+
+	// Don't validate authorized key if the node does not match the request that routing is needed
+	if a.NodeAddr != nodeAddr {
+		return nil, nil
+	}
+
+	return a.SessionManager.GetSession(sessionID)
 }

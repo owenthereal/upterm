@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
 	log "github.com/sirupsen/logrus"
@@ -20,6 +21,7 @@ import (
 
 type webSocketProxy struct {
 	ConnDialer connDialer
+	Decoder    routing.Decoder
 	Logger     log.FieldLogger
 
 	srv *http.Server
@@ -48,6 +50,7 @@ func (s *webSocketProxy) Serve(ln net.Listener) error {
 	s.srv = &http.Server{
 		Handler: webHandler(&wsHandler{
 			ConnDialer: s.ConnDialer,
+			Decoder:    s.Decoder,
 			Logger:     s.Logger,
 		}),
 	}
@@ -78,6 +81,7 @@ var upgrader = websocket.Upgrader{
 
 type wsHandler struct {
 	ConnDialer connDialer
+	Decoder    routing.Decoder
 	Logger     log.FieldLogger
 }
 
@@ -107,9 +111,9 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = wsconn.Close()
 	}()
 
-	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion))
+	id, err := api.DecodeIdentifier(user+":"+pass, string(clientVersion), h.Decoder)
 	if err != nil {
-		h.wsError(wsc, err, "error decoding id")
+		h.wsError(wsc, err, "error resolving SSH user")
 		return
 	}
 
