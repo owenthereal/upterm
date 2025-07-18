@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
+	"github.com/avast/retry-go/v4"
 	"github.com/hashicorp/consul/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
@@ -14,8 +16,11 @@ import (
 )
 
 const (
-	DefaultSessionTTL   = 30 * time.Minute   // Default TTL for session data in Consul
-	DefaultConsulPrefix = "uptermd/sessions" // Default prefix for Consul session keys
+	DefaultSessionTTL    = 30 * time.Minute   // Default TTL for session data in Consul
+	DefaultConsulPrefix  = "uptermd/sessions" // Default prefix for Consul session keys
+	DefaultConsulTimeout = 5 * time.Second    // Default timeout for Consul operations
+	DefaultMaxRetries    = 3                  // Default number of retries for Consul operations
+	DefaultRetryDelay    = 100 * time.Millisecond // Default delay between retries
 )
 
 // Session represents the complete session information
@@ -136,6 +141,17 @@ func newConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 		config.Address = consulAddr
 	}
 
+	// Configure HTTP client with timeouts and connection pooling
+	config.HttpClient = &http.Client{
+		Timeout: DefaultConsulTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
+		},
+	}
+
 	client, err := api.NewClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consul client: %w", err)
@@ -159,7 +175,21 @@ func newConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 
 // Store complete session data in Consul
 func (c *consulSessionStore) Store(session *Session) error {
+	if session == nil {
+		return fmt.Errorf("session cannot be nil")
+	}
+	if session.ID == "" {
+		return fmt.Errorf("session ID cannot be empty")
+	}
+
+	// Outside retry: deterministic operations
 	key := fmt.Sprintf("%s/%s", c.prefix, session.ID)
+
+	// Serialize session data as JSON first to fail fast on marshaling errors
+	sessionBytes, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session data: %w", err)
+	}
 
 	// Create a session for TTL support
 	sessionID_consul := &api.SessionEntry{
@@ -169,32 +199,47 @@ func (c *consulSessionStore) Store(session *Session) error {
 		LockDelay: time.Second,
 	}
 
-	sessionResp, _, err := c.client.Session().Create(sessionID_consul, nil)
+	// Inside retry: only network operations
+	err = retry.Do(
+		func() error {
+			sessionResp, _, err := c.client.Session().Create(sessionID_consul, nil)
+			if err != nil {
+				return fmt.Errorf("failed to create consul session: %w", err)
+			}
+
+			// Store the complete session data with session-based TTL
+			pair := &api.KVPair{
+				Key:     key,
+				Value:   sessionBytes,
+				Session: sessionResp,
+			}
+
+			success, _, err := c.client.KV().Acquire(pair, nil)
+			if err != nil {
+				return fmt.Errorf("failed to store session data: %w", err)
+			}
+			if !success {
+				return fmt.Errorf("failed to acquire lock for session %s", session.ID)
+			}
+
+			return nil
+		},
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.WithFields(log.Fields{
+				"operation": "store",
+				"attempt":   n + 1,
+				"error":     err,
+			}).Debug("retrying consul store operation")
+		}),
+	)
+
 	if err != nil {
-		return fmt.Errorf("failed to create consul session: %w", err)
+		return err
 	}
 
-	// Serialize session data as JSON
-	sessionBytes, err := json.Marshal(session)
-	if err != nil {
-		return fmt.Errorf("failed to marshal session data: %w", err)
-	}
-
-	// Store the complete session data with session-based TTL
-	pair := &api.KVPair{
-		Key:     key,
-		Value:   sessionBytes,
-		Session: sessionResp,
-	}
-
-	success, _, err := c.client.KV().Acquire(pair, nil)
-	if err != nil {
-		return fmt.Errorf("failed to store session data: %w", err)
-	}
-	if !success {
-		return fmt.Errorf("failed to acquire lock for session %s", session.ID)
-	}
-
+	// Log success only once, after all retries are done
 	c.logger.WithFields(log.Fields{
 		"session": session.ID,
 		"node":    session.NodeAddr,
@@ -206,38 +251,91 @@ func (c *consulSessionStore) Store(session *Session) error {
 
 // Get complete session data from Consul
 func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID cannot be empty")
+	}
+
+	// Outside retry: deterministic operations
 	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+	var session *Session
 
-	pair, _, err := c.client.KV().Get(key, nil)
+	// Inside retry: only network operations
+	err := retry.Do(
+		func() error {
+			pair, _, err := c.client.KV().Get(key, nil)
+			if err != nil {
+				return fmt.Errorf("failed to get session data: %w", err)
+			}
+			if pair == nil {
+				return fmt.Errorf("session %s not found", sessionID)
+			}
+
+			var s Session
+			if err := json.Unmarshal(pair.Value, &s); err != nil {
+				return fmt.Errorf("failed to unmarshal session data: %w", err)
+			}
+
+			session = &s
+			return nil
+		},
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.WithFields(log.Fields{
+				"operation": "get",
+				"attempt":   n + 1,
+				"error":     err,
+			}).Debug("retrying consul get operation")
+		}),
+	)
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session data: %w", err)
-	}
-	if pair == nil {
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		return nil, err
 	}
 
-	var session Session
-	if err := json.Unmarshal(pair.Value, &session); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session data: %w", err)
-	}
-
+	// Log success only once, after all retries are done
 	c.logger.WithFields(log.Fields{
 		"session": sessionID,
 		"node":    session.NodeAddr,
 	}).Debug("retrieved session data from consul")
 
-	return &session, nil
+	return session, nil
 }
 
 // Delete session data from Consul
 func (c *consulSessionStore) Delete(sessionID string) error {
-	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
-
-	_, err := c.client.KV().Delete(key, nil)
-	if err != nil {
-		return fmt.Errorf("failed to delete session data: %w", err)
+	if sessionID == "" {
+		return fmt.Errorf("session ID cannot be empty")
 	}
 
+	// Outside retry: deterministic operations
+	key := fmt.Sprintf("%s/%s", c.prefix, sessionID)
+
+	// Inside retry: only network operations
+	err := retry.Do(
+		func() error {
+			_, err := c.client.KV().Delete(key, nil)
+			if err != nil {
+				return fmt.Errorf("failed to delete session data: %w", err)
+			}
+			return nil
+		},
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.WithFields(log.Fields{
+				"operation": "delete",
+				"attempt":   n + 1,
+				"error":     err,
+			}).Debug("retrying consul delete operation")
+		}),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// Log success only once, after all retries are done
 	c.logger.WithFields(log.Fields{
 		"session": sessionID,
 		"key":     key,
