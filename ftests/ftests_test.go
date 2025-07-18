@@ -35,12 +35,12 @@ import (
 
 const (
 	// Test timeouts and configuration - optimized for faster test runs
-	defaultTestTimeout       = 15 * time.Second  // Reduced from 30s
-	serverStartupTimeout     = 3 * time.Second   // Reduced from 10s
-	unixSocketWaitTimeout    = 3 * time.Second   // Reduced from 10s
-	keepAliveDuration        = 2 * time.Second   // Reduced from 10s
-	consulHealthCheckTimeout = 2 * time.Second   // Reduced from 5s
-	sshAttachTimeout         = 500 * time.Millisecond  // New: replace hardcoded sleep
+	defaultTestTimeout       = 15 * time.Second       // Reduced from 30s
+	serverStartupTimeout     = 3 * time.Second        // Reduced from 10s
+	unixSocketWaitTimeout    = 3 * time.Second        // Reduced from 10s
+	keepAliveDuration        = 2 * time.Second        // Reduced from 10s
+	consulHealthCheckTimeout = 2 * time.Second        // Reduced from 5s
+	sshAttachTimeout         = 500 * time.Millisecond // New: replace hardcoded sleep
 
 	// Test key material
 	ServerPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
@@ -126,10 +126,10 @@ func (suite *FtestSuite) SetupSuite() {
 
 func (suite *FtestSuite) TearDownSuite() {
 	if suite.ts1 != nil {
-		suite.ts1.Shutdown()
+		_ = suite.ts1.Shutdown()
 	}
 	if suite.ts2 != nil {
-		suite.ts2.Shutdown()
+		_ = suite.ts2.Shutdown()
 	}
 }
 
@@ -258,7 +258,7 @@ type TestServer interface {
 	SSHAddr() string
 	WSAddr() string
 	NodeAddr() string
-	Shutdown()
+	Shutdown() error
 }
 
 func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
@@ -295,20 +295,20 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 
 	// Wait for SSH server
 	if err := utils.WaitForServer(ctx, s.SSHAddr()); err != nil {
-		s.Shutdown()
+		_ = s.Shutdown()
 		return nil, fmt.Errorf("SSH server failed to start: %w", err)
 	}
 
 	// Wait for WebSocket server
 	if err := utils.WaitForServer(ctx, s.WSAddr()); err != nil {
-		s.Shutdown()
+		_ = s.Shutdown()
 		return nil, fmt.Errorf("WebSocket server failed to start: %w", err)
 	}
 
 	// Check for startup errors
 	select {
 	case err := <-startErrCh:
-		s.Shutdown()
+		_ = s.Shutdown()
 		return nil, fmt.Errorf("server startup failed: %w", err)
 	default:
 	}
@@ -326,6 +326,7 @@ type Server struct {
 	logger         log.FieldLogger
 
 	shutdownOnce sync.Once
+	mu           sync.RWMutex
 }
 
 func (s *Server) start() error {
@@ -385,6 +386,7 @@ func (s *Server) start() error {
 		return fmt.Errorf("unsupported routing mode: %s", s.mode)
 	}
 
+	s.mu.Lock()
 	s.Server = &server.Server{
 		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
 		HostSigners:     hostSigners,
@@ -394,6 +396,7 @@ func (s *Server) start() error {
 		SessionManager:  sm,
 		Logger:          logger,
 	}
+	s.mu.Unlock()
 
 	return s.Server.ServeWithContext(context.Background(), s.sshln, s.wsln)
 }
@@ -407,21 +410,26 @@ func (s *Server) WSAddr() string {
 }
 
 func (s *Server) NodeAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Server == nil {
+		return ""
+	}
 	return s.Server.NodeAddr
 }
 
-func (s *Server) Shutdown() {
+func (s *Server) Shutdown() error {
+	var err error
 	s.shutdownOnce.Do(func() {
 		if s.logger != nil {
 			s.logger.Info("shutting down test server")
 		}
 
 		if s.Server != nil {
-			s.Server.Shutdown()
+			err = s.Server.Shutdown()
 		}
-
-		// Listeners are closed by Server.Shutdown() - no need to close manually
 	})
+	return err
 }
 
 type Host struct {

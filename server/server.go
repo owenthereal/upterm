@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -248,7 +249,9 @@ func Start(opt Opt) error {
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
 		}, func(err error) {
-			s.Shutdown()
+			if err := s.Shutdown(); err != nil {
+				s.Logger.WithError(err).Error("error during server shutdown")
+			}
 		})
 	}
 	{
@@ -297,28 +300,43 @@ type Server struct {
 	cancel func()
 }
 
-func (s *Server) Shutdown() {
+func (s *Server) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
-	// Clean up sessions created by this node
-	if err := s.SessionManager.Shutdown(s.NodeAddr); err != nil {
-		s.Logger.WithError(err).Error("failed to cleanup sessions during shutdown")
-	} else {
-		s.Logger.Debug("cleaned up sessions during shutdown")
+	var err error
+
+	// Stop accepting new connections first
+	if s.sshln != nil {
+		if sshErr := s.sshln.Close(); sshErr != nil {
+			err = errors.Join(err, fmt.Errorf("ssh listener close: %w", sshErr))
+		}
 	}
 
+	if s.wsln != nil {
+		if wsErr := s.wsln.Close(); wsErr != nil {
+			err = errors.Join(err, fmt.Errorf("websocket listener close: %w", wsErr))
+		}
+	}
+
+	// Cancel context to signal graceful shutdown
 	if s.cancel != nil {
 		s.cancel()
 	}
 
-	if s.sshln != nil {
-		_ = s.sshln.Close()
+	// Clean up sessions created by this node
+	if sessionErr := s.SessionManager.Shutdown(s.NodeAddr); sessionErr != nil {
+		s.Logger.WithError(sessionErr).Error("failed to cleanup sessions during shutdown")
+		err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
+	} else {
+		s.Logger.Debug("cleaned up sessions during shutdown")
 	}
 
-	if s.wsln != nil {
-		_ = s.wsln.Close()
+	if err == nil {
+		s.Logger.Debug("server shutdown completed")
 	}
+
+	return err
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
@@ -360,7 +378,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			g.Add(func() error {
 				return sp.Serve(sshln)
 			}, func(err error) {
-				_ = sp.Shutdown()
+				if err := sp.Shutdown(); err != nil {
+					s.Logger.WithError(err).Error("error during ssh proxy shutdown")
+				}
 			})
 		}
 	}
@@ -393,7 +413,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			g.Add(func() error {
 				return ws.Serve(wsln)
 			}, func(err error) {
-				_ = ws.Shutdown()
+				if err := ws.Shutdown(); err != nil {
+					s.Logger.WithError(err).Error("error during websocket proxy shutdown")
+				}
 			})
 		}
 	}
@@ -413,7 +435,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		g.Add(func() error {
 			return sshd.Serve(ln)
 		}, func(err error) {
-			_ = sshd.Shutdown()
+			if err := sshd.Shutdown(); err != nil {
+				s.Logger.WithError(err).Error("error during sshd shutdown")
+			}
 		})
 	}
 
