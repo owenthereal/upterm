@@ -19,8 +19,7 @@ func WaitForServer(ctx context.Context, addr string) error {
 		case <-ticker.C:
 			conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 			if err == nil {
-				conn.Close()
-				return nil
+				return conn.Close()
 			}
 		}
 	}

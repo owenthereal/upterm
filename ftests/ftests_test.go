@@ -217,7 +217,7 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 
 	wsln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		sshln.Close()
+		_ = sshln.Close()
 		return nil, fmt.Errorf("failed to create WebSocket listener: %w", err)
 	}
 

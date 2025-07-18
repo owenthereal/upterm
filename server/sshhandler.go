@@ -192,5 +192,5 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 
 	delete(h.forwards, sessionID)
 
-	h.sessionStore.Delete(sessionID)
+	_ = h.sessionStore.Delete(sessionID)
 }

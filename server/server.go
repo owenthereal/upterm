@@ -44,10 +44,60 @@ type Opt struct {
 	ConsulSessionTTL string       `mapstructure:"consul-session-ttl"`
 }
 
-func Start(opt Opt) error {
-	// must always have a ssh addr
+// Validate validates the server configuration
+func (opt *Opt) Validate() error {
+	// Basic validation
 	if opt.SSHAddr == "" {
-		return fmt.Errorf("must specify a ssh address")
+		return fmt.Errorf("ssh-addr is required")
+	}
+
+	// Routing-specific validation
+	routingMode := opt.Routing
+	if routingMode == "" {
+		routingMode = routing.ModeEmbedded
+	}
+
+	switch routingMode {
+	case routing.ModeConsul:
+		return opt.validateConsulConfig()
+	case routing.ModeEmbedded:
+		return opt.validateEmbeddedConfig()
+	default:
+		return fmt.Errorf("unsupported routing mode: %s", routingMode)
+	}
+}
+
+// validateConsulConfig validates Consul-specific configuration
+func (opt *Opt) validateConsulConfig() error {
+	if opt.ConsulAddr == "" {
+		return fmt.Errorf("consul-addr is required for consul routing mode")
+	}
+
+	// Validate Consul address format
+	if _, err := url.Parse("http://" + opt.ConsulAddr); err != nil {
+		return fmt.Errorf("invalid consul address format: %w", err)
+	}
+
+	// Validate TTL format if provided
+	if opt.ConsulSessionTTL != "" {
+		if _, err := time.ParseDuration(opt.ConsulSessionTTL); err != nil {
+			return fmt.Errorf("invalid consul session TTL format: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// validateEmbeddedConfig validates embedded mode configuration
+func (opt *Opt) validateEmbeddedConfig() error {
+	// No special validation needed for embedded mode
+	return nil
+}
+
+func Start(opt Opt) error {
+	// Validate configuration upfront
+	if err := opt.Validate(); err != nil {
+		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	network := networks.Get(opt.Network)
