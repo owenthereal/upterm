@@ -4,25 +4,27 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
 
 func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
 	jch := make(chan *api.Client)
 	lch := make(chan *api.Client)
 
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -42,9 +44,8 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		},
 	}
 
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
 	// verify admin server
@@ -56,31 +57,20 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.JoinWithContext(ctx, session, clientJoinURL); err != nil {
-		t.Fatal(err)
-	}
+	err = c.JoinWithContext(ctx, session, clientJoinURL)
+	require.NoError(err)
 
 	var clientID string
 	select {
 	case cc := <-jch:
 		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(err)
 
-		if cc.Id == "" {
-			t.Fatal("client id can't be empty")
-		}
-
+		assert.NotEmpty(cc.Id, "client id can't be empty")
 		clientID = cc.Id
 
-		if diff := cmp.Diff(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint); diff != "" {
-			t.Fatal(diff)
-		}
-
-		if diff := cmp.Diff("SSH-2.0-Go", cc.Version); diff != "" {
-			t.Fatal(diff)
-		}
+		assert.Equal(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint, "public key fingerprint should match")
+		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match")
 	case <-time.After(2 * time.Second):
 		t.Fatal("client joined callback is not called")
 	}
@@ -91,26 +81,14 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 
 	select {
 	case cc := <-lch:
-		if cc.Id == "" {
-			t.Fatal("client id can't be empty")
-		}
+		assert.NotEmpty(cc.Id, "client id can't be empty")
 
 		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(err)
 
-		if diff := cmp.Diff(clientID, cc.Id); diff != "" {
-			t.Fatal(diff)
-		}
-
-		if diff := cmp.Diff(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint); diff != "" {
-			t.Fatal(diff)
-		}
-
-		if diff := cmp.Diff("SSH-2.0-Go", cc.Version); diff != "" {
-			t.Fatal(diff)
-		}
+		assert.Equal(clientID, cc.Id, "client ID should match on leave")
+		assert.Equal(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint, "public key fingerprint should match on leave")
+		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match on leave")
 	case <-time.After(2 * time.Second):
 		if os.Getenv("MUTE_FLAKY_TESTS") != "" {
 			log.Error("FLAKY_TEST: client left callback is not called")
@@ -121,39 +99,34 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 }
 
 func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
 	h := &Host{
 		Command:      []string{"bash", "--norc"},
 		ForceCommand: []string{"vim"},
 		PrivateKeys:  []string{HostPrivateKey},
 		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
-			if want, got := []string{"bash", "--norc"}, session.Command; !cmp.Equal(want, got) {
-				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
-			if want, got := []string{"vim"}, session.ForceCommand; !cmp.Equal(want, got) {
-				t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-			}
+			assert.Equal([]string{"bash", "--norc"}, session.Command, "command should match")
+			assert.Equal([]string{"vim"}, session.ForceCommand, "force command should match")
 
 			checkSessionPayload(t, session, hostShareURL, hostNodeAddr)
 			return nil
 		},
 	}
 
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err := h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 }
 
 func testHostFailToShareWithoutPrivateKey(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
 	h := &Host{
 		Command: []string{"bash"},
 	}
 	err := h.Share(hostShareURL)
-	if err == nil {
-		t.Fatal("expect error")
-	}
-
-	if !strings.Contains(err.Error(), "Permission denied (publickey)") {
-		t.Fatalf("expect permission denied error: %s", err)
-	}
+	require.Error(err, "should fail without private key")
+	require.ErrorContains(err, "Permission denied (publickey)", "should fail with permission denied error")
 }

@@ -4,22 +4,22 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -31,28 +31,28 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAd
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
-	// verify admin server
+	// Verify admin server - require session exists to continue
 	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	c := &Client{
 		PrivateKeys: []string{HostPrivateKey}, // use the wrong key
 	}
 
-	if err := c.Join(session, clientJoinURL); err != nil {
-		t.Fatal(err)
-	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
 }
 
 func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -65,12 +65,11 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
-	// verify admin server
+	// Verify admin server - require session exists to continue
 	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
 
 	c := &Client{
@@ -79,12 +78,9 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 
 	err = c.Join(session, clientJoinURL)
 
-	// Unfortunately there is no explicit error to the client.
-	// SSH handshake should fail with the connection closed.
-	// And there should be error like "public key not allowed" in the log
-	if want, got := "ssh: handshake failed:", err.Error(); !strings.Contains(got, want) {
-		t.Fatalf("Unexpected error, want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	// Test authorization failure - use assert for expected error validation
+	require.Error(err, "connection should be rejected with wrong key")
+	assert.ErrorContains(err, "ssh: handshake failed", "should fail with SSH handshake error")
 }
 
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -133,10 +129,12 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 }
 
 func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -149,9 +147,8 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
 	// verify admin server
@@ -164,54 +161,39 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, clientJoinURL); err != nil {
-		t.Fatal(err)
-	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
 
 	// host input
 	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(hostScanner), "host should echo command")
+	assert.Equal("hello", scan(hostScanner), "host should show command output")
 
 	// client output
-	if want, got := "echo hello", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(remoteScanner), "client should see host command")
+	assert.Equal("hello", scan(remoteScanner), "client should see host output")
 
 	// client input
 	remoteInputCh <- "echo hello again"
-	if want, got := "echo hello again", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello again", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello again", scan(remoteScanner), "client should echo its own command")
+	assert.Equal("hello again", scan(remoteScanner), "client should see its own output")
 
 	// host output
 	// host should link to remote with the same input/output
-	if want, got := "echo hello again", scan(hostScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello again", scan(hostScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello again", scan(hostScanner), "host should see client command")
+	assert.Equal("hello again", scan(hostScanner), "host should see client output")
 }
 
 func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -225,9 +207,8 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
 	// verify admin server
@@ -238,47 +219,36 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	hostScanner := scanner(hostOutputCh)
 
 	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(hostScanner), "host should echo initial command")
+	assert.Equal("hello", scan(hostScanner), "host should show initial output")
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, clientJoinURL); err != nil {
-		t.Fatal(err)
-	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
 	time.Sleep(1 * time.Second) // HACK: wait for ssh stdin/stdout to fully attach
 
 	remoteInputCh <- "echo hello again"
-	if want, got := "echo hello again", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello again", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello again", scan(remoteScanner), "client should echo its command")
+	assert.Equal("hello again", scan(remoteScanner), "client should see its output")
 
 	// host shouldn't be linked to remote
 	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(hostScanner), "host should echo second command independently")
+	assert.Equal("hello", scan(hostScanner), "host should show second output independently")
 }
 
 func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Setup - use require for critical setup steps
 	adminSockDir, err := newAdminSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 	defer func() {
 		_ = os.RemoveAll(adminSockDir)
 	}()
@@ -292,9 +262,8 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		ReadOnly:                 true,
 	}
-	if err := h.Share(hostShareURL); err != nil {
-		t.Fatal(err)
-	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
 	defer h.Close()
 
 	// verify admin server
@@ -307,9 +276,8 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
 	}
-	if err := c.Join(session, clientJoinURL); err != nil {
-		t.Fatal(err)
-	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
@@ -319,25 +287,17 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	// \n
 	// === Attached to read-only session ===
 	// \n
-	if want, got := "=== Attached to read-only session ===", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("=== Attached to read-only session ===", scan(remoteScanner), "client should see read-only welcome message")
 
 	// host input should still work
 	hostInputCh <- "echo hello"
-	if want, got := "echo hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
-	if want, got := "hello", scan(hostScanner); want != got {
-		t.Fatalf("want=%s got=%s:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(hostScanner), "host should echo command in read-only mode")
+	assert.Equal("hello", scan(hostScanner), "host should show output in read-only mode")
 
 	// client input should be disabled
 	remoteInputCh <- "echo hello again"
 	// client should read what was sent by hostInputCh and not what was sent on remoteInputCh
-	if want, got := "echo hello", scan(remoteScanner); want != got {
-		t.Fatalf("want=%q got=%q:\n%s", want, got, cmp.Diff(want, got))
-	}
+	assert.Equal("echo hello", scan(remoteScanner), "client should see host output, not its own input")
 
 	select {
 	// host shouldn't receive anything from client and because client input is disabled
@@ -351,15 +311,13 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 }
 
 func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, wantNodeURL string) *api.GetSessionResponse {
+	require := require.New(t)
+
 	adminClient, err := host.AdminClient(adminSocketFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 
 	sess, err := adminClient.GetSession(context.Background(), &api.GetSessionRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(err)
 
 	checkSessionPayload(t, sess, wantHostURL, wantNodeURL)
 
