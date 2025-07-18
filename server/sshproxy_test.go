@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/routing"
@@ -59,7 +61,10 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 		_ = proxy.Serve(proxyLn)
 	}()
 
-	if err := utils.WaitForServer(proxyAddr); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := utils.WaitForServer(ctx, proxyAddr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -83,7 +88,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 		_ = sshd.Serve(sshLn)
 	}()
 
-	if err := utils.WaitForServer(sshdAddr); err != nil {
+	if err := utils.WaitForServer(ctx, sshdAddr); err != nil {
 		t.Fatal(err)
 	}
 
