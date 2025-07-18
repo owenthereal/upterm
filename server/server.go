@@ -15,6 +15,7 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pires/go-proxyproto"
@@ -38,7 +39,7 @@ type Opt struct {
 	MetricAddr       string   `mapstructure:"metric-addr"`
 	Debug            bool     `mapstructure:"debug"`
 	// Session routing configuration
-	SessionRouting   string   `mapstructure:"session-routing"`
+	SessionRouting string `mapstructure:"session-routing"`
 	// Consul configuration
 	ConsulAddr       string `mapstructure:"consul-addr"`
 	ConsulPrefix     string `mapstructure:"consul-prefix"`
@@ -148,12 +149,23 @@ func Start(opt Opt) error {
 		// Determine session routing mode
 		sessionRouting := opt.SessionRouting
 		if sessionRouting == "" {
-			sessionRouting = "embedded" // Default to embedded mode
+			sessionRouting = string(routing.ModeEmbedded) // Default to embedded mode
+		}
+
+		// Convert to routing.Mode
+		var sessionRoutingMode routing.Mode
+		switch sessionRouting {
+		case string(routing.ModeConsul):
+			sessionRoutingMode = routing.ModeConsul
+		case string(routing.ModeEmbedded):
+			sessionRoutingMode = routing.ModeEmbedded
+		default:
+			sessionRoutingMode = routing.ModeEmbedded // Default fallback
 		}
 
 		// Create session store based on session routing mode
 		var sessionStore SessionStore
-		if sessionRouting == "consul" {
+		if sessionRouting == string(routing.ModeConsul) {
 			consulTTL := 30 * time.Minute
 			if opt.ConsulSessionTTL != "" {
 				if parsedTTL, err := time.ParseDuration(opt.ConsulSessionTTL); err == nil {
@@ -174,19 +186,22 @@ func Start(opt Opt) error {
 			}
 			sessionStore = store
 			logger.Info("using consul session store for routing")
-		} else if sessionRouting == "embedded" {
+		} else if sessionRouting == string(routing.ModeEmbedded) {
 			sessionStore = NewMemorySessionStore(logger.WithField("com", "memory-session-store"))
 			logger.Info("using embedded session routing (in-memory session store)")
 		} else {
-			return fmt.Errorf("invalid session routing mode: %s (supported: embedded, consul)", sessionRouting)
+			return fmt.Errorf("invalid session routing mode: %s (supported: %s, %s)", sessionRouting, routing.ModeEmbedded, routing.ModeConsul)
 		}
+
+		// Create session manager with the appropriate routing mode
+		sessionManager := NewSessionManager(sessionStore, sessionRoutingMode)
 
 		s := &Server{
 			NodeAddr:        nodeAddr,
 			HostSigners:     hostSigners,
 			Signers:         signers,
 			NetworkProvider: network,
-			SessionStore:    sessionStore,
+			SessionManager:  sessionManager,
 			Logger:          logger.WithField("com", "server"),
 			MetricsProvider: mp,
 		}
@@ -231,7 +246,7 @@ type Server struct {
 	Signers         []ssh.Signer
 	NetworkProvider NetworkProvider
 	MetricsProvider provider.Provider
-	SessionStore    SessionStore
+	SessionManager  *SessionManager
 	Logger          log.FieldLogger
 
 	sshln net.Listener
@@ -283,7 +298,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				NodeAddr:            s.NodeAddr,
 				SSHDDialListener:    sshdDialListener,
 				SessionDialListener: sessionDialListener,
-				SessionStore:        s.SessionStore,
+				SessionStore:        s.SessionManager.GetStore(),
 				NeighbourDialer:     tcpConnDialer{},
 				Logger:              s.Logger.WithField("com", "ssh-conn-dialer"),
 			}
@@ -292,7 +307,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Signers:         s.Signers,
 				NodeAddr:        s.NodeAddr,
 				ConnDialer:      cd,
-				SessionStore:    s.SessionStore,
+				SessionStore:    s.SessionManager.GetStore(),
 				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}
@@ -311,7 +326,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 					NodeAddr:            s.NodeAddr,
 					SSHDDialListener:    sshdDialListener,
 					SessionDialListener: sessionDialListener,
-					SessionStore:        s.SessionStore,
+					SessionStore:        s.SessionManager.GetStore(),
 					NeighbourDialer:     wsConnDialer{},
 					Logger:              s.Logger.WithField("com", "ws-conn-dialer"),
 				}
@@ -343,7 +358,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		}
 
 		sshd := sshd{
-			SessionStore:        s.SessionStore,
+			SessionManager:      s.SessionManager,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,

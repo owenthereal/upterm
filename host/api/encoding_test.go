@@ -55,11 +55,15 @@ func Test_EncodeDecodeIdentifier(t *testing.T) {
 func TestDecodeIdentifier(t *testing.T) {
 	assert := assert.New(t)
 
+	// Test invalid base64 in embedded mode should fail
 	_, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY:MTI3LjAuMC4xOjIyMjIIII=", "")
 	assert.Error(err)
-	assert.ErrorContains(err, "illegal base64 data")
+	assert.ErrorContains(err, "failed to decode node address")
 
-	_, err = DecodeIdentifier("10OLFAKZu4cxx2roOboaY", "")
-	assert.Error(err)
-	assert.ErrorContains(err, "invalid client session id")
+	// Test plain session ID (Consul mode) should succeed
+	id, err := DecodeIdentifier("10OLFAKZu4cxx2roOboaY", "")
+	assert.NoError(err)
+	assert.Equal("10OLFAKZu4cxx2roOboaY", id.Id)
+	assert.Equal(Identifier_CLIENT, id.Type)
+	assert.Equal("", id.NodeAddr) // Empty for Consul mode
 }

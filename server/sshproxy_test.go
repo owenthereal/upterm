@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -72,9 +73,10 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 
 	sshdAddr := sshLn.Addr().String()
 	sshd := &sshd{
-		HostSigners: []ssh.Signer{signer},
-		NodeAddr:    sshdAddr,
-		Logger:      logger,
+		SessionManager: NewSessionManager(NewMemorySessionStore(logger), routing.ModeEmbedded),
+		HostSigners:    []ssh.Signer{signer},
+		NodeAddr:       sshdAddr,
+		Logger:         logger,
 	}
 
 	go func() {
