@@ -211,13 +211,21 @@ func (s *Server) start() error {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
+	sm, err := server.NewSessionManager(
+		routing.ModeEmbedded,
+		server.WithSessionManagerLogger(logger),
+	)
+	if err != nil {
+		return err
+	}
+
 	s.Server = &server.Server{
 		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
 		HostSigners:     hostSigners,
 		Signers:         signers,
 		NetworkProvider: network,
 		MetricsProvider: provider.NewDiscardProvider(),
-		SessionManager:  server.NewSessionManager(server.NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
+		SessionManager:  sm,
 		Logger:          logger,
 	}
 

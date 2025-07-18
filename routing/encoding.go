@@ -105,16 +105,6 @@ func (c *ConsulEncodeDecoder) Mode() Mode {
 	return ModeConsul
 }
 
-// EncodeWithEncoder encodes using a specific encoder
-func EncodeWithEncoder(encoder Encoder, sessionID, nodeAddr string) string {
-	return encoder.Encode(sessionID, nodeAddr)
-}
-
-// DecodeWithDecoder decodes using a specific decoder
-func DecodeWithDecoder(decoder Decoder, sshUser string) (sessionID, nodeAddr string, err error) {
-	return decoder.Decode(sshUser)
-}
-
 // ConnectionType represents the type of SSH connection
 type ConnectionType int
 
@@ -144,38 +134,4 @@ func DecodeIdentifier(sshUser, clientVersion string, decoder Decoder) (*api.Iden
 		Type:     api.Identifier_CLIENT,
 		NodeAddr: nodeAddr,
 	}, nil
-}
-
-// Legacy functions for backward compatibility
-
-// EncodeSSHUser encodes a session ID and node address into an SSH username based on the routing mode
-func EncodeSSHUser(sessionID, nodeAddr string, mode Mode) string {
-	encoder := NewEncodeDecoder(mode)
-	return encoder.Encode(sessionID, nodeAddr)
-}
-
-// DecodeSSHUser decodes an SSH username and determines the routing mode automatically
-func DecodeSSHUser(sshUser string) (sessionID, nodeAddr string, mode Mode, err error) {
-	// Try embedded mode first (contains colon)
-	if strings.Contains(sshUser, ":") {
-		embeddedDecoder := &EmbeddedEncodeDecoder{}
-		sessionID, nodeAddr, err = embeddedDecoder.Decode(sshUser)
-		if err != nil {
-			return "", "", "", err
-		}
-		return sessionID, nodeAddr, ModeEmbedded, nil
-	}
-
-	// Consul mode (plain session ID)
-	consulDecoder := &ConsulEncodeDecoder{}
-	sessionID, nodeAddr, err = consulDecoder.Decode(sshUser)
-	if err != nil {
-		return "", "", "", err
-	}
-	return sessionID, nodeAddr, ModeConsul, nil
-}
-
-// DecodeSSHUserWithDecoder decodes an SSH username using a specific decoder
-func DecodeSSHUserWithDecoder(sshUser string, decoder EncodeDecoder) (sessionID, nodeAddr string, err error) {
-	return decoder.Decode(sshUser)
 }
