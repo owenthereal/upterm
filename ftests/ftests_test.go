@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
@@ -29,6 +30,7 @@ import (
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -62,36 +64,40 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 var (
 	HostPrivateKey   string
 	ClientPrivateKey string
-
-	ts1 TestServer
-	ts2 TestServer
 )
 
-func TestMain(m *testing.M) {
-	remove, err := SetupKeyPairs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer remove()
-
-	ts1, err = NewServer(ServerPrivateKeyContent)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ts2, err = NewServer(ServerPrivateKeyContent)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	exitCode := m.Run()
-
-	ts1.Shutdown()
-	ts2.Shutdown()
-
-	os.Exit(exitCode)
+// FtestSuite runs functional tests with different session routing modes
+type FtestSuite struct {
+	suite.Suite
+	mode routing.Mode
+	ts1  TestServer
+	ts2  TestServer
 }
 
-func Test_ftest(t *testing.T) {
+func (suite *FtestSuite) SetupSuite() {
+	// Setup key pairs
+	remove, err := setupKeyPairs()
+	suite.Require().NoError(err)
+	suite.T().Cleanup(remove)
+
+	// Create test servers with the specified routing mode
+	suite.ts1, err = NewServerWithMode(ServerPrivateKeyContent, suite.mode)
+	suite.Require().NoError(err)
+
+	suite.ts2, err = NewServerWithMode(ServerPrivateKeyContent, suite.mode)
+	suite.Require().NoError(err)
+}
+
+func (suite *FtestSuite) TearDownSuite() {
+	if suite.ts1 != nil {
+		suite.ts1.Shutdown()
+	}
+	if suite.ts2 != nil {
+		suite.ts2.Shutdown()
+	}
+}
+
+func (suite *FtestSuite) TestFtests() {
 	testCases := []func(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string){
 		testHostNoAuthorizedKeyAnyClientJoin,
 		testClientAuthorizedKeyNotMatching,
@@ -105,28 +111,61 @@ func Test_ftest(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		testLocal := test
+		testName := funcName(test)
 
-		t.Run("ssh/singleNode/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ssh://"+ts1.SSHAddr(), ts1.NodeAddr(), "ssh://"+ts1.SSHAddr())
+		suite.Run("ssh/singleNode/"+testName, func() {
+			test(suite.T(), "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts1.SSHAddr())
 		})
 
-		t.Run("ws/singleNode/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ws://"+ts1.WSAddr(), ts1.NodeAddr(), "ws://"+ts1.WSAddr())
+		suite.Run("ws/singleNode/"+testName, func() {
+			test(suite.T(), "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts1.WSAddr())
 		})
 
-		t.Run("ssh/multiNodes/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ssh://"+ts1.SSHAddr(), ts1.NodeAddr(), "ssh://"+ts2.SSHAddr())
+		suite.Run("ssh/multiNodes/"+testName, func() {
+			test(suite.T(), "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts2.SSHAddr())
 		})
 
-		t.Run("ws/multiNodes/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ws://"+ts1.WSAddr(), ts1.NodeAddr(), "ws://"+ts2.WSAddr())
+		suite.Run("ws/multiNodes/"+testName, func() {
+			test(suite.T(), "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts2.WSAddr())
 		})
 	}
+}
+
+// Test runners for different modes
+func TestEmbededFtests(t *testing.T) {
+	suite.Run(t, &FtestSuite{mode: routing.ModeEmbedded})
+}
+
+func TestConsulFtests(t *testing.T) {
+	// Skip if Consul is not available
+	if !isConsulAvailable() {
+		t.Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
+	}
+	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
+}
+
+// isConsulAvailable checks if Consul is running and accessible
+func isConsulAvailable() bool {
+	config := consulapi.DefaultConfig()
+	config.Address = consulAddr()
+
+	client, err := consulapi.NewClient(config)
+	if err != nil {
+		return false
+	}
+
+	// Try to get leader - simple health check
+	_, err = client.Status().Leader()
+	return err == nil
+}
+
+func consulAddr() string {
+	addr := os.Getenv("CONSUL_ADDR")
+	if addr == "" {
+		addr = "localhost:8500"
+	}
+
+	return addr
 }
 
 func funcName(i interface{}) string {
@@ -143,7 +182,7 @@ type TestServer interface {
 	Shutdown()
 }
 
-func NewServer(hostKey string) (TestServer, error) {
+func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 	sshln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -158,6 +197,7 @@ func NewServer(hostKey string) (TestServer, error) {
 		hostKeyContent: hostKey,
 		sshln:          sshln,
 		wsln:           wsln,
+		mode:           mode,
 	}
 
 	go func() {
@@ -184,6 +224,7 @@ type Server struct {
 	wsln  net.Listener
 
 	hostKeyContent string
+	mode           routing.Mode
 }
 
 func (s *Server) start() error {
@@ -211,12 +252,29 @@ func (s *Server) start() error {
 	logger := log.New()
 	logger.Level = log.DebugLevel
 
-	sm, err := server.NewSessionManager(
-		routing.ModeEmbedded,
-		server.WithSessionManagerLogger(logger),
-	)
-	if err != nil {
-		return err
+	// Create session manager based on the mode
+	var sm *server.SessionManager
+	switch s.mode {
+	case routing.ModeEmbedded:
+		sm, err = server.NewSessionManager(
+			routing.ModeEmbedded,
+			server.WithSessionManagerLogger(logger),
+		)
+		if err != nil {
+			return err
+		}
+	case routing.ModeConsul:
+		sm, err = server.NewSessionManager(
+			routing.ModeConsul,
+			server.WithSessionManagerLogger(logger),
+			server.WithSessionManagerConsulAddr(consulAddr()),
+			server.WithSessionManagerConsulPrefix("uptermd-ftest/sessions"),
+		)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported routing mode: %s", s.mode)
 	}
 
 	s.Server = &server.Server{
@@ -586,7 +644,7 @@ func authMethodsFromFiles(privateKeys []string) ([]ssh.AuthMethod, error) {
 	return auths, nil
 }
 
-func SetupKeyPairs() (func(), error) {
+func setupKeyPairs() (func(), error) {
 	var err error
 
 	HostPrivateKey, err = writeTempFile("id_ed25519", HostPrivateKeyContent)

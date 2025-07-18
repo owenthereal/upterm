@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/oklog/run"
+	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
@@ -19,9 +20,9 @@ import (
 )
 
 type webSocketProxy struct {
-	ConnDialer connDialer
-	Decoder    routing.Decoder
-	Logger     log.FieldLogger
+	ConnDialer     connDialer
+	SessionManager *SessionManager
+	Logger         log.FieldLogger
 
 	srv *http.Server
 	mux sync.Mutex
@@ -48,9 +49,9 @@ func (s *webSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
 	s.srv = &http.Server{
 		Handler: webHandler(&wsHandler{
-			ConnDialer: s.ConnDialer,
-			Decoder:    s.Decoder,
-			Logger:     s.Logger,
+			ConnDialer:     s.ConnDialer,
+			SessionManager: s.SessionManager,
+			Logger:         s.Logger,
 		}),
 	}
 	s.mux.Unlock()
@@ -79,9 +80,9 @@ var upgrader = websocket.Upgrader{
 }
 
 type wsHandler struct {
-	ConnDialer connDialer
-	Decoder    routing.Decoder
-	Logger     log.FieldLogger
+	ConnDialer     connDialer
+	SessionManager *SessionManager
+	Logger         log.FieldLogger
 }
 
 // ServeHTTP checks the following header:
@@ -101,7 +102,7 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sshUser := user
-	if pass != "" {
+	if h.SessionManager.GetRoutingMode() == routing.ModeEmbedded {
 		sshUser = user + ":" + pass
 	}
 
@@ -115,10 +116,27 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = wsconn.Close()
 	}()
 
-	id, err := routing.DecodeIdentifier(sshUser, string(clientVersion), h.Decoder)
-	if err != nil {
-		h.wsError(wsc, err, "error decoding identifier")
-		return
+	// Determine connection type and decode identifier using SessionManager
+	var id *api.Identifier
+	if string(clientVersion) == upterm.HostSSHClientVersion {
+		// HOST connection: sshUser is the session ID
+		id = &api.Identifier{
+			Id:   sshUser,
+			Type: api.Identifier_HOST,
+		}
+	} else {
+		// CLIENT connection: decode the SSH user using SessionManager
+		sessionID, nodeAddr, err := h.SessionManager.ResolveSSHUser(sshUser)
+		if err != nil {
+			h.wsError(wsc, fmt.Errorf("error resolving SSH user %s: %w", sshUser, err), "error resolving SSH user")
+			return
+		}
+
+		id = &api.Identifier{
+			Id:       sessionID,
+			NodeAddr: nodeAddr,
+			Type:     api.Identifier_CLIENT,
+		}
 	}
 
 	conn, err := h.ConnDialer.Dial(id)
