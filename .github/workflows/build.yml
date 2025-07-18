@@ -24,13 +24,35 @@ jobs:
           check-latest: true
       - name: Compile
         run: make install
-  test:
-    name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test
+        run: make test
+        env:
+          BASH_SILENCE_DEPRECATION_WARNING: 1
+          MUTE_FLAKY_TESTS: 1
+
+  test-ubuntu:
+    name: Test (Ubuntu + Consul)
+    runs-on: ubuntu-latest
+    services:
+      consul:
+        image: consul:1.15
+        ports:
+          - 8500:8500
+        options: >-
+          --health-cmd "consul members"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -57,6 +79,6 @@ jobs:
         run: make vet
   docker:
     name: Docker
-    needs: [build, test, vet]
+    needs: [build, test-macos, test-ubuntu, vet]
     uses: ./.github/workflows/docker.yaml
     secrets: inherit
