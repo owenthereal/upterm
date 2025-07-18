@@ -326,7 +326,6 @@ type Server struct {
 	logger         log.FieldLogger
 
 	shutdownOnce sync.Once
-	shutdownErr  error
 }
 
 func (s *Server) start() error {
@@ -421,21 +420,7 @@ func (s *Server) Shutdown() {
 			s.Server.Shutdown()
 		}
 
-		// Close listeners
-		if s.sshln != nil {
-			if err := s.sshln.Close(); err != nil && s.shutdownErr == nil {
-				s.shutdownErr = fmt.Errorf("failed to close SSH listener: %w", err)
-			}
-		}
-		if s.wsln != nil {
-			if err := s.wsln.Close(); err != nil && s.shutdownErr == nil {
-				s.shutdownErr = fmt.Errorf("failed to close WebSocket listener: %w", err)
-			}
-		}
-
-		if s.shutdownErr != nil && s.logger != nil {
-			s.logger.WithError(s.shutdownErr).Error("error during shutdown")
-		}
+		// Listeners are closed by Server.Shutdown() - no need to close manually
 	})
 }
 
