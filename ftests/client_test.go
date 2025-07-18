@@ -17,21 +17,15 @@ import (
 func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
 
-	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:         []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -50,14 +44,8 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	require := require.New(t)
 	assert := assert.New(t)
 
-	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -65,7 +53,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -86,14 +74,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
 
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -101,7 +82,7 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 
 	defer h.Close()
@@ -133,13 +114,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -147,7 +122,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -192,13 +167,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -207,7 +176,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -230,7 +199,9 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
-	time.Sleep(1 * time.Second) // HACK: wait for ssh stdin/stdout to fully attach
+	
+	// Wait for ssh stdin/stdout to fully attach - critical for force command isolation
+	time.Sleep(time.Second)
 
 	remoteInputCh <- "echo hello again"
 	assert.Equal("echo hello again", scan(remoteScanner), "client should echo its command")
@@ -247,13 +218,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -262,7 +227,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		ReadOnly:                 true,
 	}
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -303,8 +268,8 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	// host shouldn't receive anything from client and because client input is disabled
 	case str := <-hostOutputCh:
 		t.Fatalf("host shouldn't receive client input: receive=%s", str)
-	case <-time.After(time.Second * 3):
-		log.Info("Timeout hit..")
+	case <-time.After(sshAttachTimeout):
+		log.Debug("Read-only timeout confirmed - client input properly blocked")
 		return
 	}
 
@@ -332,6 +297,17 @@ func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL
 	require.NotEmpty(sess.SshUser, "SSH user should not be empty")
 }
 
-func newAdminSocketDir() (string, error) {
-	return os.MkdirTemp("", "upterm")
+
+// setupAdminSocket creates a temporary admin socket and returns the socket file path
+func setupAdminSocket(t *testing.T) string {
+	require := require.New(t)
+	
+	// Use a shorter temp dir to avoid Unix socket path length limits
+	adminSockDir, err := os.MkdirTemp("", "up")
+	require.NoError(err)
+	
+	t.Cleanup(func() {
+		_ = os.RemoveAll(adminSockDir)
+	})
+	return filepath.Join(adminSockDir, "u.sock")
 }

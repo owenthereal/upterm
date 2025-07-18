@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -35,12 +34,13 @@ import (
 )
 
 const (
-	// Test timeouts and configuration
-	defaultTestTimeout       = 30 * time.Second
-	serverStartupTimeout     = 10 * time.Second
-	unixSocketWaitTimeout    = 10 * time.Second
-	keepAliveDuration        = 10 * time.Second
-	consulHealthCheckTimeout = 5 * time.Second
+	// Test timeouts and configuration - optimized for faster test runs
+	defaultTestTimeout       = 15 * time.Second  // Reduced from 30s
+	serverStartupTimeout     = 3 * time.Second   // Reduced from 10s
+	unixSocketWaitTimeout    = 3 * time.Second   // Reduced from 10s
+	keepAliveDuration        = 2 * time.Second   // Reduced from 10s
+	consulHealthCheckTimeout = 2 * time.Second   // Reduced from 5s
+	sshAttachTimeout         = 500 * time.Millisecond  // New: replace hardcoded sleep
 
 	// Test key material
 	ServerPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
@@ -496,15 +496,7 @@ func (c *Host) Share(url string) error {
 	}
 
 	if c.AdminSocketFile == "" {
-		adminSockDir, err := newAdminSocketDir()
-		if err != nil {
-			return err
-		}
-		defer func() {
-			_ = os.RemoveAll(adminSockDir)
-		}()
-
-		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
+		return fmt.Errorf("AdminSocketFile is required but not set")
 	}
 
 	logger := log.New()

@@ -3,7 +3,6 @@ package ftests
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+
 func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -22,14 +22,8 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	jch := make(chan *api.Client)
 	lch := make(chan *api.Client)
 
-	// Setup - use require for critical setup steps
-	adminSockDir, err := newAdminSocketDir()
-	require.NoError(err)
-	defer func() {
-		_ = os.RemoveAll(adminSockDir)
-	}()
-
-	adminSocketFile := filepath.Join(adminSockDir, "upterm.sock")
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
 		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
@@ -44,7 +38,7 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		},
 	}
 
-	err = h.Share(hostShareURL)
+	err := h.Share(hostShareURL)
 	require.NoError(err)
 	defer h.Close()
 
@@ -102,10 +96,14 @@ func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, cl
 	require := require.New(t)
 	assert := assert.New(t)
 
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
+
 	h := &Host{
-		Command:      []string{"bash", "--norc"},
-		ForceCommand: []string{"vim"},
-		PrivateKeys:  []string{HostPrivateKey},
+		Command:                []string{"bash", "--norc"},
+		ForceCommand:           []string{"vim"},
+		PrivateKeys:            []string{HostPrivateKey},
+		AdminSocketFile:        adminSocketFile,
 		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
 			assert.Equal([]string{"bash", "--norc"}, session.Command, "command should match")
 			assert.Equal([]string{"vim"}, session.ForceCommand, "force command should match")
@@ -123,8 +121,12 @@ func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, cl
 func testHostFailToShareWithoutPrivateKey(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
 
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
+
 	h := &Host{
-		Command: []string{"bash"},
+		Command:         []string{"bash"},
+		AdminSocketFile: adminSocketFile,
 	}
 	err := h.Share(hostShareURL)
 	require.Error(err, "should fail without private key")
