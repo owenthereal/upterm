@@ -74,6 +74,34 @@ var (
 	ClientPrivateKey string
 )
 
+// FtestCase represents a functional test case
+type FtestCase func(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string)
+
+// AuthTestCases contains all authentication-related test functions
+var AuthTestCases = []FtestCase{
+	testHostNoAuthorizedKeyAnyClientJoin,
+	testClientAuthorizedKeyNotMatching,
+	testHostFailToShareWithoutPrivateKey,
+}
+
+// SessionTestCases contains all session management test functions
+var SessionTestCases = []FtestCase{
+	testClientNonExistingSession,
+}
+
+// ConnectionTestCases contains all connection-related test functions
+var ConnectionTestCases = []FtestCase{
+	testClientAttachHostWithSameCommand,
+	testClientAttachHostWithDifferentCommand,
+	testClientAttachReadOnly,
+}
+
+// CallbackTestCases contains all callback/event-related test functions
+var CallbackTestCases = []FtestCase{
+	testHostClientCallback,
+	testHostSessionCreatedCallback,
+}
+
 // FtestSuite runs functional tests with different session routing modes
 type FtestSuite struct {
 	suite.Suite
@@ -105,52 +133,76 @@ func (suite *FtestSuite) TearDownSuite() {
 	}
 }
 
-type FtestCase func(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string)
+func (suite *FtestSuite) TestAuth() {
+	suite.runTestCategory(AuthTestCases)
+}
 
-func (suite *FtestSuite) TestFtests() {
-	testCases := []FtestCase{
-		testHostNoAuthorizedKeyAnyClientJoin,
-		testClientAuthorizedKeyNotMatching,
-		testClientNonExistingSession,
-		testClientAttachHostWithSameCommand,
-		testClientAttachHostWithDifferentCommand,
-		testClientAttachReadOnly,
-		testHostFailToShareWithoutPrivateKey,
-		testHostSessionCreatedCallback,
-		testHostClientCallback,
-	}
+func (suite *FtestSuite) TestSession() {
+	suite.runTestCategory(SessionTestCases)
+}
 
-	for _, test := range testCases {
-		testName := funcName(test)
+func (suite *FtestSuite) TestConnection() {
+	suite.runTestCategory(ConnectionTestCases)
+}
 
-		suite.T().Run("ssh/singleNode/"+testName, func(t *testing.T) {
-			t.Parallel()
-			test(t, "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts1.SSHAddr())
-		})
+func (suite *FtestSuite) TestCallbacks() {
+	suite.runTestCategory(CallbackTestCases)
+}
 
-		suite.T().Run("ws/singleNode/"+testName, func(t *testing.T) {
-			t.Parallel()
-			test(t, "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts1.WSAddr())
-		})
+func (suite *FtestSuite) runTestCategory(testCases []FtestCase) {
+	protocols := []string{"ssh", "ws"}
 
-		suite.T().Run("ssh/multiNodes/"+testName, func(t *testing.T) {
-			t.Parallel()
-			test(t, "ssh://"+suite.ts1.SSHAddr(), suite.ts1.NodeAddr(), "ssh://"+suite.ts2.SSHAddr())
-		})
-
-		suite.T().Run("ws/multiNodes/"+testName, func(t *testing.T) {
-			t.Parallel()
-			test(t, "ws://"+suite.ts1.WSAddr(), suite.ts1.NodeAddr(), "ws://"+suite.ts2.WSAddr())
+	for _, protocol := range protocols {
+		suite.T().Run(protocol, func(t *testing.T) {
+			suite.runTestsForProtocol(protocol, testCases)
 		})
 	}
+}
+
+func (suite *FtestSuite) runTestsForProtocol(protocol string, testCases []FtestCase) {
+	topologies := []struct {
+		name      string
+		hostURL   string
+		clientURL string
+	}{
+		{
+			name:      "singleNode",
+			hostURL:   protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+			clientURL: protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+		},
+		{
+			name:      "multiNodes",
+			hostURL:   protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+			clientURL: protocol + "://" + suite.getServerAddr(protocol, suite.ts2),
+		},
+	}
+
+	for _, topo := range topologies {
+		suite.T().Run(topo.name, func(t *testing.T) {
+			for _, testFunc := range testCases {
+				testName := funcName(testFunc)
+				t.Run(testName, func(t *testing.T) {
+					t.Parallel()
+					testFunc(t, topo.hostURL, suite.ts1.NodeAddr(), topo.clientURL)
+				})
+			}
+		})
+	}
+}
+
+func (suite *FtestSuite) getServerAddr(protocol string, server TestServer) string {
+	if protocol == "ssh" {
+		return server.SSHAddr()
+	}
+	return server.WSAddr()
 }
 
 // Test runners for different modes
-func TestEmbededFtests(t *testing.T) {
+func TestEmbedded(t *testing.T) {
 	suite.Run(t, &FtestSuite{mode: routing.ModeEmbedded})
 }
 
-func TestConsulFtests(t *testing.T) {
+func TestConsul(t *testing.T) {
 	// Skip if Consul is not available
 	if !isConsulAvailable() {
 		t.Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
