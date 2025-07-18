@@ -217,7 +217,7 @@ func (s *Server) start() error {
 		Signers:         signers,
 		NetworkProvider: network,
 		MetricsProvider: provider.NewDiscardProvider(),
-		SessionManager:  server.NewSessionManager(server.NewMemorySessionStore(logger), routing.ModeEmbedded),
+		SessionManager:  server.NewSessionManager(server.NewMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeEmbedded)),
 		Logger:          logger,
 	}
 

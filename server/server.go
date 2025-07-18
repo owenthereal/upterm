@@ -28,22 +28,20 @@ const (
 )
 
 type Opt struct {
-	SSHAddr          string   `mapstructure:"ssh-addr"`
-	SSHProxyProtocol bool     `mapstructure:"ssh-proxy-protocol"`
-	WSAddr           string   `mapstructure:"ws-addr"`
-	NodeAddr         string   `mapstructure:"node-addr"`
-	PrivateKeys      []string `mapstructure:"private-key"`
-	Hostnames        []string `mapstructure:"hostname"`
-	Network          string   `mapstructure:"network"`
-	NetworkOpts      []string `mapstructure:"network-opt"`
-	MetricAddr       string   `mapstructure:"metric-addr"`
-	Debug            bool     `mapstructure:"debug"`
-	// Session routing configuration
-	SessionRouting string `mapstructure:"session-routing"`
-	// Consul configuration
-	ConsulAddr       string `mapstructure:"consul-addr"`
-	ConsulPrefix     string `mapstructure:"consul-prefix"`
-	ConsulSessionTTL string `mapstructure:"consul-session-ttl"`
+	SSHAddr          string       `mapstructure:"ssh-addr"`
+	SSHProxyProtocol bool         `mapstructure:"ssh-proxy-protocol"`
+	WSAddr           string       `mapstructure:"ws-addr"`
+	NodeAddr         string       `mapstructure:"node-addr"`
+	PrivateKeys      []string     `mapstructure:"private-key"`
+	Hostnames        []string     `mapstructure:"hostname"`
+	Network          string       `mapstructure:"network"`
+	NetworkOpts      []string     `mapstructure:"network-opt"`
+	MetricAddr       string       `mapstructure:"metric-addr"`
+	Debug            bool         `mapstructure:"debug"`
+	Routing          routing.Mode `mapstructure:"routing"`
+	ConsulAddr       string       `mapstructure:"consul-addr"`
+	ConsulPrefix     string       `mapstructure:"consul-prefix"`
+	ConsulSessionTTL string       `mapstructure:"consul-session-ttl"`
 }
 
 func Start(opt Opt) error {
@@ -147,26 +145,16 @@ func Start(opt Opt) error {
 		}
 
 		// Determine session routing mode
-		sessionRouting := opt.SessionRouting
+		sessionRouting := opt.Routing
 		if sessionRouting == "" {
-			sessionRouting = string(routing.ModeEmbedded) // Default to embedded mode
-		}
-
-		// Convert to routing.Mode
-		var sessionRoutingMode routing.Mode
-		switch sessionRouting {
-		case string(routing.ModeConsul):
-			sessionRoutingMode = routing.ModeConsul
-		case string(routing.ModeEmbedded):
-			sessionRoutingMode = routing.ModeEmbedded
-		default:
-			sessionRoutingMode = routing.ModeEmbedded // Default fallback
+			sessionRouting = routing.ModeEmbedded // Default to embedded mode
 		}
 
 		// Create session store based on session routing mode
 		var sessionStore SessionStore
-		if sessionRouting == string(routing.ModeConsul) {
-			consulTTL := 30 * time.Minute
+		switch sessionRouting {
+		case routing.ModeConsul:
+			var consulTTL time.Duration
 			if opt.ConsulSessionTTL != "" {
 				if parsedTTL, err := time.ParseDuration(opt.ConsulSessionTTL); err == nil {
 					consulTTL = parsedTTL
@@ -184,17 +172,19 @@ func Start(opt Opt) error {
 			if err != nil {
 				return fmt.Errorf("failed to create consul session store: %w", err)
 			}
+
 			sessionStore = store
+
 			logger.Info("using consul session store for routing")
-		} else if sessionRouting == string(routing.ModeEmbedded) {
+		case routing.ModeEmbedded:
 			sessionStore = NewMemorySessionStore(logger.WithField("com", "memory-session-store"))
 			logger.Info("using embedded session routing (in-memory session store)")
-		} else {
+		default:
 			return fmt.Errorf("invalid session routing mode: %s (supported: %s, %s)", sessionRouting, routing.ModeEmbedded, routing.ModeConsul)
 		}
 
 		// Create session manager with the appropriate routing mode
-		sessionManager := NewSessionManager(sessionStore, sessionRoutingMode)
+		sessionManager := NewSessionManager(sessionStore, routing.NewEncodeDecoder(routing.ModeConsul))
 
 		s := &Server{
 			NodeAddr:        nodeAddr,
