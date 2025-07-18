@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	DefaultSessionTTL    = 30 * time.Minute   // Default TTL for session data in Consul
-	DefaultConsulPrefix  = "uptermd/sessions" // Default prefix for Consul session keys
-	DefaultConsulTimeout = 5 * time.Second    // Default timeout for Consul operations
-	DefaultMaxRetries    = 3                  // Default number of retries for Consul operations
+	DefaultSessionTTL    = 30 * time.Minute       // Default TTL for session data in Consul
+	DefaultConsulPrefix  = "uptermd/sessions"     // Default prefix for Consul session keys
+	DefaultConsulTimeout = 5 * time.Second        // Default timeout for Consul operations
+	DefaultMaxRetries    = 3                      // Default number of retries for Consul operations
 	DefaultRetryDelay    = 100 * time.Millisecond // Default delay between retries
 )
 
@@ -206,7 +206,7 @@ func (c *consulSessionStore) Store(session *Session) error {
 	// Inside retry: only network operations
 	err = retry.Do(
 		func() error {
-			sessionResp, _, err := c.client.Session().Create(sessionID_consul, nil)
+			consulSessionID, _, err := c.client.Session().Create(sessionID_consul, nil)
 			if err != nil {
 				return fmt.Errorf("failed to create consul session: %w", err)
 			}
@@ -215,7 +215,7 @@ func (c *consulSessionStore) Store(session *Session) error {
 			pair := &api.KVPair{
 				Key:     key,
 				Value:   sessionBytes,
-				Session: sessionResp,
+				Session: consulSessionID,
 			}
 
 			success, _, err := c.client.KV().Acquire(pair, nil)
@@ -274,12 +274,11 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 				return fmt.Errorf("session %s not found", sessionID)
 			}
 
-			var s Session
-			if err := json.Unmarshal(pair.Value, &s); err != nil {
+			session = &Session{}
+			if err := json.Unmarshal(pair.Value, session); err != nil {
 				return fmt.Errorf("failed to unmarshal session data: %w", err)
 			}
 
-			session = &s
 			return nil
 		},
 		retry.Attempts(DefaultMaxRetries),
@@ -358,10 +357,7 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 	const maxBatchSize = 50
 
 	for i := 0; i < len(sessionIDs); i += maxBatchSize {
-		end := i + maxBatchSize
-		if end > len(sessionIDs) {
-			end = len(sessionIDs)
-		}
+		end := min(i+maxBatchSize, len(sessionIDs))
 
 		if err := c.deleteBatch(sessionIDs[i:end]); err != nil {
 			return err
