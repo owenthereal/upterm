@@ -55,7 +55,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	}
 
 	sh := newStreamlocalForwardHandler(
-		s.SessionManager.GetStore(),
+		s.SessionManager,
 		s.SessionDialListener,
 		s.Logger.WithField("com", "stream-local-handler"),
 	)

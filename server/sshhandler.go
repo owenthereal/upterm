@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/ssh"
@@ -26,13 +29,47 @@ type forwardedStreamlocalPayload struct {
 	Reserved0  string
 }
 
+// isExpectedShutdownError returns true if the error is expected during normal session shutdown
+func isExpectedShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	// Context cancellation is normal during shutdown
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	
+	// EOF and connection closed errors are normal during shutdown
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	
+	errStr := err.Error()
+	// Common shutdown-related error messages
+	shutdownMessages := []string{
+		"closed",
+		"connection reset",
+		"broken pipe",
+		"use of closed network connection",
+	}
+	
+	for _, msg := range shutdownMessages {
+		if strings.Contains(errStr, msg) {
+			return true
+		}
+	}
+	
+	return false
+}
+
 func newStreamlocalForwardHandler(
-	sessionStore SessionStore,
+	sessionManager *SessionManager,
 	sessionDialListener SessionDialListener,
 	logger log.FieldLogger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
-		sessionStore:        sessionStore,
+		sessionManager:      sessionManager,
 		sessionDialListener: sessionDialListener,
 		forwards:            make(map[string]net.Listener),
 		logger:              logger,
@@ -40,7 +77,7 @@ func newStreamlocalForwardHandler(
 }
 
 type streamlocalForwardHandler struct {
-	sessionStore        SessionStore
+	sessionManager      *SessionManager
 	sessionDialListener SessionDialListener
 	forwards            map[string]net.Listener
 	logger              log.FieldLogger
@@ -56,52 +93,76 @@ func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, ses
 			return err
 		}
 
-		go func(sessionID string, logger log.FieldLogger) {
-			payload := gossh.Marshal(&forwardedStreamlocalPayload{
-				SocketPath: sessionID,
-			})
-			ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
-			if err != nil {
-				logger.WithError(err).Error("error opening channel")
-				_ = c.Close()
-				return
-			}
+		go h.handleConnection(ctx, conn, c, sessionID, logger)
+	}
+}
 
-			closeAll := func() {
-				_ = ch.Close()
-				_ = c.Close()
-			}
+func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *gossh.ServerConn, localConn net.Conn, sessionID string, logger log.FieldLogger) {
+	defer func() {
+		if err := localConn.Close(); err != nil {
+			logger.WithError(err).Debug("error closing local connection")
+		}
+	}()
 
-			var g run.Group
-			{
-				g.Add(func() error {
-					gossh.DiscardRequests(reqs)
-					return nil
-				}, func(err error) {
-					closeAll()
-				})
-			}
-			{
-				g.Add(func() error {
-					_, err := io.Copy(ch, c)
-					return err
-				}, func(err error) {
-					closeAll()
-				})
-			}
-			{
-				g.Add(func() error {
-					_, err := io.Copy(c, ch)
-					return err
-				}, func(err error) {
-					closeAll()
-				})
-			}
+	payload := gossh.Marshal(&forwardedStreamlocalPayload{
+		SocketPath: sessionID,
+	})
+	
+	ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
+	if err != nil {
+		logger.WithError(err).Error("error opening channel")
+		return
+	}
+	defer func() {
+		if err := ch.Close(); err != nil {
+			logger.WithError(err).Debug("error closing SSH channel")
+		}
+	}()
 
-			if err := g.Run(); err != nil {
-				logger.WithError(err).Error("error listening connection")
-			}
-		}(sessionID, logger)
+	var g run.Group
+	
+	// Context cancellation handler
+	{
+		g.Add(func() error {
+			<-ctx.Done()
+			return ctx.Err()
+		}, func(err error) {
+			// Context cancelled, close all connections
+		})
+	}
+	
+	// SSH request handler
+	{
+		g.Add(func() error {
+			gossh.DiscardRequests(reqs)
+			return nil
+		}, func(err error) {
+			// Requests handler stopped
+		})
+	}
+	
+	// Copy from local to SSH channel
+	{
+		g.Add(func() error {
+			_, err := io.Copy(ch, localConn)
+			return err
+		}, func(err error) {
+			// Copy stopped
+		})
+	}
+	
+	// Copy from SSH channel to local
+	{
+		g.Add(func() error {
+			_, err := io.Copy(localConn, ch)
+			return err
+		}, func(err error) {
+			// Copy stopped
+		})
+	}
+
+	if err := g.Run(); err != nil && err != context.Canceled {
+		logger.WithError(err).Error("error handling connection")
 	}
 }
 
@@ -122,13 +183,13 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		logger := h.logger.WithFields(log.Fields{"session-id": sessionID})
 
 		// validate session exists
-		if _, err := h.sessionStore.Get(sessionID); err != nil {
+		if _, err := h.sessionManager.GetSession(sessionID); err != nil {
 			return false, []byte(err.Error())
 		}
 
 		ln, err := h.sessionDialListener.Listen(sessionID)
 		if err != nil {
-			logger.WithError(err).Error("error listening socketing")
+			logger.WithError(err).Error("error listening socket")
 			return false, []byte(err.Error())
 		}
 
@@ -153,7 +214,12 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 
 		go func(sessionID string) {
 			if err := g.Run(); err != nil {
-				h.logger.WithError(err).WithField("session-id", sessionID).Debug("error handling ssh session")
+				// Log expected shutdown errors at debug level, critical errors at error level
+				if isExpectedShutdownError(err) {
+					h.logger.WithField("session-id", sessionID).Debug("ssh session ended")
+				} else {
+					h.logger.WithError(err).WithField("session-id", sessionID).Error("error handling ssh session")
+				}
 			}
 		}(sessionID)
 
@@ -161,7 +227,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	case cancelStreamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			h.logger.WithError(err).Error("error parsing steamlocal payload")
+			h.logger.WithError(err).Error("error parsing streamlocal payload")
 			return false, []byte(err.Error())
 		}
 
@@ -185,12 +251,23 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 	h.Lock()
 	defer h.Unlock()
 
+	logger := h.logger.WithField("session-id", sessionID)
+
 	ln, ok := h.forwards[sessionID]
-	if ok {
-		_ = ln.Close()
+	if !ok {
+		// Already closed
+		return
+	}
+
+	if err := ln.Close(); err != nil {
+		logger.WithError(err).Error("error closing listener")
+	} else {
+		logger.Debug("closed listener")
 	}
 
 	delete(h.forwards, sessionID)
 
-	_ = h.sessionStore.Delete(sessionID)
+	if err := h.sessionManager.DeleteSession(sessionID); err != nil {
+		logger.WithError(err).Error("error deleting session")
+	}
 }
