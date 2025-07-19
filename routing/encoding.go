@@ -4,9 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
-
-	"github.com/owenthereal/upterm/host/api"
-	"github.com/owenthereal/upterm/upterm"
 )
 
 var (
@@ -113,33 +110,4 @@ func (c *ConsulEncodeDecoder) Mode() Mode {
 	return ModeConsul
 }
 
-// ConnectionType represents the type of SSH connection
-type ConnectionType int
 
-const (
-	ConnectionTypeHost ConnectionType = iota
-	ConnectionTypeClient
-)
-
-// DecodeIdentifier decodes an SSH user and client version into an API Identifier
-func DecodeIdentifier(sshUser, clientVersion string, decoder Decoder) (*api.Identifier, error) {
-	// Check connection type based on client version
-	if clientVersion == upterm.HostSSHClientVersion {
-		// HOST connection
-		return &api.Identifier{
-			Id:   sshUser,
-			Type: api.Identifier_HOST,
-		}, nil
-	}
-
-	// CLIENT connection: decode the SSH user to get session ID and node address
-	sessionID, nodeAddr, err := decoder.Decode(sshUser)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode SSH user: %w", err)
-	}
-	return &api.Identifier{
-		Id:       sessionID,
-		Type:     api.Identifier_CLIENT,
-		NodeAddr: nodeAddr,
-	}, nil
-}

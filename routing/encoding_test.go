@@ -3,8 +3,6 @@ package routing
 import (
 	"testing"
 
-	"github.com/owenthereal/upterm/host/api"
-	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -100,61 +98,7 @@ func (suite *EncodeDecoderTestSuite) TestConsulDecodeBackwardCompatibility() {
 	suite.Empty(decodedNodeAddr2, "consul decoder should return empty node address")
 }
 
-// DecodeIdentifierTestSuite tests the DecodeIdentifier function
-type DecodeIdentifierTestSuite struct {
-	suite.Suite
-}
-
-func (suite *DecodeIdentifierTestSuite) TestHostConnection() {
-	// Host connections should ignore decoder and return HOST type
-	decoder := NewDecoder(ModeConsul) // Mode doesn't matter for host connections
-
-	id, err := DecodeIdentifier("session123", upterm.HostSSHClientVersion, decoder)
-	suite.NoError(err)
-	suite.Equal("session123", id.Id)
-	suite.Equal(api.Identifier_HOST, id.Type)
-	suite.Empty(id.NodeAddr)
-}
-
-func (suite *DecodeIdentifierTestSuite) TestClientConnectionConsulMode() {
-	consulDecoder := NewDecoder(ModeConsul)
-
-	id, err := DecodeIdentifier("test-session-456", "", consulDecoder)
-	suite.NoError(err)
-	suite.Equal("test-session-456", id.Id)
-	suite.Equal(api.Identifier_CLIENT, id.Type)
-	suite.Empty(id.NodeAddr)
-}
-
-func (suite *DecodeIdentifierTestSuite) TestClientConnectionEmbeddedMode() {
-	sessionID := "test-session-123"
-	nodeAddr := "127.0.0.1:2222"
-
-	// Create properly encoded SSH user for embedded mode
-	encoder := NewEncodeDecoder(ModeEmbedded)
-	encodedSSHUser := encoder.Encode(sessionID, nodeAddr)
-
-	decoder := NewDecoder(ModeEmbedded)
-
-	id, err := DecodeIdentifier(encodedSSHUser, "SSH-2.0-client", decoder)
-	suite.NoError(err)
-	suite.Equal(sessionID, id.Id)
-	suite.Equal(api.Identifier_CLIENT, id.Type)
-	suite.Equal(nodeAddr, id.NodeAddr)
-}
-
-func (suite *DecodeIdentifierTestSuite) TestInvalidBase64EmbeddedMode() {
-	embeddedDecoder := NewDecoder(ModeEmbedded)
-
-	_, err := DecodeIdentifier("session:invalid-base64===!@#$", "", embeddedDecoder)
-	suite.Error(err, "expected error for invalid base64")
-}
-
 // Test suite runners
 func TestEncodeDecoderSuite(t *testing.T) {
 	suite.Run(t, new(EncodeDecoderTestSuite))
-}
-
-func TestDecodeIdentifierSuite(t *testing.T) {
-	suite.Run(t, new(DecodeIdentifierTestSuite))
 }
