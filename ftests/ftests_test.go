@@ -102,6 +102,11 @@ var CallbackTestCases = []FtestCase{
 	testHostSessionCreatedCallback,
 }
 
+// BackwardCompatibilityTestCases contains tests for backward compatibility scenarios
+var BackwardCompatibilityTestCases = []FtestCase{
+	testOldClientToNewConsulServer,
+}
+
 // FtestSuite runs functional tests with different session routing modes
 type FtestSuite struct {
 	suite.Suite
@@ -147,6 +152,16 @@ func (suite *FtestSuite) TestConnection() {
 
 func (suite *FtestSuite) TestCallbacks() {
 	suite.runTestCategory(CallbackTestCases)
+}
+
+func (suite *FtestSuite) TestBackwardCompatibility() {
+	// Only run backward compatibility tests in Consul mode
+	// (since embedded mode doesn't need backward compatibility)
+	if suite.mode != routing.ModeConsul {
+		suite.T().Skip("Backward compatibility tests only run in Consul mode")
+		return
+	}
+	suite.runTestCategory(BackwardCompatibilityTestCases)
 }
 
 func (suite *FtestSuite) runTestCategory(testCases []FtestCase) {

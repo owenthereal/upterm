@@ -77,6 +77,29 @@ func (suite *EncodeDecoderTestSuite) TestConsulDecodeInvalidFormats() {
 	suite.Error(err)
 }
 
+func (suite *EncodeDecoderTestSuite) TestConsulDecodeBackwardCompatibility() {
+	sessionID := "test-session-123"
+	nodeAddr := "127.0.0.1:2222"
+
+	// Create an embedded format SSH user (what old clients send)
+	embeddedEncoder := NewEncodeDecoder(ModeEmbedded)
+	embeddedSSHUser := embeddedEncoder.Encode(sessionID, nodeAddr)
+
+	// Test that Consul decoder can handle embedded format
+	consulDecoder := NewEncodeDecoder(ModeConsul)
+	decodedSessionID, decodedNodeAddr, err := consulDecoder.Decode(embeddedSSHUser)
+	
+	suite.NoError(err)
+	suite.Equal(sessionID, decodedSessionID, "should extract session ID from embedded format")
+	suite.Empty(decodedNodeAddr, "consul decoder should return empty node address")
+
+	// Test that it still works with pure consul format
+	decodedSessionID2, decodedNodeAddr2, err2 := consulDecoder.Decode(sessionID)
+	suite.NoError(err2)
+	suite.Equal(sessionID, decodedSessionID2, "should handle pure consul format")
+	suite.Empty(decodedNodeAddr2, "consul decoder should return empty node address")
+}
+
 // DecodeIdentifierTestSuite tests the DecodeIdentifier function
 type DecodeIdentifierTestSuite struct {
 	suite.Suite

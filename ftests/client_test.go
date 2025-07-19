@@ -9,6 +9,7 @@ import (
 
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -295,6 +296,57 @@ func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL
 	require.Equal(wantHostURL, sess.Host, "host URL mismatch")
 	require.Equal(wantNodeURL, sess.NodeAddr, "node URL mismatch")
 	require.NotEmpty(sess.SshUser, "SSH user should not be empty")
+}
+
+// testOldClientToNewConsulServer tests backward compatibility scenario where
+// an old upterm client (using embedded format) connects to a new uptermd server running in Consul mode
+func testOldClientToNewConsulServer(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:         []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		PrivateKeys:     []string{HostPrivateKey},
+		AdminSocketFile: adminSocketFile,
+	}
+	err := h.Share(hostShareURL)
+	require.NoError(err)
+	defer h.Close()
+
+	// Get session info from host (this is in the new format for Consul mode)
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	// Create an embedded format SSH user (what old clients would send)
+	embeddedEncoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
+	oldClientSSHUser := embeddedEncoder.Encode(session.SessionId, session.NodeAddr)
+
+	t.Logf("Testing backward compatibility:")
+	t.Logf("  Session ID: %s", session.SessionId)
+	t.Logf("  Node Address: %s", session.NodeAddr)
+	t.Logf("  New client SSH user (Consul format): %s", session.SshUser)
+	t.Logf("  Old client SSH user (embedded format): %s", oldClientSSHUser)
+
+	// Create a regular client but override the SSH username to simulate old client behavior
+	c := &Client{
+		PrivateKeys: []string{ClientPrivateKey},
+	}
+
+	// Create a modified session response with the old format SSH user
+	oldFormatSession := &api.GetSessionResponse{
+		SessionId: session.SessionId,
+		NodeAddr:  session.NodeAddr,
+		Host:      session.Host,
+		SshUser:   oldClientSSHUser, // Use old embedded format instead of Consul format
+	}
+
+	// This should work thanks to our backward compatibility fix
+	err = c.Join(oldFormatSession, clientJoinURL)
+	require.NoError(err, "Old client with embedded format should be able to connect to Consul server")
+	defer c.Close()
+
+	t.Log("Backward compatibility test passed: old client successfully connected to new Consul server")
 }
 
 
