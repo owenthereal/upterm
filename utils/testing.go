@@ -1,36 +1,32 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 )
 
-func WaitForServer(addr string) error {
-	ticker := time.NewTicker(time.Second)
+// WaitForServer waits for a server to be available at the given address with context support
+func WaitForServer(ctx context.Context, addr string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	count := 0
-
-	for range ticker.C {
-		log.WithField("addr", addr).Info("waiting for server")
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
-		if err != nil {
-			count++
-			if count >= 10 {
-				return fmt.Errorf("waiting for addr %s failed", addr)
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for server at %s: %w", addr, ctx.Err())
+		case <-ticker.C:
+			conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+			if err != nil {
+				continue
 			}
-			continue
-		}
 
-		if err := conn.Close(); err != nil {
-			return fmt.Errorf("error closing connection to %s: %w", addr, err)
-		}
+			if err := conn.Close(); err != nil {
+				return fmt.Errorf("error closing connection: %w", err)
+			}
 
-		break
+			return nil
+		}
 	}
-
-	return nil
 }

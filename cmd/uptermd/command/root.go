@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -35,6 +36,11 @@ func Root(logger log.FieldLogger) *cobra.Command {
 
 	cmd.PersistentFlags().StringP("metric-addr", "", "", "metric server address")
 	cmd.PersistentFlags().BoolP("debug", "", os.Getenv("DEBUG") != "", "debug")
+
+	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode")
+	cmd.PersistentFlags().String("consul-addr", "", "consul address for routing mode 'consul'")
+	cmd.PersistentFlags().String("consul-prefix", server.DefaultConsulPrefix, "consul prefix for routing mode 'consul'")
+	cmd.PersistentFlags().String("consul-session-ttl", server.DefaultSessionTTL.String(), "consul session TTL for routing mode 'consul'")
 
 	return cmd
 }

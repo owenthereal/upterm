@@ -12,6 +12,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
@@ -206,9 +207,10 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 }
 
 func displaySession(session *api.GetSessionResponse) error {
-	user, err := api.EncodeIdentifierSession(session)
-	if err != nil {
-		return err
+	user := session.SshUser
+	if user == "" {
+		// Fallback to encoding for backward compatibility with older servers
+		user = routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(session.SessionId, session.NodeAddr)
 	}
 
 	u, scheme, host, port, err := parseURL(session.Host)
