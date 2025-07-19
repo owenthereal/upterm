@@ -27,6 +27,7 @@ proto:
 build:
 	go build -o $(BIN_DIR)/upterm ./cmd/upterm
 	go build -o $(BIN_DIR)/uptermd ./cmd/uptermd
+	go build -o $(BIN_DIR)/uptermd-fly ./cmd/uptermd-fly
 
 .PHONY: install
 install:
