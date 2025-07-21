@@ -34,13 +34,11 @@ import (
 )
 
 const (
-	// Test timeouts and configuration - optimized for faster test runs
-	defaultTestTimeout       = 15 * time.Second       // Reduced from 30s
-	serverStartupTimeout     = 3 * time.Second        // Reduced from 10s
-	unixSocketWaitTimeout    = 3 * time.Second        // Reduced from 10s
-	keepAliveDuration        = 2 * time.Second        // Reduced from 10s
-	consulHealthCheckTimeout = 2 * time.Second        // Reduced from 5s
-	sshAttachTimeout         = 500 * time.Millisecond // New: replace hardcoded sleep
+	serverStartupTimeout     = 3 * time.Second
+	unixSocketWaitTimeout    = 3 * time.Second
+	keepAliveDuration        = 2 * time.Second
+	consulHealthCheckTimeout = 2 * time.Second
+	sshAttachTimeout         = 500 * time.Millisecond
 
 	// Test key material
 	ServerPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`

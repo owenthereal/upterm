@@ -696,6 +696,18 @@ func (sm *SessionManager) DeleteSession(sessionID string) error {
 	return sm.store.Delete(sessionID)
 }
 
+// shouldValidateSessionExistence returns true if session existence should be validated
+// based on the current routing mode and operational requirements.
+//
+// Both embedded and Consul modes are valid deployment options:
+// - Embedded mode: For single-node or simple deployments without external dependencies
+// - Consul mode: For multi-node deployments requiring shared session state
+func (sm *SessionManager) shouldValidateSessionExistence() bool {
+	// In Consul mode: validate existence (shared store accessible across all nodes)
+	// In embedded mode: skip validation (session data is local to each node)
+	return sm.encodeDecoder.Mode() == routing.ModeConsul
+}
+
 // ResolveSSHUser resolves an SSH username by decoding it and conditionally validating session existence
 // In embedded mode: only decodes (session may be on another node)
 // In consul mode: decodes and validates (shared store across all nodes)
@@ -706,9 +718,8 @@ func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr st
 		return "", "", fmt.Errorf("failed to decode SSH user: %w", err)
 	}
 
-	// Only validate session existence in Consul mode
-	// In embedded mode, the session might exist on another node
-	if sm.encodeDecoder.Mode() == routing.ModeConsul {
+	// Validate session existence based on routing mode strategy
+	if sm.shouldValidateSessionExistence() {
 		session, err := sm.store.Get(sessionID)
 		if err != nil {
 			return "", "", fmt.Errorf("session %s not found: %w", sessionID, err)

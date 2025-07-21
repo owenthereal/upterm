@@ -95,8 +95,8 @@ func (c *ConsulEncodeDecoder) Decode(sshUser string) (sessionID, nodeAddr string
 	}
 
 	// In Consul mode, the SSH user is just the session ID
-	// Handle backward compatibility: if SSH user contains ":" (embedded format),
-	// extract only the session ID part (before the colon)
+	// Handle mixed-mode scenarios: if SSH user contains ":" (embedded format),
+	// extract only the session ID part (before the colon) for compatibility
 	if colonIndex := strings.Index(sshUser, ":"); colonIndex != -1 {
 		sessionID = sshUser[:colonIndex]
 	} else {
