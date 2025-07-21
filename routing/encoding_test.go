@@ -86,7 +86,7 @@ func (suite *EncodeDecoderTestSuite) TestConsulDecodeBackwardCompatibility() {
 	// Test that Consul decoder can handle embedded format
 	consulDecoder := NewEncodeDecoder(ModeConsul)
 	decodedSessionID, decodedNodeAddr, err := consulDecoder.Decode(embeddedSSHUser)
-	
+
 	suite.NoError(err)
 	suite.Equal(sessionID, decodedSessionID, "should extract session ID from embedded format")
 	suite.Empty(decodedNodeAddr, "consul decoder should return empty node address")

@@ -14,7 +14,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-
 func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -100,10 +99,10 @@ func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, cl
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                []string{"bash", "--norc"},
-		ForceCommand:           []string{"vim"},
-		PrivateKeys:            []string{HostPrivateKey},
-		AdminSocketFile:        adminSocketFile,
+		Command:         []string{"bash", "--norc"},
+		ForceCommand:    []string{"vim"},
+		PrivateKeys:     []string{HostPrivateKey},
+		AdminSocketFile: adminSocketFile,
 		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
 			assert.Equal([]string{"bash", "--norc"}, session.Command, "command should match")
 			assert.Equal([]string{"vim"}, session.ForceCommand, "force command should match")

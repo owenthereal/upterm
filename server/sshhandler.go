@@ -34,17 +34,17 @@ func isExpectedShutdownError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Context cancellation is normal during shutdown
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
-	
+
 	// EOF and connection closed errors are normal during shutdown
 	if errors.Is(err, io.EOF) {
 		return true
 	}
-	
+
 	errStr := err.Error()
 	// Common shutdown-related error messages
 	shutdownMessages := []string{
@@ -53,13 +53,13 @@ func isExpectedShutdownError(err error) bool {
 		"broken pipe",
 		"use of closed network connection",
 	}
-	
+
 	for _, msg := range shutdownMessages {
 		if strings.Contains(errStr, msg) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -107,7 +107,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 	payload := gossh.Marshal(&forwardedStreamlocalPayload{
 		SocketPath: sessionID,
 	})
-	
+
 	ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 	if err != nil {
 		logger.WithError(err).Error("error opening channel")
@@ -120,7 +120,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 	}()
 
 	var g run.Group
-	
+
 	// Context cancellation handler
 	{
 		g.Add(func() error {
@@ -130,7 +130,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 			// Context cancelled, close all connections
 		})
 	}
-	
+
 	// SSH request handler
 	{
 		g.Add(func() error {
@@ -140,7 +140,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 			// Requests handler stopped
 		})
 	}
-	
+
 	// Copy from local to SSH channel
 	{
 		g.Add(func() error {
@@ -150,7 +150,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 			// Copy stopped
 		})
 	}
-	
+
 	// Copy from SSH channel to local
 	{
 		g.Add(func() error {

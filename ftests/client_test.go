@@ -200,7 +200,7 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
 	remoteScanner := scanner(remoteOutputCh)
-	
+
 	// Wait for ssh stdin/stdout to fully attach - critical for force command isolation
 	time.Sleep(time.Second)
 
@@ -349,15 +349,14 @@ func testOldClientToNewConsulServer(t *testing.T, hostShareURL, hostNodeAddr, cl
 	t.Log("Backward compatibility test passed: old client successfully connected to new Consul server")
 }
 
-
 // setupAdminSocket creates a temporary admin socket and returns the socket file path
 func setupAdminSocket(t *testing.T) string {
 	require := require.New(t)
-	
+
 	// Use a shorter temp dir to avoid Unix socket path length limits
 	adminSockDir, err := os.MkdirTemp("", "up")
 	require.NoError(err)
-	
+
 	t.Cleanup(func() {
 		_ = os.RemoveAll(adminSockDir)
 	})

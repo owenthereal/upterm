@@ -138,7 +138,7 @@ func (c *command) Run() error {
 			go func() {
 				done <- c.cmd.Wait()
 			}()
-			
+
 			select {
 			case err := <-done:
 				return err

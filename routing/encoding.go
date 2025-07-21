@@ -109,5 +109,3 @@ func (c *ConsulEncodeDecoder) Decode(sshUser string) (sessionID, nodeAddr string
 func (c *ConsulEncodeDecoder) Mode() Mode {
 	return ModeConsul
 }
-
-
