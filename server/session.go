@@ -348,8 +348,9 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 		return nil
 	}
 
-	// Consul transaction limit is typically 64 operations
-	const maxBatchSize = 50
+	// Consul's official transaction limit is 64 operations
+	// Reference: https://developer.hashicorp.com/consul/api-docs/txn
+	const maxBatchSize = 64
 
 	for i := 0; i < len(sessionIDs); i += maxBatchSize {
 		end := min(i+maxBatchSize, len(sessionIDs))
