@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
@@ -63,17 +62,8 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		authorizedKeys = append(authorizedKeys, ssh.MarshalAuthorizedKey(ak))
 	}
 
-	id := &api.Identifier{
-		Id:   user.Username,
-		Type: api.Identifier_HOST,
-	}
-	encodedID, err := api.EncodeIdentifier(id)
-	if err != nil {
-		return nil, err
-	}
-
 	config := &ssh.ClientConfig{
-		User:          encodedID,
+		User:          user.Username,
 		Auth:          auths,
 		ClientVersion: upterm.HostSSHClientVersion,
 		// Enforce a restricted set of algorithms for security
@@ -91,7 +81,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 
 	if isWSScheme(c.Host.Scheme) {
 		u, _ := url.Parse(c.Host.String()) // clone
-		u.User = url.UserPassword(encodedID, "")
+		u.User = url.UserPassword(user.Username, "")
 		c.Client, err = ws.NewSSHClient(u, config, false)
 	} else {
 		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)

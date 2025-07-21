@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pires/go-proxyproto"
@@ -27,22 +29,76 @@ const (
 )
 
 type Opt struct {
-	SSHAddr          string   `mapstructure:"ssh-addr"`
-	SSHProxyProtocol bool     `mapstructure:"ssh-proxy-protocol"`
-	WSAddr           string   `mapstructure:"ws-addr"`
-	NodeAddr         string   `mapstructure:"node-addr"`
-	PrivateKeys      []string `mapstructure:"private-key"`
-	Hostnames        []string `mapstructure:"hostname"`
-	Network          string   `mapstructure:"network"`
-	NetworkOpts      []string `mapstructure:"network-opt"`
-	MetricAddr       string   `mapstructure:"metric-addr"`
-	Debug            bool     `mapstructure:"debug"`
+	SSHAddr          string       `mapstructure:"ssh-addr"`
+	SSHProxyProtocol bool         `mapstructure:"ssh-proxy-protocol"`
+	WSAddr           string       `mapstructure:"ws-addr"`
+	NodeAddr         string       `mapstructure:"node-addr"`
+	PrivateKeys      []string     `mapstructure:"private-key"`
+	Hostnames        []string     `mapstructure:"hostname"`
+	Network          string       `mapstructure:"network"`
+	NetworkOpts      []string     `mapstructure:"network-opt"`
+	MetricAddr       string       `mapstructure:"metric-addr"`
+	Debug            bool         `mapstructure:"debug"`
+	Routing          routing.Mode `mapstructure:"routing"`
+	ConsulAddr       string       `mapstructure:"consul-addr"`
+	ConsulPrefix     string       `mapstructure:"consul-prefix"`
+	ConsulSessionTTL string       `mapstructure:"consul-session-ttl"`
+}
+
+// Validate validates the server configuration
+func (opt *Opt) Validate() error {
+	// Basic validation
+	if opt.SSHAddr == "" {
+		return fmt.Errorf("ssh-addr is required")
+	}
+
+	// Routing-specific validation
+	routingMode := opt.Routing
+	if routingMode == "" {
+		routingMode = routing.ModeEmbedded
+	}
+
+	switch routingMode {
+	case routing.ModeConsul:
+		return opt.validateConsulConfig()
+	case routing.ModeEmbedded:
+		return opt.validateEmbeddedConfig()
+	default:
+		return fmt.Errorf("unsupported routing mode: %s", routingMode)
+	}
+}
+
+// validateConsulConfig validates Consul-specific configuration
+func (opt *Opt) validateConsulConfig() error {
+	if opt.ConsulAddr == "" {
+		return fmt.Errorf("consul-addr is required for consul routing mode")
+	}
+
+	// Validate Consul address format
+	if _, err := url.Parse("http://" + opt.ConsulAddr); err != nil {
+		return fmt.Errorf("invalid consul address format: %w", err)
+	}
+
+	// Validate TTL format if provided
+	if opt.ConsulSessionTTL != "" {
+		if _, err := time.ParseDuration(opt.ConsulSessionTTL); err != nil {
+			return fmt.Errorf("invalid consul session TTL format: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// validateEmbeddedConfig validates embedded mode configuration
+func (opt *Opt) validateEmbeddedConfig() error {
+	// No special validation needed for embedded mode
+	return nil
 }
 
 func Start(opt Opt) error {
-	// must always have a ssh addr
-	if opt.SSHAddr == "" {
-		return fmt.Errorf("must specify a ssh address")
+	// Validate configuration upfront
+	if err := opt.Validate(); err != nil {
+		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	network := networks.Get(opt.Network)
@@ -139,18 +195,63 @@ func Start(opt Opt) error {
 			mp = provider.NewPrometheusProvider("upterm", "uptermd")
 		}
 
+		// Determine session routing mode
+		sessionRouting := opt.Routing
+		if sessionRouting == "" {
+			sessionRouting = routing.ModeEmbedded // Default to embedded mode
+		}
+
+		// Create session manager with the appropriate routing mode
+		var sessionManager *SessionManager
+		switch sessionRouting {
+		case routing.ModeConsul:
+			var consulTTL time.Duration
+			if opt.ConsulSessionTTL != "" {
+				if parsedTTL, err := time.ParseDuration(opt.ConsulSessionTTL); err == nil {
+					consulTTL = parsedTTL
+				} else {
+					logger.WithError(err).Warn("invalid consul session TTL, using default")
+				}
+			}
+
+			sm, err := NewSessionManager(routing.ModeConsul,
+				WithSessionManagerLogger(logger.WithField("com", "session-manager")),
+				WithSessionManagerConsulAddr(opt.ConsulAddr),
+				WithSessionManagerConsulPrefix(opt.ConsulPrefix),
+				WithSessionManagerConsulTTL(consulTTL))
+			if err != nil {
+				return fmt.Errorf("failed to create consul session manager: %w", err)
+			}
+			sessionManager = sm
+
+			logger.Info("using consul session store for routing")
+		case routing.ModeEmbedded:
+			sm, err := NewSessionManager(routing.ModeEmbedded,
+				WithSessionManagerLogger(logger.WithField("com", "session-manager")))
+			if err != nil {
+				return fmt.Errorf("failed to create embedded session manager: %w", err)
+			}
+			sessionManager = sm
+			logger.Info("using embedded session routing (in-memory session store)")
+		default:
+			return fmt.Errorf("invalid session routing mode: %s (supported: %s, %s)", sessionRouting, routing.ModeEmbedded, routing.ModeConsul)
+		}
+
 		s := &Server{
 			NodeAddr:        nodeAddr,
 			HostSigners:     hostSigners,
 			Signers:         signers,
 			NetworkProvider: network,
+			SessionManager:  sessionManager,
 			Logger:          logger.WithField("com", "server"),
 			MetricsProvider: mp,
 		}
 		g.Add(func() error {
 			return s.ServeWithContext(context.Background(), sshln, wsln)
 		}, func(err error) {
-			s.Shutdown()
+			if err := s.Shutdown(); err != nil {
+				s.Logger.WithError(err).Error("error during server shutdown")
+			}
 		})
 	}
 	{
@@ -188,6 +289,7 @@ type Server struct {
 	Signers         []ssh.Signer
 	NetworkProvider NetworkProvider
 	MetricsProvider provider.Provider
+	SessionManager  *SessionManager
 	Logger          log.FieldLogger
 
 	sshln net.Listener
@@ -198,21 +300,43 @@ type Server struct {
 	cancel func()
 }
 
-func (s *Server) Shutdown() {
+func (s *Server) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	var err error
+
+	// Stop accepting new connections first
+	if s.sshln != nil {
+		if sshErr := s.sshln.Close(); sshErr != nil {
+			err = errors.Join(err, fmt.Errorf("ssh listener close: %w", sshErr))
+		}
+	}
+
+	if s.wsln != nil {
+		if wsErr := s.wsln.Close(); wsErr != nil {
+			err = errors.Join(err, fmt.Errorf("websocket listener close: %w", wsErr))
+		}
+	}
+
+	// Cancel context to signal graceful shutdown
 	if s.cancel != nil {
 		s.cancel()
 	}
 
-	if s.sshln != nil {
-		_ = s.sshln.Close()
+	// Clean up sessions created by this node
+	if sessionErr := s.SessionManager.Shutdown(s.NodeAddr); sessionErr != nil {
+		s.Logger.WithError(sessionErr).Error("failed to cleanup sessions during shutdown")
+		err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
+	} else {
+		s.Logger.Debug("cleaned up sessions during shutdown")
 	}
 
-	if s.wsln != nil {
-		_ = s.wsln.Close()
+	if err == nil {
+		s.Logger.Debug("server shutdown completed")
 	}
+
+	return err
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
@@ -223,7 +347,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
-	sessRepo := newSessionRepo()
 
 	var g run.Group
 	{
@@ -248,14 +371,16 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Signers:         s.Signers,
 				NodeAddr:        s.NodeAddr,
 				ConnDialer:      cd,
-				SessionRepo:     sessRepo,
+				SessionManager:  s.SessionManager,
 				Logger:          s.Logger.WithField("com", "ssh-proxy"),
 				MetricsProvider: s.MetricsProvider,
 			}
 			g.Add(func() error {
 				return sp.Serve(sshln)
 			}, func(err error) {
-				_ = sp.Shutdown()
+				if err := sp.Shutdown(); err != nil {
+					s.Logger.WithError(err).Error("error during ssh proxy shutdown")
+				}
 			})
 		}
 	}
@@ -281,13 +406,16 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				}
 			}
 			ws := &webSocketProxy{
-				ConnDialer: cd,
-				Logger:     s.Logger.WithField("com", "ws-proxy"),
+				ConnDialer:     cd,
+				SessionManager: s.SessionManager,
+				Logger:         s.Logger.WithField("com", "ws-proxy"),
 			}
 			g.Add(func() error {
 				return ws.Serve(wsln)
 			}, func(err error) {
-				_ = ws.Shutdown()
+				if err := ws.Shutdown(); err != nil {
+					s.Logger.WithError(err).Error("error during websocket proxy shutdown")
+				}
 			})
 		}
 	}
@@ -298,7 +426,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		}
 
 		sshd := sshd{
-			SessionRepo:         sessRepo,
+			SessionManager:      s.SessionManager,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
@@ -307,7 +435,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		g.Add(func() error {
 			return sshd.Serve(ln)
 		}, func(err error) {
-			_ = sshd.Shutdown()
+			if err := sshd.Shutdown(); err != nil {
+				s.Logger.WithError(err).Error("error during sshd shutdown")
+			}
 		})
 	}
 
@@ -365,8 +495,10 @@ type sidewayConnDialer struct {
 }
 
 func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	logger := cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "type": api.Identifier_Type_name[int32(id.Type)]})
+
 	if id.Type == api.Identifier_HOST {
-		cd.Logger.WithFields(log.Fields{"host": id.Id, "node": cd.NodeAddr}).Info("dialing sshd")
+		logger.Info("dialing sshd")
 		return cd.SSHDDialListener.Dial()
 	} else {
 		host, port, ee := net.SplitHostPort(id.NodeAddr)
@@ -374,15 +506,16 @@ func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 			return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, ee)
 		}
 		addr := net.JoinHostPort(host, port)
+		logger = logger.WithField("addr", addr)
 
 		// if current node is matching, dial to session.
 		// Otherwise, dial to neighbour node
 		if cd.NodeAddr == addr {
-			cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing session")
+			logger.Info("dialing session")
 			return cd.SessionDialListener.Dial(id.Id)
 		}
 
-		cd.Logger.WithFields(log.Fields{"session": id.Id, "node": cd.NodeAddr, "addr": addr}).Info("dialing neighbour")
+		logger.Info("dialing neighbour")
 		return cd.NeighbourDialer.Dial(id)
 	}
 }

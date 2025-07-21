@@ -18,6 +18,7 @@ message GetSessionResponse {
   string node_addr = 5;
   repeated Client connected_clients = 6;
   repeated AuthorizedKey authorized_keys = 7;
+  string ssh_user = 8; // SSH username for client connections
 }
 
 message AuthorizedKey {

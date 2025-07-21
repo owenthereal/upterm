@@ -1,13 +1,15 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
-	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
@@ -48,6 +50,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	proxy := &sshProxy{
 		HostSigners:     []ssh.Signer{hostSigner},
 		Signers:         []ssh.Signer{signer},
+		SessionManager:  newEmbeddedSessionManager(logger),
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
@@ -58,7 +61,10 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 		_ = proxy.Serve(proxyLn)
 	}()
 
-	if err := utils.WaitForServer(proxyAddr); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := utils.WaitForServer(ctx, proxyAddr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,29 +78,22 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 
 	sshdAddr := sshLn.Addr().String()
 	sshd := &sshd{
-		HostSigners: []ssh.Signer{signer},
-		NodeAddr:    sshdAddr,
-		Logger:      logger,
+		SessionManager: newEmbeddedSessionManager(logger),
+		HostSigners:    []ssh.Signer{signer},
+		NodeAddr:       sshdAddr,
+		Logger:         logger,
 	}
 
 	go func() {
 		_ = sshd.Serve(sshLn)
 	}()
 
-	if err := utils.WaitForServer(sshdAddr); err != nil {
+	if err := utils.WaitForServer(ctx, sshdAddr); err != nil {
 		t.Fatal(err)
 	}
 
-	id := &api.Identifier{
-		Id:       xid.New().String(),
-		Type:     api.Identifier_CLIENT,
-		NodeAddr: sshdAddr,
-	}
-	user, err := api.EncodeIdentifier(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	encoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
+	user := encoder.Encode(xid.New().String(), sshdAddr)
 	ucs, err := testCertSigner(user, signer)
 	if err != nil {
 		t.Fatal(err)

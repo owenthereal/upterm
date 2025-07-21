@@ -132,10 +132,27 @@ func (c *command) Run() error {
 		})
 	}
 	{
+		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
-			return c.cmd.Wait()
+			done := make(chan error, 1)
+			go func() {
+				done <- c.cmd.Wait()
+			}()
+
+			select {
+			case err := <-done:
+				return err
+			case <-ctx.Done():
+				// Context cancelled, kill the process and wait for it to exit
+				if c.cmd.Process != nil {
+					_ = c.cmd.Process.Kill()
+				}
+				<-done // Wait for the process to actually exit
+				return ctx.Err()
+			}
 		}, func(err error) {
 			_ = c.ptmx.Close()
+			cancel()
 		})
 	}
 

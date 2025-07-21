@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -19,19 +18,29 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/ssh"
 )
 
 const (
+	serverStartupTimeout     = 3 * time.Second
+	unixSocketWaitTimeout    = 3 * time.Second
+	keepAliveDuration        = 2 * time.Second
+	consulHealthCheckTimeout = 2 * time.Second
+	sshAttachTimeout         = 500 * time.Millisecond
+
+	// Test key material
 	ServerPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
 	ServerPrivateKeyContent = `-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
@@ -61,71 +70,194 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 var (
 	HostPrivateKey   string
 	ClientPrivateKey string
-
-	ts1 TestServer
-	ts2 TestServer
 )
 
-func TestMain(m *testing.M) {
-	remove, err := SetupKeyPairs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer remove()
+// FtestCase represents a functional test case
+type FtestCase func(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string)
 
-	ts1, err = NewServer(ServerPrivateKeyContent)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ts2, err = NewServer(ServerPrivateKeyContent)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	exitCode := m.Run()
-
-	ts1.Shutdown()
-	ts2.Shutdown()
-
-	os.Exit(exitCode)
+// AuthTestCases contains all authentication-related test functions
+var AuthTestCases = []FtestCase{
+	testHostNoAuthorizedKeyAnyClientJoin,
+	testClientAuthorizedKeyNotMatching,
+	testHostFailToShareWithoutPrivateKey,
 }
 
-func Test_ftest(t *testing.T) {
-	testCases := []func(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string){
-		testHostNoAuthorizedKeyAnyClientJoin,
-		testClientAuthorizedKeyNotMatching,
-		testClientNonExistingSession,
-		testClientAttachHostWithSameCommand,
-		testClientAttachHostWithDifferentCommand,
-		testClientAttachReadOnly,
-		testHostFailToShareWithoutPrivateKey,
-		testHostSessionCreatedCallback,
-		testHostClientCallback,
+// SessionTestCases contains all session management test functions
+var SessionTestCases = []FtestCase{
+	testClientNonExistingSession,
+}
+
+// ConnectionTestCases contains all connection-related test functions
+var ConnectionTestCases = []FtestCase{
+	testClientAttachHostWithSameCommand,
+	testClientAttachHostWithDifferentCommand,
+	testClientAttachReadOnly,
+}
+
+// CallbackTestCases contains all callback/event-related test functions
+var CallbackTestCases = []FtestCase{
+	testHostClientCallback,
+	testHostSessionCreatedCallback,
+}
+
+// BackwardCompatibilityTestCases contains tests for backward compatibility scenarios
+var BackwardCompatibilityTestCases = []FtestCase{
+	testOldClientToNewConsulServer,
+}
+
+// FtestSuite runs functional tests with different session routing modes
+type FtestSuite struct {
+	suite.Suite
+	mode routing.Mode
+	ts1  TestServer
+	ts2  TestServer
+}
+
+func (suite *FtestSuite) SetupSuite() {
+	// Setup key pairs
+	remove, err := setupKeyPairs()
+	suite.Require().NoError(err)
+	suite.T().Cleanup(remove)
+
+	// Create test servers with the specified routing mode
+	suite.ts1, err = NewServerWithMode(ServerPrivateKeyContent, suite.mode)
+	suite.Require().NoError(err)
+
+	suite.ts2, err = NewServerWithMode(ServerPrivateKeyContent, suite.mode)
+	suite.Require().NoError(err)
+}
+
+func (suite *FtestSuite) TearDownSuite() {
+	if suite.ts1 != nil {
+		_ = suite.ts1.Shutdown()
+	}
+	if suite.ts2 != nil {
+		_ = suite.ts2.Shutdown()
+	}
+}
+
+func (suite *FtestSuite) TestAuth() {
+	suite.runTestCategory(AuthTestCases)
+}
+
+func (suite *FtestSuite) TestSession() {
+	suite.runTestCategory(SessionTestCases)
+}
+
+func (suite *FtestSuite) TestConnection() {
+	suite.runTestCategory(ConnectionTestCases)
+}
+
+func (suite *FtestSuite) TestCallbacks() {
+	suite.runTestCategory(CallbackTestCases)
+}
+
+func (suite *FtestSuite) TestBackwardCompatibility() {
+	// Only run backward compatibility tests in Consul mode
+	// (since embedded mode doesn't need backward compatibility)
+	if suite.mode != routing.ModeConsul {
+		suite.T().Skip("Backward compatibility tests only run in Consul mode")
+		return
+	}
+	suite.runTestCategory(BackwardCompatibilityTestCases)
+}
+
+func (suite *FtestSuite) runTestCategory(testCases []FtestCase) {
+	protocols := []string{"ssh", "ws"}
+
+	for _, protocol := range protocols {
+		suite.T().Run(protocol, func(t *testing.T) {
+			suite.runTestsForProtocol(protocol, testCases)
+		})
+	}
+}
+
+func (suite *FtestSuite) runTestsForProtocol(protocol string, testCases []FtestCase) {
+	topologies := []struct {
+		name      string
+		hostURL   string
+		clientURL string
+	}{
+		{
+			name:      "singleNode",
+			hostURL:   protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+			clientURL: protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+		},
+		{
+			name:      "multiNodes",
+			hostURL:   protocol + "://" + suite.getServerAddr(protocol, suite.ts1),
+			clientURL: protocol + "://" + suite.getServerAddr(protocol, suite.ts2),
+		},
 	}
 
-	for _, test := range testCases {
-		testLocal := test
-
-		t.Run("ssh/singleNode/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ssh://"+ts1.SSHAddr(), ts1.NodeAddr(), "ssh://"+ts1.SSHAddr())
-		})
-
-		t.Run("ws/singleNode/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ws://"+ts1.WSAddr(), ts1.NodeAddr(), "ws://"+ts1.WSAddr())
-		})
-
-		t.Run("ssh/multiNodes/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ssh://"+ts1.SSHAddr(), ts1.NodeAddr(), "ssh://"+ts2.SSHAddr())
-		})
-
-		t.Run("ws/multiNodes/"+funcName(testLocal), func(t *testing.T) {
-			t.Parallel()
-			testLocal(t, "ws://"+ts1.WSAddr(), ts1.NodeAddr(), "ws://"+ts2.WSAddr())
+	for _, topo := range topologies {
+		suite.T().Run(topo.name, func(t *testing.T) {
+			for _, testFunc := range testCases {
+				testName := funcName(testFunc)
+				t.Run(testName, func(t *testing.T) {
+					t.Parallel()
+					testFunc(t, topo.hostURL, suite.ts1.NodeAddr(), topo.clientURL)
+				})
+			}
 		})
 	}
+}
+
+func (suite *FtestSuite) getServerAddr(protocol string, server TestServer) string {
+	if protocol == "ssh" {
+		return server.SSHAddr()
+	}
+	return server.WSAddr()
+}
+
+// Test runners for different modes
+func TestEmbedded(t *testing.T) {
+	suite.Run(t, &FtestSuite{mode: routing.ModeEmbedded})
+}
+
+func TestConsul(t *testing.T) {
+	// Skip if Consul is not available
+	if !isConsulAvailable() {
+		t.Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
+	}
+	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
+}
+
+// isConsulAvailable checks if Consul is running and accessible
+func isConsulAvailable() bool {
+	config := consulapi.DefaultConfig()
+	config.Address = consulAddr()
+
+	client, err := consulapi.NewClient(config)
+	if err != nil {
+		return false
+	}
+
+	// Try to get leader with timeout - simple health check
+	ctx, cancel := context.WithTimeout(context.Background(), consulHealthCheckTimeout)
+	defer cancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		_, err = client.Status().Leader()
+		done <- err == nil
+	}()
+
+	select {
+	case result := <-done:
+		return result
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func consulAddr() string {
+	addr := os.Getenv("CONSUL_ADDR")
+	if addr == "" {
+		addr = "localhost:8500"
+	}
+
+	return addr
 }
 
 func funcName(i interface{}) string {
@@ -139,38 +271,59 @@ type TestServer interface {
 	SSHAddr() string
 	WSAddr() string
 	NodeAddr() string
-	Shutdown()
+	Shutdown() error
 }
 
-func NewServer(hostKey string) (TestServer, error) {
+func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 	sshln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create SSH listener: %w", err)
 	}
 
 	wsln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, err
+		_ = sshln.Close()
+		return nil, fmt.Errorf("failed to create WebSocket listener: %w", err)
 	}
 
 	s := &Server{
 		hostKeyContent: hostKey,
 		sshln:          sshln,
 		wsln:           wsln,
+		mode:           mode,
 	}
 
+	// Start server in background
+	startErrCh := make(chan error, 1)
 	go func() {
 		if err := s.start(); err != nil {
-			log.WithError(err).Error("error starting test server")
+			log.WithError(err).WithField("mode", mode).Error("error starting test server")
+			startErrCh <- err
 		}
 	}()
 
-	if err := utils.WaitForServer(s.SSHAddr()); err != nil {
-		return nil, err
+	// Wait for server to start with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), serverStartupTimeout)
+	defer cancel()
+
+	// Wait for SSH server
+	if err := utils.WaitForServer(ctx, s.SSHAddr()); err != nil {
+		_ = s.Shutdown()
+		return nil, fmt.Errorf("SSH server failed to start: %w", err)
 	}
 
-	if err := utils.WaitForServer(s.WSAddr()); err != nil {
-		return nil, err
+	// Wait for WebSocket server
+	if err := utils.WaitForServer(ctx, s.WSAddr()); err != nil {
+		_ = s.Shutdown()
+		return nil, fmt.Errorf("WebSocket server failed to start: %w", err)
+	}
+
+	// Check for startup errors
+	select {
+	case err := <-startErrCh:
+		_ = s.Shutdown()
+		return nil, fmt.Errorf("server startup failed: %w", err)
+	default:
 	}
 
 	return s, nil
@@ -179,45 +332,84 @@ func NewServer(hostKey string) (TestServer, error) {
 type Server struct {
 	Server *server.Server
 
-	sshln net.Listener
-	wsln  net.Listener
-
+	sshln          net.Listener
+	wsln           net.Listener
 	hostKeyContent string
+	mode           routing.Mode
+	logger         log.FieldLogger
+
+	shutdownOnce sync.Once
+	mu           sync.RWMutex
 }
 
 func (s *Server) start() error {
 	signers, err := utils.CreateSigners([][]byte{[]byte(s.hostKeyContent)})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create signers: %w", err)
 	}
 
 	var hostSigners []ssh.Signer
-	for _, s := range signers {
+	for _, signer := range signers {
 		cs := server.HostCertSigner{
 			Hostnames: []string{"127.0.0.1"},
 		}
-		hostSigner, err := cs.SignCert(s)
+		hostSigner, err := cs.SignCert(signer)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to sign host certificate: %w", err)
 		}
 
 		hostSigners = append(hostSigners, hostSigner)
 	}
 
 	network := &server.MemoryProvider{}
-	_ = network.SetOpts(nil)
+	if err := network.SetOpts(nil); err != nil {
+		return fmt.Errorf("failed to set network provider options: %w", err)
+	}
 
 	logger := log.New()
 	logger.Level = log.DebugLevel
+	s.logger = logger.WithFields(log.Fields{
+		"mode": s.mode,
+		"ssh":  s.SSHAddr(),
+		"ws":   s.WSAddr(),
+	})
 
+	// Create session manager based on the mode
+	var sm *server.SessionManager
+	switch s.mode {
+	case routing.ModeEmbedded:
+		sm, err = server.NewSessionManager(
+			routing.ModeEmbedded,
+			server.WithSessionManagerLogger(logger),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create embedded session manager: %w", err)
+		}
+	case routing.ModeConsul:
+		sm, err = server.NewSessionManager(
+			routing.ModeConsul,
+			server.WithSessionManagerLogger(logger),
+			server.WithSessionManagerConsulAddr(consulAddr()),
+			server.WithSessionManagerConsulPrefix("uptermd-ftest/sessions"),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create consul session manager: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported routing mode: %s", s.mode)
+	}
+
+	s.mu.Lock()
 	s.Server = &server.Server{
 		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
 		HostSigners:     hostSigners,
 		Signers:         signers,
 		NetworkProvider: network,
 		MetricsProvider: provider.NewDiscardProvider(),
+		SessionManager:  sm,
 		Logger:          logger,
 	}
+	s.mu.Unlock()
 
 	return s.Server.ServeWithContext(context.Background(), s.sshln, s.wsln)
 }
@@ -231,11 +423,26 @@ func (s *Server) WSAddr() string {
 }
 
 func (s *Server) NodeAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Server == nil {
+		return ""
+	}
 	return s.Server.NodeAddr
 }
 
-func (s *Server) Shutdown() {
-	s.Server.Shutdown()
+func (s *Server) Shutdown() error {
+	var err error
+	s.shutdownOnce.Do(func() {
+		if s.logger != nil {
+			s.logger.Info("shutting down test server")
+		}
+
+		if s.Server != nil {
+			err = s.Server.Shutdown()
+		}
+	})
+	return err
 }
 
 type Host struct {
@@ -295,15 +502,7 @@ func (c *Host) Share(url string) error {
 	}
 
 	if c.AdminSocketFile == "" {
-		adminSockDir, err := newAdminSocketDir()
-		if err != nil {
-			return err
-		}
-		defer func() {
-			_ = os.RemoveAll(adminSockDir)
-		}()
-
-		c.AdminSocketFile = filepath.Join(adminSockDir, "upterm.sock")
+		return fmt.Errorf("AdminSocketFile is required but not set")
 	}
 
 	logger := log.New()
@@ -319,7 +518,7 @@ func (c *Host) Share(url string) error {
 		SessionCreatedCallback: c.SessionCreatedCallback,
 		ClientJoinedCallback:   c.ClientJoinedCallback,
 		ClientLeftCallback:     c.ClientLeftCallback,
-		KeepAliveDuration:      10 * time.Second,
+		KeepAliveDuration:      keepAliveDuration,
 		Logger:                 logger,
 		HostKeyCallback:        ssh.InsecureIgnoreHostKey(),
 		Stdin:                  stdinr,
@@ -409,13 +608,8 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		return err
 	}
 
-	user, err := api.EncodeIdentifierSession(session)
-	if err != nil {
-		return err
-	}
-
 	config := &ssh.ClientConfig{
-		User:            user,
+		User:            session.SshUser,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
@@ -542,22 +736,22 @@ func scan(s *bufio.Scanner) string {
 }
 
 func waitForUnixSocket(socket string, errCh chan error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), unixSocketWaitTimeout)
+	defer cancel()
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	count := 0
 	for {
 		select {
 		case err := <-errCh:
 			return err
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for unix socket %s: %w", socket, ctx.Err())
 		case <-ticker.C:
-			log.WithField("socket", socket).Info("waiting for unix socket")
+			log.WithField("socket", socket).Debug("waiting for unix socket")
 			if _, err := os.Stat(socket); err == nil {
 				return nil
-			}
-			count++
-			if count >= 10 {
-				return fmt.Errorf("waiting for unix socket failed")
 			}
 		}
 	}
@@ -581,7 +775,7 @@ func authMethodsFromFiles(privateKeys []string) ([]ssh.AuthMethod, error) {
 	return auths, nil
 }
 
-func SetupKeyPairs() (func(), error) {
+func setupKeyPairs() (func(), error) {
 	var err error
 
 	HostPrivateKey, err = writeTempFile("id_ed25519", HostPrivateKeyContent)

@@ -44,9 +44,11 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 		SessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
 		Logger:              log.New(),
 	}
+	logger := log.New()
 	wsh := &wsHandler{
-		ConnDialer: cd,
-		Logger:     log.New(),
+		ConnDialer:     cd,
+		SessionManager: newEmbeddedSessionManager(logger),
+		Logger:         logger,
 	}
 	ts := httptest.NewServer(wsh)
 	defer ts.Close()

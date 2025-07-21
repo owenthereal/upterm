@@ -223,6 +223,7 @@ func (c *Host) Run(ctx context.Context) error {
 		SessionId:      sessResp.SessionID,
 		Host:           u.String(),
 		NodeAddr:       sessResp.NodeAddr,
+		SshUser:        sessResp.SshUser,
 		Command:        c.Command,
 		ForceCommand:   c.ForceCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
