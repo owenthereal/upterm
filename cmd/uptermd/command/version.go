@@ -12,7 +12,7 @@ func versionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Show version",
 		RunE: func(c *cobra.Command, args []string) error {
-			_, err := fmt.Printf("Upterm version v%s\n", version.String())
+			_, err := fmt.Printf("Uptermd version v%s\n", version.String())
 			return err
 		},
 	}

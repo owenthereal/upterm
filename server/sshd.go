@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/ssh"
+	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -70,7 +71,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 		},
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			config := &gossh.ServerConfig{
-				ServerVersion: upterm.ServerSSHServerVersion,
+				ServerVersion: version.ServerSSHVersion(),
 			}
 			return config
 		},
