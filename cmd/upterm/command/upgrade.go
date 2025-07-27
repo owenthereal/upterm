@@ -9,6 +9,7 @@ import (
 	"time"
 
 	ggh "github.com/google/go-github/v48/github"
+	"github.com/owenthereal/upterm/internal/version"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
@@ -40,7 +41,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		Store: &store{
 			Owner:   "owenthereal",
 			Repo:    "upterm",
-			Version: Version,
+			Version: version.String(),
 		},
 	}
 
@@ -68,7 +69,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		r = release{releases[0]}
 	}
 
-	if fmt.Sprintf("v%s", Version) == r.Version {
+	if fmt.Sprintf("v%s", version.String()) == r.Version {
 		fmt.Println("Upterm is up-to-date")
 		return nil
 	}
@@ -90,7 +91,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("error installing: %s", err)
 	}
 
-	fmt.Printf("Upgraded upterm %s to %s\n", Version, trimVPrefix(r.Version))
+	fmt.Printf("Upgraded upterm %s to %s\n", version.String(), trimVPrefix(r.Version))
 	return nil
 }
 

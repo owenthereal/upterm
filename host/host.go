@@ -16,6 +16,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
+	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -203,6 +204,15 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	defer rt.Close()
 
+	// Check server version compatibility after establishing connection
+	serverVersion := string(rt.ServerVersion())
+	logger.WithField("server_version", serverVersion).Debug("detected server version")
+
+	// Check for version compatibility
+	if result := version.CheckCompatibility(serverVersion); !result.Compatible {
+		displayVersionWarning(c.Stdout, logger, result)
+	}
+
 	if c.AdminSocketFile == "" {
 		dir, err := utils.CreateUptermDir()
 		if err != nil {
@@ -371,4 +381,24 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 	}
 
 	return apiAks
+}
+
+// displayVersionWarning prints a formatted version mismatch warning to the given writer
+func displayVersionWarning(out io.Writer, logger log.FieldLogger, result *version.CompatibilityResult) {
+	messages := []struct {
+		text     string
+		debugMsg string
+	}{
+		{"[WARNING] VERSION MISMATCH DETECTED\n", "failed to display version warning header"},
+		{result.Message + "\n", "failed to display version warning message"},
+		{fmt.Sprintf("Host version:   %s\n", result.HostVersion), "failed to display host version"},
+		{fmt.Sprintf("Server version: %s\n", result.ServerVersion), "failed to display server version"},
+		{"\nThis may cause compatibility issues. Consider updating to matching versions.\n\n", "failed to display version warning footer"},
+	}
+
+	for _, msg := range messages {
+		if _, err := fmt.Fprint(out, msg.text); err != nil {
+			logger.WithError(err).Debug(msg.debugMsg)
+		}
+	}
 }

@@ -50,6 +50,7 @@ require (
 	github.com/cli/go-gh/v2 v2.12.1
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
+	github.com/hashicorp/go-version v1.7.0
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.20.1
