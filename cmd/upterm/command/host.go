@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/icon"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -225,11 +226,11 @@ func shareRunE(c *cobra.Command, args []string) error {
 }
 
 func clientJoinedCallback(c *api.Client) {
-	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), "")
+	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), icon.Upterm)
 }
 
 func clientLeftCallback(c *api.Client) {
-	_ = beeep.Notify("Upterm Client Left", notifyBody(c), "")
+	_ = beeep.Notify("Upterm Client Left", notifyBody(c), icon.Upterm)
 }
 
 func notifyBody(c *api.Client) string {
