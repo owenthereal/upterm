@@ -29,7 +29,7 @@ require (
 	github.com/jpillora/chisel v1.10.1
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/oklog/run v1.1.1-0.20200508094559-c7096881717e
+	github.com/oklog/run v1.2.0
 	github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pborman/ansi v1.0.0
