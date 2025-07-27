@@ -88,7 +88,7 @@ type CompatibilityResult struct {
 }
 
 // CheckCompatibility checks if the server version is compatible with the current host version
-// Always returns a result - Compatible=true for unparseable server versions to allow graceful fallback
+// Always returns a result - Compatible=false for unparseable server versions to indicate incompatibility
 func CheckCompatibility(sshVersion string) *CompatibilityResult {
 	hostVersion := Current()
 	hostVersionStr := "v" + hostVersion.String()
