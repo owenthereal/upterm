@@ -97,18 +97,40 @@ func listRunE(c *cobra.Command, args []string) error {
 	}
 
 	if len(sessions) == 0 {
-		fmt.Println("No session is found. Create one with `upterm host`.")
+		fmt.Println("📡 Active Sessions (0)")
+		fmt.Println("═══════════════════════")
+		fmt.Println("\n🔍 No active sessions found")
+		fmt.Printf("\n💡 Get started:\n")
+		fmt.Printf("  • Run 'upterm host' to share your terminal\n")
+		fmt.Printf("  • Run 'upterm host --help' for more options\n")
 		return nil
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Current", "Session", "Command", "Force Command", "Host"})
-	table.SetBorder(false)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetCenterSeparator("|")
-	table.AppendBulk(sessions)
+	fmt.Printf("📡 Active Sessions (%d)\n", len(sessions))
+	fmt.Println("═══════════════════════")
 
-	table.Render()
+	table := tablewriter.NewWriter(os.Stdout)
+	table.Header(" ", "Session ID", "Command", "Host")
+	for _, session := range sessions {
+		// Create simplified row without Force Command (usually n/a)
+		simplified := []string{
+			session[0], // Current marker
+			session[1], // Session ID
+			session[2], // Command
+			session[4], // Host (skip Force Command)
+		}
+		if err := table.Append(simplified); err != nil {
+			return err
+		}
+	}
+
+	if err := table.Render(); err != nil {
+		return err
+	}
+
+	fmt.Printf("\n💡 Tips:\n")
+	fmt.Printf("  • Use 'upterm session current' to see details\n")
+	fmt.Printf("  • Use 'upterm session info <SESSION_ID>' for specific session\n")
 	return nil
 }
 
@@ -240,7 +262,8 @@ func displaySession(session *api.GetSessionResponse) error {
 		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
 		{"Host:", u.Scheme + "://" + hostPort},
 		{"Authorized Keys:", naIfEmpty(displayAuthorizedKeys(session.AuthorizedKeys))},
-		{"SSH Session:", sshCmd},
+		{"", ""},
+		{"➤ SSH Command:", sshCmd},
 	}
 
 	isFirst := true
@@ -253,19 +276,19 @@ func displaySession(session *api.GetSessionResponse) error {
 		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
 	}
 
+	fmt.Printf("╭─ Session: %s ─╮\n", session.SessionId)
+
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"=== " + session.SessionId})
-	table.SetHeaderLine(false)
-	table.SetAutoWrapText(false)
-	table.SetBorder(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetRowSeparator("")
-	table.SetCenterSeparator("")
-	table.SetColumnSeparator("")
-	table.SetNoWhiteSpace(true)
-	table.AppendBulk(data)
-	table.Render()
+	for _, row := range data {
+		if err := table.Append(row); err != nil {
+			return err
+		}
+	}
+	if err := table.Render(); err != nil {
+		return err
+	}
+
+	fmt.Printf("\n╰─ Run 'upterm session current' to display this again ─╯\n")
 
 	return nil
 }
