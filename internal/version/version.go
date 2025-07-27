@@ -1,8 +1,26 @@
+// Package version provides version management and compatibility checking for upterm/uptermd.
+//
+// This package centralizes version handling across the upterm ecosystem, including:
+//   - Single source of truth for version constants
+//   - Semantic version parsing and comparison
+//   - SSH server version extraction and validation
+//   - Host/server compatibility checking with detailed results
+//
+// The main entry point is CheckCompatibility() which compares the current host version
+// with a server's SSH version string and returns detailed compatibility information.
+//
+// Example usage:
+//
+//	result := version.CheckCompatibility("SSH-2.0-uptermd-0.14.3")
+//	if !result.Compatible {
+//	    fmt.Printf("Warning: %s\n", result.Message)
+//	    fmt.Printf("Host: %s, Server: %s\n", result.HostVersion, result.ServerVersion)
+//	}
 package version
 
 import (
 	"fmt"
-	"strings"
+	"regexp"
 
 	"github.com/hashicorp/go-version"
 	"github.com/owenthereal/upterm/upterm"
@@ -18,21 +36,27 @@ func Parse(v string) (*version.Version, error) {
 }
 
 // ParseFromSSHVersion extracts version from SSH version strings like "SSH-2.0-uptermd-0.14.3"
+// Uses regex for precise parsing and supports complex semantic versions like "1.0.0-beta.1+build.123"
 func ParseFromSSHVersion(sshVersion string) (*version.Version, error) {
-	// Handle SSH version strings that include version suffix
-	if strings.HasPrefix(sshVersion, upterm.ServerSSHServerVersion) {
-		parts := strings.Split(sshVersion, "-")
-		if len(parts) >= 4 { // SSH-2.0-uptermd-0.14.3 has 4+ parts
-			// Try to parse the last part as version
-			versionStr := parts[len(parts)-1]
-			if v, err := Parse(versionStr); err == nil {
-				return v, nil
-			}
-		}
+	// Build regex pattern using the constant to ensure consistency
+	// Escape dots in the server version string for regex safety
+	escapedServerVersion := regexp.QuoteMeta(upterm.ServerSSHServerVersion)
+	pattern := fmt.Sprintf(`^%s-(.+)$`, escapedServerVersion)
+	
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(sshVersion)
+	if len(matches) != 2 {
+		return nil, fmt.Errorf("not a valid uptermd SSH version: %s", sshVersion)
 	}
-
-	// If no version found in SSH string, return error
-	return nil, fmt.Errorf("no version found in SSH version string: %s", sshVersion)
+	
+	// Extract and parse the version string
+	versionStr := matches[1]
+	v, err := Parse(versionStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid version format in SSH string %s: %w", sshVersion, err)
+	}
+	
+	return v, nil
 }
 
 // Current returns the current version as a parsed version object

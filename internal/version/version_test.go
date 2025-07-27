@@ -38,6 +38,30 @@ func TestParseFromSSHVersion(t *testing.T) {
 			expectedVer: "",
 			expectError: true,
 		},
+		{
+			name:        "complex semantic version with prerelease",
+			sshVersion:  "SSH-2.0-uptermd-1.0.0-beta.1",
+			expectedVer: "1.0.0-beta.1",
+			expectError: false,
+		},
+		{
+			name:        "complex semantic version with build metadata",
+			sshVersion:  "SSH-2.0-uptermd-1.0.0+build.123",
+			expectedVer: "1.0.0+build.123",
+			expectError: false,
+		},
+		{
+			name:        "complex semantic version with both prerelease and build",
+			sshVersion:  "SSH-2.0-uptermd-2.0.0-rc.1+20220101",
+			expectedVer: "2.0.0-rc.1+20220101",
+			expectError: false,
+		},
+		{
+			name:        "wrong server name - should fail",
+			sshVersion:  "SSH-2.0-upterm-server-0.14.3",
+			expectedVer: "",
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -210,22 +210,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 	// Check for version compatibility
 	if result := version.CheckCompatibility(serverVersion); !result.Compatible {
-		// Display version mismatch warning to host
-		if _, err := fmt.Fprintf(c.Stdout, "\n[WARNING] VERSION MISMATCH DETECTED\n"); err != nil {
-			logger.WithError(err).Debug("failed to display version warning header")
-		}
-		if _, err := fmt.Fprintf(c.Stdout, "%s\n", result.Message); err != nil {
-			logger.WithError(err).Debug("failed to display version warning message")
-		}
-		if _, err := fmt.Fprintf(c.Stdout, "Host version:   %s\n", result.HostVersion); err != nil {
-			logger.WithError(err).Debug("failed to display host version")
-		}
-		if _, err := fmt.Fprintf(c.Stdout, "Server version: %s\n", result.ServerVersion); err != nil {
-			logger.WithError(err).Debug("failed to display server version")
-		}
-		if _, err := fmt.Fprintf(c.Stdout, "\nThis may cause compatibility issues. Consider updating to matching versions.\n\n"); err != nil {
-			logger.WithError(err).Debug("failed to display version warning footer")
-		}
+		displayVersionWarning(c.Stdout, logger, result)
 	}
 
 	if c.AdminSocketFile == "" {
@@ -396,4 +381,24 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 	}
 
 	return apiAks
+}
+
+// displayVersionWarning prints a formatted version mismatch warning to the given writer
+func displayVersionWarning(out io.Writer, logger log.FieldLogger, result *version.CompatibilityResult) {
+	messages := []struct {
+		text     string
+		debugMsg string
+	}{
+		{"[WARNING] VERSION MISMATCH DETECTED\n", "failed to display version warning header"},
+		{result.Message + "\n", "failed to display version warning message"},
+		{fmt.Sprintf("Host version:   %s\n", result.HostVersion), "failed to display host version"},
+		{fmt.Sprintf("Server version: %s\n", result.ServerVersion), "failed to display server version"},
+		{"\nThis may cause compatibility issues. Consider updating to matching versions.\n\n", "failed to display version warning footer"},
+	}
+
+	for _, msg := range messages {
+		if _, err := fmt.Fprint(out, msg.text); err != nil {
+			logger.WithError(err).Debug(msg.debugMsg)
+		}
+	}
 }
