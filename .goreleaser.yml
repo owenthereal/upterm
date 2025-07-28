@@ -26,7 +26,7 @@ archives:
   - id: upterm
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     wrap_in_directory: false
-    builds:
+    ids:
       - upterm
     files:
       - LICENSE*
@@ -41,7 +41,7 @@ archives:
     files:
       - LICENSE*
       - README*
-brews:
+homebrew_casks:
   - repository:
       owner: owenthereal
       name: homebrew-upterm
@@ -50,25 +50,25 @@ brews:
       email: o@owenou.com
     homepage: https://upterm.dev
     description: Instant Terminal Sharing
-    directory: Formula
+    directory: Casks
     ids:
       - upterm
     license: "Apache 2.0"
     custom_block: |
       head "https://github.com/owenthereal/upterm.git"
-    install: |
-      bin.install "upterm"
-      man1.install Dir["etc/man/man1/upterm*.1"]
-      generate_completions_from_executable(bin/"upterm", "completion")
-    test: |
-      assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
+    manpages:
+      - "etc/man/man1/upterm*.1"
+    completions:
+      bash: "etc/completion/upterm.bash_completion.sh"
+      zsh: "etc/completion/upterm.zsh_completion"
 dockers:
   - image_templates:
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
       - "{{ .Env.DOCKER_REPO }}:latest-amd64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: Dockerfile.uptermd
     use: buildx
     build_flag_templates:
+      - "--target=pre-built-binary"
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description=Upterm server daemon"
@@ -88,9 +88,10 @@ dockers:
   - image_templates:
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-arm64"
       - "{{ .Env.DOCKER_REPO }}:latest-arm64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: Dockerfile.uptermd
     use: buildx
     build_flag_templates:
+      - "--target=pre-built-binary"
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description=Upterm server daemon"

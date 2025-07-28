@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 
+# Build stage - builds from source (used by Fly deployment)
 FROM golang:latest AS builder
 
 ARG TARGETOS
@@ -12,6 +13,7 @@ RUN --mount=target=. \
     --mount=type=cache,target=/go/pkg \
     GOOS=$TARGETOS GOARCH=$TARGETARCH go install ./cmd/...
 
+# Base runtime stage
 FROM gcr.io/distroless/static:nonroot AS base
 
 WORKDIR /app
@@ -20,10 +22,15 @@ ENV PATH="/app:${PATH}"
 # sshd ws & prometheus
 EXPOSE 2222 8080 9090
 
+# Fly deployment stage (builds from source)
 FROM base AS uptermd-fly
 COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
 ENTRYPOINT ["uptermd-fly"]
 
-FROM base
-COPY --from=builder /go/bin/uptermd /app/
+# Pre-built binary stage (used by GoReleaser)
+FROM base AS pre-built-binary
+COPY uptermd /app/
 ENTRYPOINT ["uptermd"]
+
+# Default stage - Fly deployment
+FROM uptermd-fly
