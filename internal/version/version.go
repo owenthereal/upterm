@@ -28,7 +28,7 @@ import (
 
 // Version is the semantic version of upterm/uptermd
 // This is the single source of truth for both client and server versions
-const Version = "0.14.3"
+const Version = "0.15.0"
 
 // Parse parses a version string using hashicorp's go-version library
 func Parse(v string) (*version.Version, error) {
@@ -42,20 +42,20 @@ func ParseFromSSHVersion(sshVersion string) (*version.Version, error) {
 	// Escape dots in the server version string for regex safety
 	escapedServerVersion := regexp.QuoteMeta(upterm.ServerSSHServerVersion)
 	pattern := fmt.Sprintf(`^%s-(.+)$`, escapedServerVersion)
-	
+
 	re := regexp.MustCompile(pattern)
 	matches := re.FindStringSubmatch(sshVersion)
 	if len(matches) != 2 {
 		return nil, fmt.Errorf("not a valid uptermd SSH version: %s", sshVersion)
 	}
-	
+
 	// Extract and parse the version string
 	versionStr := matches[1]
 	v, err := Parse(versionStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version format in SSH string %s: %w", sshVersion, err)
 	}
-	
+
 	return v, nil
 }
 
