@@ -49,6 +49,7 @@ test:
 vet:
 	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m --fix
 
+DOCKER_REPO ?= ghcr.io/owenthereal/upterm/uptermd
 .PHONY: goreleaser
 goreleaser:
-	goreleaser release --clean --snapshot --skip=publish
+	DOCKER_REPO=$(DOCKER_REPO) goreleaser release --clean --snapshot --skip=publish

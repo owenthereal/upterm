@@ -77,8 +77,12 @@ jobs:
           check-latest: true
       - name: Vet
         run: make vet
-  docker:
-    name: Docker
+  build-and-release:
+    name: Build and Release (Snapshot)
     needs: [build, test-macos, test-ubuntu, vet]
-    uses: ./.github/workflows/docker.yaml
-    secrets: inherit
+    uses: ./.github/workflows/build-and-release.yaml
+    with:
+      snapshot: true
+      docker_repo: ghcr.io/owenthereal/upterm/uptermd
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
