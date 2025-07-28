@@ -1,5 +1,7 @@
+version: 2
 builds:
-  - env:
+  - id: upterm
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -10,16 +12,36 @@ builds:
       - "arm"
       - "arm64"
     main: ./cmd/upterm
+  - id: uptermd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - "amd64"
+      - "arm64"
+    main: ./cmd/uptermd
+    binary: uptermd
 archives:
-  - format: tar.gz
+  - id: upterm
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     wrap_in_directory: false
+    ids:
+      - upterm
     files:
       - LICENSE*
       - README*
       - etc/*
       - docs/*
-brews:
+  - id: uptermd
+    name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
+    wrap_in_directory: false
+    ids:
+      - uptermd
+    files:
+      - LICENSE*
+      - README*
+homebrew_casks:
   - repository:
       owner: owenthereal
       name: homebrew-upterm
@@ -28,20 +50,77 @@ brews:
       email: o@owenou.com
     homepage: https://upterm.dev
     description: Instant Terminal Sharing
-    directory: Formula
+    directory: Casks
+    ids:
+      - upterm
     license: "Apache 2.0"
     custom_block: |
       head "https://github.com/owenthereal/upterm.git"
-    install: |
-      bin.install "upterm"
-      man1.install Dir["etc/man/man1/upterm*.1"]
-      generate_completions_from_executable(bin/"upterm", "completion")
-    test: |
-      assert_match(/Upterm version/, shell_output("#{bin}/upterm version"))
+    manpages:
+      - "etc/man/man1/upterm*.1"
+    completions:
+      bash: "etc/completion/upterm.bash_completion.sh"
+      zsh: "etc/completion/upterm.zsh_completion"
+dockers:
+  - image_templates:
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
+      - "{{ .Env.DOCKER_REPO }}:latest-amd64"
+    dockerfile: Dockerfile.uptermd
+    use: buildx
+    build_flag_templates:
+      - "--target=pre-built-binary"
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=Upterm server daemon"
+      - "--label=org.opencontainers.image.url=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.source=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    extra_files:
+      - go.mod
+      - go.sum
+    ids:
+      - uptermd
+    goos: linux
+    goarch: amd64
+  - image_templates:
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-arm64"
+      - "{{ .Env.DOCKER_REPO }}:latest-arm64"
+    dockerfile: Dockerfile.uptermd
+    use: buildx
+    build_flag_templates:
+      - "--target=pre-built-binary"
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=Upterm server daemon"
+      - "--label=org.opencontainers.image.url=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.source=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    extra_files:
+      - go.mod
+      - go.sum
+    ids:
+      - uptermd
+    goos: linux
+    goarch: arm64
+docker_manifests:
+  - name_template: "{{ .Env.DOCKER_REPO }}:{{ .Tag }}"
+    image_templates:
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-arm64"
+  - name_template: "{{ .Env.DOCKER_REPO }}:latest"
+    image_templates:
+      - "{{ .Env.DOCKER_REPO }}:latest-amd64"
+      - "{{ .Env.DOCKER_REPO }}:latest-arm64"
 checksum:
   name_template: "checksums.txt"
 snapshot:
-  name_template: "{{ incpatch .Version }}-snapshot"
+  version_template: "{{ incpatch .Version }}-snapshot"
 release:
   prerelease: auto
   name_template: "Upterm {{.Version}}"
@@ -59,6 +138,8 @@ changelog:
 nfpms: #build:linux
   - license: Apache-2.0
     maintainer: Owen Ou <o@owenou.com>
+    ids:
+      - upterm
     homepage: https://github.com/owenthereal/upterm
     bindir: /usr/bin
     description: Instant Terminal Sharing
