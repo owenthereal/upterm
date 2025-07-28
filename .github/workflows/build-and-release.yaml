@@ -13,9 +13,6 @@ on:
         required: false
         default: 'ghcr.io/owenthereal/upterm/uptermd'
         type: string
-    secrets:
-      GITHUB_TOKEN:
-        required: true
 
 permissions:
   contents: write

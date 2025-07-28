@@ -5,7 +5,7 @@ on:
       - master
   pull_request:
 permissions:
-  contents: read
+  contents: write
   packages: write
 jobs:
   build:
@@ -84,5 +84,4 @@ jobs:
     with:
       snapshot: true
       docker_repo: ghcr.io/owenthereal/upterm/uptermd
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit

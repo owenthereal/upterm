@@ -13,8 +13,7 @@ jobs:
     with:
       snapshot: false
       docker_repo: ghcr.io/owenthereal/upterm/uptermd
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
