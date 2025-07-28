@@ -15,7 +15,7 @@ This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
 ### Mac
 
 ```console
-brew install owenthereal/upterm/upterm
+brew install --cask owenthereal/upterm/upterm
 ```
 
 ### Standalone
