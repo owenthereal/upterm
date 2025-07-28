@@ -36,7 +36,7 @@ archives:
   - id: uptermd
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
     wrap_in_directory: false
-    builds:
+    ids:
       - uptermd
     files:
       - LICENSE*
