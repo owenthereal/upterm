@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +20,6 @@ import (
 
 const (
 	DefaultSessionTTL    = 30 * time.Minute       // Default TTL for session data in Consul
-	DefaultConsulPrefix  = "uptermd/sessions"     // Default prefix for Consul session keys
 	DefaultConsulTimeout = 5 * time.Second        // Default timeout for Consul operations
 	DefaultMaxRetries    = 3                      // Default number of retries for Consul operations
 	DefaultRetryDelay    = 100 * time.Millisecond // Default delay between retries
@@ -132,20 +134,17 @@ type SessionStore interface {
 
 // consulSessionStore implements SessionStore using Consul KV
 type consulSessionStore struct {
-	client *api.Client
-	logger log.FieldLogger
-	prefix string
-	ttl    time.Duration
+	client    *api.Client
+	logger    log.FieldLogger
+	ttl       time.Duration
+	keyPrefix string
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
-func newConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger log.FieldLogger) (*consulSessionStore, error) {
+func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger log.FieldLogger) (*consulSessionStore, error) {
 	config := api.DefaultConfig()
-	if consulAddr != "" {
-		config.Address = consulAddr
-	}
-
-	// Configure HTTP client with timeouts and connection pooling
+	config.Address = consulURL.Host
+	config.Scheme = consulURL.Scheme
 	config.HttpClient = &http.Client{
 		Timeout: DefaultConsulTimeout,
 		Transport: &http.Transport{
@@ -155,26 +154,39 @@ func newConsulSessionStore(consulAddr, prefix string, ttl time.Duration, logger 
 			DisableKeepAlives:   false,
 		},
 	}
+	if u := consulURL.User; u != nil {
+		config.Token, _ = u.Password()
+	}
 
 	client, err := api.NewClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consul client: %w", err)
 	}
 
-	if prefix == "" {
-		prefix = DefaultConsulPrefix
+	var keyPrefix string
+	if v := strings.TrimPrefix(consulURL.Path, "/"); v != "" {
+		keyPrefix = v
+	} else {
+		keyPrefix = "uptermd"
 	}
 
 	if ttl == 0 {
 		ttl = DefaultSessionTTL
 	}
 
-	return &consulSessionStore{
-		client: client,
-		logger: logger,
-		prefix: prefix,
-		ttl:    ttl,
-	}, nil
+	store := &consulSessionStore{
+		client:    client,
+		logger:    logger,
+		ttl:       ttl,
+		keyPrefix: keyPrefix,
+	}
+
+	// Register the node with Consul
+	if err := store.registerNode(); err != nil {
+		return nil, fmt.Errorf("failed to register node with consul: %w", err)
+	}
+
+	return store, nil
 }
 
 // Store complete session data in Consul
@@ -187,7 +199,7 @@ func (c *consulSessionStore) Store(session *Session) error {
 	}
 
 	// Outside retry: deterministic operations
-	kvStoreKey := c.kvKey(session.ID)
+	kvStoreKey := c.SessionKey(session.ID)
 
 	// Serialize session data as JSON first to fail fast on marshaling errors
 	sessionData, err := json.Marshal(session)
@@ -201,7 +213,7 @@ func (c *consulSessionStore) Store(session *Session) error {
 	// Inside retry: only network operations
 	err = retry.Do(
 		func() error {
-			consulLockSessionID, _, err := c.client.Session().Create(consulLockSession, nil)
+			consulLockSessionID, _, err := c.client.Session().CreateNoChecks(consulLockSession, nil)
 			if err != nil {
 				return fmt.Errorf("failed to create consul lock session: %w", err)
 			}
@@ -255,7 +267,7 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	}
 
 	// Outside retry: deterministic operations
-	kvStoreKey := c.kvKey(sessionID)
+	kvStoreKey := c.SessionKey(sessionID)
 	var session *Session
 
 	// Inside retry: only network operations
@@ -307,7 +319,7 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	}
 
 	// Outside retry: deterministic operations
-	kvStoreKey := c.kvKey(sessionID)
+	kvStoreKey := c.SessionKey(sessionID)
 
 	// Inside retry: only network operations
 	err := retry.Do(
@@ -368,7 +380,7 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 func (c *consulSessionStore) deleteBatch(sessionIDs []string) error {
 	ops := make([]*api.KVTxnOp, len(sessionIDs))
 	for i, sessionID := range sessionIDs {
-		kvStoreKey := c.kvKey(sessionID)
+		kvStoreKey := c.SessionKey(sessionID)
 		ops[i] = &api.KVTxnOp{
 			Verb: api.KVDelete,
 			Key:  kvStoreKey,
@@ -405,7 +417,7 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 
 	err := retry.Do(
 		func() error {
-			pairs, _, err := c.client.KV().List(c.prefix, nil)
+			pairs, _, err := c.client.KV().List(c.SessionsKey(), nil)
 			if err != nil {
 				return fmt.Errorf("failed to list sessions: %w", err)
 			}
@@ -441,20 +453,36 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 	return sessions, nil
 }
 
-// kvKey generates the Consul KV store key for a session
-func (c *consulSessionStore) kvKey(sessionID string) string {
-	return fmt.Sprintf("%s/%s", c.prefix, sessionID)
+func (c *consulSessionStore) NodeName() string {
+	return path.Join(c.keyPrefix, "uptermd")
 }
 
-// consulSessionName generates the Consul session name for locking
-func (c *consulSessionStore) consulSessionName(sessionID string) string {
-	return fmt.Sprintf("upterm-lock-%s", sessionID)
+// SessionKey generates the Consul KV store key for a session
+func (c *consulSessionStore) SessionKey(sessionID string) string {
+	return path.Join(c.keyPrefix, "sessions", sessionID)
+}
+
+func (c *consulSessionStore) SessionsKey() string {
+	return path.Join(c.keyPrefix, "sessions")
+}
+
+// registerNode registers this node with Consul
+func (c *consulSessionStore) registerNode() error {
+	_, err := c.client.Catalog().Register(&api.CatalogRegistration{
+		Node:    c.NodeName(),
+		Address: "localhost", // not used but required
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("register node %q: %w", c.NodeName(), err)
+	}
+	return nil
 }
 
 // createConsulLockSession creates a Consul session for distributed locking
 func (c *consulSessionStore) createConsulLockSession(sessionID string) *api.SessionEntry {
 	return &api.SessionEntry{
-		Name:      c.consulSessionName(sessionID),
+		Name:      sessionID,
+		Node:      c.NodeName(),
 		TTL:       c.ttl.String(),
 		Behavior:  api.SessionBehaviorDelete,
 		LockDelay: time.Second,
@@ -571,11 +599,10 @@ type SessionManager struct {
 
 // SessionManagerConfig holds configuration for creating a SessionManager
 type SessionManagerConfig struct {
-	Mode         routing.Mode
-	Logger       log.FieldLogger
-	ConsulAddr   string
-	ConsulPrefix string
-	ConsulTTL    time.Duration
+	Mode      routing.Mode
+	Logger    log.FieldLogger
+	ConsulURL *url.URL
+	ConsulTTL time.Duration
 }
 
 // SessionManagerOption is a functional option for configuring SessionManager
@@ -588,19 +615,13 @@ func WithSessionManagerLogger(logger log.FieldLogger) SessionManagerOption {
 	}
 }
 
-// WithSessionManagerConsulAddr sets the Consul address for consul mode
-func WithSessionManagerConsulAddr(addr string) SessionManagerOption {
+// WithSessionManagerConsulURL sets the Consul URL for consul mode
+func WithSessionManagerConsulURL(consulURL *url.URL) SessionManagerOption {
 	return func(c *SessionManagerConfig) {
-		c.ConsulAddr = addr
+		c.ConsulURL = consulURL
 	}
 }
 
-// WithSessionManagerConsulPrefix sets the Consul key prefix for consul mode
-func WithSessionManagerConsulPrefix(prefix string) SessionManagerOption {
-	return func(c *SessionManagerConfig) {
-		c.ConsulPrefix = prefix
-	}
-}
 
 // WithSessionManagerConsulTTL sets the session TTL for consul mode
 func WithSessionManagerConsulTTL(ttl time.Duration) SessionManagerOption {
@@ -620,20 +641,18 @@ func WithSessionManagerConsulTTL(ttl time.Duration) SessionManagerOption {
 //	sm, err := NewSessionManager(routing.ModeEmbedded, WithSessionManagerLogger(logger))
 //
 //	// Consul mode with minimal configuration
-//	sm, err := NewSessionManager(routing.ModeConsul, WithSessionManagerConsulAddr("localhost:8500"))
+//	sm, err := NewSessionManager(routing.ModeConsul, WithSessionManagerConsulURL("http://localhost:8500"))
 //
 //	// Consul mode with full configuration
 //	sm, err := NewSessionManager(routing.ModeConsul,
 //	    WithSessionManagerLogger(logger),
-//	    WithSessionManagerConsulAddr("consul.example.com:8500"),
-//	    WithSessionManagerConsulPrefix("upterm/prod/sessions"),
+//	    WithSessionManagerConsulURL("http://consul.example.com:8500"),
 //	    WithSessionManagerConsulTTL(1*time.Hour))
 func NewSessionManager(mode routing.Mode, opts ...SessionManagerOption) (*SessionManager, error) {
 	config := &SessionManagerConfig{
-		Mode:         mode,
-		Logger:       log.StandardLogger(), // Default logger
-		ConsulTTL:    DefaultSessionTTL,
-		ConsulPrefix: DefaultConsulPrefix,
+		Mode:      mode,
+		Logger:    log.StandardLogger(), // Default logger
+		ConsulTTL: DefaultSessionTTL,
 	}
 
 	// Apply all options
@@ -645,7 +664,7 @@ func NewSessionManager(mode routing.Mode, opts ...SessionManagerOption) (*Sessio
 	case routing.ModeEmbedded:
 		return newEmbeddedSessionManager(config.Logger), nil
 	case routing.ModeConsul:
-		return newConsulSessionManager(config.ConsulAddr, config.ConsulPrefix, config.ConsulTTL, config.Logger)
+		return newConsulSessionManager(config.ConsulURL, config.ConsulTTL, config.Logger)
 	default:
 		return nil, fmt.Errorf("unsupported routing mode: %s", mode)
 	}
@@ -667,8 +686,8 @@ func newEmbeddedSessionManager(logger log.FieldLogger) *SessionManager {
 }
 
 // newConsulSessionManager creates a SessionManager for consul mode with Consul storage
-func newConsulSessionManager(consulAddr, prefix string, ttl time.Duration, logger log.FieldLogger) (*SessionManager, error) {
-	store, err := newConsulSessionStore(consulAddr, prefix, ttl, logger)
+func newConsulSessionManager(consulURL *url.URL, ttl time.Duration, logger log.FieldLogger) (*SessionManager, error) {
+	store, err := newConsulSessionStore(consulURL, ttl, logger)
 	if err != nil {
 		return nil, err
 	}

@@ -40,8 +40,7 @@ type Opt struct {
 	MetricAddr       string       `mapstructure:"metric-addr"`
 	Debug            bool         `mapstructure:"debug"`
 	Routing          routing.Mode `mapstructure:"routing"`
-	ConsulAddr       string       `mapstructure:"consul-addr"`
-	ConsulPrefix     string       `mapstructure:"consul-prefix"`
+	ConsulURL        string       `mapstructure:"consul-url"`
 	ConsulSessionTTL string       `mapstructure:"consul-session-ttl"`
 }
 
@@ -70,13 +69,13 @@ func (opt *Opt) Validate() error {
 
 // validateConsulConfig validates Consul-specific configuration
 func (opt *Opt) validateConsulConfig() error {
-	if opt.ConsulAddr == "" {
-		return fmt.Errorf("consul-addr is required for consul routing mode")
+	if opt.ConsulURL == "" {
+		return fmt.Errorf("consul-url is required for consul routing mode")
 	}
 
-	// Validate Consul address format
-	if _, err := url.Parse("http://" + opt.ConsulAddr); err != nil {
-		return fmt.Errorf("invalid consul address format: %w", err)
+	// Validate Consul URL format
+	if _, err := url.Parse(opt.ConsulURL); err != nil {
+		return fmt.Errorf("invalid consul URL format: %w", err)
 	}
 
 	// Validate TTL format if provided
@@ -214,10 +213,15 @@ func Start(opt Opt) error {
 				}
 			}
 
+			// Parse Consul address as URL
+			consulURL, err := url.Parse(opt.ConsulURL)
+			if err != nil {
+				return fmt.Errorf("invalid consul address URL: %w", err)
+			}
+
 			sm, err := NewSessionManager(routing.ModeConsul,
 				WithSessionManagerLogger(logger.WithField("com", "session-manager")),
-				WithSessionManagerConsulAddr(opt.ConsulAddr),
-				WithSessionManagerConsulPrefix(opt.ConsulPrefix),
+				WithSessionManagerConsulURL(consulURL),
 				WithSessionManagerConsulTTL(consulTTL))
 			if err != nil {
 				return fmt.Errorf("failed to create consul session manager: %w", err)

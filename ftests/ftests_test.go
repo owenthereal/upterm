@@ -218,7 +218,7 @@ func TestEmbedded(t *testing.T) {
 func TestConsul(t *testing.T) {
 	// Skip if Consul is not available
 	if !isConsulAvailable() {
-		t.Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
+		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
 }
@@ -226,7 +226,12 @@ func TestConsul(t *testing.T) {
 // isConsulAvailable checks if Consul is running and accessible
 func isConsulAvailable() bool {
 	config := consulapi.DefaultConfig()
-	config.Address = consulAddr()
+	consulURLStr := consulURL()
+	u, err := url.Parse(consulURLStr)
+	if err != nil {
+		return false
+	}
+	config.Address = u.Host
 
 	client, err := consulapi.NewClient(config)
 	if err != nil {
@@ -251,13 +256,21 @@ func isConsulAvailable() bool {
 	}
 }
 
-func consulAddr() string {
-	addr := os.Getenv("CONSUL_ADDR")
+func consulURL() string {
+	addr := os.Getenv("CONSUL_URL")
 	if addr == "" {
-		addr = "localhost:8500"
+		addr = "http://localhost:8500"
 	}
 
 	return addr
+}
+
+func mustParseURL(urlStr string) *url.URL {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse URL %s: %v", urlStr, err))
+	}
+	return u
 }
 
 func funcName(i interface{}) string {
@@ -389,8 +402,7 @@ func (s *Server) start() error {
 		sm, err = server.NewSessionManager(
 			routing.ModeConsul,
 			server.WithSessionManagerLogger(logger),
-			server.WithSessionManagerConsulAddr(consulAddr()),
-			server.WithSessionManagerConsulPrefix("uptermd-ftest/sessions"),
+			server.WithSessionManagerConsulURL(mustParseURL(consulURL())),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create consul session manager: %w", err)

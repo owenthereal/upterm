@@ -38,8 +38,7 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().BoolP("debug", "", os.Getenv("DEBUG") != "", "debug")
 
 	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode")
-	cmd.PersistentFlags().String("consul-addr", "", "consul address for routing mode 'consul'")
-	cmd.PersistentFlags().String("consul-prefix", server.DefaultConsulPrefix, "consul prefix for routing mode 'consul'")
+	cmd.PersistentFlags().String("consul-url", "", "consul URL for routing mode 'consul'")
 	cmd.PersistentFlags().String("consul-session-ttl", server.DefaultSessionTTL.String(), "consul session TTL for routing mode 'consul'")
 
 	cmd.AddCommand(versionCmd())

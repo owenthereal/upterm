@@ -33,7 +33,7 @@ func main() {
 		"UPTERMD_WS_ADDR":            "0.0.0.0:8080",
 		"UPTERMD_HOSTNAME":           "uptermd.upterm.dev",
 		"UPTERMD_ROUTING":            "consul",
-		"UPTERMD_CONSUL_ADDR":        flyConsulURL,
+		"UPTERMD_CONSUL_URL":         flyConsulURL,
 		"UPTERMD_CONSUL_SESSION_TTL": "1h",
 	}
 

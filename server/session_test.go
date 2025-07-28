@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -173,10 +174,13 @@ type ConsulModeTestSuite struct {
 func (suite *ConsulModeTestSuite) SetupSuite() {
 	// Skip if Consul is not available
 	if !suite.isConsulAvailable() {
-		suite.T().Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
+		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 
-	sm, err := newConsulSessionManager(suite.consulAddr(), "uptermd-test/sessions", 5*time.Minute, logrus.New())
+	consulURL, err := url.Parse(suite.consulURL())
+	suite.Require().NoError(err)
+
+	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, logrus.New())
 	suite.Require().NoError(err)
 	suite.sm = sm
 
@@ -291,7 +295,7 @@ func (suite *ConsulModeTestSuite) TestResolveSSHUserValidation() {
 }
 
 // isConsulAvailable checks if Consul is running and accessible.
-// It first checks the CONSUL_ADDR environment variable, falling back to localhost:8500.
+// It first checks the CONSUL_URL environment variable, falling back to localhost:8500.
 // This allows tests to run against a custom Consul instance or skip if unavailable.
 func (suite *ConsulModeTestSuite) isConsulAvailable() bool {
 	client, err := suite.consulClient()
@@ -304,17 +308,21 @@ func (suite *ConsulModeTestSuite) isConsulAvailable() bool {
 	return err == nil
 }
 
-func (suite *ConsulModeTestSuite) consulAddr() string {
-	addr := os.Getenv("CONSUL_ADDR")
+func (suite *ConsulModeTestSuite) consulURL() string {
+	addr := os.Getenv("CONSUL_URL")
 	if addr == "" {
-		addr = "localhost:8500"
+		addr = "http://localhost:8500"
 	}
 	return addr
 }
 
 func (suite *ConsulModeTestSuite) consulClient() (*api.Client, error) {
 	config := api.DefaultConfig()
-	config.Address = suite.consulAddr()
+	consulURL, err := url.Parse(suite.consulURL())
+	if err != nil {
+		return nil, err
+	}
+	config.Address = consulURL.Host
 
 	client, err := api.NewClient(config)
 	if err != nil {
