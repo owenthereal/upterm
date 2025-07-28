@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -20,6 +21,20 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
+
+// UserDiscardedError represents a user's intentional choice to discard the session
+type UserDiscardedError struct{}
+
+func (e UserDiscardedError) Error() string {
+	return "session discarded by user"
+}
+
+// UserInterruptedError represents a user's Ctrl+C interruption
+type UserInterruptedError struct{}
+
+func (e UserInterruptedError) Error() string {
+	return "interrupted by user"
+}
 
 var (
 	flagServer             string
@@ -222,7 +237,22 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ReadOnly:               flagReadOnly,
 	}
 
-	return h.Run(context.Background())
+	err = h.Run(context.Background())
+
+	// Handle user actions specially - no help menu
+	var userDiscardedErr UserDiscardedError
+	var userInterruptedErr UserInterruptedError
+	if errors.As(err, &userDiscardedErr) {
+		return nil // Clean exit for user discard (exit code 0)
+	}
+	if errors.As(err, &userInterruptedErr) {
+		// Set both flags to prevent help menu and error display
+		c.SilenceUsage = true
+		c.SilenceErrors = true
+		return userInterruptedErr
+	}
+
+	return err
 }
 
 func clientJoinedCallback(c *api.Client) {
@@ -241,29 +271,33 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 	if err := displaySession(session); err != nil {
 		return err
 	}
-
-	if !flagAccept {
-		fmt.Printf("\nRun 'upterm session current' to display this screen again\n\n")
-
-		if err := keyboard.Open(); err != nil {
-			return err
-		}
-		defer func() {
-			_ = keyboard.Close()
-		}()
-
-		fmt.Println("Press <q> or <ctrl-c> to accept connections...")
-		for {
-			char, key, err := keyboard.GetKey()
-			if err != nil {
-				return err
-			} else if key == keyboard.KeyCtrlC || char == 'q' {
-				break
-			}
-		}
+	if flagAccept {
+		return nil
 	}
 
-	return nil
+	if err := keyboard.Open(); err != nil {
+		return err
+	}
+	defer func() {
+		_ = keyboard.Close()
+	}()
+
+	fmt.Println("\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)")
+	for {
+		char, key, err := keyboard.GetKey()
+		if err != nil {
+			return err
+		} else if key == keyboard.KeyCtrlC {
+			fmt.Println("\nCancelled by user.")
+			return UserInterruptedError{}
+		} else if char == 'y' || char == 'Y' {
+			fmt.Println("\n✅ Starting to accept connections...")
+			return nil
+		} else if char == 'n' || char == 'N' {
+			fmt.Println("\n❌ Session discarded.")
+			return UserDiscardedError{}
+		}
+	}
 }
 
 func defaultPrivateKeys(homeDir string) []string {
