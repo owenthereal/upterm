@@ -14,10 +14,6 @@ on:
         default: 'ghcr.io/owenthereal/upterm/uptermd'
         type: string
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
@@ -46,7 +42,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GH_TOKEN }}
 
       - name: Run GoReleaser (Snapshot)
         if: ${{ inputs.snapshot }}
@@ -56,7 +52,7 @@ jobs:
           version: '~> v2'
           args: release --clean --snapshot --skip=publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           DOCKER_REPO: ${{ inputs.docker_repo }}
 
       - name: Run GoReleaser (Release)
@@ -67,5 +63,5 @@ jobs:
           version: '~> v2'
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           DOCKER_REPO: ${{ inputs.docker_repo }}
