@@ -470,6 +470,21 @@ func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
 	suite.Error(err, "Session should not be accessible after deletion")
 }
 
+func (suite *ConsulStoreTestSuite) TestSessionNotFoundNoRetry() {
+	// Test that session not found errors are not retried unnecessarily
+	nonExistentSessionID := fmt.Sprintf("nonexistent-%d", time.Now().UnixNano())
+	
+	// This should fail quickly without retries
+	start := time.Now()
+	_, err := suite.store1.Get(nonExistentSessionID)
+	duration := time.Since(start)
+	
+	suite.Error(err)
+	suite.Contains(err.Error(), "not found")
+	// Should fail quickly (under 100ms) since we don't retry "not found" errors
+	suite.Less(duration, 100*time.Millisecond, "Session not found should fail quickly without retries")
+}
+
 func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 	sessions := []*Session{
 		{ID: "batch-consul-1", NodeAddr: "192.168.1.1:2222", HostUser: "user1"},

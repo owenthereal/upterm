@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -19,6 +20,15 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
+
+// SessionNotFoundError represents a non-retryable session not found error
+type SessionNotFoundError struct {
+	SessionID string
+}
+
+func (e *SessionNotFoundError) Error() string {
+	return fmt.Sprintf("session %s not found", e.SessionID)
+}
 
 const (
 	DefaultSessionTTL      = 30 * time.Minute       // Default TTL for session data in Consul
@@ -408,7 +418,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
 			if kvPair == nil {
-				return fmt.Errorf("session %s not found", sessionID)
+				return &SessionNotFoundError{SessionID: sessionID}
 			}
 
 			var s Session
@@ -421,6 +431,11 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 		},
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
+		retry.RetryIf(func(err error) bool {
+			// Don't retry if session is not found - it's a business logic error, not a network error
+			var notFoundErr *SessionNotFoundError
+			return !errors.As(err, &notFoundErr)
+		}),
 		retry.OnRetry(func(n uint, err error) {
 			c.logger.WithFields(log.Fields{
 				"operation": "get_from_consul",
