@@ -36,6 +36,8 @@ const (
 	DefaultWatchTimeout    = 10 * time.Minute       // Default timeout for Consul watch operations (long-polling)
 	DefaultMaxRetries      = 3                      // Default number of retries for Consul operations
 	DefaultRetryDelay      = 100 * time.Millisecond // Default delay between retries
+	DefaultKeyPrefix       = "uptermd"               // Default key prefix for Consul storage
+	UnusedNodeAddress      = "localhost"            // Placeholder address for node registration (not used but required by Consul)
 )
 
 // Session represents the complete session information
@@ -286,7 +288,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger log.Fie
 	if v := strings.TrimPrefix(consulURL.Path, "/"); v != "" {
 		keyPrefix = v
 	} else {
-		keyPrefix = "uptermd"
+		keyPrefix = DefaultKeyPrefix
 	}
 
 	if ttl == 0 {
@@ -607,7 +609,7 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 }
 
 func (c *consulSessionStore) NodeName() string {
-	return path.Join(c.keyPrefix, "uptermd")
+	return path.Join(c.keyPrefix, DefaultKeyPrefix)
 }
 
 // SessionKey generates the Consul KV store key for a session
@@ -628,7 +630,7 @@ func (c *consulSessionStore) KeyPrefix() string {
 func (c *consulSessionStore) registerNode() error {
 	_, err := c.client.Catalog().Register(&api.CatalogRegistration{
 		Node:    c.NodeName(),
-		Address: "localhost", // not used but required
+		Address: UnusedNodeAddress, // not used but required
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("register node %q: %w", c.NodeName(), err)
