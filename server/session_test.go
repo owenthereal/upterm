@@ -1,14 +1,16 @@
 package server
 
 import (
+	"fmt"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/consul/api"
+	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -173,11 +175,11 @@ type ConsulModeTestSuite struct {
 
 func (suite *ConsulModeTestSuite) SetupSuite() {
 	// Skip if Consul is not available
-	if !suite.isConsulAvailable() {
+	if !testhelpers.IsConsulAvailable() {
 		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 
-	consulURL, err := url.Parse(suite.consulURL())
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
 	suite.Require().NoError(err)
 
 	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, logrus.New())
@@ -185,23 +187,25 @@ func (suite *ConsulModeTestSuite) SetupSuite() {
 	suite.sm = sm
 
 	// Setup client for cleanup
-	client, err := suite.consulClient()
+	client, err := testhelpers.ConsulClient()
 	suite.Require().NoError(err)
 	suite.client = client
 }
 
 func (suite *ConsulModeTestSuite) TearDownSuite() {
 	if suite.client != nil {
-		// Clean up test data
-		_, err := suite.client.KV().DeleteTree("uptermd-test/", nil)
-		suite.NoError(err)
+		// Clean up test data using the actual key prefix from the store
+		if store, ok := suite.sm.GetStore().(*consulSessionStore); ok {
+			_, err := suite.client.KV().DeleteTree(store.KeyPrefix(), nil)
+			suite.NoError(err)
+		}
 	}
 }
 
 func (suite *ConsulModeTestSuite) TestStoreOperations() {
 	store := suite.sm.GetStore()
 
-	sessionID := "test-consul-session"
+	sessionID := fmt.Sprintf("test-consul-session-%d", time.Now().UnixNano())
 	session := &Session{
 		ID:       sessionID,
 		NodeAddr: "127.0.0.1:2222",
@@ -212,7 +216,7 @@ func (suite *ConsulModeTestSuite) TestStoreOperations() {
 	err := store.Store(session)
 	suite.NoError(err)
 
-	// Test Get
+	// Test Get - should be immediately available (strong consistency)
 	retrievedSession, err := store.Get(sessionID)
 	suite.NoError(err)
 	suite.Equal(session.ID, retrievedSession.ID)
@@ -225,10 +229,15 @@ func (suite *ConsulModeTestSuite) TestStoreOperations() {
 	err = store.Delete(sessionID)
 	suite.NoError(err)
 
+	// Should be immediately deleted (strong consistency)
+	_, err = store.Get(sessionID)
+	suite.Error(err)
+
 	session.NodeAddr = "192.168.1.100:2222"
 	err = store.Store(session)
 	suite.NoError(err)
 
+	// Should be immediately available (strong consistency)
 	retrievedSession, err = store.Get(sessionID)
 	suite.NoError(err)
 	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
@@ -237,13 +246,13 @@ func (suite *ConsulModeTestSuite) TestStoreOperations() {
 	err = store.Delete(sessionID)
 	suite.NoError(err)
 
-	// Verify deletion
+	// Should be immediately deleted (strong consistency)
 	_, err = store.Get(sessionID)
 	suite.Error(err)
 }
 
 func (suite *ConsulModeTestSuite) TestSessionOperations() {
-	sessionID := "test-factory-session"
+	sessionID := fmt.Sprintf("test-factory-session-%d", time.Now().UnixNano())
 	nodeAddr := "192.168.1.100:2222"
 	session := &Session{
 		ID:       sessionID,
@@ -256,9 +265,10 @@ func (suite *ConsulModeTestSuite) TestSessionOperations() {
 	suite.NoError(err)
 	suite.Equal(sessionID, sshUser) // Consul mode returns just session ID
 
-	// Test ResolveSSHUser - should validate session existence
+	// Test GetSession - should be immediately available (strong consistency)
 	ss, err := suite.sm.GetSession(sessionID)
 	suite.NoError(err)
+	suite.NotNil(ss)
 	suite.Equal(sessionID, ss.ID)
 	suite.Equal(nodeAddr, ss.NodeAddr)
 
@@ -269,7 +279,7 @@ func (suite *ConsulModeTestSuite) TestSessionOperations() {
 
 func (suite *ConsulModeTestSuite) TestResolveSSHUserValidation() {
 	// Consul mode should validate session existence
-	sessionID := "nonexistent-session"
+	sessionID := fmt.Sprintf("nonexistent-session-%d", time.Now().UnixNano())
 
 	// Try to resolve non-existent session
 	_, _, err := suite.sm.ResolveSSHUser(sessionID)
@@ -283,7 +293,7 @@ func (suite *ConsulModeTestSuite) TestResolveSSHUserValidation() {
 	_, err = suite.sm.CreateSession(session)
 	suite.NoError(err)
 
-	// Now it should work
+	// Now it should work immediately (strong consistency)
 	resolvedSessionID, resolvedNodeAddr, err := suite.sm.ResolveSSHUser(sessionID)
 	suite.NoError(err)
 	suite.Equal(sessionID, resolvedSessionID)
@@ -294,42 +304,6 @@ func (suite *ConsulModeTestSuite) TestResolveSSHUserValidation() {
 	suite.NoError(err)
 }
 
-// isConsulAvailable checks if Consul is running and accessible.
-// It first checks the CONSUL_URL environment variable, falling back to localhost:8500.
-// This allows tests to run against a custom Consul instance or skip if unavailable.
-func (suite *ConsulModeTestSuite) isConsulAvailable() bool {
-	client, err := suite.consulClient()
-	if err != nil {
-		return false
-	}
-
-	// Try to get leader - simple health check
-	_, err = client.Status().Leader()
-	return err == nil
-}
-
-func (suite *ConsulModeTestSuite) consulURL() string {
-	addr := os.Getenv("CONSUL_URL")
-	if addr == "" {
-		addr = "http://localhost:8500"
-	}
-	return addr
-}
-
-func (suite *ConsulModeTestSuite) consulClient() (*api.Client, error) {
-	config := api.DefaultConfig()
-	consulURL, err := url.Parse(suite.consulURL())
-	if err != nil {
-		return nil, err
-	}
-	config.Address = consulURL.Host
-
-	client, err := api.NewClient(config)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
-}
 
 // Test suite runners
 func TestEmbeddedModeTestSuite(t *testing.T) {
@@ -338,4 +312,163 @@ func TestEmbeddedModeTestSuite(t *testing.T) {
 
 func TestConsulModeTestSuite(t *testing.T) {
 	suite.Run(t, new(ConsulModeTestSuite))
+}
+
+// ConsulReplicationTestSuite tests the session replication functionality at the store level
+type ConsulReplicationTestSuite struct {
+	suite.Suite
+
+	store1 *consulSessionStore // First store instance
+	store2 *consulSessionStore // Second store instance
+	client *api.Client
+}
+
+func (suite *ConsulReplicationTestSuite) SetupSuite() {
+	// Skip if Consul is not available
+	if !testhelpers.IsConsulAvailable() {
+		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
+	}
+
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+
+	// Create two store instances to simulate multi-node setup
+	store1, err := newConsulSessionStore(consulURL, 5*time.Minute, logrus.New())
+	suite.Require().NoError(err)
+	suite.store1 = store1
+
+	store2, err := newConsulSessionStore(consulURL, 5*time.Minute, logrus.New())
+	suite.Require().NoError(err)
+	suite.store2 = store2
+
+	// Setup client for cleanup
+	client, err := testhelpers.ConsulClient()
+	suite.Require().NoError(err)
+	suite.client = client
+
+	// Watches will initialize automatically when first used
+}
+
+func (suite *ConsulReplicationTestSuite) TearDownSuite() {
+	if suite.store1 != nil {
+		suite.store1.Close()
+	}
+	if suite.store2 != nil {
+		suite.store2.Close()
+	}
+	if suite.client != nil {
+		// Clean up test data using the actual key prefix from the store
+		_, err := suite.client.KV().DeleteTree(suite.store1.KeyPrefix(), nil)
+		suite.NoError(err)
+	}
+}
+
+func (suite *ConsulReplicationTestSuite) TestWatchPropagatesSessionCreation() {
+	sessionID := "watch-creation-test"
+	session := &Session{
+		ID:       sessionID,
+		NodeAddr: "192.168.1.100:2222",
+		HostUser: "testuser",
+	}
+
+	// Store session in store1
+	err := suite.store1.Store(session)
+	suite.NoError(err)
+	defer suite.store1.Delete(sessionID)
+
+	// Wait for watch to propagate to store2's cache
+	suite.waitForSessionInCache(sessionID)
+
+	// Verify data integrity and measure lookup performance
+	start := time.Now()
+	retrievedSession, err := suite.store2.Get(sessionID)
+	duration := time.Since(start)
+
+	suite.NoError(err)
+	suite.Equal(sessionID, retrievedSession.ID)
+	suite.Equal("192.168.1.100:2222", retrievedSession.NodeAddr)
+	suite.Equal("testuser", retrievedSession.HostUser)
+	suite.Less(duration, 1*time.Millisecond, "Memory lookup should be instant")
+}
+
+func (suite *ConsulReplicationTestSuite) TestWatchPropagatesSessionDeletion() {
+	sessionID := "watch-deletion-test"
+	session := &Session{
+		ID:       sessionID,
+		NodeAddr: "172.16.0.1:2222",
+		HostUser: "deleteuser",
+	}
+
+	// Store session and wait for replication
+	err := suite.store1.Store(session)
+	suite.NoError(err)
+	suite.waitForSessionInCache(sessionID)
+
+	// Delete from store1
+	err = suite.store1.Delete(sessionID)
+	suite.NoError(err)
+
+	// Wait for deletion to propagate via watch
+	suite.waitForSessionRemovedFromCache(sessionID)
+
+	// Verify session is actually deleted
+	_, err = suite.store2.Get(sessionID)
+	suite.Error(err, "Session should not be accessible after deletion")
+}
+
+func (suite *ConsulReplicationTestSuite) TestWatchHandlesMultipleSessions() {
+	sessions := []*Session{
+		{ID: "multi-1", NodeAddr: "192.168.1.1:2222", HostUser: "user1"},
+		{ID: "multi-2", NodeAddr: "192.168.1.2:2222", HostUser: "user2"},
+		{ID: "multi-3", NodeAddr: "192.168.1.3:2222", HostUser: "user3"},
+	}
+
+	// Store all sessions in store1
+	for _, session := range sessions {
+		err := suite.store1.Store(session)
+		suite.NoError(err)
+	}
+	defer func() {
+		for _, session := range sessions {
+			suite.store1.Delete(session.ID)
+		}
+	}()
+
+	// Wait for all sessions to propagate via watch
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		assert := assert.New(t)
+		for _, session := range sessions {
+			assert.True(suite.store2.HasInCache(session.ID), "Session %s should be in store2's cache", session.ID)
+		}
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify data integrity for all sessions
+	for _, session := range sessions {
+		retrievedSession, err := suite.store2.Get(session.ID)
+		suite.NoError(err)
+		suite.Equal(session.ID, retrievedSession.ID)
+		suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
+		suite.Equal(session.HostUser, retrievedSession.HostUser)
+	}
+}
+
+// Helper method to wait for session to appear in cache via watch
+func (suite *ConsulReplicationTestSuite) waitForSessionInCache(sessionID string) {
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		assert := assert.New(t)
+		assert.True(suite.store2.HasInCache(sessionID), "Session should be in store2's cache via watch")
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+// Helper method to wait for session to be removed from cache via watch
+func (suite *ConsulReplicationTestSuite) waitForSessionRemovedFromCache(sessionID string) {
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		assert := assert.New(t)
+		assert.False(suite.store2.HasInCache(sessionID), "Session should be removed from store2's cache via watch")
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+
+func TestConsulReplicationTestSuite(t *testing.T) {
+	suite.Run(t, new(ConsulReplicationTestSuite))
 }

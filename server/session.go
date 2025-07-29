@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	reflect "reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/avast/retry-go/v4"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/api/watch"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	log "github.com/sirupsen/logrus"
@@ -130,14 +132,120 @@ type SessionStore interface {
 	BatchDelete(sessionIDs []string) error
 	// List all sessions (for cleanup and management)
 	List() ([]*Session, error)
+	// Close cleans up resources and stops background processes
+	Close() error
 }
 
-// consulSessionStore implements SessionStore using Consul KV
+// sessionCache provides thread-safe in-memory caching for sessions
+type sessionCache struct {
+	sessions map[string]*Session
+	mutex    sync.RWMutex
+	logger   log.FieldLogger
+}
+
+// newSessionCache creates a new session cache
+func newSessionCache(logger log.FieldLogger) *sessionCache {
+	return &sessionCache{
+		sessions: make(map[string]*Session),
+		logger:   logger,
+	}
+}
+
+// Get retrieves a session from cache
+func (c *sessionCache) Get(sessionID string) (*Session, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	session, exists := c.sessions[sessionID]
+	return session, exists
+}
+
+// Has checks if a session exists in cache without retrieving it (useful for testing)
+func (c *sessionCache) Has(sessionID string) bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	_, exists := c.sessions[sessionID]
+	return exists
+}
+
+// Set stores a session in cache
+func (c *sessionCache) Set(sessionID string, session *Session) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.sessions[sessionID] = session
+	c.logger.WithField("session", sessionID).Debug("cached session")
+}
+
+// Delete removes a session from cache
+func (c *sessionCache) Delete(sessionID string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	delete(c.sessions, sessionID)
+	c.logger.WithField("session", sessionID).Debug("removed session from cache")
+}
+
+// BatchDelete removes multiple sessions from cache
+func (c *sessionCache) BatchDelete(sessionIDs []string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	for _, sessionID := range sessionIDs {
+		delete(c.sessions, sessionID)
+	}
+	c.logger.WithField("count", len(sessionIDs)).Debug("batch removed sessions from cache")
+}
+
+// ReplaceAll atomically replaces all sessions in cache
+func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updated, deleted int) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	// Calculate changes for logging
+	for sessionID, newSession := range newSessions {
+		if oldSession, exists := c.sessions[sessionID]; exists {
+			if !reflect.DeepEqual(oldSession, newSession) {
+				updated++
+			}
+		} else {
+			added++
+		}
+	}
+
+	// Count deleted sessions
+	for sessionID := range c.sessions {
+		if _, exists := newSessions[sessionID]; !exists {
+			deleted++
+		}
+	}
+
+	// Replace the entire session map atomically
+	c.sessions = newSessions
+
+	if added > 0 || updated > 0 || deleted > 0 {
+		c.logger.WithFields(log.Fields{
+			"total":   len(newSessions),
+			"added":   added,
+			"updated": updated,
+			"deleted": deleted,
+		}).Info("updated session cache")
+	}
+
+	return added, updated, deleted
+}
+
+// consulSessionStore implements SessionStore using Consul KV with hybrid read-through cache
 type consulSessionStore struct {
 	client    *api.Client
 	logger    log.FieldLogger
 	ttl       time.Duration
 	keyPrefix string
+	// Hybrid cache for instant lookups with fallback to Consul
+	cache *sessionCache
+	// Watch management
+	watchPlan *watch.Plan
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
@@ -179,11 +287,17 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger log.Fie
 		logger:    logger,
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
+		cache:     newSessionCache(logger),
 	}
 
 	// Register the node with Consul
 	if err := store.registerNode(); err != nil {
 		return nil, fmt.Errorf("failed to register node with consul: %w", err)
+	}
+
+	// Initialize session replication by starting the watch
+	if err := store.startSessionWatch(config); err != nil {
+		return nil, fmt.Errorf("failed to start session watch: %w", err)
 	}
 
 	return store, nil
@@ -250,27 +364,42 @@ func (c *consulSessionStore) Store(session *Session) error {
 		return err
 	}
 
-	// Log success only once, after all retries are done
+	// Immediately update local cache for strong consistency
+	c.cache.Set(session.ID, session)
+
 	c.logger.WithFields(log.Fields{
 		"session": session.ID,
 		"node":    session.NodeAddr,
 		"key":     kvStoreKey,
-	}).Debug("stored session data in consul")
+	}).Debug("stored session data in consul and cache")
 
 	return nil
 }
 
-// Get complete session data from Consul
+// Get session data with hybrid read-through cache
 func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("session ID cannot be empty")
 	}
 
-	// Outside retry: deterministic operations
-	kvStoreKey := c.SessionKey(sessionID)
-	var session *Session
+	// Try local cache first for instant lookup
+	if session, exists := c.cache.Get(sessionID); exists {
+		c.logger.WithFields(log.Fields{
+			"session": sessionID,
+			"node":    session.NodeAddr,
+		}).Debug("retrieved session data from cache")
+		return session, nil
+	}
 
-	// Inside retry: only network operations
+	// Cache miss - fetch from Consul for strong consistency
+	return c.getFromConsulAndCache(sessionID)
+}
+
+// getFromConsulAndCache fetches session from Consul and updates local cache
+func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, error) {
+	kvStoreKey := c.SessionKey(sessionID)
+
+	var session *Session
 	err := retry.Do(
 		func() error {
 			kvPair, _, err := c.client.KV().Get(kvStoreKey, nil)
@@ -281,18 +410,19 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 				return fmt.Errorf("session %s not found", sessionID)
 			}
 
-			session = &Session{}
-			if err := json.Unmarshal(kvPair.Value, session); err != nil {
+			var s Session
+			if err := json.Unmarshal(kvPair.Value, &s); err != nil {
 				return fmt.Errorf("failed to unmarshal session data: %w", err)
 			}
 
+			session = &s
 			return nil
 		},
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
 			c.logger.WithFields(log.Fields{
-				"operation": "get",
+				"operation": "get_from_consul",
 				"attempt":   n + 1,
 				"error":     err,
 			}).Debug("retrying consul get operation")
@@ -303,11 +433,13 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 		return nil, err
 	}
 
-	// Log success only once, after all retries are done
+	// Update local cache with fetched data
+	c.cache.Set(sessionID, session)
+
 	c.logger.WithFields(log.Fields{
 		"session": sessionID,
 		"node":    session.NodeAddr,
-	}).Debug("retrieved session data from consul")
+	}).Debug("retrieved session data from consul and cached")
 
 	return session, nil
 }
@@ -345,11 +477,13 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 		return err
 	}
 
-	// Log success only once, after all retries are done
+	// Immediately remove from local cache for strong consistency
+	c.cache.Delete(sessionID)
+
 	c.logger.WithFields(log.Fields{
 		"session": sessionID,
 		"key":     kvStoreKey,
-	}).Debug("deleted session data from consul")
+	}).Debug("deleted session data from consul and cache")
 
 	return nil
 }
@@ -372,7 +506,10 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 		}
 	}
 
-	c.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from consul")
+	// Immediately remove from local cache for strong consistency
+	c.cache.BatchDelete(sessionIDs)
+
+	c.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from consul and cache")
 	return nil
 }
 
@@ -466,6 +603,11 @@ func (c *consulSessionStore) SessionsKey() string {
 	return path.Join(c.keyPrefix, "sessions")
 }
 
+// KeyPrefix returns the root key prefix used by this store (useful for cleanup in tests)
+func (c *consulSessionStore) KeyPrefix() string {
+	return c.keyPrefix + "/"
+}
+
 // registerNode registers this node with Consul
 func (c *consulSessionStore) registerNode() error {
 	_, err := c.client.Catalog().Register(&api.CatalogRegistration{
@@ -487,6 +629,73 @@ func (c *consulSessionStore) createConsulLockSession(sessionID string) *api.Sess
 		Behavior:  api.SessionBehaviorDelete,
 		LockDelay: time.Second,
 	}
+}
+
+// startSessionWatch initializes the Consul watch to maintain full session replica
+func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
+	// Create watch plan for all sessions
+	params := map[string]interface{}{
+		"type":   "keyprefix",
+		"prefix": c.SessionsKey(),
+		"token":  cfg.Token,
+	}
+
+	watchPlan, err := watch.Parse(params)
+	if err != nil {
+		return fmt.Errorf("failed to create watch plan: %w", err)
+	}
+
+	// Set up the handler to update local session replica
+	watchPlan.Handler = func(idx uint64, data interface{}) {
+		if kvPairs, ok := data.(api.KVPairs); ok {
+			c.updateSessionReplica(kvPairs)
+		}
+	}
+
+	c.watchPlan = watchPlan
+
+	// Start watching in background
+	go func() {
+		c.logger.Info("starting session watch for full replication")
+		if err := watchPlan.RunWithConfig(cfg.Address, cfg); err != nil {
+			c.logger.WithError(err).Error("session watch failed")
+		}
+	}()
+
+	return nil
+}
+
+// updateSessionReplica updates the local session replica based on Consul data
+func (c *consulSessionStore) updateSessionReplica(kvPairs api.KVPairs) {
+	// Create new session map from Consul data
+	newSessions := make(map[string]*Session)
+
+	for _, kvPair := range kvPairs {
+		var session Session
+		if err := json.Unmarshal(kvPair.Value, &session); err != nil {
+			c.logger.WithError(err).WithField("key", kvPair.Key).Warn("failed to unmarshal session data")
+			continue
+		}
+
+		// Use session.ID from the unmarshaled value directly
+		newSessions[session.ID] = &session
+	}
+
+	// Atomically replace cache contents and get change statistics
+	c.cache.ReplaceAll(newSessions)
+}
+
+// Close gracefully stops the session watch and cleans up resources
+func (c *consulSessionStore) Close() error {
+	if c.watchPlan != nil {
+		c.watchPlan.Stop()
+	}
+	return nil
+}
+
+// HasInCache checks if a session exists in the local cache (useful for testing watch functionality)
+func (c *consulSessionStore) HasInCache(sessionID string) bool {
+	return c.cache.Has(sessionID)
 }
 
 // memorySessionStore is a simple in-memory implementation for testing/fallback
@@ -565,6 +774,11 @@ func (m *memorySessionStore) List() ([]*Session, error) {
 	return sessions, nil
 }
 
+// Close cleans up memory store resources (no-op for memory store)
+func (m *memorySessionStore) Close() error {
+	return nil
+}
+
 // NewSession creates Session from session parameters
 func NewSession(sessionID, nodeAddr, hostUser string, hostPublicKeys, clientAuthorizedKeys [][]byte) *Session {
 	var hostKeys []ssh.PublicKey
@@ -621,7 +835,6 @@ func WithSessionManagerConsulURL(consulURL *url.URL) SessionManagerOption {
 		c.ConsulURL = consulURL
 	}
 }
-
 
 // WithSessionManagerConsulTTL sets the session TTL for consul mode
 func WithSessionManagerConsulTTL(ttl time.Duration) SessionManagerOption {
@@ -773,25 +986,26 @@ func (sm *SessionManager) Shutdown(nodeAddr string) error {
 		return fmt.Errorf("failed to list sessions for cleanup: %w", err)
 	}
 
-	if len(sessions) == 0 {
-		return nil
-	}
+	if len(sessions) > 0 {
+		// Collect session IDs for this node
+		var sessionIDsToDelete []string
+		for _, session := range sessions {
+			if session.NodeAddr == nodeAddr {
+				sessionIDsToDelete = append(sessionIDsToDelete, session.ID)
+			}
+		}
 
-	// Collect session IDs for this node
-	var sessionIDsToDelete []string
-	for _, session := range sessions {
-		if session.NodeAddr == nodeAddr {
-			sessionIDsToDelete = append(sessionIDsToDelete, session.ID)
+		// Batch delete sessions for this node
+		if len(sessionIDsToDelete) > 0 {
+			if err := sm.store.BatchDelete(sessionIDsToDelete); err != nil {
+				return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
+			}
 		}
 	}
 
-	if len(sessionIDsToDelete) == 0 {
-		return nil
-	}
-
-	// Batch delete sessions
-	if err := sm.store.BatchDelete(sessionIDsToDelete); err != nil {
-		return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
+	// Close the store to clean up resources (e.g., stop watch goroutines)
+	if err := sm.store.Close(); err != nil {
+		return fmt.Errorf("failed to close session store: %w", err)
 	}
 
 	return nil

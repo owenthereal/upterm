@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
-	consulapi "github.com/hashicorp/consul/api"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/testhelpers"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
@@ -217,53 +217,12 @@ func TestEmbedded(t *testing.T) {
 
 func TestConsul(t *testing.T) {
 	// Skip if Consul is not available
-	if !isConsulAvailable() {
+	if !testhelpers.IsConsulAvailable() {
 		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
 }
 
-// isConsulAvailable checks if Consul is running and accessible
-func isConsulAvailable() bool {
-	config := consulapi.DefaultConfig()
-	consulURLStr := consulURL()
-	u, err := url.Parse(consulURLStr)
-	if err != nil {
-		return false
-	}
-	config.Address = u.Host
-
-	client, err := consulapi.NewClient(config)
-	if err != nil {
-		return false
-	}
-
-	// Try to get leader with timeout - simple health check
-	ctx, cancel := context.WithTimeout(context.Background(), consulHealthCheckTimeout)
-	defer cancel()
-
-	done := make(chan bool, 1)
-	go func() {
-		_, err = client.Status().Leader()
-		done <- err == nil
-	}()
-
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func consulURL() string {
-	addr := os.Getenv("CONSUL_URL")
-	if addr == "" {
-		addr = "http://localhost:8500"
-	}
-
-	return addr
-}
 
 func mustParseURL(urlStr string) *url.URL {
 	u, err := url.Parse(urlStr)
@@ -402,7 +361,7 @@ func (s *Server) start() error {
 		sm, err = server.NewSessionManager(
 			routing.ModeConsul,
 			server.WithSessionManagerLogger(logger),
-			server.WithSessionManagerConsulURL(mustParseURL(consulURL())),
+			server.WithSessionManagerConsulURL(mustParseURL(testhelpers.ConsulURL())),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create consul session manager: %w", err)
