@@ -360,10 +360,10 @@ func (suite *ConsulStoreTestSuite) SetupSuite() {
 
 func (suite *ConsulStoreTestSuite) TearDownSuite() {
 	if suite.store1 != nil {
-		suite.store1.Close()
+		_ = suite.store1.Close()
 	}
 	if suite.store2 != nil {
-		suite.store2.Close()
+		_ = suite.store2.Close()
 	}
 	if suite.client != nil {
 		// Clean up test data using the actual key prefix from the store
@@ -428,7 +428,9 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	// Store session in store1
 	err := suite.store1.Store(session)
 	suite.NoError(err)
-	defer suite.store1.Delete(sessionID)
+	defer func() {
+		_ = suite.store1.Delete(sessionID)
+	}()
 
 	// Wait for watch to propagate to store2's cache
 	suite.waitForSessionInCache(sessionID)
@@ -473,12 +475,12 @@ func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
 func (suite *ConsulStoreTestSuite) TestSessionNotFoundNoRetry() {
 	// Test that session not found errors are not retried unnecessarily
 	nonExistentSessionID := fmt.Sprintf("nonexistent-%d", time.Now().UnixNano())
-	
+
 	// This should fail quickly without retries
 	start := time.Now()
 	_, err := suite.store1.Get(nonExistentSessionID)
 	duration := time.Since(start)
-	
+
 	suite.Error(err)
 	suite.Contains(err.Error(), "not found")
 	// Should fail quickly (under 100ms) since we don't retry "not found" errors
@@ -499,7 +501,7 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 	}
 	defer func() {
 		for _, session := range sessions {
-			suite.store1.Delete(session.ID)
+			_ = suite.store1.Delete(session.ID)
 		}
 	}()
 
