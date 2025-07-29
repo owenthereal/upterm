@@ -79,7 +79,6 @@ jobs:
         run: make vet
   build-and-release:
     name: Build and Release (Snapshot)
-    needs: [build, test-macos, test-ubuntu, vet]
     uses: ./.github/workflows/build-and-release.yaml
     with:
       snapshot: true
