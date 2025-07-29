@@ -21,12 +21,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// SessionNotFoundError represents a non-retryable session not found error
-type SessionNotFoundError struct {
+// ErrSessionNotFound represents a non-retryable session not found error
+type ErrSessionNotFound struct {
 	SessionID string
 }
 
-func (e *SessionNotFoundError) Error() string {
+func (e *ErrSessionNotFound) Error() string {
 	return fmt.Sprintf("session %s not found", e.SessionID)
 }
 
@@ -418,7 +418,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
 			if kvPair == nil {
-				return &SessionNotFoundError{SessionID: sessionID}
+				return &ErrSessionNotFound{SessionID: sessionID}
 			}
 
 			var s Session
@@ -433,7 +433,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 		retry.Delay(DefaultRetryDelay),
 		retry.RetryIf(func(err error) bool {
 			// Don't retry if session is not found - it's a business logic error, not a network error
-			var notFoundErr *SessionNotFoundError
+			var notFoundErr *ErrSessionNotFound
 			return !errors.As(err, &notFoundErr)
 		}),
 		retry.OnRetry(func(n uint, err error) {
@@ -760,7 +760,7 @@ func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
 
 	session, exists := m.sessions[sessionID]
 	if !exists {
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		return nil, &ErrSessionNotFound{SessionID: sessionID}
 	}
 	return session, nil
 }
