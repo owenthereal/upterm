@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	DefaultSessionTTL    = 30 * time.Minute       // Default TTL for session data in Consul
-	DefaultConsulTimeout = 5 * time.Second        // Default timeout for Consul operations
-	DefaultMaxRetries    = 3                      // Default number of retries for Consul operations
-	DefaultRetryDelay    = 100 * time.Millisecond // Default delay between retries
+	DefaultSessionTTL      = 30 * time.Minute       // Default TTL for session data in Consul
+	DefaultConsulTimeout   = 5 * time.Second        // Default timeout for Consul operations
+	DefaultWatchTimeout    = 10 * time.Minute       // Default timeout for Consul watch operations (long-polling)
+	DefaultMaxRetries      = 3                      // Default number of retries for Consul operations
+	DefaultRetryDelay      = 100 * time.Millisecond // Default delay between retries
 )
 
 // Session represents the complete session information
@@ -654,10 +655,23 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 
 	c.watchPlan = watchPlan
 
+	// Create a separate config for watch operations with longer timeout
+	// Consul watches use long-polling and need extended timeouts
+	watchConfig := *cfg // Copy the config
+	watchConfig.HttpClient = &http.Client{
+		Timeout: DefaultWatchTimeout, // Allow long-polling for Consul watches
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
+		},
+	}
+
 	// Start watching in background
 	go func() {
 		c.logger.Info("starting session watch for full replication")
-		if err := watchPlan.RunWithConfig(cfg.Address, cfg); err != nil {
+		if err := watchPlan.RunWithConfig(watchConfig.Address, &watchConfig); err != nil {
 			c.logger.WithError(err).Error("session watch failed")
 		}
 	}()
