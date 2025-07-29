@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
-	consulapi "github.com/hashicorp/consul/api"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/testhelpers"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
@@ -217,47 +217,19 @@ func TestEmbedded(t *testing.T) {
 
 func TestConsul(t *testing.T) {
 	// Skip if Consul is not available
-	if !isConsulAvailable() {
-		t.Skip("Consul not available - set CONSUL_ADDR or ensure Consul is running on localhost:8500")
+	if !testhelpers.IsConsulAvailable() {
+		t.Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
 }
 
-// isConsulAvailable checks if Consul is running and accessible
-func isConsulAvailable() bool {
-	config := consulapi.DefaultConfig()
-	config.Address = consulAddr()
 
-	client, err := consulapi.NewClient(config)
+func mustParseURL(urlStr string) *url.URL {
+	u, err := url.Parse(urlStr)
 	if err != nil {
-		return false
+		panic(fmt.Sprintf("failed to parse URL %s: %v", urlStr, err))
 	}
-
-	// Try to get leader with timeout - simple health check
-	ctx, cancel := context.WithTimeout(context.Background(), consulHealthCheckTimeout)
-	defer cancel()
-
-	done := make(chan bool, 1)
-	go func() {
-		_, err = client.Status().Leader()
-		done <- err == nil
-	}()
-
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func consulAddr() string {
-	addr := os.Getenv("CONSUL_ADDR")
-	if addr == "" {
-		addr = "localhost:8500"
-	}
-
-	return addr
+	return u
 }
 
 func funcName(i interface{}) string {
@@ -389,8 +361,7 @@ func (s *Server) start() error {
 		sm, err = server.NewSessionManager(
 			routing.ModeConsul,
 			server.WithSessionManagerLogger(logger),
-			server.WithSessionManagerConsulAddr(consulAddr()),
-			server.WithSessionManagerConsulPrefix("uptermd-ftest/sessions"),
+			server.WithSessionManagerConsulURL(mustParseURL(testhelpers.ConsulURL())),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create consul session manager: %w", err)
