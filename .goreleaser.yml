@@ -131,8 +131,6 @@ docker_manifests:
       - "{{ .Env.DOCKER_REPO }}:latest-arm64"
 checksum:
   name_template: "checksums.txt"
-signs:
-  - artifacts: checksum
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 release:
