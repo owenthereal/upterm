@@ -12,6 +12,8 @@ builds:
       - "arm"
       - "arm64"
     main: ./cmd/upterm
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Tag}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
   - id: uptermd
     env:
       - CGO_ENABLED=0
@@ -22,6 +24,8 @@ builds:
       - "arm64"
     main: ./cmd/uptermd
     binary: uptermd
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Tag}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
 archives:
   - id: upterm
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
@@ -48,16 +52,24 @@ homebrew_casks:
     commit_author:
       name: Owen Ou
       email: o@owenou.com
+    conflicts:
+      - formula: upterm
     homepage: https://upterm.dev
     description: Instant Terminal Sharing
     directory: Casks
     ids:
       - upterm
     license: "Apache 2.0"
-    custom_block: |
-      head "https://github.com/owenthereal/upterm.git"
     manpages:
-      - "etc/man/man1/upterm*.1"
+      - "etc/man/man1/upterm.1"
+      - "etc/man/man1/upterm-host.1"
+      - "etc/man/man1/upterm-proxy.1"
+      - "etc/man/man1/upterm-session.1"
+      - "etc/man/man1/upterm-session-current.1"
+      - "etc/man/man1/upterm-session-info.1"
+      - "etc/man/man1/upterm-session-list.1"
+      - "etc/man/man1/upterm-upgrade.1"
+      - "etc/man/man1/upterm-version.1"
     completions:
       bash: "etc/completion/upterm.bash_completion.sh"
       zsh: "etc/completion/upterm.zsh_completion"
@@ -119,6 +131,12 @@ docker_manifests:
       - "{{ .Env.DOCKER_REPO }}:latest-arm64"
 checksum:
   name_template: "checksums.txt"
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .Binary }}_{{ .Os }}_{{ .Arch }}_sbom.spdx.json"
+signs:
+  - artifacts: checksum
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 release:
