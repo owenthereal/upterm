@@ -28,7 +28,21 @@ import (
 
 // Version is the semantic version of upterm/uptermd
 // This is the single source of truth for both client and server versions
-const Version = "0.15.0"
+// Can be overridden at build time with ldflags
+var Version = "0.0.0+dev"
+
+// Build-time variables set via ldflags
+var (
+	GitCommit string // Git commit SHA
+	Date      string // Build date
+)
+
+// BuildInfo contains version and build information
+type BuildInfo struct {
+	Version   string `json:"version"`
+	GitCommit string `json:"git_commit,omitempty"`
+	BuildDate string `json:"build_date,omitempty"`
+}
 
 // Parse parses a version string using hashicorp's go-version library
 func Parse(v string) (*version.Version, error) {
@@ -72,6 +86,29 @@ func Current() *version.Version {
 // String returns the current version as a string
 func String() string {
 	return Version
+}
+
+// GetBuildInfo returns comprehensive build information
+func GetBuildInfo() BuildInfo {
+	return BuildInfo{
+		Version:   Version,
+		GitCommit: GitCommit,
+		BuildDate: Date,
+	}
+}
+
+// PrintVersion prints version information with the given binary name
+func PrintVersion(binaryName string) {
+	buildInfo := GetBuildInfo()
+	fmt.Printf("%s version %s\n", binaryName, buildInfo.Version)
+
+	if buildInfo.GitCommit != "" {
+		fmt.Printf("Git commit: %s\n", buildInfo.GitCommit)
+	}
+
+	if buildInfo.BuildDate != "" {
+		fmt.Printf("Build date: %s\n", buildInfo.BuildDate)
+	}
 }
 
 // ServerSSHVersion returns the SSH server version string with embedded version
