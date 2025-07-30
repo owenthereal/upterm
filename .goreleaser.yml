@@ -73,6 +73,12 @@ homebrew_casks:
     completions:
       bash: "etc/completion/upterm.bash_completion.sh"
       zsh: "etc/completion/upterm.zsh_completion"
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/upterm"]
+          end
 dockers:
   - image_templates:
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
