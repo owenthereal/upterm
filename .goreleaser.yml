@@ -131,10 +131,6 @@ docker_manifests:
       - "{{ .Env.DOCKER_REPO }}:latest-arm64"
 checksum:
   name_template: "checksums.txt"
-sboms:
-  - artifacts: archive
-    documents:
-      - "{{ .Binary }}_{{ .Os }}_{{ .Arch }}_sbom.spdx.json"
 signs:
   - artifacts: checksum
 snapshot:
