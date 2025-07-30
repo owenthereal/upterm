@@ -29,7 +29,7 @@ import (
 // Version is the semantic version of upterm/uptermd
 // This is the single source of truth for both client and server versions
 // Can be overridden at build time with ldflags
-var Version = "dev"
+var Version = "0.0.0-dev"
 
 // Build-time variables set via ldflags
 var (
