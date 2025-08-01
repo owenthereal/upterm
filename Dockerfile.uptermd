@@ -31,6 +31,3 @@ ENTRYPOINT ["uptermd-fly"]
 FROM base AS pre-built-binary
 COPY uptermd /app/
 ENTRYPOINT ["uptermd"]
-
-# Default stage - Fly deployment
-FROM uptermd-fly
