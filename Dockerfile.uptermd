@@ -29,7 +29,7 @@ ENTRYPOINT ["uptermd-fly"]
 
 # Pre-built binary stage (used by GoReleaser)
 FROM base AS pre-built-binary
-COPY uptermd /app/
+COPY --from=builder /go/bin/uptermd /app/
 ENTRYPOINT ["uptermd"]
 
 # Default stage - Fly deployment
