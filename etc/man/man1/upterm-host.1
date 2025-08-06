@@ -27,7 +27,7 @@ private key. To authorize client connections, specify a authorized_key file with
 
 .PP
 \fB--codeberg-user\fP=[]
-	Authorize specified Codeberg users by allowing their public keys to connect.
+	Authorize specified Codeberg users by allowing their public keys to connect. For self-hosted installations, set CODEBERG_HOST, along with the protocol prefix (e.g., https://git.example.com).
 
 .PP
 \fB-f\fP, \fB--force-command\fP=""
@@ -35,11 +35,11 @@ private key. To authorize client connections, specify a authorized_key file with
 
 .PP
 \fB--github-user\fP=[]
-	Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
+	Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details. For self-hosted installations, set GITHUB_HOST, along with the protocol prefix (e.g., https://git.example.com).
 
 .PP
 \fB--gitlab-user\fP=[]
-	Authorize specified GitLab users by allowing their public keys to connect.
+	Authorize specified GitLab users by allowing their public keys to connect. For self-hosted installations, set GITLAB_HOST, along with the protocol prefix (e.g., https://git.example.com).
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]
@@ -63,7 +63,7 @@ private key. To authorize client connections, specify a authorized_key file with
 
 .PP
 \fB--srht-user\fP=[]
-	Authorize specified SourceHut users by allowing their public keys to connect.
+	Authorize specified SourceHut users by allowing their public keys to connect. For self-hosted installations, set SOURCEHUT_HOST, along with the protocol prefix (e.g., https://git.example.com).
 
 
 .SH EXAMPLE
