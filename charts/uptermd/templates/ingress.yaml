@@ -1,5 +1,5 @@
 {{- if .Values.websocket.enabled }}
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "upterm.fullname" . }}
@@ -12,6 +12,9 @@ metadata:
     nginx.ingress.kubernetes.io/limit-connections: "4"
     nginx.ingress.kubernetes.io/limit-rps: "5"
     cert-manager.io/issuer: {{ include "upterm.fullname" . }}-letsencrypt
+    {{- with .Values.websocket.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
     tls:
       - hosts:
@@ -21,7 +24,11 @@ spec:
       - host: {{ .Values.hostname }}
         http:
           paths:
-          - backend:
-              serviceName: {{ include "upterm.fullname" . }}
-              servicePort: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "upterm.fullname" . }}
+                port:
+                  number: 80
 {{- end }}

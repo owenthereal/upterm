@@ -40,6 +40,8 @@ securityContext: {}
 
 service:
   type: ClusterIP
+  # Set to LoadBalancer to accept traffic from outside the cluster
+  # type: LoadBalancer
   annotations: {}
 
 resources: 
@@ -51,7 +53,7 @@ resources:
     memory: 512Mi
 
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 1
   maxReplicas: 10
   targetCPUUtilizationPercentage: 80
@@ -72,3 +74,5 @@ websocket:
   enabled: false
   cert_manager_acme_email: your_email
   ingress_nginx_ingress_class: nginx
+  ingress:
+    annotations: {}
