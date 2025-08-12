@@ -52,7 +52,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.7.0
 	github.com/pires/go-proxyproto v0.8.1
-	github.com/spf13/pflag v1.0.6
+	github.com/spf13/pflag v1.0.7
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.10.0
 	github.com/tj/go-update v2.2.4+incompatible
