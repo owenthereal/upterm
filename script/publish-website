@@ -2,6 +2,17 @@
 
 set -e
 
+# Cleanup function
+cleanup() {
+    if [ -d "$tmp_dir" ]; then
+        rm -rf "$tmp_dir"
+    fi
+    if [ -n "$current_branch" ] && [ "$(git rev-parse --abbrev-ref HEAD)" != "$current_branch" ]; then
+        git checkout "$current_branch" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
 current_branch=$(git rev-parse --abbrev-ref HEAD)
 tmp_dir=$(mktemp -d -t upterm-XXXXXXXXXX)
 upterm_dir=${PWD}
@@ -9,14 +20,19 @@ upterm_dir=${PWD}
 pushd  $tmp_dir
 helm package $upterm_dir/charts/uptermd && helm repo index .
 cp $upterm_dir/README.md index.md
+cp -r $upterm_dir/docs .
+cp $upterm_dir/fly.example.toml .
 popd > /dev/null
 
 git checkout gh-pages
-cp $tmp_dir/* .
+cp -r $tmp_dir/* .
+cp -r $tmp_dir/.* . 2>/dev/null || true
 
 git add .
-git commit -m "Generated website"
-git push origin gh-pages
-
-git checkout $current_branch
+if git diff --staged --quiet; then
+    echo "No changes to commit"
+else
+    git commit -m "Generated website"
+    git push origin gh-pages
+fi
 
