@@ -168,10 +168,32 @@ helm repo update
 helm install uptermd upterm/uptermd
 ```
 
+### Fly.io
+
+The cheapest way to deploy a worry-free [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Fly.io](https://fly.io).
+Fly offers a generous free tier and excellent global performance. The official uptermd community server is hosted on Fly.
+
+1. Install the Fly CLI and authenticate:
+
+```console
+curl -L https://fly.io/install.sh | sh
+flyctl auth login
+```
+
+2. Refer to the [`fly.toml`](./fly.toml) file as an example deployment configuration.
+
+3. Deploy your uptermd server:
+
+```console
+flyctl deploy
+```
+
+Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
+
 ### Heroku
 
-The cheapest way to deploy a worry-free [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Heroku](https://heroku.com).
-Heroku offers [free Dyno hours](https://www.heroku.com/pricing) which should be sufficient for most casual uses.
+You can deploy an [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) to [Heroku](https://heroku.com).
+Note that Heroku discontinued their free tier in November 2022, so this option now requires paid plans.
 
 You can deploy with one click of the following button:
 
