@@ -30,18 +30,24 @@ type webSocketProxy struct {
 
 func webHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/getting-started") {
-			h.ServeHTTP(w, r)
+		switch {
+		case r.URL.Path == "/health":
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
 			return
-		}
-
-		w.Header().Add("Content-Type", "text/plain")
-		// TODO: better getting-started guide
-		data := `1. Install the upterm CLI by following https://github.com/owenthereal/upterm#installation.
+		case strings.HasPrefix(r.URL.Path, "/getting-started"):
+			w.Header().Add("Content-Type", "text/plain")
+			// TODO: better getting-started guide
+			data := `1. Install the upterm CLI by following https://github.com/owenthereal/upterm#installation.
 2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.
 3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
 `
-		_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+			return
+		default:
+			h.ServeHTTP(w, r)
+		}
 	})
 }
 

@@ -180,7 +180,7 @@ curl -L https://fly.io/install.sh | sh
 flyctl auth login
 ```
 
-2. Refer to the [`fly.toml`](./fly.toml) file as an example deployment configuration.
+2. Copy and customize the [`fly.example.toml`](./fly.example.toml) file to `fly.toml` for your deployment configuration.
 
 3. Deploy your uptermd server:
 
