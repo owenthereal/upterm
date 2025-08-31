@@ -52,8 +52,6 @@ homebrew_casks:
     commit_author:
       name: Owen Ou
       email: o@owenou.com
-    conflicts:
-      - formula: upterm
     homepage: https://upterm.dev
     description: Instant Terminal Sharing
     directory: Casks
