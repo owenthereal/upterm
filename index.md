@@ -71,18 +71,19 @@ Host a session with specified client public key(s) authorized to connect:
 upterm host --authorized-key PATH_TO_PUBLIC_KEY
 ```
 
-Authorize specified GitHub, GitLab, or SourceHut users with their corresponding public keys:
+Authorize specified GitHub, GitLab, SourceHut, Codeberg users with their corresponding public keys:
 
 ```console
 upterm host --github-user username
 upterm host --gitlab-user username
 upterm host --srht-user username
+upterm host --codeberg-user username
 ```
 
 ### Force command
 
 Host a session initiating `tmux new -t pair-programming`, while ensuring clients join with `tmux attach -t pair-programming`.
-This mirrors functionarity provided by tmate:
+This mirrors functionality provided by tmate:
 
 ```console
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
@@ -101,6 +102,28 @@ Clients can connect to the host session via WebSocket as well:
 ```console
 ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
+
+### Debug GitHub Actions
+
+`upterm` can be integrated with GitHub Actions to enable real-time SSH debugging, allowing you to interact directly with the runner system during workflow execution. This is achieved through [action-upterm](https://github.com/owenthereal/action-upterm), which sets up an `upterm` session within your CI pipeline.
+
+To get started, include `action-upterm` in your GitHub Actions workflow as follows:
+
+```yaml
+name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup upterm session
+      uses: owenthereal/action-upterm@v1
+```
+
+This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
+
+For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
 
 ## :bulb: Tips
 
@@ -175,7 +198,7 @@ Provision uptermd in Heroku Private Spaces. Follow instructions.
 TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/heroku-install
 ```
 
-You **must** use WebScoket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
+You **must** use WebSocket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
 This is how you host a session and join a session:
 
 Use the Heroku-deployed Uptermd server via WebSocket
@@ -214,7 +237,61 @@ systemctl daemon-reload
 systemctl start uptermd
 ```
 
-## :balance_scale: Comparasion with Prior Arts
+### Traefik
+
+Below is an example `docker-compose` configuration for deploying `uptermd` behind [Traefik](https://doc.traefik.io/traefik/), including support for both SSH and WebSocket connections:
+
+```yaml
+services:
+  upterm:
+    build: https://github.com/owenthereal/upterm
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      # SSH over TCP (port 2222)
+      - "traefik.tcp.services.uptermd.loadbalancer.server.port=2222"
+      - "traefik.tcp.services.uptermd.loadbalancer.proxyProtocol.version=2" # required for real IP forwarding over TCP
+      - "traefik.tcp.routers.uptermd.service=uptermd"
+      - "traefik.tcp.routers.uptermd.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.uptermd.entrypoints=uptermd"
+      # WebSocket over HTTPS (port 8443)
+      - "traefik.http.services.uptermd-wss.loadbalancer.server.port=8443"
+      - "traefik.http.routers.uptermd-wss.service=uptermd-wss"
+      - "traefik.http.routers.uptermd-wss.rule=Host(`upterm.example.com`)" # edit as needed
+      - "traefik.http.routers.uptermd-wss.entrypoints=websecure"
+      - "traefik.http.routers.uptermd-wss.tls.certresolver=<your cert resolver here>"
+
+    command:
+      - --ssh-addr=0.0.0.0:2222
+      - --ws-addr=0.0.0.0:8443
+      - --ssh-proxy-protocol
+
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+```
+
+**Important notes:**
+
+- **Proxy Protocol:**
+  The `--ssh-proxy-protocol` flag (or `UPTERMD_SSH_PROXY_PROTOCOL=true` environment variable) tells `uptermd` to expect the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header on incoming SSH connections. This is essential when using Traefik (or other TCP proxies like HAProxy or AWS ELB) to preserve the real client IP address.
+  **If you enable `--ssh-proxy-protocol`, all incoming SSH connections must come through a proxy that supports and is configured to use the PROXY protocol. Direct SSH connections will fail, as `uptermd` will expect the protocol header.**
+
+- **Entrypoints:**
+  Make sure to configure the appropriate [Traefik entrypoints](https://doc.traefik.io/traefik/routing/entrypoints/). This example uses two: one for SSH (`uptermd` on port `2222`) and one for WebSocket/HTTPS (`websecure` on port `443`).
+
+- **WebSocket:**
+  The WebSocket service allows clients to connect to `uptermd` over HTTPS, which is useful in restrictive network environments.
+
+- **Certificates:**
+  Replace `<your cert resolver here>` with your actual Traefik certificate resolver for TLS.
+
+For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
+
+## :balance_scale: Comparison with Prior Arts
 
 Upterm stands as a modern alternative to [Tmate](https://tmate.io).
 
