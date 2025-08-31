@@ -9,6 +9,11 @@ build-target = "uptermd-fly"
 [experimental]
 entrypoint = ["uptermd-fly"]
 
+[vm]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256
+
 [[services]]
 protocol = "tcp"
 internal_port = 2222
@@ -19,6 +24,9 @@ processes = ["app"]
 
 [[services.ports]]
 port = 22
+handlers = ["proxy_proto"]
+proxy_proto_options = { version = "v2" }
+
 [services.concurrency]
 type = "connections"
 hard_limit = 2500
@@ -28,6 +36,7 @@ soft_limit = 2000
 interval = "15s"
 timeout = "2s"
 grace_period = "5s"
+restart_limit = 3
 
 [[services]]
 protocol = "tcp"
@@ -49,3 +58,11 @@ handlers = ["tls", "http"]
 type = "connections"
 hard_limit = 2500
 soft_limit = 2000
+
+[[services.http_checks]]
+interval = "30s"
+timeout = "5s"
+grace_period = "10s"
+restart_limit = 3
+path = "/health"
+protocol = "http"

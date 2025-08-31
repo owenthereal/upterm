@@ -21,20 +21,25 @@ func main() {
 		logger.Fatal("FLY_MACHINE_ID is not set")
 	}
 
-	flyConsulURL := os.Getenv("FLY_CONSUL_URL")
-	if flyConsulURL == "" {
-		logger.Fatal("FLY_CONSUL_URL is not set")
-	}
-
-	// Configure uptermd for Fly.io deployment with Consul routing
+	// Configure uptermd for Fly.io deployment
 	config := map[string]any{
-		"UPTERMD_NODE_ADDR":          fmt.Sprintf("%s.vm.%s.internal:2222", flyMachineID, flyAppName),
 		"UPTERMD_SSH_ADDR":           "0.0.0.0:2222",
 		"UPTERMD_WS_ADDR":            "0.0.0.0:8080",
-		"UPTERMD_HOSTNAME":           "uptermd.upterm.dev",
-		"UPTERMD_ROUTING":            "consul",
-		"UPTERMD_CONSUL_URL":         flyConsulURL,
-		"UPTERMD_CONSUL_SESSION_TTL": "1h",
+		"UPTERMD_NODE_ADDR":          fmt.Sprintf("%s.vm.%s.internal:2222", flyMachineID, flyAppName),
+		"UPTERMD_SSH_PROXY_PROTOCOL": "true",
+	}
+
+	flyConsulURL := os.Getenv("FLY_CONSUL_URL")
+	if flyConsulURL != "" {
+		// Use Consul routing for multi-machine deployments
+		config["UPTERMD_ROUTING"] = "consul"
+		config["UPTERMD_CONSUL_URL"] = flyConsulURL
+		config["UPTERMD_CONSUL_SESSION_TTL"] = "1h"
+		logger.Info("Using Consul routing for multi-machine deployment")
+	} else {
+		// Use embedded routing for single-machine deployments
+		config["UPTERMD_ROUTING"] = "embedded"
+		logger.Info("Using embedded routing for single-machine deployment")
 	}
 
 	// Set environment variables
@@ -44,7 +49,7 @@ func main() {
 		}
 	}
 
-	logger.WithFields(log.Fields(config)).Info("Starting uptermd on Fly.io with Consul routing")
+	logger.WithFields(log.Fields(config)).Info("Starting uptermd on Fly.io")
 
 	if err := command.Root(logger).Execute(); err != nil {
 		logger.Fatal(err)
