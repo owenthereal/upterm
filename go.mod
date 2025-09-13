@@ -36,7 +36,7 @@ require (
 	github.com/prometheus/client_golang v1.23.0
 	github.com/rs/xid v1.6.0
 	github.com/sirupsen/logrus v1.9.3
-	github.com/spf13/cobra v1.9.1
+	github.com/spf13/cobra v1.10.1
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.12 // indirect
 	golang.org/x/crypto v0.39.0
@@ -52,7 +52,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.7.0
 	github.com/pires/go-proxyproto v0.8.1
-	github.com/spf13/pflag v1.0.7
+	github.com/spf13/pflag v1.0.9
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tj/go-update v2.2.4+incompatible
