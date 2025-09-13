@@ -1,15 +1,15 @@
-// +heroku goVersion 1.24
+// +heroku goVersion 1.25.1
 // +heroku install ./cmd/uptermd/...
 
 module github.com/owenthereal/upterm
 
-go 1.24.0
+go 1.25.1
 
 require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/apex/log v1.9.0 // indirect
-	github.com/buger/goterm v1.0.4 // indirect
+	github.com/buger/goterm v1.0.4 // indirect; idirect
 	github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c // indirect
 	github.com/creack/pty v1.1.24
 	github.com/dchest/uniuri v1.2.0
@@ -38,7 +38,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.1
 	github.com/tj/go v1.8.7
-	github.com/ulikunitz/xz v0.5.12 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
 	golang.org/x/crypto v0.39.0
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.8
