@@ -41,7 +41,7 @@ require (
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	golang.org/x/crypto v0.41.0
 	google.golang.org/grpc v1.75.1
-	google.golang.org/protobuf v1.36.8
+	google.golang.org/protobuf v1.36.9
 )
 
 require (
