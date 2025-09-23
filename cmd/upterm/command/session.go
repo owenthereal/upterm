@@ -19,7 +19,8 @@ import (
 )
 
 var (
-	flagAdminSocket string
+	flagAdminSocket  string
+	flagHideClientIp bool
 )
 
 func sessionCmd() *cobra.Command {
@@ -81,6 +82,7 @@ sharing a session with 'upterm host'.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "admin unix domain socket (required)")
+	cmd.PersistentFlags().BoolVarP(&flagHideClientIp, "hide-client-ip", "", false, "hide client IPs from session list")
 
 	return cmd
 }
@@ -294,6 +296,9 @@ func displaySession(session *api.GetSessionResponse) error {
 }
 
 func clientDesc(addr, clientVer, fingerprint string) string {
+	if flagHideClientIp {
+		addr = "[ip hidden]"
+	}
 	return fmt.Sprintf("%s %s %s", addr, clientVer, fingerprint)
 }
 
