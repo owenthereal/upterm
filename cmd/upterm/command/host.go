@@ -171,7 +171,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 	logger.SetOutput(lf)
 
 	var authorizedKeys []*host.AuthorizedKey
+	var restrictedAccess bool
 	if flagAuthorizedKeys != "" {
+		restrictedAccess = true
 		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
 		if err != nil {
 			return fmt.Errorf("error reading authorized keys: %w", err)
@@ -186,6 +188,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		authorizedKeys = append(authorizedKeys, codebergUserKeys...)
 	}
 	if flagGitHubUsers != nil {
+		restrictedAccess = true
 		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
@@ -193,6 +196,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
 	}
 	if flagGitLabUsers != nil {
+		restrictedAccess = true
 		gitLabUserKeys, err := host.GitLabUserAuthorizedKeys(flagGitLabUsers)
 		if err != nil {
 			return fmt.Errorf("error reading GitLab user keys: %w", err)
@@ -200,11 +204,16 @@ func shareRunE(c *cobra.Command, args []string) error {
 		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
 	}
 	if flagSourceHutUsers != nil {
+		restrictedAccess = true
 		sourceHutUserKeys, err := host.SourceHutUserAuthorizedKeys(flagSourceHutUsers)
 		if err != nil {
 			return fmt.Errorf("error reading SourceHut user keys: %w", err)
 		}
 		authorizedKeys = append(authorizedKeys, sourceHutUserKeys...)
+	}
+
+	if len(authorizedKeys) == 0 && restrictedAccess {
+		return fmt.Errorf("no authorized keys found")
 	}
 
 	signers, cleanup, err := host.Signers(flagPrivateKeys)
