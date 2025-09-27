@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -13,7 +14,6 @@ import (
 	libmetrics "github.com/owenthereal/upterm/metrics"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -26,7 +26,7 @@ type SSHRouting struct {
 	HostSigners     []ssh.Signer
 	AuthPiper       *authPiper
 	Decoder         routing.Decoder
-	Logger          log.FieldLogger
+	Logger          *slog.Logger
 	MetricsProvider provider.Provider
 
 	listener net.Listener
@@ -108,20 +108,20 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 				if max := 1 * time.Second; tempDelay > max {
 					tempDelay = max
 				}
-				p.Logger.WithError(err).Errorf("tcp: Accept error; retrying in %v", tempDelay)
+				p.Logger.Error("tcp: Accept error; retrying", "error", err, "retry_delay", tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
 
-			p.Logger.WithError(err).Error("failed to accept connection")
+			p.Logger.Error("failed to accept connection", "error", err)
 			inst.errors.Add(1)
 			return err
 		}
 
 		tempDelay = 0
 
-		logger := p.Logger.WithField("addr", dconn.RemoteAddr())
-		go func(dconn net.Conn, inst *routingInstruments, logger log.FieldLogger) {
+		logger := p.Logger.With("addr", dconn.RemoteAddr())
+		go func(dconn net.Conn, inst *routingInstruments, logger *slog.Logger) {
 			defer func() {
 				_ = dconn.Close()
 			}()
@@ -154,11 +154,11 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 				defer pconn.Close()
 
 				if err := pconn.Wait(); err != nil {
-					logger.WithError(err).Debug("error waiting for pipe")
+					logger.Debug("error waiting for pipe", "error", err)
 					inst.errors.Add(1)
 				}
 			case err := <-errorc:
-				logger.WithError(err).Debug("connection establishing failed")
+				logger.Debug("connection establishing failed", "error", err)
 				inst.errors.Add(1)
 			case <-time.After(pipeEstablishingTimeout):
 				logger.Debug("pipe establishing timeout")

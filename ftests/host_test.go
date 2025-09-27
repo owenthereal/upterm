@@ -8,7 +8,6 @@ import (
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -84,7 +83,7 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match on leave")
 	case <-time.After(2 * time.Second):
 		if os.Getenv("MUTE_FLAKY_TESTS") != "" {
-			log.Error("FLAKY_TEST: client left callback is not called")
+			testLogger.Error("FLAKY_TEST: client left callback is not called")
 		} else {
 			t.Fatal("client left callback is not called")
 		}

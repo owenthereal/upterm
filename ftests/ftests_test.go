@@ -17,10 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"log/slog"
+
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/routing"
@@ -28,17 +31,20 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/ssh"
 )
 
+var (
+	// Shared debug logger for all tests
+	testLogger = logging.Must(logging.Console(), logging.Debug()).Logger
+)
+
 const (
-	serverStartupTimeout     = 3 * time.Second
-	unixSocketWaitTimeout    = 3 * time.Second
-	keepAliveDuration        = 2 * time.Second
-	consulHealthCheckTimeout = 2 * time.Second
-	sshAttachTimeout         = 500 * time.Millisecond
+	serverStartupTimeout  = 3 * time.Second
+	unixSocketWaitTimeout = 3 * time.Second
+	keepAliveDuration     = 2 * time.Second
+	sshAttachTimeout      = 500 * time.Millisecond
 
 	// Test key material
 	ServerPublicKeyContent  = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA7wM3URdkoip/GKliykxrkz5k5U9OeX3y/bE0Nz/Pl6`
@@ -223,7 +229,6 @@ func TestConsul(t *testing.T) {
 	suite.Run(t, &FtestSuite{mode: routing.ModeConsul})
 }
 
-
 func mustParseURL(urlStr string) *url.URL {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -269,7 +274,7 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 	startErrCh := make(chan error, 1)
 	go func() {
 		if err := s.start(); err != nil {
-			log.WithError(err).WithField("mode", mode).Error("error starting test server")
+			testLogger.Error("error starting test server", "error", err, "mode", mode)
 			startErrCh <- err
 		}
 	}()
@@ -308,7 +313,7 @@ type Server struct {
 	wsln           net.Listener
 	hostKeyContent string
 	mode           routing.Mode
-	logger         log.FieldLogger
+	logger         *slog.Logger
 
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
@@ -338,13 +343,12 @@ func (s *Server) start() error {
 		return fmt.Errorf("failed to set network provider options: %w", err)
 	}
 
-	logger := log.New()
-	logger.Level = log.DebugLevel
-	s.logger = logger.WithFields(log.Fields{
-		"mode": s.mode,
-		"ssh":  s.SSHAddr(),
-		"ws":   s.WSAddr(),
-	})
+	logger := testLogger.With(
+		"mode", s.mode,
+		"ssh", s.SSHAddr(),
+		"ws", s.WSAddr(),
+	)
+	s.logger = logger
 
 	// Create session manager based on the mode
 	var sm *server.SessionManager
@@ -476,8 +480,7 @@ func (c *Host) Share(url string) error {
 		return fmt.Errorf("AdminSocketFile is required but not set")
 	}
 
-	logger := log.New()
-	logger.Level = log.DebugLevel
+	logger := testLogger
 
 	c.Host = &host.Host{
 		Host:                   url,
@@ -500,7 +503,7 @@ func (c *Host) Share(url string) error {
 	errCh := make(chan error)
 	go func() {
 		if err := c.Run(c.ctx); err != nil {
-			log.WithError(err).Error("error running host")
+			testLogger.Error("error running host", "error", err)
 			errCh <- err
 		}
 	}()
@@ -524,7 +527,7 @@ func (c *Host) Share(url string) error {
 			return len(p), nil
 		})
 		if _, err := io.Copy(w, stdoutr); err != nil {
-			log.WithError(err).Error("error copying from stdout")
+			testLogger.Error("error copying from stdout", "error", err)
 		}
 	}()
 
@@ -533,7 +536,7 @@ func (c *Host) Share(url string) error {
 		hostWg.Done()
 		for c := range c.inputCh {
 			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+"\n")); err != nil {
-				log.WithError(err).Error("error copying to stdin")
+				testLogger.Error("error copying to stdin", "error", err)
 			}
 		}
 	}()
@@ -667,7 +670,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 
 	go func() {
 		if err := g.Run(); err != nil {
-			log.WithError(err).Error("error joining host")
+			testLogger.Error("error joining host", "error", err)
 
 		}
 	}()
@@ -720,7 +723,7 @@ func waitForUnixSocket(socket string, errCh chan error) error {
 		case <-ctx.Done():
 			return fmt.Errorf("timeout waiting for unix socket %s: %w", socket, ctx.Err())
 		case <-ticker.C:
-			log.WithField("socket", socket).Debug("waiting for unix socket")
+			testLogger.Debug("waiting for unix socket", "socket", socket)
 			if _, err := os.Stat(socket); err == nil {
 				return nil
 			}

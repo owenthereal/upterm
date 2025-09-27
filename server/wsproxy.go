@@ -16,13 +16,13 @@ import (
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 )
 
 type webSocketProxy struct {
 	ConnDialer     connDialer
 	SessionManager *SessionManager
-	Logger         log.FieldLogger
+	Logger         *slog.Logger
 
 	srv *http.Server
 	mux sync.Mutex
@@ -88,7 +88,7 @@ var upgrader = websocket.Upgrader{
 type wsHandler struct {
 	ConnDialer     connDialer
 	SessionManager *SessionManager
-	Logger         log.FieldLogger
+	Logger         *slog.Logger
 }
 
 // ServeHTTP checks the following header:
@@ -181,12 +181,12 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
-	h.Logger.WithError(err).Error("http error")
+	h.Logger.Error("http error", "error", err)
 	w.WriteHeader(400)
 	_, _ = w.Write([]byte(err.Error()))
 }
 
 func (h *wsHandler) wsError(ws *websocket.Conn, err error, msg string) {
-	h.Logger.WithError(err).Error(msg)
+	h.Logger.Error(msg, "error", err)
 	_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 }

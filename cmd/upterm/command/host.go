@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -17,8 +18,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/icon"
-	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
+	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/spf13/cobra"
 )
 
@@ -82,7 +82,8 @@ private key. To authorize client connections, specify a authorized_key file with
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("error getting user home directory", "error", err)
+		os.Exit(1)
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
@@ -159,16 +160,10 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	lf, err := utils.OpenHostLogFile()
-	if err != nil {
-		return err
+	logger := uptermctx.Logger(c.Context())
+	if logger == nil {
+		return fmt.Errorf("logger not available")
 	}
-	defer func() {
-		_ = lf.Close()
-	}()
-
-	logger := log.New()
-	logger.SetOutput(lf)
 
 	var authorizedKeys []*host.AuthorizedKey
 	if flagAuthorizedKeys != "" {
@@ -186,7 +181,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		authorizedKeys = append(authorizedKeys, codebergUserKeys...)
 	}
 	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger)
+		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger.Logger)
 		if err != nil {
 			return fmt.Errorf("error reading GitHub user keys: %w", err)
 		}
@@ -233,7 +228,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ClientLeftCallback:     clientLeftCallback,
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
-		Logger:                 logger,
+		Logger:                 logger.Logger,
 		ReadOnly:               flagReadOnly,
 	}
 

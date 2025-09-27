@@ -9,16 +9,15 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/rs/xid"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
 func Test_sshProxy_dialUpstream(t *testing.T) {
-	logger := log.New()
-	logger.Level = log.DebugLevel
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	if err != nil {

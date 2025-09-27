@@ -40,6 +40,15 @@ func CreateUptermDir() (string, error) {
 	return dir, nil
 }
 
+func UptermLogFilePath() (string, error) {
+	dir, err := UptermDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, logFile), nil
+}
+
 func OpenHostLogFile() (*os.File, error) {
 	dir, err := CreateUptermDir()
 	if err != nil {

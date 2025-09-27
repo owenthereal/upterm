@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -26,8 +26,7 @@ sAc/vd/gl5673pRkRBGYAAAAAAECAwQF
 )
 
 func Test_sshd_DisallowSession(t *testing.T) {
-	logger := log.New()
-	logger.Level = log.DebugLevel
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

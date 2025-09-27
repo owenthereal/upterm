@@ -10,7 +10,7 @@ import (
 
 	"github.com/charmbracelet/ssh"
 	"github.com/oklog/run"
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -66,7 +66,7 @@ func isExpectedShutdownError(err error) bool {
 func newStreamlocalForwardHandler(
 	sessionManager *SessionManager,
 	sessionDialListener SessionDialListener,
-	logger log.FieldLogger,
+	logger *slog.Logger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
 		sessionManager:      sessionManager,
@@ -80,11 +80,11 @@ type streamlocalForwardHandler struct {
 	sessionManager      *SessionManager
 	sessionDialListener SessionDialListener
 	forwards            map[string]net.Listener
-	logger              log.FieldLogger
+	logger              *slog.Logger
 	sync.Mutex
 }
 
-func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, sessionID string, logger log.FieldLogger) error {
+func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, sessionID string, logger *slog.Logger) error {
 	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
 
 	for {
@@ -97,10 +97,10 @@ func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, ses
 	}
 }
 
-func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *gossh.ServerConn, localConn net.Conn, sessionID string, logger log.FieldLogger) {
+func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *gossh.ServerConn, localConn net.Conn, sessionID string, logger *slog.Logger) {
 	defer func() {
 		if err := localConn.Close(); err != nil {
-			logger.WithError(err).Debug("error closing local connection")
+			logger.Debug("error closing local connection", "error", err)
 		}
 	}()
 
@@ -110,12 +110,12 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 
 	ch, reqs, err := conn.OpenChannel(forwardedStreamlocalChannelType, payload)
 	if err != nil {
-		logger.WithError(err).Error("error opening channel")
+		logger.Error("error opening channel", "error", err)
 		return
 	}
 	defer func() {
 		if err := ch.Close(); err != nil {
-			logger.WithError(err).Debug("error closing SSH channel")
+			logger.Debug("error closing SSH channel", "error", err)
 		}
 	}()
 
@@ -162,7 +162,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 	}
 
 	if err := g.Run(); err != nil && err != context.Canceled {
-		logger.WithError(err).Error("error handling connection")
+		logger.Error("error handling connection", "error", err)
 	}
 }
 
@@ -171,7 +171,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	case streamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			h.logger.WithError(err).Error("error parsing streamlocal payload")
+			h.logger.Error("error parsing streamlocal payload", "error", err)
 			return false, []byte(err.Error())
 		}
 
@@ -180,7 +180,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		}
 
 		sessionID := reqPayload.SocketPath
-		logger := h.logger.WithFields(log.Fields{"session-id": sessionID})
+		logger := h.logger.With("session-id", sessionID)
 
 		// validate session exists
 		if _, err := h.sessionManager.GetSession(sessionID); err != nil {
@@ -189,7 +189,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 
 		ln, err := h.sessionDialListener.Listen(sessionID)
 		if err != nil {
-			logger.WithError(err).Error("error listening socket")
+			logger.Error("error listening socket", "error", err)
 			return false, []byte(err.Error())
 		}
 
@@ -216,9 +216,9 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 			if err := g.Run(); err != nil {
 				// Log expected shutdown errors at debug level, critical errors at error level
 				if isExpectedShutdownError(err) {
-					h.logger.WithField("session-id", sessionID).Debug("ssh session ended")
+					h.logger.Debug("ssh session ended", "session-id", sessionID)
 				} else {
-					h.logger.WithError(err).WithField("session-id", sessionID).Error("error handling ssh session")
+					h.logger.Error("error handling ssh session", "error", err, "session-id", sessionID)
 				}
 			}
 		}(sessionID)
@@ -227,7 +227,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	case cancelStreamlocalForwardChannelType:
 		var reqPayload streamlocalChannelForwardMsg
 		if err := gossh.Unmarshal(req.Payload, &reqPayload); err != nil {
-			h.logger.WithError(err).Error("error parsing streamlocal payload")
+			h.logger.Error("error parsing streamlocal payload", "error", err)
 			return false, []byte(err.Error())
 		}
 
@@ -251,7 +251,7 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 	h.Lock()
 	defer h.Unlock()
 
-	logger := h.logger.WithField("session-id", sessionID)
+	logger := h.logger.With("session-id", sessionID)
 
 	ln, ok := h.forwards[sessionID]
 	if !ok {
@@ -260,7 +260,7 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 	}
 
 	if err := ln.Close(); err != nil {
-		logger.WithError(err).Error("error closing listener")
+		logger.Error("error closing listener", "error", err)
 	} else {
 		logger.Debug("closed listener")
 	}
@@ -268,6 +268,6 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 	delete(h.forwards, sessionID)
 
 	if err := h.sessionManager.DeleteSession(sessionID); err != nil {
-		logger.WithError(err).Error("error deleting session")
+		logger.Error("error deleting session", "error", err)
 	}
 }
