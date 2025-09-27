@@ -5,21 +5,22 @@ import (
 	"os"
 	"strings"
 
+	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
-func Root(logger log.FieldLogger) *cobra.Command {
+func Root() *cobra.Command {
 	rootCmd := &rootCmd{}
 	cmd := &cobra.Command{
 		Use:   "uptermd",
 		Short: "Upterm Daemon",
-		RunE:  rootCmd.Run,
+		RunE:  rootCmd.RunE,
 	}
 
 	cmd.PersistentFlags().String("config", "", "server config")
@@ -41,6 +42,8 @@ func Root(logger log.FieldLogger) *cobra.Command {
 	cmd.PersistentFlags().String("consul-url", "", "consul URL for routing mode 'consul'")
 	cmd.PersistentFlags().String("consul-session-ttl", server.DefaultSessionTTL.String(), "consul session TTL for routing mode 'consul'")
 
+	cmd.PersistentFlags().String("sentry-dsn", "", "Sentry DSN for error tracking")
+
 	cmd.AddCommand(versionCmd())
 
 	return cmd
@@ -49,13 +52,36 @@ func Root(logger log.FieldLogger) *cobra.Command {
 type rootCmd struct {
 }
 
-func (cmd *rootCmd) Run(c *cobra.Command, args []string) error {
+func (cmd *rootCmd) RunE(c *cobra.Command, args []string) error {
 	var opt server.Opt
 	if err := unmarshalFlags(c, &opt); err != nil {
 		return err
 	}
 
-	return server.Start(opt)
+	logOptions := []logging.Option{logging.Console()}
+	if opt.Debug {
+		logOptions = append(logOptions, logging.Debug())
+	}
+	if opt.SentryDSN != "" {
+		logOptions = append(logOptions, logging.Sentry(opt.SentryDSN))
+	}
+
+	logger, err := logging.New(logOptions...)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = logger.Close()
+	}()
+
+	c.SetContext(uptermctx.WithLogger(c.Context(), logger))
+
+	if err := server.Start(c.Context(), opt, logger.Logger); err != nil {
+		logger.Error("failed to start uptermd", "error", err)
+		return fmt.Errorf("failed to start uptermd: %w", err)
+	}
+
+	return nil
 }
 
 func unmarshalFlags(cmd *cobra.Command, opts interface{}) error {

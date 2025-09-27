@@ -67,12 +67,12 @@ func TestParseFromSSHVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			version, err := ParseFromSSHVersion(tt.sshVersion)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				return
 			}
-			
+
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedVer, version.String())
 		})
@@ -141,7 +141,7 @@ func TestCheckCompatibility(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := CheckCompatibility(tt.sshVersion)
-			
+
 			assert.Equal(t, tt.expectedComp, result.Compatible)
 			assert.Equal(t, tt.expectedHost, result.HostVersion)
 			assert.Equal(t, tt.expectedSvr, result.ServerVersion)
@@ -153,7 +153,7 @@ func TestCheckCompatibility(t *testing.T) {
 func TestServerSSHVersion(t *testing.T) {
 	expected := "SSH-2.0-uptermd-" + Version
 	actual := ServerSSHVersion()
-	
+
 	assert.Equal(t, expected, actual)
 }
 

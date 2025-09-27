@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/ws"
-	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -39,12 +39,13 @@ func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
 }
 
 func Test_WebSocketProxy_Host(t *testing.T) {
+	testLogger := logging.Must(logging.Console(), logging.Debug()).Logger
 	cd := sidewayConnDialer{
 		SSHDDialListener:    &testSshdDialListener{bufconn.Listen(1024)},
 		SessionDialListener: &testSessionDialListener{bufconn.Listen(1024)},
-		Logger:              log.New(),
+		Logger:              testLogger,
 	}
-	logger := log.New()
+	logger := testLogger
 	wsh := &wsHandler{
 		ConnDialer:     cd,
 		SessionManager: newEmbeddedSessionManager(logger),

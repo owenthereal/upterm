@@ -2,16 +2,22 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/consul/api"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/owenthereal/upterm/routing"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+)
+
+var (
+	// Shared debug logger for session tests
+	sessionTestLogger = logging.Must(logging.Console(), logging.Debug()).Logger
 )
 
 // This file contains comprehensive tests for the session management system.
@@ -33,11 +39,11 @@ import (
 type EmbeddedSessionManagerTestSuite struct {
 	suite.Suite
 	sm     *SessionManager
-	logger logrus.FieldLogger
+	logger *slog.Logger
 }
 
 func (suite *EmbeddedSessionManagerTestSuite) SetupTest() {
-	suite.logger = logrus.New()
+	suite.logger = sessionTestLogger
 	suite.sm = newEmbeddedSessionManager(suite.logger)
 }
 
@@ -147,7 +153,7 @@ func (suite *ConsulSessionManagerTestSuite) SetupSuite() {
 	consulURL, err := url.Parse(testhelpers.ConsulURL())
 	suite.Require().NoError(err)
 
-	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, logrus.New())
+	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.sm = sm
 
@@ -239,11 +245,11 @@ func (suite *ConsulSessionManagerTestSuite) TestRoutingMode() {
 type MemoryStoreTestSuite struct {
 	suite.Suite
 	store  *memorySessionStore
-	logger logrus.FieldLogger
+	logger *slog.Logger
 }
 
 func (suite *MemoryStoreTestSuite) SetupTest() {
-	suite.logger = logrus.New()
+	suite.logger = sessionTestLogger
 	suite.store = newMemorySessionStore(suite.logger)
 }
 
@@ -344,11 +350,11 @@ func (suite *ConsulStoreTestSuite) SetupSuite() {
 	suite.Require().NoError(err)
 
 	// Create two store instances to simulate multi-node setup
-	store1, err := newConsulSessionStore(consulURL, 5*time.Minute, logrus.New())
+	store1, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.store1 = store1
 
-	store2, err := newConsulSessionStore(consulURL, 5*time.Minute, logrus.New())
+	store2, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	suite.store2 = store2
 

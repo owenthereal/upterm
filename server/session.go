@@ -12,12 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"log/slog"
+
 	"github.com/avast/retry-go/v4"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -31,13 +32,13 @@ func (e *ErrSessionNotFound) Error() string {
 }
 
 const (
-	DefaultSessionTTL      = 30 * time.Minute       // Default TTL for session data in Consul
-	DefaultConsulTimeout   = 5 * time.Second        // Default timeout for Consul operations
-	DefaultWatchTimeout    = 10 * time.Minute       // Default timeout for Consul watch operations (long-polling)
-	DefaultMaxRetries      = 3                      // Default number of retries for Consul operations
-	DefaultRetryDelay      = 100 * time.Millisecond // Default delay between retries
-	DefaultKeyPrefix       = "uptermd"               // Default key prefix for Consul storage
-	UnusedNodeAddress      = "localhost"            // Placeholder address for node registration (not used but required by Consul)
+	DefaultSessionTTL    = 30 * time.Minute       // Default TTL for session data in Consul
+	DefaultConsulTimeout = 5 * time.Second        // Default timeout for Consul operations
+	DefaultWatchTimeout  = 10 * time.Minute       // Default timeout for Consul watch operations (long-polling)
+	DefaultMaxRetries    = 3                      // Default number of retries for Consul operations
+	DefaultRetryDelay    = 100 * time.Millisecond // Default delay between retries
+	DefaultKeyPrefix     = "uptermd"              // Default key prefix for Consul storage
+	UnusedNodeAddress    = "localhost"            // Placeholder address for node registration (not used but required by Consul)
 )
 
 // Session represents the complete session information
@@ -153,11 +154,11 @@ type SessionStore interface {
 type sessionCache struct {
 	sessions map[string]*Session
 	mutex    sync.RWMutex
-	logger   log.FieldLogger
+	logger   *slog.Logger
 }
 
 // newSessionCache creates a new session cache
-func newSessionCache(logger log.FieldLogger) *sessionCache {
+func newSessionCache(logger *slog.Logger) *sessionCache {
 	return &sessionCache{
 		sessions: make(map[string]*Session),
 		logger:   logger,
@@ -188,7 +189,7 @@ func (c *sessionCache) Set(sessionID string, session *Session) {
 	defer c.mutex.Unlock()
 
 	c.sessions[sessionID] = session
-	c.logger.WithField("session", sessionID).Debug("cached session")
+	c.logger.Debug("cached session", "session", sessionID)
 }
 
 // Delete removes a session from cache
@@ -197,7 +198,7 @@ func (c *sessionCache) Delete(sessionID string) {
 	defer c.mutex.Unlock()
 
 	delete(c.sessions, sessionID)
-	c.logger.WithField("session", sessionID).Debug("removed session from cache")
+	c.logger.Debug("removed session from cache", "session", sessionID)
 }
 
 // BatchDelete removes multiple sessions from cache
@@ -208,7 +209,7 @@ func (c *sessionCache) BatchDelete(sessionIDs []string) {
 	for _, sessionID := range sessionIDs {
 		delete(c.sessions, sessionID)
 	}
-	c.logger.WithField("count", len(sessionIDs)).Debug("batch removed sessions from cache")
+	c.logger.Debug("batch removed sessions from cache", "count", len(sessionIDs))
 }
 
 // ReplaceAll atomically replaces all sessions in cache
@@ -238,12 +239,7 @@ func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updat
 	c.sessions = newSessions
 
 	if added > 0 || updated > 0 || deleted > 0 {
-		c.logger.WithFields(log.Fields{
-			"total":   len(newSessions),
-			"added":   added,
-			"updated": updated,
-			"deleted": deleted,
-		}).Info("updated session cache")
+		c.logger.Info("updated session cache", "total", len(newSessions), "added", added, "updated", updated, "deleted", deleted)
 	}
 
 	return added, updated, deleted
@@ -252,7 +248,7 @@ func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updat
 // consulSessionStore implements SessionStore using Consul KV with hybrid read-through cache
 type consulSessionStore struct {
 	client    *api.Client
-	logger    log.FieldLogger
+	logger    *slog.Logger
 	ttl       time.Duration
 	keyPrefix string
 	// Hybrid cache for instant lookups with fallback to Consul
@@ -262,7 +258,7 @@ type consulSessionStore struct {
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
-func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger log.FieldLogger) (*consulSessionStore, error) {
+func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.Logger) (*consulSessionStore, error) {
 	config := api.DefaultConfig()
 	config.Address = consulURL.Host
 	config.Scheme = consulURL.Scheme
@@ -365,11 +361,11 @@ func (c *consulSessionStore) Store(session *Session) error {
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.WithFields(log.Fields{
-				"operation": "store",
-				"attempt":   n + 1,
-				"error":     err,
-			}).Debug("retrying consul store operation")
+			c.logger.Debug("retrying consul store operation",
+				"operation", "store",
+				"attempt", n+1,
+				"error", err,
+			)
 		}),
 	)
 
@@ -380,11 +376,11 @@ func (c *consulSessionStore) Store(session *Session) error {
 	// Immediately update local cache for strong consistency
 	c.cache.Set(session.ID, session)
 
-	c.logger.WithFields(log.Fields{
-		"session": session.ID,
-		"node":    session.NodeAddr,
-		"key":     kvStoreKey,
-	}).Debug("stored session data in consul and cache")
+	c.logger.Debug("stored session data in consul and cache",
+		"session", session.ID,
+		"node", session.NodeAddr,
+		"key", kvStoreKey,
+	)
 
 	return nil
 }
@@ -397,10 +393,10 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 
 	// Try local cache first for instant lookup
 	if session, exists := c.cache.Get(sessionID); exists {
-		c.logger.WithFields(log.Fields{
-			"session": sessionID,
-			"node":    session.NodeAddr,
-		}).Debug("retrieved session data from cache")
+		c.logger.Debug("retrieved session data from cache",
+			"session", sessionID,
+			"node", session.NodeAddr,
+		)
 		return session, nil
 	}
 
@@ -439,11 +435,11 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 			return !errors.As(err, &notFoundErr)
 		}),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.WithFields(log.Fields{
-				"operation": "get_from_consul",
-				"attempt":   n + 1,
-				"error":     err,
-			}).Debug("retrying consul get operation")
+			c.logger.Debug("retrying consul get operation",
+				"operation", "get_from_consul",
+				"attempt", n+1,
+				"error", err,
+			)
 		}),
 	)
 
@@ -454,10 +450,10 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	// Update local cache with fetched data
 	c.cache.Set(sessionID, session)
 
-	c.logger.WithFields(log.Fields{
-		"session": sessionID,
-		"node":    session.NodeAddr,
-	}).Debug("retrieved session data from consul and cached")
+	c.logger.Debug("retrieved session data from consul and cached",
+		"session", sessionID,
+		"node", session.NodeAddr,
+	)
 
 	return session, nil
 }
@@ -483,11 +479,11 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.WithFields(log.Fields{
-				"operation": "delete",
-				"attempt":   n + 1,
-				"error":     err,
-			}).Debug("retrying consul delete operation")
+			c.logger.Debug("retrying consul delete operation",
+				"operation", "delete",
+				"attempt", n+1,
+				"error", err,
+			)
 		}),
 	)
 
@@ -498,10 +494,10 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	// Immediately remove from local cache for strong consistency
 	c.cache.Delete(sessionID)
 
-	c.logger.WithFields(log.Fields{
-		"session": sessionID,
-		"key":     kvStoreKey,
-	}).Debug("deleted session data from consul and cache")
+	c.logger.Debug("deleted session data from consul and cache",
+		"session", sessionID,
+		"key", kvStoreKey,
+	)
 
 	return nil
 }
@@ -527,7 +523,7 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 	// Immediately remove from local cache for strong consistency
 	c.cache.BatchDelete(sessionIDs)
 
-	c.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from consul and cache")
+	c.logger.Debug("batch deleted sessions from consul and cache", "count", len(sessionIDs))
 	return nil
 }
 
@@ -556,12 +552,12 @@ func (c *consulSessionStore) deleteBatch(sessionIDs []string) error {
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.WithFields(log.Fields{
-				"operation": "batch_delete",
-				"attempt":   n + 1,
-				"count":     len(sessionIDs),
-				"error":     err,
-			}).Debug("retrying consul batch delete operation")
+			c.logger.Debug("retrying consul batch delete operation",
+				"operation", "batch_delete",
+				"attempt", n+1,
+				"count", len(sessionIDs),
+				"error", err,
+			)
 		}),
 	)
 }
@@ -582,7 +578,7 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 				var session Session
 				if err := json.Unmarshal(pair.Value, &session); err != nil {
 					// Skip invalid sessions but continue processing
-					c.logger.WithError(err).WithField("key", pair.Key).Warn("failed to unmarshal session, skipping")
+					c.logger.Warn("failed to unmarshal session, skipping", "error", err, "key", pair.Key)
 					continue
 				}
 				sessions = append(sessions, &session)
@@ -592,11 +588,11 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.WithFields(log.Fields{
-				"operation": "list",
-				"attempt":   n + 1,
-				"error":     err,
-			}).Debug("retrying consul list operation")
+			c.logger.Debug("retrying consul list operation",
+				"operation", "list",
+				"attempt", n+1,
+				"error", err,
+			)
 		}),
 	)
 
@@ -604,7 +600,7 @@ func (c *consulSessionStore) List() ([]*Session, error) {
 		return nil, err
 	}
 
-	c.logger.WithField("count", len(sessions)).Debug("listed sessions from consul")
+	c.logger.Debug("listed sessions from consul", "count", len(sessions))
 	return sessions, nil
 }
 
@@ -689,7 +685,7 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 	go func() {
 		c.logger.Info("starting session watch for full replication")
 		if err := watchPlan.RunWithConfig(watchConfig.Address, &watchConfig); err != nil {
-			c.logger.WithError(err).Error("session watch failed")
+			c.logger.Error("session watch failed", "error", err)
 		}
 	}()
 
@@ -704,7 +700,7 @@ func (c *consulSessionStore) updateSessionReplica(kvPairs api.KVPairs) {
 	for _, kvPair := range kvPairs {
 		var session Session
 		if err := json.Unmarshal(kvPair.Value, &session); err != nil {
-			c.logger.WithError(err).WithField("key", kvPair.Key).Warn("failed to unmarshal session data")
+			c.logger.Warn("failed to unmarshal session data", "error", err, "key", kvPair.Key)
 			continue
 		}
 
@@ -732,12 +728,12 @@ func (c *consulSessionStore) HasInCache(sessionID string) bool {
 // memorySessionStore is a simple in-memory implementation for testing/fallback
 type memorySessionStore struct {
 	sessions map[string]*Session
-	logger   log.FieldLogger
+	logger   *slog.Logger
 	mutex    sync.RWMutex
 }
 
 // newMemorySessionStore creates a new MemorySessionStore
-func newMemorySessionStore(logger log.FieldLogger) *memorySessionStore {
+func newMemorySessionStore(logger *slog.Logger) *memorySessionStore {
 	return &memorySessionStore{
 		sessions: make(map[string]*Session),
 		logger:   logger,
@@ -749,10 +745,10 @@ func (m *memorySessionStore) Store(session *Session) error {
 	defer m.mutex.Unlock()
 
 	m.sessions[session.ID] = session
-	m.logger.WithFields(log.Fields{
-		"session": session.ID,
-		"node":    session.NodeAddr,
-	}).Debug("stored session data in memory")
+	m.logger.Debug("stored session data in memory",
+		"session", session.ID,
+		"node", session.NodeAddr,
+	)
 	return nil
 }
 
@@ -772,9 +768,9 @@ func (m *memorySessionStore) Delete(sessionID string) error {
 	defer m.mutex.Unlock()
 
 	delete(m.sessions, sessionID)
-	m.logger.WithFields(log.Fields{
-		"session": sessionID,
-	}).Debug("deleted session data from memory")
+	m.logger.Debug("deleted session data from memory",
+		"session", sessionID,
+	)
 	return nil
 }
 
@@ -787,7 +783,7 @@ func (m *memorySessionStore) BatchDelete(sessionIDs []string) error {
 		delete(m.sessions, sessionID)
 	}
 
-	m.logger.WithField("count", len(sessionIDs)).Debug("batch deleted sessions from memory")
+	m.logger.Debug("batch deleted sessions from memory", "count", len(sessionIDs))
 	return nil
 }
 
@@ -801,7 +797,7 @@ func (m *memorySessionStore) List() ([]*Session, error) {
 		sessions = append(sessions, session)
 	}
 
-	m.logger.WithField("count", len(sessions)).Debug("listed sessions from memory")
+	m.logger.Debug("listed sessions from memory", "count", len(sessions))
 	return sessions, nil
 }
 
@@ -845,7 +841,7 @@ type SessionManager struct {
 // SessionManagerConfig holds configuration for creating a SessionManager
 type SessionManagerConfig struct {
 	Mode      routing.Mode
-	Logger    log.FieldLogger
+	Logger    *slog.Logger
 	ConsulURL *url.URL
 	ConsulTTL time.Duration
 }
@@ -854,7 +850,7 @@ type SessionManagerConfig struct {
 type SessionManagerOption func(*SessionManagerConfig)
 
 // WithSessionManagerLogger sets the logger for the session manager
-func WithSessionManagerLogger(logger log.FieldLogger) SessionManagerOption {
+func WithSessionManagerLogger(logger *slog.Logger) SessionManagerOption {
 	return func(c *SessionManagerConfig) {
 		c.Logger = logger
 	}
@@ -895,7 +891,7 @@ func WithSessionManagerConsulTTL(ttl time.Duration) SessionManagerOption {
 func NewSessionManager(mode routing.Mode, opts ...SessionManagerOption) (*SessionManager, error) {
 	config := &SessionManagerConfig{
 		Mode:      mode,
-		Logger:    log.StandardLogger(), // Default logger
+		Logger:    slog.Default(),
 		ConsulTTL: DefaultSessionTTL,
 	}
 
@@ -923,14 +919,14 @@ func newSessionManagerWithStore(store SessionStore, encodeDecoder routing.Encode
 }
 
 // newEmbeddedSessionManager creates a SessionManager for embedded mode with memory storage
-func newEmbeddedSessionManager(logger log.FieldLogger) *SessionManager {
+func newEmbeddedSessionManager(logger *slog.Logger) *SessionManager {
 	store := newMemorySessionStore(logger)
 	encodeDecoder := routing.NewEncodeDecoder(routing.ModeEmbedded)
 	return newSessionManagerWithStore(store, encodeDecoder)
 }
 
 // newConsulSessionManager creates a SessionManager for consul mode with Consul storage
-func newConsulSessionManager(consulURL *url.URL, ttl time.Duration, logger log.FieldLogger) (*SessionManager, error) {
+func newConsulSessionManager(consulURL *url.URL, ttl time.Duration, logger *slog.Logger) (*SessionManager, error) {
 	store, err := newConsulSessionStore(consulURL, ttl, logger)
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os/user"
@@ -12,7 +13,6 @@ import (
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
 )
@@ -29,7 +29,7 @@ type ReverseTunnel struct {
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
 	HostKeyCallback   ssh.HostKeyCallback
-	Logger            log.FieldLogger
+	Logger            *slog.Logger
 
 	ln net.Listener
 }
@@ -47,6 +47,11 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
+	}
+
+	baseLogger := c.Logger
+	if baseLogger == nil {
+		baseLogger = slog.Default()
 	}
 
 	var (
@@ -106,7 +111,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		// TODO: ping with session ID
 		_, _, err := c.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		if err != nil {
-			c.Logger.WithError(err).Error("error pinging server")
+			baseLogger.Error("error pinging server", "error", err)
 		}
 	})
 

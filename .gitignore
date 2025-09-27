@@ -6,3 +6,4 @@ release
 *.tfstate.backup
 dist
 bin
+CLAUDE.md

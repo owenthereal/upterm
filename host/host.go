@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
@@ -19,7 +21,6 @@ import (
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -163,7 +164,7 @@ type Host struct {
 	SessionCreatedCallback func(*api.GetSessionResponse) error
 	ClientJoinedCallback   func(*api.Client)
 	ClientLeftCallback     func(*api.Client)
-	Logger                 log.FieldLogger
+	Logger                 *slog.Logger
 	Stdin                  *os.File
 	Stdout                 *os.File
 	ReadOnly               bool
@@ -187,8 +188,7 @@ func (c *Host) Run(ctx context.Context) error {
 		aks = append(aks, ak.PublicKeys...)
 	}
 
-	logger := c.Logger.WithField("server", u)
-
+	logger := c.Logger.With("server", u.String())
 	logger.Info("Establishing reverse tunnel")
 	rt := internal.ReverseTunnel{
 		Host:              u,
@@ -196,7 +196,7 @@ func (c *Host) Run(ctx context.Context) error {
 		HostKeyCallback:   c.HostKeyCallback,
 		AuthorizedKeys:    aks,
 		KeepAliveDuration: c.KeepAliveDuration,
-		Logger:            c.Logger.WithField("com", "reverse-tunnel"),
+		Logger:            logger.With("component", "reverse-tunnel"),
 	}
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
@@ -206,7 +206,7 @@ func (c *Host) Run(ctx context.Context) error {
 
 	// Check server version compatibility after establishing connection
 	serverVersion := string(rt.ServerVersion())
-	logger.WithField("server_version", serverVersion).Debug("detected server version")
+	logger.Debug("detected server version", "server_version", serverVersion)
 
 	// Check for version compatibility
 	if result := version.CheckCompatibility(serverVersion); !result.Compatible {
@@ -226,7 +226,7 @@ func (c *Host) Run(ctx context.Context) error {
 		}()
 	}
 
-	logger = logger.WithField("session", sessResp.SessionID)
+	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
 
 	session := &api.GetSessionResponse{
@@ -248,7 +248,7 @@ func (c *Host) Run(ctx context.Context) error {
 	clientRepo := internal.NewClientRepo()
 	eventEmitter := emitter.New(1)
 
-	logger = logger.WithFields(log.Fields{"cmd": c.Command, "force-cmd": c.ForceCommand})
+	logger = logger.With("cmd", c.Command, "force_cmd", c.ForceCommand)
 
 	var g run.Group
 	{
@@ -275,7 +275,7 @@ func (c *Host) Run(ctx context.Context) error {
 				client, ok := args[0].(*api.Client)
 				if ok {
 					_ = clientRepo.Add(client)
-					logger.WithField("client", client.Addr).Info("Client joined")
+					logger.Info("Client joined", "client", client.Addr)
 					if c.ClientJoinedCallback != nil {
 						c.ClientJoinedCallback(client)
 					}
@@ -299,7 +299,7 @@ func (c *Host) Run(ctx context.Context) error {
 				if ok {
 					client := clientRepo.Get(cid)
 					if client != nil {
-						logger.WithField("client", client.Addr).Info("Client left")
+						logger.Info("Client left", "client", client.Addr)
 						clientRepo.Delete(cid)
 						if c.ClientLeftCallback != nil {
 							c.ClientLeftCallback(client)
@@ -328,7 +328,7 @@ func (c *Host) Run(ctx context.Context) error {
 			KeepAliveDuration: c.KeepAliveDuration,
 			Stdin:             c.Stdin,
 			Stdout:            c.Stdout,
-			Logger:            c.Logger.WithField("com", "server"),
+			Logger:            logger.With("component", "server"),
 			ReadOnly:          c.ReadOnly,
 		}
 		g.Add(func() error {
@@ -384,7 +384,7 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 }
 
 // displayVersionWarning prints a formatted version mismatch warning to the given writer
-func displayVersionWarning(out io.Writer, logger log.FieldLogger, result *version.CompatibilityResult) {
+func displayVersionWarning(out io.Writer, logger *slog.Logger, result *version.CompatibilityResult) {
 	messages := []struct {
 		text     string
 		debugMsg string
@@ -398,7 +398,7 @@ func displayVersionWarning(out io.Writer, logger log.FieldLogger, result *versio
 
 	for _, msg := range messages {
 		if _, err := fmt.Fprint(out, msg.text); err != nil {
-			logger.WithError(err).Debug(msg.debugMsg)
+			logger.Debug(msg.debugMsg, "error", err)
 		}
 	}
 }

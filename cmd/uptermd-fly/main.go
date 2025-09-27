@@ -2,26 +2,25 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/owenthereal/upterm/cmd/uptermd/command"
-	log "github.com/sirupsen/logrus"
 )
 
 func main() {
-	logger := log.New()
-
 	flyAppName := os.Getenv("FLY_APP_NAME")
 	if flyAppName == "" {
-		logger.Fatal("FLY_APP_NAME is not set")
+		slog.Error("FLY_APP_NAME is not set")
+		os.Exit(1)
 	}
 
 	flyMachineID := os.Getenv("FLY_MACHINE_ID")
 	if flyMachineID == "" {
-		logger.Fatal("FLY_MACHINE_ID is not set")
+		slog.Error("FLY_MACHINE_ID is not set")
+		os.Exit(1)
 	}
 
-	// Configure uptermd for Fly.io deployment
 	config := map[string]any{
 		"UPTERMD_SSH_ADDR":           "0.0.0.0:2222",
 		"UPTERMD_WS_ADDR":            "0.0.0.0:8080",
@@ -31,27 +30,25 @@ func main() {
 
 	flyConsulURL := os.Getenv("FLY_CONSUL_URL")
 	if flyConsulURL != "" {
-		// Use Consul routing for multi-machine deployments
 		config["UPTERMD_ROUTING"] = "consul"
 		config["UPTERMD_CONSUL_URL"] = flyConsulURL
 		config["UPTERMD_CONSUL_SESSION_TTL"] = "1h"
-		logger.Info("Using Consul routing for multi-machine deployment")
+		slog.Info("Using Consul routing for multi-machine deployment")
 	} else {
-		// Use embedded routing for single-machine deployments
 		config["UPTERMD_ROUTING"] = "embedded"
-		logger.Info("Using embedded routing for single-machine deployment")
+		slog.Info("Using embedded routing for single-machine deployment")
 	}
 
-	// Set environment variables
 	for key, value := range config {
 		if err := os.Setenv(key, fmt.Sprintf("%v", value)); err != nil {
-			logger.WithError(err).WithField("key", key).Fatal("Failed to set environment variable")
+			slog.Error("failed to set environment variable", "key", key, "error", err)
+			os.Exit(1)
 		}
 	}
 
-	logger.WithFields(log.Fields(config)).Info("Starting uptermd on Fly.io")
-
-	if err := command.Root(logger).Execute(); err != nil {
-		logger.Fatal(err)
+	slog.Info("Starting uptermd on Fly.io", "config", config)
+	if err := command.Root().Execute(); err != nil {
+		slog.Error("command execution failed", "error", err)
+		os.Exit(1)
 	}
 }

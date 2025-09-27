@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -18,7 +19,6 @@ import (
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,7 +32,7 @@ type Server struct {
 	KeepAliveDuration time.Duration
 	Stdin             *os.File
 	Stdout            *os.File
-	Logger            log.FieldLogger
+	Logger            *slog.Logger
 	ReadOnly          bool
 }
 
@@ -104,7 +104,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
-				s.Logger.WithError(err).Error("connection failed")
+				s.Logger.Error("connection failed", "error", err)
 			},
 		}
 		g.Add(func() error {
@@ -123,14 +123,14 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
 	EventEmmiter   *emitter.Emitter
-	Logger         log.FieldLogger
+	Logger         *slog.Logger
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
 	checker := server.UserCertChecker{}
 	auth, pk, err := checker.Authenticate(ctx.User(), key)
 	if err != nil {
-		h.Logger.WithError(err).Error("error parsing auth request from cert")
+		h.Logger.Error("error parsing auth request from cert", "error", err)
 		return false
 	}
 
@@ -159,7 +159,7 @@ type sessionHandler struct {
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
-	logger            log.FieldLogger
+	logger            *slog.Logger
 	readonly          bool
 }
 
@@ -190,7 +190,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				select {
 				case <-ticker.C:
 					if _, err := sess.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil); err != nil {
-						h.logger.WithError(err).Debug("error pinging client to keepalive")
+						h.logger.Debug("error pinging client to keepalive", "error", err)
 					}
 				case <-ctx.Done():
 					return ctx.Err()
@@ -209,7 +209,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 		cmd, ptmx, err = startAttachCmd(ctx, h.forceCommand, ptyReq.Term)
 		if err != nil {
-			h.logger.WithError(err).Error("error starting force command")
+			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
 			return
 		}

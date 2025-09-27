@@ -9,8 +9,8 @@ import (
 	"time"
 
 	ggh "github.com/google/go-github/v48/github"
+	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/version"
-	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
 	"github.com/tj/go-update/progress"
@@ -33,6 +33,11 @@ func upgradeCmd() *cobra.Command {
 }
 
 func upgradeRunE(c *cobra.Command, args []string) error {
+	logger := uptermctx.Logger(c.Context())
+	if logger == nil {
+		return fmt.Errorf("logger not available")
+	}
+
 	term.HideCursor()
 	defer term.ShowCursor()
 
@@ -57,7 +62,8 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		// fetch the new releases
 		releases, err := m.LatestReleases()
 		if err != nil {
-			log.Fatalf("error fetching releases: %s", err)
+			logger.Error("error fetching releases", "error", err)
+			return fmt.Errorf("error fetching releases: %w", err)
 		}
 
 		// no updates

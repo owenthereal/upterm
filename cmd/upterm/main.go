@@ -1,13 +1,15 @@
 package main
 
 import (
+	"log/slog"
+	"os"
+
 	"github.com/owenthereal/upterm/cmd/upterm/command"
-	log "github.com/sirupsen/logrus"
 )
 
 func main() {
-	rootCmd := command.Root()
-	if err := rootCmd.Execute(); err != nil {
-		log.Fatal(err)
+	if err := command.Root().Execute(); err != nil {
+		slog.Error("Error executing command", "error", err)
+		os.Exit(1)
 	}
 }

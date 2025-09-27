@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -19,7 +19,7 @@ type sshProxy struct {
 	NodeAddr        string
 	ConnDialer      connDialer
 	SessionManager  *SessionManager
-	Logger          log.FieldLogger
+	Logger          *slog.Logger
 	MetricsProvider provider.Provider
 
 	routing *SSHRouting

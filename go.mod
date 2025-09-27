@@ -15,6 +15,8 @@ require (
 	github.com/dchest/uniuri v1.2.0
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/gen2brain/beeep v0.11.1
+	github.com/getsentry/sentry-go v0.35.3
+	github.com/getsentry/sentry-go/slog v0.35.3
 	github.com/go-kit/kit v0.13.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-querystring v1.1.0 // indirect
@@ -24,7 +26,6 @@ require (
 	github.com/gosuri/uiprogress v0.0.1 // indirect
 	github.com/hashicorp/consul/api v1.32.1
 	github.com/hashicorp/go-multierror v1.1.1
-	github.com/heroku/rollrus v0.2.0
 	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c // indirect
 	github.com/jpillora/chisel v1.11.3
 	github.com/klauspost/pgzip v1.2.6 // indirect
@@ -35,7 +36,6 @@ require (
 	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/xid v1.6.0
-	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.1
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
@@ -52,6 +52,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.7.0
 	github.com/pires/go-proxyproto v0.8.1
+	github.com/samber/slog-multi v1.5.0
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
@@ -112,9 +113,10 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/rollbar/rollbar-go v1.4.8 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
+	github.com/samber/lo v1.51.0 // indirect
+	github.com/samber/slog-common v0.19.0 // indirect
 	github.com/sergeymakinen/go-bmp v1.0.0 // indirect
 	github.com/sergeymakinen/go-ico v1.0.0-beta.0 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect

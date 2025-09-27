@@ -10,7 +10,6 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -270,7 +269,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	case str := <-hostOutputCh:
 		t.Fatalf("host shouldn't receive client input: receive=%s", str)
 	case <-time.After(sshAttachTimeout):
-		log.Debug("Read-only timeout confirmed - client input properly blocked")
+		testLogger.Debug("Read-only timeout confirmed - client input properly blocked")
 		return
 	}
 

@@ -6,9 +6,10 @@ import (
 	"io"
 	"strings"
 
+	"log/slog"
+
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/upterm"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -52,7 +53,7 @@ func (t terminalEventEmitter) TerminalDetached(id string, pty *pty) {
 
 type terminalEventHandler struct {
 	eventEmitter *emitter.Emitter
-	logger       log.FieldLogger
+	logger       *slog.Logger
 }
 
 func (t terminalEventHandler) Handle(ctx context.Context) error {
@@ -69,11 +70,11 @@ func (t terminalEventHandler) Handle(ctx context.Context) error {
 		select {
 		case evt := <-winCh:
 			if err := t.handleWindowChanged(evt, m); err != nil {
-				t.logger.WithError(err).Error("error handling window changed")
+				t.logger.Error("error handling window changed", "error", err)
 			}
 		case evt := <-dtCh:
 			if err := t.handleTerminalDetached(evt, m); err != nil {
-				t.logger.WithError(err).Error("error handling terminal detached")
+				t.logger.Error("error handling terminal detached", "error", err)
 			}
 		case <-ctx.Done():
 			return ctx.Err()

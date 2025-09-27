@@ -11,7 +11,7 @@ import (
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 	gossh "golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
 )
@@ -29,7 +29,7 @@ type sshd struct {
 	HostSigners         []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
-	Logger              log.FieldLogger
+	Logger              *slog.Logger
 
 	server *ssh.Server
 	mux    sync.Mutex
@@ -58,7 +58,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	sh := newStreamlocalForwardHandler(
 		s.SessionManager,
 		s.SessionDialListener,
-		s.Logger.WithField("com", "stream-local-handler"),
+		s.Logger.With("com", "stream-local-handler"),
 	)
 	s.mux.Lock()
 	s.server = &ssh.Server{
@@ -67,7 +67,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 			_ = s.Exit(1) // disable ssh login
 		},
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
-			s.Logger.WithError(err).Error("connection failed")
+			s.Logger.Error("connection failed", "error", err)
 		},
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			config := &gossh.ServerConfig{
@@ -76,14 +76,14 @@ func (s *sshd) Serve(ln net.Listener) error {
 			return config
 		},
 		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) (granted bool) {
-			s.Logger.WithFields(log.Fields{"tunnel-host": host, "tunnel-port": port}).Info("attempt to bind")
+			s.Logger.Info("attempt to bind", "tunnel-host", host, "tunnel-port", port)
 			return true
 		}),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
 			checker := UserCertChecker{}
 			_, _, err := checker.Authenticate(ctx.User(), key)
 			if err != nil {
-				s.Logger.WithError(err).Error("error parsing auth request from cert")
+				s.Logger.Error("error parsing auth request from cert", "error", err)
 				return false
 			}
 
@@ -122,10 +122,11 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 
 	sshUser, err := s.SessionManager.CreateSession(session)
 	if err != nil {
-		s.Logger.WithError(err).WithFields(log.Fields{
-			"session": sessionID,
-			"node":    s.NodeAddr,
-		}).Error("failed to create session")
+		s.Logger.Error("failed to create session",
+			"error", err,
+			"session", sessionID,
+			"node", s.NodeAddr,
+		)
 		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
 
