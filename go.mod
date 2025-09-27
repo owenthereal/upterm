@@ -32,7 +32,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oklog/run v1.2.0
 	github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba
-	github.com/olekukonko/tablewriter v1.0.9
+	github.com/olekukonko/tablewriter v1.1.0
 	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/xid v1.6.0
