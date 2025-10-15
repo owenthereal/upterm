@@ -60,6 +60,8 @@ func show() *cobra.Command {
 		RunE: infoRunE,
 	}
 
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments)")
+
 	return cmd
 }
 
@@ -81,6 +83,7 @@ sharing a session with 'upterm host'.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "admin unix domain socket (required)")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments)")
 
 	return cmd
 }
@@ -294,6 +297,9 @@ func displaySession(session *api.GetSessionResponse) error {
 }
 
 func clientDesc(addr, clientVer, fingerprint string) string {
+	if shouldHideClientIP() {
+		addr = "[redacted]"
+	}
 	return fmt.Sprintf("%s %s %s", addr, clientVer, fingerprint)
 }
 
