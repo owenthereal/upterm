@@ -9,9 +9,9 @@ ARG TARGETARCH
 WORKDIR /src
 ENV CGO_ENABLED=0
 RUN --mount=target=. \
-    --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH go install ./cmd/...
+  --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/go/pkg \
+  GOOS=$TARGETOS GOARCH=$TARGETARCH go install ./cmd/...
 
 # Base runtime stage
 FROM gcr.io/distroless/static:nonroot AS base
