@@ -113,7 +113,7 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 		confirm = strings.TrimSpace(confirm)
 
 		if confirm == "yes" || confirm == fp {
-			return cb.appendHostLine(isCert, hostname, remote.String(), key)
+			return cb.appendHostLine(isCert, hostname, key)
 		}
 
 		if confirm == "no" {
@@ -124,7 +124,7 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	}
 }
 
-func (cb hostKeyCallback) appendHostLine(isCert bool, hostname, remote string, key ssh.PublicKey) error {
+func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.PublicKey) error {
 	f, err := os.OpenFile(cb.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -133,11 +133,16 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname, remote string, k
 		_ = f.Close()
 	}()
 
-	// hostname and remote can be both IPs
+	// Only store the hostname, not the IP address.
+	// This prevents breakage when server IPs change due to:
+	// - Load balancers and auto-scaling
+	// - Cloud redeployments
+	// - CDN/proxy rotation
+	// - IPv6 address rotation
+	// The security benefit of storing IPs is minimal in modern infrastructure
+	// since we already trust DNS, and MITM attacks would need to compromise
+	// both DNS and the host key.
 	addr := []string{hostname}
-	if hostname != remote {
-		addr = append(addr, remote)
-	}
 
 	line := knownhosts.Line(addr, key)
 
