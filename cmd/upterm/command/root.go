@@ -1,6 +1,7 @@
 package command
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -99,10 +100,8 @@ func bindFlagsToEnv(cmd *cobra.Command) error {
 	// Visit all flags and bind them to viper
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		if flag.Name != "help" {
-			if err := v.BindPFlag(flag.Name, flag); err != nil {
-				// Log but don't fail - this is for convenience
-				return
-			}
+			// Ignore binding errors - not all flags support environment variable binding
+			_ = v.BindPFlag(flag.Name, flag)
 		}
 	})
 
@@ -117,17 +116,16 @@ func bindFlagsToEnv(cmd *cobra.Command) error {
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		if flag.Name != "help" && !flag.Changed && v.IsSet(flag.Name) {
 			val := v.Get(flag.Name)
-			if err := cmd.Flags().Set(flag.Name, toString(val)); err != nil {
-				// Log but don't fail
-				return
-			}
+			// Ignore setting errors - not all flag types can be set from strings
+			_ = cmd.Flags().Set(flag.Name, toString(val))
 		}
 	})
 
 	return nil
 }
 
-// toString converts a value to string for flag setting
+// toString converts a value to string for flag setting.
+// Handles bool and string slice types specially, uses fmt.Sprintf for others.
 func toString(val interface{}) string {
 	switch v := val.(type) {
 	case bool:
@@ -137,7 +135,11 @@ func toString(val interface{}) string {
 		return "false"
 	case string:
 		return v
+	case []string:
+		// For string slice flags (e.g., --private-key), join with commas
+		return strings.Join(v, ",")
 	default:
-		return ""
+		// For all other types (int, float, etc.), use fmt.Sprintf
+		return fmt.Sprintf("%v", v)
 	}
 }
