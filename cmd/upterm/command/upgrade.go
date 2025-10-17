@@ -75,7 +75,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		r = release{releases[0]}
 	}
 
-	if fmt.Sprintf("v%s", version.String()) == r.Version {
+	if version.String() == trimVPrefix(r.Version) {
 		fmt.Println("Upterm is up-to-date")
 		return nil
 	}
