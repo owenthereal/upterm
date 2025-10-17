@@ -6,6 +6,10 @@ kill_timeout = "5s"
 dockerfile = "Dockerfile.uptermd"
 build-target = "uptermd-fly"
 
+[metrics]
+port = 9091
+path = "/metrics"
+
 [experimental]
 entrypoint = ["uptermd-fly"]
 

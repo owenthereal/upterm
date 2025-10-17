@@ -11,7 +11,6 @@ import (
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/version"
-	libmetrics "github.com/owenthereal/upterm/metrics"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
@@ -47,7 +46,7 @@ func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 		connections:        p.NewCounter("routing_connections_count"),
 		errors:             p.NewCounter("routing_errors_count"),
 		activeConnections:  p.NewGauge("routing_active_connections_count"),
-		connectionDuration: p.NewHistogram("routing_connection_duration_ms", 50),
+		connectionDuration: p.NewHistogram("routing_connection_duration_seconds", 50),
 		connectionTimeouts: p.NewCounter("routing_connection_timeout_count"),
 	}
 }
@@ -122,10 +121,16 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 		logger := p.Logger.With("addr", dconn.RemoteAddr())
 		go func(dconn net.Conn, inst *routingInstruments, logger *slog.Logger) {
+			startTime := time.Now()
+
 			defer func() {
 				_ = dconn.Close()
 			}()
-			defer libmetrics.MeasureSince(inst.connectionDuration, time.Now())
+			defer func() {
+				// Track connection duration in seconds
+				durationSec := time.Since(startTime).Seconds()
+				inst.connectionDuration.Observe(durationSec)
+			}()
 			defer inst.activeConnections.Add(-1)
 
 			inst.connections.Add(1)
