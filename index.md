@@ -313,6 +313,18 @@ networks:
 
 For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
 
+## :chart_with_upwards_trend: Monitoring
+
+`uptermd` exposes Prometheus metrics at the `/metrics` endpoint when configured with `--metric-addr` (or `UPTERMD_METRIC_ADDR` environment variable).
+
+Available metrics:
+
+- `routing_connections_count` (Counter) - Total number of SSH connections accepted
+- `routing_active_connections_count` (Gauge) - Current number of active SSH connections
+- `routing_connection_duration_seconds` (Histogram) - Connection duration in seconds
+- `routing_errors_count` (Counter) - Total number of connection errors
+- `routing_connection_timeout_count` (Counter) - Number of connections that timed out during establishment
+
 ## :balance_scale: Comparison with Prior Arts
 
 Upterm stands as a modern alternative to [Tmate](https://tmate.io).
