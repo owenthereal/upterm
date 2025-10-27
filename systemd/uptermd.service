@@ -1,7 +1,7 @@
 [Unit]
 Description=upterm secure terminal sharing
 After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+Wants=network-online.target
 
 [Service]
 ExecStart=/usr/bin/uptermd --ssh-addr 0.0.0.0:2222
