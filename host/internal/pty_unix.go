@@ -1,3 +1,6 @@
+//go:build !windows
+// +build !windows
+
 package internal
 
 import (
@@ -70,4 +73,21 @@ func (pty *pty) Close() error {
 	defer pty.Unlock()
 
 	return pty.File.Close()
+}
+
+// Wait is a no-op on Unix - the exec.Cmd.Wait() handles process waiting
+func (pty *pty) Wait() error {
+	return nil
+}
+
+// Kill is a no-op on Unix - the exec.Cmd.Process.Kill() handles process killing
+func (pty *pty) Kill() error {
+	return nil
+}
+
+// waitForCommand waits for a command started via pty to exit.
+// On Unix, we use cmd.Wait() since the command was started via ptylib.Start()
+// which properly calls cmd.Start().
+func waitForCommand(cmd *exec.Cmd, ptmx *pty) error {
+	return cmd.Wait()
 }
