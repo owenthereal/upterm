@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"net"
 	"sync"
 
 	"github.com/owenthereal/upterm/host/api"
@@ -17,7 +16,7 @@ type AdminServer struct {
 }
 
 func (s *AdminServer) Serve(ctx context.Context, sock string) error {
-	ln, err := net.Listen("unix", sock)
+	ln, err := createListener(sock)
 	if err != nil {
 		return err
 	}

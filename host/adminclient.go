@@ -17,8 +17,13 @@ func AdminSocketFile(sessionID string) string {
 }
 
 func AdminClient(socket string) (api.AdminServiceClient, error) {
+	target, err := getAdminTarget(socket)
+	if err != nil {
+		return nil, err
+	}
+
 	// Use mtls
-	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}

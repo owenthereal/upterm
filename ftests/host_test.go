@@ -24,7 +24,7 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -98,12 +98,12 @@ func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, cl
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:         []string{"bash", "--norc"},
+		Command:         getTestShell(),
 		ForceCommand:    []string{"vim"},
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
-			assert.Equal([]string{"bash", "--norc"}, session.Command, "command should match")
+			assert.Equal(getTestShell(), session.Command, "command should match")
 			assert.Equal([]string{"vim"}, session.ForceCommand, "force command should match")
 
 			checkSessionPayload(t, session, hostShareURL, hostNodeAddr)
@@ -123,7 +123,7 @@ func testHostFailToShareWithoutPrivateKey(t *testing.T, hostShareURL, hostNodeAd
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:         []string{"bash"},
+		Command:         getTestShell(),
 		AdminSocketFile: adminSocketFile,
 	}
 	err := h.Share(hostShareURL)
