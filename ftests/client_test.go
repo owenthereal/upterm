@@ -285,10 +285,10 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 
 	// client output
 	// client should get "welcome message"
-	// Server sends: "\r\n=== Attached to read-only session ===\r\n\r\n"
-	welcomeMsg := scanAndStrip(remoteScanner)
-
-	assert.Equal("=== Attached to read-only session ===", welcomeMsg, "client should see read-only welcome message")
+	// \n
+	// === Attached to read-only session ===
+	// \n
+	assert.Equal("=== Attached to read-only session ===", scanAndStrip(remoteScanner), "client should see read-only welcome message")
 
 	// host input should still work
 	hostInputCh <- `echo "hello"`
