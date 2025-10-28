@@ -336,7 +336,13 @@ func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
 		for _, fp := range ak.PublicKeyFingerprints {
 			fps = append(fps, fmt.Sprintf("- %s", fp))
 		}
-		aks = append(aks, fmt.Sprintf("%s:\n%s", ak.Comment, strings.Join(fps, "\n")))
+		var line string
+		if ak.Comment != "" {
+			line = fmt.Sprintf("%s:\n%s", ak.Comment, strings.Join(fps, "\n"))
+		} else {
+			line = strings.Join(fps, "\n")
+		}
+		aks = append(aks, line)
 	}
 
 	return strings.Join(aks, "\n")
