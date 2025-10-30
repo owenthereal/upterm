@@ -332,11 +332,15 @@ func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {
 func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
 	var aks []string
 	for _, ak := range keys {
-		var fps []string
-		for _, fp := range ak.PublicKeyFingerprints {
-			fps = append(fps, fmt.Sprintf("- %s", fp))
+		if len(ak.PublicKeyFingerprints) == 0 {
+			aks = append(aks, fmt.Sprintf("[!] %s (no SSH keys configured)\n", ak.Comment))
+		} else {
+			var fps []string
+			for _, fp := range ak.PublicKeyFingerprints {
+				fps = append(fps, fmt.Sprintf("- %s", fp))
+			}
+			aks = append(aks, fmt.Sprintf("%s:\n%s", ak.Comment, strings.Join(fps, "\n")))
 		}
-		aks = append(aks, fmt.Sprintf("%s:\n%s", ak.Comment, strings.Join(fps, "\n")))
 	}
 
 	return strings.Join(aks, "\n")
