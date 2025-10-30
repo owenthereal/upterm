@@ -1,0 +1,42 @@
+name: Integration Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration-test-windows:
+    name: Integration Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Integration Test
+        run: |
+          # Create .ssh directory
+          New-Item -ItemType Directory -Force -Path $HOME\.ssh
+
+          $null | ssh-keygen -t rsa -q -N "" -f "$HOME\.ssh\id_rsa"
+
+          # Scan and save host keys for both hostname and IP
+          $job1 = Start-Job -ScriptBlock { ssh-keyscan uptermd.upterm.dev 2>$null }
+          Wait-Job $job1 -Timeout 10 | Out-Null
+          $hostKeys = Receive-Job $job1
+          Remove-Job $job1 -Force
+
+          $hostKeys | Out-File -Encoding ASCII $HOME\.ssh\known_hosts
+
+          # Add cert-authority entries
+          $certAuthLine = $hostKeys -replace '^uptermd\.upterm\.dev\s+', '@cert-authority * '
+          $certAuthLine | Out-File -Encoding ASCII -Append $HOME\.ssh\known_hosts
+
+          go build -o upterm.exe ./cmd/upterm
+
+          .\upterm.exe host --accept --github-user mxschmitt --server ssh://uptermd.upterm.dev:22
+        env:
+          MUTE_FLAKY_TESTS: 1
+        timeout-minutes: 15
