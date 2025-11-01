@@ -333,7 +333,7 @@ func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
 	var aks []string
 	for _, ak := range keys {
 		if len(ak.PublicKeyFingerprints) == 0 {
-			aks = append(aks, fmt.Sprintf("[!] %s (no SSH keys configured)\n", ak.Comment))
+			aks = append(aks, fmt.Sprintf("[!] %s (no SSH keys configured)", ak.Comment))
 		} else {
 			var fps []string
 			for _, fp := range ak.PublicKeyFingerprints {
