@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -535,6 +536,7 @@ func (c *Host) Share(url string) error {
 			if err != nil {
 				// Ignore ANSI parsing errors (e.g., malformed OSC sequences on Windows)
 				// and use the original bytes instead
+				testLogger.Warn("failed to strip ANSI codes", "p", p, "error", err)
 				b = p
 			}
 			c.outputCh <- string(b)
@@ -657,6 +659,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 				if err != nil {
 					// Ignore ANSI parsing errors (e.g., malformed OSC sequences on Windows)
 					// and use the original bytes instead
+					testLogger.Warn("failed to strip ANSI codes", "pp", pp, "error", err)
 					b = pp
 				}
 				c.outputCh <- string(b)
@@ -722,9 +725,27 @@ func scanner(ch chan string) *bufio.Scanner {
 	return s
 }
 
+// stripShellPrompt removes PowerShell prompt prefix and ANSI codes on Windows
+// PowerShell outputs: "\x1b[...ANSI codes...PS C:\path> command" instead of just "command"
+func stripShellPrompt(s string) string {
+	if runtime.GOOS != "windows" {
+		return s
+	}
+
+	// First, remove all ANSI escape sequences
+	// ANSI codes start with ESC [ and end with a letter, or ESC ] ... BEL
+	ansiRe := regexp.MustCompile(`\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
+	s = ansiRe.ReplaceAllString(s, "")
+
+	// Then remove "PS <path>>" (can appear multiple times due to screen redraws)
+	// Don't use ^ anchor so we match all occurrences, not just start of line
+	promptRe := regexp.MustCompile(`PS [^>]+>\s*`)
+	return promptRe.ReplaceAllString(s, "")
+}
+
 func scan(s *bufio.Scanner) string {
 	for s.Scan() {
-		text := strings.TrimSpace(s.Text())
+		text := stripShellPrompt(strings.TrimSpace(s.Text()))
 		if text == "" {
 			continue
 		}

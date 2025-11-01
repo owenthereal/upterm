@@ -1,12 +1,9 @@
 package ftests
 
 import (
-	"bufio"
 	"context"
 	"os"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"testing"
 	"time"
 
@@ -16,35 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// stripShellPrompt removes PowerShell prompt prefix and ANSI codes on Windows
-// PowerShell outputs: "\x1b[...ANSI codes...PS C:\path> command" instead of just "command"
-func stripShellPrompt(s string) string {
-	if runtime.GOOS != "windows" {
-		return s
-	}
-
-	// First, remove all ANSI escape sequences
-	// ANSI codes start with ESC [ and end with a letter, or ESC ] ... BEL
-	ansiRe := regexp.MustCompile(`\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
-	s = ansiRe.ReplaceAllString(s, "")
-
-	// Then remove "PS <path>>" (can appear multiple times due to screen redraws)
-	// Don't use ^ anchor so we match all occurrences, not just start of line
-	promptRe := regexp.MustCompile(`PS [^>]+>\s*`)
-	return promptRe.ReplaceAllString(s, "")
-}
-
-// scanAndStrip scans and strips shell prompts, looping until we get actual content
-// This handles PowerShell sending prompts/ANSI codes that become empty after stripping
-func scanAndStrip(s *bufio.Scanner) string {
-	for {
-		result := stripShellPrompt(scan(s))
-		if result != "" {
-			return result
-		}
-	}
-}
 
 func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
@@ -127,8 +95,8 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	hostScanner := scanner(hostOutputCh)
 
 	hostInputCh <- `echo "hello"`
-	require.Equal(`echo "hello"`, scanAndStrip(hostScanner))
-	require.Equal("hello", scanAndStrip(hostScanner))
+	require.Equal(`echo "hello"`, scan(hostScanner))
+	require.Equal("hello", scan(hostScanner))
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -176,22 +144,22 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 
 	// host input
 	hostInputCh <- `echo "hello"`
-	assert.Equal(`echo "hello"`, scanAndStrip(hostScanner), "host should echo command")
-	assert.Equal("hello", scanAndStrip(hostScanner), "host should show command output")
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command")
+	assert.Equal("hello", scan(hostScanner), "host should show command output")
 
 	// client output
-	assert.Equal(`echo "hello"`, scanAndStrip(remoteScanner), "client should see host command")
-	assert.Equal("hello", scanAndStrip(remoteScanner), "client should see host output")
+	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host command")
+	assert.Equal("hello", scan(remoteScanner), "client should see host output")
 
 	// client input
 	remoteInputCh <- `echo "hello again"`
-	assert.Equal(`echo "hello again"`, scanAndStrip(remoteScanner), "client should echo its own command")
-	assert.Equal("hello again", scanAndStrip(remoteScanner), "client should see its own output")
+	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its own command")
+	assert.Equal("hello again", scan(remoteScanner), "client should see its own output")
 
 	// host output
 	// host should link to remote with the same input/output
-	assert.Equal(`echo "hello again"`, scanAndStrip(hostScanner), "host should see client command")
-	assert.Equal("hello again", scanAndStrip(hostScanner), "host should see client output")
+	assert.Equal(`echo "hello again"`, scan(hostScanner), "host should see client command")
+	assert.Equal("hello again", scan(hostScanner), "host should see client output")
 }
 
 func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string, hostNodeAddr, clientJoinURL string) {
@@ -221,9 +189,9 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scanAndStrip(hostScanner), "host should echo initial command")
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo initial command")
 
-	assert.Equal("hello", scanAndStrip(hostScanner), "host should show initial output")
+	assert.Equal("hello", scan(hostScanner), "host should show initial output")
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -239,14 +207,14 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	remoteInputCh <- `echo "hello again"`
 
-	assert.Equal(`echo "hello again"`, scanAndStrip(remoteScanner), "client should echo its command")
-	assert.Equal("hello again", scanAndStrip(remoteScanner), "client should see output")
+	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its command")
+	assert.Equal("hello again", scan(remoteScanner), "client should see output")
 
 	// host shouldn't be linked to remote
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scanAndStrip(hostScanner), "host should echo second command independently")
-	assert.Equal("hello", scanAndStrip(hostScanner), "host should show second output independently")
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo second command independently")
+	assert.Equal("hello", scan(hostScanner), "host should show second output independently")
 }
 
 func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -288,19 +256,19 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	// \n
 	// === Attached to read-only session ===
 	// \n
-	assert.Equal("=== Attached to read-only session ===", scanAndStrip(remoteScanner), "client should see read-only welcome message")
+	assert.Equal("=== Attached to read-only session ===", scan(remoteScanner), "client should see read-only welcome message")
 
 	// host input should still work
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scanAndStrip(hostScanner), "host should echo command in read-only mode")
-	assert.Equal("hello", scanAndStrip(hostScanner), "host should show output in read-only mode")
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command in read-only mode")
+	assert.Equal("hello", scan(hostScanner), "host should show output in read-only mode")
 
 	// client input should be disabled
 	remoteInputCh <- `echo "hello again"`
 
 	// client should read what was sent by hostInputCh and not what was sent on remoteInputCh
-	assert.Equal(`echo "hello"`, scanAndStrip(remoteScanner), "client should see host output, not its own input")
+	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host output, not its own input")
 
 	select {
 	// host shouldn't receive anything from client and because client input is disabled

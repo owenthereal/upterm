@@ -15,8 +15,7 @@ import (
 
 // startPty starts a PTY for the given command on Windows using ConPTY
 func startPty(c *exec.Cmd) (*pty, error) {
-	// Create ConPTY with default size (80x30)
-	cpty, err := conpty.New(80, 30, 0)
+	cpty, err := conpty.New(conpty.DefaultHeight, conpty.DefaultWidth, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create conpty: %w", err)
 	}
@@ -114,6 +113,9 @@ func (p *pty) Wait() error {
 		return fmt.Errorf("no process handle")
 	}
 
+	// Close the process handle when done, regardless of error paths
+	defer syscall.CloseHandle(syscall.Handle(p.handle))
+
 	// Wait for the process to exit
 	s, err := syscall.WaitForSingleObject(syscall.Handle(p.handle), syscall.INFINITE)
 	if err != nil {
@@ -128,9 +130,6 @@ func (p *pty) Wait() error {
 	if err := syscall.GetExitCodeProcess(syscall.Handle(p.handle), &exitCode); err != nil {
 		return fmt.Errorf("GetExitCodeProcess failed: %w", err)
 	}
-
-	// Close the process handle
-	syscall.CloseHandle(syscall.Handle(p.handle))
 
 	// Don't close ConPTY here - let the run.Group interrupt handler do it
 	// This ensures proper shutdown order
