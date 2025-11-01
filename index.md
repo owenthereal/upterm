@@ -15,8 +15,22 @@ This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
 ### Mac
 
 ```console
-brew install owenthereal/upterm/upterm
+brew install --cask owenthereal/upterm/upterm
 ```
+
+#### Migrating from Formula to Cask
+
+If you previously installed upterm using the Homebrew formula (without `--cask`), you'll need to migrate to the Cask version:
+
+```console
+# Uninstall the old formula version
+brew uninstall upterm
+
+# Install the new Cask version
+brew install --cask owenthereal/upterm/upterm
+```
+
+**Note:** Running `brew upgrade` with the old formula installed will fail with an error. Follow the migration steps above to resolve this.
 
 ### Standalone
 
