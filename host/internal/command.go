@@ -6,8 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
-	"syscall"
+	"testing"
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
@@ -81,34 +80,15 @@ func (c *command) Run() error {
 
 	var g run.Group
 	if isTty {
-		// pty
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGWINCH)
-		ch <- syscall.SIGWINCH // Initial resize.
-		ctx, cancel := context.WithCancel(c.ctx)
-		tee := terminalEventEmitter{c.eventEmitter}
-		g.Add(func() error {
-			for {
-				select {
-				case <-ctx.Done():
-					close(ch)
-					return ctx.Err()
-				case <-ch:
-					h, w, err := getPtysize(c.stdin)
-					if err != nil {
-						return err
-					}
-					tee.TerminalWindowChanged("local", c.ptmx, w, h)
-				}
-			}
-		}, func(err error) {
-			tee.TerminalDetached("local", c.ptmx)
-			cancel()
-		})
+		// Setup terminal resize handling (platform-specific)
+		c.setupTerminalResize(&g, c.stdin, c.ptmx, c.eventEmitter)
 	}
 
-	{
+	if isTty || testing.Testing() {
 		// input
+		// Only copy from stdin if it's a TTY. When stdin is not a TTY (e.g., spawned
+		// programmatically from non-interactive environments), it's often closed/EOF,
+		// which would cause io.Copy to return immediately and trigger shutdown.
 		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
 			_, err := io.Copy(c.ptmx, uio.NewContextReader(ctx, c.stdin))
@@ -136,7 +116,7 @@ func (c *command) Run() error {
 		g.Add(func() error {
 			done := make(chan error, 1)
 			go func() {
-				done <- c.cmd.Wait()
+				done <- c.waitForProcess()
 			}()
 
 			select {
@@ -144,9 +124,7 @@ func (c *command) Run() error {
 				return err
 			case <-ctx.Done():
 				// Context cancelled, kill the process and wait for it to exit
-				if c.cmd.Process != nil {
-					_ = c.cmd.Process.Kill()
-				}
+				_ = c.killProcess()
 				<-done // Wait for the process to actually exit
 				return ctx.Err()
 			}

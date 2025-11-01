@@ -226,7 +226,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 		{
 			g.Add(func() error {
-				return cmd.Wait()
+				return waitForCommand(cmd, ptmx)
 			}, func(err error) {
 				cancel()
 				_ = ptmx.Close()

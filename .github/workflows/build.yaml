@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
       - name: Set up Go
@@ -64,6 +64,21 @@ jobs:
         run: make test
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
+          MUTE_FLAKY_TESTS: 1
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test
+        run: go test -v ./...
+        env:
           MUTE_FLAKY_TESTS: 1
   vet:
     name: Vet

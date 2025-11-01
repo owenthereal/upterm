@@ -143,7 +143,8 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 func shareRunE(c *cobra.Command, args []string) error {
 	var err error
 	if len(args) == 0 {
-		args, err = shlex.Split(os.Getenv("SHELL"))
+		shellCmd := getDefaultShell()
+		args, err = shlex.Split(shellCmd)
 		if err != nil {
 			return err
 		}

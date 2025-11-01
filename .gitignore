@@ -7,3 +7,6 @@ release
 dist
 bin
 CLAUDE.md
+.claude/
+*.exe
+*.exe~
