@@ -219,7 +219,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	if c.AdminSocketFile == "" {
-		dir, err := utils.CreateUptermDir()
+		dir, err := utils.CreateUptermRuntimeDir()
 		if err != nil {
 			return err
 		}

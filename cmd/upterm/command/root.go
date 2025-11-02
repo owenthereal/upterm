@@ -51,12 +51,7 @@ Environment Variables:
 
 			debug, _ := cmd.Flags().GetBool("debug")
 
-			logPath, err := utils.UptermLogFilePath()
-			if err != nil {
-				return err
-			}
-
-			logOptions := []logging.Option{logging.File(logPath)}
+			logOptions := []logging.Option{logging.File(utils.UptermLogFilePath())}
 			if debug {
 				logOptions = append(logOptions, logging.Debug())
 			}
@@ -79,7 +74,9 @@ Environment Variables:
 		},
 	}
 
-	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "", "enable debug logging")
+	logPath := utils.UptermLogFilePath()
+	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
+		fmt.Sprintf("enable debug level logging (log file: %s)", logPath))
 
 	rootCmd.AddCommand(hostCmd())
 	rootCmd.AddCommand(proxyCmd())
@@ -92,8 +89,9 @@ Environment Variables:
 
 // bindFlagsToEnv binds all command flags to environment variables with UPTERM_ prefix.
 // This allows any flag to be set via environment variable, e.g.:
-//   --hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var
-//   --read-only flag -> UPTERM_READ_ONLY env var
+//
+//	--hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var
+//	--read-only flag -> UPTERM_READ_ONLY env var
 func bindFlagsToEnv(cmd *cobra.Command) error {
 	v := viper.New()
 

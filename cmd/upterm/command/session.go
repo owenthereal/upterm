@@ -36,11 +36,16 @@ func sessionCmd() *cobra.Command {
 }
 
 func list() *cobra.Command {
+	runtimeDir := utils.UptermRuntimeDir()
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls", "l"},
 		Short:   "List shared sessions",
-		Long:    `List shared sessions. Session admin sockets are located in ~/.upterm.`,
+		Long: fmt.Sprintf(`List shared sessions.
+
+Sockets are stored in: %s
+
+This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, runtimeDir),
 		Example: `  # List shared sessions:
   upterm session list`,
 		RunE: listRunE,
@@ -66,13 +71,18 @@ func show() *cobra.Command {
 }
 
 func current() *cobra.Command {
+	runtimeDir := utils.UptermRuntimeDir()
 	cmd := &cobra.Command{
 		Use:     "current",
 		Aliases: []string{"c"},
 		Short:   "Display the current terminal session",
-		Long: `Display the current terminal session. By default, this command retrieves the current session from
+		Long: fmt.Sprintf(`Display the current terminal session. By default, this command retrieves the current session from
 the admin socket path specified in the UPTERM_ADMIN_SOCKET environment variable. This environment variable is set upon
-sharing a session with 'upterm host'.`,
+sharing a session with 'upterm host'.
+
+Sockets are stored in: %s
+
+This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, runtimeDir),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
@@ -89,12 +99,9 @@ sharing a session with 'upterm host'.`,
 }
 
 func listRunE(c *cobra.Command, args []string) error {
-	uptermDir, err := utils.CreateUptermDir()
-	if err != nil {
-		return err
-	}
+	runtimeDir := utils.UptermRuntimeDir()
 
-	sessions, err := listSessions(uptermDir)
+	sessions, err := listSessions(runtimeDir)
 	if err != nil {
 		return err
 	}
@@ -142,12 +149,8 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("missing session name")
 	}
 
-	uptermDir, err := utils.UptermDir()
-	if err != nil {
-		return err
-	}
-
-	return displaySessionFromAdminSocketPath(filepath.Join(uptermDir, host.AdminSocketFile(args[0])))
+	runtimeDir := utils.UptermRuntimeDir()
+	return displaySessionFromAdminSocketPath(filepath.Join(runtimeDir, host.AdminSocketFile(args[0])))
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
