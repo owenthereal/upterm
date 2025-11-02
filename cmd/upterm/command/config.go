@@ -143,7 +143,7 @@ func configEditRunE(c *cobra.Command, args []string) error {
 
 	// Create example config if file doesn't exist
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		if err := os.WriteFile(configPath, []byte(exampleConfig()), 0644); err != nil {
+		if err := os.WriteFile(configPath, []byte(exampleConfig()), 0600); err != nil {
 			return fmt.Errorf("failed to create config file: %w", err)
 		}
 	}

@@ -45,6 +45,7 @@ require (
 )
 
 require (
+	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
 	github.com/cli/go-gh/v2 v2.12.2
@@ -62,7 +63,6 @@ require (
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast v1.1.2 // indirect
-	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
