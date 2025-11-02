@@ -15,6 +15,9 @@ func main() {
 		_ = logger.Close()
 	}()
 
+	// Note: XDG environment variables should be set externally before running this command
+	// to generate docs with generic paths instead of machine-specific paths.
+	// See Makefile 'docs' target for proper environment variable setup.
 	rootCmd := command.Root()
 
 	if err := doc.GenMarkdownTree(rootCmd, "./docs"); err != nil {

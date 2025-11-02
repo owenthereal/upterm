@@ -6,7 +6,7 @@ Show the path to the config file
 
 Show the path to the config file.
 
-Config file: /Users/owen/Library/Application Support/upterm/config.yaml
+Config file: /home/user/.config/upterm/config.yaml
 
 The config file is optional and created manually by users.
 
@@ -33,7 +33,7 @@ upterm config path [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
+      --debug   enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
 ```
 
 ### SEE ALSO

@@ -16,7 +16,7 @@ generate: proto
 docs:
 	rm -rf docs && mkdir docs
 	rm -rf etc && mkdir -p etc/man/man1 && mkdir -p etc/completion
-	go run cmd/gendoc/main.go
+	XDG_STATE_HOME=/home/user/.local/state XDG_CONFIG_HOME=/home/user/.config XDG_RUNTIME_DIR=/run/user/1000 go run cmd/gendoc/main.go
 
 .PHONY: proto
 proto:

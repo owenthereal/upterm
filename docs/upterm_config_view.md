@@ -6,7 +6,7 @@ View the config file contents
 
 View the config file contents.
 
-Config file: /Users/owen/Library/Application Support/upterm/config.yaml
+Config file: /home/user/.config/upterm/config.yaml
 
 If the config file exists, this command displays its contents. If it doesn't
 exist, this command shows an example config file that you can use as a template.
@@ -34,7 +34,7 @@ upterm config view [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
+      --debug   enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
 ```
 
 ### SEE ALSO

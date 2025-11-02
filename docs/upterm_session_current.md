@@ -9,7 +9,7 @@ Display the current terminal session.
 By default, reads the admin socket path from $UPTERM_ADMIN_SOCKET (automatically set
 when you run 'upterm host').
 
-Sockets are stored in: /Users/owen/Library/Application Support/upterm
+Sockets are stored in: /run/user/1000/upterm
 
 This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).
 
@@ -38,7 +38,7 @@ upterm session current [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
+      --debug   enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
 ```
 
 ### SEE ALSO

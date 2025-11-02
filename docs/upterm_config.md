@@ -6,7 +6,7 @@ Manage upterm configuration
 
 Manage upterm configuration file.
 
-Config file: /Users/owen/Library/Application Support/upterm/config.yaml
+Config file: /home/user/.config/upterm/config.yaml
 
 This follows the XDG Base Directory Specification.
 
@@ -25,7 +25,7 @@ Configuration priority (highest to lowest):
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
+      --debug   enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
 ```
 
 ### SEE ALSO

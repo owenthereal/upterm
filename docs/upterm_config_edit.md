@@ -6,7 +6,7 @@ Edit the config file
 
 Edit the config file in your default editor.
 
-Config file: /Users/owen/Library/Application Support/upterm/config.yaml
+Config file: /home/user/.config/upterm/config.yaml
 
 This command opens the config file in your editor (determined by $VISUAL, $EDITOR,
 or a sensible default). If the config file doesn't exist, it creates a template
@@ -37,7 +37,7 @@ upterm config edit [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
+      --debug   enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
 ```
 
 ### SEE ALSO
