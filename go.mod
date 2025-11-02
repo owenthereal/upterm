@@ -45,6 +45,7 @@ require (
 )
 
 require (
+	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
 	github.com/cli/go-gh/v2 v2.12.2

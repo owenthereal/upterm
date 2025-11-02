@@ -9,53 +9,95 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/adrg/xdg"
 	gssh "github.com/charmbracelet/ssh"
 	"github.com/dchest/uniuri"
 	"golang.org/x/crypto/ssh"
 )
 
 const (
-	logFile = "upterm.log"
+	logFile    = "upterm.log"
+	configFile = "config.yaml"
+	appName    = "upterm"
 )
 
-func UptermDir() (string, error) {
-	homedir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(homedir, ".upterm"), nil
+// UptermRuntimeDir returns the directory for runtime files (sockets).
+//
+// Following the XDG Base Directory Specification, this directory maps to
+// XDG_RUNTIME_DIR/upterm and is typically cleaned on logout/reboot.
+//
+// Platform-specific paths:
+//   - Linux:   /run/user/1000/upterm
+//   - macOS:   $TMPDIR/upterm (e.g., /var/folders/.../T/upterm)
+//   - Windows: %LOCALAPPDATA%\Temp\upterm
+func UptermRuntimeDir() string {
+	return filepath.Join(xdg.RuntimeDir, appName)
 }
 
-func CreateUptermDir() (string, error) {
-	dir, err := UptermDir()
-	if err != nil {
+// UptermStateDir returns the directory for state files (logs).
+//
+// Following the XDG Base Directory Specification, this directory maps to
+// XDG_STATE_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.local/state/upterm
+//   - macOS:   ~/Library/Application Support/upterm
+//   - Windows: %LOCALAPPDATA%\upterm
+func UptermStateDir() string {
+	return filepath.Join(xdg.StateHome, appName)
+}
+
+// UptermLogFilePath returns the path to the log file in the state directory.
+//
+// Following the XDG Base Directory Specification, this file is stored in
+// XDG_STATE_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.local/state/upterm/upterm.log
+//   - macOS:   ~/Library/Application Support/upterm/upterm.log
+//   - Windows: %LOCALAPPDATA%\upterm\upterm.log
+//
+// Note: The directory is created lazily by the logging system when the file is opened.
+func UptermLogFilePath() string {
+	return filepath.Join(UptermStateDir(), logFile)
+}
+
+// UptermConfigDir returns the directory for configuration files.
+//
+// Following the XDG Base Directory Specification, this directory maps to
+// XDG_CONFIG_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.config/upterm
+//   - macOS:   ~/Library/Application Support/upterm
+//   - Windows: %LOCALAPPDATA%\upterm
+func UptermConfigDir() string {
+	return filepath.Join(xdg.ConfigHome, appName)
+}
+
+// UptermConfigFilePath returns the path to the config file.
+//
+// Following the XDG Base Directory Specification, this file is stored in
+// XDG_CONFIG_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.config/upterm/config.yaml
+//   - macOS:   ~/Library/Application Support/upterm/config.yaml
+//   - Windows: %LOCALAPPDATA%\upterm\config.yaml
+//
+// Note: The config file is optional and created manually by users.
+func UptermConfigFilePath() string {
+	return filepath.Join(UptermConfigDir(), configFile)
+}
+
+// CreateUptermRuntimeDir creates the runtime directory for sockets.
+// Mode 0700 ensures only the current user can access sockets.
+func CreateUptermRuntimeDir() (string, error) {
+	dir := UptermRuntimeDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-
 	return dir, nil
-}
-
-func UptermLogFilePath() (string, error) {
-	dir, err := UptermDir()
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(dir, logFile), nil
-}
-
-func OpenHostLogFile() (*os.File, error) {
-	dir, err := CreateUptermDir()
-	if err != nil {
-		return nil, err
-	}
-
-	return os.OpenFile(filepath.Join(dir, logFile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755)
 }
 
 func DefaultLocalhost(defaultPort string) string {

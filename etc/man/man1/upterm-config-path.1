@@ -2,26 +2,26 @@
 .TH "UPTERM" "1" "Nov 2025" "Upterm 0.0.0+dev" "Upterm Manual"
 
 .SH NAME
-upterm-session-list - List shared sessions
+upterm-config-path - Show the path to the config file
 
 
 .SH SYNOPSIS
-\fBupterm session list [flags]\fP
+\fBupterm config path [flags]\fP
 
 
 .SH DESCRIPTION
-List shared sessions.
+Show the path to the config file.
 
 .PP
-Sockets are stored in: /run/user/1000/upterm
+Config file: /home/user/.config/upterm/config.yaml
 
 .PP
-This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).
+The config file is optional and created manually by users.
 
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]
-	help for list
+	help for path
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
@@ -31,13 +31,16 @@ This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).
 
 .SH EXAMPLE
 .EX
-  # List shared sessions:
-  upterm session list
+  # Show config file path:
+  upterm config path
+
+  # Create config file directory:
+  mkdir -p "$(dirname "$(upterm config path)")"
 .EE
 
 
 .SH SEE ALSO
-\fBupterm-session(1)\fP
+\fBupterm-config(1)\fP
 
 
 .SH HISTORY
