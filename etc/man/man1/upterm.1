@@ -13,6 +13,23 @@ upterm - Instant Terminal Sharing
 Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.
 
 .PP
+Configuration Priority (highest to lowest):
+  1. Command-line flags
+  2. Environment variables (UPTERM_ prefix)
+  3. Config file (see below)
+  4. Default values
+
+.PP
+Config File:
+  ~/.config/upterm/config.yaml (Linux)
+  ~/Library/Application Support/upterm/config.yaml (macOS)
+  %LOCALAPPDATA%\\upterm\\config.yaml (Windows)
+
+.PP
+Run 'upterm config path' to see your config file location.
+  Run 'upterm config edit' to create and edit the config file.
+
+.PP
 Environment Variables:
   All flags can be set via environment variables with the UPTERM_ prefix.
   Flag names are converted by replacing hyphens (-) with underscores (_).
@@ -55,7 +72,7 @@ Examples:
 
 
 .SH SEE ALSO
-\fBupterm-host(1)\fP, \fBupterm-proxy(1)\fP, \fBupterm-session(1)\fP, \fBupterm-upgrade(1)\fP, \fBupterm-version(1)\fP
+\fBupterm-config(1)\fP, \fBupterm-host(1)\fP, \fBupterm-proxy(1)\fP, \fBupterm-session(1)\fP, \fBupterm-upgrade(1)\fP, \fBupterm-version(1)\fP
 
 
 .SH HISTORY

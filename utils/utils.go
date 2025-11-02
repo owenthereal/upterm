@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	logFile = "upterm.log"
-	appName = "upterm"
+	logFile    = "upterm.log"
+	configFile = "config.yaml"
+	appName    = "upterm"
 )
 
 // UptermRuntimeDir returns the directory for runtime files (sockets).
@@ -59,6 +60,34 @@ func UptermStateDir() string {
 // Note: The directory is created lazily by the logging system when the file is opened.
 func UptermLogFilePath() string {
 	return filepath.Join(UptermStateDir(), logFile)
+}
+
+// UptermConfigDir returns the directory for configuration files.
+//
+// Following the XDG Base Directory Specification, this directory maps to
+// XDG_CONFIG_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.config/upterm
+//   - macOS:   ~/Library/Application Support/upterm
+//   - Windows: %LOCALAPPDATA%\upterm
+func UptermConfigDir() string {
+	return filepath.Join(xdg.ConfigHome, appName)
+}
+
+// UptermConfigFilePath returns the path to the config file.
+//
+// Following the XDG Base Directory Specification, this file is stored in
+// XDG_CONFIG_HOME/upterm and persists across sessions.
+//
+// Platform-specific paths:
+//   - Linux:   ~/.config/upterm/config.yaml
+//   - macOS:   ~/Library/Application Support/upterm/config.yaml
+//   - Windows: %LOCALAPPDATA%\upterm\config.yaml
+//
+// Note: The config file is optional and created manually by users.
+func UptermConfigFilePath() string {
+	return filepath.Join(UptermConfigDir(), configFile)
 }
 
 // CreateUptermRuntimeDir creates the runtime directory for sockets.

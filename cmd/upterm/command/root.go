@@ -19,6 +19,20 @@ func Root() *cobra.Command {
 		Short: "Instant Terminal Sharing",
 		Long: `Upterm is an open-source solution for sharing terminal sessions instantly over secure SSH tunnels to the public internet.
 
+Configuration Priority (highest to lowest):
+  1. Command-line flags
+  2. Environment variables (UPTERM_ prefix)
+  3. Config file (see below)
+  4. Default values
+
+Config File:
+  ~/.config/upterm/config.yaml (Linux)
+  ~/Library/Application Support/upterm/config.yaml (macOS)
+  %LOCALAPPDATA%\upterm\config.yaml (Windows)
+
+  Run 'upterm config path' to see your config file location.
+  Run 'upterm config edit' to create and edit the config file.
+
 Environment Variables:
   All flags can be set via environment variables with the UPTERM_ prefix.
   Flag names are converted by replacing hyphens (-) with underscores (_).
@@ -78,6 +92,7 @@ Environment Variables:
 	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
 		fmt.Sprintf("enable debug level logging (log file: %s)", logPath))
 
+	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(hostCmd())
 	rootCmd.AddCommand(proxyCmd())
 	rootCmd.AddCommand(sessionCmd())
@@ -87,13 +102,35 @@ Environment Variables:
 	return rootCmd
 }
 
-// bindFlagsToEnv binds all command flags to environment variables with UPTERM_ prefix.
-// This allows any flag to be set via environment variable, e.g.:
+// bindFlagsToEnv binds all command flags to config file and environment variables.
+// Configuration priority (highest to lowest):
+//  1. Command-line flags
+//  2. Environment variables with UPTERM_ prefix
+//  3. Config file (XDG_CONFIG_HOME/upterm/config.yaml)
+//  4. Default values
 //
-//	--hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var
-//	--read-only flag -> UPTERM_READ_ONLY env var
+// Examples:
+//
+//	--hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var -> hide-client-ip in config.yaml
+//	--read-only flag -> UPTERM_READ_ONLY env var -> read-only in config.yaml
 func bindFlagsToEnv(cmd *cobra.Command) error {
 	v := viper.New()
+
+	// Configure config file
+	configPath := utils.UptermConfigFilePath()
+	v.SetConfigFile(configPath)
+
+	// Try to read config file (silent fail if not exists, but warn on parse errors)
+	if err := v.ReadInConfig(); err != nil {
+		// Only warn if the file exists but can't be parsed
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			// File exists but couldn't be read - log warning if we have logger
+			if logger := uptermctx.Logger(cmd.Context()); logger != nil {
+				logger.Warn("Failed to read config file", "path", configPath, "error", err)
+			}
+		}
+		// Otherwise silently continue - config file is optional
+	}
 
 	// Visit all flags and bind them to viper
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
@@ -111,6 +148,7 @@ func bindFlagsToEnv(cmd *cobra.Command) error {
 	v.SetEnvPrefix("UPTERM")
 
 	// Sync viper values back to flags
+	// Priority: flags (if changed) > env vars > config file > defaults
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		if flag.Name != "help" && !flag.Changed && v.IsSet(flag.Name) {
 			val := v.Get(flag.Name)
@@ -124,7 +162,7 @@ func bindFlagsToEnv(cmd *cobra.Command) error {
 
 // toString converts a value to string for flag setting.
 // Handles bool and string slice types specially, uses fmt.Sprintf for others.
-func toString(val interface{}) string {
+func toString(val any) string {
 	switch v := val.(type) {
 	case bool:
 		if v {

@@ -360,6 +360,132 @@ __upterm_handle_word()
     __upterm_handle_word
 }
 
+_upterm_config_edit()
+{
+    last_command="upterm_config_edit"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
+_upterm_config_help()
+{
+    last_command="upterm_config_help"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    has_completion_function=1
+    noun_aliases=()
+}
+
+_upterm_config_path()
+{
+    last_command="upterm_config_path"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
+_upterm_config_view()
+{
+    last_command="upterm_config_view"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
+_upterm_config()
+{
+    last_command="upterm_config"
+
+    command_aliases=()
+
+    commands=()
+    commands+=("edit")
+    commands+=("help")
+    commands+=("path")
+    commands+=("view")
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_help()
 {
     last_command="upterm_help"
@@ -659,6 +785,7 @@ _upterm_root_command()
     command_aliases=()
 
     commands=()
+    commands+=("config")
     commands+=("help")
     commands+=("host")
     commands+=("proxy")
