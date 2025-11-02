@@ -37,7 +37,7 @@ upterm config edit [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
 ```
 
 ### SEE ALSO

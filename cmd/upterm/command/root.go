@@ -90,7 +90,7 @@ Environment Variables:
 
 	logPath := utils.UptermLogFilePath()
 	rootCmd.PersistentFlags().Bool("debug", os.Getenv("DEBUG") != "",
-		fmt.Sprintf("enable debug level logging (log file: %s)", logPath))
+		fmt.Sprintf("enable debug level logging (log file: %s).", logPath))
 
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(hostCmd())

@@ -54,11 +54,16 @@ func hostCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host",
 		Short: "Host a terminal session",
-		Long: `Host a terminal session via a reverse SSH tunnel to the Upterm server, linking the IO of the host
-and client to a command's IO. Authentication against the Upterm server defaults to using private key files located
-at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, it resorts
-to reading private keys from the SSH Agent. Absence of private keys in files or SSH Agent generates an on-the-fly
-private key. To authorize client connections, specify a authorized_key file with public keys using --authorized-keys.`,
+		Long: `Host a terminal session via a reverse SSH tunnel to the Upterm server.
+
+The session links the host and client IO to a command's IO. Authentication with the
+Upterm server uses private keys in this order:
+  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  2. SSH Agent keys
+  3. Auto-generated ephemeral key (if no keys found)
+
+To authorize client connections, use --authorized-keys to specify an authorized_keys file
+containing client public keys.`,
 		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   upterm host
 
@@ -97,7 +102,7 @@ private key. To authorize client connections, specify a authorized_key file with
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction.")
-	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments)")
+	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }

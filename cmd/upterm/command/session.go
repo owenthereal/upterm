@@ -26,7 +26,7 @@ func sessionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "session",
 		Aliases: []string{"se"},
-		Short:   "Display session",
+		Short:   "Display and manage terminal sessions",
 	}
 	cmd.AddCommand(current())
 	cmd.AddCommand(list())
@@ -65,7 +65,7 @@ func show() *cobra.Command {
 		RunE: infoRunE,
 	}
 
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments)")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }
@@ -76,9 +76,10 @@ func current() *cobra.Command {
 		Use:     "current",
 		Aliases: []string{"c"},
 		Short:   "Display the current terminal session",
-		Long: fmt.Sprintf(`Display the current terminal session. By default, this command retrieves the current session from
-the admin socket path specified in the UPTERM_ADMIN_SOCKET environment variable. This environment variable is set upon
-sharing a session with 'upterm host'.
+		Long: fmt.Sprintf(`Display the current terminal session.
+
+By default, reads the admin socket path from $UPTERM_ADMIN_SOCKET (automatically set
+when you run 'upterm host').
 
 Sockets are stored in: %s
 
@@ -92,8 +93,8 @@ This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, r
 		RunE:    currentRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "admin unix domain socket (required)")
-	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments)")
+	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin unix domain socket (required).")
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }

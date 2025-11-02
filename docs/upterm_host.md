@@ -4,11 +4,16 @@ Host a terminal session
 
 ### Synopsis
 
-Host a terminal session via a reverse SSH tunnel to the Upterm server, linking the IO of the host
-and client to a command's IO. Authentication against the Upterm server defaults to using private key files located
-at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, it resorts
-to reading private keys from the SSH Agent. Absence of private keys in files or SSH Agent generates an on-the-fly
-private key. To authorize client connections, specify a authorized_key file with public keys using --authorized-keys.
+Host a terminal session via a reverse SSH tunnel to the Upterm server.
+
+The session links the host and client IO to a command's IO. Authentication with the
+Upterm server uses private keys in this order:
+  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  2. SSH Agent keys
+  3. Auto-generated ephemeral key (if no keys found)
+
+To authorize client connections, use --authorized-keys to specify an authorized_keys file
+containing client public keys.
 
 ```
 upterm host [flags]
@@ -46,7 +51,7 @@ upterm host [flags]
       --github-user strings      Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
       --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect.
   -h, --help                     help for host
-      --hide-client-ip           Hide client IP addresses from output (auto-enabled in CI environments)
+      --hide-client-ip           Hide client IP addresses from output (auto-enabled in CI environments).
       --known-hosts string       Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
   -i, --private-key strings      Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
   -r, --read-only                Host a read-only session, preventing client interaction.
@@ -57,7 +62,7 @@ upterm host [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
 ```
 
 ### SEE ALSO

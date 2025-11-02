@@ -10,11 +10,18 @@ upterm-host - Host a terminal session
 
 
 .SH DESCRIPTION
-Host a terminal session via a reverse SSH tunnel to the Upterm server, linking the IO of the host
-and client to a command's IO. Authentication against the Upterm server defaults to using private key files located
-at ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, and ~/.ssh/id_rsa. If no private key file is found, it resorts
-to reading private keys from the SSH Agent. Absence of private keys in files or SSH Agent generates an on-the-fly
-private key. To authorize client connections, specify a authorized_key file with public keys using --authorized-keys.
+Host a terminal session via a reverse SSH tunnel to the Upterm server.
+
+.PP
+The session links the host and client IO to a command's IO. Authentication with the
+Upterm server uses private keys in this order:
+  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  2. SSH Agent keys
+  3. Auto-generated ephemeral key (if no keys found)
+
+.PP
+To authorize client connections, use --authorized-keys to specify an authorized_keys file
+containing client public keys.
 
 
 .SH OPTIONS
@@ -47,7 +54,7 @@ private key. To authorize client connections, specify a authorized_key file with
 
 .PP
 \fB--hide-client-ip\fP[=false]
-	Hide client IP addresses from output (auto-enabled in CI environments)
+	Hide client IP addresses from output (auto-enabled in CI environments).
 
 .PP
 \fB--known-hosts\fP="/Users/owen/.ssh/known_hosts"
@@ -72,7 +79,7 @@ private key. To authorize client connections, specify a authorized_key file with
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 \fB--debug\fP[=false]
-	enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+	enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
 
 
 .SH EXAMPLE

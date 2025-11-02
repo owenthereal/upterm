@@ -21,11 +21,11 @@ func upgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade the CLI",
-		Example: `  # Upgrade to the latest version
+		Example: `  # Upgrade to the latest version:
   upterm upgrade
 
-  # Upgrade to a specific version
-  $ upterm upgrade 0.2.0`,
+  # Upgrade to a specific version:
+  upterm upgrade 0.2.0`,
 		RunE: upgradeRunE,
 	}
 

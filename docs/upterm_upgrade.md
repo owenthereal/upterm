@@ -9,11 +9,11 @@ upterm upgrade [flags]
 ### Examples
 
 ```
-  # Upgrade to the latest version
+  # Upgrade to the latest version:
   upterm upgrade
 
-  # Upgrade to a specific version
-  $ upterm upgrade 0.2.0
+  # Upgrade to a specific version:
+  upterm upgrade 0.2.0
 ```
 
 ### Options
@@ -25,7 +25,7 @@ upterm upgrade [flags]
 ### Options inherited from parent commands
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
 ```
 
 ### SEE ALSO

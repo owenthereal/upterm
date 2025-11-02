@@ -53,7 +53,7 @@ Environment Variables:
 ### Options
 
 ```
-      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+      --debug   enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
   -h, --help    help for upterm
 ```
 
@@ -62,7 +62,7 @@ Environment Variables:
 * [upterm config](upterm_config.md)	 - Manage upterm configuration
 * [upterm host](upterm_host.md)	 - Host a terminal session
 * [upterm proxy](upterm_proxy.md)	 - Proxy a terminal session via WebSocket
-* [upterm session](upterm_session.md)	 - Display session
+* [upterm session](upterm_session.md)	 - Display and manage terminal sessions
 * [upterm upgrade](upterm_upgrade.md)	 - Upgrade the CLI
 * [upterm version](upterm_version.md)	 - Show version
 

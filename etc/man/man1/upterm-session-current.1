@@ -10,9 +10,11 @@ upterm-session-current - Display the current terminal session
 
 
 .SH DESCRIPTION
-Display the current terminal session. By default, this command retrieves the current session from
-the admin socket path specified in the UPTERM_ADMIN_SOCKET environment variable. This environment variable is set upon
-sharing a session with 'upterm host'.
+Display the current terminal session.
+
+.PP
+By default, reads the admin socket path from $UPTERM_ADMIN_SOCKET (automatically set
+when you run 'upterm host').
 
 .PP
 Sockets are stored in: /Users/owen/Library/Application Support/upterm
@@ -23,7 +25,7 @@ This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).
 
 .SH OPTIONS
 \fB--admin-socket\fP=""
-	admin unix domain socket (required)
+	Admin unix domain socket (required).
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]
@@ -31,12 +33,12 @@ This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).
 
 .PP
 \fB--hide-client-ip\fP[=false]
-	Hide client IP addresses from output (auto-enabled in CI environments)
+	Hide client IP addresses from output (auto-enabled in CI environments).
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 \fB--debug\fP[=false]
-	enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log)
+	enable debug level logging (log file: /Users/owen/Library/Application Support/upterm/upterm.log).
 
 
 .SH EXAMPLE
