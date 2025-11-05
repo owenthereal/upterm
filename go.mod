@@ -16,7 +16,7 @@ require (
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/gen2brain/beeep v0.11.1
 	github.com/getsentry/sentry-go v0.36.2
-	github.com/getsentry/sentry-go/slog v0.36.1
+	github.com/getsentry/sentry-go/slog v0.36.2
 	github.com/go-kit/kit v0.13.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-querystring v1.1.0 // indirect
