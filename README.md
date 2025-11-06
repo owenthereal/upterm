@@ -82,7 +82,7 @@ upterm host -- docker run --rm -ti ubuntu bash
 Host a session with specified client public key(s) authorized to connect:
 
 ```console
-upterm host --authorized-key PATH_TO_PUBLIC_KEY
+upterm host --authorized-keys PATH_TO_PUBLIC_KEY
 ```
 
 Authorize specified GitHub, GitLab, SourceHut, Codeberg users with their corresponding public keys:
@@ -341,7 +341,7 @@ Available metrics:
 
 ## :balance_scale: Comparison with Prior Arts
 
-Upterm stands as a modern alternative to [Tmate](https://tmate.io).
+Upterm stands as a modern alternative to [Tmate](https://github.com/tmate-io/tmate).
 
 Tmate originates as a fork from an older iteration of Tmux, extending terminal sharing capabilities atop Tmux 2.x. However, Tmate has no plans to align with the latest Tmux updates, compelling Tmate & Tmux users to manage two separate configurations. For instance, the necessity to [bind identical keys twice, conditionally](https://github.com/tmate-io/tmate/issues/108).
 
