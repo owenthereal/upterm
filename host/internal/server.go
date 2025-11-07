@@ -34,6 +34,9 @@ type Server struct {
 	Stdout            *os.File
 	Logger            *slog.Logger
 	ReadOnly          bool
+	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
+	// This is used in tests where stdin is a pipe but we still want to forward test data.
+	ForceForwardingInputForTesting bool
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -49,6 +52,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Stdout,
 		s.EventEmitter,
 		writers,
+		s.ForceForwardingInputForTesting,
 	)
 	ptmx, err := cmd.Start(cmdCtx)
 	if err != nil {

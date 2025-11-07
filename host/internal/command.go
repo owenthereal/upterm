@@ -23,15 +23,17 @@ func newCommand(
 	stdout *os.File,
 	eventEmitter *emitter.Emitter,
 	writers *uio.MultiWriter,
+	forceForwardingInputForTesting bool,
 ) *command {
 	return &command{
-		name:         name,
-		args:         args,
-		env:          env,
-		stdin:        stdin,
-		stdout:       stdout,
-		eventEmitter: eventEmitter,
-		writers:      writers,
+		name:                           name,
+		args:                           args,
+		env:                            env,
+		stdin:                          stdin,
+		stdout:                         stdout,
+		eventEmitter:                   eventEmitter,
+		writers:                        writers,
+		forceForwardingInputForTesting: forceForwardingInputForTesting,
 	}
 }
 
@@ -51,6 +53,10 @@ type command struct {
 	eventEmitter *emitter.Emitter
 
 	ctx context.Context
+
+	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
+	// This is used in tests where stdin is a pipe but we still want to forward test data.
+	forceForwardingInputForTesting bool
 }
 
 func (c *command) Start(ctx context.Context) (*pty, error) {
@@ -107,8 +113,10 @@ func (c *command) Run() error {
 		})
 	}
 
-	{
-		// input
+	// Forward stdin if it's a TTY or if forced for testing.
+	// Do not forward stdin if it's not a TTY to avoid blocking on Read.
+	if isTty || c.forceForwardingInputForTesting {
+		// input - forward stdin to PTY
 		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
 			_, err := io.Copy(c.ptmx, uio.NewContextReader(ctx, c.stdin))
