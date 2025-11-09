@@ -114,7 +114,8 @@ func (c *command) Run() error {
 	}
 
 	// Forward stdin if it's a TTY or if forced for testing.
-	// Do not forward stdin if it's not a TTY to avoid blocking on Read.
+	// Do not forward stdin if it's not a TTY to avoid blocking indefinitely on io.Copy,
+	// since non-TTY stdin (pipes, redirects) may never receive EOF in daemon-like scenarios.
 	if isTty || c.forceForwardingInputForTesting {
 		// input - forward stdin to PTY
 		ctx, cancel := context.WithCancel(c.ctx)
