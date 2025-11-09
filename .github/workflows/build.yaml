@@ -77,7 +77,7 @@ jobs:
           go-version-file: go.mod
           check-latest: true
       - name: Test
-        run: go test -v ./...
+        run: make test
         env:
           MUTE_FLAKY_TESTS: 1
   vet:
