@@ -483,21 +483,22 @@ func (c *Host) Share(url string) error {
 	logger := testLogger
 
 	c.Host = &host.Host{
-		Host:                   url,
-		Command:                c.Command,
-		ForceCommand:           c.ForceCommand,
-		Signers:                signers,
-		AuthorizedKeys:         authorizedKeys,
-		AdminSocketFile:        c.AdminSocketFile,
-		SessionCreatedCallback: c.SessionCreatedCallback,
-		ClientJoinedCallback:   c.ClientJoinedCallback,
-		ClientLeftCallback:     c.ClientLeftCallback,
-		KeepAliveDuration:      keepAliveDuration,
-		Logger:                 logger,
-		HostKeyCallback:        ssh.InsecureIgnoreHostKey(),
-		Stdin:                  stdinr,
-		Stdout:                 stdoutw,
-		ReadOnly:               c.ReadOnly,
+		Host:                           url,
+		Command:                        c.Command,
+		ForceCommand:                   c.ForceCommand,
+		Signers:                        signers,
+		AuthorizedKeys:                 authorizedKeys,
+		AdminSocketFile:                c.AdminSocketFile,
+		SessionCreatedCallback:         c.SessionCreatedCallback,
+		ClientJoinedCallback:           c.ClientJoinedCallback,
+		ClientLeftCallback:             c.ClientLeftCallback,
+		KeepAliveDuration:              keepAliveDuration,
+		Logger:                         logger,
+		HostKeyCallback:                ssh.InsecureIgnoreHostKey(),
+		Stdin:                          stdinr,
+		Stdout:                         stdoutw,
+		ReadOnly:                       c.ReadOnly,
+		ForceForwardingInputForTesting: true,
 	}
 
 	errCh := make(chan error)

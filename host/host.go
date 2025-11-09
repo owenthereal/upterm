@@ -158,21 +158,22 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.P
 }
 
 type Host struct {
-	Host                   string
-	KeepAliveDuration      time.Duration
-	Command                []string
-	ForceCommand           []string
-	Signers                []ssh.Signer
-	HostKeyCallback        ssh.HostKeyCallback
-	AuthorizedKeys         []*AuthorizedKey
-	AdminSocketFile        string
-	SessionCreatedCallback func(*api.GetSessionResponse) error
-	ClientJoinedCallback   func(*api.Client)
-	ClientLeftCallback     func(*api.Client)
-	Logger                 *slog.Logger
-	Stdin                  *os.File
-	Stdout                 *os.File
-	ReadOnly               bool
+	Host                           string
+	KeepAliveDuration              time.Duration
+	Command                        []string
+	ForceCommand                   []string
+	Signers                        []ssh.Signer
+	HostKeyCallback                ssh.HostKeyCallback
+	AuthorizedKeys                 []*AuthorizedKey
+	AdminSocketFile                string
+	SessionCreatedCallback         func(*api.GetSessionResponse) error
+	ClientJoinedCallback           func(*api.Client)
+	ClientLeftCallback             func(*api.Client)
+	Logger                         *slog.Logger
+	Stdin                          *os.File
+	Stdout                         *os.File
+	ReadOnly                       bool
+	ForceForwardingInputForTesting bool
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -324,17 +325,18 @@ func (c *Host) Run(ctx context.Context) error {
 
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := internal.Server{
-			Command:           c.Command,
-			CommandEnv:        []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
-			ForceCommand:      c.ForceCommand,
-			Signers:           c.Signers,
-			AuthorizedKeys:    aks,
-			EventEmitter:      eventEmitter,
-			KeepAliveDuration: c.KeepAliveDuration,
-			Stdin:             c.Stdin,
-			Stdout:            c.Stdout,
-			Logger:            logger.With("component", "server"),
-			ReadOnly:          c.ReadOnly,
+			Command:                        c.Command,
+			CommandEnv:                     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
+			ForceCommand:                   c.ForceCommand,
+			Signers:                        c.Signers,
+			AuthorizedKeys:                 aks,
+			EventEmitter:                   eventEmitter,
+			KeepAliveDuration:              c.KeepAliveDuration,
+			Stdin:                          c.Stdin,
+			Stdout:                         c.Stdout,
+			Logger:                         logger.With("component", "server"),
+			ReadOnly:                       c.ReadOnly,
+			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())
