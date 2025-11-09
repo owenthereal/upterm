@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 // TestCommand_TTY_DetectionWithRealPTY verifies that a real PTY is properly
 // detected as a TTY and stdin forwarding is enabled.
 func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
+	// Skip on Windows - ptylib.Open() uses Unix PTY which is not available
+	// Windows uses ConPTY which is already tested through the main command implementation
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PTY test not applicable on Windows (uses ConPTY)")
+	}
+
 	require := require.New(t)
 	assert := assert.New(t)
 
