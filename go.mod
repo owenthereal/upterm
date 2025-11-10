@@ -48,7 +48,7 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
-	github.com/cli/go-gh/v2 v2.12.2
+	github.com/cli/go-gh/v2 v2.13.0
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.7.0
