@@ -94,7 +94,10 @@ func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Send input through the PTY master
-	_, err = ptmx.Write([]byte("hello from pty\n"))
+	// Use \r (carriage return) for canonical mode compatibility on Linux
+	// The outer PTY is in raw mode, so we need to send the line terminator
+	// that bash's canonical mode expects
+	_, err = ptmx.Write([]byte("hello from pty\r"))
 	require.NoError(err, "failed to write to PTY")
 
 	// Wait for command to complete
