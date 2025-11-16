@@ -308,7 +308,8 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *pty, error) {
 	cmd := exec.CommandContext(ctx, c[0], c[1:]...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
-	pty, err := startPty(cmd)
+	// Pass nil for stdin since this is a remote attach - size will come from SSH client
+	pty, err := startPty(cmd, nil)
 
 	return cmd, pty, err
 }

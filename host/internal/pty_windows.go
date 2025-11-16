@@ -6,16 +6,34 @@ package internal
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
 
 	"github.com/charmbracelet/x/conpty"
+	"golang.org/x/term"
 )
 
 // startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd) (*pty, error) {
-	cpty, err := conpty.New(conpty.DefaultHeight, conpty.DefaultWidth, 0)
+func startPty(c *exec.Cmd, stdin *os.File) (*pty, error) {
+	// Get the actual terminal size from stdin if available
+	// Otherwise, use default dimensions
+	height := conpty.DefaultHeight
+	width := conpty.DefaultWidth
+
+	if stdin != nil {
+		// Try to get the terminal size from stdin
+		h, w, err := getPtysize(stdin)
+		if err == nil && w > 0 && h > 0 {
+			width = w
+			height = h
+		}
+		// If GetSize fails or returns invalid dimensions, we'll use the defaults
+	}
+
+	// conpty.New expects (width, height, flags)
+	cpty, err := conpty.New(width, height, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create conpty: %w", err)
 	}
@@ -100,6 +118,12 @@ func (p *pty) Close() error {
 		p.cpty = nil
 	}
 	return err
+}
+
+// getPtysize gets the terminal size from a file descriptor on Windows
+func getPtysize(f *os.File) (h, w int, err error) {
+	w, h, err = term.GetSize(int(f.Fd()))
+	return h, w, err
 }
 
 // Windows doesn't return EIO like Linux, so this is a no-op

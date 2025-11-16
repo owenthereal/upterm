@@ -12,10 +12,24 @@ import (
 	ptylib "github.com/creack/pty"
 )
 
-func startPty(c *exec.Cmd) (*pty, error) {
+func startPty(c *exec.Cmd, stdin *os.File) (*pty, error) {
+	// Create PTY with kernel defaults first
 	f, err := ptylib.Start(c)
 	if err != nil {
 		return nil, err
+	}
+
+	// Set the initial size from stdin if available
+	if stdin != nil {
+		h, w, err := getPtysize(stdin)
+		if err == nil && w > 0 && h > 0 {
+			// Set the PTY size before returning
+			// Ignore error - process is already running, will use kernel defaults if this fails
+			_ = ptylib.Setsize(f, &ptylib.Winsize{
+				Rows: uint16(h),
+				Cols: uint16(w),
+			})
+		}
 	}
 
 	return wrapPty(f), nil

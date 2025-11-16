@@ -17,7 +17,7 @@ import (
 func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, eventEmitter *emitter.Emitter) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
-	ch <- syscall.SIGWINCH // Initial resize.
+	// Note: Initial size is already set in startPty, so we only handle resize events here
 	ctx, cancel := context.WithCancel(c.ctx)
 	tee := terminalEventEmitter{eventEmitter}
 	g.Add(func() error {

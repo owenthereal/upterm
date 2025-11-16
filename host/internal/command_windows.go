@@ -4,17 +4,57 @@
 package internal
 
 import (
+	"context"
 	"os"
+	"time"
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 )
 
-// setupTerminalResize is a no-op on Windows since ConPTY handles resize internally
-// Windows doesn't have SIGWINCH, and ConPTY manages terminal resizing automatically
+// setupTerminalResize polls for terminal size changes on Windows
+// Windows doesn't have SIGWINCH signals like Unix, so we poll for terminal size changes
+// Note: Initial size is already set in startPty
 func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, eventEmitter *emitter.Emitter) {
-	// No-op on Windows - ConPTY handles this automatically
-	// Terminal resize events are managed by the Windows Console system
+	// Get the initial size to track changes
+	h, w, err := getPtysize(stdin)
+	if err != nil {
+		// If we can't get the size, skip resize monitoring
+		return
+	}
+
+	tee := terminalEventEmitter{eventEmitter}
+	// Track the last known size for comparison
+	lastH, lastW := h, w
+
+	// Poll for terminal size changes
+	ctx, cancel := context.WithCancel(c.ctx)
+	g.Add(func() error {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				h, w, err := getPtysize(stdin)
+				if err != nil {
+					// Can't get size, skip this check
+					continue
+				}
+
+				// Only notify if size actually changed
+				if h != lastH || w != lastW {
+					lastH, lastW = h, w
+					tee.TerminalWindowChanged("local", ptmx, w, h)
+				}
+			}
+		}
+	}, func(err error) {
+		tee.TerminalDetached("local", ptmx)
+		cancel()
+	})
 }
 
 // waitForProcess waits for the process to exit on Windows

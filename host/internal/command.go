@@ -63,7 +63,8 @@ func (c *command) Start(ctx context.Context) (*pty, error) {
 	c.cmd.Env = append(c.env, os.Environ()...)
 
 	var err error
-	c.ptmx, err = startPty(c.cmd)
+	// Pass stdin so startPty can get the initial terminal size
+	c.ptmx, err = startPty(c.cmd, c.stdin)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

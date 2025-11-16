@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -44,11 +45,15 @@ var (
 // getTestShell returns platform-appropriate shell command for tests
 func getTestShell() []string {
 	if runtime.GOOS == "windows" {
-		// Use PowerShell Core with -NonInteractive
+		// Prefer PowerShell Core (pwsh) if available, otherwise use Windows PowerShell (powershell)
 		// -NonInteractive disables PSReadLine (no syntax highlighting/line editing)
 		// -NoProfile/-NoLogo reduce startup noise
 		// Tests must drain the initial "PS >" prompt
-		return []string{"pwsh", "-NoProfile", "-NoLogo", "-NonInteractive"}
+		shell := "powershell" // Default to Windows PowerShell (always available)
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			shell = "pwsh" // Use PowerShell Core if available
+		}
+		return []string{shell, "-NoProfile", "-NoLogo", "-NonInteractive"}
 	}
 	return []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"}
 }
