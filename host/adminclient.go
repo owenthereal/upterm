@@ -1,7 +1,9 @@
 package host
 
 import (
+	"context"
 	"fmt"
+	"net"
 
 	"github.com/owenthereal/upterm/host/api"
 	"google.golang.org/grpc"
@@ -18,7 +20,14 @@ func AdminSocketFile(sessionID string) string {
 
 func AdminClient(socket string) (api.AdminServiceClient, error) {
 	// Use mtls
-	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Workaround for gRPC Unix socket support on Windows: https://github.com/grpc/grpc-go/issues/8675
+	conn, err := grpc.NewClient(
+		"passthrough:///unix",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}

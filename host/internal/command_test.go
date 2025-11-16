@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 // TestCommand_TTY_DetectionWithRealPTY verifies that a real PTY is properly
 // detected as a TTY and stdin forwarding is enabled.
 func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
+	// Skip on Windows - ptylib.Open() uses Unix PTY which is not available
+	// Windows uses ConPTY which is already tested through the main command implementation
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PTY test not applicable on Windows (uses ConPTY)")
+	}
+
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -87,7 +94,10 @@ func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Send input through the PTY master
-	_, err = ptmx.Write([]byte("hello from pty\n"))
+	// Use \r (carriage return) for canonical mode compatibility on Linux
+	// The outer PTY is in raw mode, so we need to send the line terminator
+	// that bash's canonical mode expects
+	_, err = ptmx.Write([]byte("hello from pty\r"))
 	require.NoError(err, "failed to write to PTY")
 
 	// Wait for command to complete

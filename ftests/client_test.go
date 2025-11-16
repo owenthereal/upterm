@@ -21,7 +21,7 @@ func testHostNoAuthorizedKeyAnyClientJoin(t *testing.T, hostShareURL, hostNodeAd
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:         []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:         getTestShell(),
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
@@ -48,7 +48,7 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -77,7 +77,7 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -94,8 +94,8 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	hostInputCh, hostOutputCh := h.InputOutput()
 	hostScanner := scanner(hostOutputCh)
 
-	hostInputCh <- "echo hello"
-	require.Equal("echo hello", scan(hostScanner))
+	hostInputCh <- `echo "hello"`
+	require.Equal(`echo "hello"`, scan(hostScanner))
 	require.Equal("hello", scan(hostScanner))
 
 	c := &Client{
@@ -117,7 +117,7 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -143,22 +143,22 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 	remoteScanner := scanner(remoteOutputCh)
 
 	// host input
-	hostInputCh <- "echo hello"
-	assert.Equal("echo hello", scan(hostScanner), "host should echo command")
+	hostInputCh <- `echo "hello"`
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command")
 	assert.Equal("hello", scan(hostScanner), "host should show command output")
 
 	// client output
-	assert.Equal("echo hello", scan(remoteScanner), "client should see host command")
+	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host command")
 	assert.Equal("hello", scan(remoteScanner), "client should see host output")
 
 	// client input
-	remoteInputCh <- "echo hello again"
-	assert.Equal("echo hello again", scan(remoteScanner), "client should echo its own command")
+	remoteInputCh <- `echo "hello again"`
+	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its own command")
 	assert.Equal("hello again", scan(remoteScanner), "client should see its own output")
 
 	// host output
 	// host should link to remote with the same input/output
-	assert.Equal("echo hello again", scan(hostScanner), "host should see client command")
+	assert.Equal(`echo "hello again"`, scan(hostScanner), "host should see client command")
 	assert.Equal("hello again", scan(hostScanner), "host should see client output")
 }
 
@@ -170,8 +170,8 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
-		ForceCommand:             []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
+		ForceCommand:             getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -187,8 +187,10 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	hostInputCh, hostOutputCh := h.InputOutput()
 	hostScanner := scanner(hostOutputCh)
 
-	hostInputCh <- "echo hello"
-	assert.Equal("echo hello", scan(hostScanner), "host should echo initial command")
+	hostInputCh <- `echo "hello"`
+
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo initial command")
+
 	assert.Equal("hello", scan(hostScanner), "host should show initial output")
 
 	c := &Client{
@@ -203,13 +205,15 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 	// Wait for ssh stdin/stdout to fully attach - critical for force command isolation
 	time.Sleep(time.Second)
 
-	remoteInputCh <- "echo hello again"
-	assert.Equal("echo hello again", scan(remoteScanner), "client should echo its command")
-	assert.Equal("hello again", scan(remoteScanner), "client should see its output")
+	remoteInputCh <- `echo "hello again"`
+
+	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its command")
+	assert.Equal("hello again", scan(remoteScanner), "client should see output")
 
 	// host shouldn't be linked to remote
-	hostInputCh <- "echo hello"
-	assert.Equal("echo hello", scan(hostScanner), "host should echo second command independently")
+	hostInputCh <- `echo "hello"`
+
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo second command independently")
 	assert.Equal("hello", scan(hostScanner), "host should show second output independently")
 }
 
@@ -221,7 +225,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:                  []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:                  getTestShell(),
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
@@ -255,14 +259,16 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	assert.Equal("=== Attached to read-only session ===", scan(remoteScanner), "client should see read-only welcome message")
 
 	// host input should still work
-	hostInputCh <- "echo hello"
-	assert.Equal("echo hello", scan(hostScanner), "host should echo command in read-only mode")
+	hostInputCh <- `echo "hello"`
+
+	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command in read-only mode")
 	assert.Equal("hello", scan(hostScanner), "host should show output in read-only mode")
 
 	// client input should be disabled
-	remoteInputCh <- "echo hello again"
+	remoteInputCh <- `echo "hello again"`
+
 	// client should read what was sent by hostInputCh and not what was sent on remoteInputCh
-	assert.Equal("echo hello", scan(remoteScanner), "client should see host output, not its own input")
+	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host output, not its own input")
 
 	select {
 	// host shouldn't receive anything from client and because client input is disabled
@@ -306,7 +312,7 @@ func testOldClientToNewConsulServer(t *testing.T, hostShareURL, hostNodeAddr, cl
 	adminSocketFile := setupAdminSocket(t)
 
 	h := &Host{
-		Command:         []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"},
+		Command:         getTestShell(),
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
 	}
