@@ -55,21 +55,21 @@ go install ./cmd/upterm/...
 
 1. Host starts a terminal session:
 
-```console
-upterm host
-```
+   ```console
+   upterm host
+   ```
 
-2. Host retrieves and shares the SSH connection string:
+1. Host retrieves and shares the SSH connection string:
 
-```console
-upterm session current
-```
+   ```console
+   upterm session current
+   ```
 
-3. Client connects using the shared string:
+1. Client connects using the shared string:
 
-```console
-ssh TOKEN@uptermd.upterm.dev
-```
+   ```console
+   ssh TOKEN@uptermd.upterm.dev
+   ```
 
 ## :blue_book: Quick Reference
 
@@ -196,18 +196,17 @@ Fly offers a generous free tier and excellent global performance. The official u
 
 1. Install the Fly CLI and authenticate:
 
-```console
-curl -L https://fly.io/install.sh | sh
-flyctl auth login
-```
+   ```console
+   curl -L https://fly.io/install.sh | sh
+   flyctl auth login
+   ```
 
-2. Copy and customize the [`fly.example.toml`](./fly.example.toml) file to `fly.toml` for your deployment configuration.
+1. Copy and customize the [`fly.example.toml`](./fly.example.toml) file to `fly.toml` for your deployment configuration.
+1. Deploy your uptermd server:
 
-3. Deploy your uptermd server:
-
-```console
-flyctl deploy
-```
+  ```console
+  flyctl deploy
+  ```
 
 Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
 
