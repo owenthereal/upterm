@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +41,22 @@ var (
 	// Shared debug logger for all tests
 	testLogger = logging.Must(logging.Console(), logging.Debug()).Logger
 )
+
+// getTestShell returns platform-appropriate shell command for tests
+func getTestShell() []string {
+	if runtime.GOOS == "windows" {
+		// Prefer PowerShell Core (pwsh) if available, otherwise use Windows PowerShell (powershell)
+		// -NonInteractive disables PSReadLine (no syntax highlighting/line editing)
+		// -NoProfile/-NoLogo reduce startup noise
+		// Tests must drain the initial "PS >" prompt
+		shell := "powershell" // Default to Windows PowerShell (always available)
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			shell = "pwsh" // Use PowerShell Core if available
+		}
+		return []string{shell, "-NoProfile", "-NoLogo", "-NonInteractive"}
+	}
+	return []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"}
+}
 
 const (
 	serverStartupTimeout  = 3 * time.Second
@@ -522,7 +540,10 @@ func (c *Host) Share(url string) error {
 		w := writeFunc(func(p []byte) (int, error) {
 			b, err := ansi.Strip(p)
 			if err != nil {
-				return 0, err
+				// Ignore ANSI parsing errors (e.g., malformed OSC sequences)
+				// and use the original bytes instead
+				testLogger.Warn("failed to strip ANSI codes", "p", p, "error", err)
+				b = p
 			}
 			c.outputCh <- string(b)
 			return len(p), nil
@@ -536,7 +557,12 @@ func (c *Host) Share(url string) error {
 	go func() {
 		hostWg.Done()
 		for c := range c.inputCh {
-			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+"\n")); err != nil {
+			// On Windows, cmd.exe needs \r\n to execute commands
+			lineEnding := "\n"
+			if runtime.GOOS == "windows" {
+				lineEnding = "\r\n"
+			}
+			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+lineEnding)); err != nil {
 				testLogger.Error("error copying to stdin", "error", err)
 			}
 		}
@@ -637,7 +663,10 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 			w := writeFunc(func(pp []byte) (int, error) {
 				b, err := ansi.Strip(pp)
 				if err != nil {
-					return 0, err
+					// Ignore ANSI parsing errors (e.g., malformed OSC sequences)
+					// and use the original bytes instead
+					testLogger.Warn("failed to strip ANSI codes", "pp", pp, "error", err)
+					b = pp
 				}
 				c.outputCh <- string(b)
 				return len(pp), nil
@@ -656,7 +685,12 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 			for {
 				select {
 				case s := <-c.inputCh:
-					if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+"\n")); err != nil {
+					// On Windows, cmd.exe needs \r\n to execute commands
+					lineEnding := "\n"
+					if runtime.GOOS == "windows" {
+						lineEnding = "\r\n"
+					}
+					if _, err := io.Copy(c.sshStdin, bytes.NewBufferString(s+lineEnding)); err != nil {
 						return err
 					}
 
@@ -697,9 +731,28 @@ func scanner(ch chan string) *bufio.Scanner {
 	return s
 }
 
+// stripShellPrompt removes PowerShell prompt prefix and ANSI codes on Windows
+// PowerShell outputs: "\x1b[...ANSI codes...PS C:\path> command" instead of just "command"
+func stripShellPrompt(s string) string {
+	if runtime.GOOS != "windows" {
+		return s
+	}
+
+	// First, remove all ANSI escape sequences
+	// CSI sequences: ESC [ ... final byte (0x40-0x7E per ECMA-48)
+	// OSC sequences: ESC ] ... BEL (0x07)
+	ansiRe := regexp.MustCompile(`\x1b\[[^\x40-\x7e]*[\x40-\x7e]|\x1b\][^\x07]*\x07`)
+	s = ansiRe.ReplaceAllString(s, "")
+
+	// Then remove "PS <path>>" (can appear multiple times due to screen redraws)
+	// Don't use ^ anchor so we match all occurrences, not just start of line
+	promptRe := regexp.MustCompile(`PS [^>]+>\s*`)
+	return promptRe.ReplaceAllString(s, "")
+}
+
 func scan(s *bufio.Scanner) string {
 	for s.Scan() {
-		text := strings.TrimSpace(s.Text())
+		text := stripShellPrompt(strings.TrimSpace(s.Text()))
 		if text == "" {
 			continue
 		}

@@ -18,7 +18,7 @@ const (
 
 type terminal struct {
 	ID     string
-	Pty    *pty
+	Pty    PTY
 	Window window
 }
 
@@ -31,7 +31,7 @@ type terminalEventEmitter struct {
 	eventEmitter *emitter.Emitter
 }
 
-func (t terminalEventEmitter) TerminalWindowChanged(id string, pty *pty, w, h int) {
+func (t terminalEventEmitter) TerminalWindowChanged(id string, pty PTY, w, h int) {
 	tt := terminal{
 		ID:  id,
 		Pty: pty,
@@ -43,7 +43,7 @@ func (t terminalEventEmitter) TerminalWindowChanged(id string, pty *pty, w, h in
 	t.eventEmitter.Emit(upterm.EventTerminalWindowChanged, tt)
 }
 
-func (t terminalEventEmitter) TerminalDetached(id string, pty *pty) {
+func (t terminalEventEmitter) TerminalDetached(id string, pty PTY) {
 	tt := terminal{
 		ID:  id,
 		Pty: pty,
@@ -131,7 +131,7 @@ func (t terminalEventHandler) handleTerminalDetached(evt emitter.Event, m map[io
 	return nil
 }
 
-func resizeWindow(ptmx *pty, ts map[string]terminal) error {
+func resizeWindow(ptmx PTY, ts map[string]terminal) error {
 	var w, h int
 
 	for _, t := range ts {

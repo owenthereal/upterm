@@ -1,73 +1,34 @@
 package internal
 
-import (
-	"os"
-	"os/exec"
-	"sync"
-	"syscall"
+import "io"
 
-	ptylib "github.com/creack/pty"
-)
+// PTY represents a pseudo-terminal abstraction that works across platforms.
+// On Unix, it wraps a traditional PTY created via creack/pty.
+// On Windows, it wraps a ConPTY (Console Pseudo Terminal).
+//
+// The interface provides a common abstraction for:
+//   - Reading/writing terminal I/O (via io.ReadWriteCloser)
+//   - Resizing the terminal window
+//   - Managing process lifecycle (Wait/Kill)
+//
+// Platform-specific implementations:
+//   - Unix: see pty_unix.go
+//   - Windows: see pty_windows.go
+type PTY interface {
+	io.ReadWriteCloser
 
-func startPty(c *exec.Cmd) (*pty, error) {
-	f, err := ptylib.Start(c)
-	if err != nil {
-		return nil, err
-	}
+	// Setsize changes the terminal dimensions.
+	// On Unix, this sends a SIGWINCH to the slave process.
+	// On Windows, this resizes the ConPTY buffer.
+	Setsize(h, w int) error
 
-	return wrapPty(f), nil
-}
+	// Wait waits for the process associated with this PTY to exit.
+	// On Unix, this delegates to exec.Cmd.Wait().
+	// On Windows, this waits on the process handle.
+	Wait() error
 
-// Linux kernel return EIO when attempting to read from a master pseudo
-// terminal which no longer has an open slave. So ignore error here.
-// See https://github.com/creack/pty/issues/21
-func ptyError(err error) error {
-	if pathErr, ok := err.(*os.PathError); !ok || pathErr.Err != syscall.EIO {
-		return err
-	}
-
-	return nil
-}
-
-func getPtysize(f *os.File) (h, w int, err error) {
-	return ptylib.Getsize(f)
-}
-
-func wrapPty(f *os.File) *pty {
-	return &pty{File: f}
-}
-
-// Pty is a wrapper of the pty *os.File that provides a read/write mutex.
-// This is to prevent data race that might happen for reszing, reading and closing.
-// See ftests failure:
-// * https://travis-ci.org/owenthereal/upterm/jobs/632489866
-// * https://travis-ci.org/owenthereal/upterm/jobs/632458125
-type pty struct {
-	*os.File
-	sync.RWMutex
-}
-
-func (pty *pty) Setsize(h, w int) error {
-	pty.RLock()
-	defer pty.RUnlock()
-
-	size := &ptylib.Winsize{
-		Rows: uint16(h),
-		Cols: uint16(w),
-	}
-	return ptylib.Setsize(pty.File, size)
-}
-
-func (pty *pty) Read(p []byte) (n int, err error) {
-	pty.RLock()
-	defer pty.RUnlock()
-
-	return pty.File.Read(p)
-}
-
-func (pty *pty) Close() error {
-	pty.Lock()
-	defer pty.Unlock()
-
-	return pty.File.Close()
+	// Kill terminates the process associated with this PTY.
+	// On Unix, this delegates to exec.Cmd.Process.Kill().
+	// On Windows, this calls TerminateProcess on the handle.
+	Kill() error
 }

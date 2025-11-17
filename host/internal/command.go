@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
-	"syscall"
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
@@ -43,7 +41,7 @@ type command struct {
 	env  []string
 
 	cmd  *exec.Cmd
-	ptmx *pty
+	ptmx PTY
 
 	stdin  *os.File
 	stdout *os.File
@@ -59,13 +57,14 @@ type command struct {
 	forceForwardingInputForTesting bool
 }
 
-func (c *command) Start(ctx context.Context) (*pty, error) {
+func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
 	c.cmd.Env = append(c.env, os.Environ()...)
 
 	var err error
-	c.ptmx, err = startPty(c.cmd)
+	// Pass stdin so startPty can get the initial terminal size
+	c.ptmx, err = startPty(c.cmd, c.stdin)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}
@@ -87,30 +86,8 @@ func (c *command) Run() error {
 
 	var g run.Group
 	if isTty {
-		// pty
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGWINCH)
-		ch <- syscall.SIGWINCH // Initial resize.
-		ctx, cancel := context.WithCancel(c.ctx)
-		tee := terminalEventEmitter{c.eventEmitter}
-		g.Add(func() error {
-			for {
-				select {
-				case <-ctx.Done():
-					close(ch)
-					return ctx.Err()
-				case <-ch:
-					h, w, err := getPtysize(c.stdin)
-					if err != nil {
-						return err
-					}
-					tee.TerminalWindowChanged("local", c.ptmx, w, h)
-				}
-			}
-		}, func(err error) {
-			tee.TerminalDetached("local", c.ptmx)
-			cancel()
-		})
+		// Setup terminal resize handling (platform-specific)
+		c.setupTerminalResize(&g, c.stdin, c.ptmx, c.eventEmitter)
 	}
 
 	// Forward stdin if it's a TTY or if forced for testing.
@@ -145,7 +122,7 @@ func (c *command) Run() error {
 		g.Add(func() error {
 			done := make(chan error, 1)
 			go func() {
-				done <- c.cmd.Wait()
+				done <- c.ptmx.Wait()
 			}()
 
 			select {
@@ -153,9 +130,7 @@ func (c *command) Run() error {
 				return err
 			case <-ctx.Done():
 				// Context cancelled, kill the process and wait for it to exit
-				if c.cmd.Process != nil {
-					_ = c.cmd.Process.Kill()
-				}
+				_ = c.ptmx.Kill()
 				<-done // Wait for the process to actually exit
 				return ctx.Err()
 			}

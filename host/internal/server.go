@@ -158,7 +158,7 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 
 type sessionHandler struct {
 	forceCommand      []string
-	ptmx              *pty
+	ptmx              PTY
 	eventEmmiter      *emitter.Emitter
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
@@ -206,12 +206,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 
 	if len(h.forceCommand) > 0 {
-		var cmd *exec.Cmd
-
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
-		cmd, ptmx, err = startAttachCmd(ctx, h.forceCommand, ptyReq.Term)
+		ptmx, err = startAttachCmd(ctx, h.forceCommand, ptyReq.Term)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
@@ -230,7 +228,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 		{
 			g.Add(func() error {
-				return cmd.Wait()
+				return ptmx.Wait()
 			}, func(err error) {
 				cancel()
 				_ = ptmx.Close()
@@ -305,10 +303,11 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 	eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 }
 
-func startAttachCmd(ctx context.Context, c []string, term string) (*exec.Cmd, *pty, error) {
+func startAttachCmd(ctx context.Context, c []string, term string) (PTY, error) {
 	cmd := exec.CommandContext(ctx, c[0], c[1:]...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
-	pty, err := startPty(cmd)
+	// Pass nil for stdin since this is a remote attach - size will come from SSH client
+	pty, err := startPty(cmd, nil)
 
-	return cmd, pty, err
+	return pty, err
 }

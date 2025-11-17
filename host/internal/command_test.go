@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,9 +15,15 @@ import (
 	"golang.org/x/term"
 )
 
-// TestCommand_TTY_DetectionWithRealPTY verifies that a real PTY is properly
-// detected as a TTY and stdin forwarding is enabled.
-func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
+// TestCommand_Unix_PTY verifies Unix-specific PTY functionality.
+// This test validates that a real PTY is properly detected as a TTY
+// and stdin forwarding is enabled.
+func TestCommand_Unix_PTY(t *testing.T) {
+	// Only run on Unix systems
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix PTY test not applicable on Windows (uses ConPTY)")
+	}
+
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -42,10 +49,11 @@ func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
 	writers := uio.NewMultiWriter(5)
 
 	// Create command with real PTY (ForceForwardingInputForTesting not needed)
-	// Use 'read' to verify stdin is actually being forwarded
+	// Use 'head -n 1' which exits immediately after reading one line
+	// This is more reliable than 'read' which has timing issues with bash initialization
 	cmd := newCommand(
-		"bash",
-		[]string{"-c", "read input && echo \"received: $input\""},
+		"head",
+		[]string{"-n", "1"},
 		nil,
 		tty,
 		stdoutw,
@@ -83,17 +91,19 @@ func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
 		errCh <- cmd.Run()
 	}()
 
-	// Give it a moment to start and begin reading
+	// Give head time to start
 	time.Sleep(100 * time.Millisecond)
 
 	// Send input through the PTY master
-	_, err = ptmx.Write([]byte("hello from pty\n"))
+	// head -n 1 reads one line and exits immediately
+	testInput := "hello from pty"
+	_, err = ptmx.Write([]byte(testInput + "\n"))
 	require.NoError(err, "failed to write to PTY")
 
 	// Wait for command to complete
 	select {
 	case err := <-errCh:
-		// Expected: command completes after receiving input
+		// Expected: head exits after reading one line
 		if err != nil {
 			t.Logf("command completed with error (might be expected): %v", err)
 		}
@@ -101,11 +111,93 @@ func TestCommand_TTY_DetectionWithRealPTY(t *testing.T) {
 		// Verify output was produced with our input
 		_ = stdoutw.Close()
 		output := <-outputCh
-		assert.Contains(output, "received: hello from pty", "should see our input echoed back through PTY")
+		assert.Contains(output, testInput, "should see our input forwarded through PTY and output by head")
 	case <-time.After(1500 * time.Millisecond):
 		cancel()
 		<-errCh // Wait for goroutine to finish
 		assert.Fail("command did not complete - stdin may not be forwarded for PTY")
+	}
+}
+
+// TestCommand_Windows_ConPTY verifies Windows-specific ConPTY functionality.
+// This test validates that ConPTY can be created and used to run commands,
+// and that command output is properly captured through the ConPTY.
+func TestCommand_Windows_ConPTY(t *testing.T) {
+	// Only run on Windows
+	if runtime.GOOS != "windows" {
+		t.Skip("ConPTY test only applicable on Windows")
+	}
+
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Create a pipe to capture stdout
+	stdoutr, stdoutw, err := os.Pipe()
+	require.NoError(err, "failed to create stdout pipe")
+	defer func() { _ = stdoutr.Close() }()
+	defer func() { _ = stdoutw.Close() }()
+
+	ee := &emitter.Emitter{}
+	writers := uio.NewMultiWriter(5)
+
+	// Run a simple command through ConPTY
+	// Use 'cmd /c echo' which is simple and reliable on Windows
+	cmd := newCommand(
+		"cmd",
+		[]string{"/c", "echo", "ConPTY test successful"},
+		nil,
+		os.Stdin, // Pass stdin so startPty can attempt to get size
+		stdoutw,
+		ee,
+		writers,
+		false,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Start the command - this will create the ConPTY
+	_, err = cmd.Start(ctx)
+	require.NoError(err, "failed to start command with ConPTY")
+
+	// Capture output in background
+	outputCh := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		var output []byte
+		for {
+			n, err := stdoutr.Read(buf)
+			if n > 0 {
+				output = append(output, buf[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		outputCh <- string(output)
+	}()
+
+	// Run the command
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Run()
+	}()
+
+	// Wait for command to complete
+	select {
+	case err := <-errCh:
+		// Command should complete successfully
+		assert.NoError(err, "command should complete successfully")
+
+		// Verify we got output through ConPTY
+		_ = stdoutw.Close()
+		output := <-outputCh
+		assert.Contains(output, "ConPTY test successful", "should see command output through ConPTY")
+		t.Logf("ConPTY output: %q", output)
+	case <-time.After(2500 * time.Millisecond):
+		cancel()
+		<-errCh // Wait for goroutine to finish
+		assert.Fail("command did not complete within timeout")
 	}
 }
 
@@ -133,10 +225,23 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	writers := uio.NewMultiWriter(5)
 
 	// Create command WITH ForceForwardingInputForTesting
-	// Use 'head -n 1' which reads exactly one line then exits
+	// Use a command that reads from stdin and outputs it (cross-platform)
+	var shellCmd string
+	var shellArgs []string
+	if runtime.GOOS == "windows" {
+		// Windows: Use 'more' which reads stdin and outputs
+		// Will exit when stdin is closed
+		shellCmd = "more"
+		shellArgs = []string{}
+	} else {
+		// Unix: Use 'head' which reads exactly one line then exits
+		shellCmd = "head"
+		shellArgs = []string{"-n", "1"}
+	}
+
 	cmd := newCommand(
-		"head",
-		[]string{"-n", "1"},
+		shellCmd,
+		shellArgs,
 		nil,
 		stdinr,
 		stdoutw,
@@ -181,7 +286,13 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	testInput := "test input from pipe"
 	_, err = stdinw.Write([]byte(testInput + "\n"))
 	require.NoError(err, "failed to write to stdin")
-	// Don't close stdinw yet - head will exit after reading one line
+
+	// Give a moment for data to be fully written and copied through the PTY
+	time.Sleep(50 * time.Millisecond)
+
+	// Close stdin so 'more' on Windows will exit after reading
+	// On Unix, 'head -n 1' exits immediately after reading one line
+	_ = stdinw.Close()
 
 	// The command should complete after receiving input
 	select {
