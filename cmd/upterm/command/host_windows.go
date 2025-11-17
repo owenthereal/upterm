@@ -12,12 +12,14 @@ import (
 func getDefaultShell() string {
 	// Check for PowerShell Core first
 	if _, err := exec.LookPath("pwsh"); err == nil {
-		return "pwsh"
+		// -NoLogo suppresses the copyright banner
+		return "pwsh -NoLogo"
 	}
 
 	// Check for PowerShell
 	if _, err := exec.LookPath("powershell"); err == nil {
-		return "powershell"
+		// -NoLogo suppresses the copyright banner
+		return "powershell -NoLogo"
 	}
 
 	// Fallback to cmd.exe (always available on Windows)
