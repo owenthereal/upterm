@@ -82,7 +82,10 @@ func TestCommand_Unix_PTY(t *testing.T) {
 				break
 			}
 		}
-		outputCh <- string(output)
+		// Only send if we captured output (don't send empty string)
+		if len(output) > 0 {
+			outputCh <- string(output)
+		}
 	}()
 
 	// Run the command in a goroutine
@@ -100,22 +103,28 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	_, err = ptmx.Write([]byte(testInput + "\n"))
 	require.NoError(err, "failed to write to PTY")
 
-	// Wait for command to complete
+	// Wait for command to complete (head exits after reading one line)
 	select {
 	case err := <-errCh:
-		// Expected: head exits after reading one line
 		if err != nil {
 			t.Logf("command completed with error (might be expected): %v", err)
 		}
-
-		// Verify output was produced with our input
-		_ = stdoutw.Close()
-		output := <-outputCh
-		assert.Contains(output, testInput, "should see our input forwarded through PTY and output by head")
 	case <-time.After(1500 * time.Millisecond):
 		cancel()
-		<-errCh // Wait for goroutine to finish
+		<-errCh
 		assert.Fail("command did not complete - stdin may not be forwarded for PTY")
+		return
+	}
+
+	// Command has exited, now close stdout writer to signal EOF to output reader
+	_ = stdoutw.Close()
+
+	// Wait for output (should be available now since command has finished)
+	select {
+	case output := <-outputCh:
+		assert.Contains(output, testInput, "should see our input forwarded through PTY and output by head")
+	case <-time.After(500 * time.Millisecond):
+		assert.Fail("no output captured - PTY may not be forwarding data correctly")
 	}
 }
 
@@ -174,7 +183,10 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 				break
 			}
 		}
-		outputCh <- string(output)
+		// Only send if we captured output (don't send empty string)
+		if len(output) > 0 {
+			outputCh <- string(output)
+		}
 	}()
 
 	// Run the command
@@ -270,7 +282,10 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 				break
 			}
 		}
-		outputCh <- string(output)
+		// Only send if we captured output (don't send empty string)
+		if len(output) > 0 {
+			outputCh <- string(output)
+		}
 	}()
 
 	// Run the command in a goroutine

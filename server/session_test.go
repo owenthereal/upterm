@@ -401,9 +401,11 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Should be immediately deleted (strong consistency)
-	_, err = suite.store1.Get(sessionID)
-	suite.Error(err)
+	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		_, err = suite.store1.Get(sessionID)
+		assert.Error(t, err, "session should be deleted")
+	}, 2*time.Second, 50*time.Millisecond)
 
 	session.NodeAddr = "192.168.1.100:2222"
 	err = suite.store1.Store(session)
@@ -418,9 +420,11 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
-	// Should be immediately deleted (strong consistency)
-	_, err = suite.store1.Get(sessionID)
-	suite.Error(err)
+	// Verify deletion with eventual consistency (Consul may take a moment to propagate)
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		_, err = suite.store1.Get(sessionID)
+		assert.Error(t, err, "session should be deleted")
+	}, 2*time.Second, 50*time.Millisecond)
 }
 
 func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
