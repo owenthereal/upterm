@@ -6,6 +6,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - "386"
       - "amd64"
@@ -77,6 +78,18 @@ homebrew_casks:
           if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/upterm"]
           end
+scoops:
+  - repository:
+      owner: owenthereal
+      name: scoop-upterm
+    commit_author:
+      name: Owen Ou
+      email: o@owenou.com
+    homepage: https://upterm.dev
+    description: Instant Terminal Sharing
+    license: Apache-2.0
+    ids:
+      - upterm
 dockers:
   - image_templates:
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
