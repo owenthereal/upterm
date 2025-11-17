@@ -739,8 +739,9 @@ func stripShellPrompt(s string) string {
 	}
 
 	// First, remove all ANSI escape sequences
-	// ANSI codes start with ESC [ and end with a letter, or ESC ] ... BEL
-	ansiRe := regexp.MustCompile(`\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
+	// CSI sequences: ESC [ ... final byte (0x40-0x7E per ECMA-48)
+	// OSC sequences: ESC ] ... BEL (0x07)
+	ansiRe := regexp.MustCompile(`\x1b\[[^\x40-\x7e]*[\x40-\x7e]|\x1b\][^\x07]*\x07`)
 	s = ansiRe.ReplaceAllString(s, "")
 
 	// Then remove "PS <path>>" (can appear multiple times due to screen redraws)

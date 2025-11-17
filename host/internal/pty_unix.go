@@ -92,16 +92,24 @@ func (pty *pty) Close() error {
 
 // Wait waits for the process to exit
 func (pty *pty) Wait() error {
-	if pty.cmd == nil {
+	pty.RLock()
+	cmd := pty.cmd
+	pty.RUnlock()
+
+	if cmd == nil {
 		return nil // No process to wait for
 	}
-	return pty.cmd.Wait()
+	return cmd.Wait()
 }
 
 // Kill terminates the process
 func (pty *pty) Kill() error {
-	if pty.cmd == nil || pty.cmd.Process == nil {
+	pty.RLock()
+	cmd := pty.cmd
+	pty.RUnlock()
+
+	if cmd == nil || cmd.Process == nil {
 		return nil // No process to kill
 	}
-	return pty.cmd.Process.Kill()
+	return cmd.Process.Kill()
 }

@@ -58,10 +58,11 @@ func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
 type pty struct {
-	cpty   *conpty.ConPty
-	handle uintptr
-	pid    int
-	closed bool
+	cpty                *conpty.ConPty
+	handle              uintptr
+	pid                 int
+	conptyClosed        bool // Tracks if ConPTY I/O has been closed
+	processHandleClosed bool // Tracks if process handle has been closed
 	sync.RWMutex
 }
 
@@ -69,7 +70,7 @@ func (p *pty) Setsize(h, w int) error {
 	p.RLock()
 	defer p.RUnlock()
 
-	if p.closed || p.cpty == nil {
+	if p.conptyClosed || p.cpty == nil {
 		return nil // Silently ignore resize on closed pty
 	}
 
@@ -78,11 +79,11 @@ func (p *pty) Setsize(h, w int) error {
 
 func (p *pty) Read(data []byte) (n int, err error) {
 	p.RLock()
-	closed := p.closed
+	conptyClosed := p.conptyClosed
 	cpty := p.cpty
 	p.RUnlock()
 
-	if closed || cpty == nil {
+	if conptyClosed || cpty == nil {
 		return 0, io.EOF
 	}
 
@@ -91,11 +92,11 @@ func (p *pty) Read(data []byte) (n int, err error) {
 
 func (p *pty) Write(data []byte) (n int, err error) {
 	p.RLock()
-	closed := p.closed
+	conptyClosed := p.conptyClosed
 	cpty := p.cpty
 	p.RUnlock()
 
-	if closed || cpty == nil {
+	if conptyClosed || cpty == nil {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -106,11 +107,11 @@ func (p *pty) Close() error {
 	p.Lock()
 	defer p.Unlock()
 
-	if p.closed {
+	if p.conptyClosed {
 		return nil
 	}
 
-	p.closed = true // Mark as closed immediately so Read/Write return EOF
+	p.conptyClosed = true // Mark as closed immediately so Read/Write return EOF
 
 	var err error
 	if p.cpty != nil {
@@ -133,15 +134,30 @@ func ptyError(err error) error {
 
 // Wait waits for the process to exit on Windows
 func (p *pty) Wait() error {
-	if p.handle == 0 {
+	p.Lock()
+	handle := p.handle
+	processHandleClosed := p.processHandleClosed
+	p.Unlock()
+
+	if handle == 0 {
 		return fmt.Errorf("no process handle")
+	}
+	if processHandleClosed {
+		return fmt.Errorf("process handle already closed")
 	}
 
 	// Close the process handle when done, regardless of error paths
-	defer syscall.CloseHandle(syscall.Handle(p.handle))
+	defer func() {
+		p.Lock()
+		if !p.processHandleClosed {
+			syscall.CloseHandle(syscall.Handle(p.handle))
+			p.processHandleClosed = true
+		}
+		p.Unlock()
+	}()
 
 	// Wait for the process to exit
-	s, err := syscall.WaitForSingleObject(syscall.Handle(p.handle), syscall.INFINITE)
+	s, err := syscall.WaitForSingleObject(syscall.Handle(handle), syscall.INFINITE)
 	if err != nil {
 		return fmt.Errorf("WaitForSingleObject failed: %w", err)
 	}
@@ -151,7 +167,7 @@ func (p *pty) Wait() error {
 
 	// Get exit code
 	var exitCode uint32
-	if err := syscall.GetExitCodeProcess(syscall.Handle(p.handle), &exitCode); err != nil {
+	if err := syscall.GetExitCodeProcess(syscall.Handle(handle), &exitCode); err != nil {
 		return fmt.Errorf("GetExitCodeProcess failed: %w", err)
 	}
 
@@ -167,12 +183,21 @@ func (p *pty) Wait() error {
 
 // Kill terminates the process on Windows
 func (p *pty) Kill() error {
-	if p.handle == 0 {
+	p.RLock()
+	handle := p.handle
+	processHandleClosed := p.processHandleClosed
+	p.RUnlock()
+
+	if handle == 0 {
+		return nil
+	}
+	if processHandleClosed {
+		// Process already exited and handle closed, nothing to kill
 		return nil
 	}
 
 	// Terminate the process
-	err := syscall.TerminateProcess(syscall.Handle(p.handle), 1)
+	err := syscall.TerminateProcess(syscall.Handle(handle), 1)
 	if err != nil {
 		return fmt.Errorf("TerminateProcess failed: %w", err)
 	}
