@@ -12,7 +12,7 @@ import (
 	ptylib "github.com/creack/pty"
 )
 
-func startPty(c *exec.Cmd, stdin *os.File) (*pty, error) {
+func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 	// Create PTY with kernel defaults first
 	f, err := ptylib.Start(c)
 	if err != nil {
@@ -32,7 +32,7 @@ func startPty(c *exec.Cmd, stdin *os.File) (*pty, error) {
 		}
 	}
 
-	return wrapPty(f), nil
+	return wrapPty(f, c), nil
 }
 
 // Linux kernel return EIO when attempting to read from a master pseudo
@@ -50,8 +50,8 @@ func getPtysize(f *os.File) (h, w int, err error) {
 	return ptylib.Getsize(f)
 }
 
-func wrapPty(f *os.File) *pty {
-	return &pty{File: f}
+func wrapPty(f *os.File, cmd *exec.Cmd) *pty {
+	return &pty{File: f, cmd: cmd}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -61,6 +61,7 @@ func wrapPty(f *os.File) *pty {
 // * https://travis-ci.org/owenthereal/upterm/jobs/632458125
 type pty struct {
 	*os.File
+	cmd *exec.Cmd // Process started with this PTY
 	sync.RWMutex
 }
 
@@ -89,19 +90,18 @@ func (pty *pty) Close() error {
 	return pty.File.Close()
 }
 
-// Wait is a no-op on Unix - the exec.Cmd.Wait() handles process waiting
+// Wait waits for the process to exit
 func (pty *pty) Wait() error {
-	return nil
+	if pty.cmd == nil {
+		return nil // No process to wait for
+	}
+	return pty.cmd.Wait()
 }
 
-// Kill is a no-op on Unix - the exec.Cmd.Process.Kill() handles process killing
+// Kill terminates the process
 func (pty *pty) Kill() error {
-	return nil
-}
-
-// waitForCommand waits for a command started via pty to exit.
-// On Unix, we use cmd.Wait() since the command was started via ptylib.Start()
-// which properly calls cmd.Start().
-func waitForCommand(cmd *exec.Cmd, ptmx *pty) error {
-	return cmd.Wait()
+	if pty.cmd == nil || pty.cmd.Process == nil {
+		return nil // No process to kill
+	}
+	return pty.cmd.Process.Kill()
 }

@@ -15,7 +15,7 @@ import (
 // setupTerminalResize polls for terminal size changes on Windows
 // Windows doesn't have SIGWINCH signals like Unix, so we poll for terminal size changes
 // Note: Initial size is already set in startPty
-func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, eventEmitter *emitter.Emitter) {
+func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx PTY, eventEmitter *emitter.Emitter) {
 	// Get the initial size to track changes
 	h, w, err := getPtysize(stdin)
 	if err != nil {
@@ -55,16 +55,4 @@ func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, e
 		tee.TerminalDetached("local", ptmx)
 		cancel()
 	})
-}
-
-// waitForProcess waits for the process to exit on Windows
-func (c *command) waitForProcess() error {
-	// On Windows, ConPTY spawned the process, so use pty.Wait()
-	return c.ptmx.Wait()
-}
-
-// killProcess kills the process on Windows
-func (c *command) killProcess() error {
-	// On Windows, kill via the pty handle
-	return c.ptmx.Kill()
 }

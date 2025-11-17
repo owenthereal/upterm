@@ -16,7 +16,7 @@ import (
 )
 
 // startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd, stdin *os.File) (*pty, error) {
+func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 	// Get the actual terminal size from stdin if available
 	// Otherwise, use default dimensions
 	height := conpty.DefaultHeight
@@ -178,11 +178,4 @@ func (p *pty) Kill() error {
 	}
 
 	return nil
-}
-
-// waitForCommand waits for a command started via ConPTY to exit.
-// On Windows, we use the PTY's Wait method since the command was spawned
-// via ConPTY.Spawn() which bypasses Go's normal exec.Cmd.Start() flow.
-func waitForCommand(cmd *exec.Cmd, ptmx *pty) error {
-	return ptmx.Wait()
 }

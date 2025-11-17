@@ -14,7 +14,7 @@ import (
 )
 
 // setupTerminalResize sets up terminal resize handling for Unix systems using SIGWINCH
-func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, eventEmitter *emitter.Emitter) {
+func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx PTY, eventEmitter *emitter.Emitter) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 	// Note: Initial size is already set in startPty, so we only handle resize events here
@@ -38,18 +38,4 @@ func (c *command) setupTerminalResize(g *run.Group, stdin *os.File, ptmx *pty, e
 		tee.TerminalDetached("local", ptmx)
 		cancel()
 	})
-}
-
-// waitForProcess waits for the process to exit on Unix
-func (c *command) waitForProcess() error {
-	// On Unix, use exec.Cmd.Wait() since it knows about the process
-	return c.cmd.Wait()
-}
-
-// killProcess kills the process on Unix
-func (c *command) killProcess() error {
-	if c.cmd.Process != nil {
-		return c.cmd.Process.Kill()
-	}
-	return nil
 }

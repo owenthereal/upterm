@@ -41,7 +41,7 @@ type command struct {
 	env  []string
 
 	cmd  *exec.Cmd
-	ptmx *pty
+	ptmx PTY
 
 	stdin  *os.File
 	stdout *os.File
@@ -57,7 +57,7 @@ type command struct {
 	forceForwardingInputForTesting bool
 }
 
-func (c *command) Start(ctx context.Context) (*pty, error) {
+func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
 	c.cmd.Env = append(c.env, os.Environ()...)
@@ -122,7 +122,7 @@ func (c *command) Run() error {
 		g.Add(func() error {
 			done := make(chan error, 1)
 			go func() {
-				done <- c.waitForProcess()
+				done <- c.ptmx.Wait()
 			}()
 
 			select {
@@ -130,7 +130,7 @@ func (c *command) Run() error {
 				return err
 			case <-ctx.Done():
 				// Context cancelled, kill the process and wait for it to exit
-				_ = c.killProcess()
+				_ = c.ptmx.Kill()
 				<-done // Wait for the process to actually exit
 				return ctx.Err()
 			}
