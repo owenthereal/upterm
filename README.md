@@ -32,6 +32,13 @@ brew install --cask owenthereal/upterm/upterm
 
 **Note:** Running `brew upgrade` with the old formula installed will fail with an error. Follow the migration steps above to resolve this.
 
+### Windows
+
+```powershell
+scoop bucket add upterm https://github.com/owenthereal/scoop-upterm
+scoop install upterm
+```
+
 ### Standalone
 
 `upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/owenthereal/upterm/releases) and put it in your executable path.

@@ -93,7 +93,7 @@ This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, r
 		RunE:    currentRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin unix domain socket (required).")
+	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path (required).")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
