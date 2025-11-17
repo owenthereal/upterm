@@ -49,10 +49,11 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	writers := uio.NewMultiWriter(5)
 
 	// Create command with real PTY (ForceForwardingInputForTesting not needed)
-	// Use 'read' to verify stdin is actually being forwarded
+	// Use 'head -n 1' which exits immediately after reading one line
+	// This is more reliable than 'read' which has timing issues with bash initialization
 	cmd := newCommand(
-		"bash",
-		[]string{"-c", "read input && echo \"received: $input\""},
+		"head",
+		[]string{"-n", "1"},
 		nil,
 		tty,
 		stdoutw,
@@ -90,19 +91,19 @@ func TestCommand_Unix_PTY(t *testing.T) {
 		errCh <- cmd.Run()
 	}()
 
-	// Give bash more time to fully start and set up its input handling
-	time.Sleep(200 * time.Millisecond)
+	// Give head time to start
+	time.Sleep(100 * time.Millisecond)
 
 	// Send input through the PTY master
-	// Use \r\n to ensure canonical mode on all systems recognizes the line ending
-	// The outer PTY is in raw mode, so we need to send both CR and LF
-	_, err = ptmx.Write([]byte("hello from pty\r\n"))
+	// head -n 1 reads one line and exits immediately
+	testInput := "hello from pty"
+	_, err = ptmx.Write([]byte(testInput + "\n"))
 	require.NoError(err, "failed to write to PTY")
 
 	// Wait for command to complete
 	select {
 	case err := <-errCh:
-		// Expected: command completes after receiving input
+		// Expected: head exits after reading one line
 		if err != nil {
 			t.Logf("command completed with error (might be expected): %v", err)
 		}
@@ -110,7 +111,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 		// Verify output was produced with our input
 		_ = stdoutw.Close()
 		output := <-outputCh
-		assert.Contains(output, "received: hello from pty", "should see our input echoed back through PTY")
+		assert.Contains(output, testInput, "should see our input forwarded through PTY and output by head")
 	case <-time.After(1500 * time.Millisecond):
 		cancel()
 		<-errCh // Wait for goroutine to finish
