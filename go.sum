@@ -51,10 +51,8 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132 h1:ILyX/vWS/SeHfyuMFAsaV95jEKrwivNUkA8tE7JEXs4=
 github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132/go.mod h1:R9cISUs5kAH4Cq/rguNbSwcR+slE5Dfm8FEs//uoIGE=
-github.com/charmbracelet/x/conpty v0.1.0 h1:4zc8KaIcbiL4mghEON8D72agYtSeIgq8FSThSPQIb+U=
-github.com/charmbracelet/x/conpty v0.1.0/go.mod h1:rMFsDJoDwVmiYM10aD4bH2XiRgwI7NYJtQgl5yskjEQ=
-github.com/charmbracelet/x/errors v0.0.0-20250606192012-6931dbeeced5 h1:AyGATHeNg6E509HyLWbYxXjdsiBEWOnyh1NX1725vY4=
-github.com/charmbracelet/x/errors v0.0.0-20250606192012-6931dbeeced5/go.mod h1:nmnmDtAEAq9i8KHhoYE3SvXMjYPuS219MWbawvAumQ4=
+github.com/charmbracelet/x/conpty v0.2.0 h1:eKtA2hm34qNfgJCDp/M6Dc0gLy7e07YEK4qAdNGOvVY=
+github.com/charmbracelet/x/conpty v0.2.0/go.mod h1:fexgUnVrZgw8scD49f6VSi0Ggj9GWYIrpedRthAwW/8=
 github.com/charmbracelet/x/termios v0.1.1 h1:o3Q2bT8eqzGnGPOYheoYS8eEleT5ZVNYNy8JawjaNZY=
 github.com/charmbracelet/x/termios v0.1.1/go.mod h1:rB7fnv1TgOPOyyKRJ9o+AsTU/vK5WHJ2ivHeut/Pcwo=
 github.com/circonus-labs/circonus-gometrics v2.3.1+incompatible/go.mod h1:nmEj6Dob7S7YxXgwXpfOuvO54S+tGdZdw9fuRZt25Ag=
