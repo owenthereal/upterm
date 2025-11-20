@@ -57,9 +57,16 @@ type command struct {
 	forceForwardingInputForTesting bool
 }
 
+// setupCommand creates an exec.Cmd with the given context, name, and args.
+// No special platform-specific handling is needed - signal handling is done
+// at the application level in host/host_*.go files.
+func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, args...)
+}
+
 func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
-	c.cmd = exec.CommandContext(ctx, c.name, c.args...)
+	c.cmd = setupCommand(ctx, c.name, c.args)
 	c.cmd.Env = append(c.env, os.Environ()...)
 
 	var err error
