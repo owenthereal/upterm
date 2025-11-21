@@ -22,11 +22,11 @@ func main() {
 	}
 
 	config := map[string]any{
-		"UPTERMD_SSH_ADDR":           "0.0.0.0:2222",
-		"UPTERMD_WS_ADDR":            "0.0.0.0:8080",
+		"UPTERMD_SSH_ADDR":           "[::]:2222",
+		"UPTERMD_WS_ADDR":            "[::]:8080",
 		"UPTERMD_NODE_ADDR":          fmt.Sprintf("%s.vm.%s.internal:2222", flyMachineID, flyAppName),
 		"UPTERMD_SSH_PROXY_PROTOCOL": "true",
-		"UPTERMD_METRIC_ADDR":        "0.0.0.0:9091",
+		"UPTERMD_METRIC_ADDR":        "[::]:9091",
 	}
 
 	flyConsulURL := os.Getenv("FLY_CONSUL_URL")
