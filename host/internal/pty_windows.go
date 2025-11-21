@@ -17,6 +17,12 @@ import (
 	"golang.org/x/term"
 )
 
+// Windows API proc handles (cached to avoid repeated lazy DLL loading)
+var (
+	modkernel32                 = windows.NewLazySystemDLL("kernel32.dll")
+	procSetInformationJobObject = modkernel32.NewProc("SetInformationJobObject")
+)
+
 // startPty starts a PTY for the given command on Windows using ConPTY
 func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 	// Get the actual terminal size from stdin if available
@@ -40,7 +46,7 @@ func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 		return nil, fmt.Errorf("failed to create conpty: %w", err)
 	}
 
-	// Spawn the process with configured process attributes (e.g., CREATE_NEW_PROCESS_GROUP)
+	// Spawn the process with process attributes from the command
 	pid, handle, err := cpty.Spawn(c.Path, c.Args, &syscall.ProcAttr{
 		Dir: c.Dir,
 		Env: c.Env,
@@ -276,7 +282,7 @@ func createJobObject(processHandle syscall.Handle) (syscall.Handle, error) {
 	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 
 	// SetInformationJobObject
-	ret, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
+	ret, _, err := procSetInformationJobObject.Call(
 		uintptr(job),
 		uintptr(JobObjectExtendedLimitInformation),
 		uintptr(unsafe.Pointer(&info)),
@@ -284,7 +290,10 @@ func createJobObject(processHandle syscall.Handle) (syscall.Handle, error) {
 	)
 	if ret == 0 {
 		windows.CloseHandle(job)
-		return 0, fmt.Errorf("SetInformationJobObject failed: %w", syscall.GetLastError())
+		if err != nil {
+			return 0, fmt.Errorf("SetInformationJobObject failed: %w", err)
+		}
+		return 0, fmt.Errorf("SetInformationJobObject failed")
 	}
 
 	// Assign the process to the job object
