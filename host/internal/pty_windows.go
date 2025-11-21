@@ -276,7 +276,7 @@ func createJobObject(processHandle syscall.Handle) (syscall.Handle, error) {
 	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 
 	// SetInformationJobObject
-	ret, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
+	ret, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
 		uintptr(job),
 		uintptr(JobObjectExtendedLimitInformation),
 		uintptr(unsafe.Pointer(&info)),
@@ -284,7 +284,7 @@ func createJobObject(processHandle syscall.Handle) (syscall.Handle, error) {
 	)
 	if ret == 0 {
 		windows.CloseHandle(job)
-		return 0, fmt.Errorf("SetInformationJobObject failed: %w", err)
+		return 0, fmt.Errorf("SetInformationJobObject failed: %w", syscall.GetLastError())
 	}
 
 	// Assign the process to the job object

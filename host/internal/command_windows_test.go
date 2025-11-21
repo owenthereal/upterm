@@ -198,10 +198,8 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 				break
 			}
 		}
-		// Only send if we captured output (don't send empty string)
-		if len(output) > 0 {
-			outputCh <- string(output)
-		}
+		// Always send to channel to avoid deadlock
+		outputCh <- string(output)
 	}()
 
 	// Run the command
@@ -218,9 +216,13 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 
 		// Verify we got output through ConPTY
 		_ = stdoutw.Close()
-		output := <-outputCh
-		assert.Contains(output, "ConPTY test successful", "should see command output through ConPTY")
-		t.Logf("ConPTY output: %q", output)
+		select {
+		case output := <-outputCh:
+			assert.Contains(output, "ConPTY test successful", "should see command output through ConPTY")
+			t.Logf("ConPTY output: %q", output)
+		case <-time.After(500 * time.Millisecond):
+			assert.Fail("timeout waiting for output")
+		}
 	case <-time.After(2500 * time.Millisecond):
 		cancel()
 		<-errCh // Wait for goroutine to finish
