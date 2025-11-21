@@ -10,9 +10,17 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"github.com/charmbracelet/x/conpty"
+	"golang.org/x/sys/windows"
 	"golang.org/x/term"
+)
+
+// Windows API proc handles (cached to avoid repeated lazy DLL loading)
+var (
+	modkernel32                 = windows.NewLazySystemDLL("kernel32.dll")
+	procSetInformationJobObject = modkernel32.NewProc("SetInformationJobObject")
 )
 
 // startPty starts a PTY for the given command on Windows using ConPTY
@@ -38,7 +46,7 @@ func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 		return nil, fmt.Errorf("failed to create conpty: %w", err)
 	}
 
-	// Spawn the process
+	// Spawn the process with process attributes from the command
 	pid, handle, err := cpty.Spawn(c.Path, c.Args, &syscall.ProcAttr{
 		Dir: c.Dir,
 		Env: c.Env,
@@ -49,10 +57,21 @@ func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 		return nil, fmt.Errorf("failed to spawn process: %w", err)
 	}
 
+	// Create a job object to ensure child processes are killed when upterm exits
+	// This provides parity with Unix behavior where closing terminal kills all processes
+	job, err := createJobObject(syscall.Handle(handle))
+	if err != nil {
+		syscall.TerminateProcess(syscall.Handle(handle), 1)
+		syscall.CloseHandle(syscall.Handle(handle))
+		cpty.Close()
+		return nil, fmt.Errorf("failed to create job object: %w", err)
+	}
+
 	return &pty{
 		cpty:   cpty,
 		handle: handle,
 		pid:    pid,
+		job:    job,
 	}, nil
 }
 
@@ -61,8 +80,9 @@ type pty struct {
 	cpty                *conpty.ConPty
 	handle              uintptr
 	pid                 int
-	conptyClosed        bool // Tracks if ConPTY I/O has been closed
-	processHandleClosed bool // Tracks if process handle has been closed
+	job                 syscall.Handle // Job object handle
+	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
+	processHandleClosed bool           // Tracks if process handle has been closed
 	sync.RWMutex
 }
 
@@ -112,6 +132,12 @@ func (p *pty) Close() error {
 	}
 
 	p.conptyClosed = true // Mark as closed immediately so Read/Write return EOF
+
+	// Close job object first - this will terminate all processes in the job
+	if p.job != 0 {
+		syscall.CloseHandle(p.job)
+		p.job = 0
+	}
 
 	var err error
 	if p.cpty != nil {
@@ -203,4 +229,81 @@ func (p *pty) Kill() error {
 	}
 
 	return nil
+}
+
+// Windows job object structures and constants
+const (
+	JobObjectExtendedLimitInformation  = 9
+	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+)
+
+type JOBOBJECT_BASIC_LIMIT_INFORMATION struct {
+	PerProcessUserTimeLimit int64
+	PerJobUserTimeLimit     int64
+	LimitFlags              uint32
+	MinimumWorkingSetSize   uintptr
+	MaximumWorkingSetSize   uintptr
+	ActiveProcessLimit      uint32
+	Affinity                uintptr
+	PriorityClass           uint32
+	SchedulingClass         uint32
+}
+
+type IO_COUNTERS struct {
+	ReadOperationCount  uint64
+	WriteOperationCount uint64
+	OtherOperationCount uint64
+	ReadTransferCount   uint64
+	WriteTransferCount  uint64
+	OtherTransferCount  uint64
+}
+
+type JOBOBJECT_EXTENDED_LIMIT_INFORMATION struct {
+	BasicLimitInformation JOBOBJECT_BASIC_LIMIT_INFORMATION
+	IoInfo                IO_COUNTERS
+	ProcessMemoryLimit    uintptr
+	JobMemoryLimit        uintptr
+	PeakProcessMemoryUsed uintptr
+	PeakJobMemoryUsed     uintptr
+}
+
+// createJobObject creates a job object and assigns the process to it
+// The job object is configured with KILL_ON_JOB_CLOSE, ensuring all processes
+// in the job are terminated when the job handle is closed.
+func createJobObject(processHandle syscall.Handle) (syscall.Handle, error) {
+	// Create an unnamed job object
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("CreateJobObject failed: %w", err)
+	}
+
+	// Configure the job to kill all processes when the job handle is closed
+	var info JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+	// SetInformationJobObject
+	ret, _, err := procSetInformationJobObject.Call(
+		uintptr(job),
+		uintptr(JobObjectExtendedLimitInformation),
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Sizeof(info)),
+	)
+	if ret == 0 {
+		windows.CloseHandle(job)
+		if err != nil {
+			return 0, fmt.Errorf("SetInformationJobObject failed: %w", err)
+		}
+		return 0, fmt.Errorf("SetInformationJobObject failed")
+	}
+
+	// Assign the process to the job object
+	// Convert syscall.Handle to windows.Handle
+	err = windows.AssignProcessToJobObject(job, windows.Handle(processHandle))
+	if err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("AssignProcessToJobObject failed: %w", err)
+	}
+
+	// Convert windows.Handle back to syscall.Handle for return
+	return syscall.Handle(job), nil
 }

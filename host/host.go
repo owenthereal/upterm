@@ -258,6 +258,11 @@ func (c *Host) Run(ctx context.Context) error {
 
 	var g run.Group
 	{
+		// Handle OS signals for graceful shutdown
+		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
+		setupSignalHandler(&g, ctx)
+	}
+	{
 		ctx, cancel := context.WithCancel(ctx)
 		s := internal.AdminServer{
 			Session:    session,
