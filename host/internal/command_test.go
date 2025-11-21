@@ -193,7 +193,7 @@ func TestCommand_ContextCancellation(t *testing.T) {
 		if err != nil && err != context.Canceled {
 			t.Logf("command exited with error (expected): %v", err)
 		}
-		assert.True(true, "command terminated after context cancellation")
+		// Command terminated successfully - reaching here proves it worked
 	case <-time.After(2 * time.Second):
 		assert.Fail("command did not terminate after context cancellation")
 	}
