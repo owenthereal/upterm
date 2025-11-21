@@ -264,6 +264,19 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command in read-only mode")
 	assert.Equal("hello", scan(hostScanner), "host should show output in read-only mode")
 
+	// Drain any buffered output (e.g., PowerShell prompts) before testing client input blocking
+	// This prevents flaky failures where trailing shell output is mistaken for client input
+	drainTimeout := 100 * time.Millisecond
+	drained := false
+	for !drained {
+		select {
+		case str := <-hostOutputCh:
+			testLogger.Debug("drained buffered host output", "output", str)
+		case <-time.After(drainTimeout):
+			drained = true
+		}
+	}
+
 	// client input should be disabled
 	remoteInputCh <- `echo "hello again"`
 
