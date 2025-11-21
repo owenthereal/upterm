@@ -454,10 +454,32 @@ type Host struct {
 	outputCh                 chan string
 	ctx                      context.Context
 	cancel                   func()
+	wg                       sync.WaitGroup
 }
 
 func (c *Host) Close() {
+	// Cancel context to signal goroutines to stop
 	c.cancel()
+
+	// Close input channel to unblock the input goroutine
+	if c.inputCh != nil {
+		close(c.inputCh)
+	}
+
+	// Wait for all goroutines to finish with a timeout
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Clean shutdown completed
+	case <-time.After(2 * time.Second):
+		// Timeout - goroutines didn't finish in time, but that's okay for tests
+		testLogger.Warn("timeout waiting for host goroutines to finish")
+	}
 }
 
 func (c *Host) init() {
@@ -531,12 +553,12 @@ func (c *Host) Share(url string) error {
 		return err
 	}
 
-	var hostWg sync.WaitGroup
-	hostWg.Add(2)
+	// Start I/O goroutines with proper synchronization
+	c.wg.Add(2)
 
-	// output
+	// output - reads from stdout and forwards to output channel
 	go func() {
-		hostWg.Done()
+		defer c.wg.Done()
 		w := writeFunc(func(p []byte) (int, error) {
 			b, err := ansi.Strip(p)
 			if err != nil {
@@ -545,30 +567,42 @@ func (c *Host) Share(url string) error {
 				testLogger.Warn("failed to strip ANSI codes", "p", p, "error", err)
 				b = p
 			}
-			c.outputCh <- string(b)
+			// Use select to respect context cancellation when sending to channel
+			select {
+			case c.outputCh <- string(b):
+			case <-c.ctx.Done():
+				return 0, c.ctx.Err()
+			}
 			return len(p), nil
 		})
-		if _, err := io.Copy(w, stdoutr); err != nil {
-			testLogger.Error("error copying from stdout", "error", err)
-		}
+		_, _ = io.Copy(w, stdoutr)
 	}()
 
-	// input
+	// input - reads from input channel and forwards to stdin
 	go func() {
-		hostWg.Done()
-		for c := range c.inputCh {
-			// On Windows, cmd.exe needs \r\n to execute commands
-			lineEnding := "\n"
-			if runtime.GOOS == "windows" {
-				lineEnding = "\r\n"
-			}
-			if _, err := io.Copy(stdinw, bytes.NewBufferString(c+lineEnding)); err != nil {
-				testLogger.Error("error copying to stdin", "error", err)
+		defer c.wg.Done()
+		for {
+			select {
+			case str, ok := <-c.inputCh:
+				if !ok {
+					// Channel closed, exit goroutine
+					return
+				}
+				// On Windows, cmd.exe needs \r\n to execute commands
+				lineEnding := "\n"
+				if runtime.GOOS == "windows" {
+					lineEnding = "\r\n"
+				}
+				if _, err := io.Copy(stdinw, bytes.NewBufferString(str+lineEnding)); err != nil {
+					testLogger.Error("error copying to stdin", "error", err)
+					return
+				}
+			case <-c.ctx.Done():
+				// Context cancelled, exit goroutine
+				return
 			}
 		}
 	}()
-
-	hostWg.Wait()
 
 	return nil
 }
@@ -585,6 +619,8 @@ type Client struct {
 	sshStdout   io.Reader
 	inputCh     chan string
 	outputCh    chan string
+	cancel      func()
+	wg          sync.WaitGroup
 }
 
 func (c *Client) init() {
@@ -597,8 +633,38 @@ func (c *Client) InputOutput() (chan string, chan string) {
 }
 
 func (c *Client) Close() {
-	_ = c.session.Close()
-	_ = c.sshClient.Close()
+	// Cancel context to signal goroutines to stop
+	if c.cancel != nil {
+		c.cancel()
+	}
+
+	// Close input channel to unblock input goroutine
+	if c.inputCh != nil {
+		close(c.inputCh)
+	}
+
+	// Wait for goroutines to finish with a timeout
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Clean shutdown completed
+	case <-time.After(2 * time.Second):
+		// Timeout - goroutines didn't finish in time
+		testLogger.Warn("timeout waiting for client goroutines to finish")
+	}
+
+	// Now close the session and client
+	if c.session != nil {
+		_ = c.session.Close()
+	}
+	if c.sshClient != nil {
+		_ = c.sshClient.Close()
+	}
 }
 
 func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionResponse, clientJoinURL string) error {
@@ -657,6 +723,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 
 	var g run.Group
 	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel // Store cancel function for cleanup
 	{
 		// output
 		g.Add(func() error {
@@ -668,7 +735,12 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 					testLogger.Warn("failed to strip ANSI codes", "pp", pp, "error", err)
 					b = pp
 				}
-				c.outputCh <- string(b)
+				// Use select to respect context cancellation
+				select {
+				case c.outputCh <- string(b):
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
 				return len(pp), nil
 			})
 			_, err := io.Copy(w, uio.NewContextReader(ctx, c.sshStdout))
@@ -684,7 +756,11 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		g.Add(func() error {
 			for {
 				select {
-				case s := <-c.inputCh:
+				case s, ok := <-c.inputCh:
+					if !ok {
+						// Channel closed, exit goroutine
+						return nil
+					}
 					// On Windows, cmd.exe needs \r\n to execute commands
 					lineEnding := "\n"
 					if runtime.GOOS == "windows" {
@@ -703,10 +779,12 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		})
 	}
 
+	// Track the goroutine running the group
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
 		if err := g.Run(); err != nil {
-			testLogger.Error("error joining host", "error", err)
-
+			testLogger.Error("error in client run group", "error", err)
 		}
 	}()
 
