@@ -26,6 +26,19 @@ import (
 )
 
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
+	return newHostKeyCallback(stdin, stdout, knownHostsFilename, false)
+}
+
+// NewAutoAcceptingHostKeyCallback creates a host key callback that automatically
+// accepts unknown host keys and adds them to the known_hosts file without prompting.
+// This is similar to SSH's StrictHostKeyChecking=accept-new behavior:
+// - Unknown host keys are automatically accepted and added to known_hosts
+// - Known host keys are still validated (preventing MITM attacks on subsequent connections)
+func NewAutoAcceptingHostKeyCallback(stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
+	return newHostKeyCallback(nil, stdout, knownHostsFilename, true)
+}
+
+func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, autoAccept bool) (ssh.HostKeyCallback, error) {
 	if err := createFileIfNotExist(knownHostsFilename); err != nil {
 		return nil, err
 	}
@@ -40,6 +53,7 @@ func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFi
 		stdout:          stdout,
 		file:            knownHostsFilename,
 		HostKeyCallback: cb,
+		autoAccept:      autoAccept,
 	}
 
 	return hkcb.checkHostKey, nil
@@ -64,9 +78,10 @@ Offending %s key in %s:%d`
 )
 
 type hostKeyCallback struct {
-	stdin  io.Reader
-	stdout io.Writer
-	file   string
+	stdin      io.Reader
+	stdout     io.Writer
+	file       string
+	autoAccept bool
 	ssh.HostKeyCallback
 }
 
@@ -84,6 +99,11 @@ func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh
 			fp := utils.FingerprintSHA256(kk.Key)
 			kt := keyType(kk.Key.Type())
 			return fmt.Errorf(errKeyMismatch, kt, fp, kk.Filename, kt, kk.Filename, kk.Line)
+		}
+
+		// Auto-accept unknown host keys if enabled
+		if cb.autoAccept {
+			return cb.autoAcceptHostKey(hostname, key)
 		}
 
 		return cb.promptForConfirmation(hostname, remote, key)
@@ -122,6 +142,17 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 
 		_, _ = fmt.Fprintf(cb.stdout, "Please type 'yes', 'no' or the fingerprint: ")
 	}
+}
+
+func (cb hostKeyCallback) autoAcceptHostKey(hostname string, key ssh.PublicKey) error {
+	cert, isCert := key.(*ssh.Certificate)
+	if isCert {
+		key = cert.SignatureKey
+	}
+
+	_, _ = fmt.Fprintf(cb.stdout, "Warning: Permanently added '%s' (%s) to the list of known hosts.\n", knownhosts.Normalize(hostname), keyType(key.Type()))
+
+	return cb.appendHostLine(isCert, hostname, key)
 }
 
 func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.PublicKey) error {
