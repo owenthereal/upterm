@@ -20,6 +20,7 @@ import (
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 )
 
 // UserDiscardedError represents a user's intentional choice to discard the session
@@ -48,6 +49,7 @@ var (
 	flagSourceHutUsers     []string
 	flagReadOnly           bool
 	flagAccept             bool
+	flagSkipHostKeyCheck   bool
 )
 
 func hostCmd() *cobra.Command {
@@ -103,6 +105,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 
 	return cmd
 }
@@ -217,7 +220,12 @@ func shareRunE(c *cobra.Command, args []string) error {
 		defer cleanup()
 	}
 
-	hkcb, err := host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename)
+	var hkcb ssh.HostKeyCallback
+	if flagSkipHostKeyCheck {
+		hkcb, err = host.NewAutoAcceptingHostKeyCallback(os.Stdout, flagKnownHostsFilename)
+	} else {
+		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename)
+	}
 	if err != nil {
 		return err
 	}
