@@ -5,13 +5,18 @@ FROM golang:latest AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=0.0.0+dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
 
 WORKDIR /src
 ENV CGO_ENABLED=0
 RUN --mount=target=. \
   --mount=type=cache,target=/root/.cache/go-build \
   --mount=type=cache,target=/go/pkg \
-  GOOS=$TARGETOS GOARCH=$TARGETARCH go install ./cmd/...
+  GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
+  -ldflags="-s -w -X github.com/owenthereal/upterm/internal/version.Version=${VERSION} -X github.com/owenthereal/upterm/internal/version.GitCommit=${GIT_COMMIT} -X github.com/owenthereal/upterm/internal/version.Date=${BUILD_DATE}" \
+  ./cmd/...
 
 # Base runtime stage
 FROM gcr.io/distroless/static:nonroot AS base

@@ -21,6 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "git_commit=$GITHUB_SHA" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+      - name: Deploy to Fly.io
+        run: |
+          flyctl deploy --remote-only \
+            --build-arg VERSION=${{ steps.version.outputs.version }} \
+            --build-arg GIT_COMMIT=${{ steps.version.outputs.git_commit }} \
+            --build-arg BUILD_DATE=${{ steps.version.outputs.build_date }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
