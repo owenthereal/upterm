@@ -11,10 +11,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/eiannone/keyboard"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gen2brain/beeep"
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/icon"
@@ -285,28 +286,34 @@ func displaySessionCallback(session *api.GetSessionResponse) error {
 		return nil
 	}
 
-	if err := keyboard.Open(); err != nil {
+	// Run Bubbletea confirmation prompt
+	prompt := "\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)\n"
+	model := tui.NewConfirmModel(prompt)
+	p := tea.NewProgram(model)
+
+	finalModel, err := p.Run()
+	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = keyboard.Close()
-	}()
 
-	fmt.Println("\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)")
-	for {
-		char, key, err := keyboard.GetKey()
-		if err != nil {
-			return err
-		} else if key == keyboard.KeyCtrlC {
-			fmt.Println("\nCancelled by user.")
-			return UserInterruptedError{}
-		} else if char == 'y' || char == 'Y' {
-			fmt.Println("\n✅ Starting to accept connections...")
-			return nil
-		} else if char == 'n' || char == 'N' {
-			fmt.Println("\n❌ Session discarded.")
-			return UserDiscardedError{}
-		}
+	// Extract result from the model
+	confirmModel, ok := finalModel.(tui.ConfirmModel)
+	if !ok {
+		return fmt.Errorf("unexpected model type")
+	}
+
+	switch confirmModel.Result() {
+	case tui.ConfirmAccepted:
+		fmt.Println("\n✅ Starting to accept connections...")
+		return nil
+	case tui.ConfirmRejected:
+		fmt.Println("\n❌ Session discarded.")
+		return UserDiscardedError{}
+	case tui.ConfirmInterrupted:
+		fmt.Println("\nCancelled by user.")
+		return UserInterruptedError{}
+	default:
+		return fmt.Errorf("unknown confirmation result")
 	}
 }
 
