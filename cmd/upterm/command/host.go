@@ -248,14 +248,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ReadOnly:               flagReadOnly,
 	}
 
-	err = h.Run(context.Background())
+	err = h.Run(c.Context())
 
 	// Handle user actions specially - no help menu
 	var userDiscardedErr UserDiscardedError
-	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userDiscardedErr) {
 		return nil // Clean exit for user discard (exit code 0)
 	}
+
+	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
 		// Set both flags to prevent help menu and error display
 		c.SilenceUsage = true
@@ -278,42 +279,38 @@ func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
-func displaySessionCallback(session *api.GetSessionResponse) error {
-	if err := displaySession(session); err != nil {
-		return err
-	}
-	if flagAccept {
-		return nil
+func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
+	// Format the session info
+	sessionOutput, err := formatSession(session)
+	if err != nil {
+		return fmt.Errorf("failed to format session: %w", err)
 	}
 
-	// Run Bubbletea confirmation prompt
-	prompt := "\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)\n"
-	model := tui.NewConfirmModel(prompt)
-	p := tea.NewProgram(model)
+	// Create and run the integrated TUI model (session display + confirmation)
+	model := tui.NewHostSessionModel(sessionOutput, flagAccept)
+	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	finalModel, err := p.Run()
 	if err != nil {
-		return err
+		return fmt.Errorf("session confirmation failed: %w", err)
 	}
 
 	// Extract result from the model
-	confirmModel, ok := finalModel.(tui.ConfirmModel)
+	sessionModel, ok := finalModel.(tui.HostSessionModel)
 	if !ok {
-		return fmt.Errorf("unexpected model type")
+		return fmt.Errorf("unexpected model type: got %T, want tui.HostSessionModel", finalModel)
 	}
 
-	switch confirmModel.Result() {
-	case tui.ConfirmAccepted:
-		fmt.Println("\n✅ Starting to accept connections...")
+	// Handle the result
+	switch sessionModel.Result() {
+	case tui.HostSessionConfirmAccepted:
 		return nil
-	case tui.ConfirmRejected:
-		fmt.Println("\n❌ Session discarded.")
+	case tui.HostSessionConfirmRejected:
 		return UserDiscardedError{}
-	case tui.ConfirmInterrupted:
-		fmt.Println("\nCancelled by user.")
+	case tui.HostSessionConfirmInterrupted:
 		return UserInterruptedError{}
 	default:
-		return fmt.Errorf("unknown confirmation result")
+		return fmt.Errorf("unknown confirmation result: %d", sessionModel.Result())
 	}
 }
 

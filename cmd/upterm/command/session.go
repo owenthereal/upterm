@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -235,7 +236,8 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 	return
 }
 
-func displaySession(session *api.GetSessionResponse) error {
+// formatSession returns the session info as a formatted string
+func formatSession(session *api.GetSessionResponse) (string, error) {
 	user := session.SshUser
 	if user == "" {
 		// Fallback to encoding for backward compatibility with older servers
@@ -244,7 +246,7 @@ func displaySession(session *api.GetSessionResponse) error {
 
 	u, scheme, host, port, err := parseURL(session.Host)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var hostPort string
@@ -283,20 +285,30 @@ func displaySession(session *api.GetSessionResponse) error {
 		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
 	}
 
-	fmt.Printf("╭─ Session: %s ─╮\n", session.SessionId)
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "╭─ Session: %s ─╮\n", session.SessionId)
 
-	table := tablewriter.NewWriter(os.Stdout)
+	table := tablewriter.NewWriter(&buf)
 	for _, row := range data {
 		if err := table.Append(row); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := table.Render(); err != nil {
-		return err
+		return "", err
 	}
 
-	fmt.Printf("\n╰─ Run 'upterm session current' to display this again ─╯\n")
+	fmt.Fprintf(&buf, "\n╰─ Run 'upterm session current' to display this again ─╯\n")
 
+	return buf.String(), nil
+}
+
+func displaySession(session *api.GetSessionResponse) error {
+	output, err := formatSession(session)
+	if err != nil {
+		return err
+	}
+	fmt.Print(output)
 	return nil
 }
 

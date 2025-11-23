@@ -102,7 +102,7 @@ func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, cl
 		ForceCommand:    []string{"vim"},
 		PrivateKeys:     []string{HostPrivateKey},
 		AdminSocketFile: adminSocketFile,
-		SessionCreatedCallback: func(session *api.GetSessionResponse) error {
+		SessionCreatedCallback: func(_ context.Context, session *api.GetSessionResponse) error {
 			assert.Equal(getTestShell(), session.Command, "command should match")
 			assert.Equal([]string{"vim"}, session.ForceCommand, "force command should match")
 

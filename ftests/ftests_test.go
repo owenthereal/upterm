@@ -445,7 +445,7 @@ type Host struct {
 	ForceCommand             []string
 	PrivateKeys              []string
 	AdminSocketFile          string
-	SessionCreatedCallback   func(*api.GetSessionResponse) error
+	SessionCreatedCallback   func(context.Context, *api.GetSessionResponse) error
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
