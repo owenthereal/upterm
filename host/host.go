@@ -197,7 +197,7 @@ type Host struct {
 	HostKeyCallback                ssh.HostKeyCallback
 	AuthorizedKeys                 []*AuthorizedKey
 	AdminSocketFile                string
-	SessionCreatedCallback         func(*api.GetSessionResponse) error
+	SessionCreatedCallback         func(context.Context, *api.GetSessionResponse) error
 	ClientJoinedCallback           func(*api.Client)
 	ClientLeftCallback             func(*api.Client)
 	Logger                         *slog.Logger
@@ -277,7 +277,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	if c.SessionCreatedCallback != nil {
-		if err := c.SessionCreatedCallback(session); err != nil {
+		if err := c.SessionCreatedCallback(ctx, session); err != nil {
 			return err
 		}
 	}

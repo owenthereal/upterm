@@ -11,10 +11,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/eiannone/keyboard"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gen2brain/beeep"
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/icon"
@@ -247,14 +248,15 @@ func shareRunE(c *cobra.Command, args []string) error {
 		ReadOnly:               flagReadOnly,
 	}
 
-	err = h.Run(context.Background())
+	err = h.Run(c.Context())
 
 	// Handle user actions specially - no help menu
 	var userDiscardedErr UserDiscardedError
-	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userDiscardedErr) {
 		return nil // Clean exit for user discard (exit code 0)
 	}
+
+	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
 		// Set both flags to prevent help menu and error display
 		c.SilenceUsage = true
@@ -277,36 +279,38 @@ func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
-func displaySessionCallback(session *api.GetSessionResponse) error {
-	if err := displaySession(session); err != nil {
-		return err
+func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
+	// Format the session info
+	sessionOutput, err := formatSession(session)
+	if err != nil {
+		return fmt.Errorf("failed to format session: %w", err)
 	}
-	if flagAccept {
+
+	// Create and run the integrated TUI model (session display + confirmation)
+	model := tui.NewHostSessionModel(sessionOutput, flagAccept)
+	p := tea.NewProgram(model, tea.WithContext(ctx))
+
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("session confirmation failed: %w", err)
+	}
+
+	// Extract result from the model
+	sessionModel, ok := finalModel.(tui.HostSessionModel)
+	if !ok {
+		return fmt.Errorf("unexpected model type: got %T, want tui.HostSessionModel", finalModel)
+	}
+
+	// Handle the result
+	switch sessionModel.Result() {
+	case tui.HostSessionConfirmAccepted:
 		return nil
-	}
-
-	if err := keyboard.Open(); err != nil {
-		return err
-	}
-	defer func() {
-		_ = keyboard.Close()
-	}()
-
-	fmt.Println("\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)")
-	for {
-		char, key, err := keyboard.GetKey()
-		if err != nil {
-			return err
-		} else if key == keyboard.KeyCtrlC {
-			fmt.Println("\nCancelled by user.")
-			return UserInterruptedError{}
-		} else if char == 'y' || char == 'Y' {
-			fmt.Println("\n✅ Starting to accept connections...")
-			return nil
-		} else if char == 'n' || char == 'N' {
-			fmt.Println("\n❌ Session discarded.")
-			return UserDiscardedError{}
-		}
+	case tui.HostSessionConfirmRejected:
+		return UserDiscardedError{}
+	case tui.HostSessionConfirmInterrupted:
+		return UserInterruptedError{}
+	default:
+		return fmt.Errorf("unknown confirmation result: %d", sessionModel.Result())
 	}
 }
 
