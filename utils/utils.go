@@ -31,6 +31,13 @@ const (
 //   - macOS:   $TMPDIR/upterm (e.g., /var/folders/.../T/upterm)
 //   - Windows: %LOCALAPPDATA%\Temp\upterm
 func UptermRuntimeDir() string {
+	_, err := os.Stat(xdg.RuntimeDir)
+
+	if os.IsNotExist(err) {
+		// /run/user/<uid> does not exist, fallback to $HOME/.upterm
+		return filepath.Join(xdg.Home, fmt.Sprintf(".%s", appName))
+	}
+
 	return filepath.Join(xdg.RuntimeDir, appName)
 }
 
