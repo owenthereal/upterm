@@ -21,17 +21,68 @@ const (
 	appName    = "upterm"
 )
 
+// envGetter is a function type for getting environment variables.
+// This allows for dependency injection in tests.
+type envGetter func(string) string
+
+// xdgDirWithFallbackEnv returns an XDG directory path with fallback to HOME-based directory.
+// It follows this priority:
+//  1. If envVar is explicitly set, use it (trust user configuration)
+//  2. If xdgPath exists and is accessible, use it
+//  3. Fall back to $HOME/.upterm
+//  4. Final fallback to os.TempDir()/.upterm (if HOME unavailable)
+//
+// This handles cases where XDG defaults point to system directories that may not exist
+// or be writable in non-interactive environments (e.g., /run/user/<uid> in CI/containers).
+//
+// The getenv parameter allows for dependency injection in tests.
+func xdgDirWithFallbackEnv(envVar, xdgPath string, getenv envGetter) string {
+	// If user explicitly set the XDG env var, respect it unconditionally
+	// Use the actual env var value, not the xdg library's cached value
+	if envValue := getenv(envVar); envValue != "" {
+		return filepath.Join(envValue, appName)
+	}
+
+	// Check if the XDG default path exists before creating the appName subdirectory within it
+	if _, err := os.Stat(xdgPath); err == nil {
+		return filepath.Join(xdgPath, appName)
+	}
+
+	// Fall back to home directory structure
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = xdg.Home // Try xdg library's cached value
+	}
+
+	// Final fallback: use temp directory if home is unavailable
+	if home == "" {
+		home = os.TempDir()
+	}
+
+	return filepath.Join(home, "."+appName)
+}
+
+// xdgDirWithFallback returns an XDG directory path with fallback to HOME-based directory.
+// This is a convenience wrapper around xdgDirWithFallbackEnv that uses os.Getenv.
+func xdgDirWithFallback(envVar, xdgPath string) string {
+	return xdgDirWithFallbackEnv(envVar, xdgPath, os.Getenv)
+}
+
 // UptermRuntimeDir returns the directory for runtime files (sockets).
 //
 // Following the XDG Base Directory Specification, this directory maps to
-// XDG_RUNTIME_DIR/upterm and is typically cleaned on logout/reboot.
+// XDG_RUNTIME_DIR/upterm when available and is typically cleaned on logout/reboot.
 //
-// Platform-specific paths:
-//   - Linux:   /run/user/1000/upterm
-//   - macOS:   $TMPDIR/upterm (e.g., /var/folders/.../T/upterm)
-//   - Windows: %LOCALAPPDATA%\Temp\upterm
+// Directory selection priority:
+//  1. $XDG_RUNTIME_DIR/upterm (if XDG_RUNTIME_DIR is explicitly set)
+//  2. Platform default if accessible:
+//     - Linux:   /run/user/1000/upterm (requires login session)
+//     - macOS:   $TMPDIR/upterm (e.g., /var/folders/.../T/upterm)
+//     - Windows: %LOCALAPPDATA%\Temp\upterm
+//  3. Fallback: $HOME/.upterm (for non-interactive environments)
+//  4. Final fallback: os.TempDir()/.upterm (if HOME unavailable)
 func UptermRuntimeDir() string {
-	return filepath.Join(xdg.RuntimeDir, appName)
+	return xdgDirWithFallback("XDG_RUNTIME_DIR", xdg.RuntimeDir)
 }
 
 // UptermStateDir returns the directory for state files (logs).
@@ -39,12 +90,16 @@ func UptermRuntimeDir() string {
 // Following the XDG Base Directory Specification, this directory maps to
 // XDG_STATE_HOME/upterm and persists across sessions.
 //
-// Platform-specific paths:
-//   - Linux:   ~/.local/state/upterm
-//   - macOS:   ~/Library/Application Support/upterm
-//   - Windows: %LOCALAPPDATA%\upterm
+// Directory selection priority:
+//  1. $XDG_STATE_HOME/upterm (if XDG_STATE_HOME is explicitly set)
+//  2. Platform default if accessible:
+//     - Linux:   ~/.local/state/upterm
+//     - macOS:   ~/Library/Application Support/upterm
+//     - Windows: %LOCALAPPDATA%\upterm
+//  3. Fallback: $HOME/.upterm
+//  4. Final fallback: os.TempDir()/.upterm (if HOME unavailable)
 func UptermStateDir() string {
-	return filepath.Join(xdg.StateHome, appName)
+	return xdgDirWithFallback("XDG_STATE_HOME", xdg.StateHome)
 }
 
 // UptermLogFilePath returns the path to the log file in the state directory.
@@ -67,12 +122,16 @@ func UptermLogFilePath() string {
 // Following the XDG Base Directory Specification, this directory maps to
 // XDG_CONFIG_HOME/upterm and persists across sessions.
 //
-// Platform-specific paths:
-//   - Linux:   ~/.config/upterm
-//   - macOS:   ~/Library/Application Support/upterm
-//   - Windows: %LOCALAPPDATA%\upterm
+// Directory selection priority:
+//  1. $XDG_CONFIG_HOME/upterm (if XDG_CONFIG_HOME is explicitly set)
+//  2. Platform default if accessible:
+//     - Linux:   ~/.config/upterm
+//     - macOS:   ~/Library/Application Support/upterm
+//     - Windows: %LOCALAPPDATA%\upterm
+//  3. Fallback: $HOME/.upterm
+//  4. Final fallback: os.TempDir()/.upterm (if HOME unavailable)
 func UptermConfigDir() string {
-	return filepath.Join(xdg.ConfigHome, appName)
+	return xdgDirWithFallback("XDG_CONFIG_HOME", xdg.ConfigHome)
 }
 
 // UptermConfigFilePath returns the path to the config file.
