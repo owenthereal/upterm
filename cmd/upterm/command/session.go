@@ -46,7 +46,8 @@ func list() *cobra.Command {
 
 Sockets are stored in: %s
 
-This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, runtimeDir),
+Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
+in constrained environments where XDG directories are unavailable.`, runtimeDir),
 		Example: `  # List shared sessions:
   upterm session list`,
 		RunE: listRunE,
@@ -84,7 +85,8 @@ when you run 'upterm host').
 
 Sockets are stored in: %s
 
-This follows the XDG Base Directory Specification ($XDG_RUNTIME_DIR/upterm).`, runtimeDir),
+Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
+in constrained environments where XDG directories are unavailable.`, runtimeDir),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
