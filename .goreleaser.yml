@@ -27,6 +27,17 @@ builds:
     binary: uptermd
     ldflags:
       - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Version}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
+  - id: uptermd-fly
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - "amd64"
+    main: ./cmd/uptermd-fly
+    binary: uptermd-fly
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Version}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
 archives:
   - id: upterm
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
@@ -97,7 +108,6 @@ dockers:
     dockerfile: Dockerfile.uptermd
     use: buildx
     build_flag_templates:
-      - "--target=pre-built-binary"
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description=Upterm server daemon"
@@ -107,11 +117,10 @@ dockers:
       - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--build-arg=GORELEASER_VERSION"
     extra_files:
       - go.mod
       - go.sum
-    ids:
-      - uptermd
     goos: linux
     goarch: amd64
   - image_templates:
@@ -120,7 +129,6 @@ dockers:
     dockerfile: Dockerfile.uptermd
     use: buildx
     build_flag_templates:
-      - "--target=pre-built-binary"
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description=Upterm server daemon"
@@ -130,11 +138,10 @@ dockers:
       - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--build-arg=GORELEASER_VERSION"
     extra_files:
       - go.mod
       - go.sum
-    ids:
-      - uptermd
     goos: linux
     goarch: arm64
 docker_manifests:
