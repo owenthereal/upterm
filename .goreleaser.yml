@@ -27,6 +27,17 @@ builds:
     binary: uptermd
     ldflags:
       - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Version}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
+  - id: uptermd-fly
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - "amd64"
+    main: ./cmd/uptermd-fly
+    binary: uptermd-fly
+    ldflags:
+      - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Version}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
 archives:
   - id: upterm
     name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ with .Mips }}_{{ . }}{{ end }}{{ if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}'
