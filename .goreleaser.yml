@@ -117,6 +117,7 @@ dockers:
       - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--build-arg=GORELEASER_VERSION"
     extra_files:
       - go.mod
       - go.sum
@@ -137,6 +138,7 @@ dockers:
       - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      - "--build-arg=GORELEASER_VERSION"
     extra_files:
       - go.mod
       - go.sum
