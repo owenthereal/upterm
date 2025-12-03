@@ -5,18 +5,20 @@ FROM golang:latest AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=0.0.0+dev
-ARG GIT_COMMIT=unknown
-ARG BUILD_DATE=unknown
 
 WORKDIR /src
 ENV CGO_ENABLED=0
-RUN --mount=target=. \
-  --mount=type=cache,target=/root/.cache/go-build \
+ENV GOOS=$TARGETOS
+ENV GOARCH=$TARGETARCH
+ARG GORELEASER_VERSION=2.12.7
+
+RUN curl -L -o /tmp/goreleaser.deb https://github.com/goreleaser/goreleaser/releases/download/v${GORELEASER_VERSION}/goreleaser_${GORELEASER_VERSION}_${TARGETARCH}.deb && \
+    dpkg -i /tmp/goreleaser.deb
+
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
   --mount=type=cache,target=/go/pkg \
-  GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
-  -ldflags="-s -w -X github.com/owenthereal/upterm/internal/version.Version=${VERSION} -X github.com/owenthereal/upterm/internal/version.GitCommit=${GIT_COMMIT} -X github.com/owenthereal/upterm/internal/version.Date=${BUILD_DATE}" \
-  ./cmd/...
+  goreleaser build --single-target --auto-snapshot
 
 # Base runtime stage
 FROM gcr.io/distroless/static:nonroot AS base
@@ -27,17 +29,12 @@ ENV PATH="/app:${PATH}"
 # sshd ws & prometheus
 EXPOSE 2222 8080 9090
 
-# Fly deployment stage (builds from source)
+# Fly deployment stage
 FROM base AS uptermd-fly
-COPY --from=builder /go/bin/uptermd /go/bin/uptermd-fly /app/
+COPY --from=builder /src/dist/**/uptermd /src/dist/**/uptermd-fly /app/
 ENTRYPOINT ["uptermd-fly"]
-
-# Pre-built binary stage (used by GoReleaser)
-FROM base AS pre-built-binary
-COPY uptermd /app/
-ENTRYPOINT ["uptermd"]
 
 # Default stage
 FROM base AS uptermd
-COPY --from=builder /go/bin/uptermd /app/
+COPY --from=builder /src/dist/**/uptermd /app/
 ENTRYPOINT ["uptermd"]
