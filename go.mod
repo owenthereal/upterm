@@ -36,7 +36,7 @@ require (
 	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/xid v1.6.0
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	golang.org/x/crypto v0.43.0
