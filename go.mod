@@ -52,7 +52,7 @@ require (
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/google/go-github/v48 v48.2.0
-	github.com/hashicorp/go-version v1.7.0
+	github.com/hashicorp/go-version v1.8.0
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/samber/slog-multi v1.6.0
 	github.com/spf13/pflag v1.0.10
