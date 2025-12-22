@@ -286,7 +286,9 @@ Below is an example `docker-compose` configuration for deploying `uptermd` behin
 ```yaml
 services:
   upterm:
-    build: https://github.com/owenthereal/upterm
+    build: 
+        context: https://github.com/owenthereal/upterm.git
+        dockerfile: Dockerfile.uptermd
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
