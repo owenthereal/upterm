@@ -100,6 +100,9 @@ func unmarshalFlags(cmd *cobra.Command, opts interface{}) error {
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.SetEnvPrefix("UPTERMD")
 
+	// Bind SENTRY_DSN directly (standard convention), with UPTERMD_SENTRY_DSN as fallback
+	_ = v.BindEnv("sentry-dsn", "SENTRY_DSN", "UPTERMD_SENTRY_DSN")
+
 	cfgFile, err := cmd.Flags().GetString("config")
 	if err != nil {
 		return err
