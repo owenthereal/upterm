@@ -28,6 +28,18 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          install-only: true
+          distribution: goreleaser
+          version: "~> v2"
+
+      - name: Set GoReleaser version
+        run: |
+          goreleaser_version="$(goreleaser --version | grep GitVersion | awk '{print $2}')"
+          echo "GORELEASER_VERSION=${goreleaser_version}" | tee -a "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
