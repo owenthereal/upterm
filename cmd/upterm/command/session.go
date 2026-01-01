@@ -3,12 +3,14 @@ package command
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/owenthereal/upterm/host"
@@ -21,7 +23,17 @@ import (
 
 var (
 	flagAdminSocket string
+	flagOutput      string
 )
+
+// sessionTemplateData holds data for template output
+type sessionTemplateData struct {
+	SessionId    string `json:"sessionId"`
+	ClientCount  int    `json:"clientCount"`
+	Host         string `json:"host"`
+	Command      string `json:"command"`
+	ForceCommand string `json:"forceCommand"`
+}
 
 func sessionCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -86,17 +98,30 @@ when you run 'upterm host').
 Sockets are stored in: %s
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.`, runtimeDir),
+in constrained environments where XDG directories are unavailable.
+
+Output formats:
+  -o json                           JSON output
+  -o go-template='{{.ClientCount}}' Custom Go template
+
+Template variables: SessionId, ClientCount, Host, Command, ForceCommand`, runtimeDir),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
-  # Display the session with a custom admin socket path:
-  upterm session current --admin-socket ADMIN_SOCKET_PATH`,
+  # Output as JSON:
+  upterm session current -o json
+
+  # Custom format for shell prompt (outputs nothing if not in session):
+  upterm session current -o go-template='🆙 {{.ClientCount}} '
+
+  # For terminal title:
+  upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionId}}'`,
 		PreRunE: validateCurrentRequiredFlags,
 		RunE:    currentRunE,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path (required).")
+	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
@@ -158,7 +183,56 @@ func infoRunE(c *cobra.Command, args []string) error {
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
+	// If output format specified, use special handling
+	if flagOutput != "" {
+		return outputSession(flagAdminSocket, flagOutput)
+	}
 	return displaySessionFromAdminSocketPath(flagAdminSocket)
+}
+
+// outputSession handles -o/--output flag for session current
+func outputSession(adminSocket, format string) error {
+	// Error if not in upterm session (no admin socket)
+	if adminSocket == "" {
+		return fmt.Errorf("not in upterm session (UPTERM_ADMIN_SOCKET not set)")
+	}
+
+	// Try to get session
+	sess, err := session(adminSocket)
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+
+	// Build template data
+	data := sessionTemplateData{
+		SessionId:    sess.SessionId,
+		ClientCount:  len(sess.ConnectedClients),
+		Host:         sess.Host,
+		Command:      strings.Join(sess.Command, " "),
+		ForceCommand: strings.Join(sess.ForceCommand, " "),
+	}
+
+	// Handle json output
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(data)
+	}
+
+	// Handle go-template output
+	tmplStr := format
+	if strings.HasPrefix(format, "go-template=") {
+		tmplStr = strings.TrimPrefix(format, "go-template=")
+	}
+	// Remove surrounding quotes if present
+	tmplStr = strings.Trim(tmplStr, "'\"")
+
+	tmpl, err := template.New("session").Parse(tmplStr)
+	if err != nil {
+		return fmt.Errorf("invalid template: %w", err)
+	}
+
+	return tmpl.Execute(os.Stdout, data)
 }
 
 func listSessions(dir string) ([][]string, error) {
