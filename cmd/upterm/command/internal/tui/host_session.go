@@ -22,10 +22,11 @@ const (
 // It renders the session information and waits for user confirmation (y/n/Ctrl+C)
 // unless auto-accept is enabled.
 type HostSessionModel struct {
-	sessionOutput string // Pre-rendered session info
-	autoAccept    bool
-	state         sessionState
-	result        HostSessionConfirmResult
+	detail     SessionDetail
+	autoAccept bool
+	state      sessionState
+	result     HostSessionConfirmResult
+	width      int
 }
 
 // sessionState represents the current state of the host session prompt
@@ -39,17 +40,18 @@ const (
 )
 
 // NewHostSessionModel creates a model for displaying session and getting confirmation
-func NewHostSessionModel(sessionOutput string, autoAccept bool) HostSessionModel {
+func NewHostSessionModel(detail SessionDetail, autoAccept bool) HostSessionModel {
 	initialState := stateWaitingForConfirm
 	if autoAccept {
 		initialState = stateDone
 	}
 
 	return HostSessionModel{
-		sessionOutput: sessionOutput,
-		autoAccept:    autoAccept,
-		state:         initialState,
-		result:        HostSessionConfirmAccepted, // default for auto-accept
+		detail:     detail,
+		autoAccept: autoAccept,
+		state:      initialState,
+		result:     HostSessionConfirmAccepted, // default for auto-accept
+		width:      getTermWidth(),
 	}
 }
 
@@ -62,14 +64,16 @@ func (m HostSessionModel) Init() tea.Cmd {
 }
 
 func (m HostSessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Only handle input when waiting for confirmation
-	// Note: Context cancellation is handled automatically by tea.Program
-	if m.state != stateWaitingForConfirm {
-		return m, nil
-	}
-
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+
 	case tea.KeyMsg:
+		// Only handle input when waiting for confirmation
+		if m.state != stateWaitingForConfirm {
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "y", "Y":
 			m.result = HostSessionConfirmAccepted
@@ -92,23 +96,30 @@ func (m HostSessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m HostSessionModel) View() string {
 	var b strings.Builder
 
-	// Always show the session info
-	b.WriteString(m.sessionOutput)
+	// Session info
+	b.WriteString(renderSessionDetail(m.detail, m.width))
+
+	if !IsTTY() {
+		return b.String()
+	}
 
 	switch m.state {
 	case stateWaitingForConfirm:
-		b.WriteString("\n🤝 Accept connections? [y/n] (or <ctrl-c> to force exit)\n")
+		b.WriteString("\n")
+		b.WriteString(FooterStyle.Render("Accept connections? [y/n] (or <ctrl-c> to force exit)"))
+		b.WriteString("\n")
 
 	case stateDone:
 		b.WriteString("\n")
 		switch m.result {
 		case HostSessionConfirmAccepted:
-			b.WriteString("✅ Starting to accept connections...\n")
+			b.WriteString(CommandStyle.Render("Starting to accept connections..."))
 		case HostSessionConfirmRejected:
-			b.WriteString("❌ Session discarded.\n")
+			b.WriteString(FooterStyle.Render("Session discarded."))
 		case HostSessionConfirmInterrupted:
-			b.WriteString("Cancelled by user.\n")
+			b.WriteString(FooterStyle.Render("Cancelled by user."))
 		}
+		b.WriteString("\n")
 	}
 
 	return b.String()
