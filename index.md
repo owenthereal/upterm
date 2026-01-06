@@ -164,10 +164,29 @@ set-option -ga update-environment " UPTERM_ADMIN_SOCKET"
 
 **Issue**: It might be unclear whether your shell command is running in an upterm session, especially with common shell commands like `bash` or `zsh`.
 
-**Solution**: To provide a clear indication, amend your `~/.bashrc` or `~/.zshrc` with the following line. This decorates your prompt with an emoji whenever the shell command is running in an upterm session:
+**Solution**: Use `upterm session current -o go-template` to customize your shell prompt with session info. Add to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 ')$PS1" # Add an emoji to the prompt if `UPTERM_ADMIN_SOCKET` exists
+# Show 🆙 emoji and connected client count when in upterm session
+export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+```
+
+**Template variables available** (Go templates use PascalCase field names):
+
+- `{{.SessionID}}` - Session ID
+- `{{.ClientCount}}` - Number of connected clients
+- `{{.Host}}` - Server host
+- `{{.Command}}` - Command being shared
+- `{{.ForceCommand}}` - Force command (if set)
+
+> **Note**: JSON output (`-o json`) uses camelCase keys (e.g., `sessionId`, `clientCount`).
+>
+> **Tip**: The same template mechanism can be used for terminal titles or other integrations.
+
+**Alternative** (simpler, without client count):
+
+```bash
+export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 ')$PS1"
 ```
 
 ## :gear: How it works
@@ -286,7 +305,9 @@ Below is an example `docker-compose` configuration for deploying `uptermd` behin
 ```yaml
 services:
   upterm:
-    build: https://github.com/owenthereal/upterm
+    build: 
+        context: https://github.com/owenthereal/upterm.git
+        dockerfile: Dockerfile.uptermd
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
