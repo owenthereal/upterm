@@ -64,10 +64,14 @@ func PrintSessionDetail(detail SessionDetail, showHint bool) {
 	fmt.Print(FormatSessionDetail(detail, showHint))
 }
 
-// wrapLines wraps text to width and returns lines
+// wrapLines wraps text to width and returns lines.
+// For non-TTY output, skips wrapping since output may be piped to other tools.
 func wrapLines(text string, width int) []string {
 	if text == "" {
 		return []string{}
+	}
+	if !IsTTY() {
+		return []string{text} // No wrapping for non-TTY
 	}
 	wrapped := wrap.String(text, max(width, 10))
 	return strings.Split(wrapped, "\n")
