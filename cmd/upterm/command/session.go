@@ -183,6 +183,11 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 		return fmt.Errorf("not in upterm session (UPTERM_ADMIN_SOCKET not set)")
 	}
 
+	// Validate format
+	if format != "json" && !strings.HasPrefix(format, "go-template=") {
+		return fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
+	}
+
 	// Try to get session
 	sess, err := session(ctx, adminSocket)
 	if err != nil {
@@ -206,10 +211,7 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 	}
 
 	// Handle go-template output
-	tmplStr := format
-	if strings.HasPrefix(format, "go-template=") {
-		tmplStr = strings.TrimPrefix(format, "go-template=")
-	}
+	tmplStr := strings.TrimPrefix(format, "go-template=")
 	// Remove surrounding quotes if present
 	tmplStr = strings.Trim(tmplStr, "'\"")
 

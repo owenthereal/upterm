@@ -128,8 +128,9 @@ func (m SessionListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "enter":
-			if len(m.sessions) > 0 {
-				selected := m.sessions[m.table.Cursor()]
+			cursor := m.table.Cursor()
+			if cursor >= 0 && cursor < len(m.sessions) {
+				selected := m.sessions[cursor]
 				m.detailView = &selected
 				return m, tea.ClearScreen
 			}

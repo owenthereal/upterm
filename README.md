@@ -171,7 +171,7 @@ set-option -ga update-environment " UPTERM_ADMIN_SOCKET"
 export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
 ```
 
-**Template variables available:**
+**Template variables available** (Go templates use PascalCase field names):
 
 - `{{.SessionId}}` - Session ID
 - `{{.ClientCount}}` - Number of connected clients
@@ -179,6 +179,8 @@ export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/
 - `{{.Command}}` - Command being shared
 - `{{.ForceCommand}}` - Force command (if set)
 
+> **Note**: JSON output (`-o json`) uses camelCase keys (e.g., `sessionId`, `clientCount`).
+>
 > **Tip**: The same template mechanism can be used for terminal titles or other integrations.
 
 **Alternative** (simpler, without client count):
