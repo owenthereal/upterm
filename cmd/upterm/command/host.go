@@ -280,14 +280,14 @@ func notifyBody(c *api.Client) string {
 }
 
 func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
-	// Format the session info
-	sessionOutput, err := formatSession(session)
+	// Build session detail
+	detail, err := buildSessionDetail(session)
 	if err != nil {
-		return fmt.Errorf("failed to format session: %w", err)
+		return fmt.Errorf("failed to build session detail: %w", err)
 	}
 
 	// Create and run the integrated TUI model (session display + confirmation)
-	model := tui.NewHostSessionModel(sessionOutput, flagAccept)
+	model := tui.NewHostSessionModel(detail, flagAccept)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	finalModel, err := p.Run()

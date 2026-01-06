@@ -1,16 +1,17 @@
 package command
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
-	"github.com/olekukonko/tablewriter"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
@@ -21,7 +22,17 @@ import (
 
 var (
 	flagAdminSocket string
+	flagOutput      string
 )
+
+// sessionTemplateData holds data for template output
+type sessionTemplateData struct {
+	SessionID    string `json:"sessionId"`
+	ClientCount  int    `json:"clientCount"`
+	Host         string `json:"host"`
+	Command      string `json:"command"`
+	ForceCommand string `json:"forceCommand"`
+}
 
 func sessionCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -86,66 +97,53 @@ when you run 'upterm host').
 Sockets are stored in: %s
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.`, runtimeDir),
+in constrained environments where XDG directories are unavailable.
+
+Output formats:
+  -o json                           JSON output
+  -o go-template='{{.ClientCount}}' Custom Go template
+
+Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, runtimeDir),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
-  # Display the session with a custom admin socket path:
-  upterm session current --admin-socket ADMIN_SOCKET_PATH`,
+  # Output as JSON:
+  upterm session current -o json
+
+  # Custom format for shell prompt (outputs nothing if not in session):
+  upterm session current -o go-template='🆙 {{.ClientCount}} '
+
+  # For terminal title:
+  upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionID}}'`,
 		PreRunE: validateCurrentRequiredFlags,
 		RunE:    currentRunE,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path (required).")
+	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }
 
 func listRunE(c *cobra.Command, args []string) error {
-	runtimeDir := utils.UptermRuntimeDir()
-
-	sessions, err := listSessions(runtimeDir)
+	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir())
 	if err != nil {
 		return err
 	}
 
-	if len(sessions) == 0 {
-		fmt.Println("📡 Active Sessions (0)")
-		fmt.Println("═══════════════════════")
-		fmt.Println("\n🔍 No active sessions found")
-		fmt.Printf("\n💡 Get started:\n")
-		fmt.Printf("  • Run 'upterm host' to share your terminal\n")
-		fmt.Printf("  • Run 'upterm host --help' for more options\n")
-		return nil
+	model := tui.NewSessionListModel(sessions)
+	_, err = tui.RunModel(model)
+	return err
+}
+
+// fetchSessionDetail returns session details for an admin socket
+func fetchSessionDetail(ctx context.Context, adminSocket string) (tui.SessionDetail, error) {
+	sess, err := session(ctx, adminSocket)
+	if err != nil {
+		return tui.SessionDetail{}, err
 	}
-
-	fmt.Printf("📡 Active Sessions (%d)\n", len(sessions))
-	fmt.Println("═══════════════════════")
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.Header(" ", "Session ID", "Command", "Host")
-	for _, session := range sessions {
-		// Create simplified row without Force Command (usually n/a)
-		simplified := []string{
-			session[0], // Current marker
-			session[1], // Session ID
-			session[2], // Command
-			session[4], // Host (skip Force Command)
-		}
-		if err := table.Append(simplified); err != nil {
-			return err
-		}
-	}
-
-	if err := table.Render(); err != nil {
-		return err
-	}
-
-	fmt.Printf("\n💡 Tips:\n")
-	fmt.Printf("  • Use 'upterm session current' to see details\n")
-	fmt.Printf("  • Use 'upterm session info <SESSION_ID>' for specific session\n")
-	return nil
+	return buildSessionDetail(sess)
 }
 
 func infoRunE(c *cobra.Command, args []string) error {
@@ -153,16 +151,80 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("missing session name")
 	}
 
-	runtimeDir := utils.UptermRuntimeDir()
-	return displaySessionFromAdminSocketPath(filepath.Join(runtimeDir, host.AdminSocketFile(args[0])))
+	adminSocket := filepath.Join(utils.UptermRuntimeDir(), host.AdminSocketFile(args[0]))
+	detail, err := fetchSessionDetail(c.Context(), adminSocket)
+	if err != nil {
+		return err
+	}
+
+	tui.PrintSessionDetail(detail, false) // no hint for session info
+	return nil
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
-	return displaySessionFromAdminSocketPath(flagAdminSocket)
+	// If output format specified, use special handling (non-interactive)
+	if flagOutput != "" {
+		return outputSession(c.Context(), flagAdminSocket, flagOutput)
+	}
+
+	detail, err := fetchSessionDetail(c.Context(), flagAdminSocket)
+	if err != nil {
+		return err
+	}
+
+	tui.PrintSessionDetail(detail, true) // show hint for session current
+	return nil
 }
 
-func listSessions(dir string) ([][]string, error) {
-	result := make([][]string, 0)
+// outputSession handles -o/--output flag for session current
+func outputSession(ctx context.Context, adminSocket, format string) error {
+	// Error if not in upterm session (no admin socket)
+	if adminSocket == "" {
+		return fmt.Errorf("not in upterm session (UPTERM_ADMIN_SOCKET not set)")
+	}
+
+	// Validate format
+	if format != "json" && !strings.HasPrefix(format, "go-template=") {
+		return fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
+	}
+
+	// Try to get session
+	sess, err := session(ctx, adminSocket)
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+
+	// Build template data
+	data := sessionTemplateData{
+		SessionID:    sess.SessionId,
+		ClientCount:  len(sess.ConnectedClients),
+		Host:         sess.Host,
+		Command:      strings.Join(sess.Command, " "),
+		ForceCommand: strings.Join(sess.ForceCommand, " "),
+	}
+
+	// Handle json output
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(data)
+	}
+
+	// Handle go-template output
+	tmplStr := strings.TrimPrefix(format, "go-template=")
+	// Remove surrounding quotes if present
+	tmplStr = strings.Trim(tmplStr, "'\"")
+
+	tmpl, err := template.New("session").Parse(tmplStr)
+	if err != nil {
+		return fmt.Errorf("invalid template: %w", err)
+	}
+
+	return tmpl.Execute(os.Stdout, data)
+}
+
+func listSessions(ctx context.Context, dir string) ([]tui.SessionDetail, error) {
+	var result []tui.SessionDetail
 
 	files, err := os.ReadDir(dir)
 	if err != nil {
@@ -177,37 +239,22 @@ func listSessions(dir string) ([][]string, error) {
 		}
 
 		adminSocket := filepath.Join(dir, file.Name())
-		session, err := session(adminSocket)
+		sess, err := session(ctx, adminSocket)
 		if err != nil {
 			continue
 		}
 
-		var current string
-		if adminSocket == currentAdminSocket {
-			current = "*"
+		detail, err := buildSessionDetail(sess)
+		if err != nil {
+			continue
 		}
 
-		result = append(
-			result,
-			[]string{
-				current,
-				session.SessionId,
-				strings.Join(session.Command, " "),
-				naIfEmpty(strings.Join(session.ForceCommand, " ")),
-				session.Host,
-			})
+		detail.IsCurrent = adminSocket == currentAdminSocket
+		detail.AdminSocket = adminSocket
+		result = append(result, detail)
 	}
 
 	return result, nil
-}
-
-func displaySessionFromAdminSocketPath(path string) error {
-	session, err := session(path)
-	if err != nil {
-		return err
-	}
-
-	return displaySession(session)
 }
 
 func parseURL(str string) (u *url.URL, scheme string, host string, port string, err error) {
@@ -238,17 +285,17 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 	return
 }
 
-// formatSession returns the session info as a formatted string
-func formatSession(session *api.GetSessionResponse) (string, error) {
-	user := session.SshUser
+// buildSessionDetail returns session detail for TUI display
+func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error) {
+	user := sess.SshUser
 	if user == "" {
 		// Fallback to encoding for backward compatibility with older servers
-		user = routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(session.SessionId, session.NodeAddr)
+		user = routing.NewEncodeDecoder(routing.ModeEmbedded).Encode(sess.SessionId, sess.NodeAddr)
 	}
 
-	u, scheme, host, port, err := parseURL(session.Host)
+	u, scheme, host, port, err := parseURL(sess.Host)
 	if err != nil {
-		return "", err
+		return tui.SessionDetail{}, err
 	}
 
 	var hostPort string
@@ -268,50 +315,20 @@ func formatSession(session *api.GetSessionResponse) (string, error) {
 		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", scheme, user, hostPort, user, host+":"+port)
 	}
 
-	data := [][]string{
-		{"Command:", strings.Join(session.Command, " ")},
-		{"Force Command:", naIfEmpty(strings.Join(session.ForceCommand, " "))},
-		{"Host:", u.Scheme + "://" + hostPort},
-		{"Authorized Keys:", naIfEmpty(displayAuthorizedKeys(session.AuthorizedKeys))},
-		{"", ""},
-		{"➤ SSH Command:", sshCmd},
+	var clients []string
+	for _, c := range sess.ConnectedClients {
+		clients = append(clients, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint))
 	}
 
-	isFirst := true
-	for _, c := range session.ConnectedClients {
-		var header string
-		if isFirst {
-			header = "Connected Client(s):"
-			isFirst = false
-		}
-		data = append(data, []string{header, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)})
-	}
-
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "╭─ Session: %s ─╮\n", session.SessionId)
-
-	table := tablewriter.NewWriter(&buf)
-	for _, row := range data {
-		if err := table.Append(row); err != nil {
-			return "", err
-		}
-	}
-	if err := table.Render(); err != nil {
-		return "", err
-	}
-
-	fmt.Fprintf(&buf, "\n╰─ Run 'upterm session current' to display this again ─╯\n")
-
-	return buf.String(), nil
-}
-
-func displaySession(session *api.GetSessionResponse) error {
-	output, err := formatSession(session)
-	if err != nil {
-		return err
-	}
-	fmt.Print(output)
-	return nil
+	return tui.SessionDetail{
+		SessionID:        sess.SessionId,
+		Command:          strings.Join(sess.Command, " "),
+		ForceCommand:     strings.Join(sess.ForceCommand, " "),
+		Host:             u.Scheme + "://" + hostPort,
+		SSHCommand:       sshCmd,
+		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
+		ConnectedClients: clients,
+	}, nil
 }
 
 func clientDesc(addr, clientVer, fingerprint string) string {
@@ -325,13 +342,13 @@ func currentAdminSocketFile() string {
 	return os.Getenv(upterm.HostAdminSocketEnvVar)
 }
 
-func session(adminSocket string) (*api.GetSessionResponse, error) {
+func session(ctx context.Context, adminSocket string) (*api.GetSessionResponse, error) {
 	c, err := host.AdminClient(adminSocket)
 	if err != nil {
 		return nil, err
 	}
 
-	return c.GetSession(context.Background(), &api.GetSessionRequest{})
+	return c.GetSession(ctx, &api.GetSessionRequest{})
 }
 
 func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {
@@ -362,12 +379,4 @@ func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
 	}
 
 	return strings.Join(aks, "\n")
-}
-
-func naIfEmpty(s string) string {
-	if s == "" {
-		return "n/a"
-	}
-
-	return s
 }

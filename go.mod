@@ -14,7 +14,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/dchest/uniuri v1.2.0
 	github.com/dsnet/compress v0.0.1 // indirect
-	github.com/gen2brain/beeep v0.11.1
+	github.com/gen2brain/beeep v0.11.2
 	github.com/getsentry/sentry-go v0.40.0
 	github.com/getsentry/sentry-go/slog v0.40.0
 	github.com/go-kit/kit v0.13.0
@@ -32,7 +32,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oklog/run v1.2.0
 	github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba
-	github.com/olekukonko/tablewriter v1.1.2
 	github.com/pborman/ansi v1.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/xid v1.6.0
@@ -47,12 +46,15 @@ require (
 require (
 	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
+	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc
 	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.8.0
+	github.com/muesli/reflow v0.3.0
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/samber/slog-multi v1.6.0
 	github.com/spf13/pflag v1.0.10
@@ -72,14 +74,12 @@ require (
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
-	github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc // indirect
 	github.com/charmbracelet/x/ansi v0.10.1 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.13 // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/cli/safeexec v1.0.1 // indirect
 	github.com/cli/shurcooL-graphql v0.0.4 // indirect
-	github.com/clipperhouse/displaywidth v0.6.0 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
@@ -116,9 +116,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
-	github.com/olekukonko/cat v0.0.0-20250911104152-50322a0618f6 // indirect
-	github.com/olekukonko/errors v1.1.0 // indirect
-	github.com/olekukonko/ll v0.1.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
