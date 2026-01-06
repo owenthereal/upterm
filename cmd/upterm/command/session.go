@@ -27,7 +27,7 @@ var (
 
 // sessionTemplateData holds data for template output
 type sessionTemplateData struct {
-	SessionId    string `json:"sessionId"`
+	SessionID    string `json:"sessionId"`
 	ClientCount  int    `json:"clientCount"`
 	Host         string `json:"host"`
 	Command      string `json:"command"`
@@ -103,7 +103,7 @@ Output formats:
   -o json                           JSON output
   -o go-template='{{.ClientCount}}' Custom Go template
 
-Template variables: SessionId, ClientCount, Host, Command, ForceCommand`, runtimeDir),
+Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, runtimeDir),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
@@ -114,7 +114,7 @@ Template variables: SessionId, ClientCount, Host, Command, ForceCommand`, runtim
   upterm session current -o go-template='🆙 {{.ClientCount}} '
 
   # For terminal title:
-  upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionId}}'`,
+  upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionID}}'`,
 		PreRunE: validateCurrentRequiredFlags,
 		RunE:    currentRunE,
 	}
@@ -196,7 +196,7 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 
 	// Build template data
 	data := sessionTemplateData{
-		SessionId:    sess.SessionId,
+		SessionID:    sess.SessionId,
 		ClientCount:  len(sess.ConnectedClients),
 		Host:         sess.Host,
 		Command:      strings.Join(sess.Command, " "),

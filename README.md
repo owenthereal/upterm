@@ -173,7 +173,7 @@ export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/
 
 **Template variables available** (Go templates use PascalCase field names):
 
-- `{{.SessionId}}` - Session ID
+- `{{.SessionID}}` - Session ID
 - `{{.ClientCount}}` - Number of connected clients
 - `{{.Host}}` - Server host
 - `{{.Command}}` - Command being shared
