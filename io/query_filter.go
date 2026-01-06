@@ -50,6 +50,10 @@ func NewTerminalQueryFilter(w io.Writer) *TerminalQueryFilter {
 	}
 }
 
+// Write filters terminal query sequences from p and writes the result to the
+// underlying writer. Returns len(p) on success to indicate all input bytes were
+// processed. On error, returns 0 because the filtered output is written atomically
+// (all or nothing) and input bytes don't map 1:1 to output bytes due to filtering.
 func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	// Reuse output buffer, reset to zero length but keep capacity
 	f.outBuf = f.outBuf[:0]
@@ -59,7 +63,7 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 		f.processByte(b)
 	}
 
-	// Write filtered output
+	// Write filtered output atomically
 	if len(f.outBuf) > 0 {
 		_, err := f.w.Write(f.outBuf)
 		if err != nil {
@@ -67,7 +71,6 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 		}
 	}
 
-	// Return original length to indicate all bytes were "processed"
 	return len(p), nil
 }
 
@@ -145,10 +148,12 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 	case qfStateOSCParam:
 		f.seqBuf = append(f.seqBuf, b)
 		if b >= '0' && b <= '9' {
-			f.oscCmd = f.oscCmd*10 + int(b-'0')
-			if f.oscCmd > 999 { // Sanity check
+			// Check before updating to prevent overflow (OSC commands are 1-3 digits)
+			if f.oscCmd > 99 {
 				f.flushAndReset()
+				return
 			}
+			f.oscCmd = f.oscCmd*10 + int(b-'0')
 			return
 		}
 		if b == ';' {

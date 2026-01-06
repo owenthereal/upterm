@@ -2,6 +2,7 @@ package io
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -270,4 +271,39 @@ func TestTerminalQueryFilter_TertiaryDeviceAttributes(t *testing.T) {
 			assert.Equal(tt.expected, buf.Bytes())
 		})
 	}
+}
+
+// errWriter is a writer that always returns an error
+type errWriter struct {
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	return 0, e.err
+}
+
+func TestTerminalQueryFilter_ErrorHandling(t *testing.T) {
+	assert := assert.New(t)
+
+	expectedErr := errors.New("write error")
+	w := &errWriter{err: expectedErr}
+	filter := NewTerminalQueryFilter(w)
+
+	// Write some data that will produce output (not filtered)
+	n, err := filter.Write([]byte("hello"))
+	assert.Equal(0, n)
+	assert.Equal(expectedErr, err)
+}
+
+func TestTerminalQueryFilter_ErrorNotReturnedForFilteredContent(t *testing.T) {
+	assert := assert.New(t)
+
+	expectedErr := errors.New("write error")
+	w := &errWriter{err: expectedErr}
+	filter := NewTerminalQueryFilter(w)
+
+	// Write a query that will be filtered (no output, so no error)
+	n, err := filter.Write([]byte("\x1b[6n"))
+	assert.Equal(4, n)
+	assert.NoError(err) // No error because nothing was written to underlying writer
 }
