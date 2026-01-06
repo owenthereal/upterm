@@ -236,12 +236,17 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	} else {
 		// output
-		if err := h.writers.Append(sess); err != nil {
+		// Wrap SSH session with TerminalQueryFilter to filter out terminal query
+		// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
+		// they reach the client. This prevents client terminals from responding
+		// to queries meant for the host terminal.
+		filteredOutput := uio.NewTerminalQueryFilter(sess)
+		if err := h.writers.Append(filteredOutput); err != nil {
 			_ = sess.Exit(1)
 			return
 		}
 
-		defer h.writers.Remove(sess)
+		defer h.writers.Remove(filteredOutput)
 	}
 
 	{

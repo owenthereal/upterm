@@ -49,7 +49,7 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc
-	github.com/charmbracelet/ssh v0.0.0-20250429213052-383d50896132
+	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/google/go-github/v48 v48.2.0
