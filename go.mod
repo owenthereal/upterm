@@ -56,7 +56,7 @@ require (
 	github.com/hashicorp/go-version v1.8.0
 	github.com/muesli/reflow v0.3.0
 	github.com/pires/go-proxyproto v0.8.1
-	github.com/samber/slog-multi v1.6.0
+	github.com/samber/slog-multi v1.7.0
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
