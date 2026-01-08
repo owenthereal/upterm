@@ -237,6 +237,9 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
+		// Log the error before returning to ensure it's captured in logs
+		// This is especially important when running in detached/background mode
+		logger.Error("Failed to establish reverse tunnel", "error", err)
 		return err
 	}
 	defer rt.Close()
