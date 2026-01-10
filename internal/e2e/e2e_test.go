@@ -329,7 +329,8 @@ func TestAuthorizedKeys(t *testing.T) {
 	require.NoError(t, unauthorizedClient.SendLine(h.ctx, sshCmdWithOpts))
 
 	// Should see permission denied or connection closed
-	require.NoError(t, h.waitForText(unauthorizedClient, "Permission denied", 30*time.Second),
+	// Use "denied" to avoid terminal line-wrapping splitting "Permission denied"
+	require.NoError(t, h.waitForText(unauthorizedClient, "denied", 30*time.Second),
 		"unauthorized client should be rejected")
 	t.Log("Unauthorized client rejected: PASS")
 }
