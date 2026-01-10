@@ -26,8 +26,9 @@ jobs:
 
       - name: Install upterm (latest release)
         run: |
-          curl -sL https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_amd64.tar.gz | tar xz
-          sudo mv upterm /usr/local/bin/
+          mkdir -p /tmp/upterm-release
+          curl -sL https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_amd64.tar.gz | tar xz -C /tmp/upterm-release
+          sudo mv /tmp/upterm-release/upterm /usr/local/bin/
 
       - name: Run E2E Tests
         run: make test-e2e
