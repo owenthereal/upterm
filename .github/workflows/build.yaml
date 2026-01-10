@@ -92,6 +92,57 @@ jobs:
           check-latest: true
       - name: Vet
         run: make vet
+
+  test-e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Build upterm
+        run: go install ./cmd/upterm
+
+      - name: Generate SSH host keys
+        run: |
+          mkdir -p /tmp/uptermd
+          ssh-keygen -t ed25519 -f /tmp/uptermd/id_ed25519 -N ""
+
+      - name: Build and start uptermd
+        run: |
+          go build -o /tmp/uptermd/uptermd ./cmd/uptermd
+          /tmp/uptermd/uptermd --ssh-addr 127.0.0.1:2222 --private-key /tmp/uptermd/id_ed25519 > /tmp/uptermd/uptermd.log 2>&1 &
+          echo "Waiting for uptermd to start..."
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2222 2>/dev/null; then
+              echo "uptermd is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "uptermd failed to start"
+              cat /tmp/uptermd/uptermd.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run E2E Tests
+        run: make test-e2e
+        env:
+          UPTERM_E2E_SERVER: ssh://127.0.0.1:2222
+
+      - name: Cleanup uptermd
+        if: always()
+        run: pkill uptermd || true
+
   build-and-release:
     name: Build and Release (Snapshot)
     uses: ./.github/workflows/build-and-release.yaml

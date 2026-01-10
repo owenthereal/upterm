@@ -55,6 +55,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.8.0
 	github.com/muesli/reflow v0.3.0
+	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/samber/slog-multi v1.7.0
 	github.com/spf13/pflag v1.0.10

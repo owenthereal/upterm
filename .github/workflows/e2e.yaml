@@ -1,0 +1,35 @@
+name: E2E Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      uptermd_url:
+        description: 'Uptermd server URL (e.g., ssh://uptermd.upterm.dev:22)'
+        required: true
+        default: 'ssh://uptermd.upterm.dev:22'
+
+jobs:
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install upterm (latest release)
+        run: |
+          curl -sL https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_amd64.tar.gz | tar xz
+          sudo mv upterm /usr/local/bin/
+
+      - name: Run E2E Tests
+        run: make test-e2e
+        env:
+          UPTERM_E2E_SERVER: ${{ inputs.uptermd_url }}
