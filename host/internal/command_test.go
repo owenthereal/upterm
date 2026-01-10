@@ -42,10 +42,10 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	var shellCmd string
 	var shellArgs []string
 	if runtime.GOOS == "windows" {
-		// Windows: Use 'more' which reads stdin and outputs
-		// Will exit when stdin is closed
-		shellCmd = "more"
-		shellArgs = []string{}
+		// Windows: Use 'findstr' with regex that matches any line
+		// This reads stdin line by line and outputs matching lines
+		shellCmd = "findstr"
+		shellArgs = []string{"/r", ".*"}
 	} else {
 		// Unix: Use 'head' which reads exactly one line then exits
 		shellCmd = "head"
