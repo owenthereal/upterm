@@ -18,6 +18,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
+	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -205,6 +206,11 @@ type Host struct {
 	Stdout                         *os.File
 	ReadOnly                       bool
 	ForceForwardingInputForTesting bool
+
+	// SFTP configuration
+	SFTPDisabled          bool                     // Disable SFTP subsystem entirely (--no-sftp)
+	SFTPRoot              string                   // Root directory for SFTP (empty = cwd)
+	SFTPPermissionChecker sftp.PermissionChecker   // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -376,6 +382,9 @@ func (c *Host) Run(ctx context.Context) error {
 			Logger:                         logger.With("component", "server"),
 			ReadOnly:                       c.ReadOnly,
 			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
+			SFTPDisabled:                   c.SFTPDisabled,
+			SFTPRoot:                       c.SFTPRoot,
+			SFTPPermissionChecker:          c.SFTPPermissionChecker,
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())

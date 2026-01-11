@@ -230,6 +230,39 @@ func extractSSHCommand(output string) string {
 	return strings.TrimSpace(matches[1])
 }
 
+// extractScpUserHost extracts user and host separately from SSH command.
+// This is needed because upterm usernames contain ':' which scp misinterprets
+// as the host:path separator. By extracting them separately, we can use
+// scp -o User=username host:/path instead of user@host:/path.
+// e.g., "ssh sessionid:base64@localhost -p 2222" -> ("sessionid:base64", "localhost")
+func extractScpUserHost(sshCmd string) (string, string) {
+	parts := strings.Fields(sshCmd)
+	if len(parts) < 2 {
+		return "", ""
+	}
+	// parts[1] should be user@host
+	userHost := parts[1]
+	atIndex := strings.LastIndex(userHost, "@")
+	if atIndex == -1 {
+		return "", userHost
+	}
+	return userHost[:atIndex], userHost[atIndex+1:]
+}
+
+// extractScpPortFlag extracts the -P flag for scp from an SSH command's -p flag.
+// e.g., "ssh user@host -p 2222" -> "-P 2222"
+// Note: scp uses -P (uppercase) for port, ssh uses -p (lowercase)
+func extractScpPortFlag(sshCmd string) string {
+	parts := strings.Fields(sshCmd)
+	for i, part := range parts {
+		if part == "-p" && i+1 < len(parts) {
+			return "-P " + parts[i+1]
+		}
+	}
+	return ""
+}
+
+
 // TestSync validates bidirectional real-time PTY sync between host and client.
 func TestSync(t *testing.T) {
 	h := newTestHarness(t, 200)
@@ -243,7 +276,6 @@ func TestSync(t *testing.T) {
 	clientText := "hello from client"
 	require.NoError(t, client.SendKeys(h.ctx, clientText))
 	require.NoError(t, h.waitForText(h.host, clientText, 10*time.Second), "host did not receive keystrokes from client")
-	t.Log("Client -> Host sync: PASS")
 
 	// Clear line and test Host -> Client sync
 	require.NoError(t, h.host.SendKeys(h.ctx, "C-u"))
@@ -252,7 +284,6 @@ func TestSync(t *testing.T) {
 	hostText := "hello from host"
 	require.NoError(t, h.host.SendKeys(h.ctx, hostText))
 	require.NoError(t, h.waitForText(client, hostText, 10*time.Second), "client did not receive keystrokes from host")
-	t.Log("Host -> Client sync: PASS")
 }
 
 // TestMultipleClients validates that multiple clients can connect and see each other's keystrokes.
@@ -272,7 +303,6 @@ func TestMultipleClients(t *testing.T) {
 	require.NoError(t, client1.SendKeys(h.ctx, client1Text))
 	require.NoError(t, h.waitForText(h.host, client1Text, 10*time.Second), "host did not see client1 keystrokes")
 	require.NoError(t, h.waitForText(client2, client1Text, 10*time.Second), "client2 did not see client1 keystrokes")
-	t.Log("Client1 -> Host, Client2: PASS")
 
 	// Clear and test Client2 types
 	require.NoError(t, h.host.SendKeys(h.ctx, "C-u"))
@@ -282,7 +312,6 @@ func TestMultipleClients(t *testing.T) {
 	require.NoError(t, client2.SendKeys(h.ctx, client2Text))
 	require.NoError(t, h.waitForText(h.host, client2Text, 10*time.Second), "host did not see client2 keystrokes")
 	require.NoError(t, h.waitForText(client1, client2Text, 10*time.Second), "client1 did not see client2 keystrokes")
-	t.Log("Client2 -> Host, Client1: PASS")
 }
 
 // TestForceCommand validates that --force-command restricts client to the specified command.
@@ -299,7 +328,6 @@ func TestForceCommand(t *testing.T) {
 	require.NoError(t, client.SendLine(h.ctx, sshCmdWithOpts))
 
 	require.NoError(t, h.waitForText(client, "FORCED_OUTPUT", 30*time.Second), "client did not see forced command output")
-	t.Log("Force command executed: PASS")
 }
 
 // TestAuthorizedKeys validates that only clients with authorized keys can connect.
@@ -320,7 +348,6 @@ func TestAuthorizedKeys(t *testing.T) {
 	testText := "auth_success"
 	require.NoError(t, client.SendKeys(h.ctx, testText))
 	require.NoError(t, h.waitForText(h.host, testText, 10*time.Second), "authorized client could not connect")
-	t.Log("Authorized client connected: PASS")
 
 	// Test 2: Unauthorized client (using host key, not in authorized_keys) should be rejected
 	unauthorizedClient := h.splitPane(client)
@@ -332,7 +359,6 @@ func TestAuthorizedKeys(t *testing.T) {
 	// Use "denied" to avoid terminal line-wrapping splitting "Permission denied"
 	require.NoError(t, h.waitForText(unauthorizedClient, "denied", 30*time.Second),
 		"unauthorized client should be rejected")
-	t.Log("Unauthorized client rejected: PASS")
 }
 
 // TestSessionInfo validates that the TUI displays correct session information.
@@ -352,6 +378,4 @@ func TestSessionInfo(t *testing.T) {
 	require.Contains(t, clean, "bash", "TUI should show the command being run")
 	require.Contains(t, clean, "Host:", "TUI should show Host")
 	require.Contains(t, clean, "SSH Command:", "TUI should show SSH Command")
-
-	t.Log("Session info display: PASS")
 }
