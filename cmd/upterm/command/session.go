@@ -320,12 +320,30 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		clients = append(clients, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint))
 	}
 
+	// Build SCP commands if SFTP is enabled and using direct SSH
+	var scpDownload, scpUpload string
+	sftpEnabled := !sess.SftpDisabled && scheme == "ssh"
+	if sftpEnabled {
+		sftpRoot := utils.ShortenHomePath(sess.SftpRoot)
+		remotePath := filepath.Join(sftpRoot, "<file>")
+		if port != "" && port != "22" {
+			scpDownload = fmt.Sprintf("scp -P %s %s@%s:%s <local>", port, user, host, remotePath)
+			scpUpload = fmt.Sprintf("scp -P %s <local> %s@%s:%s", port, user, host, remotePath)
+		} else {
+			scpDownload = fmt.Sprintf("scp %s@%s:%s <local>", user, host, remotePath)
+			scpUpload = fmt.Sprintf("scp <local> %s@%s:%s", user, host, remotePath)
+		}
+	}
+
 	return tui.SessionDetail{
 		SessionID:        sess.SessionId,
 		Command:          strings.Join(sess.Command, " "),
 		ForceCommand:     strings.Join(sess.ForceCommand, " "),
 		Host:             u.Scheme + "://" + hostPort,
 		SSHCommand:       sshCmd,
+		SFTPEnabled:      sftpEnabled,
+		SCPDownload:      scpDownload,
+		SCPUpload:        scpUpload,
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 	}, nil

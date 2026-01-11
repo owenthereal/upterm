@@ -46,6 +46,9 @@ type SessionDetail struct {
 	ForceCommand     string
 	Host             string
 	SSHCommand       string
+	SFTPEnabled      bool   // Whether SFTP/SCP is enabled
+	SCPDownload      string // SCP download command
+	SCPUpload        string // SCP upload command
 	AuthorizedKeys   string
 	ConnectedClients []string
 }
@@ -117,9 +120,18 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 		renderWrappedRow(&b, "Authorized Keys:", detail.AuthorizedKeys, labelWidth, valueWidth, ValueStyle)
 	}
 
-	// SSH Command with marker and visual separation
+	// Commands section - each command on its own line for readability
 	b.WriteString("\n")
-	renderWrappedRow(&b, "➤ SSH Command:", detail.SSHCommand, labelWidth, valueWidth, CommandStyle)
+	b.WriteString(LabelStyle.Render("➤ SSH Command:") + "\n")
+	b.WriteString("    " + CommandStyle.Render(detail.SSHCommand) + "\n")
+
+	// SCP Commands (only shown if SFTP is enabled)
+	if detail.SFTPEnabled {
+		b.WriteString(LabelStyle.Render("➤ SCP Download:") + "\n")
+		b.WriteString("    " + CommandStyle.Render(detail.SCPDownload) + "\n")
+		b.WriteString(LabelStyle.Render("➤ SCP Upload:") + "\n")
+		b.WriteString("    " + CommandStyle.Render(detail.SCPUpload) + "\n")
+	}
 
 	// Connected clients
 	if len(detail.ConnectedClients) > 0 {

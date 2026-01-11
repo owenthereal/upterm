@@ -59,5 +59,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		ForceCommand:     s.Session.ForceCommand,
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
 		ConnectedClients: s.ClientRepo.Clients(),
+		SftpDisabled:     s.Session.SftpDisabled,
+		SftpRoot:         s.Session.SftpRoot,
 	}, nil
 }

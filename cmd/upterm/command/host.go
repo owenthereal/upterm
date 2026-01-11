@@ -296,7 +296,7 @@ func notifyBody(c *api.Client) string {
 }
 
 func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
-	// Build session detail
+	// Build session detail (includes SCP commands if SFTP is enabled)
 	detail, err := buildSessionDetail(session)
 	if err != nil {
 		return fmt.Errorf("failed to build session detail: %w", err)
@@ -354,3 +354,4 @@ func defaultPrivateKeys(homeDir string) []string {
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }
+

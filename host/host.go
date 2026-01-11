@@ -275,6 +275,13 @@ func (c *Host) Run(ctx context.Context) error {
 	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
 
+	// Resolve SFTP root for display (empty means cwd)
+	sftpRoot := c.SFTPRoot
+	if sftpRoot == "" {
+		sftpRoot, _ = os.Getwd()
+	}
+	sftpRoot = utils.ShortenHomePath(sftpRoot)
+
 	session := &api.GetSessionResponse{
 		SessionId:      sessResp.SessionID,
 		Host:           u.String(),
@@ -283,6 +290,8 @@ func (c *Host) Run(ctx context.Context) error {
 		Command:        c.Command,
 		ForceCommand:   c.ForceCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
+		SftpDisabled:   c.SFTPDisabled,
+		SftpRoot:       sftpRoot,
 	}
 
 	if c.SessionCreatedCallback != nil {
