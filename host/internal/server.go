@@ -40,9 +40,8 @@ type Server struct {
 	ForceForwardingInputForTesting bool
 
 	// SFTP configuration
-	SFTPDisabled          bool                    // Disable SFTP subsystem entirely
-	SFTPRoot              string                  // Root directory for SFTP (empty = cwd)
-	SFTPPermissionChecker sftp.PermissionChecker  // Optional: prompts user for SFTP permissions (nil = auto-allow)
+	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
+	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -96,7 +95,6 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			ctx:                   ctx,
 			logger:                s.Logger,
 			readonly:              s.ReadOnly,
-			sftpRoot:              s.SFTPRoot,
 			sftpPermissionChecker: s.SFTPPermissionChecker,
 		}
 		ph := publicKeyHandler{
@@ -184,8 +182,7 @@ type sessionHandler struct {
 	readonly          bool
 
 	// SFTP configuration
-	sftpRoot              string                  // Root directory for SFTP
-	sftpPermissionChecker sftp.PermissionChecker  // Optional: prompts user for SFTP permissions
+	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {

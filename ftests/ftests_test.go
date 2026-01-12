@@ -450,10 +450,9 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
-	ReadOnly                 bool
-	SFTPDisabled             bool   // Disable SFTP subsystem
-	SFTPRoot                 string // Root directory for SFTP
-	inputCh                  chan string
+	ReadOnly     bool
+	SFTPDisabled bool // Disable SFTP subsystem
+	inputCh      chan string
 	outputCh                 chan string
 	ctx                      context.Context
 	cancel                   func()
@@ -542,7 +541,6 @@ func (c *Host) Share(url string) error {
 		Stdout:                         stdoutw,
 		ReadOnly:                       c.ReadOnly,
 		SFTPDisabled:                   c.SFTPDisabled,
-		SFTPRoot:                       c.SFTPRoot,
 		ForceForwardingInputForTesting: true,
 	}
 

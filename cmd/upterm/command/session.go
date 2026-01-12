@@ -321,17 +321,17 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 	}
 
 	// Build SCP commands if SFTP is enabled and using direct SSH
+	// Uses standard OpenSSH path syntax: relative paths from home, or absolute paths
 	var scpDownload, scpUpload string
 	sftpEnabled := !sess.SftpDisabled && scheme == "ssh"
 	if sftpEnabled {
-		sftpRoot := utils.ShortenHomePath(sess.SftpRoot)
-		remotePath := filepath.Join(sftpRoot, "<file>")
+		// Show standard SCP syntax: <remote> is relative to home or an absolute path
 		if port != "" && port != "22" {
-			scpDownload = fmt.Sprintf("scp -P %s %s@%s:%s <local>", port, user, host, remotePath)
-			scpUpload = fmt.Sprintf("scp -P %s <local> %s@%s:%s", port, user, host, remotePath)
+			scpDownload = fmt.Sprintf("scp -P %s %s@%s:<remote> <local>", port, user, host)
+			scpUpload = fmt.Sprintf("scp -P %s <local> %s@%s:<remote>", port, user, host)
 		} else {
-			scpDownload = fmt.Sprintf("scp %s@%s:%s <local>", user, host, remotePath)
-			scpUpload = fmt.Sprintf("scp <local> %s@%s:%s", user, host, remotePath)
+			scpDownload = fmt.Sprintf("scp %s@%s:<remote> <local>", user, host)
+			scpUpload = fmt.Sprintf("scp <local> %s@%s:<remote>", user, host)
 		}
 	}
 

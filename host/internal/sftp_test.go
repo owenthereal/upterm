@@ -11,63 +11,85 @@ import (
 )
 
 func TestSFTPSession_resolvePath(t *testing.T) {
-	tempDir := t.TempDir()
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
 
 	session := &SFTPSession{
-		root:     tempDir,
 		readOnly: false,
 	}
 
+	// Test cases for path resolution:
+	// - Tilde paths (~ or ~/path) are expanded to home directory
+	// - Absolute paths (starting with /) are used as-is
+	// - Relative paths are passed through (WithStartDirectory handles them at protocol level)
 	tests := []struct {
-		name      string
-		reqPath   string
-		wantPath  string
-		wantError bool
+		name     string
+		reqPath  string
+		wantPath string
 	}{
+		// Absolute paths - used as-is
 		{
-			name:     "root path",
+			name:     "filesystem root",
 			reqPath:  "/",
-			wantPath: tempDir,
+			wantPath: "/",
 		},
 		{
-			name:     "simple file",
-			reqPath:  "/file.txt",
-			wantPath: filepath.Join(tempDir, "file.txt"),
+			name:     "absolute path",
+			reqPath:  "/tmp/file.txt",
+			wantPath: "/tmp/file.txt",
 		},
 		{
-			name:     "nested path",
-			reqPath:  "/dir/subdir/file.txt",
-			wantPath: filepath.Join(tempDir, "dir/subdir/file.txt"),
+			name:     "absolute nested path",
+			reqPath:  "/var/log/syslog",
+			wantPath: "/var/log/syslog",
 		},
 		{
-			name:     "path without leading slash",
+			name:     "absolute path with double dots",
+			reqPath:  "/tmp/../etc/passwd",
+			wantPath: "/etc/passwd",
+		},
+		// Tilde expansion (OpenSSH may send literal ~)
+		{
+			name:     "tilde only expands to home",
+			reqPath:  "~",
+			wantPath: home,
+		},
+		{
+			name:     "tilde with path expands to home subdir",
+			reqPath:  "~/Documents",
+			wantPath: filepath.Join(home, "Documents"),
+		},
+		{
+			name:     "tilde with nested path",
+			reqPath:  "~/Documents/projects/file.txt",
+			wantPath: filepath.Join(home, "Documents/projects/file.txt"),
+		},
+		{
+			name:     "tilde with trailing slash",
+			reqPath:  "~/upterm/",
+			wantPath: filepath.Join(home, "upterm"),
+		},
+		// Relative paths - passed through as-is (library handles with WithStartDirectory)
+		{
+			name:     "relative file passed through",
 			reqPath:  "file.txt",
-			wantPath: filepath.Join(tempDir, "file.txt"),
+			wantPath: "file.txt",
 		},
 		{
-			name:     "directory traversal attempt - stays in root",
-			reqPath:  "/../../../etc/passwd",
-			wantPath: filepath.Join(tempDir, "etc/passwd"),
+			name:     "relative nested path passed through",
+			reqPath:  "Documents/file.txt",
+			wantPath: "Documents/file.txt",
 		},
 		{
-			name:     "directory traversal with nested path - stays in root",
-			reqPath:  "/dir/../../../etc/passwd",
-			wantPath: filepath.Join(tempDir, "etc/passwd"),
-		},
-		{
-			name:     "double dots in middle",
-			reqPath:  "/dir/../file.txt",
-			wantPath: filepath.Join(tempDir, "file.txt"),
+			name:     "dot passed through",
+			reqPath:  ".",
+			wantPath: ".",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotPath, err := session.resolvePath(tt.reqPath)
-			if tt.wantError {
-				assert.Error(t, err)
-				return
-			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPath, gotPath)
 		})

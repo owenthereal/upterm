@@ -208,9 +208,8 @@ type Host struct {
 	ForceForwardingInputForTesting bool
 
 	// SFTP configuration
-	SFTPDisabled          bool                     // Disable SFTP subsystem entirely (--no-sftp)
-	SFTPRoot              string                   // Root directory for SFTP (empty = cwd)
-	SFTPPermissionChecker sftp.PermissionChecker   // Optional: prompts user for SFTP permissions (nil = auto-allow)
+	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
+	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -275,13 +274,6 @@ func (c *Host) Run(ctx context.Context) error {
 	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
 
-	// Resolve SFTP root for display (empty means cwd)
-	sftpRoot := c.SFTPRoot
-	if sftpRoot == "" {
-		sftpRoot, _ = os.Getwd()
-	}
-	sftpRoot = utils.ShortenHomePath(sftpRoot)
-
 	session := &api.GetSessionResponse{
 		SessionId:      sessResp.SessionID,
 		Host:           u.String(),
@@ -291,7 +283,6 @@ func (c *Host) Run(ctx context.Context) error {
 		ForceCommand:   c.ForceCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
 		SftpDisabled:   c.SFTPDisabled,
-		SftpRoot:       sftpRoot,
 	}
 
 	if c.SessionCreatedCallback != nil {
@@ -392,7 +383,6 @@ func (c *Host) Run(ctx context.Context) error {
 			ReadOnly:                       c.ReadOnly,
 			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
 			SFTPDisabled:                   c.SFTPDisabled,
-			SFTPRoot:                       c.SFTPRoot,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
 		}
 		g.Add(func() error {

@@ -49,11 +49,10 @@ var (
 	flagGitHubUsers        []string
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
-	flagReadOnly           bool
-	flagAccept             bool
-	flagSkipHostKeyCheck   bool
-	flagNoSFTP             bool
-	flagSFTPRoot           string
+	flagReadOnly         bool
+	flagAccept           bool
+	flagSkipHostKeyCheck bool
+	flagNoSFTP           bool
 )
 
 func hostCmd() *cobra.Command {
@@ -111,7 +110,6 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP.")
-	cmd.PersistentFlags().StringVar(&flagSFTPRoot, "sftp-root", "", "Restrict SFTP file access to this directory (default: current working directory). Use --sftp-root=/ for full filesystem access.")
 
 	return cmd
 }
@@ -258,10 +256,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
 		Logger:                 logger.Logger,
-		ReadOnly:               flagReadOnly,
-		SFTPDisabled:           flagNoSFTP,
-		SFTPRoot:               flagSFTPRoot,
-		SFTPPermissionChecker:  sftpPermissionChecker,
+		ReadOnly:              flagReadOnly,
+		SFTPDisabled:          flagNoSFTP,
+		SFTPPermissionChecker: sftpPermissionChecker,
 	}
 
 	err = h.Run(c.Context())

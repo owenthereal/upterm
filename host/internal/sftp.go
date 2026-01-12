@@ -6,20 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	gssh "github.com/charmbracelet/ssh"
 	"github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/utils"
 	pkgsftp "github.com/pkg/sftp"
 )
 
 // SFTPSession tracks permission state for a single SFTP session
 type SFTPSession struct {
-	root              string            // Root directory for file access
-	readOnly          bool              // Only allow downloads (no upload/delete)
-	alwaysAllow       bool              // User clicked "Always" in dialog
+	readOnly          bool                   // Only allow downloads (no upload/delete)
 	permissionChecker sftp.PermissionChecker // Optional: prompts user for permission (nil = auto-allow)
-	mu                sync.Mutex
+	clientInfo        sftp.ClientInfo        // Client information for permission dialogs
 }
 
 // HandleSFTP handles SFTP subsystem requests
@@ -27,33 +25,26 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 
-	// Determine root directory
-	root := h.sftpRoot
-	if root == "" {
-		var err error
-		root, err = os.Getwd()
-		if err != nil {
-			h.logger.Error("failed to get working directory", "error", err)
-			_ = sess.Exit(1)
-			return
-		}
+	// Clean up permission cache when session ends
+	if h.sftpPermissionChecker != nil {
+		defer h.sftpPermissionChecker.ClearSession(sessionID)
 	}
 
-	// Ensure root is absolute and clean
-	root, err := filepath.Abs(root)
-	if err != nil {
-		h.logger.Error("failed to resolve SFTP root", "error", err)
-		_ = sess.Exit(1)
-		return
+	// Get client info for permission dialogs
+	clientInfo := sftp.ClientInfo{
+		SessionID: sessionID,
+	}
+	if pk := sess.PublicKey(); pk != nil {
+		clientInfo.Fingerprint = utils.FingerprintSHA256(pk)
 	}
 
-	h.logger.Info("SFTP session started", "root", root, "readonly", h.readonly)
+	h.logger.Info("SFTP session started", "readonly", h.readonly, "client", clientInfo.Fingerprint)
 
 	// Create permission-checking handlers
 	sftpSession := &SFTPSession{
-		root:              root,
 		readOnly:          h.readonly,
 		permissionChecker: h.sftpPermissionChecker,
+		clientInfo:        clientInfo,
 	}
 
 	handlers := pkgsftp.Handlers{
@@ -63,7 +54,16 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		FileList: &sftpFileLister{session: sftpSession, logger: h.logger},
 	}
 
-	server := pkgsftp.NewRequestServer(sess, handlers)
+	// Get user's home directory for SFTP start directory
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		h.logger.Error("failed to get user home directory", "error", err)
+		_ = sess.Exit(1)
+		return
+	}
+
+	// Set start directory to user's home for relative path resolution
+	server := pkgsftp.NewRequestServer(sess, handlers, pkgsftp.WithStartDirectory(userHome))
 	if err := server.Serve(); err != nil {
 		if err != io.EOF {
 			h.logger.Error("sftp server error", "error", err)
@@ -74,28 +74,30 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	h.logger.Info("SFTP session ended")
 }
 
-// resolvePath validates and resolves a path within the SFTP root
+// resolvePath resolves a path following standard OpenSSH/SCP semantics.
+// - Tilde paths (~ or ~/path) are expanded to home directory
+// - Absolute paths (starting with /) are used as-is
+// - Relative paths are resolved from the user's home directory
+//
+// Note: WithStartDirectory(home) is set on the SFTP server, which handles
+// relative path resolution at the protocol level.
 func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
-	// Clean the requested path and make it relative
-	cleanPath := filepath.Clean("/" + reqPath)
-
-	// Join with root
-	absPath := filepath.Join(s.root, cleanPath)
-
-	// Ensure path stays within root (prevent directory traversal)
-	// We need to handle the case where root itself is being accessed
-	if !strings.HasPrefix(absPath, s.root) {
-		return "", os.ErrPermission
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
 	}
 
-	// Also check that after cleaning, the path still starts with root
-	// This handles cases like /root/../etc
-	absPath = filepath.Clean(absPath)
-	if !strings.HasPrefix(absPath, s.root) && absPath != s.root {
-		return "", os.ErrPermission
+	// Handle tilde expansion (OpenSSH may send literal ~ or ~/path)
+	if reqPath == "~" {
+		return home, nil
+	}
+	if strings.HasPrefix(reqPath, "~/") {
+		return filepath.Join(home, reqPath[2:]), nil
 	}
 
-	return absPath, nil
+	// Clean and return the path as-is
+	// The SFTP server's WithStartDirectory handles relative paths
+	return filepath.Clean(reqPath), nil
 }
 
 // listerat implements sftp.ListerAt

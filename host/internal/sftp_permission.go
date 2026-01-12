@@ -7,35 +7,22 @@ import (
 )
 
 // checkPermission prompts user for permission if needed
-func (s *SFTPSession) checkPermission(operation, path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Skip prompt if user already clicked "Always"
-	if s.alwaysAllow {
-		return nil
-	}
-
+func (s *SFTPSession) checkPermission(op sftp.Operation, path string) error {
 	// No checker = auto-allow (headless/CI mode)
 	if s.permissionChecker == nil {
 		return nil
 	}
 
-	// Try to show permission dialog
-	result, err := s.permissionChecker.CheckPermission(operation, path)
+	// Check permission (the checker handles caching of "Allow All" decisions)
+	result, err := s.permissionChecker.CheckPermission(op, path, s.clientInfo)
 	if err != nil {
 		// Checker unavailable (headless system)
 		// Allow operation - connection-level consent is sufficient
 		return nil
 	}
 
-	switch result {
-	case sftp.PermissionAllowed:
-		return nil
-	case sftp.PermissionAlwaysAllow:
-		s.alwaysAllow = true
-		return nil
-	default:
+	if result == sftp.PermissionDenied {
 		return fmt.Errorf("permission denied by user")
 	}
+	return nil
 }

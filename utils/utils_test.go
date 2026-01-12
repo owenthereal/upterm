@@ -9,6 +9,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestShortenHomePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err, "failed to get user home dir")
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "home directory",
+			path: home,
+			want: "~",
+		},
+		{
+			name: "path under home",
+			path: filepath.Join(home, "Documents/file.txt"),
+			want: "~/Documents/file.txt",
+		},
+		{
+			name: "path outside home unchanged",
+			path: "/etc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "relative path unchanged",
+			path: "relative/path",
+			want: "relative/path",
+		},
+		{
+			name: "empty path unchanged",
+			path: "",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShortenHomePath(tt.path)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestXDGDirWithFallback(t *testing.T) {
 	// Get the actual home directory for fallback tests
 	home, err := os.UserHomeDir()

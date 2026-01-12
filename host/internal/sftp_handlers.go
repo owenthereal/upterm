@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	hostsftp "github.com/owenthereal/upterm/host/sftp"
 	"github.com/pkg/sftp"
 )
 
@@ -23,7 +24,7 @@ func (h *sftpFileReader) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	}
 
 	// Check permission (shows zenity dialog if needed)
-	if err := h.session.checkPermission("download", path); err != nil {
+	if err := h.session.checkPermission(hostsftp.OpDownload, path); err != nil {
 		h.logger.Info("SFTP download denied", "path", path)
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
@@ -45,17 +46,22 @@ func (h *sftpFileWriter) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
 
+	logger := h.logger.With("original_path", r.Filepath)
+	logger.Debug("SFTP upload request", "original_path", r.Filepath)
+
 	path, err := h.session.resolvePath(r.Filepath)
 	if err != nil {
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
 
-	if err := h.session.checkPermission("upload", path); err != nil {
-		h.logger.Info("SFTP upload denied", "path", path)
+	logger = logger.With("resolved_path", path)
+
+	if err := h.session.checkPermission(hostsftp.OpUpload, path); err != nil {
+		logger.Info("SFTP upload denied")
 		return nil, sftp.ErrSSHFxPermissionDenied
 	}
 
-	h.logger.Info("SFTP upload", "path", path)
+	logger.Info("SFTP upload")
 
 	// Get file flags from request
 	pflags := r.Pflags()
@@ -95,26 +101,29 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		return sftp.ErrSSHFxPermissionDenied
 	}
 
-	// Map request method to operation name
-	var operation string
+	// Map request method to operation
+	var op hostsftp.Operation
 	switch r.Method {
 	case "Remove":
-		operation = "delete"
+		op = hostsftp.OpDelete
 	case "Mkdir":
-		operation = "mkdir"
+		op = hostsftp.OpMkdir
 	case "Rename":
-		operation = "rename"
+		op = hostsftp.OpRename
 	case "Rmdir":
-		operation = "rmdir"
+		op = hostsftp.OpRmdir
 	case "Symlink":
-		operation = "symlink"
+		op = hostsftp.OpSymlink
+	case "Link":
+		op = hostsftp.OpLink
 	case "Setstat":
-		operation = "setstat"
+		op = hostsftp.OpSetstat
 	default:
-		operation = r.Method
+		h.logger.Info("SFTP unsupported command", "method", r.Method, "path", path)
+		return sftp.ErrSSHFxOpUnsupported
 	}
 
-	if err := h.session.checkPermission(operation, path); err != nil {
+	if err := h.session.checkPermission(op, path); err != nil {
 		h.logger.Info("SFTP command denied", "method", r.Method, "path", path)
 		return sftp.ErrSSHFxPermissionDenied
 	}
@@ -142,6 +151,13 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 			return sftp.ErrSSHFxPermissionDenied
 		}
 		return os.Symlink(targetPath, path)
+	case "Link":
+		// For hard link, Filepath is the link name and Target is the existing file
+		targetPath, err := h.session.resolvePath(r.Target)
+		if err != nil {
+			return sftp.ErrSSHFxPermissionDenied
+		}
+		return os.Link(targetPath, path)
 	case "Setstat":
 		// Handle file attribute changes
 		attrs := r.Attributes()
@@ -151,11 +167,12 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 			}
 		}
 		if attrs.Mtime != 0 {
-			atime := attrs.Atime
-			if atime == 0 {
-				atime = attrs.Mtime
+			// Use atime if provided, otherwise fall back to mtime
+			atime := attrs.AccessTime()
+			if attrs.Atime == 0 {
+				atime = attrs.ModTime()
 			}
-			if err := os.Chtimes(path, attrs.AccessTime(), attrs.ModTime()); err != nil {
+			if err := os.Chtimes(path, atime, attrs.ModTime()); err != nil {
 				return err
 			}
 		}

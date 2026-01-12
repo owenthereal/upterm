@@ -121,16 +121,26 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	}
 
 	// Commands section - each command on its own line for readability
+	// Use wrapping to prevent truncation on narrow terminals
+	cmdIndent := 4
+	cmdWidth := max(width-cmdIndent-2, 20)
+
 	b.WriteString("\n")
 	b.WriteString(LabelStyle.Render("➤ SSH Command:") + "\n")
-	b.WriteString("    " + CommandStyle.Render(detail.SSHCommand) + "\n")
+	for _, line := range wrapLines(detail.SSHCommand, cmdWidth) {
+		b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+	}
 
 	// SCP Commands (only shown if SFTP is enabled)
 	if detail.SFTPEnabled {
 		b.WriteString(LabelStyle.Render("➤ SCP Download:") + "\n")
-		b.WriteString("    " + CommandStyle.Render(detail.SCPDownload) + "\n")
+		for _, line := range wrapLines(detail.SCPDownload, cmdWidth) {
+			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+		}
 		b.WriteString(LabelStyle.Render("➤ SCP Upload:") + "\n")
-		b.WriteString("    " + CommandStyle.Render(detail.SCPUpload) + "\n")
+		for _, line := range wrapLines(detail.SCPUpload, cmdWidth) {
+			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+		}
 	}
 
 	// Connected clients
