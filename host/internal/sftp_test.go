@@ -110,13 +110,26 @@ func TestSFTPSession_resolvePath(t *testing.T) {
 			reqPath:  "../other/file.txt",
 			wantPath: "../other/file.txt",
 		},
+		// Windows SFTP paths - leading "/" stripped for drive letter paths
+		{
+			name:     "windows drive path from SFTP",
+			reqPath:  "/C:/Users/foo",
+			wantPath: "C:/Users/foo",
+		},
+		{
+			name:     "windows drive path lowercase",
+			reqPath:  "/c:/temp/file.txt",
+			wantPath: "c:/temp/file.txt",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotPath, err := session.resolvePath(tt.reqPath)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantPath, gotPath)
+			// Use filepath.FromSlash to convert expected path to native separators
+			// since filepath.Clean in resolvePath produces native paths
+			assert.Equal(t, filepath.FromSlash(tt.wantPath), gotPath)
 		})
 	}
 }

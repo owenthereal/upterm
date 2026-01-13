@@ -120,8 +120,11 @@ func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
 		return filepath.Join(home, reqPath[2:]), nil
 	}
 
-	// Clean and return the path as-is
-	// The SFTP server's WithStartDirectory handles relative paths
+	// SFTP sends Windows paths like "/C:/foo" - strip leading "/" for proper handling
+	if len(reqPath) >= 3 && reqPath[0] == '/' && reqPath[2] == ':' {
+		reqPath = reqPath[1:]
+	}
+
 	return filepath.Clean(reqPath), nil
 }
 
