@@ -38,7 +38,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
-	golang.org/x/crypto v0.44.0
+	golang.org/x/crypto v0.45.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -156,3 +156,5 @@ require (
 )
 
 replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.45.0-sshpiper-20251119
+
+replace github.com/pkg/sftp => github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e

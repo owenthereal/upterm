@@ -328,6 +328,8 @@ github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba h1:/Q5vvLs180BFH7
 github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba/go.mod h1:eT2/Pcsim3XBjbvldGiJBvvgiqZkAFyiOJJsDKXs/ts=
 github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/gomega v1.5.0/go.mod h1:ex+gbHU/CVuBBDIJjb2X0qEXbFg53c61hWP/1CpauHY=
+github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e h1:aTNsPifEBOqyFBeJ66kg55fGiLMM9D6AH0pzzAlqnEY=
+github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e/go.mod h1:ZJjziXQfMZHQhZLwCXYsNgAWo7JCwe+ZPgUAuNeb+ck=
 github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d h1:M4eHUCs7KYTLz8jK6sOa+bCXiU2BV8xj9f2QFJsYLeA=
 github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d/go.mod h1:LmUG3DzUnCf1F03dVT+dyJADTiFN+dK+ZQHCqfkmvrQ=
 github.com/pascaldekloe/goe v0.0.0-20180627143212-57f6aae5913c/go.mod h1:lzWF7FIEvWOWxwDKqyGYQf6ZUaNfKdP144TG7ZOy1lc=
@@ -346,8 +348,6 @@ github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINE
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
-github.com/pkg/sftp v1.13.10 h1:+5FbKNTe5Z9aspU88DPIKJ9z2KZoaGCu6Sr6kKR/5mU=
-github.com/pkg/sftp v1.13.10/go.mod h1:bJ1a7uDhrX/4OII+agvy28lzRvQrmIQuaHrcI1HbeGA=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
