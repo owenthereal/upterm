@@ -47,24 +47,21 @@ type SessionDetail struct {
 	Host             string
 	SSHCommand       string
 	SFTPEnabled      bool   // Whether SFTP/SCP is enabled
-	SCPDownload      string // SCP download command
-	SCPUpload        string // SCP upload command
+	SFTPCommand      string // SFTP command
+	SCPUpload        string // SCP upload example
+	SCPDownload      string // SCP download example
 	AuthorizedKeys   string
 	ConnectedClients []string
 }
 
 // FormatSessionDetail renders a SessionDetail to a string using terminal width
-func FormatSessionDetail(detail SessionDetail, showHint bool) string {
-	content := renderSessionDetail(detail, getTermWidth())
-	if showHint {
-		content += "\n" + FooterStyle.Render("💡 Run 'upterm session current' to display this again") + "\n"
-	}
-	return content
+func FormatSessionDetail(detail SessionDetail) string {
+	return renderSessionDetail(detail, getTermWidth())
 }
 
 // PrintSessionDetail prints session detail to stdout
-func PrintSessionDetail(detail SessionDetail, showHint bool) {
-	fmt.Print(FormatSessionDetail(detail, showHint))
+func PrintSessionDetail(detail SessionDetail) {
+	fmt.Print(FormatSessionDetail(detail))
 }
 
 // wrapLines wraps text to width and returns lines.
@@ -126,19 +123,22 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	cmdWidth := max(width-cmdIndent-2, 20)
 
 	b.WriteString("\n")
-	b.WriteString(LabelStyle.Render("➤ SSH Command:") + "\n")
+	b.WriteString(LabelStyle.Render("➤ SSH:") + "\n")
 	for _, line := range wrapLines(detail.SSHCommand, cmdWidth) {
 		b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
 	}
 
-	// SCP Commands (only shown if SFTP is enabled)
+	// SFTP and SCP commands (only shown if SFTP is enabled)
 	if detail.SFTPEnabled {
-		b.WriteString(LabelStyle.Render("➤ SCP Download:") + "\n")
-		for _, line := range wrapLines(detail.SCPDownload, cmdWidth) {
+		b.WriteString(LabelStyle.Render("➤ SFTP:") + "\n")
+		for _, line := range wrapLines(detail.SFTPCommand, cmdWidth) {
 			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
 		}
-		b.WriteString(LabelStyle.Render("➤ SCP Upload:") + "\n")
+		b.WriteString(LabelStyle.Render("➤ SCP:") + "\n")
 		for _, line := range wrapLines(detail.SCPUpload, cmdWidth) {
+			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+		}
+		for _, line := range wrapLines(detail.SCPDownload, cmdWidth) {
 			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
 		}
 	}

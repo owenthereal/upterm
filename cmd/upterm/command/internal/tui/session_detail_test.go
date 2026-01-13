@@ -84,7 +84,7 @@ func Test_FormatSessionDetail_authorizedKeys(t *testing.T) {
 		AuthorizedKeys: "user1:\n- SHA256:key1\nuser2:\n- SHA256:key2",
 	}
 
-	output := FormatSessionDetail(detail, false)
+	output := FormatSessionDetail(detail)
 
 	// Verify the output contains properly formatted authorized keys
 	assert.Contains(t, output, "Authorized Keys:")
