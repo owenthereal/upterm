@@ -30,9 +30,9 @@ func TestSFTPDownload(t *testing.T) {
 
 	// Create a test file on the host to download
 	testContent := "hello from sftp download test"
-	h.writeFile("download-test.txt", testContent, 0644)
+	testFile := h.writeFile("download-test.txt", testContent, 0644)
 
-	sshCmd := h.startHost("--accept --sftp-root " + h.tmpDir)
+	sshCmd := h.startHost("--accept")
 	client := h.splitPane(h.host)
 
 	// Extract user and host separately (username contains ':' which scp misinterprets)
@@ -44,8 +44,9 @@ func TestSFTPDownload(t *testing.T) {
 	downloadDest := filepath.Join(h.tmpDir, "downloaded.txt")
 
 	// Build scp command using -o User= to avoid ':' parsing issues
-	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:/download-test.txt %s",
-		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, downloadDest)
+	// Use absolute path for remote file
+	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:%s %s",
+		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, testFile, downloadDest)
 
 	require.NoError(t, client.SendLine(h.ctx, scpCmd))
 	require.NoError(t, waitForFile(downloadDest, 30*time.Second), "scp download did not complete")
@@ -64,7 +65,7 @@ func TestSFTPUpload(t *testing.T) {
 	uploadContent := "hello from sftp upload test"
 	localFile := h.writeFile("upload-source.txt", uploadContent, 0644)
 
-	sshCmd := h.startHost("--accept --sftp-root " + h.tmpDir)
+	sshCmd := h.startHost("--accept")
 	client := h.splitPane(h.host)
 
 	// Extract user and host separately (username contains ':' which scp misinterprets)
@@ -73,13 +74,14 @@ func TestSFTPUpload(t *testing.T) {
 	require.NotEmpty(t, scpHost, "failed to extract scp host from SSH command")
 
 	// Build scp command using -o User= to avoid ':' parsing issues
-	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s %s:/uploaded.txt",
-		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), localFile, scpHost)
+	// Use absolute path for remote destination
+	uploadedPath := filepath.Join(h.tmpDir, "uploaded.txt")
+	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s %s:%s",
+		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), localFile, scpHost, uploadedPath)
 
 	require.NoError(t, client.SendLine(h.ctx, scpCmd))
 
 	// Wait for uploaded file to appear on host
-	uploadedPath := filepath.Join(h.tmpDir, "uploaded.txt")
 	require.NoError(t, waitForFile(uploadedPath, 30*time.Second), "scp upload did not complete")
 
 	// Verify uploaded content
@@ -93,10 +95,10 @@ func TestSFTPDisabled(t *testing.T) {
 	h := newTestHarness(t, 200)
 
 	// Create a test file that should NOT be downloadable
-	h.writeFile("forbidden.txt", "you should not see this", 0644)
+	testFile := h.writeFile("forbidden.txt", "you should not see this", 0644)
 
 	// Start host with SFTP disabled
-	sshCmd := h.startHost("--accept --no-sftp --sftp-root " + h.tmpDir)
+	sshCmd := h.startHost("--accept --no-sftp")
 	client := h.splitPane(h.host)
 
 	// Extract user and host separately (username contains ':' which scp misinterprets)
@@ -106,8 +108,8 @@ func TestSFTPDisabled(t *testing.T) {
 
 	// Try to download - should fail
 	downloadDest := filepath.Join(h.tmpDir, "should-not-exist.txt")
-	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:/forbidden.txt %s",
-		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, downloadDest)
+	scpCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:%s %s",
+		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, testFile, downloadDest)
 
 	require.NoError(t, client.SendLine(h.ctx, scpCmd))
 
@@ -125,10 +127,10 @@ func TestSFTPReadOnly(t *testing.T) {
 
 	// Create a test file that should be downloadable
 	downloadContent := "read-only download test"
-	h.writeFile("readonly-file.txt", downloadContent, 0644)
+	testFile := h.writeFile("readonly-file.txt", downloadContent, 0644)
 
 	// Start host in read-only mode
-	sshCmd := h.startHost("--accept --read-only --sftp-root " + h.tmpDir)
+	sshCmd := h.startHost("--accept --read-only")
 	client := h.splitPane(h.host)
 
 	// Extract user and host separately (username contains ':' which scp misinterprets)
@@ -138,8 +140,8 @@ func TestSFTPReadOnly(t *testing.T) {
 
 	// Test 1: Download should work
 	downloadDest := filepath.Join(h.tmpDir, "downloaded-readonly.txt")
-	scpDownloadCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:/readonly-file.txt %s",
-		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, downloadDest)
+	scpDownloadCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s:%s %s",
+		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), scpHost, testFile, downloadDest)
 
 	require.NoError(t, client.SendLine(h.ctx, scpDownloadCmd))
 	require.NoError(t, waitForFile(downloadDest, 30*time.Second), "scp download did not complete")
@@ -150,8 +152,9 @@ func TestSFTPReadOnly(t *testing.T) {
 
 	// Test 2: Upload should fail
 	uploadFile := h.writeFile("try-upload.txt", "this should fail", 0644)
-	scpUploadCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s %s:/should-fail.txt",
-		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), uploadFile, scpHost)
+	uploadDest := filepath.Join(h.tmpDir, "should-fail.txt")
+	scpUploadCmd := fmt.Sprintf("scp -o User=%s -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s %s %s:%s",
+		scpUser, h.clientKeyFile, extractScpPortFlag(sshCmd), uploadFile, scpHost, uploadDest)
 
 	require.NoError(t, client.SendLine(h.ctx, scpUploadCmd))
 
@@ -159,6 +162,6 @@ func TestSFTPReadOnly(t *testing.T) {
 	require.NoError(t, h.waitForText(client, "denied", 30*time.Second), "expected permission denied error")
 
 	// Verify file was NOT uploaded
-	_, err = os.Stat(filepath.Join(h.tmpDir, "should-fail.txt"))
+	_, err = os.Stat(uploadDest)
 	require.Error(t, err, "upload should fail in read-only mode")
 }
