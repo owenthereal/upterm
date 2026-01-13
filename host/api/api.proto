@@ -20,7 +20,6 @@ message GetSessionResponse {
   repeated AuthorizedKey authorized_keys = 7;
   string ssh_user = 8; // SSH username for client connections
   bool sftp_disabled = 9; // true if SFTP is disabled (--no-sftp)
-  string sftp_root = 10; // SFTP root directory
 }
 
 message AuthorizedKey {
