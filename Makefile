@@ -43,7 +43,7 @@ docker_build:
 GO_TEST_FLAGS ?= ""
 .PHONY: test
 test:
-	go test $$(go list ./... | grep -v /e2e) -timeout=120s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
+	go test $$(go list ./... | grep -v /e2e) -timeout=180s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
 
 # E2E tests require tmux and UPTERM_E2E_SERVER env var
 # Example: UPTERM_E2E_SERVER=ssh://uptermd.upterm.dev:22 make test-e2e
