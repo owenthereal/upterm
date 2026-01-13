@@ -155,4 +155,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.43.0-sshpiper-20251012
+replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.45.0-sshpiper-20251119
