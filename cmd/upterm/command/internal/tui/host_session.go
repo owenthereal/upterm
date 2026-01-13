@@ -114,6 +114,8 @@ func (m HostSessionModel) View() string {
 		switch m.result {
 		case HostSessionConfirmAccepted:
 			b.WriteString(CommandStyle.Render("Starting to accept connections..."))
+			b.WriteString("\n\n")
+			b.WriteString(FooterStyle.Render("💡 Run 'upterm session current' to display session info"))
 		case HostSessionConfirmRejected:
 			b.WriteString(FooterStyle.Render("Session discarded."))
 		case HostSessionConfirmInterrupted:

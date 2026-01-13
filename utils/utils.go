@@ -236,3 +236,19 @@ func publicKey(pk ssh.PublicKey) ssh.PublicKey {
 
 	return pk
 }
+
+// ShortenHomePath replaces the home directory prefix with ~ for cleaner display.
+// If the path doesn't start with home directory, it's returned unchanged.
+// Always uses forward slash after ~ for consistency across platforms.
+func ShortenHomePath(path string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		return path
+	}
+	if after, found := strings.CutPrefix(path, homeDir); found {
+		// Use forward slashes after ~ for consistent display (e.g., ~/Documents not ~\Documents)
+		after = strings.ReplaceAll(after, "\\", "/")
+		return "~" + after
+	}
+	return path
+}

@@ -12,6 +12,7 @@ import (
 
 	gssh "github.com/charmbracelet/ssh"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -37,6 +38,10 @@ type Server struct {
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
+
+	// SFTP configuration
+	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
+	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
@@ -82,14 +87,15 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		sh := sessionHandler{
-			forceCommand:      s.ForceCommand,
-			ptmx:              ptmx,
-			eventEmmiter:      s.EventEmitter,
-			writers:           writers,
-			keepAliveDuration: s.KeepAliveDuration,
-			ctx:               ctx,
-			logger:            s.Logger,
-			readonly:          s.ReadOnly,
+			forceCommand:          s.ForceCommand,
+			ptmx:                  ptmx,
+			eventEmmiter:          s.EventEmitter,
+			writers:               writers,
+			keepAliveDuration:     s.KeepAliveDuration,
+			ctx:                   ctx,
+			logger:                s.Logger,
+			readonly:              s.ReadOnly,
+			sftpPermissionChecker: s.SFTPPermissionChecker,
 		}
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
@@ -102,11 +108,20 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			ss = append(ss, signer)
 		}
 
+		// Set up subsystem handlers (SFTP)
+		var subsystemHandlers map[string]gssh.SubsystemHandler
+		if !s.SFTPDisabled {
+			subsystemHandlers = map[string]gssh.SubsystemHandler{
+				"sftp": sh.HandleSFTP,
+			}
+		}
+
 		server := gssh.Server{
-			HostSigners:      ss,
-			Handler:          sh.HandleSession,
-			Version:          upterm.HostSSHServerVersion,
-			PublicKeyHandler: ph.HandlePublicKey,
+			HostSigners:       ss,
+			Handler:           sh.HandleSession,
+			Version:           upterm.HostSSHServerVersion,
+			PublicKeyHandler:  ph.HandlePublicKey,
+			SubsystemHandlers: subsystemHandlers,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.Error("connection failed", "error", err)
 			},
@@ -165,6 +180,9 @@ type sessionHandler struct {
 	ctx               context.Context
 	logger            *slog.Logger
 	readonly          bool
+
+	// SFTP configuration
+	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {

@@ -33,6 +33,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/ssh"
 )
@@ -449,8 +450,9 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
-	ReadOnly                 bool
-	inputCh                  chan string
+	ReadOnly     bool
+	SFTPDisabled bool // Disable SFTP subsystem
+	inputCh      chan string
 	outputCh                 chan string
 	ctx                      context.Context
 	cancel                   func()
@@ -538,6 +540,7 @@ func (c *Host) Share(url string) error {
 		Stdin:                          stdinr,
 		Stdout:                         stdoutw,
 		ReadOnly:                       c.ReadOnly,
+		SFTPDisabled:                   c.SFTPDisabled,
 		ForceForwardingInputForTesting: true,
 	}
 
@@ -630,6 +633,15 @@ func (c *Client) init() {
 
 func (c *Client) InputOutput() (chan string, chan string) {
 	return c.inputCh, c.outputCh
+}
+
+// SFTP returns an SFTP client using the existing SSH connection.
+// The caller is responsible for closing the returned SFTP client.
+func (c *Client) SFTP() (*sftp.Client, error) {
+	if c.sshClient == nil {
+		return nil, fmt.Errorf("SSH client not connected")
+	}
+	return sftp.NewClient(c.sshClient)
 }
 
 func (c *Client) Close() {

@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/spf13/cobra"
@@ -48,9 +49,10 @@ var (
 	flagGitHubUsers        []string
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
-	flagReadOnly           bool
-	flagAccept             bool
-	flagSkipHostKeyCheck   bool
+	flagReadOnly         bool
+	flagAccept           bool
+	flagSkipHostKeyCheck bool
+	flagNoSFTP           bool
 )
 
 func hostCmd() *cobra.Command {
@@ -104,9 +106,10 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "Authorize specified GitLab users by allowing their public keys to connect.")
 	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction.")
+	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
+	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 
 	return cmd
 }
@@ -231,6 +234,14 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Set up SFTP permission checker based on --accept flag
+	var sftpPermissionChecker sftp.PermissionChecker
+	if flagAccept {
+		sftpPermissionChecker = &AutoAllowPermissionChecker{}
+	} else {
+		sftpPermissionChecker = &DialogPermissionChecker{}
+	}
+
 	h := &host.Host{
 		Host:                   flagServer,
 		Command:                args,
@@ -245,7 +256,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
 		Logger:                 logger.Logger,
-		ReadOnly:               flagReadOnly,
+		ReadOnly:              flagReadOnly,
+		SFTPDisabled:          flagNoSFTP,
+		SFTPPermissionChecker: sftpPermissionChecker,
 	}
 
 	err = h.Run(c.Context())
@@ -280,7 +293,7 @@ func notifyBody(c *api.Client) string {
 }
 
 func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
-	// Build session detail
+	// Build session detail (includes SCP commands if SFTP is enabled)
 	detail, err := buildSessionDetail(session)
 	if err != nil {
 		return fmt.Errorf("failed to build session detail: %w", err)
@@ -338,3 +351,4 @@ func defaultPrivateKeys(homeDir string) []string {
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }
+

@@ -19,6 +19,7 @@ message GetSessionResponse {
   repeated Client connected_clients = 6;
   repeated AuthorizedKey authorized_keys = 7;
   string ssh_user = 8; // SSH username for client connections
+  bool sftp_disabled = 9; // true if SFTP is disabled (--no-sftp)
 }
 
 message AuthorizedKey {

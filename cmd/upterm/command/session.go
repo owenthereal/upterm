@@ -157,7 +157,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	tui.PrintSessionDetail(detail, false) // no hint for session info
+	tui.PrintSessionDetail(detail)
 	return nil
 }
 
@@ -172,7 +172,7 @@ func currentRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	tui.PrintSessionDetail(detail, true) // show hint for session current
+	tui.PrintSessionDetail(detail)
 	return nil
 }
 
@@ -320,12 +320,32 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		clients = append(clients, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint))
 	}
 
+	// Build SFTP/SCP commands if enabled and using direct SSH
+	var sftpCmd, scpUpload, scpDownload string
+	sftpEnabled := !sess.SftpDisabled && scheme == "ssh"
+	if sftpEnabled {
+		// SFTP command (similar to SSH)
+		if port != "" && port != "22" {
+			sftpCmd = fmt.Sprintf("sftp -P %s %s@%s", port, user, host)
+			scpUpload = fmt.Sprintf("scp -P %s <local> %s@%s:<remote>", port, user, host)
+			scpDownload = fmt.Sprintf("scp -P %s %s@%s:<remote> <local>", port, user, host)
+		} else {
+			sftpCmd = fmt.Sprintf("sftp %s@%s", user, host)
+			scpUpload = fmt.Sprintf("scp <local> %s@%s:<remote>", user, host)
+			scpDownload = fmt.Sprintf("scp %s@%s:<remote> <local>", user, host)
+		}
+	}
+
 	return tui.SessionDetail{
 		SessionID:        sess.SessionId,
 		Command:          strings.Join(sess.Command, " "),
 		ForceCommand:     strings.Join(sess.ForceCommand, " "),
 		Host:             u.Scheme + "://" + hostPort,
 		SSHCommand:       sshCmd,
+		SFTPEnabled:      sftpEnabled,
+		SFTPCommand:      sftpCmd,
+		SCPUpload:        scpUpload,
+		SCPDownload:      scpDownload,
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 	}, nil
