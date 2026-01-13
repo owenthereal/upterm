@@ -23,18 +23,30 @@ type DialogPermissionChecker struct {
 }
 
 // CheckPermission shows a dialog for the operation.
-func (d *DialogPermissionChecker) CheckPermission(op sftp.Operation, path string, client sftp.ClientInfo) (sftp.PermissionResult, error) {
+// For two-path operations (rename, symlink, link), both source and target paths are passed.
+func (d *DialogPermissionChecker) CheckPermission(op sftp.Operation, client sftp.ClientInfo, paths ...string) (sftp.PermissionResult, error) {
+	if len(paths) == 0 {
+		return sftp.PermissionDenied, fmt.Errorf("no path provided")
+	}
+
 	// Auto-allow if user clicked "Allow All" for this session
 	if d.isSessionAllowed(client.SessionID) {
 		return sftp.PermissionAllowed, nil
 	}
 
-	// Auto-allow if user clicked "Allow" for this file in this session
-	if d.isFileAllowed(client.SessionID, path) {
+	// Auto-allow if user clicked "Allow" for all involved paths in this session
+	allPathsAllowed := true
+	for _, p := range paths {
+		if !d.isFileAllowed(client.SessionID, p) {
+			allPathsAllowed = false
+			break
+		}
+	}
+	if allPathsAllowed {
 		return sftp.PermissionAllowed, nil
 	}
 
-	result, err := showPermissionDialog(op, path, client)
+	result, err := d.showDialog(op, client, paths)
 
 	// Track based on user's choice
 	switch result {
@@ -42,8 +54,10 @@ func (d *DialogPermissionChecker) CheckPermission(op sftp.Operation, path string
 		// "Allow All" - allow all operations in this session
 		d.allowSession(client.SessionID)
 	case sftp.PermissionAllowed:
-		// "Allow" - allow all operations on this file in this session
-		d.allowFile(client.SessionID, path)
+		// "Allow" - allow all operations on these paths in this session
+		for _, p := range paths {
+			d.allowFile(client.SessionID, p)
+		}
 	}
 
 	return result, err
@@ -84,18 +98,7 @@ func (d *DialogPermissionChecker) ClearSession(sessionID string) {
 	})
 }
 
-// AutoAllowPermissionChecker always allows operations (for --accept mode or testing).
-type AutoAllowPermissionChecker struct{}
-
-// CheckPermission always returns SFTPPermissionAllowed.
-func (a *AutoAllowPermissionChecker) CheckPermission(op sftp.Operation, path string, client sftp.ClientInfo) (sftp.PermissionResult, error) {
-	return sftp.PermissionAllowed, nil
-}
-
-// ClearSession is a no-op since AutoAllowPermissionChecker doesn't track sessions.
-func (a *AutoAllowPermissionChecker) ClearSession(sessionID string) {}
-
-func showPermissionDialog(op sftp.Operation, path string, client sftp.ClientInfo) (sftp.PermissionResult, error) {
+func (d *DialogPermissionChecker) showDialog(op sftp.Operation, client sftp.ClientInfo, paths []string) (sftp.PermissionResult, error) {
 	title := "Upterm File Transfer"
 
 	// Format client identifier
@@ -104,8 +107,12 @@ func showPermissionDialog(op sftp.Operation, path string, client sftp.ClientInfo
 		clientID = client.Fingerprint
 	}
 
-	// Use shortened path for user-friendly display (e.g., ~/foo instead of /Users/name/foo)
-	displayPath := utils.ShortenHomePath(path)
+	// Use shortened paths for user-friendly display (e.g., ~/foo instead of /Users/name/foo)
+	displayPath := utils.ShortenHomePath(paths[0])
+	var displayTarget string
+	if len(paths) > 1 {
+		displayTarget = utils.ShortenHomePath(paths[1])
+	}
 
 	var msg string
 	switch op {
@@ -118,11 +125,23 @@ func showPermissionDialog(op sftp.Operation, path string, client sftp.ClientInfo
 	case sftp.OpMkdir:
 		msg = fmt.Sprintf("Client [%s] wants to create directory:\n%s", clientID, displayPath)
 	case sftp.OpRename:
-		msg = fmt.Sprintf("Client [%s] wants to rename:\n%s", clientID, displayPath)
+		if displayTarget != "" {
+			msg = fmt.Sprintf("Client [%s] wants to rename:\n%s → %s", clientID, displayPath, displayTarget)
+		} else {
+			msg = fmt.Sprintf("Client [%s] wants to rename:\n%s", clientID, displayPath)
+		}
 	case sftp.OpSymlink:
-		msg = fmt.Sprintf("Client [%s] wants to create symlink:\n%s", clientID, displayPath)
+		if displayTarget != "" {
+			msg = fmt.Sprintf("Client [%s] wants to create symlink:\n%s → %s", clientID, displayPath, displayTarget)
+		} else {
+			msg = fmt.Sprintf("Client [%s] wants to create symlink:\n%s", clientID, displayPath)
+		}
 	case sftp.OpLink:
-		msg = fmt.Sprintf("Client [%s] wants to create hard link:\n%s", clientID, displayPath)
+		if displayTarget != "" {
+			msg = fmt.Sprintf("Client [%s] wants to create hard link:\n%s → %s", clientID, displayPath, displayTarget)
+		} else {
+			msg = fmt.Sprintf("Client [%s] wants to create hard link:\n%s", clientID, displayPath)
+		}
 	case sftp.OpSetstat:
 		msg = fmt.Sprintf("Client [%s] wants to modify file attributes:\n%s", clientID, displayPath)
 	default:
@@ -150,3 +169,14 @@ func showPermissionDialog(op sftp.Operation, path string, client sftp.ClientInfo
 	// Other error (e.g., zenity not installed, no display)
 	return sftp.PermissionDenied, err
 }
+
+// AutoAllowPermissionChecker always allows operations (for --accept mode or testing).
+type AutoAllowPermissionChecker struct{}
+
+// CheckPermission always returns PermissionAllowed.
+func (a *AutoAllowPermissionChecker) CheckPermission(op sftp.Operation, client sftp.ClientInfo, paths ...string) (sftp.PermissionResult, error) {
+	return sftp.PermissionAllowed, nil
+}
+
+// ClearSession is a no-op since AutoAllowPermissionChecker doesn't track sessions.
+func (a *AutoAllowPermissionChecker) ClearSession(sessionID string) {}

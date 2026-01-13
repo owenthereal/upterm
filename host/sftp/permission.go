@@ -60,8 +60,10 @@ type ClientInfo struct {
 // Implementations can show UI dialogs, auto-allow, or deny based on policy.
 type PermissionChecker interface {
 	// CheckPermission returns the user's decision for the operation.
+	// For single-path operations (download, upload, delete, etc.), pass one path.
+	// For two-path operations (rename, symlink, link), pass source and target paths.
 	// Returns error if the checker is unavailable (e.g., no display).
-	CheckPermission(op Operation, path string, client ClientInfo) (PermissionResult, error)
+	CheckPermission(op Operation, client ClientInfo, paths ...string) (PermissionResult, error)
 
 	// ClearSession removes any cached permissions for the given session.
 	// Called when an SFTP session ends to prevent memory leaks.

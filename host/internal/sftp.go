@@ -77,15 +77,16 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	h.logger.Info("SFTP session ended")
 }
 
-// checkPermission prompts user for permission if needed
-func (s *SFTPSession) checkPermission(op hostsftp.Operation, path string) error {
+// checkPermission prompts user for permission if needed.
+// For two-path operations (rename, symlink, link), pass both source and target paths.
+func (s *SFTPSession) checkPermission(op hostsftp.Operation, paths ...string) error {
 	// No checker = auto-allow (headless/CI mode)
 	if s.permissionChecker == nil {
 		return nil
 	}
 
 	// Check permission (the checker handles caching of "Allow All" decisions)
-	result, err := s.permissionChecker.CheckPermission(op, path, s.clientInfo)
+	result, err := s.permissionChecker.CheckPermission(op, s.clientInfo, paths...)
 	if err != nil {
 		// Checker unavailable (headless system)
 		// Allow operation - connection-level consent is sufficient
@@ -214,6 +215,16 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		return sftp.ErrSSHFxPermissionDenied
 	}
 
+	// Resolve target path upfront for two-path operations
+	var targetPath string
+	isTwoPathOp := r.Method == "Rename" || r.Method == "Symlink" || r.Method == "Link"
+	if isTwoPathOp {
+		targetPath, err = h.session.resolvePath(r.Target)
+		if err != nil {
+			return sftp.ErrSSHFxPermissionDenied
+		}
+	}
+
 	// Map request method to operation
 	var op hostsftp.Operation
 	switch r.Method {
@@ -236,14 +247,20 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 		return sftp.ErrSSHFxOpUnsupported
 	}
 
-	if err := h.session.checkPermission(op, path); err != nil {
+	// Check permission - pass both paths for two-path operations
+	if isTwoPathOp {
+		err = h.session.checkPermission(op, path, targetPath)
+	} else {
+		err = h.session.checkPermission(op, path)
+	}
+	if err != nil {
 		h.logger.Info("SFTP command denied", "method", r.Method, "path", path)
 		return sftp.ErrSSHFxPermissionDenied
 	}
 
 	h.logger.Info("SFTP command", "method", r.Method, "path", path)
 
-	// Execute the actual operation
+	// Execute the operation
 	switch r.Method {
 	case "Remove":
 		return os.Remove(path)
@@ -252,48 +269,46 @@ func (h *sftpFileCmder) Filecmd(r *sftp.Request) error {
 	case "Rmdir":
 		return os.Remove(path)
 	case "Rename":
-		targetPath, err := h.session.resolvePath(r.Target)
-		if err != nil {
-			return sftp.ErrSSHFxPermissionDenied
-		}
 		return os.Rename(path, targetPath)
 	case "Symlink":
-		// For symlink, Filepath is the link name and Target is the target
-		targetPath, err := h.session.resolvePath(r.Target)
-		if err != nil {
-			return sftp.ErrSSHFxPermissionDenied
-		}
 		return os.Symlink(targetPath, path)
 	case "Link":
-		// For hard link, Filepath is the link name and Target is the existing file
-		targetPath, err := h.session.resolvePath(r.Target)
-		if err != nil {
-			return sftp.ErrSSHFxPermissionDenied
-		}
 		return os.Link(targetPath, path)
 	case "Setstat":
 		// Handle file attribute changes
 		attrs := r.Attributes()
-		if attrs.Size != 0 {
+		flags := r.AttrFlags()
+
+		// Handle size change (truncate) - use flags to detect if size was set (allows truncate to 0)
+		if flags.Size {
 			if err := os.Truncate(path, int64(attrs.Size)); err != nil {
 				return err
 			}
 		}
-		if attrs.Mtime != 0 {
-			// Use atime if provided, otherwise fall back to mtime
-			atime := attrs.AccessTime()
-			if attrs.Atime == 0 {
-				atime = attrs.ModTime()
-			}
-			if err := os.Chtimes(path, atime, attrs.ModTime()); err != nil {
+
+		// Handle ownership change
+		if flags.UidGid {
+			if err := os.Chown(path, int(attrs.UID), int(attrs.GID)); err != nil {
 				return err
 			}
 		}
-		if attrs.Mode != 0 {
+
+		// Handle permission change
+		if flags.Permissions {
 			if err := os.Chmod(path, attrs.FileMode()); err != nil {
 				return err
 			}
 		}
+
+		// Handle timestamp change
+		if flags.Acmodtime {
+			atime := attrs.AccessTime()
+			mtime := attrs.ModTime()
+			if err := os.Chtimes(path, atime, mtime); err != nil {
+				return err
+			}
+		}
+
 		return nil
 	}
 
