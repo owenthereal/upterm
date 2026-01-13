@@ -76,6 +76,11 @@ func TestSFTPSession_resolvePath(t *testing.T) {
 			wantPath: "file.txt",
 		},
 		{
+			name:     "relative directory",
+			reqPath:  "Downloads",
+			wantPath: "Downloads",
+		},
+		{
 			name:     "relative nested path passed through",
 			reqPath:  "Documents/file.txt",
 			wantPath: "Documents/file.txt",
@@ -84,6 +89,26 @@ func TestSFTPSession_resolvePath(t *testing.T) {
 			name:     "dot passed through",
 			reqPath:  ".",
 			wantPath: ".",
+		},
+		{
+			name:     "dot-slash prefix cleaned",
+			reqPath:  "./Downloads",
+			wantPath: "Downloads",
+		},
+		{
+			name:     "dot-slash nested cleaned",
+			reqPath:  "./Documents/file.txt",
+			wantPath: "Documents/file.txt",
+		},
+		{
+			name:     "parent directory relative",
+			reqPath:  "../Downloads",
+			wantPath: "../Downloads",
+		},
+		{
+			name:     "parent then child",
+			reqPath:  "../other/file.txt",
+			wantPath: "../other/file.txt",
 		},
 	}
 
