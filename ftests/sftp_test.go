@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +18,7 @@ var SFTPTestCases = []FtestCase{
 	testSFTPReadOnly,
 	testSFTPDisabled,
 	testSFTPDirectoryListing,
+	testSFTPSetstat,
 }
 
 // TestSFTP runs SFTP tests using the FtestSuite framework
@@ -295,4 +297,88 @@ func testSFTPDirectoryListing(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	require.NoError(err, "should be able to list subdirectory")
 	require.Len(subEntries, 1, "subdir should have one file")
 	assert.Equal("file3.txt", subEntries[0].Name(), "should see file3.txt in subdir")
+}
+
+// testSFTPSetstat tests file attribute modifications (chmod, truncate, chtimes)
+func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Create temp directory for test files
+	testDir := t.TempDir()
+
+	// Create a test file
+	testFilePath := filepath.Join(testDir, "setstat-test.txt")
+	testContent := "Hello from SFTP setstat test!\n"
+	err := os.WriteFile(testFilePath, []byte(testContent), 0644)
+	require.NoError(err)
+
+	// Setup admin socket
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:                  getTestShell(),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}
+	err = h.Share(hostShareURL)
+	require.NoError(err)
+	defer h.Close()
+
+	// Verify admin server and get session
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	// Connect client
+	c := &Client{
+		PrivateKeys: []string{ClientPrivateKey},
+	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
+	defer c.Close()
+
+	// Open SFTP client
+	sftpClient, err := c.SFTP()
+	require.NoError(err, "should be able to open SFTP connection")
+	defer func() { _ = sftpClient.Close() }()
+
+	// Test 1: Chmod - change file permissions
+	err = sftpClient.Chmod(testFilePath, 0600)
+	require.NoError(err, "should be able to chmod file")
+
+	info, err := os.Stat(testFilePath)
+	require.NoError(err)
+	assert.Equal(os.FileMode(0600), info.Mode().Perm(), "file permissions should be 0600")
+
+	// Test 2: Truncate - change file size
+	err = sftpClient.Truncate(testFilePath, 5)
+	require.NoError(err, "should be able to truncate file")
+
+	info, err = os.Stat(testFilePath)
+	require.NoError(err)
+	assert.Equal(int64(5), info.Size(), "file size should be 5 bytes")
+
+	// Verify content is truncated
+	content, err := os.ReadFile(testFilePath)
+	require.NoError(err)
+	assert.Equal("Hello", string(content), "content should be truncated to 'Hello'")
+
+	// Test 3: Truncate to 0 - verify we can truncate to zero bytes
+	err = sftpClient.Truncate(testFilePath, 0)
+	require.NoError(err, "should be able to truncate file to 0 bytes")
+
+	info, err = os.Stat(testFilePath)
+	require.NoError(err)
+	assert.Equal(int64(0), info.Size(), "file size should be 0 bytes")
+
+	// Test 4: Chtimes - change file timestamps
+	atime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	mtime := time.Date(2021, 6, 15, 12, 30, 0, 0, time.UTC)
+	err = sftpClient.Chtimes(testFilePath, atime, mtime)
+	require.NoError(err, "should be able to change file times")
+
+	info, err = os.Stat(testFilePath)
+	require.NoError(err)
+	// Note: atime may not be preserved on all systems, but mtime should be
+	assert.Equal(mtime.Unix(), info.ModTime().Unix(), "mtime should be updated")
 }
