@@ -110,6 +110,25 @@ This mirrors functionality provided by tmate:
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
 
+### File Transfer (SFTP/SCP)
+
+Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:
+
+```console
+# Download a file from host
+scp -P PORT USER@HOST:/path/to/file.txt ./local/
+
+# Upload a file to host
+scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
+```
+
+**Security model:**
+
+- File transfers have the same access as the terminal session (clients can already access any file via the shell)
+- Without `--accept`, each file operation prompts the host for approval via a dialog
+- Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
+- Use `--no-sftp` to disable file transfers entirely
+
 ### WebSocket Connection
 
 In scenarios where your host restricts ssh transport, establish a connection to `uptermd.upterm.dev` (or your self-hosted server) via WebSocket:
