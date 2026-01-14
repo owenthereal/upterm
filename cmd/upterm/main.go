@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 
@@ -9,7 +10,11 @@ import (
 
 func main() {
 	if err := command.Root().Execute(); err != nil {
-		slog.Error("Error executing command", "error", err)
+		// Don't log errors that have already been displayed to the user
+		var silentErr command.SilentError
+		if !errors.As(err, &silentErr) {
+			slog.Error("Error executing command", "error", err)
+		}
 		os.Exit(1)
 	}
 }
