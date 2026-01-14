@@ -22,8 +22,13 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          install-only: true
       - name: Compile
-        run: make install
+        run: |
+          make goreleaser-build
   test-macos:
     name: Test (macOS)
     runs-on: macos-latest

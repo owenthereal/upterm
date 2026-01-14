@@ -59,3 +59,7 @@ DOCKER_REPO ?= ghcr.io/owenthereal/upterm/uptermd
 .PHONY: goreleaser
 goreleaser:
 	DOCKER_REPO=$(DOCKER_REPO) goreleaser release --clean --snapshot --skip=publish
+
+.PHONY: goreleaser-dev
+goreleaser-build:
+	goreleaser build --single-target --clean --auto-snapshot
