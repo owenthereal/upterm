@@ -39,6 +39,20 @@ func (e UserInterruptedError) Error() string {
 	return "interrupted by user"
 }
 
+// SilentError wraps an error that has already been displayed to the user.
+// main.go checks for this type to avoid duplicate logging.
+type SilentError struct {
+	Err error
+}
+
+func (e SilentError) Error() string {
+	return e.Err.Error()
+}
+
+func (e SilentError) Unwrap() error {
+	return e.Err
+}
+
 var (
 	flagServer             string
 	flagForceCommand       string
@@ -153,6 +167,18 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
+	// Early TTY check: if interactive confirmation is needed but no TTY is available, fail fast
+	// before making any network connections. This provides clear feedback and avoids orphan sessions.
+	if !flagAccept && !tui.IsTTY() {
+		c.SilenceUsage = true
+		c.SilenceErrors = true
+		fmt.Fprintln(os.Stderr, "Error: interactive confirmation requires a terminal (TTY)")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "To run in non-interactive environments (CI, scripts, etc.), use --accept:")
+		fmt.Fprintln(os.Stderr, "  upterm host --accept [command]")
+		return SilentError{Err: errors.New("no TTY available")}
+	}
+
 	var err error
 	if len(args) == 0 {
 		shellCmd := getDefaultShell()
@@ -299,8 +325,14 @@ func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse
 		return fmt.Errorf("failed to build session detail: %w", err)
 	}
 
-	// Create and run the integrated TUI model (session display + confirmation)
-	model := tui.NewHostSessionModel(detail, flagAccept)
+	// With --accept, just print session info and continue (no interactive confirmation needed)
+	if flagAccept {
+		tui.PrintSessionDetail(detail)
+		return nil
+	}
+
+	// Run interactive TUI for confirmation (TTY is guaranteed by early check in shareRunE)
+	model := tui.NewHostSessionModel(detail, false)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	finalModel, err := p.Run()
