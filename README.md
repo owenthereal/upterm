@@ -46,7 +46,7 @@ scoop install upterm
 ### From source
 
 ```console
-git clone git@github.com:owenthereal/upterm.git
+git clone https://github.com/owenthereal/upterm.git
 cd upterm
 go install ./cmd/upterm/...
 ```
