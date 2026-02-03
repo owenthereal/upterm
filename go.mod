@@ -57,7 +57,7 @@ require (
 	github.com/muesli/reflow v0.3.0
 	github.com/ncruces/zenity v0.10.14
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
-	github.com/pires/go-proxyproto v0.8.1
+	github.com/pires/go-proxyproto v0.9.2
 	github.com/pkg/sftp v1.13.10
 	github.com/samber/slog-multi v1.7.0
 	github.com/spf13/pflag v1.0.10
