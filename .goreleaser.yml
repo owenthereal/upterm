@@ -12,6 +12,8 @@ builds:
       - "amd64"
       - "arm"
       - "arm64"
+      - "ppc64le"
+      - "s390x"
     main: ./cmd/upterm
     ldflags:
       - -s -w -X github.com/owenthereal/upterm/internal/version.Version={{.Version}} -X github.com/owenthereal/upterm/internal/version.GitCommit={{.Commit}} -X github.com/owenthereal/upterm/internal/version.Date={{.CommitDate}}
@@ -23,6 +25,8 @@ builds:
     goarch:
       - "amd64"
       - "arm64"
+      - "ppc64le"
+      - "s390x"
     main: ./cmd/uptermd
     binary: uptermd
     ldflags:
@@ -137,15 +141,65 @@ dockers:
       - uptermd
     goos: linux
     goarch: arm64
+  - image_templates:
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-ppc64le"
+      - "{{ .Env.DOCKER_REPO }}:latest-ppc64le"
+    dockerfile: Dockerfile.uptermd
+    use: buildx
+    build_flag_templates:
+      - "--target=pre-built-binary"
+      - "--platform=linux/ppc64le"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=Upterm server daemon"
+      - "--label=org.opencontainers.image.url=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.source=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    extra_files:
+      - go.mod
+      - go.sum
+    ids:
+      - uptermd
+    goos: linux
+    goarch: ppc64le
+  - image_templates:
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-s390x"
+      - "{{ .Env.DOCKER_REPO }}:latest-s390x"
+    dockerfile: Dockerfile.uptermd
+    use: buildx
+    build_flag_templates:
+      - "--target=pre-built-binary"
+      - "--platform=linux/s390x"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.description=Upterm server daemon"
+      - "--label=org.opencontainers.image.url=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.source=https://github.com/owenthereal/upterm"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    extra_files:
+      - go.mod
+      - go.sum
+    ids:
+      - uptermd
+    goos: linux
+    goarch: s390x
 docker_manifests:
   - name_template: "{{ .Env.DOCKER_REPO }}:{{ .Tag }}"
     image_templates:
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-amd64"
       - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-arm64"
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-ppc64le"
+      - "{{ .Env.DOCKER_REPO }}:{{ .Tag }}-s390x"
   - name_template: "{{ .Env.DOCKER_REPO }}:latest"
     image_templates:
       - "{{ .Env.DOCKER_REPO }}:latest-amd64"
       - "{{ .Env.DOCKER_REPO }}:latest-arm64"
+      - "{{ .Env.DOCKER_REPO }}:latest-ppc64le"
+      - "{{ .Env.DOCKER_REPO }}:latest-s390x"
 checksum:
   name_template: "checksums.txt"
 snapshot:
