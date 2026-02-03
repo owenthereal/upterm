@@ -121,8 +121,8 @@ github.com/gen2brain/beeep v0.11.2 h1:+KfiKQBbQCuhfJFPANZuJ+oxsSKAYNe88hIpJuyKWD
 github.com/gen2brain/beeep v0.11.2/go.mod h1:jQVvuwnLuwOcdctHn/uyh8horSBNJ8uGb9Cn2W4tvoc=
 github.com/getsentry/sentry-go v0.42.0 h1:eeFMACuZTbUQf90RE8dE4tXeSe4CZyfvR1MBL7RLEt8=
 github.com/getsentry/sentry-go v0.42.0/go.mod h1:eRXCoh3uvmjQLY6qu63BjUZnaBu5L5WhMV1RwYO8W5s=
-github.com/getsentry/sentry-go/slog v0.40.0 h1:uR2EPL9w6uHw3XB983IAqzqM9mP+fjJpNY9kfob3/Z8=
-github.com/getsentry/sentry-go/slog v0.40.0/go.mod h1:ArRaP+0rsbnJGyvZwYDo/vDQT/YBbOQeOlO+DGW+F9s=
+github.com/getsentry/sentry-go/slog v0.42.0 h1:SX5IoyHt8hLLA7fai7Lu/hZ5EzSESoFEhML3KdsJDk4=
+github.com/getsentry/sentry-go/slog v0.42.0/go.mod h1:wViJ4JAiz6BSHFPo1zpimxjFeMAO3Hcx9tcAVgNOWhE=
 github.com/go-errors/errors v1.4.2 h1:J6MZopCL4uSllY1OfXM374weqZFFItUbrImctkmUxIA=
 github.com/go-errors/errors v1.4.2/go.mod h1:sIVyrIiJhuEF+Pj9Ebtd6P/rEYROXFi3BopGUQ5a5Og=
 github.com/go-kit/kit v0.8.0/go.mod h1:xBxKIO96dXMWWy0MnWVtmwkA9/13aqxPnvrjFYMA2as=
