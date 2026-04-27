@@ -63,10 +63,11 @@ var (
 	flagGitHubUsers        []string
 	flagGitLabUsers        []string
 	flagSourceHutUsers     []string
-	flagReadOnly         bool
-	flagAccept           bool
-	flagSkipHostKeyCheck bool
-	flagNoSFTP           bool
+	flagReadOnly           bool
+	flagAccept             bool
+	flagSkipHostKeyCheck   bool
+	flagNoSFTP             bool
+	flagAllowTCPForwarding bool
 )
 
 func hostCmd() *cobra.Command {
@@ -98,6 +99,9 @@ containing client public keys.`,
   # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
+  # Allow clients to use local TCP forwarding through the hosted session:
+  upterm host --allow-tcp-forwarding
+
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND`,
 		PreRunE: validateShareRequiredFlags,
@@ -124,6 +128,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
+	cmd.PersistentFlags().BoolVar(&flagAllowTCPForwarding, "allow-tcp-forwarding", false, "Allow clients to open local TCP forwards through the hosted session with standard SSH forwarding such as -L.")
 
 	return cmd
 }
@@ -282,9 +287,10 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Stdin:                  os.Stdin,
 		Stdout:                 os.Stdout,
 		Logger:                 logger.Logger,
-		ReadOnly:              flagReadOnly,
-		SFTPDisabled:          flagNoSFTP,
-		SFTPPermissionChecker: sftpPermissionChecker,
+		ReadOnly:               flagReadOnly,
+		AllowTCPForwarding:     flagAllowTCPForwarding,
+		SFTPDisabled:           flagNoSFTP,
+		SFTPPermissionChecker:  sftpPermissionChecker,
 	}
 
 	err = h.Run(c.Context())
@@ -383,4 +389,3 @@ func defaultPrivateKeys(homeDir string) []string {
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }
-

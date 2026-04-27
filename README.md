@@ -129,6 +129,15 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 
+### Local TCP Forwarding
+
+Clients can use standard SSH local forwarding through a hosted session when the host opts in:
+
+```console
+upterm host --allow-tcp-forwarding
+ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
+```
+
 ### WebSocket Connection
 
 In scenarios where your host restricts ssh transport, establish a connection to `uptermd.upterm.dev` (or your self-hosted server) via WebSocket:

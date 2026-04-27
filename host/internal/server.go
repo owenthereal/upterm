@@ -24,17 +24,18 @@ import (
 )
 
 type Server struct {
-	Command           []string
-	CommandEnv        []string
-	ForceCommand      []string
-	Signers           []ssh.Signer
-	AuthorizedKeys    []ssh.PublicKey
-	EventEmitter      *emitter.Emitter
-	KeepAliveDuration time.Duration
-	Stdin             *os.File
-	Stdout            *os.File
-	Logger            *slog.Logger
-	ReadOnly          bool
+	Command            []string
+	CommandEnv         []string
+	ForceCommand       []string
+	Signers            []ssh.Signer
+	AuthorizedKeys     []ssh.PublicKey
+	EventEmitter       *emitter.Emitter
+	KeepAliveDuration  time.Duration
+	Stdin              *os.File
+	Stdout             *os.File
+	Logger             *slog.Logger
+	ReadOnly           bool
+	AllowTCPForwarding bool
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
@@ -117,10 +118,23 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		}
 
 		server := gssh.Server{
-			HostSigners:       ss,
-			Handler:           sh.HandleSession,
-			Version:           upterm.HostSSHServerVersion,
-			PublicKeyHandler:  ph.HandlePublicKey,
+			HostSigners:      ss,
+			Handler:          sh.HandleSession,
+			Version:          upterm.HostSSHServerVersion,
+			PublicKeyHandler: ph.HandlePublicKey,
+			LocalPortForwardingCallback: func(_ gssh.Context, destinationHost string, destinationPort uint32) bool {
+				if !s.AllowTCPForwarding {
+					s.Logger.Debug("rejecting local port forwarding", "destination-host", destinationHost, "destination-port", destinationPort)
+					return false
+				}
+
+				s.Logger.Debug("allowing local port forwarding", "destination-host", destinationHost, "destination-port", destinationPort)
+				return true
+			},
+			ChannelHandlers: map[string]gssh.ChannelHandler{
+				"session":      gssh.DefaultSessionHandler,
+				"direct-tcpip": gssh.DirectTCPIPHandler,
+			},
 			SubsystemHandlers: subsystemHandlers,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.Error("connection failed", "error", err)
