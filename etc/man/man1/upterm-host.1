@@ -29,6 +29,10 @@ containing client public keys.
 	Automatically accept client connections without prompts.
 
 .PP
+\fB--allow-tcp-forwarding\fP[=false]
+	Allow clients to open local TCP forwards through the hosted session with standard SSH forwarding such as -L.
+
+.PP
 \fB--authorized-keys\fP=""
 	Specify a authorize_keys file listing authorized public keys for connection.
 
@@ -106,6 +110,9 @@ containing client public keys.
 
   # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
+
+  # Allow clients to use local TCP forwarding through the hosted session:
+  upterm host --allow-tcp-forwarding
 
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND

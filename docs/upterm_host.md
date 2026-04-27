@@ -37,6 +37,9 @@ upterm host [flags]
   # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
+  # Allow clients to use local TCP forwarding through the hosted session:
+  upterm host --allow-tcp-forwarding
+
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
 ```
@@ -45,6 +48,7 @@ upterm host [flags]
 
 ```
       --accept                   Automatically accept client connections without prompts.
+      --allow-tcp-forwarding     Allow clients to open local TCP forwards through the hosted session with standard SSH forwarding such as -L.
       --authorized-keys string   Specify a authorize_keys file listing authorized public keys for connection.
       --codeberg-user strings    Authorize specified Codeberg users by allowing their public keys to connect.
   -f, --force-command string     Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
