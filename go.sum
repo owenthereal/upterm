@@ -242,8 +242,8 @@ github.com/jmespath/go-jmespath v0.3.0/go.mod h1:9QtRXoHjLGCJ5IBSaohpXITPlowMeeY
 github.com/josephspurrier/goversioninfo v1.4.1 h1:5LvrkP+n0tg91J9yTkoVnt/QgNnrI1t4uSsWjIonrqY=
 github.com/josephspurrier/goversioninfo v1.4.1/go.mod h1:JWzv5rKQr+MmW+LvM412ToT/IkYDZjaclF2pKDss8IY=
 github.com/jpillora/backoff v0.0.0-20180909062703-3050d21c67d7/go.mod h1:2iMrUgbbvHEiQClaW2NsSzMyGHqN+rDFqY705q49KG0=
-github.com/jpillora/chisel v1.11.4 h1:epPSf2o0WAjVflHEoSegCdQRrEa1Ae9PNjYgGEsLRjM=
-github.com/jpillora/chisel v1.11.4/go.mod h1:gAFVTwDLIMM/dH0w1twfSXz0NQUnBVWrlimi707vk7k=
+github.com/jpillora/chisel v1.11.6 h1:wqlbuatAk8pst2GNY7d2F4AnHxMaLVOA2S/SkC7OlEg=
+github.com/jpillora/chisel v1.11.6/go.mod h1:gAFVTwDLIMM/dH0w1twfSXz0NQUnBVWrlimi707vk7k=
 github.com/jpillora/sizestr v1.0.0 h1:4tr0FLxs1Mtq3TnsLDV+GYUWG7Q26a6s+tV5Zfw2ygw=
 github.com/jpillora/sizestr v1.0.0/go.mod h1:bUhLv4ctkknatr6gR42qPxirmd5+ds1u7mzD+MZ33f0=
 github.com/json-iterator/go v1.1.6/go.mod h1:+SdeFBvtyEkXs7REEP0seUULqWtbJapLOCVDaaPEHmU=
