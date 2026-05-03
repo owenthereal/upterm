@@ -4,7 +4,53 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 )
+
+func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T) {
+	origServer := flagServer
+	origReadOnly := flagReadOnly
+	origAllowLocalTCPForwarding := flagAllowLocalTCPForwarding
+	t.Cleanup(func() {
+		flagServer = origServer
+		flagReadOnly = origReadOnly
+		flagAllowLocalTCPForwarding = origAllowLocalTCPForwarding
+	})
+
+	flagServer = "ssh://uptermd.upterm.dev:22"
+
+	cases := []struct {
+		name                    string
+		readOnly                bool
+		allowLocalTCPForwarding bool
+		wantErrSubstr           string
+	}{
+		{name: "neither", readOnly: false, allowLocalTCPForwarding: false},
+		{name: "read-only only", readOnly: true, allowLocalTCPForwarding: false},
+		{name: "forwarding only", readOnly: false, allowLocalTCPForwarding: true},
+		{
+			name:                    "both rejected",
+			readOnly:                true,
+			allowLocalTCPForwarding: true,
+			wantErrSubstr:           "--read-only and --allow-local-tcp-forwarding cannot be used together",
+		},
+	}
+
+	for _, c := range cases {
+		cc := c
+		t.Run(cc.name, func(t *testing.T) {
+			flagReadOnly = cc.readOnly
+			flagAllowLocalTCPForwarding = cc.allowLocalTCPForwarding
+
+			err := validateShareRequiredFlags(nil, nil)
+			if cc.wantErrSubstr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, cc.wantErrSubstr)
+		})
+	}
+}
 
 func Test_parseURL(t *testing.T) {
 	cases := []struct {

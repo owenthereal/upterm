@@ -452,7 +452,7 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
-	AllowTCPForwarding       bool
+	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
 	inputCh                  chan string
@@ -542,7 +542,7 @@ func (c *Host) Share(url string) error {
 		HostKeyCallback:                ssh.InsecureIgnoreHostKey(),
 		Stdin:                          stdinr,
 		Stdout:                         stdoutw,
-		AllowTCPForwarding:             c.AllowTCPForwarding,
+		AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
 		ReadOnly:                       c.ReadOnly,
 		SFTPDisabled:                   c.SFTPDisabled,
 		ForceForwardingInputForTesting: true,

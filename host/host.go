@@ -205,7 +205,7 @@ type Host struct {
 	Stdin                          *os.File
 	Stdout                         *os.File
 	ReadOnly                       bool
-	AllowTCPForwarding             bool
+	AllowLocalTCPForwarding        bool
 	ForceForwardingInputForTesting bool
 
 	// SFTP configuration
@@ -382,7 +382,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Stdout:                         c.Stdout,
 			Logger:                         logger.With("component", "server"),
 			ReadOnly:                       c.ReadOnly,
-			AllowTCPForwarding:             c.AllowTCPForwarding,
+			AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
 			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,

@@ -307,7 +307,7 @@ func testClientLocalPortForward(t *testing.T, hostShareURL, hostNodeAddr, client
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
-		AllowTCPForwarding:       true,
+		AllowLocalTCPForwarding:  true,
 	}
 	err := h.Share(hostShareURL)
 	require.NoError(err)

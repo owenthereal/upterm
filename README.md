@@ -134,7 +134,7 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 Clients can use standard SSH local forwarding through a hosted session when the host opts in:
 
 ```console
-upterm host --allow-tcp-forwarding
+upterm host --allow-local-tcp-forwarding
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
 

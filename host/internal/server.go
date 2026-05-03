@@ -24,18 +24,18 @@ import (
 )
 
 type Server struct {
-	Command            []string
-	CommandEnv         []string
-	ForceCommand       []string
-	Signers            []ssh.Signer
-	AuthorizedKeys     []ssh.PublicKey
-	EventEmitter       *emitter.Emitter
-	KeepAliveDuration  time.Duration
-	Stdin              *os.File
-	Stdout             *os.File
-	Logger             *slog.Logger
-	ReadOnly           bool
-	AllowTCPForwarding bool
+	Command                 []string
+	CommandEnv              []string
+	ForceCommand            []string
+	Signers                 []ssh.Signer
+	AuthorizedKeys          []ssh.PublicKey
+	EventEmitter            *emitter.Emitter
+	KeepAliveDuration       time.Duration
+	Stdin                   *os.File
+	Stdout                  *os.File
+	Logger                  *slog.Logger
+	ReadOnly                bool
+	AllowLocalTCPForwarding bool
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
@@ -122,13 +122,20 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			Handler:          sh.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
-			LocalPortForwardingCallback: func(_ gssh.Context, destinationHost string, destinationPort uint32) bool {
-				if !s.AllowTCPForwarding {
-					s.Logger.Debug("rejecting local port forwarding", "destination-host", destinationHost, "destination-port", destinationPort)
+			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
+				logArgs := []any{
+					"destination-host", destinationHost,
+					"destination-port", destinationPort,
+					"remote-addr", ctx.RemoteAddr().String(),
+					"user", ctx.User(),
+					"session-id", ctx.SessionID(),
+				}
+				if !s.AllowLocalTCPForwarding {
+					s.Logger.Warn("rejecting local port forwarding", logArgs...)
 					return false
 				}
 
-				s.Logger.Debug("allowing local port forwarding", "destination-host", destinationHost, "destination-port", destinationPort)
+				s.Logger.Info("allowing local port forwarding", logArgs...)
 				return true
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
