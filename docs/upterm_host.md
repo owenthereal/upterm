@@ -37,8 +37,8 @@ upterm host [flags]
   # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
-  # Allow clients to use local TCP forwarding through the hosted session:
-  upterm host --allow-tcp-forwarding
+  # Allow clients to use local TCP forwarding (ssh -L) through the hosted session:
+  upterm host --allow-local-tcp-forwarding
 
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
@@ -47,22 +47,22 @@ upterm host [flags]
 ### Options
 
 ```
-      --accept                   Automatically accept client connections without prompts.
-      --allow-tcp-forwarding     Allow clients to open local TCP forwards through the hosted session with standard SSH forwarding such as -L.
-      --authorized-keys string   Specify a authorize_keys file listing authorized public keys for connection.
-      --codeberg-user strings    Authorize specified Codeberg users by allowing their public keys to connect.
-  -f, --force-command string     Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
-      --github-user strings      Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
-      --gitlab-user strings      Authorize specified GitLab users by allowing their public keys to connect.
-  -h, --help                     help for host
-      --hide-client-ip           Hide client IP addresses from output (auto-enabled in CI environments).
-      --known-hosts string       Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
-      --no-sftp                  Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
-  -i, --private-key strings      Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
-  -r, --read-only                Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
-      --server string            Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
-      --skip-host-key-check      Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
-      --srht-user strings        Authorize specified SourceHut users by allowing their public keys to connect.
+      --accept                       Automatically accept client connections without prompts.
+      --allow-local-tcp-forwarding   Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.
+      --authorized-keys string       Specify a authorize_keys file listing authorized public keys for connection.
+      --codeberg-user strings        Authorize specified Codeberg users by allowing their public keys to connect.
+  -f, --force-command string         Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
+      --github-user strings          Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
+      --gitlab-user strings          Authorize specified GitLab users by allowing their public keys to connect.
+  -h, --help                         help for host
+      --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).
+      --known-hosts string           Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
+      --no-sftp                      Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
+  -i, --private-key strings          Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
+  -r, --read-only                    Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
+      --server string                Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
+      --skip-host-key-check          Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
+      --srht-user strings            Authorize specified SourceHut users by allowing their public keys to connect.
 ```
 
 ### Options inherited from parent commands
@@ -75,4 +75,4 @@ upterm host [flags]
 
 * [upterm](upterm.md)	 - Instant Terminal Sharing
 
-###### Auto generated by spf13/cobra on 12-Jan-2026
+###### Auto generated by spf13/cobra on 3-May-2026
