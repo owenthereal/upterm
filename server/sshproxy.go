@@ -87,7 +87,7 @@ func (a authPiper) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 		return nil
 	}
 
-	fp := utils.FingerprintSHA256(pk)
+	fp := publicKeyFingerprint(pk)
 	if _, ok := a.authorizedKeys[fp]; ok {
 		a.Logger.Info("access granted", "fingerprint", fp)
 		return nil
@@ -95,6 +95,18 @@ func (a authPiper) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 
 	a.Logger.Warn("access denied", "fingerprint", fp)
 	return fmt.Errorf("public key is not authorized")
+}
+
+// publicKeyFingerprint returns the SHA256 fingerprint of the underlying
+// public key, unwrapping any SSH certificate. authorized_keys files contain
+// raw key entries, but hosts authenticating with a CertSigner (commonly
+// supplied by ssh-agent) present a certificate; matching must be done on
+// the underlying key identity, not the certificate blob.
+func publicKeyFingerprint(pk ssh.PublicKey) string {
+	if cert, ok := pk.(*ssh.Certificate); ok {
+		pk = cert.Key
+	}
+	return utils.FingerprintSHA256(pk)
 }
 
 // loadAuthorizedKeys reads the configured authorized_keys files once at
@@ -120,7 +132,7 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 				break
 			}
 			rest = next
-			fps[utils.FingerprintSHA256(pk)] = struct{}{}
+			fps[publicKeyFingerprint(pk)] = struct{}{}
 		}
 	}
 	return fps, nil

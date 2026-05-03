@@ -237,6 +237,12 @@ func Test_authPiper_checkAuthorizedKeys(t *testing.T) {
 	hostPubKey := hostSigner.PublicKey()
 	hostFp := utils.FingerprintSHA256(hostPubKey)
 
+	// Wrap the host's key in a certificate to mimic an agent-provided CertSigner:
+	// the SSH library passes the certificate (not the raw key) to PublicKeyCallback.
+	hostCertSigner, err := testCertSigner("host", hostSigner)
+	require.NoError(t, err)
+	hostCertAsPubKey := hostCertSigner.PublicKey()
+
 	otherSigner, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	require.NoError(t, err)
 	otherFp := utils.FingerprintSHA256(otherSigner.PublicKey())
@@ -284,6 +290,20 @@ func Test_authPiper_checkAuthorizedKeys(t *testing.T) {
 			keys:      map[string]struct{}{},
 			meta:      hostMeta,
 			offered:   hostPubKey,
+			wantGrant: false,
+		},
+		{
+			name:      "cert is matched against its underlying key (in set)",
+			keys:      map[string]struct{}{hostFp: {}},
+			meta:      hostMeta,
+			offered:   hostCertAsPubKey,
+			wantGrant: true,
+		},
+		{
+			name:      "cert is matched against its underlying key (absent)",
+			keys:      map[string]struct{}{otherFp: {}},
+			meta:      hostMeta,
+			offered:   hostCertAsPubKey,
 			wantGrant: false,
 		},
 	}
