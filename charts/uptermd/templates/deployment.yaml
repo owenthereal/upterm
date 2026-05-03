@@ -101,7 +101,7 @@ spec:
         {{- if gt (len .Values.authorized_keys) 0 }}
         - name: authorized-keys
           configMap:
-            name: uptermd
+            name: {{ include "upterm.fullname" . }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -28,7 +28,7 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
 	cmd.PersistentFlags().StringP("ws-addr", "", "", "websocket server address")
 	cmd.PersistentFlags().StringP("node-addr", "", "", "node address")
-	cmd.PersistentFlags().StringP("authorized-keys", "", "", "authorized_keys file to control proxy access")
+	cmd.PersistentFlags().StringSliceP("authorized-keys", "", nil, "authorized_keys file(s) controlling which public keys may register as hosts; may be repeated, mirroring OpenSSH's AuthorizedKeysFile directive")
 	cmd.PersistentFlags().StringSliceP("private-key", "", nil, "server private key")
 	cmd.PersistentFlags().StringSliceP("hostname", "", nil, "server hostname for public-key authentication certificate principals. If empty, public-key authentication is used instead.")
 	cmd.PersistentFlags().BoolP("ssh-proxy-protocol", "", false, "enable PROXY protocol support for the SSH listener (for use behind TCP proxies like Traefik, HAProxy, or AWS ELB)")

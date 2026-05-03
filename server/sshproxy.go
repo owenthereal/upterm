@@ -15,14 +15,14 @@ import (
 )
 
 type sshProxy struct {
-	HostSigners        []ssh.Signer
-	Signers            []ssh.Signer
-	NodeAddr           string
-	AuthorizedKeysFile string
-	ConnDialer         connDialer
-	SessionManager     *SessionManager
-	Logger             *slog.Logger
-	MetricsProvider    provider.Provider
+	HostSigners         []ssh.Signer
+	Signers             []ssh.Signer
+	NodeAddr            string
+	AuthorizedKeysFiles []string
+	ConnDialer          connDialer
+	SessionManager      *SessionManager
+	Logger              *slog.Logger
+	MetricsProvider     provider.Provider
 
 	routing *SSHRouting
 	mux     sync.Mutex
@@ -40,17 +40,22 @@ func (r *sshProxy) Shutdown() error {
 }
 
 func (r *sshProxy) Serve(ln net.Listener) error {
+	authorizedKeys, err := loadAuthorizedKeys(r.AuthorizedKeysFiles)
+	if err != nil {
+		return err
+	}
+
 	r.mux.Lock()
 	r.routing = &SSHRouting{
 		HostSigners: r.HostSigners,
 		AuthPiper: &authPiper{
-			HostSigners:        r.HostSigners,
-			Signers:            r.Signers,
-			SessionManager:     r.SessionManager,
-			ConnDialer:         r.ConnDialer,
-			NodeAddr:           r.NodeAddr,
-			AuthorizedKeysFile: r.AuthorizedKeysFile,
-			Logger:             r.Logger.With("component", "auth"),
+			HostSigners:    r.HostSigners,
+			Signers:        r.Signers,
+			SessionManager: r.SessionManager,
+			ConnDialer:     r.ConnDialer,
+			NodeAddr:       r.NodeAddr,
+			authorizedKeys: authorizedKeys,
+			Logger:         r.Logger.With("component", "auth"),
 		},
 		Decoder:         r.SessionManager.GetEncodeDecoder(),
 		MetricsProvider: r.MetricsProvider,
@@ -62,47 +67,63 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 }
 
 type authPiper struct {
-	NodeAddr           string
-	AuthorizedKeysFile string
-	SessionManager     *SessionManager
-	ConnDialer         connDialer
-	Signers            []ssh.Signer
-	HostSigners        []ssh.Signer
+	NodeAddr       string
+	authorizedKeys map[string]struct{} // SHA256 fingerprints; nil disables the gate
+	SessionManager *SessionManager
+	ConnDialer     connDialer
+	Signers        []ssh.Signer
+	HostSigners    []ssh.Signer
 
 	Logger *slog.Logger
 }
 
-func (a authPiper) CheckAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) (ssh.PublicKey, error) {
-	if a.AuthorizedKeysFile == "" {
-		return pk, nil
+func (a authPiper) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) error {
+	if a.authorizedKeys == nil {
+		return nil
 	}
 
 	// Only HOST connections (uptermd hosts registering with the proxy) are gated by authorized_keys.
 	if string(conn.ClientVersion()) != upterm.HostSSHClientVersion {
-		return pk, nil
+		return nil
 	}
 
-	rest, err := os.ReadFile(a.AuthorizedKeysFile)
-	if err != nil {
-		a.Logger.Error("unable to load custom authorized_keys file", "path", a.AuthorizedKeysFile)
-		return nil, err
+	fp := utils.FingerprintSHA256(pk)
+	if _, ok := a.authorizedKeys[fp]; ok {
+		a.Logger.Info("access granted", "fingerprint", fp)
+		return nil
 	}
 
-	var authedPubkey ssh.PublicKey
-	for len(rest) > 0 {
-		authedPubkey, _, _, rest, err = ssh.ParseAuthorizedKey(rest)
+	a.Logger.Warn("access denied", "fingerprint", fp)
+	return fmt.Errorf("public key is not authorized")
+}
+
+// loadAuthorizedKeys reads the configured authorized_keys files once at
+// startup and returns the set of SHA256 fingerprints permitted to register
+// as hosts. Returns nil when paths is empty, signaling that the gate is
+// disabled. Edits to the files require restarting uptermd to take effect.
+func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	fps := make(map[string]struct{})
+	for _, path := range paths {
+		rest, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read authorized_keys %s: %w", path, err)
 		}
 
-		if utils.KeysEqual(authedPubkey, pk) {
-			a.Logger.Info("access granted", "fingerprint", utils.FingerprintSHA256(pk))
-			return pk, nil
+		for len(rest) > 0 {
+			pk, _, _, next, perr := ssh.ParseAuthorizedKey(rest)
+			if perr != nil {
+				// No more parseable keys (trailing comments, blanks, or junk).
+				break
+			}
+			rest = next
+			fps[utils.FingerprintSHA256(pk)] = struct{}{}
 		}
 	}
-
-	a.Logger.Info("access denied", "fingerprint", utils.FingerprintSHA256(pk))
-	return nil, fmt.Errorf("public key is not authorized")
+	return fps, nil
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
@@ -112,9 +133,8 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 		},
 	}
 
-	// Check for authorized_hosts to allow proxying.
-	_, err := a.CheckAuthorizedKeys(conn, pk)
-	if err != nil {
+	// Gate registration based on authorized_keys before any cert/upstream work.
+	if err := a.checkAuthorizedKeys(conn, pk); err != nil {
 		return nil, err
 	}
 

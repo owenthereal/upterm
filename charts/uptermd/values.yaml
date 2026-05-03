@@ -67,6 +67,13 @@ affinity: {}
 
 host_keys: {}
 
+# SSH public keys (in `authorized_keys` line format, one entry per list item)
+# permitted to register as hosts on this uptermd. When empty, any client may
+# register. Edits require restarting uptermd to take effect.
+# Example:
+#   authorized_keys:
+#     - "ssh-ed25519 AAAA... alice@laptop"
+#     - "ssh-ed25519 BBBB... bob@desktop"
 authorized_keys: []
 
 hostname: my-upterm-host
