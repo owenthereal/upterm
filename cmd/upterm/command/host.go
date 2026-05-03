@@ -54,19 +54,20 @@ func (e SilentError) Unwrap() error {
 }
 
 var (
-	flagServer             string
-	flagForceCommand       string
-	flagPrivateKeys        []string
-	flagKnownHostsFilename string
-	flagAuthorizedKeys     string
-	flagCodebergUsers      []string
-	flagGitHubUsers        []string
-	flagGitLabUsers        []string
-	flagSourceHutUsers     []string
-	flagReadOnly         bool
-	flagAccept           bool
-	flagSkipHostKeyCheck bool
-	flagNoSFTP           bool
+	flagServer                  string
+	flagForceCommand            string
+	flagPrivateKeys             []string
+	flagKnownHostsFilename      string
+	flagAuthorizedKeys          string
+	flagCodebergUsers           []string
+	flagGitHubUsers             []string
+	flagGitLabUsers             []string
+	flagSourceHutUsers          []string
+	flagReadOnly                bool
+	flagAccept                  bool
+	flagSkipHostKeyCheck        bool
+	flagNoSFTP                  bool
+	flagAllowLocalTCPForwarding bool
 )
 
 func hostCmd() *cobra.Command {
@@ -98,6 +99,9 @@ containing client public keys.`,
   # Host a 'tmux new -t pair-programming' session, forcing clients to join with 'tmux attach -t pair-programming':
   upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 
+  # Allow clients to use local TCP forwarding (ssh -L) through the hosted session:
+  upterm host --allow-local-tcp-forwarding
+
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND`,
 		PreRunE: validateShareRequiredFlags,
@@ -124,12 +128,17 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
+	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 
 	return cmd
 }
 
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	var result error
+
+	if flagReadOnly && flagAllowLocalTCPForwarding {
+		result = multierror.Append(result, fmt.Errorf("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host"))
+	}
 
 	if flagServer == "" {
 		result = multierror.Append(result, fmt.Errorf("missing flag --server"))
@@ -269,22 +278,23 @@ func shareRunE(c *cobra.Command, args []string) error {
 	}
 
 	h := &host.Host{
-		Host:                   flagServer,
-		Command:                args,
-		ForceCommand:           forceCommand,
-		Signers:                signers,
-		HostKeyCallback:        hkcb,
-		AuthorizedKeys:         authorizedKeys,
-		KeepAliveDuration:      50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-		SessionCreatedCallback: displaySessionCallback,
-		ClientJoinedCallback:   clientJoinedCallback,
-		ClientLeftCallback:     clientLeftCallback,
-		Stdin:                  os.Stdin,
-		Stdout:                 os.Stdout,
-		Logger:                 logger.Logger,
-		ReadOnly:              flagReadOnly,
-		SFTPDisabled:          flagNoSFTP,
-		SFTPPermissionChecker: sftpPermissionChecker,
+		Host:                    flagServer,
+		Command:                 args,
+		ForceCommand:            forceCommand,
+		Signers:                 signers,
+		HostKeyCallback:         hkcb,
+		AuthorizedKeys:          authorizedKeys,
+		KeepAliveDuration:       50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
+		SessionCreatedCallback:  displaySessionCallback,
+		ClientJoinedCallback:    clientJoinedCallback,
+		ClientLeftCallback:      clientLeftCallback,
+		Stdin:                   os.Stdin,
+		Stdout:                  os.Stdout,
+		Logger:                  logger.Logger,
+		ReadOnly:                flagReadOnly,
+		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
+		SFTPDisabled:            flagNoSFTP,
+		SFTPPermissionChecker:   sftpPermissionChecker,
 	}
 
 	err = h.Run(c.Context())
@@ -383,4 +393,3 @@ func defaultPrivateKeys(homeDir string) []string {
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }
-

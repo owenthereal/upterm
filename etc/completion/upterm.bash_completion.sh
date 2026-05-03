@@ -523,6 +523,7 @@ _upterm_host()
     flags_completion=()
 
     flags+=("--accept")
+    flags+=("--allow-local-tcp-forwarding")
     flags+=("--authorized-keys=")
     two_word_flags+=("--authorized-keys")
     flags+=("--codeberg-user=")

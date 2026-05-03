@@ -117,6 +117,8 @@ var ConnectionTestCases = []FtestCase{
 	testClientAttachHostWithSameCommand,
 	testClientAttachHostWithDifferentCommand,
 	testClientAttachReadOnly,
+	testClientLocalPortForwardDisabled,
+	testClientLocalPortForward,
 }
 
 // CallbackTestCases contains all callback/event-related test functions
@@ -450,9 +452,10 @@ type Host struct {
 	ClientJoinedCallback     func(*api.Client)
 	ClientLeftCallback       func(*api.Client)
 	PermittedClientPublicKey string
-	ReadOnly     bool
-	SFTPDisabled bool // Disable SFTP subsystem
-	inputCh      chan string
+	AllowLocalTCPForwarding  bool
+	ReadOnly                 bool
+	SFTPDisabled             bool // Disable SFTP subsystem
+	inputCh                  chan string
 	outputCh                 chan string
 	ctx                      context.Context
 	cancel                   func()
@@ -539,6 +542,7 @@ func (c *Host) Share(url string) error {
 		HostKeyCallback:                ssh.InsecureIgnoreHostKey(),
 		Stdin:                          stdinr,
 		Stdout:                         stdoutw,
+		AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
 		ReadOnly:                       c.ReadOnly,
 		SFTPDisabled:                   c.SFTPDisabled,
 		ForceForwardingInputForTesting: true,

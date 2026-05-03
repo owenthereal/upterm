@@ -240,6 +240,11 @@ func exampleConfig() string {
 # When enabled, clients can view but not interact with the session.
 # read-only: false
 
+# Allow clients to use SSH local TCP forwarding (ssh -L) (default: false)
+# When enabled, clients can reach TCP destinations visible to the host.
+# Cannot be combined with read-only.
+# allow-local-tcp-forwarding: false
+
 # Auto-accept clients without confirmation (default: false)
 # WARNING: Only use this in trusted environments.
 # accept: false

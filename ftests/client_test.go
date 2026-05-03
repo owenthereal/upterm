@@ -2,6 +2,9 @@ package ftests
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -292,6 +295,144 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 		return
 	}
 
+}
+
+func testClientLocalPortForward(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:                  getTestShell(),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+		AllowLocalTCPForwarding:  true,
+	}
+	err := h.Share(hostShareURL)
+	require.NoError(err)
+	defer h.Close()
+
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(err)
+	defer func() {
+		_ = targetLn.Close()
+	}()
+
+	targetErrCh := make(chan error, 1)
+	go func() {
+		conn, err := targetLn.Accept()
+		if err != nil {
+			targetErrCh <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			targetErrCh <- err
+			return
+		}
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			targetErrCh <- err
+			return
+		}
+
+		if string(buf) != "ping" {
+			targetErrCh <- fmt.Errorf("unexpected forwarded payload: %q", string(buf))
+			return
+		}
+
+		_, err = io.WriteString(conn, "pong")
+		targetErrCh <- err
+	}()
+
+	c := &Client{
+		PrivateKeys: []string{ClientPrivateKey},
+	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
+	defer c.Close()
+
+	forwardedConn, err := c.sshClient.Dial("tcp", targetLn.Addr().String())
+	require.NoError(err)
+	defer func() {
+		_ = forwardedConn.Close()
+	}()
+
+	forwardErrCh := make(chan error, 1)
+	go func() {
+		if _, err := io.WriteString(forwardedConn, "ping"); err != nil {
+			forwardErrCh <- err
+			return
+		}
+
+		reply := make([]byte, 4)
+		if _, err := io.ReadFull(forwardedConn, reply); err != nil {
+			forwardErrCh <- err
+			return
+		}
+
+		if string(reply) != "pong" {
+			forwardErrCh <- fmt.Errorf("unexpected forwarded reply: %q", string(reply))
+			return
+		}
+
+		forwardErrCh <- nil
+	}()
+
+	select {
+	case err := <-forwardErrCh:
+		require.NoError(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for forwarded TCP round trip")
+	}
+
+	select {
+	case err := <-targetErrCh:
+		require.NoError(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for forwarded TCP target")
+	}
+}
+
+func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:                  getTestShell(),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}
+	err := h.Share(hostShareURL)
+	require.NoError(err)
+	defer h.Close()
+
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	c := &Client{
+		PrivateKeys: []string{ClientPrivateKey},
+	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
+	defer c.Close()
+
+	forwardedConn, err := c.sshClient.Dial("tcp", "127.0.0.1:1")
+	if forwardedConn != nil {
+		_ = forwardedConn.Close()
+	}
+
+	require.Error(err)
+	assert.ErrorContains(err, "port forwarding is disabled")
 }
 
 func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, wantNodeURL string) *api.GetSessionResponse {
