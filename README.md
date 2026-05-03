@@ -382,6 +382,32 @@ networks:
 
 For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
 
+### Restricting Host Registration
+
+By default, any SSH client that can reach `uptermd` can register a session as a host.
+For private or invite-only deployments, the `--authorized-keys` flag (or `UPTERMD_AUTHORIZED_KEYS` environment variable) restricts host registration to a specific set of public keys.
+This mirrors OpenSSH's [`AuthorizedKeysFile`](https://man.openbsd.org/sshd_config#AuthorizedKeysFile) directive.
+
+```console
+uptermd --authorized-keys /etc/uptermd/authorized_keys
+```
+
+The flag accepts standard `authorized_keys`-formatted files (one key per line, comments allowed) and may be repeated to compose keys from multiple sources:
+
+```console
+uptermd --authorized-keys /etc/uptermd/team.keys --authorized-keys /etc/uptermd/ops.keys
+```
+
+Files are read once at startup; restart `uptermd` to pick up edits. Joiners (clients connecting to a session) are unaffected — they continue to be authorized by the host's own `authorized_keys`.
+
+For the Helm chart, populate the `authorized_keys` value:
+
+```yaml
+authorized_keys:
+  - "ssh-ed25519 AAAA... alice@laptop"
+  - "ssh-ed25519 BBBB... bob@desktop"
+```
+
 ## :chart_with_upwards_trend: Monitoring
 
 `uptermd` exposes Prometheus metrics at the `/metrics` endpoint when configured with `--metric-addr` (or `UPTERMD_METRIC_ADDR` environment variable).
