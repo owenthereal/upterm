@@ -82,8 +82,14 @@ func (g *UserCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 		return nil, fmt.Errorf("error marshaling auth request: %w", err)
 	}
 
-	at := time.Now()
-	bt := at.Add(1 * time.Minute) // cert valid for 1 min
+	// Backdate ValidAfter to tolerate clock skew between the uptermd server
+	// and the host's embedded sshd (which validates this cert using its own
+	// time.Now()). Without this, a skew of even 1 second in the "server
+	// ahead of host" direction causes CheckCert to return "cert is not yet
+	// valid" on every auth attempt. See issue #151.
+	now := time.Now()
+	at := now.Add(-1 * time.Minute)
+	bt := now.Add(1 * time.Minute)
 	cert := &ssh.Certificate{
 		Key:             signer.PublicKey(),
 		CertType:        ssh.UserCert,
