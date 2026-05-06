@@ -14,6 +14,14 @@ var (
 	errCertNotSignedByHost = fmt.Errorf("ssh cert not signed by host")
 )
 
+// certClockSkewTolerance widens the user cert validity window symmetrically
+// around time.Now() so that the host's embedded sshd (which validates with
+// its own time.Now()) accepts the cert despite NTP drift between machines.
+// One minute matches step-ca's default and sits comfortably above typical
+// drift on dev environments where this fails (Docker Desktop / Rancher
+// Desktop / colima after suspend/resume). See issue #151.
+const certClockSkewTolerance = 1 * time.Minute
+
 type UserCertChecker struct {
 	UserKeyFallback func(user string, key ssh.PublicKey) (ssh.PublicKey, error)
 }
@@ -82,14 +90,9 @@ func (g *UserCertSigner) SignCert(signer ssh.Signer) (ssh.Signer, error) {
 		return nil, fmt.Errorf("error marshaling auth request: %w", err)
 	}
 
-	// Backdate ValidAfter to tolerate clock skew between the uptermd server
-	// and the host's embedded sshd (which validates this cert using its own
-	// time.Now()). Without this, a skew of even 1 second in the "server
-	// ahead of host" direction causes CheckCert to return "cert is not yet
-	// valid" on every auth attempt. See issue #151.
 	now := time.Now()
-	at := now.Add(-1 * time.Minute)
-	bt := now.Add(1 * time.Minute)
+	at := now.Add(-certClockSkewTolerance)
+	bt := now.Add(certClockSkewTolerance)
 	cert := &ssh.Certificate{
 		Key:             signer.PublicKey(),
 		CertType:        ssh.UserCert,
