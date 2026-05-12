@@ -53,7 +53,7 @@ require (
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/google/go-github/v48 v48.2.0
-	github.com/hashicorp/go-version v1.8.0
+	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
 	github.com/ncruces/zenity v0.10.14
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
