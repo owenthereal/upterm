@@ -65,7 +65,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tj/go-update v2.2.4+incompatible
 	golang.org/x/sys v0.46.0
-	golang.org/x/term v0.43.0
+	golang.org/x/term v0.44.0
 )
 
 require (
