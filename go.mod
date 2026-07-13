@@ -27,7 +27,7 @@ require (
 	github.com/hashicorp/consul/api v1.34.3
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c // indirect
-	github.com/jpillora/chisel v1.11.7
+	github.com/jpillora/chisel v1.11.8
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oklog/run v1.2.0
@@ -38,7 +38,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )
