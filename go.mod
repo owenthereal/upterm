@@ -24,12 +24,12 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/gosuri/uilive v0.0.4 // indirect
 	github.com/gosuri/uiprogress v0.0.1 // indirect
-	github.com/hashicorp/consul/api v1.34.3
+	github.com/hashicorp/consul/api v1.34.4
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c // indirect
 	github.com/jpillora/chisel v1.11.8
 	github.com/klauspost/pgzip v1.2.6 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/oklog/run v1.2.0
 	github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba
 	github.com/pborman/ansi v1.2.0
@@ -92,20 +92,21 @@ require (
 	github.com/dchest/jsmin v0.0.0-20220218165748-59f39799265f // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
-	github.com/fatih/color v1.16.0 // indirect
+	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
-	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/go-hclog v1.5.0 // indirect
+	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
+	github.com/hashicorp/go-metrics v0.6.0 // indirect
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
-	github.com/hashicorp/golang-lru v0.5.4 // indirect
-	github.com/hashicorp/serf v0.10.1 // indirect
+	github.com/hashicorp/golang-lru v1.0.2 // indirect
+	github.com/hashicorp/serf v0.10.4 // indirect
 	github.com/henvic/httpretty v0.1.4 // indirect
 	github.com/hooklift/assert v0.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -115,7 +116,7 @@ require (
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
