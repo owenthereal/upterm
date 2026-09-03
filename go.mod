@@ -38,7 +38,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
-	golang.org/x/crypto v0.52.0
+	golang.org/x/crypto v0.55.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -64,8 +64,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tj/go-update v2.2.4+incompatible
-	golang.org/x/sys v0.46.0
-	golang.org/x/term v0.44.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -149,13 +149,13 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
 	golang.org/x/image v0.41.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.50.0-sshpiper-20260423
+replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.55.0-sshpiper-20260828
 
 replace github.com/pkg/sftp => github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e
