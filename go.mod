@@ -27,7 +27,7 @@ require (
 	github.com/hashicorp/consul/api v1.34.4
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c // indirect
-	github.com/jpillora/chisel v1.11.8
+	github.com/jpillora/chisel v1.12.1
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/oklog/run v1.2.0
@@ -93,7 +93,7 @@ require (
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
 	github.com/fatih/color v1.19.0 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
+	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
