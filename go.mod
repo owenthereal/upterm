@@ -55,7 +55,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
-	github.com/ncruces/zenity v0.10.14
+	github.com/ncruces/zenity v0.10.15
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/pkg/sftp v1.13.10
@@ -88,7 +88,7 @@ require (
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/dchest/jsmin v0.0.0-20220218165748-59f39799265f // indirect
+	github.com/dchest/jsmin v1.0.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/esiqveland/notify v0.13.3 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -110,7 +110,7 @@ require (
 	github.com/hooklift/assert v0.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackmordaunt/icns/v3 v3.0.1 // indirect
-	github.com/josephspurrier/goversioninfo v1.4.1 // indirect
+	github.com/josephspurrier/goversioninfo v1.7.0 // indirect
 	github.com/jpillora/sizestr v1.0.0 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/kr/fs v0.1.0 // indirect
@@ -129,7 +129,7 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
-	github.com/randall77/makefat v0.0.0-20210315173500-7ddd0e42c844 // indirect
+	github.com/randall77/makefat v0.0.0-20260406194835-1b91746796b7 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
@@ -146,7 +146,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
-	golang.org/x/image v0.41.0 // indirect
+	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
