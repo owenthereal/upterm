@@ -311,6 +311,17 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	if h.readonly {
 		// write to client to notify them that they have connected to a read-only session
 		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+
+		// Still read the client's input, discarding it. Reading is what
+		// tells us the client has gone (EOF), and it keeps the channel
+		// window from filling up if the client types.
+		ctx, cancel := context.WithCancel(h.ctx)
+		g.Add(func() error {
+			_, err := io.Copy(io.Discard, uio.NewContextReader(ctx, sess))
+			return err
+		}, func(err error) {
+			cancel()
+		})
 	} else {
 		// input
 		ctx, cancel := context.WithCancel(h.ctx)

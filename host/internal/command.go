@@ -6,12 +6,62 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync/atomic"
+	"time"
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/term"
 )
+
+const (
+	// outputIdleTimeout is how long output may stay quiet after the process
+	// exits before the pty is considered drained.
+	outputIdleTimeout = 100 * time.Millisecond
+	// outputDrainTimeout bounds the total time spent draining after exit.
+	outputDrainTimeout = time.Second
+)
+
+// activityWriter records when it last wrote, so a drain can stop once output
+// has gone idle.
+type activityWriter struct {
+	io.Writer
+	last atomic.Int64 // unix nanoseconds of the last write
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.last.Store(time.Now().UnixNano())
+	return n, err
+}
+
+// waitIdle returns when done is closed, when no write has happened for idle,
+// or after max. The idle window is measured from now, not from the last
+// write, so output that has not yet been read still gets its chance.
+func (w *activityWriter) waitIdle(done <-chan struct{}, idle, max time.Duration) {
+	start := time.Now()
+	deadline := time.NewTimer(max)
+	defer deadline.Stop()
+	tick := time.NewTicker(idle / 4)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-deadline.C:
+			return
+		case <-tick.C:
+			last := time.Unix(0, w.last.Load())
+			if last.Before(start) {
+				last = start
+			}
+			if time.Since(last) >= idle {
+				return
+			}
+		}
+	}
+}
 
 func newCommand(
 	name string,
@@ -116,11 +166,21 @@ func (c *command) Run() error {
 			return err
 		}
 		ctx, cancel := context.WithCancel(c.ctx)
+		output := &activityWriter{Writer: c.writers}
+		done := make(chan struct{})
 		g.Add(func() error {
-			_, err := io.Copy(c.writers, uio.NewContextReader(ctx, c.ptmx))
+			defer close(done)
+			_, err := io.Copy(output, uio.NewContextReader(ctx, c.ptmx))
 			return ptyError(err)
 		}, func(err error) {
-			c.writers.Remove(os.Stdout)
+			// The process may have exited with output still buffered in the
+			// pty. Cancelling the copy here would drop it, so let the copy
+			// run until the read ends or output goes idle. On Unix the read
+			// ends by itself once the slave side closes; ConPTY never signals
+			// EOF until closed, and a background child can keep a Unix pty
+			// open, so the wait is bounded.
+			output.waitIdle(done, outputIdleTimeout, outputDrainTimeout)
+			c.writers.Remove(c.stdout)
 			cancel()
 		})
 	}

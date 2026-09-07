@@ -38,7 +38,6 @@ jobs:
         run: make test
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
-          MUTE_FLAKY_TESTS: 1
 
   test-ubuntu:
     name: Test (Ubuntu + Consul)
@@ -64,7 +63,6 @@ jobs:
         run: make test
         env:
           BASH_SILENCE_DEPRECATION_WARNING: 1
-          MUTE_FLAKY_TESTS: 1
 
   test-windows:
     name: Test (Windows)
@@ -78,8 +76,6 @@ jobs:
           check-latest: true
       - name: Test
         run: make test
-        env:
-          MUTE_FLAKY_TESTS: 1
   vet:
     name: Vet
     runs-on: ubuntu-latest

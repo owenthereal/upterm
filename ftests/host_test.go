@@ -2,7 +2,6 @@ package ftests
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -14,6 +13,17 @@ import (
 )
 
 func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	testClientCallbacks(t, hostShareURL, hostNodeAddr, clientJoinURL, false)
+}
+
+// testHostClientCallbackReadOnly covers the read-only session path, which
+// has no input copy and so relies on the window-change channel closing to
+// learn that the client has left.
+func testHostClientCallbackReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	testClientCallbacks(t, hostShareURL, hostNodeAddr, clientJoinURL, true)
+}
+
+func testClientCallbacks(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string, readOnly bool) {
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -28,6 +38,7 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		ReadOnly:                 readOnly,
 		ClientJoinedCallback: func(c *api.Client) {
 			jch <- c
 		},
@@ -82,11 +93,7 @@ func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		assert.Equal(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint, "public key fingerprint should match on leave")
 		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match on leave")
 	case <-time.After(2 * time.Second):
-		if os.Getenv("MUTE_FLAKY_TESTS") != "" {
-			testLogger.Error("FLAKY_TEST: client left callback is not called")
-		} else {
-			t.Fatal("client left callback is not called")
-		}
+		t.Fatal("client left callback is not called")
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pborman/ansi"
 	"github.com/pkg/sftp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/ssh"
 )
@@ -56,7 +57,7 @@ func getTestShell() []string {
 		}
 		return []string{shell, "-NoProfile", "-NoLogo", "-NonInteractive"}
 	}
-	return []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc"}
+	return []string{"bash", "-c", "PS1='' BASH_SILENCE_DEPRECATION_WARNING=1 bash --norc --noediting"}
 }
 
 const (
@@ -124,6 +125,7 @@ var ConnectionTestCases = []FtestCase{
 // CallbackTestCases contains all callback/event-related test functions
 var CallbackTestCases = []FtestCase{
 	testHostClientCallback,
+	testHostClientCallbackReadOnly,
 	testHostSessionCreatedCallback,
 }
 
@@ -548,9 +550,15 @@ func (c *Host) Share(url string) error {
 		ForceForwardingInputForTesting: true,
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go func() {
-		if err := c.Run(c.ctx); err != nil {
+		err := c.Run(c.ctx)
+		// Nothing writes to stdout once Run has returned. Close the pipe so
+		// the output goroutine sees EOF instead of waiting for stray shell
+		// output that may never come.
+		_ = stdoutw.Close()
+		_ = stdinr.Close()
+		if err != nil {
 			testLogger.Error("error running host", "error", err)
 			errCh <- err
 		}
@@ -842,6 +850,25 @@ func stripShellPrompt(s string) string {
 	// Don't use ^ anchor so we match all occurrences, not just start of line
 	promptRe := regexp.MustCompile(`PS [^>]+>\s*`)
 	return promptRe.ReplaceAllString(s, "")
+}
+
+// expectLine reads lines until one equals want and fails the test if it does
+// not appear within a bounded number of lines. Terminals echo typed input and
+// may redraw or repeat it (readline on resize, ConPTY re-rendering), so
+// asserting an exact sequence of lines is inherently racy; skipping to the
+// expected line is not.
+func expectLine(t *testing.T, s *bufio.Scanner, want string, msgAndArgs ...interface{}) {
+	t.Helper()
+	const maxLines = 20
+	var seen []string
+	for i := 0; i < maxLines; i++ {
+		got := scan(s)
+		if got == want {
+			return
+		}
+		seen = append(seen, got)
+	}
+	assert.Fail(t, fmt.Sprintf("line %q not seen within %d lines; got %q", want, maxLines, seen), msgAndArgs...)
 }
 
 func scan(s *bufio.Scanner) string {

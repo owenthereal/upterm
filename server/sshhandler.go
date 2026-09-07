@@ -122,6 +122,14 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 		}
 	}()
 
+	// Whichever side finishes first, close both. Without this, a guest
+	// disconnecting leaves the channel to the host open until the host next
+	// writes output, so the host cannot tell that the guest has left.
+	closeBoth := func(error) {
+		_ = localConn.Close()
+		_ = ch.Close()
+	}
+
 	var g run.Group
 
 	// Context cancellation handler
@@ -129,9 +137,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 		g.Add(func() error {
 			<-ctx.Done()
 			return ctx.Err()
-		}, func(err error) {
-			// Context cancelled, close all connections
-		})
+		}, closeBoth)
 	}
 
 	// SSH request handler
@@ -139,9 +145,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 		g.Add(func() error {
 			gossh.DiscardRequests(reqs)
 			return nil
-		}, func(err error) {
-			// Requests handler stopped
-		})
+		}, closeBoth)
 	}
 
 	// Copy from local to SSH channel
@@ -149,9 +153,7 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 		g.Add(func() error {
 			_, err := io.Copy(ch, localConn)
 			return err
-		}, func(err error) {
-			// Copy stopped
-		})
+		}, closeBoth)
 	}
 
 	// Copy from SSH channel to local
@@ -159,12 +161,10 @@ func (h *streamlocalForwardHandler) handleConnection(ctx ssh.Context, conn *goss
 		g.Add(func() error {
 			_, err := io.Copy(localConn, ch)
 			return err
-		}, func(err error) {
-			// Copy stopped
-		})
+		}, closeBoth)
 	}
 
-	if err := g.Run(); err != nil && err != context.Canceled {
+	if err := g.Run(); err != nil && err != context.Canceled && !isExpectedShutdownError(err) {
 		logger.Error("error handling connection", "error", err)
 	}
 }

@@ -98,8 +98,8 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 	hostScanner := scanner(hostOutputCh)
 
 	hostInputCh <- `echo "hello"`
-	require.Equal(`echo "hello"`, scan(hostScanner))
-	require.Equal("hello", scan(hostScanner))
+	expectLine(t, hostScanner, `echo "hello"`)
+	expectLine(t, hostScanner, "hello")
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -114,7 +114,6 @@ func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clie
 
 func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
-	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
 	adminSocketFile := setupAdminSocket(t)
@@ -147,27 +146,26 @@ func testClientAttachHostWithSameCommand(t *testing.T, hostShareURL, hostNodeAdd
 
 	// host input
 	hostInputCh <- `echo "hello"`
-	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command")
-	assert.Equal("hello", scan(hostScanner), "host should show command output")
+	expectLine(t, hostScanner, `echo "hello"`, "host should echo command")
+	expectLine(t, hostScanner, "hello", "host should show command output")
 
 	// client output
-	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host command")
-	assert.Equal("hello", scan(remoteScanner), "client should see host output")
+	expectLine(t, remoteScanner, `echo "hello"`, "client should see host command")
+	expectLine(t, remoteScanner, "hello", "client should see host output")
 
 	// client input
 	remoteInputCh <- `echo "hello again"`
-	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its own command")
-	assert.Equal("hello again", scan(remoteScanner), "client should see its own output")
+	expectLine(t, remoteScanner, `echo "hello again"`, "client should echo its own command")
+	expectLine(t, remoteScanner, "hello again", "client should see its own output")
 
 	// host output
 	// host should link to remote with the same input/output
-	assert.Equal(`echo "hello again"`, scan(hostScanner), "host should see client command")
-	assert.Equal("hello again", scan(hostScanner), "host should see client output")
+	expectLine(t, hostScanner, `echo "hello again"`, "host should see client command")
+	expectLine(t, hostScanner, "hello again", "host should see client output")
 }
 
 func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
-	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
 	adminSocketFile := setupAdminSocket(t)
@@ -192,9 +190,9 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo initial command")
+	expectLine(t, hostScanner, `echo "hello"`, "host should echo initial command")
 
-	assert.Equal("hello", scan(hostScanner), "host should show initial output")
+	expectLine(t, hostScanner, "hello", "host should show initial output")
 
 	c := &Client{
 		PrivateKeys: []string{ClientPrivateKey},
@@ -210,19 +208,18 @@ func testClientAttachHostWithDifferentCommand(t *testing.T, hostShareURL string,
 
 	remoteInputCh <- `echo "hello again"`
 
-	assert.Equal(`echo "hello again"`, scan(remoteScanner), "client should echo its command")
-	assert.Equal("hello again", scan(remoteScanner), "client should see output")
+	expectLine(t, remoteScanner, `echo "hello again"`, "client should echo its command")
+	expectLine(t, remoteScanner, "hello again", "client should see output")
 
 	// host shouldn't be linked to remote
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo second command independently")
-	assert.Equal("hello", scan(hostScanner), "host should show second output independently")
+	expectLine(t, hostScanner, `echo "hello"`, "host should echo second command independently")
+	expectLine(t, hostScanner, "hello", "host should show second output independently")
 }
 
 func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	require := require.New(t)
-	assert := assert.New(t)
 
 	// Setup - use require for critical setup steps
 	adminSocketFile := setupAdminSocket(t)
@@ -259,13 +256,13 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	// \n
 	// === Attached to read-only session ===
 	// \n
-	assert.Equal("=== Attached to read-only session ===", scan(remoteScanner), "client should see read-only welcome message")
+	expectLine(t, remoteScanner, "=== Attached to read-only session ===", "client should see read-only welcome message")
 
 	// host input should still work
 	hostInputCh <- `echo "hello"`
 
-	assert.Equal(`echo "hello"`, scan(hostScanner), "host should echo command in read-only mode")
-	assert.Equal("hello", scan(hostScanner), "host should show output in read-only mode")
+	expectLine(t, hostScanner, `echo "hello"`, "host should echo command in read-only mode")
+	expectLine(t, hostScanner, "hello", "host should show output in read-only mode")
 
 	// Drain any buffered output (e.g., PowerShell prompts) before testing client input blocking
 	// This prevents flaky failures where trailing shell output is mistaken for client input
@@ -284,7 +281,7 @@ func testClientAttachReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	remoteInputCh <- `echo "hello again"`
 
 	// client should read what was sent by hostInputCh and not what was sent on remoteInputCh
-	assert.Equal(`echo "hello"`, scan(remoteScanner), "client should see host output, not its own input")
+	expectLine(t, remoteScanner, `echo "hello"`, "client should see host output, not its own input")
 
 	select {
 	// host shouldn't receive anything from client and because client input is disabled

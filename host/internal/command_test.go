@@ -2,8 +2,10 @@ package internal
 
 import (
 	"context"
+	"io"
 	"os"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,10 +85,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 				break
 			}
 		}
-		// Only send if we captured output (don't send empty string)
-		if len(output) > 0 {
-			outputCh <- string(output)
-		}
+		outputCh <- string(output)
 	}()
 
 	// Run the command in a goroutine
@@ -120,9 +119,13 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 
 		// Verify the output shows our input was forwarded through stdin
 		_ = stdoutw.Close()
-		output := <-outputCh
-		// head -n 1 should output exactly the line we sent
-		assert.Contains(output, testInput, "should see our piped input in output, proving stdin was forwarded")
+		select {
+		case output := <-outputCh:
+			// head -n 1 should output exactly the line we sent
+			assert.Contains(output, testInput, "should see our piped input in output, proving stdin was forwarded")
+		case <-time.After(2 * time.Second):
+			assert.Fail("stdout never reached EOF")
+		}
 	case <-time.After(1500 * time.Millisecond):
 		cancel()
 		assert.Fail("command did not complete after receiving input")
@@ -196,5 +199,83 @@ func TestCommand_ContextCancellation(t *testing.T) {
 		// Command terminated successfully - reaching here proves it worked
 	case <-time.After(2 * time.Second):
 		assert.Fail("command did not terminate after context cancellation")
+	}
+}
+
+// exitedPTY models a process that has already exited with output still
+// buffered in the pty: Wait returns at once, while Read keeps returning the
+// pending chunks before EOF. On Linux and Windows the real pty behaves this
+// way; on macOS the slave write blocks until the master reads, so the race
+// cannot be reproduced with a real process.
+type exitedPTY struct {
+	mu        sync.Mutex
+	pending   [][]byte
+	closed    bool
+	readDelay time.Duration
+}
+
+func (p *exitedPTY) Read(b []byte) (int, error) {
+	time.Sleep(p.readDelay)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || len(p.pending) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(b, p.pending[0])
+	p.pending = p.pending[1:]
+	return n, nil
+}
+
+func (p *exitedPTY) Write(b []byte) (int, error) { return len(b), nil }
+func (p *exitedPTY) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	return nil
+}
+func (p *exitedPTY) Setsize(int, int) error { return nil }
+func (p *exitedPTY) Wait() error            { return nil }
+func (p *exitedPTY) Kill() error            { return nil }
+
+// TestCommand_DrainsOutputAfterExit verifies that output the process wrote
+// just before exiting is delivered rather than dropped when Run notices the
+// exit.
+func TestCommand_DrainsOutputAfterExit(t *testing.T) {
+	require := require.New(t)
+
+	stdinr, stdinw, err := os.Pipe()
+	require.NoError(err)
+	defer func() { _ = stdinr.Close() }()
+	defer func() { _ = stdinw.Close() }()
+	stdoutr, stdoutw, err := os.Pipe()
+	require.NoError(err)
+	defer func() { _ = stdoutr.Close() }()
+
+	const lastLine = "written just before exit"
+	cmd := &command{
+		stdin:   stdinr,
+		stdout:  stdoutw,
+		writers: uio.NewMultiWriter(5),
+		ctx:     context.Background(),
+		ptmx: &exitedPTY{
+			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
+			readDelay: 20 * time.Millisecond,
+		},
+	}
+
+	captured := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(stdoutr)
+		captured <- string(b)
+	}()
+
+	require.NoError(cmd.Run())
+	require.NoError(stdoutw.Close())
+
+	select {
+	case output := <-captured:
+		require.Contains(output, lastLine, "output buffered in the pty at exit was dropped")
+	case <-time.After(2 * time.Second):
+		t.Fatal("stdout never reached EOF")
 	}
 }

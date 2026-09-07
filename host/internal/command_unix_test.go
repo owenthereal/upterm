@@ -78,10 +78,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 				break
 			}
 		}
-		// Only send if we captured output (don't send empty string)
-		if len(output) > 0 {
-			outputCh <- string(output)
-		}
+		outputCh <- string(output)
 	}()
 
 	// Run the command in a goroutine

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -108,6 +109,7 @@ type testSSHD struct {
 	addr       string
 	certSigner ssh.Signer
 	reg        *prometheus.Registry
+	network    *MemoryProvider
 }
 
 func newTestSSHD(t *testing.T) *testSSHD {
@@ -154,7 +156,7 @@ func newTestSSHD(t *testing.T) *testSSHD {
 	defer cancel()
 	require.NoError(t, utils.WaitForServer(ctx, addr))
 
-	return &testSSHD{sshd: sshd, addr: addr, certSigner: certSigner, reg: reg}
+	return &testSSHD{sshd: sshd, addr: addr, certSigner: certSigner, reg: reg, network: network}
 }
 
 func (s *testSSHD) dial(t *testing.T) *ssh.Client {
@@ -359,4 +361,43 @@ func Test_localSessions_SlowDeleteDoesNotBlockAdd(t *testing.T) {
 	v, ok := gatherValue(t, reg, "test_server_sessions_active_count", nil)
 	require.True(t, ok)
 	require.Equal(t, 1.0, v)
+}
+
+func Test_sshd_ClosesTunnelChannelWhenGuestLeaves(t *testing.T) {
+	s := newTestSSHD(t)
+
+	client := s.dial(t)
+	incoming := client.HandleChannelOpen(forwardedStreamlocalChannelType)
+	sessionID := s.createSession(t, client)
+	ok, body := forwardRequest(t, client, streamlocalForwardChannelType, sessionID)
+	require.True(t, ok, body)
+
+	// The relay dials the session socket on a guest's behalf, which opens a
+	// forwarded channel to the host.
+	guest, err := s.network.Session().Dial(sessionID)
+	require.NoError(t, err)
+	var newCh ssh.NewChannel
+	select {
+	case newCh = <-incoming:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never received the forwarded channel")
+	}
+	ch, reqs, err := newCh.Accept()
+	require.NoError(t, err)
+	go ssh.DiscardRequests(reqs)
+
+	// The guest goes away. The host must learn of it without having to
+	// write anything first: that is what drives its client-left event.
+	require.NoError(t, guest.Close())
+	read := make(chan error, 1)
+	go func() {
+		_, err := ch.Read(make([]byte, 1))
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		require.ErrorIs(t, err, io.EOF)
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel stayed open after the guest disconnected")
+	}
 }
