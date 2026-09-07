@@ -39,16 +39,28 @@ type routingInstruments struct {
 	connectionDuration metrics.Histogram
 	errors             metrics.Counter
 	connectionTimeouts metrics.Counter
+	// authenticatedHost and authenticatedClient count connections whose
+	// downstream and upstream authentication both completed, split by what
+	// connected. connections counts every accepted TCP connection, scanners
+	// included.
+	authenticatedHost   metrics.Counter
+	authenticatedClient metrics.Counter
 }
 
 func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
-	return &routingInstruments{
-		connections:        p.NewCounter("routing_connections_count"),
-		errors:             p.NewCounter("routing_errors_count"),
-		activeConnections:  p.NewGauge("routing_active_connections_count"),
-		connectionDuration: p.NewHistogram("routing_connection_duration_seconds", 50),
-		connectionTimeouts: p.NewCounter("routing_connection_timeout_count"),
+	authenticated := newLabeledCounter(p, "routing_authenticated_connections_count", "kind")
+	inst := &routingInstruments{
+		connections:         p.NewCounter("routing_connections_count"),
+		errors:              p.NewCounter("routing_errors_count"),
+		activeConnections:   p.NewGauge("routing_active_connections_count"),
+		connectionDuration:  p.NewHistogram("routing_connection_duration_seconds", 50),
+		connectionTimeouts:  p.NewCounter("routing_connection_timeout_count"),
+		authenticatedHost:   authenticated.With("kind", "host"),
+		authenticatedClient: authenticated.With("kind", "client"),
 	}
+	inst.authenticatedHost.Add(0) // export both series from startup
+	inst.authenticatedClient.Add(0)
+	return inst
 }
 
 func (p *SSHRouting) Serve(ln net.Listener) error {
@@ -157,6 +169,15 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 			select {
 			case pconn := <-pipec:
 				defer pconn.Close()
+
+				// NewSSHPiperConn returns only once both sides have
+				// authenticated. PublicKeyCallback is too early: the
+				// server also invokes it for unsigned key queries.
+				if string(pconn.DownstreamConnMeta().ClientVersion()) == upterm.HostSSHClientVersion {
+					inst.authenticatedHost.Add(1)
+				} else {
+					inst.authenticatedClient.Add(1)
+				}
 
 				if err := pconn.Wait(); err != nil {
 					logger.Debug("error waiting for pipe", "error", err)

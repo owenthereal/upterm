@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -56,6 +58,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	}()
 
 	proxyAddr := proxyLn.Addr().String()
+	mp, reg := newTestMetrics(t)
 	cd := sidewayConnDialer{
 		NodeAddr:        proxyAddr,
 		NeighbourDialer: tcpConnDialer{},
@@ -68,7 +71,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 		NodeAddr:        proxyAddr,
 		ConnDialer:      cd,
 		Logger:          logger,
-		MetricsProvider: provider.NewDiscardProvider(),
+		MetricsProvider: mp,
 	}
 
 	go func() {
@@ -92,10 +95,11 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 
 	sshdAddr := sshLn.Addr().String()
 	sshd := &sshd{
-		SessionManager: newEmbeddedSessionManager(logger),
-		HostSigners:    []ssh.Signer{signer},
-		NodeAddr:       sshdAddr,
-		Logger:         logger,
+		SessionManager:  newEmbeddedSessionManager(logger),
+		HostSigners:     []ssh.Signer{signer},
+		NodeAddr:        sshdAddr,
+		MetricsProvider: provider.NewDiscardProvider(),
+		Logger:          logger,
 	}
 
 	go func() {
@@ -146,6 +150,37 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 			}
 		})
 	}
+
+	// Both cases authenticated as clients (non-host SSH client version) and
+	// none as hosts.
+	const authenticated = "test_server_routing_authenticated_connections_count"
+	v, ok := gatherValue(t, reg, authenticated, map[string]string{"kind": "client"})
+	require.True(t, ok)
+	require.Equal(t, float64(len(cases)), v)
+	v, ok = gatherValue(t, reg, authenticated, map[string]string{"kind": "host"})
+	require.True(t, ok, "host series should be exported even at zero")
+	require.Equal(t, 0.0, v)
+
+	// A client that answers the server's key query but never signs runs
+	// PublicKeyCallback yet fails authentication; it must not be counted.
+	_, err = ssh.Dial("tcp", proxyAddr, &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(refusingSigner{signer})},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	})
+	require.Error(t, err)
+	v, ok = gatherValue(t, reg, authenticated, map[string]string{"kind": "client"})
+	require.True(t, ok)
+	require.Equal(t, float64(len(cases)), v, "failed authentication must not be counted")
+}
+
+// refusingSigner presents a public key but refuses to sign with it.
+type refusingSigner struct {
+	ssh.Signer
+}
+
+func (s refusingSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
+	return nil, errors.New("refused to sign")
 }
 
 func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {

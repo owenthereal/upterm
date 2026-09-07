@@ -22,6 +22,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/pires/go-proxyproto"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -190,7 +191,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		if opt.MetricAddr == "" {
 			mp = provider.NewDiscardProvider()
 		} else {
-			mp = provider.NewPrometheusProvider("upterm", "uptermd")
+			mp = newPrometheusProvider("upterm", "uptermd", prometheus.DefaultRegisterer)
 		}
 
 		// Determine session routing mode
@@ -436,6 +437,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			HostSigners:         s.HostSigners, // TODO: use different host keys
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
+			MetricsProvider:     s.MetricsProvider,
 			Logger:              s.Logger.With("component", "sshd"),
 		}
 		g.Add(func() error {

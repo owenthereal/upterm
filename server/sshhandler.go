@@ -10,8 +10,8 @@ import (
 
 	"github.com/charmbracelet/ssh"
 	"github.com/oklog/run"
-	"log/slog"
 	gossh "golang.org/x/crypto/ssh"
+	"log/slog"
 )
 
 const (
@@ -66,11 +66,13 @@ func isExpectedShutdownError(err error) bool {
 func newStreamlocalForwardHandler(
 	sessionManager *SessionManager,
 	sessionDialListener SessionDialListener,
+	sessions *localSessions,
 	logger *slog.Logger,
 ) *streamlocalForwardHandler {
 	return &streamlocalForwardHandler{
 		sessionManager:      sessionManager,
 		sessionDialListener: sessionDialListener,
+		sessions:            sessions,
 		forwards:            make(map[string]net.Listener),
 		logger:              logger,
 	}
@@ -79,6 +81,7 @@ func newStreamlocalForwardHandler(
 type streamlocalForwardHandler struct {
 	sessionManager      *SessionManager
 	sessionDialListener SessionDialListener
+	sessions            *localSessions
 	forwards            map[string]net.Listener
 	logger              *slog.Logger
 	sync.Mutex
@@ -182,7 +185,19 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		sessionID := reqPayload.SocketPath
 		logger := h.logger.With("session-id", sessionID)
 
-		// validate session exists
+		// Only the connection that created a session may open its tunnel,
+		// and only while the session is still active here. The store is
+		// shared across nodes, so existence alone proves nothing about who
+		// is asking; and an ended session whose store delete failed must not
+		// be reopened uncounted.
+		if !ownsSession(ctx, sessionID) {
+			logger.Warn("rejected forward for session not created on this connection")
+			return false, []byte("session not created on this connection")
+		}
+		if !h.sessions.active(sessionID) {
+			logger.Warn("rejected forward for ended session")
+			return false, []byte("session has ended")
+		}
 		if _, err := h.sessionManager.GetSession(sessionID); err != nil {
 			return false, []byte(err.Error())
 		}
@@ -232,6 +247,10 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		}
 
 		sessionID := reqPayload.SocketPath
+		if !ownsSession(ctx, sessionID) {
+			h.logger.Warn("rejected cancel for session not created on this connection", "session-id", sessionID)
+			return false, []byte("session not created on this connection")
+		}
 		h.closeListener(sessionID)
 
 		return true, nil
@@ -267,7 +286,5 @@ func (h *streamlocalForwardHandler) closeListener(sessionID string) {
 
 	delete(h.forwards, sessionID)
 
-	if err := h.sessionManager.DeleteSession(sessionID); err != nil {
-		logger.Error("error deleting session", "error", err)
-	}
+	h.sessions.end(sessionID)
 }
