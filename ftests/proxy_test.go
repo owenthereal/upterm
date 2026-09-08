@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -172,16 +171,14 @@ func testProxyExitStatus(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 		"output written before the exit status should not be truncated by the close")
 }
 
-// testProxyForcedCommandExitStatus pins that a forced command's termination is
-// reported to the guest at all.
+// testProxyForcedCommandExitStatus pins that a forced command's exit code
+// reaches the guest.
 //
-// The exit *code* is deliberately not asserted. upterm's host races the forced
-// command's Wait against the pty's EOF in a run.Group and reports whichever
-// lands first, so the guest sees the command's real code or a clean 0
-// depending on scheduling (host/internal/server.go, HandleSession). That is a
-// host-side defect, unrelated to the relay, and pinning it here would make
-// this test flaky. What the relay owes the guest is that *an* exit status
-// arrives before the channel closes, which is what this asserts.
+// This is the realistic shape of the exit-status hazard, and the case Expo's
+// join.sh runs. It is also a regression test for the host: HandleSession used
+// to read the status off run.Group's return value, which reports whichever
+// actor finished first, so the command's wait raced the pty's EOF and the
+// guest saw 42 or a clean 0 depending on scheduling.
 func testProxyForcedCommandExitStatus(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	const wantCode = 42
 
@@ -218,10 +215,8 @@ func testProxyForcedCommandExitStatus(t *testing.T, hostShareURL, hostNodeAddr, 
 		"guest received no exit-status before the channel closed")
 
 	var exitErr *ssh.ExitError
-	if errors.As(err, &exitErr) {
-		t.Logf("forced command exit status: %d (host reports %d or 0, see doc comment)",
-			exitErr.ExitStatus(), wantCode)
-	}
+	require.ErrorAs(t, err, &exitErr, "expected exit status %d, got %v", wantCode, err)
+	assert.Equal(t, wantCode, exitErr.ExitStatus(), "forced command's exit code should reach the guest")
 }
 
 // testProxyLargeTransfer pushes several megabytes through the relay in both
