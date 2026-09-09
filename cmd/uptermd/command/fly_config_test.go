@@ -1,9 +1,12 @@
 package command
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/owenthereal/upterm/routing"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,4 +122,72 @@ func setFlyEnv(t *testing.T, consulURL string) {
 	t.Setenv("FLY_MACHINE_ID", "d891")
 	t.Setenv("FLY_APP_NAME", "upterm")
 	t.Setenv("FLY_CONSUL_URL", consulURL)
+}
+
+// loadShippedFlyEnv reads the [env] block out of a committed TOML file and
+// applies it to the process environment, mimicking what Fly does at runtime.
+func loadShippedFlyEnv(t *testing.T, file string) {
+	t.Helper()
+	resetUptermdEnv(t)
+
+	// viper already parses TOML; no new dependency is needed.
+	cfg := viper.New()
+	cfg.SetConfigFile(filepath.Join("..", "..", "..", file))
+	require.NoError(t, cfg.ReadInConfig())
+
+	env := cfg.GetStringMapString("env")
+	require.NotEmpty(t, env, "[env] block is missing")
+
+	// viper lowercases keys; uppercase them back into real variables.
+	for k, v := range env {
+		t.Setenv(strings.ToUpper(k), v)
+	}
+	t.Setenv("FLY_MACHINE_ID", "d891")
+	t.Setenv("FLY_APP_NAME", "upterm")
+}
+
+// TestShippedFlyConfigsDecode runs the [env] block from each committed TOML
+// file through the real decode path, so a typo in the shipped configuration
+// fails here rather than on deploy.
+//
+// Both Consul states are exercised. With Consul absent only, a UPTERMD_CONSUL_URL
+// that had been deleted or misspelled in both files would still yield an empty
+// ConsulURL and resolve to embedded — passing while broken.
+func TestShippedFlyConfigsDecode(t *testing.T) {
+	for _, file := range []string{"fly.toml", "fly.example.toml"} {
+		t.Run(file+"/no consul attached", func(t *testing.T) {
+			loadShippedFlyEnv(t, file)
+			unsetEnv(t, "FLY_CONSUL_URL")
+
+			opt, err := unmarshalForTest(t)
+			require.NoError(t, err)
+
+			require.Equal(t, "[::]:2222", opt.SSHAddr)
+			require.Equal(t, "[::]:8080", opt.WSAddr)
+			require.Equal(t, "[::]:9091", opt.MetricAddr)
+			require.True(t, opt.SSHProxyProtocol)
+			require.Equal(t, "d891.vm.upterm.internal:2222", opt.NodeAddr)
+			require.Equal(t, routing.ModeAuto, opt.Routing)
+			require.Empty(t, opt.ConsulURL)
+			require.Equal(t, routing.ModeEmbedded, opt.ResolvedRouting())
+			require.Equal(t, "1h", opt.ConsulSessionTTL)
+			require.NoError(t, opt.Validate())
+		})
+
+		t.Run(file+"/consul attached", func(t *testing.T) {
+			const consulURL = "https://consul.internal:8500/upterm/"
+			loadShippedFlyEnv(t, file)
+			t.Setenv("FLY_CONSUL_URL", consulURL)
+
+			opt, err := unmarshalForTest(t)
+			require.NoError(t, err)
+
+			// Fails if UPTERMD_CONSUL_URL is missing or misspelled in the file.
+			require.Equal(t, consulURL, opt.ConsulURL)
+			require.Equal(t, routing.ModeConsul, opt.ResolvedRouting())
+			require.Equal(t, "1h", opt.ConsulSessionTTL)
+			require.Equal(t, "d891.vm.upterm.internal:2222", opt.NodeAddr)
+			require.NoError(t, opt.Validate())
+		})
+	}
 }
