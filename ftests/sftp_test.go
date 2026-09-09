@@ -22,6 +22,7 @@ var SFTPTestCases = []FtestCase{
 	testSFTPDisabled,
 	testSFTPDirectoryListing,
 	testSFTPSetstat,
+	testSFTPNativeWindowsPath,
 }
 
 // TestSFTP runs SFTP tests using the FtestSuite framework
@@ -85,6 +86,63 @@ func TestRemotePath(t *testing.T) {
 
 	assert.Equal(t, "/dir/file.txt", remotePath("/dir/file.txt"))
 	assert.Equal(t, "dir/file.txt", remotePath("dir/file.txt"))
+}
+
+// testSFTPNativeWindowsPath checks that a guest can name a file the way it
+// looks on the host, not only the way the protocol spells it.
+//
+// SFTP paths are POSIX everywhere, so an absolute path on a Windows host
+// travels as /C:/dir/file, which is what remotePath produces and what the
+// other cases here use. But a guest looking at a Windows machine reasonably
+// types C:\dir\file, and that is what the fork this replaced used to accept.
+// The server sees a path the protocol reads as relative, resolves it against
+// the session's start directory, and the request arrives doubled; the host
+// repairs it. Nothing to test off Windows: elsewhere ':' is an ordinary
+// filename character and the path means what it says.
+func testSFTPNativeWindowsPath(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native drive-letter paths only arise against a Windows host")
+	}
+
+	require := require.New(t)
+	assert := assert.New(t)
+
+	testDir := t.TempDir()
+	testContent := "Hello from a native Windows path!\n"
+	testFilePath := filepath.Join(testDir, "native-path-test.txt")
+	require.NoError(os.WriteFile(testFilePath, []byte(testContent), 0644))
+
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:                  getTestShell(),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}
+	require.NoError(h.Share(hostShareURL))
+	defer h.Close()
+
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
+	require.NoError(c.Join(session, clientJoinURL))
+	defer c.Close()
+
+	sftpClient, err := c.SFTP()
+	require.NoError(err, "should be able to open SFTP connection")
+	defer func() { _ = sftpClient.Close() }()
+
+	// Deliberately not remotePath: send the native path, backslashes and all.
+	require.Contains(testFilePath, `\`, "expected a native Windows path from t.TempDir")
+
+	f, err := sftpClient.Open(testFilePath)
+	require.NoError(err, "a native Windows path should be accepted")
+	defer func() { _ = f.Close() }()
+
+	got, err := io.ReadAll(f)
+	require.NoError(err)
+	assert.Equal(testContent, string(got), "downloaded content should match")
 }
 
 // testSFTPDownload tests downloading a file via SFTP
