@@ -46,8 +46,8 @@ func TestFlyConfigMatchesDeletedWrapper(t *testing.T) {
 
 		// Divergence 2: the wrapper left ConsulSessionTTL at the flag default
 		// in embedded mode. Setting it unconditionally is inert, because it is
-		// read only under case routing.ModeConsul (server/server.go:206-215)
-		// and validated only in validateConsulConfig (server/server.go:86-89).
+		// read only under case routing.ModeConsul in Start (server/server.go)
+		// and validated only in validateConsulConfig (server/server.go).
 		require.Equal(t, "1h", opt.ConsulSessionTTL)
 		require.NoError(t, opt.Validate())
 	})
@@ -72,21 +72,41 @@ func TestFlyConfigMatchesDeletedWrapper(t *testing.T) {
 	})
 }
 
-// TestFlyConfigFailsWithoutFlyRuntimeVars pins the guard that
-// cmd/uptermd-fly/main.go:12-22 provided.
+// TestFlyConfigFailsWithoutFlyRuntimeVars pins both halves of the guard that
+// cmd/uptermd-fly/main.go:12-22 provided: it exited if either FLY_APP_NAME or
+// FLY_MACHINE_ID was missing. Both are covered because expansion scans left to
+// right — an absent FLY_MACHINE_ID short-circuits before the FLY_APP_NAME
+// token is reached, so one case cannot stand in for the other.
 func TestFlyConfigFailsWithoutFlyRuntimeVars(t *testing.T) {
-	resetUptermdEnv(t)
-	for k, v := range flyEnv {
-		t.Setenv(k, v)
-	}
-	t.Setenv("FLY_APP_NAME", "upterm")
-	// FLY_MACHINE_ID must be absent, not merely unmentioned.
-	unsetEnv(t, "FLY_MACHINE_ID")
+	t.Run("FLY_MACHINE_ID missing", func(t *testing.T) {
+		resetUptermdEnv(t)
+		for k, v := range flyEnv {
+			t.Setenv(k, v)
+		}
+		t.Setenv("FLY_APP_NAME", "upterm")
+		// FLY_MACHINE_ID must be absent, not merely unmentioned.
+		unsetEnv(t, "FLY_MACHINE_ID")
 
-	_, err := unmarshalForTest(t)
+		_, err := unmarshalForTest(t)
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), `required variable "FLY_MACHINE_ID" is not set`)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `required variable "FLY_MACHINE_ID" is not set`)
+	})
+
+	t.Run("FLY_APP_NAME missing", func(t *testing.T) {
+		resetUptermdEnv(t)
+		for k, v := range flyEnv {
+			t.Setenv(k, v)
+		}
+		t.Setenv("FLY_MACHINE_ID", "d891")
+		// FLY_APP_NAME must be absent, not merely unmentioned.
+		unsetEnv(t, "FLY_APP_NAME")
+
+		_, err := unmarshalForTest(t)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `required variable "FLY_APP_NAME" is not set`)
+	})
 }
 
 func setFlyEnv(t *testing.T, consulURL string) {
