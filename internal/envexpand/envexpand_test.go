@@ -156,10 +156,13 @@ func TestExpand(t *testing.T) {
 // Expansion errors reach stderr and slog. A malformed reference inside a
 // credential must not copy the surrounding secret into the message.
 //
-// The sentinel is placed INSIDE the malformed reference on purpose. An earlier
-// draft put it before the "${", where neither leaking implementation would
-// have echoed it — the unterminated message quoted s[i:], which starts at the
-// "$" — so the test passed against the very bug it claimed to catch.
+// The sentinel is placed INSIDE the malformed reference in all three cases on
+// purpose. An earlier draft put it before the "${" in the empty-name case,
+// which let both leaking implementations pass: the unterminated message quoted
+// s[i:] (everything from "$" onward), and the invalid-name message quoted the
+// rejected name, but the empty-name case had nothing to leak. Placing the
+// sentinel inside ${:-<secret>} catches implementations that echo the reference
+// body or default text.
 func TestExpandErrorsDoNotLeakValueContents(t *testing.T) {
 	const secret = "sup3rs3cr3t"
 
@@ -168,8 +171,8 @@ func TestExpandErrorsDoNotLeakValueContents(t *testing.T) {
 		"unterminated": "https://user@host/${BROKEN-" + secret,
 		// Quoting the rejected name would echo the name's contents.
 		"invalid name": "https://user@host/${BAD-" + secret + "}",
-		// Nothing to echo, but the message must still stay content-free.
-		"empty name": "https://user@host/${}",
+		// Echoing the reference body or default text would expose the sentinel.
+		"empty name": "https://user@host/${:-" + secret + "}",
 	}
 
 	for name, in := range malformed {
