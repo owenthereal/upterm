@@ -20,6 +20,14 @@ var uptermdEnv = []string{
 	"SENTRY_DSN",
 }
 
+// ambientEnv lists variables that reach the decoded struct through flag
+// DEFAULTS rather than viper's UPTERMD_ prefix, and so are invisible to
+// uptermdEnv. PORT feeds the ssh-addr default via utils.DefaultLocalhost
+// (utils/utils.go:163); DEBUG feeds the debug default (root.go:41). Both are
+// read when Root() is constructed, which is why resetUptermdEnv must clear
+// them before unmarshalForTest builds the command.
+var ambientEnv = []string{"PORT", "DEBUG"}
+
 // unsetEnv removes keys for the duration of the test and restores their prior
 // state afterwards. Go has t.Setenv but no t.Unsetenv.
 func unsetEnv(t *testing.T, keys ...string) {
@@ -43,6 +51,7 @@ func unsetEnv(t *testing.T, keys ...string) {
 func resetUptermdEnv(t *testing.T) {
 	t.Helper()
 	unsetEnv(t, uptermdEnv...)
+	unsetEnv(t, ambientEnv...)
 }
 
 // unmarshalForTest parses args against a fresh root command and decodes the
@@ -162,4 +171,20 @@ func TestUnmarshalFlagsFailsOnUnsetRequiredVariable(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `required variable "FLY_MACHINE_ID" is not set`)
+}
+
+// PORT and DEBUG reach the decoded struct through flag defaults rather than
+// viper's UPTERMD_ prefix. Setting them before the reset is deliberate: the
+// reset clearing them is exactly what this test asserts.
+func TestResetUptermdEnvClearsAmbientPortAndDebug(t *testing.T) {
+	t.Setenv("PORT", "9999")
+	t.Setenv("DEBUG", "1")
+
+	resetUptermdEnv(t)
+
+	opt, err := unmarshalForTest(t)
+
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:2222", opt.SSHAddr)
+	require.False(t, opt.Debug)
 }
