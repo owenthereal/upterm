@@ -150,6 +150,18 @@ type sliceWriter []byte
 
 func (s sliceWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+type funcWriter func(p []byte) (int, error)
+
+func (f funcWriter) Write(p []byte) (int, error) { return f(p) }
+
+// wrappedWriter hides the problem one level down. Its type is comparable --
+// a struct with an interface field is -- so a check that asks the type says
+// yes, and the comparison inside Remove panics anyway when the writers it
+// holds are funcs. Decorators shaped exactly like this are ordinary: the host
+// attaches one, TerminalQueryFilter, and it is only safe because it is
+// attached by pointer.
+type wrappedWriter struct{ io.Writer }
+
 // Append refuses a writer Remove could never match.
 //
 // Write removes the writers that failed it, so a non-comparable writer turns
@@ -157,17 +169,47 @@ func (s sliceWriter) Write(p []byte) (int, error) { return len(p), nil }
 // takes the process down. Reporting it from Append keeps the failure at the
 // call that can still do something about it.
 func TestMultiWriterAppendRejectsUnremovableWriters(t *testing.T) {
+	discard := funcWriter(func(p []byte) (int, error) { return len(p), nil })
+
+	tests := []struct {
+		name   string
+		writer io.Writer
+	}{
+		{name: "nil", writer: nil},
+		{name: "slice", writer: sliceWriter(nil)},
+		{name: "func", writer: discard},
+		{name: "struct wrapping a func writer", writer: wrappedWriter{discard}},
+		{name: "struct wrapping a slice writer", writer: wrappedWriter{sliceWriter(nil)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Error(t, NewMultiWriter(1).Append(tt.writer))
+		})
+	}
+}
+
+// The check is on the value, so it must not turn away a writer that is
+// perfectly removable. A decorator holding a pointer is the shape the host
+// actually attaches, and rejecting it would stop guests joining at all.
+func TestMultiWriterAppendAcceptsComparableWrappers(t *testing.T) {
+	var inner bytes.Buffer
+	wrapped := wrappedWriter{&inner}
+
 	w := NewMultiWriter(1)
-
-	require.Error(t, w.Append(sliceWriter(nil)), "a non-comparable writer should be refused")
-	require.Error(t, w.Append(nil), "a nil writer should be refused")
-
-	var good bytes.Buffer
-	require.NoError(t, w.Append(&good))
+	require.NoError(t, w.Append(wrapped))
 
 	_, err := w.Write([]byte("hello"))
 	require.NoError(t, err)
-	assert.Equal(t, "hello", good.String(), "a refused writer should not have been attached")
+	assert.Equal(t, "hello", inner.String())
+
+	// Removal is where an unremovable writer would have panicked, and Write
+	// does it unprompted for any writer that fails, so this is the half of
+	// the invariant that keeps the panic out of the host's pty copy.
+	w.Remove(wrapped)
+	_, err = w.Write([]byte("gone"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", inner.String(), "the wrapper should have been removable by identity")
 }
 
 // A writer that fails must not fail the producer.

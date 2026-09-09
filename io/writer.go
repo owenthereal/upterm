@@ -110,12 +110,21 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 // host's pty copy and take the whole process down. Refusing the writer at the
 // door reports the mistake to the caller that made it, at the one point where
 // it is still fixable.
+//
+// The question has to be asked of the value, not the type. A struct wrapping
+// an io.Writer is a comparable type, because an interface field is one, yet
+// comparing two of them still panics if the writers inside are funcs.
+// reflect.Value.Comparable walks into the interface and answers for what is
+// actually there, and promises the comparison will not panic when it says yes.
+//
+// This is checked once per attached writer, on a path that runs when a guest
+// joins, so the reflection costs nothing that matters.
 func checkRemovable(w io.Writer) error {
 	if w == nil {
 		return errors.New("multiwriter: writer is nil")
 	}
-	if rt := reflect.TypeOf(w); !rt.Comparable() {
-		return fmt.Errorf("multiwriter: writer of type %s is not comparable, so it could never be removed", rt)
+	if !reflect.ValueOf(w).Comparable() {
+		return fmt.Errorf("multiwriter: writer of type %T is not comparable, so it could never be removed", w)
 	}
 	return nil
 }
