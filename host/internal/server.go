@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	gssh "github.com/charmbracelet/ssh"
+	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"

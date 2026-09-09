@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/ssh"
+	"charm.land/ssh"
 	"github.com/oklog/run"
 	gossh "golang.org/x/crypto/ssh"
 	"log/slog"

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/ssh"
+	"charm.land/ssh"
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/version"

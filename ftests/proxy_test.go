@@ -289,13 +289,15 @@ func testProxyLargeTransfer(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 // host's for the rest of the session.
 //
 // The round trip before the resize is load-bearing, and not only because it
-// makes this a mid-session resize. charmbracelet/ssh does not guard sess.pty
-// with the mutex the session struct already embeds, so the "window-change"
-// case writing sess.pty.Window (session.go:391) races any handler reading
+// makes this a mid-session resize. charm.land/ssh does not guard sess.pty with
+// the mutex the session struct already embeds, so the "window-change" case
+// writing sess.pty.Window (session.go:412 in v0.4.3) races any handler reading
 // sess.Pty(), which upterm's HandleSession does on entry. Resizing before the
 // session has exchanged anything makes the two unordered and -race reports it.
-// The bug is upstream and unfixable from here; a guest that resizes its
-// terminal in the first moments of a session can still hit it in production.
+// Unfixable from here, because Pty() is the only way to obtain the window
+// channel; a guest that resizes in the first moments of a session can still
+// hit it in production. Reported upstream with a fix; drop this round trip
+// once a release carrying it is in go.mod.
 func testProxyWindowChange(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stty is not available on Windows")

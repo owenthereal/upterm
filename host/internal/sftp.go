@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	gssh "github.com/charmbracelet/ssh"
+	gssh "charm.land/ssh"
 	hostsftp "github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/pkg/sftp"

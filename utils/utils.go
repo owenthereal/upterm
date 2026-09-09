@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	gssh "charm.land/ssh"
 	"github.com/adrg/xdg"
-	gssh "github.com/charmbracelet/ssh"
 	"github.com/dchest/uniuri"
 	"golang.org/x/crypto/ssh"
 )
