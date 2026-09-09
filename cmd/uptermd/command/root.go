@@ -40,7 +40,7 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().StringP("metric-addr", "", "", "metric server address")
 	cmd.PersistentFlags().BoolP("debug", "", os.Getenv("DEBUG") != "", "debug")
 
-	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode")
+	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode: embedded, consul, or auto (consul when consul-url is set, otherwise embedded)")
 	cmd.PersistentFlags().String("consul-url", "", "consul URL for routing mode 'consul'")
 	cmd.PersistentFlags().String("consul-session-ttl", server.DefaultSessionTTL.String(), "consul session TTL for routing mode 'consul'")
 

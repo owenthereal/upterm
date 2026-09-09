@@ -8,4 +8,8 @@ const (
 	ModeEmbedded Mode = "embedded"
 	// ModeConsul looks up node address from Consul
 	ModeConsul Mode = "consul"
+	// ModeAuto resolves to ModeConsul when a Consul URL is configured and to
+	// ModeEmbedded otherwise. It lets a deployment leave routing unset until
+	// runtime, when it may or may not have Consul attached.
+	ModeAuto Mode = "auto"
 )
