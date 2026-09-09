@@ -7,7 +7,7 @@ export PATH := $(BIN_DIR):$(PATH)
 tools:
 	rm -rf $(BIN_DIR) && mkdir -p $(BIN_DIR)
 	# goreleaser
-	GOBIN=$(BIN_DIR) go install github.com/goreleaser/goreleaser@latest
+	GOBIN=$(BIN_DIR) go install github.com/goreleaser/goreleaser/v2@latest
 
 .PHONY: generate
 generate: proto

@@ -76,12 +76,20 @@ homebrew_casks:
     completions:
       bash: "etc/completion/upterm.bash_completion.sh"
       zsh: "etc/completion/upterm.zsh_completion"
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/upterm"]
-          end
+    # Strip the macOS quarantine attribute so Gatekeeper does not block the
+    # unsigned binary. Homebrew deprecated the `postflight` stanza that
+    # `hooks.post.install` generates, so emit `postflight_steps` by hand until
+    # GoReleaser grows `hooks.post.install_steps`. Once that ships, replace this
+    # with the hook so the stanza lands in the right place in the Cask.
+    # See https://github.com/goreleaser/goreleaser/pull/6873
+    # The inner braces are escaped so GoReleaser leaves Homebrew's
+    # `{{staged_path}}` token for Homebrew to expand.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ `{{staged_path}}` }}/upterm"]
+        end
+      end
 scoops:
   - repository:
       owner: owenthereal
