@@ -184,3 +184,63 @@ func TestExpandErrorsDoNotLeakValueContents(t *testing.T) {
 		})
 	}
 }
+
+// namedString mirrors routing.Mode: a named type whose underlying kind is
+// string. A .(string) type assertion would skip it; reflect.Kind does not.
+type namedString string
+
+type testOpt struct {
+	Addr       string
+	Mode       namedString
+	Keys       []string
+	Enabled    bool
+	unexported string //nolint:unused // present to prove unsettable fields are skipped
+}
+
+func TestExpandStruct(t *testing.T) {
+	t.Setenv("HOST", "example.com")
+	t.Setenv("MODE", "consul")
+	t.Setenv("DIR", "/etc/keys")
+
+	opt := &testOpt{
+		Addr:    "${HOST}:2222",
+		Mode:    "${MODE}",
+		Keys:    []string{"${DIR}/a", "$${DIR}/b", "plain"},
+		Enabled: true,
+	}
+
+	require.NoError(t, ExpandStruct(opt))
+
+	require.Equal(t, "example.com:2222", opt.Addr)
+	require.Equal(t, namedString("consul"), opt.Mode, "named string types must be expanded")
+	require.Equal(t, []string{"/etc/keys/a", "${DIR}/b", "plain"}, opt.Keys)
+	require.True(t, opt.Enabled)
+}
+
+func TestExpandStructErrorNamesField(t *testing.T) {
+	unsetEnv(t, "MISSING_VAR")
+
+	opt := &testOpt{Addr: "${MISSING_VAR}"}
+
+	err := ExpandStruct(opt)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Addr")
+	require.Contains(t, err.Error(), `required variable "MISSING_VAR" is not set`)
+}
+
+func TestExpandStructErrorNamesSliceIndex(t *testing.T) {
+	unsetEnv(t, "MISSING_VAR")
+
+	opt := &testOpt{Keys: []string{"ok", "${MISSING_VAR}"}}
+
+	err := ExpandStruct(opt)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Keys[1]")
+}
+
+func TestExpandStructRejectsNonStructPointer(t *testing.T) {
+	require.Error(t, ExpandStruct(testOpt{}))
+	require.Error(t, ExpandStruct(nil))
+}

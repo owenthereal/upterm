@@ -14,6 +14,7 @@ package envexpand
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 )
 
@@ -113,5 +114,47 @@ func validateName(name string, offset int) error {
 			return fmt.Errorf("invalid variable name in reference at offset %d", offset)
 		}
 	}
+	return nil
+}
+
+// ExpandStruct expands every string and []string field of the struct pointed
+// to by v, in place. Each field is expanded exactly once.
+//
+// Fields are matched on reflect.Kind rather than by type assertion so that
+// named string types — routing.Mode, for example — are covered.
+func ExpandStruct(v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() || rv.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("envexpand: want a non-nil pointer to struct, got %T", v)
+	}
+
+	st := rv.Elem()
+	for i := 0; i < st.NumField(); i++ {
+		field := st.Field(i)
+		if !field.CanSet() {
+			continue
+		}
+		name := st.Type().Field(i).Name
+
+		switch {
+		case field.Kind() == reflect.String:
+			out, err := Expand(field.String())
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			field.SetString(out)
+
+		case field.Kind() == reflect.Slice && field.Type().Elem().Kind() == reflect.String:
+			for j := 0; j < field.Len(); j++ {
+				elem := field.Index(j)
+				out, err := Expand(elem.String())
+				if err != nil {
+					return fmt.Errorf("%s[%d]: %w", name, j, err)
+				}
+				elem.SetString(out)
+			}
+		}
+	}
+
 	return nil
 }
