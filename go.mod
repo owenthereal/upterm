@@ -155,5 +155,3 @@ require (
 )
 
 replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.55.0-sshpiper-20260828
-
-replace github.com/pkg/sftp => github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e

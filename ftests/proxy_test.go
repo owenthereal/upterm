@@ -257,7 +257,7 @@ func testProxyLargeTransfer(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 	defer func() { _ = sftpClient.Close() }()
 
 	// Host to guest.
-	f, err := sftpClient.Open(downloadPath)
+	f, err := sftpClient.Open(remotePath(downloadPath))
 	require.NoError(t, err)
 	got, err := io.ReadAll(f)
 	_ = f.Close()
@@ -267,7 +267,7 @@ func testProxyLargeTransfer(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 
 	// Guest to host.
 	uploadPath := filepath.Join(testDir, "upload.bin")
-	w, err := sftpClient.Create(uploadPath)
+	w, err := sftpClient.Create(remotePath(uploadPath))
 	require.NoError(t, err)
 	n, err := io.Copy(w, bytes.NewReader(payload))
 	require.NoError(t, err)
