@@ -47,10 +47,13 @@ func Test_ContextReader(t *testing.T) {
 	t.Run("cancel context during copy", func(t *testing.T) {
 		t.Parallel()
 
+		// The read cannot be interrupted, so it does complete, late and
+		// unheard. It must not reach t: this used to call t.Error on the way
+		// out, which fires after the subtest has finished and panics the whole
+		// binary with "Fail in goroutine after ... has completed".
 		r := readFunc(func(p []byte) (int, error) {
 			time.Sleep(5 * time.Second) // simulate slow read
-			t.Error("should never get here")
-			return 0, nil
+			return copy(p, "late"), nil
 		})
 		w := bytes.NewBuffer(nil)
 
@@ -64,6 +67,9 @@ func Test_ContextReader(t *testing.T) {
 		got := err
 		if diff := cmp.Diff(want.Error(), got.Error()); diff != "" {
 			t.Errorf("want=%s got=%s:\n%s", want, got, diff)
+		}
+		if w.Len() != 0 {
+			t.Errorf("abandoned read delivered %q", w.String())
 		}
 	})
 

@@ -103,6 +103,18 @@ func testClientCallbacks(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 	err = c.JoinWithContext(ctx, session, clientJoinURL)
 	require.NoError(err)
 
+	// Drain the guest's output. Client.JoinWithContext pumps the session into
+	// an unbuffered channel, so a test that never reads it stops the guest
+	// reading its SSH channel, the channel window fills, and the host blocks
+	// writing to it. This test does not care what the shell prints, but
+	// leaving it unread makes the host's output fan-out the slowest part of
+	// the system for no reason.
+	_, remoteOutputCh := c.InputOutput()
+	go func() {
+		for range remoteOutputCh { //nolint:revive // drained, not inspected
+		}
+	}()
+
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
 	require.NoError(err)
 
