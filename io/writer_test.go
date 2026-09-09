@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,10 +53,24 @@ func Test_MultiWriter(t *testing.T) {
 }
 
 // blockingWriter models a guest whose SSH channel window has filled because it
-// stopped reading: Write blocks until released.
-type blockingWriter struct{ release chan struct{} }
+// stopped reading: Write blocks until released. It closes entered first, so a
+// test can wait for the fan-out to actually reach a writer rather than for the
+// goroutine that will eventually call Write to be scheduled.
+type blockingWriter struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingWriter() *blockingWriter {
+	return &blockingWriter{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
 
 func (b *blockingWriter) Write(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
 	<-b.release
 	return len(p), nil
 }
@@ -74,15 +89,18 @@ func (f *failingWriter) Write(p []byte) (int, error) {
 // so HandleSession never returned and never emitted the client-left event that
 // is deferred behind it.
 func TestMultiWriterStuckWriterDoesNotBlockRemove(t *testing.T) {
-	stuck := &blockingWriter{release: make(chan struct{})}
+	stuck := newBlockingWriter()
 	defer close(stuck.release)
 
 	w := NewMultiWriter(1)
 	require.NoError(t, w.Append(stuck))
 
-	writing := make(chan struct{})
-	go func() { close(writing); _, _ = w.Write([]byte("shell output")) }()
-	<-writing
+	go func() { _, _ = w.Write([]byte("shell output")) }()
+
+	// Wait for the fan-out to be inside the stuck writer, not merely for the
+	// writing goroutine to have started. Signalling from the caller side let
+	// Remove win the race and pass without ever exercising the bug.
+	<-stuck.entered
 
 	done := make(chan struct{})
 	go func() { defer close(done); w.Remove(stuck) }()
@@ -92,6 +110,64 @@ func TestMultiWriterStuckWriterDoesNotBlockRemove(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Remove blocked behind a stuck writer")
 	}
+}
+
+// Concurrent producers must not reach the same writer at once.
+//
+// Most attached writers are not concurrency safe, and even one that is would
+// end up with two writes interleaved. Run under -race, two goroutines writing
+// into a shared bytes.Buffer report a data race if the fan-out is unserialized.
+func TestMultiWriterConcurrentWritesAreSerialized(t *testing.T) {
+	var shared bytes.Buffer
+
+	w := NewMultiWriter(1)
+	require.NoError(t, w.Append(&shared))
+
+	const (
+		producers = 4
+		writes    = 200
+	)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range producers {
+		wg.Go(func() {
+			<-start
+			for range writes {
+				_, _ = w.Write([]byte("chunk"))
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, producers*writes*len("chunk"), shared.Len(), "every write should land intact")
+}
+
+// sliceWriter is a legal io.Writer whose dynamic type cannot be compared, so
+// `t.writers[i] == v` inside Remove would panic on it.
+type sliceWriter []byte
+
+func (s sliceWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// Append refuses a writer Remove could never match.
+//
+// Write removes the writers that failed it, so a non-comparable writer turns
+// an ordinary guest disconnect into a panic in the host's pty copy, which
+// takes the process down. Reporting it from Append keeps the failure at the
+// call that can still do something about it.
+func TestMultiWriterAppendRejectsUnremovableWriters(t *testing.T) {
+	w := NewMultiWriter(1)
+
+	require.Error(t, w.Append(sliceWriter(nil)), "a non-comparable writer should be refused")
+	require.Error(t, w.Append(nil), "a nil writer should be refused")
+
+	var good bytes.Buffer
+	require.NoError(t, w.Append(&good))
+
+	_, err := w.Write([]byte("hello"))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", good.String(), "a refused writer should not have been attached")
 }
 
 // A writer that fails must not fail the producer.

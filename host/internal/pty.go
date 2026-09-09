@@ -45,7 +45,13 @@ type PTY interface {
 // such error to return and needs this to carry the code instead of burying it
 // in a message string.
 type ExitError struct {
-	Code int
+	// Code is the status GetExitCodeProcess reported, kept unsigned because
+	// that is what Windows produces and what SSH puts on the wire. On a
+	// 32-bit build, narrowing it to int would make every status with the high
+	// bit set negative -- an unhandled exception such as 0xC0000005, or a
+	// deliberate "exit -1" -- and exitCode would then read it as a process
+	// that never exited under its own control.
+	Code uint32
 }
 
 func (e *ExitError) Error() string {
@@ -58,6 +64,11 @@ func (e *ExitError) Error() string {
 // what happens when the session is torn down and the pty is closed underneath
 // a still-running command. A caller reporting an exit status to an SSH client
 // must not pass that on, because the status is marshalled as a uint32.
+//
+// That -1 check belongs to exec alone. Windows has no signals to report here,
+// so every ExitError carries a real status, and the int it is returned as is
+// only a courier: ssh.Session.Exit converts back to uint32, so a status that
+// does not fit a 32-bit int arrives intact anyway.
 func exitCode(err error) (int, bool) {
 	if err == nil {
 		return 0, true
@@ -72,7 +83,7 @@ func exitCode(err error) (int, bool) {
 		code := execErr.ExitCode()
 		return code, code >= 0
 	case errors.As(err, &ptyErr):
-		return ptyErr.Code, ptyErr.Code >= 0
+		return int(ptyErr.Code), true
 	}
 
 	return 0, false

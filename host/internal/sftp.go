@@ -132,15 +132,24 @@ func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
 // server resolves it against the session's start directory and the request
 // arrives doubled, as /C:/Users/me/C:/dir/file.
 //
-// Windows filenames cannot contain ':', so a drive letter anywhere but the
-// front can only have arrived this way, and the last one is the path the
-// client meant. Callers must only apply this on Windows: ':' is legal in a
-// POSIX filename, and on a Linux host a client asking for C:\foo really is
-// naming a file under the start directory.
+// A path component of exactly "X:" cannot be a filename -- Windows does not
+// allow ':' in one -- so a drive letter anywhere but the front can only have
+// arrived this way, and the last one is the path the client meant. Callers
+// must only apply this on Windows: ':' is legal in a POSIX filename, and on a
+// Linux host a client asking for C:\foo really is naming a file under the
+// start directory.
 func undoubleDriveLetter(p string) string {
 	last := -1
 	for i := 0; i+2 < len(p); i++ {
-		if p[i] == '/' && p[i+2] == ':' && isDriveLetter(p[i+1]) {
+		if p[i] != '/' || p[i+2] != ':' || !isDriveLetter(p[i+1]) {
+			continue
+		}
+		// The drive must be the whole component: it either introduces a
+		// path or ends the string. A colon that merely follows a one-letter
+		// name is NTFS alternate-data-stream syntax -- "/C:/dir/f:meta" is
+		// the "meta" stream of the file "f" -- and rewriting that would
+		// silently retarget the request at drive F: instead.
+		if i+3 == len(p) || p[i+3] == '/' {
 			last = i
 		}
 	}

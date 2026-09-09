@@ -164,6 +164,25 @@ func TestUndoubleDriveLetter(t *testing.T) {
 			want: "/C:/Users/me/ab:/notes.txt",
 		},
 		{
+			// "f:metadata" is the NTFS alternate data stream "metadata" on
+			// the file "f". Reading the "/f:" as a drive would send the
+			// request to drive F: instead of the file the client named.
+			name: "alternate data stream on a one-letter file is not a drive",
+			in:   "/C:/Users/me/f:metadata",
+			want: "/C:/Users/me/f:metadata",
+		},
+		{
+			name: "alternate data stream is not a drive even when doubled",
+			in:   "/C:/Users/me/C:/Users/me/f:metadata",
+			want: "/C:/Users/me/f:metadata",
+		},
+		{
+			// A drive can end the path: this is what "ls C:" doubles into.
+			name: "trailing bare drive is repaired",
+			in:   "/C:/Users/me/D:",
+			want: "/D:",
+		},
+		{
 			name: "empty",
 			in:   "",
 			want: "",
