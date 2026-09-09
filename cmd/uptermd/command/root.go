@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/internal/envexpand"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
@@ -119,5 +120,13 @@ func unmarshalFlags(cmd *cobra.Command, opts interface{}) error {
 		}
 	}
 
-	return v.Unmarshal(opts)
+	if err := v.Unmarshal(opts); err != nil {
+		return err
+	}
+
+	// Expand ${VAR} references after decoding rather than via a mapstructure
+	// decode hook: this keeps expansion ordered explicitly after viper's list
+	// splitting, guarantees it runs exactly once per value, and leaves viper's
+	// own decode hooks untouched.
+	return envexpand.ExpandStruct(opts)
 }
