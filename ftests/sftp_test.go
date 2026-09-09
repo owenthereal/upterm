@@ -3,7 +3,10 @@ package ftests
 import (
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +22,127 @@ var SFTPTestCases = []FtestCase{
 	testSFTPDisabled,
 	testSFTPDirectoryListing,
 	testSFTPSetstat,
+	testSFTPNativeWindowsPath,
 }
 
 // TestSFTP runs SFTP tests using the FtestSuite framework
 func (suite *FtestSuite) TestSFTP() {
 	suite.runTestCategory(SFTPTestCases)
+}
+
+// remotePath converts a local filesystem path into the POSIX form SFTP uses on
+// the wire.
+//
+// The sftp client sends paths verbatim; there is not one filepath reference in
+// its client.go. On Windows that means an absolute path like C:\dir\file goes
+// out as-is, and the server does not see it as absolute, because POSIX rules
+// need a leading slash. It therefore joins it onto the session's start
+// directory and the request lands on
+// /C:/Users/me/C:/dir/file. OpenSSH's own clients encode Windows absolute
+// paths as /C:/dir/file, which is what this produces. On Unix it is identity.
+//
+// Every path handed to the sftp client has to go through this. Missing one is
+// silent on Unix and only shows up on the Windows job, as a chtimes or open
+// error naming a path with the start directory glued to the front.
+func remotePath(p string) string {
+	s := filepath.ToSlash(p)
+	if filepath.IsAbs(p) && !path.IsAbs(s) {
+		s = "/" + s
+	}
+	return s
+}
+
+// TestRemotePathIsPOSIXAbsolute pins the invariant the SFTP tests depend on.
+//
+// The sftp client sends paths verbatim, and the server treats anything that is
+// not POSIX-absolute as relative to the session's start directory, which upterm
+// sets to the user's home. A native Windows path is not POSIX-absolute, so
+// handing filepath.Join(t.TempDir(), ...) straight to the client made every
+// request land on /C:/Users/me/C:/Users/me/... instead of the file.
+//
+// This fails on Windows if remotePath is ever reduced to the identity, and is
+// the cheap, deterministic counterpart to the functional SFTP tests below,
+// which cover the same ground but only end to end.
+func TestRemotePathIsPOSIXAbsolute(t *testing.T) {
+	local := filepath.Join(t.TempDir(), "file.txt")
+
+	got := remotePath(local)
+	require.True(t, path.IsAbs(got),
+		"remotePath(%q) = %q, which the server would resolve against the start directory", local, got)
+	require.False(t, strings.Contains(got, "\\"),
+		"remotePath(%q) = %q still contains a native separator", local, got)
+}
+
+// TestRemotePath pins the conversion itself, per platform.
+func TestRemotePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assert.Equal(t, "/C:/dir/file.txt", remotePath(`C:\dir\file.txt`))
+		assert.Equal(t, "/C:/dir", remotePath(`C:\dir`))
+		// Already in wire form, or relative: left alone.
+		assert.Equal(t, "/C:/dir/file.txt", remotePath("/C:/dir/file.txt"))
+		assert.Equal(t, "dir/file.txt", remotePath(`dir\file.txt`))
+		return
+	}
+
+	assert.Equal(t, "/dir/file.txt", remotePath("/dir/file.txt"))
+	assert.Equal(t, "dir/file.txt", remotePath("dir/file.txt"))
+}
+
+// testSFTPNativeWindowsPath checks that a guest can name a file the way it
+// looks on the host, not only the way the protocol spells it.
+//
+// SFTP paths are POSIX everywhere, so an absolute path on a Windows host
+// travels as /C:/dir/file, which is what remotePath produces and what the
+// other cases here use. But a guest looking at a Windows machine reasonably
+// types C:\dir\file, and that is what the fork this replaced used to accept.
+// The server sees a path the protocol reads as relative, resolves it against
+// the session's start directory, and the request arrives doubled; the host
+// repairs it. Nothing to test off Windows: elsewhere ':' is an ordinary
+// filename character and the path means what it says.
+func testSFTPNativeWindowsPath(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native drive-letter paths only arise against a Windows host")
+	}
+
+	require := require.New(t)
+	assert := assert.New(t)
+
+	testDir := t.TempDir()
+	testContent := "Hello from a native Windows path!\n"
+	testFilePath := filepath.Join(testDir, "native-path-test.txt")
+	require.NoError(os.WriteFile(testFilePath, []byte(testContent), 0644))
+
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:                  getTestShell(),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}
+	require.NoError(h.Share(hostShareURL))
+	defer h.Close()
+
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	c := &Client{PrivateKeys: []string{ClientPrivateKey}}
+	require.NoError(c.Join(session, clientJoinURL))
+	defer c.Close()
+
+	sftpClient, err := c.SFTP()
+	require.NoError(err, "should be able to open SFTP connection")
+	defer func() { _ = sftpClient.Close() }()
+
+	// Deliberately not remotePath: send the native path, backslashes and all.
+	require.Contains(testFilePath, `\`, "expected a native Windows path from t.TempDir")
+
+	f, err := sftpClient.Open(testFilePath)
+	require.NoError(err, "a native Windows path should be accepted")
+	defer func() { _ = f.Close() }()
+
+	got, err := io.ReadAll(f)
+	require.NoError(err)
+	assert.Equal(testContent, string(got), "downloaded content should match")
 }
 
 // testSFTPDownload tests downloading a file via SFTP
@@ -72,7 +191,7 @@ func testSFTPDownload(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL st
 	defer func() { _ = sftpClient.Close() }()
 
 	// Download the file using absolute path (OpenSSH semantics)
-	f, err := sftpClient.Open(testFilePath)
+	f, err := sftpClient.Open(remotePath(testFilePath))
 	require.NoError(err, "should be able to open file via SFTP")
 	defer func() { _ = f.Close() }()
 
@@ -123,7 +242,7 @@ func testSFTPUpload(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL stri
 	// Upload a new file using absolute path (OpenSSH semantics)
 	uploadFilePath := filepath.Join(testDir, "upload-test.txt")
 	uploadContent := "Hello from SFTP upload test!\n"
-	f, err := sftpClient.Create(uploadFilePath)
+	f, err := sftpClient.Create(remotePath(uploadFilePath))
 	require.NoError(err, "should be able to create file via SFTP")
 
 	_, err = f.Write([]byte(uploadContent))
@@ -182,7 +301,7 @@ func testSFTPReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL st
 	defer func() { _ = sftpClient.Close() }()
 
 	// Download should still work in read-only mode (using absolute path)
-	f, err := sftpClient.Open(testFilePath)
+	f, err := sftpClient.Open(remotePath(testFilePath))
 	require.NoError(err, "download should work in read-only mode")
 	downloadedContent, err := io.ReadAll(f)
 	require.NoError(err)
@@ -191,7 +310,7 @@ func testSFTPReadOnly(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL st
 
 	// Upload should fail in read-only mode
 	uploadFilePath := filepath.Join(testDir, "upload-should-fail.txt")
-	_, err = sftpClient.Create(uploadFilePath)
+	_, err = sftpClient.Create(remotePath(uploadFilePath))
 	assert.Error(err, "upload should fail in read-only mode")
 }
 
@@ -278,7 +397,7 @@ func testSFTPDirectoryListing(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 	defer func() { _ = sftpClient.Close() }()
 
 	// List test directory using absolute path (OpenSSH semantics)
-	entries, err := sftpClient.ReadDir(testDir)
+	entries, err := sftpClient.ReadDir(remotePath(testDir))
 	require.NoError(err, "should be able to list test directory")
 
 	// Verify we see the expected entries
@@ -293,7 +412,7 @@ func testSFTPDirectoryListing(t *testing.T, hostShareURL, hostNodeAddr, clientJo
 
 	// List subdirectory using absolute path
 	subDirPath := filepath.Join(testDir, "subdir")
-	subEntries, err := sftpClient.ReadDir(subDirPath)
+	subEntries, err := sftpClient.ReadDir(remotePath(subDirPath))
 	require.NoError(err, "should be able to list subdirectory")
 	require.Len(subEntries, 1, "subdir should have one file")
 	assert.Equal("file3.txt", subEntries[0].Name(), "should see file3.txt in subdir")
@@ -343,7 +462,7 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 	defer func() { _ = sftpClient.Close() }()
 
 	// Test 1: Chmod - change file permissions
-	err = sftpClient.Chmod(testFilePath, 0600)
+	err = sftpClient.Chmod(remotePath(testFilePath), 0600)
 	require.NoError(err, "should be able to chmod file")
 
 	info, err := os.Stat(testFilePath)
@@ -353,7 +472,7 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 	assert.NotZero(info.Mode().Perm()&0200, "file should be writable")
 
 	// Test 2: Truncate - change file size
-	err = sftpClient.Truncate(testFilePath, 5)
+	err = sftpClient.Truncate(remotePath(testFilePath), 5)
 	require.NoError(err, "should be able to truncate file")
 
 	info, err = os.Stat(testFilePath)
@@ -366,7 +485,7 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 	assert.Equal("Hello", string(content), "content should be truncated to 'Hello'")
 
 	// Test 3: Truncate to 0 - verify we can truncate to zero bytes
-	err = sftpClient.Truncate(testFilePath, 0)
+	err = sftpClient.Truncate(remotePath(testFilePath), 0)
 	require.NoError(err, "should be able to truncate file to 0 bytes")
 
 	info, err = os.Stat(testFilePath)
@@ -376,7 +495,7 @@ func testSFTPSetstat(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL str
 	// Test 4: Chtimes - change file timestamps
 	atime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	mtime := time.Date(2021, 6, 15, 12, 30, 0, 0, time.UTC)
-	err = sftpClient.Chtimes(testFilePath, atime, mtime)
+	err = sftpClient.Chtimes(remotePath(testFilePath), atime, mtime)
 	require.NoError(err, "should be able to change file times")
 
 	info, err = os.Stat(testFilePath)

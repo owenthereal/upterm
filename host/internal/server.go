@@ -7,10 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"time"
 
-	gssh "github.com/charmbracelet/ssh"
+	gssh "charm.land/ssh"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/server"
@@ -214,12 +213,32 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	if !isPty {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
 		_ = sess.Exit(1)
+		// Exit closes the channel. Without returning, the rest of the handler
+		// ran against a dead session: it attached it to the shared output
+		// writer, started a keepalive ticker and a window-change loop, and
+		// finished with a second Exit that could only fail.
+		return
 	}
 
 	var (
 		g    run.Group
 		err  error
 		ptmx = h.ptmx
+	)
+
+	// The forced command's exit status, recorded by the actor that waits on it
+	// rather than read back off run.Group's return value.
+	//
+	// run.Group.Run returns whichever actor finished first, and when a forced
+	// command exits, two of them unblock at the same instant: the wait, which
+	// carries the status, and the output copy, which sees the pty's EOF and
+	// returns nil. Reading the status off Run therefore made the guest's exit
+	// code a coin toss; measured, `--force-command 'exit 42'` reported 42 or 0
+	// depending on scheduling. Run drains every actor before returning, so
+	// reading these afterwards is ordered.
+	var (
+		cmdCode   int
+		cmdExited bool
 	)
 
 	// simulate openssh keepalive
@@ -267,7 +286,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 		{
 			g.Add(func() error {
-				return ptmx.Wait()
+				err := ptmx.Wait()
+				cmdCode, cmdExited = exitCode(err)
+				return err
 			}, func(err error) {
 				cancel()
 				_ = ptmx.Close()
@@ -333,13 +354,16 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	}
 
-	if err := g.Run(); err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			_ = sess.Exit(exitError.ExitCode())
-		} else {
-			_ = sess.Exit(1)
-		}
-	} else {
+	runErr := g.Run()
+
+	switch {
+	case cmdExited:
+		// A forced command ran and terminated under its own control. Its
+		// status is the session's, whichever actor unblocked run.Group first.
+		_ = sess.Exit(cmdCode)
+	case runErr != nil:
+		_ = sess.Exit(1)
+	default:
 		_ = sess.Exit(0)
 	}
 }

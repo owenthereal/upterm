@@ -1,7 +1,9 @@
 package ftests
 
 import (
+	"bytes"
 	"context"
+	"runtime/pprof"
 	"testing"
 	"time"
 
@@ -11,6 +13,38 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
+
+// callbackTimeout bounds how long a test waits for a host callback that is
+// causally downstream of an action the test has already taken. Measured on the
+// happy path, the client-left callback fires ~600µs after Client.Close()
+// returns, so this ceiling is four orders of magnitude of headroom: it costs
+// nothing when the callback fires and keeps the assertion about *whether* the
+// event happened rather than about how loaded the machine is.
+//
+// It replaces a 2s budget that failed roughly one full-suite run in five on
+// testHostClientCallback. A flaky baseline is worse than a slow one here,
+// because the functional suite is the safety net for the front-door rewrite,
+// and a failure that cannot be trusted is not a safety net.
+const callbackTimeout = 10 * time.Second
+
+// awaitClientCallback waits for a client event, dumping goroutine stacks if it
+// never arrives. A bare "callback is not called" says nothing about whether the
+// event was dropped, the host's event loop wedged, or the relay never tore the
+// connection down; the stacks say which.
+func awaitClientCallback(t *testing.T, ch <-chan *api.Client, what string) *api.Client {
+	t.Helper()
+
+	select {
+	case c := <-ch:
+		return c
+	case <-time.After(callbackTimeout):
+		var stacks bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
+		t.Logf("goroutine dump at %s callback timeout:\n%s", what, stacks.String())
+		t.Fatalf("client %s callback was not called within %s", what, callbackTimeout)
+		return nil
+	}
+}
 
 func testHostClientCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	testClientCallbacks(t, hostShareURL, hostNodeAddr, clientJoinURL, false)
@@ -27,8 +61,14 @@ func testClientCallbacks(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 	require := require.New(t)
 	assert := assert.New(t)
 
-	jch := make(chan *api.Client)
-	lch := make(chan *api.Client)
+	// Buffered so a duplicate event cannot wedge the host. The emitter
+	// delivers to listeners from a goroutine that holds an emitter-wide lock
+	// while it blocks on the listener channel, so one callback stuck on an
+	// unbuffered send stalls every later event on that host, including the
+	// client-left event this test is waiting for. The spare capacity also
+	// lets the test observe duplicates instead of deadlocking on them.
+	jch := make(chan *api.Client, 4)
+	lch := make(chan *api.Client, 4)
 
 	// Setup admin socket
 	adminSocketFile := setupAdminSocket(t)
@@ -63,38 +103,42 @@ func testClientCallbacks(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 	err = c.JoinWithContext(ctx, session, clientJoinURL)
 	require.NoError(err)
 
-	var clientID string
-	select {
-	case cc := <-jch:
-		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
-		require.NoError(err)
+	// Drain the guest's output. Client.JoinWithContext pumps the session into
+	// an unbuffered channel, so a test that never reads it stops the guest
+	// reading its SSH channel, the channel window fills, and the host blocks
+	// writing to it. This test does not care what the shell prints, but
+	// leaving it unread makes the host's output fan-out the slowest part of
+	// the system for no reason.
+	_, remoteOutputCh := c.InputOutput()
+	go func() {
+		for range remoteOutputCh { //nolint:revive // drained, not inspected
+		}
+	}()
 
-		assert.NotEmpty(cc.Id, "client id can't be empty")
-		clientID = cc.Id
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
+	require.NoError(err)
 
-		assert.Equal(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint, "public key fingerprint should match")
-		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match")
-	case <-time.After(2 * time.Second):
-		t.Fatal("client joined callback is not called")
-	}
+	joined := awaitClientCallback(t, jch, "joined")
+	assert.NotEmpty(joined.Id, "client id can't be empty")
+	assert.Equal(utils.FingerprintSHA256(pk), joined.PublicKeyFingerprint, "public key fingerprint should match")
+	assert.Equal("SSH-2.0-Go", joined.Version, "client version should match")
 
 	// client leaves
 	cancel()
 	c.Close()
 
-	select {
-	case cc := <-lch:
-		assert.NotEmpty(cc.Id, "client id can't be empty")
+	left := awaitClientCallback(t, lch, "left")
+	assert.NotEmpty(left.Id, "client id can't be empty")
+	assert.Equal(joined.Id, left.Id, "client ID should match on leave")
+	assert.Equal(utils.FingerprintSHA256(pk), left.PublicKeyFingerprint, "public key fingerprint should match on leave")
+	assert.Equal("SSH-2.0-Go", left.Version, "client version should match on leave")
 
-		pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ClientPublicKeyContent))
-		require.NoError(err)
-
-		assert.Equal(clientID, cc.Id, "client ID should match on leave")
-		assert.Equal(utils.FingerprintSHA256(pk), cc.PublicKeyFingerprint, "public key fingerprint should match on leave")
-		assert.Equal("SSH-2.0-Go", cc.Version, "client version should match on leave")
-	case <-time.After(2 * time.Second):
-		t.Fatal("client left callback is not called")
-	}
+	// Exactly one event of each kind per guest. The relay terminates SSH on
+	// both sides, so a change to how it originates connections upstream can
+	// easily make the host see a guest join or leave twice; today it does not.
+	// These can only fire on a real duplicate, never on a slow machine.
+	assert.Empty(jch, "expected exactly one client joined event")
+	assert.Empty(lch, "expected exactly one client left event")
 }
 
 func testHostSessionCreatedCallback(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {

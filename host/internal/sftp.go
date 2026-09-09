@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"time"
 
-	gssh "github.com/charmbracelet/ssh"
+	gssh "charm.land/ssh"
 	hostsftp "github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/pkg/sftp"
@@ -99,25 +99,21 @@ func (s *SFTPSession) checkPermission(op hostsftp.Operation, paths ...string) er
 	return nil
 }
 
-// resolvePath resolves a path following standard OpenSSH/SCP semantics.
-// - Tilde paths (~ or ~/path) are expanded to home directory
-// - Absolute paths (starting with /) are used as-is
-// - Relative paths are resolved from the user's home directory
+// resolvePath turns the POSIX path the client sent into a local one.
 //
-// Note: WithStartDirectory(home) is set on the SFTP server, which handles
-// relative path resolution at the protocol level.
+// Absolute paths are used as-is. Relative paths arrive already resolved
+// against the session's start directory, which WithStartDirectory sets to the
+// user's home, so there is nothing to do for them here.
+//
+// There is no tilde handling. Tilde expansion is not part of SFTP, and the
+// branch that used to be here could never run: the library resolves every
+// request against the start directory before a handler sees it, so reqPath is
+// always absolute by this point and never still begins with "~". Relative
+// paths already resolve to the home directory, so "notes.txt" covers what
+// "~/notes.txt" was reaching for.
 func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	// Handle tilde expansion (OpenSSH may send literal ~ or ~/path)
-	if reqPath == "~" {
-		return home, nil
-	}
-	if strings.HasPrefix(reqPath, "~/") {
-		return filepath.Join(home, reqPath[2:]), nil
+	if runtime.GOOS == "windows" {
+		reqPath = undoubleDriveLetter(reqPath)
 	}
 
 	// SFTP sends Windows paths like "/C:/foo" - strip leading "/" for proper handling
@@ -126,6 +122,47 @@ func (s *SFTPSession) resolvePath(reqPath string) (string, error) {
 	}
 
 	return filepath.Clean(reqPath), nil
+}
+
+// undoubleDriveLetter repairs a path a client sent in native Windows form.
+//
+// SFTP paths are POSIX on every platform, so an absolute path on a Windows
+// host travels as /C:/dir/file. A client that sends the native C:\dir\file or
+// C:/dir/file is sending something the protocol reads as relative, so the
+// server resolves it against the session's start directory and the request
+// arrives doubled, as /C:/Users/me/C:/dir/file.
+//
+// A path component of exactly "X:" cannot be a filename -- Windows does not
+// allow ':' in one -- so a drive letter anywhere but the front can only have
+// arrived this way, and the last one is the path the client meant. Callers
+// must only apply this on Windows: ':' is legal in a POSIX filename, and on a
+// Linux host a client asking for C:\foo really is naming a file under the
+// start directory.
+func undoubleDriveLetter(p string) string {
+	last := -1
+	for i := 0; i+2 < len(p); i++ {
+		if p[i] != '/' || p[i+2] != ':' || !isDriveLetter(p[i+1]) {
+			continue
+		}
+		// The drive must be the whole component: it either introduces a
+		// path or ends the string. A colon that merely follows a one-letter
+		// name is NTFS alternate-data-stream syntax -- "/C:/dir/f:meta" is
+		// the "meta" stream of the file "f" -- and rewriting that would
+		// silently retarget the request at drive F: instead.
+		if i+3 == len(p) || p[i+3] == '/' {
+			last = i
+		}
+	}
+
+	// last == 0 is the ordinary "/C:/dir" form, which needs no repair.
+	if last > 0 {
+		return p[last:]
+	}
+	return p
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // sftpFileReader handles file download requests

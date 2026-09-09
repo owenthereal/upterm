@@ -200,7 +200,7 @@ func (p *pty) Wait() error {
 	// This ensures proper shutdown order
 
 	if exitCode != 0 {
-		return fmt.Errorf("exit status %d", exitCode)
+		return &ExitError{Code: exitCode}
 	}
 
 	return nil

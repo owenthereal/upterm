@@ -44,12 +44,12 @@ require (
 )
 
 require (
+	charm.land/ssh v0.4.3
 	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc
-	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.13.0
 	github.com/google/go-github/v48 v48.2.0
@@ -155,5 +155,3 @@ require (
 )
 
 replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto v0.55.0-sshpiper-20260828
-
-replace github.com/pkg/sftp => github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e

@@ -1,3 +1,5 @@
+charm.land/ssh v0.4.3 h1:hr5cYmlUYsP+KxyG/ug7ZMzKKN9f6VOD9yPpcGqdzzM=
+charm.land/ssh v0.4.3/go.mod h1:so/3IECPNlYZSnE7JKn7NFmcUyyxJqIAeM4TJy35qPk=
 git.sr.ht/~jackmordaunt/go-toast v1.1.2 h1:/yrfI55LRt1M7H1vkaw+NaH1+L1CDxrqDltwm5euVuE=
 git.sr.ht/~jackmordaunt/go-toast v1.1.2/go.mod h1:jA4OqHKTQ4AFBdwrSnwnskUIIS3HYzlJSgdzCKqfavo=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
@@ -56,8 +58,6 @@ github.com/charmbracelet/colorprofile v0.4.1 h1:a1lO03qTrSIRaK8c3JRxJDZOvhvIeSco
 github.com/charmbracelet/colorprofile v0.4.1/go.mod h1:U1d9Dljmdf9DLegaJ0nGZNJvoXAhayhmidOdcBwAvKk=
 github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc h1:nFRtCfZu/zkltd2lsLUPlVNv3ej/Atod9hcdbRZtlys=
 github.com/charmbracelet/lipgloss v1.1.1-0.20250319133953-166f707985bc/go.mod h1:aKC/t2arECF6rNOnaKaVU6y4t4ZeHQzqfxedE/VkVhA=
-github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309 h1:dCVbCRRtg9+tsfiTXTp0WupDlHruAXyp+YoxGVofHHc=
-github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309/go.mod h1:R9cISUs5kAH4Cq/rguNbSwcR+slE5Dfm8FEs//uoIGE=
 github.com/charmbracelet/x/ansi v0.11.6 h1:GhV21SiDz/45W9AnV2R61xZMRri5NlLnl6CVF7ihZW8=
 github.com/charmbracelet/x/ansi v0.11.6/go.mod h1:2JNYLgQUsyqaiLovhU2Rv/pb8r6ydXKS3NIttu3VGZQ=
 github.com/charmbracelet/x/cellbuf v0.0.15 h1:ur3pZy0o6z/R7EylET877CBxaiE1Sp1GMxoFPAIztPI=
@@ -305,8 +305,6 @@ github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba h1:/Q5vvLs180BFH7
 github.com/olebedev/emitter v0.0.0-20230411050614-349169dec2ba/go.mod h1:eT2/Pcsim3XBjbvldGiJBvvgiqZkAFyiOJJsDKXs/ts=
 github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/gomega v1.5.0/go.mod h1:ex+gbHU/CVuBBDIJjb2X0qEXbFg53c61hWP/1CpauHY=
-github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e h1:aTNsPifEBOqyFBeJ66kg55fGiLMM9D6AH0pzzAlqnEY=
-github.com/owenthereal/sftp v0.0.0-20260113082633-ef3e1c92482e/go.mod h1:ZJjziXQfMZHQhZLwCXYsNgAWo7JCwe+ZPgUAuNeb+ck=
 github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d h1:M4eHUCs7KYTLz8jK6sOa+bCXiU2BV8xj9f2QFJsYLeA=
 github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d/go.mod h1:LmUG3DzUnCf1F03dVT+dyJADTiFN+dK+ZQHCqfkmvrQ=
 github.com/pascaldekloe/goe v0.1.0 h1:cBOtyMzM9HTpWjXfbbunk26uA6nG3a8n06Wieeh0MwY=
@@ -324,6 +322,8 @@ github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINE
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+github.com/pkg/sftp v1.13.10 h1:+5FbKNTe5Z9aspU88DPIKJ9z2KZoaGCu6Sr6kKR/5mU=
+github.com/pkg/sftp v1.13.10/go.mod h1:bJ1a7uDhrX/4OII+agvy28lzRvQrmIQuaHrcI1HbeGA=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/prometheus/client_golang v0.9.1/go.mod h1:7SWBe2y4D6OKWSNQJUaRYU/AaXPKyh/dDVn+NZz0KFw=
 github.com/prometheus/client_golang v1.0.0/go.mod h1:db9x61etRT2tGnBNRi70OPL5FsnadC4Ky3P0J6CfImo=
