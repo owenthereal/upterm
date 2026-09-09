@@ -248,7 +248,9 @@ Fly offers a generous free tier and excellent global performance. The official u
    flyctl auth login
    ```
 
-1. Copy and customize the [`fly.example.toml`](./fly.example.toml) file to `fly.toml` for your deployment configuration.
+1. Copy [`fly.example.toml`](./fly.example.toml) to `fly.toml` and set your app
+   name. It pulls the published `ghcr.io/owenthereal/upterm/uptermd` image, so
+   no local build is needed.
 1. Deploy your uptermd server:
 
   ```console
@@ -256,6 +258,24 @@ Fly offers a generous free tier and excellent global performance. The official u
   ```
 
 Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
+
+### Variable expansion in configuration
+
+`uptermd` expands environment variable references in its configuration values —
+flags, `UPTERMD_*` environment variables, and config files alike. This exists
+because the container image has no shell, so values that need a runtime value
+(a machine ID, a pod IP) cannot be interpolated before the process starts.
+
+| Syntax | Meaning |
+| --- | --- |
+| `${NAME}` | Required. `uptermd` exits at startup if `NAME` is unset or empty. |
+| `${NAME:-default}` | Uses `default` when `NAME` is unset or empty. |
+| `$${` | A literal `${`. |
+
+A `$` not followed by `{` is always literal, and substituted values are never
+rescanned — a password containing `${TOKEN}` is passed through untouched.
+
+If an existing configuration value contains a literal `${`, escape it as `$${`.
 
 ### Heroku
 
