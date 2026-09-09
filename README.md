@@ -259,6 +259,8 @@ Fly offers a generous free tier and excellent global performance. The official u
 
 Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
 
+> **Upgrading from an earlier release:** `uptermd-fly` no longer exists. Replace your `[build] dockerfile`/`build-target` and `[experimental] entrypoint` settings with the `[build] image` and `[env]` blocks shown in [`fly.example.toml`](./fly.example.toml).
+
 ### Variable expansion in configuration
 
 `uptermd` expands environment variable references in its configuration values —
@@ -270,10 +272,12 @@ because the container image has no shell, so values that need a runtime value
 | --- | --- |
 | `${NAME}` | Required. `uptermd` exits at startup if `NAME` is unset or empty. |
 | `${NAME:-default}` | Uses `default` when `NAME` is unset or empty. |
-| `$${` | A literal `${`. |
+| `$${` | A literal `${` (outside defaults only). |
 
 A `$` not followed by `{` is always literal, and substituted values are never
-rescanned — a password containing `${TOKEN}` is passed through untouched.
+rescanned — a password containing `${TOKEN}` is passed through untouched. The `$${` escape applies only outside defaults; a default value cannot contain `${` or `}`.
+
+Comma-separated lists are split before expansion, so a substituted value is always a single element — with `HOSTS=a.example.com,b.example.com`, setting `UPTERMD_HOSTNAME=${HOSTS}` produces one element, not two.
 
 If an existing configuration value contains a literal `${`, escape it as `$${`.
 
