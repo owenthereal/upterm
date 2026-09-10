@@ -263,10 +263,15 @@ Your uptermd server will be available at `your-app-name.fly.dev`. You can connec
 
 ### Variable expansion in configuration
 
-`uptermd` expands environment variable references in its configuration values —
-flags, `UPTERMD_*` environment variables, and config files alike. This exists
-because the container image has no shell, so values that need a runtime value
-(a machine ID, a pod IP) cannot be interpolated before the process starts.
+`uptermd` expands environment variable references in its text configuration
+values — flags, `UPTERMD_*` environment variables, and config files alike. This
+exists because the container image has no shell, so values that need a runtime
+value (a machine ID, a pod IP) cannot be interpolated before the process starts.
+
+Expansion applies to text values only. Boolean options — `--debug` and
+`--ssh-proxy-protocol` — are parsed before expansion runs, so a reference such
+as `UPTERMD_DEBUG=${DEBUG_ENABLED}` fails at startup with a parse error rather
+than being substituted. Give booleans a literal `true` or `false`.
 
 | Syntax | Meaning |
 | --- | --- |
