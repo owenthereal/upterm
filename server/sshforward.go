@@ -127,11 +127,13 @@ type sshForwarder struct {
 	cancel context.CancelCauseFunc
 }
 
-// A peer can pipeline channel opens without waiting for confirmation. Each one
-// relayed here costs a goroutine blocked in OpenChannel plus mux state on both
-// sides, so cap how many are in flight. Over the cap opens are refused rather
-// than queued: blocking this loop would stall the mux for every other channel
-// on the connection, and the request path is bounded for the same reason.
+// A peer can pipeline channel opens without waiting for confirmation, and each
+// one still awaiting the destination costs a goroutine blocked in OpenChannel,
+// so cap how many opens are outstanding at once. Over the cap opens are refused
+// rather than queued: blocking this loop would stall the mux for every other
+// channel on the connection, and the request path is bounded for the same
+// reason. This bounds opens in progress only — an established channel holds no
+// permit, so the count of live channels stays as unlimited as SSH itself.
 const maxSSHConcurrentChannelOpens = 64
 
 // Once draining starts, stop opening channels and report completion of the
@@ -164,8 +166,7 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 				continue
 			}
 			workers.Go(func() {
-				defer func() { <-opens }()
-				f.channel(destination, channel, &accepted)
+				f.channel(destination, channel, &accepted, func() { <-opens })
 			})
 		}
 	}
@@ -198,7 +199,13 @@ func (d *sshChannelDrain) wait() {
 	d.workers.Wait()
 }
 
-func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, accepted *sshChannelDrain) {
+// openDone releases the permit this open holds. It fires as soon as the open
+// resolves either way, so the cap counts opens in progress rather than the
+// channels they establish — a guest holding a channel open must not consume a
+// permit for the life of its session.
+func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, accepted *sshChannelDrain, openDone func()) {
+	openDone = sync.OnceFunc(openDone)
+	defer openDone()
 	// Accept only after the destination accepts, preserving CHANNEL_OPEN_FAILURE.
 	remote, remoteRequests, err := destination.OpenChannel(incoming.ChannelType(), incoming.ExtraData())
 	if err != nil {
@@ -224,6 +231,7 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 		ssh.DiscardRequests(remoteRequests)
 		return
 	}
+	openDone() // established: the channel itself holds no permit
 	localEndpoint := &sshForwardChannel{Channel: local}
 	remoteEndpoint := &sshForwardChannel{Channel: remote}
 	var workers sync.WaitGroup
@@ -445,12 +453,15 @@ func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) err
 		}
 	})
 	defer func() {
-		close(finished)
 		// Answer the opens the mux has already buffered while the transport is
 		// still live. Past Close, Reject has no transport to write to and the
-		// peer would see a bare disconnect in place of the reason.
+		// peer would see a bare disconnect in place of the reason. These are
+		// writes, so a peer that has stopped reading can block them: the
+		// deadline watcher above stays armed until the transport is closed,
+		// because closing it is the only thing that releases such a write.
 		rejectBufferedSSHChannels(downstream.channels, cause)
 		_ = downstream.conn.Close()
+		close(finished)
 		// Release the mux's sender for opens that raced the close. These can no
 		// longer be answered; draining them only unblocks shutdown.
 		for range downstream.channels {

@@ -559,6 +559,87 @@ func TestSSHForwardOriginCloseWithPendingReply(t *testing.T) {
 	_ = b2.Close()
 }
 
+// stalledSSHConn models a peer that has stopped reading: writes toward it block
+// until the transport is closed, which is the only thing that releases them.
+type stalledSSHConn struct {
+	ssh.Conn
+	closed    chan struct{}
+	channels  chan ssh.NewChannel
+	closeOnce sync.Once
+}
+
+func (c *stalledSSHConn) Close() error {
+	// A real mux stops delivering opens once its transport is gone.
+	c.closeOnce.Do(func() { close(c.closed); close(c.channels) })
+	return nil
+}
+
+func (c *stalledSSHConn) Wait() error {
+	<-c.closed
+	return io.EOF
+}
+
+// stalledNewChannel blocks in Reject the way a real one blocks writing to a
+// transport whose peer is not draining it. A nil release rejects at once.
+type stalledNewChannel struct {
+	ssh.NewChannel
+	release <-chan struct{}
+}
+
+func (c stalledNewChannel) Reject(ssh.RejectionReason, string) error {
+	if c.release != nil {
+		<-c.release
+		return net.ErrClosed
+	}
+	return nil
+}
+
+// Rejecting the opens the mux already buffered happens before the transport is
+// closed, so those are writes. The deadline has to stay enforced across them,
+// or a peer that stopped reading pins the connection and its workers forever.
+func TestSSHRejectChannelsBoundedThroughBufferedWrites(t *testing.T) {
+	conn := &stalledSSHConn{closed: make(chan struct{}), channels: make(chan ssh.NewChannel, 2)}
+	// The first open is answered by the select inside rejectSSHChannels and
+	// returns at once, so the deferred rejection below runs with the deadline
+	// still live. The second is what the mux had buffered, and it stalls.
+	conn.channels <- stalledNewChannel{}
+	conn.channels <- stalledNewChannel{release: conn.closed}
+	requests := make(chan *ssh.Request)
+	close(requests)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- rejectSSHChannels(ctx, sshPeer{conn, conn.channels, requests}, errors.New("upstream unavailable"))
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rejection outlived its deadline; a stalled peer pins the connection")
+	}
+}
+
+// The concurrent-open cap must bound opens in progress, not established
+// channels: every guest on a session holds a channel open on the host
+// connection for as long as it is joined.
+func TestSSHForwardEstablishedChannelsAreNotCapped(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	opened := make([]ssh.Channel, 0, maxSSHConcurrentChannelOpens+1)
+	for i := range maxSSHConcurrentChannelOpens + 1 {
+		a, ar, b, br := forwardTestChannel(t, client, server)
+		if a == nil || b == nil {
+			t.Fatalf("channel %d rejected while %d were open", i, len(opened))
+		}
+		go ssh.DiscardRequests(ar)
+		go ssh.DiscardRequests(br)
+		opened = append(opened, a, b)
+	}
+	for _, ch := range opened {
+		_ = ch.Close()
+	}
+}
+
 // recordingRequestSender stands in for a destination so a test can hold one
 // send open and observe exactly what want_reply each request carried.
 type recordingRequestSender struct {
