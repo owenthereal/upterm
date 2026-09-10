@@ -808,3 +808,142 @@ func TestSSHForwardTransportDrainBounded(t *testing.T) {
 		})
 	}
 }
+
+// Pause after the real peer has replied, before the forwarder can relay that
+// reply. This exposes a CLOSE overtaking an already-successful request without
+// depending on which SSH worker the scheduler happens to run first.
+type forwardTestReplyGateConn struct {
+	ssh.Conn
+	received chan struct{}
+	release  <-chan struct{}
+}
+
+func (c forwardTestReplyGateConn) OpenChannel(name string, payload []byte) (ssh.Channel, <-chan *ssh.Request, error) {
+	channel, requests, err := c.Conn.OpenChannel(name, payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	return forwardTestReplyGateChannel{Channel: channel, received: c.received, release: c.release}, requests, nil
+}
+
+type forwardTestReplyGateChannel struct {
+	ssh.Channel
+	received chan struct{}
+	release  <-chan struct{}
+}
+
+func (c forwardTestReplyGateChannel) SendRequest(name string, wantReply bool, payload []byte) (bool, error) {
+	ok, err := c.Channel.SendRequest(name, wantReply, payload)
+	if name == "shell" && wantReply {
+		close(c.received)
+		<-c.release
+	}
+	return ok, err
+}
+
+func TestSSHForwardSuccessReplyBeforePeerClose(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprint(reverse), func(t *testing.T) {
+			client, downstream := forwardTestPair(t, nil, nil)
+			upstream, server := forwardTestPair(t, nil, nil)
+			received, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			origin, destination := client, server
+			if reverse {
+				downstream.conn = forwardTestReplyGateConn{downstream.conn, received, release}
+				origin, destination = server, client
+			} else {
+				upstream.conn = forwardTestReplyGateConn{upstream.conn, received, release}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- forwardSSH(ctx, downstream, upstream) }()
+			t.Cleanup(func() { cancel(); _ = forwardTestReceive(t, done) })
+			a, ar, b, br := forwardTestChannel(t, origin, destination)
+			type response struct {
+				ok  bool
+				err error
+			}
+			replied := make(chan response, 1)
+			go func() { ok, err := a.SendRequest("shell", true, nil); replied <- response{ok, err} }()
+			request := forwardTestReceive(t, br)
+			if err := request.Reply(true, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-received: // The forwarder already holds the peer's success.
+			case <-time.After(3 * time.Second):
+				t.Fatal("forwarder did not receive the success reply")
+			}
+			output := make(chan []byte, 1)
+			go func() { data, _ := io.ReadAll(a); output <- data }()
+			if _, err := b.Write([]byte("PTY is required.\n")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.SendRequest("exit-status", false, []byte{0, 0, 0, 1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Close(); err != nil {
+				t.Fatal(err)
+			}
+			status := forwardTestReceive(t, ar)
+			if status.Type != "exit-status" || !bytes.Equal(status.Payload, []byte{0, 0, 0, 1}) {
+				t.Fatalf("changed exit status: %+v", status)
+			}
+			if data := forwardTestReceive(t, output); string(data) != "PTY is required.\n" {
+				t.Fatalf("lost output: %q", data)
+			}
+			select {
+			case result := <-replied:
+				t.Fatalf("channel closed before the success reply could be forwarded: ok=%v err=%v", result.ok, result.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			unblock()
+			if result := forwardTestReceive(t, replied); result.err != nil || !result.ok {
+				t.Fatalf("lost success reply: ok=%v err=%v", result.ok, result.err)
+			}
+			select {
+			case _, ok := <-ar:
+				if ok {
+					t.Fatal("unexpected request after exit status")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("channel did not close after its reply was delivered")
+			}
+		})
+	}
+}
+
+func TestSSHForwardSimultaneousCloseWithPendingReplies(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	a, ar, b, br := forwardTestChannel(t, client, server)
+	type response struct {
+		ok  bool
+		err error
+	}
+	replies := make(chan response, 2)
+	go func() { ok, err := a.SendRequest("pending-a", true, nil); replies <- response{ok, err} }()
+	go func() { ok, err := b.SendRequest("pending-b", true, nil); replies <- response{ok, err} }()
+	pendingA := forwardTestReceive(t, br)
+	pendingB := forwardTestReceive(t, ar)
+	defer func() { _ = pendingA.Reply(false, nil); _ = pendingB.Reply(false, nil) }()
+	closed := make(chan error, 2)
+	go func() { closed <- a.Close() }()
+	go func() { closed <- b.Close() }()
+	for range 2 {
+		if err := forwardTestReceive(t, closed); err != nil {
+			t.Fatal(err)
+		}
+		if result := forwardTestReceive(t, replies); result.err == nil && result.ok {
+			t.Fatal("unanswered request succeeded after both peers closed")
+		}
+	}
+	// Only the channel was closed; aborting its pending replies must leave
+	// the transport available for another channel in either direction.
+	for _, direction := range [][2]sshPeer{{client, server}, {server, client}} {
+		a, _, b, _ := forwardTestChannel(t, direction[0], direction[1])
+		_ = a.Close()
+		_ = b.Close()
+	}
+}

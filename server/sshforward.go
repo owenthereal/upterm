@@ -77,7 +77,7 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
 			// A disconnected source cannot receive an outstanding global reply. Do
 			// not hold up drain completion on that reply, but still drain all channel
 			// buffers before closing the destination transport to release its sender.
-			forwarder.requests(destination.conn, source.requests, finished)
+			forwarder.requests(destination.conn, source.requests, finished, nil)
 		})
 	}
 	var err error
@@ -206,10 +206,20 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 		ssh.DiscardRequests(remoteRequests)
 		return
 	}
+	localEndpoint := &sshForwardChannel{Channel: local}
+	remoteEndpoint := &sshForwardChannel{Channel: remote}
 	var workers sync.WaitGroup
-	workers.Go(func() { f.channelDirection(local, remote, remoteRequests) })
-	workers.Go(func() { f.channelDirection(remote, local, localRequests) })
+	workers.Go(func() { f.channelDirection(localEndpoint, remoteEndpoint, remoteRequests) })
+	workers.Go(func() { f.channelDirection(remoteEndpoint, localEndpoint, localRequests) })
 	workers.Wait()
+}
+
+// replies protects replies owed to this endpoint from an ordinary close sent
+// by the opposite direction. Cancellation and unanswered-request aborts bypass
+// it so they can release blocked senders while request ingress keeps draining.
+type sshForwardChannel struct {
+	ssh.Channel
+	replies sync.Mutex
 }
 
 // Normal close waits until source data and requests have drained. An explicit
@@ -217,11 +227,15 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 // alone cannot close a channel: a command may still produce output and status
 // after stdin EOF. Treat either endpoint's CLOSE symmetrically so a caller can
 // close one channel without leaving its peer open for the connection's lifetime.
-func (f sshForwarder) channelDirection(destination, source ssh.Channel, requests <-chan *ssh.Request) {
+func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() })
+	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() }, &source.replies)
 	streams.Wait()
+	// The source may send success and CLOSE back-to-back. Its reply worker
+	// must deliver that success before this direction closes the destination.
+	destination.replies.Lock()
+	defer destination.replies.Unlock()
 	_ = destination.Close()
 }
 
@@ -261,13 +275,16 @@ const (
 // Source closure can abort an unanswered WantReply through abortPending. For
 // channels it closes the destination channel; for globals it waives waiting for
 // the reply during transport drain. Ordinary request tails still drain in order.
-func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func()) {
+func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func(), replies *sync.Mutex) {
 	jobs := make(chan *ssh.Request)
 	completed := make(chan struct{})
 	senderDone := make(chan struct{})
 	go func() {
 		defer close(senderDone)
 		for request := range jobs {
+			if request.WantReply && replies != nil {
+				replies.Lock()
+			}
 			ok, payload, err := destination.SendRequest(request.Type, request.WantReply, request.Payload)
 			if err != nil {
 				ok, payload = false, nil
@@ -277,6 +294,9 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 			completed <- struct{}{}
 			if request.WantReply {
 				_ = request.Reply(ok, payload)
+				if replies != nil {
+					replies.Unlock()
+				}
 			}
 		}
 	}()

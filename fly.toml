@@ -3,15 +3,21 @@ kill_signal = "SIGINT"
 kill_timeout = "5s"
 
 [build]
-dockerfile = "Dockerfile.uptermd"
-build-target = "uptermd-fly"
+image = "ghcr.io/owenthereal/upterm/uptermd:latest"
 
 [metrics]
 port = 9091
 path = "/metrics"
 
-[experimental]
-entrypoint = ["uptermd-fly"]
+[env]
+UPTERMD_SSH_ADDR           = "[::]:2222"
+UPTERMD_WS_ADDR            = "[::]:8080"
+UPTERMD_METRIC_ADDR        = "[::]:9091"
+UPTERMD_SSH_PROXY_PROTOCOL = "true"
+UPTERMD_NODE_ADDR          = "${FLY_MACHINE_ID}.vm.${FLY_APP_NAME}.internal:2222"
+UPTERMD_ROUTING            = "auto"
+UPTERMD_CONSUL_URL         = "${FLY_CONSUL_URL:-}"
+UPTERMD_CONSUL_SESSION_TTL = "1h"
 
 [vm]
 cpu_kind = "shared"

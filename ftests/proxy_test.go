@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -316,22 +317,85 @@ func testProxyWindowChange(t *testing.T, hostShareURL, hostNodeAddr, clientJoinU
 	defer c.Close()
 
 	remoteInputCh, remoteOutputCh := c.InputOutput()
-	remoteScanner := scanner(remoteOutputCh)
+	deadlineAt := time.Now().Add(10 * time.Second)
+	deadline := time.NewTimer(time.Until(deadlineAt))
+	defer deadline.Stop()
+	var pending, lastSize string
+
+	// Read chunks directly so the deadline also bounds missing output, without
+	// leaving a scanner goroutine blocked after this test closes the client.
+	readLine := func() string {
+		t.Helper()
+		for {
+			if !time.Now().Before(deadlineAt) {
+				t.Fatalf("timed out observing terminal size; last stty size was %q, want 24 120", lastSize)
+			}
+			if line, rest, ok := strings.Cut(pending, "\n"); ok {
+				pending = rest
+				if line = stripShellPrompt(strings.TrimSpace(line)); line != "" {
+					return line
+				}
+				continue
+			}
+			select {
+			case chunk, ok := <-remoteOutputCh:
+				require.True(t, ok, "terminal output closed before observing the requested size")
+				pending += chunk
+			case <-deadline.C:
+				t.Fatalf("timed out waiting for terminal output; last stty size was %q, want 24 120", lastSize)
+			}
+		}
+	}
+	send := func(command string) {
+		t.Helper()
+		select {
+		case remoteInputCh <- command:
+		case <-deadline.C:
+			t.Fatalf("timed out sending %q; last stty size was %q, want 24 120", command, lastSize)
+		}
+	}
+	expect := func(want, message string) {
+		t.Helper()
+		const maxLines = 20
+		var seen []string
+		for i := 0; i < maxLines; i++ {
+			got := readLine()
+			if got == want {
+				return
+			}
+			seen = append(seen, got)
+		}
+		assert.Fail(t, fmt.Sprintf("line %q not seen within %d lines; got %q", want, maxLines, seen), message)
+	}
 
 	// Establish the session before resizing, so this is a mid-session resize
 	// rather than one racing the shell's start.
-	remoteInputCh <- `echo "before-resize"`
-	expectLine(t, remoteScanner, `echo "before-resize"`, "guest should echo before resizing")
-	expectLine(t, remoteScanner, "before-resize", "guest should see output before resizing")
+	send(`echo "before-resize"`)
+	expect(`echo "before-resize"`, "guest should echo before resizing")
+	expect("before-resize", "guest should see output before resizing")
 
 	// Client.Join requests 40x80. Resize to something unmistakably different;
 	// x/crypto's WindowChange takes rows first, the wire format is columns
 	// first, and getting that backwards is a live hazard in this area.
 	require.NoError(t, c.session.WindowChange(24, 120))
 
-	remoteInputCh <- "stty size"
-	expectLine(t, remoteScanner, "stty size", "guest should echo the command")
-	expectLine(t, remoteScanner, "24 120", "host pty should have been resized to 24 rows by 120 columns")
+	// WindowChange has no reply: stdin can reach stty before the host applies
+	// the resize. Take fresh samples until the exact requested size is seen.
+	retry := time.NewTicker(50 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		send("stty size")
+		expect("stty size", "guest should echo the command")
+		lastSize = readLine()
+		if lastSize == "24 120" {
+			return
+		}
+		select {
+		case <-retry.C:
+		case <-deadline.C:
+			t.Fatalf("host pty should have been resized to 24 rows by 120 columns; last stty size was %q", lastSize)
+		}
+	}
 }
 
 // testProxyPreShellRequests sends channel requests before starting the shell.

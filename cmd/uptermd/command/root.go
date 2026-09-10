@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/internal/envexpand"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
@@ -40,7 +41,7 @@ func Root() *cobra.Command {
 	cmd.PersistentFlags().StringP("metric-addr", "", "", "metric server address")
 	cmd.PersistentFlags().BoolP("debug", "", os.Getenv("DEBUG") != "", "debug")
 
-	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode")
+	cmd.PersistentFlags().String("routing", string(routing.ModeEmbedded), "session routing mode: embedded, consul, or auto (consul when consul-url is set, otherwise embedded)")
 	cmd.PersistentFlags().String("consul-url", "", "consul URL for routing mode 'consul'")
 	cmd.PersistentFlags().String("consul-session-ttl", server.DefaultSessionTTL.String(), "consul session TTL for routing mode 'consul'")
 
@@ -120,5 +121,13 @@ func unmarshalFlags(cmd *cobra.Command, opts interface{}) error {
 		}
 	}
 
-	return v.Unmarshal(opts)
+	if err := v.Unmarshal(opts); err != nil {
+		return err
+	}
+
+	// Expand ${VAR} references after decoding rather than via a mapstructure
+	// decode hook: this keeps expansion ordered explicitly after viper's list
+	// splitting, guarantees it runs exactly once per value, and leaves viper's
+	// own decode hooks untouched.
+	return envexpand.ExpandStruct(opts)
 }
