@@ -8,7 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -299,6 +301,53 @@ func TestUpstreamFailureReasonAllowlist(t *testing.T) {
 	require.Equal(t, errUpstreamUnavailable,
 		upstreamFailureReason(errors.New("dial unix /var/folders/x/uptermd123/sshd.sock: connect: connection refused")))
 	require.Equal(t, errUpstreamUnavailable, upstreamFailureReason(nil))
+}
+
+// flakyListener fails Accept a fixed number of times before reporting itself
+// closed, so a test can tell a retry apart from a bail-out.
+type flakyListener struct {
+	failures []error
+	calls    atomic.Int32
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if n := int(l.calls.Add(1)); n <= len(l.failures) {
+		return nil, l.failures[n-1]
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *flakyListener) Close() error   { return nil }
+func (l *flakyListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+// Running out of descriptors clears as open connections drain. Accept reports
+// it as a net.Error that is not a timeout, so a timeout-only check would take
+// the listener -- and with it uptermd -- down over a condition that passes.
+func TestStockSSHAcceptRetriesResourceExhaustion(t *testing.T) {
+	accept := func(errno syscall.Errno) error {
+		return &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", errno)}
+	}
+	ln := &flakyListener{failures: []error{accept(syscall.EMFILE), accept(syscall.ENFILE), accept(syscall.ENOBUFS)}}
+	mp, _ := newTestMetrics(t)
+	p := &SSHRouting{MetricsProvider: mp}
+
+	require.ErrorIs(t, p.Serve(ln), net.ErrClosed)
+	require.Equal(t, int32(len(ln.failures)+1), ln.calls.Load(),
+		"every recoverable accept failure should be retried, not returned")
+}
+
+func TestRecoverableAcceptErrors(t *testing.T) {
+	syscallErr := func(errno syscall.Errno) error {
+		return &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", errno)}
+	}
+	for _, errno := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM} {
+		require.True(t, isRecoverableAcceptError(syscallErr(errno)), errno)
+	}
+	require.True(t, isRecoverableAcceptError(&net.OpError{Op: "accept", Err: os.ErrDeadlineExceeded}))
+	// A closed or otherwise broken listener never recovers by retrying.
+	require.False(t, isRecoverableAcceptError(net.ErrClosed))
+	require.False(t, isRecoverableAcceptError(syscallErr(syscall.EINVAL)))
+	require.False(t, isRecoverableAcceptError(errors.New("boom")))
 }
 
 func TestHandshakeTimeoutValidation(t *testing.T) {

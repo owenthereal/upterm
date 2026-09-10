@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/version"
@@ -50,6 +51,23 @@ func upstreamFailureReason(err error) error {
 	}
 }
 
+// isRecoverableAcceptError reports whether Accept is worth retrying. A timeout
+// comes from a deadline set on a wrapped listener; the rest are resource
+// exhaustion, which clears as open connections drain and which taking the
+// daemon down would only make worse. Go reports these as Temporary, but that
+// method is deprecated and ill-defined, so match the errno values directly.
+// Anything else means the listener itself is gone and Serve must return.
+func isRecoverableAcceptError(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.ENOMEM)
+}
+
 func (p *SSHRouting) serveStock(ln net.Listener) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mux.Lock()
@@ -74,10 +92,9 @@ func (p *SSHRouting) serveStock(ln net.Listener) error {
 			if ctx.Err() != nil {
 				return ErrListnerClosed
 			}
-			// A temporary accept error must not take the whole listener down:
+			// A recoverable accept error must not take the whole listener down:
 			// returning here fails the run.Group actor and terminates uptermd.
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if isRecoverableAcceptError(err) {
 				if retryDelay == 0 {
 					retryDelay = 5 * time.Millisecond
 				} else {
