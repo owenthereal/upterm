@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync/atomic"
 	"time"
 
 	gssh "charm.land/ssh"
@@ -159,10 +160,76 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	return g.Run()
 }
 
-// forceCommandDrainTimeout bounds how long a forced command's exit waits for its
-// output to finish reaching the guest. Flushing a pty buffer takes microseconds;
-// this only caps the case where something else is holding the pty open.
-const forceCommandDrainTimeout = 2 * time.Second
+const (
+	// forceCommandDrainIdle is how long a forced command's exit waits for more
+	// output after the last byte was read. EOF is not a portable signal here:
+	// Windows' ConPTY only reports EOF once the pty is closed, and deferring
+	// that close is the entire point of the drain, so "nothing has arrived for
+	// a while" is what has to stand in for it there.
+	forceCommandDrainIdle = 100 * time.Millisecond
+
+	// forceCommandDrainTimeout caps the drain overall, so a command that exits
+	// while a background child keeps writing cannot hold the session open.
+	forceCommandDrainTimeout = 2 * time.Second
+)
+
+// activityReader records when output was last seen so the exit path can tell
+// "still streaming" from "nothing more is coming".
+type activityReader struct {
+	r    io.Reader
+	last atomic.Int64 // unix nanos
+}
+
+func newActivityReader(r io.Reader) *activityReader {
+	a := &activityReader{r: r}
+	a.touch()
+	return a
+}
+
+func (a *activityReader) touch() { a.last.Store(time.Now().UnixNano()) }
+
+func (a *activityReader) idleFor() time.Duration {
+	return time.Since(time.Unix(0, a.last.Load()))
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.touch()
+	}
+	return n, err
+}
+
+// drainForceCommandOutput holds the forced command's exit until its output has
+// reached the guest: until the reader reports EOF, or until nothing has arrived
+// for forceCommandDrainIdle, whichever happens first.
+func drainForceCommandOutput(logger *slog.Logger, output *activityReader, drained, done <-chan struct{}) {
+	// Start the idle window now rather than at construction. The command may
+	// have run for a while before exiting, and a stale timestamp would read as
+	// "idle" immediately and skip the drain entirely.
+	output.touch()
+
+	deadline := time.NewTimer(forceCommandDrainTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(forceCommandDrainIdle / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-drained:
+			return
+		case <-done:
+			return
+		case <-deadline.C:
+			logger.Warn("timed out draining forced command output", "timeout", forceCommandDrainTimeout)
+			return
+		case <-ticker.C:
+			if output.idleFor() >= forceCommandDrainIdle {
+				return
+			}
+		}
+	}
+}
 
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
@@ -287,11 +354,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// a clean exit with no output at all. Measured on Linux, that lost the
 		// output roughly one run in ten.
 		outputDrained := make(chan struct{})
+		output := newActivityReader(uio.NewContextReader(ctx, ptmx))
 		{
 			// reattach output
 			g.Add(func() error {
 				defer close(outputDrained)
-				_, err := io.Copy(sess, uio.NewContextReader(ctx, ptmx))
+				_, err := io.Copy(sess, output)
 				return ptyError(err)
 			}, func(err error) {
 				cancel()
@@ -305,15 +373,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 				// Hold this actor open until the output is drained, so the
 				// interrupts above cannot close the pty out from under the copy.
-				// The wait is bounded: a command can exit while a background child
-				// keeps the pty's slave side open, and hanging the session on that
-				// would be a worse failure than the one being fixed.
-				select {
-				case <-outputDrained:
-				case <-ctx.Done():
-				case <-time.After(forceCommandDrainTimeout):
-					h.logger.Warn("timed out draining forced command output", "timeout", forceCommandDrainTimeout)
-				}
+				drainForceCommandOutput(h.logger, output, outputDrained, ctx.Done())
 
 				return err
 			}, func(err error) {
