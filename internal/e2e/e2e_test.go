@@ -221,8 +221,8 @@ func extractSSHCommand(output string) string {
 	// Remove newlines/extra spaces caused by terminal wrapping
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 
-	// Match ssh command with optional -p port
-	re := regexp.MustCompile(`SSH:\s*(ssh\s+\S+(?:\s+-p\s+\d+)?)`)
+	// Preserve the quoted WebSocket ProxyCommand and optional SSH port.
+	re := regexp.MustCompile(`SSH:\s*(ssh\s+(?:-o\s+ProxyCommand='[^']+'\s+)?\S+(?:\s+-p\s+\d+)?)`)
 	matches := re.FindStringSubmatch(clean)
 	if len(matches) < 2 {
 		return ""
