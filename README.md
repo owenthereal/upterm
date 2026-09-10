@@ -43,6 +43,12 @@ scoop install upterm
 
 `upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/owenthereal/upterm/releases) and put it in your executable path.
 
+### Go
+
+```console
+go install github.com/owenthereal/upterm@latest
+```
+
 ### From source
 
 ```console

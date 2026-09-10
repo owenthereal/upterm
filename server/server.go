@@ -31,21 +31,22 @@ const (
 )
 
 type Opt struct {
-	SSHAddr             string       `mapstructure:"ssh-addr"`
-	SSHProxyProtocol    bool         `mapstructure:"ssh-proxy-protocol"`
-	WSAddr              string       `mapstructure:"ws-addr"`
-	NodeAddr            string       `mapstructure:"node-addr"`
-	AuthorizedKeysFiles []string     `mapstructure:"authorized-keys"`
-	PrivateKeys         []string     `mapstructure:"private-key"`
-	Hostnames           []string     `mapstructure:"hostname"`
-	Network             string       `mapstructure:"network"`
-	NetworkOpts         []string     `mapstructure:"network-opt"`
-	MetricAddr          string       `mapstructure:"metric-addr"`
-	Debug               bool         `mapstructure:"debug"`
-	Routing             routing.Mode `mapstructure:"routing"`
-	ConsulURL           string       `mapstructure:"consul-url"`
-	ConsulSessionTTL    string       `mapstructure:"consul-session-ttl"`
-	SentryDSN           string       `mapstructure:"sentry-dsn"`
+	HandshakeTimeout    time.Duration `mapstructure:"handshake-timeout"`
+	SSHAddr             string        `mapstructure:"ssh-addr"`
+	SSHProxyProtocol    bool          `mapstructure:"ssh-proxy-protocol"`
+	WSAddr              string        `mapstructure:"ws-addr"`
+	NodeAddr            string        `mapstructure:"node-addr"`
+	AuthorizedKeysFiles []string      `mapstructure:"authorized-keys"`
+	PrivateKeys         []string      `mapstructure:"private-key"`
+	Hostnames           []string      `mapstructure:"hostname"`
+	Network             string        `mapstructure:"network"`
+	NetworkOpts         []string      `mapstructure:"network-opt"`
+	MetricAddr          string        `mapstructure:"metric-addr"`
+	Debug               bool          `mapstructure:"debug"`
+	Routing             routing.Mode  `mapstructure:"routing"`
+	ConsulURL           string        `mapstructure:"consul-url"`
+	ConsulSessionTTL    string        `mapstructure:"consul-session-ttl"`
+	SentryDSN           string        `mapstructure:"sentry-dsn"`
 }
 
 // ResolvedRouting returns the effective routing mode. It resolves ModeAuto
@@ -67,6 +68,9 @@ func (opt *Opt) ResolvedRouting() routing.Mode {
 
 // Validate validates the server configuration
 func (opt *Opt) Validate() error {
+	if opt.HandshakeTimeout < 0 {
+		return fmt.Errorf("handshake-timeout must not be negative")
+	}
 	// Basic validation
 	if opt.SSHAddr == "" {
 		return fmt.Errorf("ssh-addr is required")
@@ -251,6 +255,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		}
 
 		s := &Server{
+			HandshakeTimeout:    opt.HandshakeTimeout,
 			NodeAddr:            nodeAddr,
 			AuthorizedKeysFiles: opt.AuthorizedKeysFiles,
 			HostSigners:         hostSigners,
@@ -298,6 +303,7 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
+	HandshakeTimeout    time.Duration
 	NodeAddr            string
 	AuthorizedKeysFiles []string
 	HostSigners         []ssh.Signer
@@ -382,6 +388,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.With("component", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
+				HandshakeTimeout:    s.HandshakeTimeout,
 				HostSigners:         s.HostSigners,
 				Signers:             s.Signers,
 				NodeAddr:            s.NodeAddr,
@@ -535,4 +542,42 @@ func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
 		logger.Info("dialing neighbour")
 		return cd.NeighbourDialer.Dial(id)
 	}
+}
+
+type contextConnDialer interface {
+	DialContext(context.Context, *api.Identifier) (net.Conn, error)
+}
+
+func (d tcpConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	return (&net.Dialer{Timeout: tcpDialTimeout}).DialContext(ctx, "tcp", id.NodeAddr)
+}
+
+func (cd sidewayConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	if id.Type == api.Identifier_HOST {
+		d, ok := cd.SSHDDialListener.(interface {
+			DialContext(context.Context) (net.Conn, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("sshd dialer does not support cancellation")
+		}
+		return d.DialContext(ctx)
+	}
+	host, port, err := net.SplitHostPort(id.NodeAddr)
+	if err != nil {
+		return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, err)
+	}
+	if cd.NodeAddr == net.JoinHostPort(host, port) {
+		d, ok := cd.SessionDialListener.(interface {
+			DialContext(context.Context, string) (net.Conn, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("session dialer does not support cancellation")
+		}
+		return d.DialContext(ctx, id.Id)
+	}
+	d, ok := cd.NeighbourDialer.(contextConnDialer)
+	if !ok {
+		return nil, fmt.Errorf("neighbour dialer does not support cancellation")
+	}
+	return d.DialContext(ctx, id)
 }

@@ -24,6 +24,7 @@ func Root() *cobra.Command {
 		RunE:  rootCmd.RunE,
 	}
 
+	cmd.PersistentFlags().Duration("handshake-timeout", server.DefaultHandshakeTimeout, "SSH establishment budget (half downstream, half upstream dial and handshake)")
 	cmd.PersistentFlags().String("config", "", "server config")
 
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")
