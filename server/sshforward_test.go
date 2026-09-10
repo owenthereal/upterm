@@ -39,7 +39,7 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	type result struct {
 		peer sshPeer
 		err  error
@@ -394,7 +394,7 @@ func TestSSHRejectChannelsAfterHostRejectsKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	hostDone := make(chan error, 1)
 	go func() {
 		conn, err := listener.Accept()
@@ -402,7 +402,7 @@ func TestSSHRejectChannelsAfterHostRejectsKey(t *testing.T) {
 			hostDone <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 		config := &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
 			return nil, errors.New("guest key rejected by host")
@@ -415,7 +415,7 @@ func TestSSHRejectChannelsAfterHostRejectsKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	_, _, _, upstreamErr := ssh.NewClientConn(conn, listener.Addr().String(), clientConfig)
 	if upstreamErr == nil {
@@ -535,7 +535,7 @@ func TestSSHForwardOriginCloseWithPendingReply(t *testing.T) {
 	pending := forwardTestReceive(t, br)
 	// Releasing the reply only in cleanup also lets the old implementation exit
 	// after the assertion fails; a successful run cannot depend on this reply.
-	defer pending.Reply(false, nil)
+	defer func() { _ = pending.Reply(false, nil) }()
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
