@@ -191,6 +191,85 @@ func TestStockSSHUpstreamFailure(t *testing.T) {
 	}
 }
 
+// A peer whose downstream authentication succeeded must always learn why the
+// upstream did not, including when the failure was the upstream budget expiring
+// — the case where the reporting path used to inherit an already-spent context.
+func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
+	// An unaccepted memory listener makes DialContext block until the stage
+	// deadline, so this exercises the timeout path rather than a fast refusal.
+	stalledDialer := func(t *testing.T) connDialer {
+		t.Helper()
+		network := &MemoryProvider{}
+		require.NoError(t, network.SetOpts(nil))
+		ln, err := network.SSHD().Listen()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ln.Close() })
+		return sidewayConnDialer{SSHDDialListener: network.SSHD()}
+	}
+
+	t.Run("host global request", func(t *testing.T) {
+		_, addr, _, signer := stockTestProxy(t, time.Second, stalledDialer(t))
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		// A host opens no channel of its own; it speaks first with a global
+		// request and reports the failure reply body verbatim.
+		ok, body, err := client.SendRequest("host-first-global", true, nil)
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Equal(t, errUpstreamUnavailable.Error(), string(body))
+	})
+
+	t.Run("client channel open", func(t *testing.T) {
+		_, addr, _, signer := stockTestProxy(t, time.Second, stalledDialer(t))
+		_, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		_, err = client.NewSession()
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, err, &rejection)
+		require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
+	})
+
+	// Dial errors name internal socket paths and node addresses; upstream
+	// handshake errors are generic and worth passing through unchanged.
+	t.Run("handshake reason passes through", func(t *testing.T) {
+		upstream, _ := stockTestUpstream(t, true, TestPrivateKeyContent)
+		_, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: upstream})
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		ok, body, err := client.SendRequest("host-first-global", true, nil)
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Contains(t, string(body), "unable to authenticate")
+	})
+}
+
+func TestHandshakeTimeoutValidation(t *testing.T) {
+	require.NoError(t, validateHandshakeTimeout(0)) // selects the default
+	require.NoError(t, validateHandshakeTimeout(DefaultHandshakeTimeout))
+	require.NoError(t, validateHandshakeTimeout(90*time.Second))
+	require.Error(t, validateHandshakeTimeout(-time.Second))
+	// Half of this would outlive the user certificate minted while authenticating.
+	require.Error(t, validateHandshakeTimeout(maxHandshakeTimeout))
+	require.Error(t, validateHandshakeTimeout(5*time.Minute))
+
+	// Operator config adds a floor: a budget too small to finish a handshake
+	// would otherwise fail every connection with no explanation.
+	base := Opt{SSHAddr: "127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", Routing: routing.ModeEmbedded}
+	valid := base
+	valid.HandshakeTimeout = minHandshakeTimeout
+	require.NoError(t, valid.Validate())
+	tooSmall := base
+	tooSmall.HandshakeTimeout = time.Millisecond
+	require.ErrorContains(t, tooSmall.Validate(), "handshake-timeout must be at least")
+	unset := base
+	require.NoError(t, unset.Validate())
+}
+
 func TestStockSSHKeyGatesAndSelection(t *testing.T) {
 	upstream, peers := stockTestUpstream(t, false, TestPrivateKeyContent)
 	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))

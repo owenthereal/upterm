@@ -68,8 +68,12 @@ func (opt *Opt) ResolvedRouting() routing.Mode {
 
 // Validate validates the server configuration
 func (opt *Opt) Validate() error {
-	if opt.HandshakeTimeout < 0 {
-		return fmt.Errorf("handshake-timeout must not be negative")
+	if err := validateHandshakeTimeout(opt.HandshakeTimeout); err != nil {
+		return err
+	}
+	// Operator config gets the stricter floor; 0 still selects the default.
+	if opt.HandshakeTimeout > 0 && opt.HandshakeTimeout < minHandshakeTimeout {
+		return fmt.Errorf("handshake-timeout must be at least %s: half of it must cover a full SSH handshake", minHandshakeTimeout)
 	}
 	// Basic validation
 	if opt.SSHAddr == "" {
@@ -475,8 +479,14 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	return g.Run()
 }
 
+// connDialer reaches the node or socket an identifier resolves to. DialContext
+// is required, not optional: the SSH front door bounds upstream establishment
+// with it, and a dialer that only offers Dial would pass every Dial-based path
+// (the WebSocket proxy, sshd) and then fail every SSH connection after
+// downstream authentication had already succeeded.
 type connDialer interface {
 	Dial(id *api.Identifier) (net.Conn, error)
+	DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error)
 }
 
 type sshProxyDialer struct {
@@ -485,28 +495,42 @@ type sshProxyDialer struct {
 }
 
 func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: tcpDialTimeout}
+
 	// If it's a host request, dial to SSHProxy in the same node.
 	// Otherwise, dial to the specified SSHProxy.
 	if id.Type == api.Identifier_HOST {
 		d.Logger.With("host", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy sshd")
-		return net.DialTimeout("tcp", d.sshProxyAddr, tcpDialTimeout)
+		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
 
 	d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr, "addr", id.NodeAddr).Info("dialing sshproxy session")
-	return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
+	return dialer.DialContext(ctx, "tcp", id.NodeAddr)
 }
 
 type tcpConnDialer struct {
 }
 
 func (d tcpConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
-	return net.DialTimeout("tcp", id.NodeAddr, tcpDialTimeout)
+	return d.DialContext(context.Background(), id)
+}
+
+func (d tcpConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	return (&net.Dialer{Timeout: tcpDialTimeout}).DialContext(ctx, "tcp", id.NodeAddr)
 }
 
 type wsConnDialer struct {
 }
 
 func (d wsConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d wsConnDialer) DialContext(_ context.Context, id *api.Identifier) (net.Conn, error) {
 	u, err := url.Parse("ws://" + id.NodeAddr)
 	if err != nil {
 		return nil, err
@@ -526,65 +550,42 @@ type sidewayConnDialer struct {
 }
 
 func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
-	logger := cd.Logger.With("session", id.Id, "node", cd.NodeAddr, "type", api.Identifier_Type_name[int32(id.Type)])
+	return cd.DialContext(context.Background(), id)
+}
+
+// DialContext makes the routing decision, so it owns the logging for it. The
+// SSH front door only ever calls this path, and these three lines are the
+// breadcrumb that tells a local dial from a cross-node hop.
+func (cd sidewayConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	logger := cd.logger().With("session", id.Id, "node", cd.NodeAddr, "type", api.Identifier_Type_name[int32(id.Type)])
 
 	if id.Type == api.Identifier_HOST {
 		logger.Info("dialing sshd")
-		return cd.SSHDDialListener.Dial()
-	} else {
-		host, port, ee := net.SplitHostPort(id.NodeAddr)
-		if ee != nil {
-			return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, ee)
-		}
-		addr := net.JoinHostPort(host, port)
-		logger = logger.With("addr", addr)
-
-		// if current node is matching, dial to session.
-		// Otherwise, dial to neighbour node
-		if cd.NodeAddr == addr {
-			logger.Info("dialing session")
-			return cd.SessionDialListener.Dial(id.Id)
-		}
-
-		logger.Info("dialing neighbour")
-		return cd.NeighbourDialer.Dial(id)
+		return cd.SSHDDialListener.DialContext(ctx)
 	}
-}
 
-type contextConnDialer interface {
-	DialContext(context.Context, *api.Identifier) (net.Conn, error)
-}
-
-func (d tcpConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
-	return (&net.Dialer{Timeout: tcpDialTimeout}).DialContext(ctx, "tcp", id.NodeAddr)
-}
-
-func (cd sidewayConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
-	if id.Type == api.Identifier_HOST {
-		d, ok := cd.SSHDDialListener.(interface {
-			DialContext(context.Context) (net.Conn, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("sshd dialer does not support cancellation")
-		}
-		return d.DialContext(ctx)
-	}
 	host, port, err := net.SplitHostPort(id.NodeAddr)
 	if err != nil {
 		return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, err)
 	}
-	if cd.NodeAddr == net.JoinHostPort(host, port) {
-		d, ok := cd.SessionDialListener.(interface {
-			DialContext(context.Context, string) (net.Conn, error)
-		})
-		if !ok {
-			return nil, fmt.Errorf("session dialer does not support cancellation")
-		}
-		return d.DialContext(ctx, id.Id)
+	addr := net.JoinHostPort(host, port)
+	logger = logger.With("addr", addr)
+
+	// if current node is matching, dial to session.
+	// Otherwise, dial to neighbour node
+	if cd.NodeAddr == addr {
+		logger.Info("dialing session")
+		return cd.SessionDialListener.DialContext(ctx, id.Id)
 	}
-	d, ok := cd.NeighbourDialer.(contextConnDialer)
-	if !ok {
-		return nil, fmt.Errorf("neighbour dialer does not support cancellation")
+
+	logger.Info("dialing neighbour")
+	return cd.NeighbourDialer.DialContext(ctx, id)
+}
+
+// logger tolerates the zero value, which tests construct directly.
+func (cd sidewayConnDialer) logger() *slog.Logger {
+	if cd.Logger == nil {
+		return slog.New(slog.DiscardHandler)
 	}
-	return d.DialContext(ctx, id)
+	return cd.Logger
 }

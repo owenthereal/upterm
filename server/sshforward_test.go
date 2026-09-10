@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -555,6 +557,75 @@ func TestSSHForwardOriginCloseWithPendingReply(t *testing.T) {
 	go ssh.DiscardRequests(br2)
 	_ = a2.Close()
 	_ = b2.Close()
+}
+
+// recordingRequestSender stands in for a destination so a test can hold one
+// send open and observe exactly what want_reply each request carried.
+type recordingRequestSender struct {
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	names   []string
+	awaited map[string]bool
+}
+
+func (s *recordingRequestSender) SendRequest(name string, wantReply bool, _ []byte) (bool, []byte, error) {
+	s.mu.Lock()
+	s.names = append(s.names, name)
+	if s.awaited == nil {
+		s.awaited = map[string]bool{}
+	}
+	s.awaited[name] = wantReply
+	first := len(s.names) == 1
+	s.mu.Unlock()
+	if first {
+		close(s.entered)
+		<-s.release
+	}
+	return true, nil, nil
+}
+
+// Once the source is gone its reply cannot be delivered, so the tail behind it
+// goes out without want_reply. That is what removes the need to force the
+// sender free, and with it the CLOSE that used to race the request write.
+func TestSSHForwardTailAfterSourceCloseKeepsRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		sender := &recordingRequestSender{entered: make(chan struct{}), release: make(chan struct{})}
+		incoming := make(chan *ssh.Request)
+		aborts := make(chan struct{}, 1)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sshForwarder{ctx: ctx, cancel: cancel}.requests(
+				sender, incoming, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
+		}()
+
+		// Occupy the serial sender, so everything after this is queued rather
+		// than dispatched while the source is still connected.
+		incoming <- &ssh.Request{Type: "blocking"}
+		<-sender.entered
+		incoming <- &ssh.Request{Type: "tail"}
+		incoming <- &ssh.Request{Type: "unanswerable", WantReply: true}
+		close(incoming)
+		synctest.Wait() // the forwarder has observed the closed ingress
+		close(sender.release)
+		<-done
+
+		if got := sender.names; !slices.Equal(got, []string{"blocking", "tail", "unanswerable"}) {
+			t.Fatalf("requests reaching the destination: %q", got)
+		}
+		if sender.awaited["unanswerable"] {
+			t.Fatal("waited for a reply the departed source could not receive")
+		}
+		select {
+		case <-aborts:
+			t.Fatal("forced the sender free when no reply was awaited")
+		default:
+		}
+	})
 }
 
 func TestSSHForwardRequestQueueOverflow(t *testing.T) {

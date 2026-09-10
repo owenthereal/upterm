@@ -39,14 +39,21 @@ type NetworkProvider interface {
 
 type NetworkOptions map[string]string
 
+// DialContext is part of these interfaces rather than an optional capability
+// discovered by type assertion: the SSH front door bounds upstream
+// establishment with it, so a provider that offered only Dial would compile,
+// serve every Dial-based path, and then fail every SSH connection after
+// downstream authentication had already succeeded.
 type SessionDialListener interface {
 	Listen(sesisonID string) (net.Listener, error)
 	Dial(sessionID string) (net.Conn, error)
+	DialContext(ctx context.Context, sessionID string) (net.Conn, error)
 }
 
 type SSHDDialListener interface {
 	Listen() (net.Listener, error)
 	Dial() (net.Conn, error)
+	DialContext(ctx context.Context) (net.Conn, error)
 }
 
 type MemoryProvider struct {
@@ -86,7 +93,13 @@ func (l *memorySSHDDialListener) Listen() (net.Listener, error) {
 }
 
 func (l *memorySSHDDialListener) Dial() (net.Conn, error) {
-	return l.memln.Dial("mem", l.socketPath)
+	return l.DialContext(context.Background())
+}
+
+// Context-aware dialing bounds establishment even when a memory listener has
+// not accepted yet.
+func (l *memorySSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
+	return l.memln.DialContext(ctx, "mem", l.socketPath)
 }
 
 type memorySessionDialListener struct {
@@ -98,7 +111,11 @@ func (d *memorySessionDialListener) Listen(sessionID string) (net.Listener, erro
 }
 
 func (d *memorySessionDialListener) Dial(sessionID string) (net.Conn, error) {
-	return d.memln.Dial("mem", sessionID)
+	return d.DialContext(context.Background(), sessionID)
+}
+
+func (d *memorySessionDialListener) DialContext(ctx context.Context, sessionID string) (net.Conn, error) {
+	return d.memln.DialContext(ctx, "mem", sessionID)
 }
 
 type UnixProvider struct {
@@ -155,7 +172,11 @@ func (d *unixSSHDDialListener) Listen() (net.Listener, error) {
 }
 
 func (d *unixSSHDDialListener) Dial() (net.Conn, error) {
-	return net.Dial("unix", d.SocketPath)
+	return d.DialContext(context.Background())
+}
+
+func (d *unixSSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", d.SocketPath)
 }
 
 type unixSessionDialListener struct {
@@ -167,24 +188,13 @@ func (d *unixSessionDialListener) Listen(sessionID string) (net.Listener, error)
 }
 
 func (d *unixSessionDialListener) Dial(sessionID string) (net.Conn, error) {
-	return net.Dial("unix", d.socketPath(sessionID))
+	return d.DialContext(context.Background(), sessionID)
+}
+
+func (d *unixSessionDialListener) DialContext(ctx context.Context, sessionID string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", d.socketPath(sessionID))
 }
 
 func (d *unixSessionDialListener) socketPath(sessionID string) string {
 	return filepath.Join(d.SocketDir, sessionID+".sock")
-}
-
-// Context-aware dialing bounds establishment even when a memory listener has
-// not accepted yet. The original Dial methods remain available to embedders.
-func (l *memorySSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
-	return l.memln.DialContext(ctx, "mem", l.socketPath)
-}
-func (d *memorySessionDialListener) DialContext(ctx context.Context, id string) (net.Conn, error) {
-	return d.memln.DialContext(ctx, "mem", id)
-}
-func (d *unixSSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "unix", d.SocketPath)
-}
-func (d *unixSessionDialListener) DialContext(ctx context.Context, id string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "unix", d.socketPath(id))
 }

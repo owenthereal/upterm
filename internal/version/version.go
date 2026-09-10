@@ -21,15 +21,42 @@ package version
 import (
 	"fmt"
 	"regexp"
+	"runtime/debug"
+	"strings"
 
 	"github.com/hashicorp/go-version"
 	"github.com/owenthereal/upterm/upterm"
 )
 
+// devVersion is what Version holds when no build-time version is available.
+const devVersion = "0.0.0+dev"
+
 // Version is the semantic version of upterm/uptermd
 // This is the single source of truth for both client and server versions
 // Can be overridden at build time with ldflags
-var Version = "0.0.0+dev"
+var Version = devVersion
+
+func init() {
+	if Version != devVersion {
+		return // set at build time via ldflags
+	}
+	// `go install github.com/owenthereal/upterm@latest` applies no ldflags, so
+	// the module version stamped into the binary is the only version there is.
+	// Without this those builds report 0.0.0+dev, which never matches a release
+	// tag, so `upterm upgrade` re-downloads on every invocation and bug reports
+	// carry no usable version.
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	v := strings.TrimPrefix(bi.Main.Version, "v")
+	// Current() panics on an unparseable Version, and a source build reports
+	// "(devel)", so only adopt something that parses.
+	if _, err := Parse(v); err != nil {
+		return
+	}
+	Version = v
+}
 
 // Build-time variables set via ldflags
 var (
