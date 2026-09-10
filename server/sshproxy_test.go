@@ -200,7 +200,7 @@ func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {
 }
 
 // fakeConnMetadata is a minimal ssh.ConnMetadata stub for unit-testing
-// authPiper.checkAuthorizedKeys, which only consults ClientVersion.
+// proxyAuth.checkAuthorizedKeys, which only consults ClientVersion.
 type fakeConnMetadata struct {
 	clientVersion string
 }
@@ -264,7 +264,7 @@ func Test_loadAuthorizedKeys(t *testing.T) {
 	})
 }
 
-func Test_authPiper_checkAuthorizedKeys(t *testing.T) {
+func Test_proxyAuth_checkAuthorizedKeys(t *testing.T) {
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 
 	hostSigner, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
@@ -345,7 +345,7 @@ func Test_authPiper_checkAuthorizedKeys(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := authPiper{
+			a := proxyAuth{
 				authorizedKeys: tc.keys,
 				Logger:         logger,
 			}

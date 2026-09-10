@@ -31,7 +31,6 @@ const (
 )
 
 type Opt struct {
-	StockSSH            bool          `mapstructure:"stock-ssh"`
 	HandshakeTimeout    time.Duration `mapstructure:"handshake-timeout"`
 	SSHAddr             string        `mapstructure:"ssh-addr"`
 	SSHProxyProtocol    bool          `mapstructure:"ssh-proxy-protocol"`
@@ -247,7 +246,6 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		}
 
 		s := &Server{
-			StockSSH:            opt.StockSSH,
 			HandshakeTimeout:    opt.HandshakeTimeout,
 			NodeAddr:            nodeAddr,
 			AuthorizedKeysFiles: opt.AuthorizedKeysFiles,
@@ -296,7 +294,6 @@ func parseNetworkOpt(opts []string) NetworkOptions {
 }
 
 type Server struct {
-	StockSSH            bool
 	HandshakeTimeout    time.Duration
 	NodeAddr            string
 	AuthorizedKeysFiles []string
@@ -382,7 +379,6 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				Logger:              s.Logger.With("component", "ssh-conn-dialer"),
 			}
 			sp := &sshProxy{
-				StockSSH:            s.StockSSH,
 				HandshakeTimeout:    s.HandshakeTimeout,
 				HostSigners:         s.HostSigners,
 				Signers:             s.Signers,

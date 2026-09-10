@@ -15,7 +15,7 @@ import (
 func (p *SSHRouting) serveStock(ln net.Listener) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mux.Lock()
-	p.listener, p.stockCancel = ln, cancel
+	p.listener, p.cancel = ln, cancel
 	select {
 	case <-p.getDoneChanLocked():
 		cancel()
@@ -73,7 +73,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	// x/crypto reuses a cached unsigned query. Never choose the last offered key.
 	prepared := make(map[*ssh.Permissions]*ssh.ClientConfig)
 	cfg := &ssh.ServerConfig{ServerVersion: version.ServerSSHVersion(), PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		upstream, err := p.AuthPiper.prepare(meta, key)
+		upstream, err := p.Auth.prepare(meta, key)
 		if err != nil {
 			return nil, err
 		}
@@ -103,7 +103,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	peer := sshPeer{downstream, channels, requests}
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
-	upstreamRaw, err := p.AuthPiper.dialUpstreamContext(upstreamCtx, downstream)
+	upstreamRaw, err := p.Auth.dialUpstreamContext(upstreamCtx, downstream)
 	if err == nil {
 		defer func() { _ = upstreamRaw.Close() }()
 		stopUpstream := context.AfterFunc(ctx, func() { _ = upstreamRaw.Close() })

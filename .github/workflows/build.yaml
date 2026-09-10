@@ -25,13 +25,7 @@ jobs:
       - name: Compile
         run: make install
   test-macos:
-    name: Test (macOS) (stock SSH ${{ matrix.stock-ssh }})
-    strategy:
-      fail-fast: false
-      matrix:
-        stock-ssh: [false, true]
-    env:
-      UPTERMD_STOCK_SSH: ${{ matrix.stock-ssh }}
+    name: Test (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -46,13 +40,7 @@ jobs:
           BASH_SILENCE_DEPRECATION_WARNING: 1
 
   test-ubuntu:
-    name: Test (Ubuntu + Consul) (stock SSH ${{ matrix.stock-ssh }})
-    strategy:
-      fail-fast: false
-      matrix:
-        stock-ssh: [false, true]
-    env:
-      UPTERMD_STOCK_SSH: ${{ matrix.stock-ssh }}
+    name: Test (Ubuntu + Consul)
     runs-on: ubuntu-latest
     services:
       consul:
@@ -77,13 +65,7 @@ jobs:
           BASH_SILENCE_DEPRECATION_WARNING: 1
 
   test-windows:
-    name: Test (Windows) (stock SSH ${{ matrix.stock-ssh }})
-    strategy:
-      fail-fast: false
-      matrix:
-        stock-ssh: [false, true]
-    env:
-      UPTERMD_STOCK_SSH: ${{ matrix.stock-ssh }}
+    name: Test (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -108,11 +90,7 @@ jobs:
         run: make vet
 
   test-e2e:
-    name: E2E Tests (stock SSH ${{ matrix.stock-ssh }})
-    strategy:
-      fail-fast: false
-      matrix:
-        stock-ssh: [false, true]
+    name: E2E Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -137,7 +115,7 @@ jobs:
       - name: Build and start uptermd
         run: |
           go build -o /tmp/uptermd/uptermd ./cmd/uptermd
-          /tmp/uptermd/uptermd --stock-ssh=${{ matrix.stock-ssh }} --ssh-addr 127.0.0.1:2222 --private-key /tmp/uptermd/id_ed25519 > /tmp/uptermd/uptermd.log 2>&1 &
+          /tmp/uptermd/uptermd --ssh-addr 127.0.0.1:2222 --private-key /tmp/uptermd/id_ed25519 > /tmp/uptermd/uptermd.log 2>&1 &
           echo "Waiting for uptermd to start..."
           for i in $(seq 1 30); do
             if nc -z 127.0.0.1 2222 2>/dev/null; then

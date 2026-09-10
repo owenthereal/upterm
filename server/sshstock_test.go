@@ -39,7 +39,7 @@ func stockTestProxy(t *testing.T, timeout time.Duration, dialer connDialer, opti
 	require.NoError(t, err)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mp, reg := newTestMetrics(t)
-	proxy := &sshProxy{StockSSH: true, HandshakeTimeout: timeout, HostSigners: []ssh.Signer{signer}, Signers: []ssh.Signer{signer}, SessionManager: newEmbeddedSessionManager(logger), NodeAddr: "127.0.0.1:2222", ConnDialer: dialer, Logger: logger, MetricsProvider: mp}
+	proxy := &sshProxy{HandshakeTimeout: timeout, HostSigners: []ssh.Signer{signer}, Signers: []ssh.Signer{signer}, SessionManager: newEmbeddedSessionManager(logger), NodeAddr: "127.0.0.1:2222", ConnDialer: dialer, Logger: logger, MetricsProvider: mp}
 	for _, option := range options {
 		option(proxy)
 	}
@@ -366,7 +366,7 @@ func TestStockSSHShutdownActiveAndUpstreamHandshake(t *testing.T) {
 
 func TestStockSSHShutdownBeforeServe(t *testing.T) {
 	mp, _ := newTestMetrics(t)
-	p := &SSHRouting{StockSSH: true, MetricsProvider: mp}
+	p := &SSHRouting{MetricsProvider: mp}
 	require.NoError(t, p.Shutdown())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

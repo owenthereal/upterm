@@ -399,7 +399,6 @@ func (s *Server) start() error {
 
 	s.mu.Lock()
 	s.Server = &server.Server{
-		StockSSH:        os.Getenv("UPTERMD_STOCK_SSH") == "true",
 		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
 		HostSigners:     hostSigners,
 		Signers:         signers,
