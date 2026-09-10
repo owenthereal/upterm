@@ -77,7 +77,8 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
 			// A disconnected source cannot receive an outstanding global reply. Do
 			// not hold up drain completion on that reply, but still drain all channel
 			// buffers before closing the destination transport to release its sender.
-			forwarder.requests(destination.conn, source.requests, finished, nil)
+			// Zero grace: finished only signals drain completion, it writes nothing.
+			forwarder.requests(destination.conn, source.requests, finished, 0, nil)
 		})
 	}
 	var err error
@@ -126,6 +127,15 @@ type sshForwarder struct {
 	cancel context.CancelCauseFunc
 }
 
+// A peer can pipeline channel opens without waiting for confirmation, and each
+// one still awaiting the destination costs a goroutine blocked in OpenChannel,
+// so cap how many opens are outstanding at once. Over the cap opens are refused
+// rather than queued: blocking this loop would stall the mux for every other
+// channel on the connection, and the request path is bounded for the same
+// reason. This bounds opens in progress only — an established channel holds no
+// permit, so the count of live channels stays as unlimited as SSH itself.
+const maxSSHConcurrentChannelOpens = 64
+
 // Once draining starts, stop opening channels and report completion of the
 // accepted channels independently of connection Wait. Keep rejecting incoming
 // opens until transport shutdown so the surviving mux never loses its reader.
@@ -134,6 +144,7 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 	var accepted sshChannelDrain
 	defer workers.Wait()
 	finish := func() { accepted.wait(); close(done) }
+	opens := make(chan struct{}, maxSSHConcurrentChannelOpens)
 	for {
 		select {
 		case <-draining:
@@ -148,7 +159,15 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 				finish()
 				return
 			}
-			workers.Go(func() { f.channel(destination, channel, &accepted) })
+			select {
+			case opens <- struct{}{}:
+			default:
+				_ = channel.Reject(ssh.ResourceShortage, "too many concurrent channel opens")
+				continue
+			}
+			workers.Go(func() {
+				f.channel(destination, channel, &accepted, func() { <-opens })
+			})
 		}
 	}
 }
@@ -180,7 +199,13 @@ func (d *sshChannelDrain) wait() {
 	d.workers.Wait()
 }
 
-func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, accepted *sshChannelDrain) {
+// openDone releases the permit this open holds. It fires as soon as the open
+// resolves either way, so the cap counts opens in progress rather than the
+// channels they establish — a guest holding a channel open must not consume a
+// permit for the life of its session.
+func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, accepted *sshChannelDrain, openDone func()) {
+	openDone = sync.OnceFunc(openDone)
+	defer openDone()
 	// Accept only after the destination accepts, preserving CHANNEL_OPEN_FAILURE.
 	remote, remoteRequests, err := destination.OpenChannel(incoming.ChannelType(), incoming.ExtraData())
 	if err != nil {
@@ -206,6 +231,7 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 		ssh.DiscardRequests(remoteRequests)
 		return
 	}
+	openDone() // established: the channel itself holds no permit
 	localEndpoint := &sshForwardChannel{Channel: local}
 	remoteEndpoint := &sshForwardChannel{Channel: remote}
 	var workers sync.WaitGroup
@@ -230,7 +256,7 @@ type sshForwardChannel struct {
 func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() }, &source.replies)
+	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
 	streams.Wait()
 	// The source may send success and CLOSE back-to-back. Its reply worker
 	// must deliver that success before this direction closes the destination.
@@ -269,34 +295,61 @@ const (
 	maxSSHQueuedRequestBytes = 1 << 20
 )
 
+// sshRequestAbortGrace is how long a destination still has to answer a request
+// whose source has since disappeared, before the sender waiting on that answer
+// is forced free. For a channel direction the release is a CLOSE, and x/crypto
+// offers no way to observe that SendRequest has written its packet, so the
+// grace is also what keeps that CLOSE from overtaking the request it follows.
+// A destination with an answer to give sends it in microseconds.
+const sshRequestAbortGrace = 100 * time.Millisecond
+
+// sshRequestJob carries one request to the serial sender. awaitReply is cleared
+// when the source is already gone: nobody is left to receive the reply, and a
+// send that does not wait for one returns as soon as its packet is written, so
+// the CLOSE that ends the direction cannot overtake it.
+type sshRequestJob struct {
+	request    *ssh.Request
+	awaitReply bool
+}
+
 // requests keeps reading ingress independently of its single serial sender.
 // Closing a transport alone cannot release SendRequest when the mux is stuck
 // delivering an incoming request, so ingress continues draining on cancellation.
-// Source closure can abort an unanswered WantReply through abortPending. For
-// channels it closes the destination channel; for globals it waives waiting for
-// the reply during transport drain. Ordinary request tails still drain in order.
-func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func(), replies *sync.Mutex) {
-	jobs := make(chan *ssh.Request)
+//
+// A source that disappears leaves nobody able to receive a reply. Requests
+// dispatched after that point are sent without awaiting one, so they complete
+// as soon as they are written and the whole tail still drains in order. Only a
+// reply already being awaited when the source went away needs abortPending,
+// after sshRequestAbortGrace: for channels it closes the destination channel,
+// for globals it waives waiting for the reply during transport drain. Pass a
+// zero grace where abortPending writes nothing to the wire.
+func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func(), grace time.Duration, replies *sync.Mutex) {
+	jobs := make(chan sshRequestJob)
 	completed := make(chan struct{})
 	senderDone := make(chan struct{})
 	go func() {
 		defer close(senderDone)
-		for request := range jobs {
-			if request.WantReply && replies != nil {
+		for job := range jobs {
+			request := job.request
+			locked := job.awaitReply && replies != nil
+			if locked {
 				replies.Lock()
 			}
-			ok, payload, err := destination.SendRequest(request.Type, request.WantReply, request.Payload)
+			ok, payload, err := destination.SendRequest(request.Type, job.awaitReply, request.Payload)
 			if err != nil {
 				ok, payload = false, nil
 			}
 			// Clear the pending-reply state before replying to the source: once
 			// it receives success, it may immediately send exit-status and CLOSE.
 			completed <- struct{}{}
-			if request.WantReply {
+			// Only a reply that was actually awaited can be relayed: once the
+			// source is gone the request goes out without want_reply, and there
+			// is no answer to pass back and nobody left to receive one.
+			if job.awaitReply {
 				_ = request.Reply(ok, payload)
-				if replies != nil {
-					replies.Unlock()
-				}
+			}
+			if locked {
+				replies.Unlock()
 			}
 		}
 	}()
@@ -304,21 +357,41 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 
 	var queue []*ssh.Request
 	var active *ssh.Request
+	awaitingReply := false
 	queuedBytes := 0
 	cancelled := f.ctx.Done()
 	stopping := false
+	var abortTimer *time.Timer
+	var abortAfter <-chan time.Time
+	disarmAbort := func() {
+		if abortTimer != nil {
+			abortTimer.Stop()
+			abortTimer, abortAfter = nil, nil
+		}
+	}
+	defer disarmAbort()
 	for incoming != nil || active != nil || len(queue) > 0 {
-		var send chan<- *ssh.Request
-		var next *ssh.Request
+		var send chan<- sshRequestJob
+		var next sshRequestJob
 		if active == nil && len(queue) > 0 {
-			send, next = jobs, queue[0]
+			send = jobs
+			next = sshRequestJob{request: queue[0], awaitReply: queue[0].WantReply && incoming != nil}
 		}
 		select {
 		case request, ok := <-incoming:
 			if !ok {
 				incoming = nil
-				if active != nil && active.WantReply && abortPending != nil {
-					abortPending()
+				// The reply this send is waiting on can no longer be delivered.
+				// Let the destination answer anyway if it is merely slow; the
+				// same wait puts the request write safely ahead of the CLOSE
+				// abortPending may send.
+				if awaitingReply && abortPending != nil {
+					if grace <= 0 {
+						abortPending()
+					} else {
+						abortTimer = time.NewTimer(grace)
+						abortAfter = abortTimer.C
+					}
 				}
 				continue
 			}
@@ -334,15 +407,16 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 			queue = append(queue, request)
 			queuedBytes += size
 		case send <- next:
-			active = next
+			active, awaitingReply = next.request, next.awaitReply
 			queue[0] = nil
 			queue = queue[1:]
-			queuedBytes -= len(next.Type) + len(next.Payload)
-			if incoming == nil && active.WantReply && abortPending != nil {
-				abortPending()
-			}
+			queuedBytes -= len(active.Type) + len(active.Payload)
 		case <-completed:
-			active = nil
+			active, awaitingReply = nil, false
+			disarmAbort()
+		case <-abortAfter:
+			disarmAbort()
+			abortPending()
 		case <-cancelled:
 			// Discard queued work, but keep consuming ingress until the mux closes it.
 			// The connection owner closes both transports to release the active send.
@@ -354,7 +428,8 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 
 // rejectSSHChannels reports an upstream failure after downstream authentication
 // succeeded. The caller supplies a bounded context; while waiting for the first
-// channel, global requests are rejected so they cannot freeze the SSH mux.
+// channel, global requests are answered with the cause so they cannot freeze
+// the SSH mux and so peers that speak before opening a channel still learn why.
 // It owns downstream and returns after closing it and joining its workers.
 func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) error {
 	var workers sync.WaitGroup
@@ -366,13 +441,30 @@ func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) err
 		case <-finished:
 		}
 	})
-	workers.Go(func() { ssh.DiscardRequests(downstream.requests) })
+	// Not DiscardRequests: it answers (false, nil). A host opens no channel of
+	// its own — it sends upterm:server-create-session first and prints the
+	// failure reply body verbatim — so an empty body leaves it with no reason.
+	// x/crypto carries this payload in SSH_MSG_REQUEST_FAILURE's trailing data.
+	workers.Go(func() {
+		for request := range downstream.requests {
+			if request.WantReply {
+				_ = request.Reply(false, []byte(cause.Error()))
+			}
+		}
+	})
 	defer func() {
-		close(finished)
+		// Answer the opens the mux has already buffered while the transport is
+		// still live. Past Close, Reject has no transport to write to and the
+		// peer would see a bare disconnect in place of the reason. These are
+		// writes, so a peer that has stopped reading can block them: the
+		// deadline watcher above stays armed until the transport is closed,
+		// because closing it is the only thing that releases such a write.
+		rejectBufferedSSHChannels(downstream.channels, cause)
 		_ = downstream.conn.Close()
-		// Drain channel opens buffered behind the first one during shutdown.
-		for channel := range downstream.channels {
-			_ = channel.Reject(ssh.ConnectionFailed, cause.Error())
+		close(finished)
+		// Release the mux's sender for opens that raced the close. These can no
+		// longer be answered; draining them only unblocks shutdown.
+		for range downstream.channels {
 		}
 		_ = downstream.conn.Wait()
 		workers.Wait()
@@ -388,5 +480,21 @@ func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) err
 			return io.EOF
 		}
 		return channel.Reject(ssh.ConnectionFailed, cause.Error())
+	}
+}
+
+// rejectBufferedSSHChannels answers the opens the mux has already queued
+// without blocking on ones that may never arrive.
+func rejectBufferedSSHChannels(channels <-chan ssh.NewChannel, cause error) {
+	for {
+		select {
+		case channel, ok := <-channels:
+			if !ok {
+				return
+			}
+			_ = channel.Reject(ssh.ConnectionFailed, cause.Error())
+		default:
+			return
+		}
 	}
 }

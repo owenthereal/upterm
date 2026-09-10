@@ -46,7 +46,7 @@ scoop install upterm
 ### Go
 
 ```console
-go install github.com/owenthereal/upterm@latest
+go install github.com/owenthereal/upterm/cmd/upterm@latest
 ```
 
 ### From source
@@ -442,6 +442,23 @@ authorized_keys:
   - "ssh-ed25519 AAAA... alice@laptop"
   - "ssh-ed25519 BBBB... bob@desktop"
 ```
+
+### Connection Establishment Budget
+
+The `--handshake-timeout` flag (or `UPTERMD_HANDSHAKE_TIMEOUT` environment variable) bounds how long a
+connection may take to be established, defaulting to `60s`. The budget is split evenly: the first half
+covers authenticating the incoming connection, the second half covers dialing the upstream and
+handshaking with it. A connection that exhausts either half is dropped.
+
+```console
+uptermd --handshake-timeout 90s
+```
+
+Raise it for clients on high-latency links or when the session store is slow to answer; lower it to shed
+half-open connections sooner. The value must be at least `1s`, since each half has to cover a complete SSH
+handshake, and less than `2m`, since each half must also fit inside the validity window of the short-lived
+user certificate `uptermd` mints while authenticating. `0` selects the default rather than disabling the
+timeout.
 
 ## :chart_with_upwards_trend: Monitoring
 

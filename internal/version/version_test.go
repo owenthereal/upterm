@@ -1,11 +1,52 @@
 package version
 
 import (
+	"runtime/debug"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestVersionFromBuildInfo(t *testing.T) {
+	t.Run("built as upterm", func(t *testing.T) {
+		v, ok := versionFromBuildInfo(&debug.BuildInfo{
+			Main: debug.Module{Path: moduleName, Version: "v0.25.1"},
+		})
+		require.True(t, ok)
+		require.Equal(t, "0.25.1", v)
+	})
+
+	// An embedding program has its own main module on its own version. Taking
+	// it would have ServerSSHVersion advertise that as an upterm version.
+	t.Run("embedded in another program", func(t *testing.T) {
+		v, ok := versionFromBuildInfo(&debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/their/daemon", Version: "v2.3.0"},
+			Deps: []*debug.Module{
+				{Path: "example.com/other/dep", Version: "v1.0.0"},
+				{Path: moduleName, Version: "v0.25.1"},
+			},
+		})
+		require.True(t, ok)
+		require.Equal(t, "0.25.1", v)
+	})
+
+	t.Run("upterm absent", func(t *testing.T) {
+		_, ok := versionFromBuildInfo(&debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/their/daemon", Version: "v2.3.0"},
+		})
+		require.False(t, ok, "an embedding program's version is not an upterm version")
+	})
+
+	// A source build records no usable version; the dev default has to stand,
+	// since Current panics on anything that does not parse.
+	t.Run("source build", func(t *testing.T) {
+		_, ok := versionFromBuildInfo(&debug.BuildInfo{
+			Main: debug.Module{Path: moduleName, Version: "(devel)"},
+		})
+		require.False(t, ok)
+	})
+}
 
 func TestParseFromSSHVersion(t *testing.T) {
 	tests := []struct {

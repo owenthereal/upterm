@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -68,6 +69,11 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 
 	return r.routing.Serve(ln)
 }
+
+// errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
+// A sentinel rather than an ad-hoc error so the failure can be recognized after
+// x/crypto has wrapped it, and reported to the peer by identity, not by text.
+var errUpstreamHostKeyMismatch = errors.New("ssh: host key mismatch")
 
 type proxyAuth struct {
 	NodeAddr       string
@@ -141,15 +147,17 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 	return fps, nil
 }
 
-// prepare validates the offered key and mints its upstream credentials without
-// opening a connection. Stock SSH calls it for unsigned queries as well.
-func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.ClientConfig, error) {
+// authorize decides whether an offered key may proceed, and resolves the
+// session it maps to. Stock SSH calls this for unsigned public-key queries as
+// well, and a successful query does not count against MaxAuthTries, so it must
+// stay cheap: no certificate minting and no upstream connection.
+func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, *Session, error) {
 	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
 		if conn.User() == "" {
-			return nil, fmt.Errorf("empty session ID for host connection")
+			return nil, nil, nil, fmt.Errorf("empty session ID for host connection")
 		}
 	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
-		return nil, fmt.Errorf("invalid SSH user format: %w", err)
+		return nil, nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
 	}
 	checker := UserCertChecker{
 		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
@@ -159,7 +167,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 
 	// Gate registration based on authorized_keys before any cert/upstream work.
 	if err := a.checkAuthorizedKeys(conn, pk); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	auth, key, err := checker.Authenticate(conn.User(), pk)
@@ -167,7 +175,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 		err = nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("error checking user cert: %w", err)
+		return nil, nil, nil, fmt.Errorf("error checking user cert: %w", err)
 	}
 
 	// Use the public-key if a key can't be parsed from cert
@@ -185,11 +193,24 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 
 	hostSess, err := a.hostSession(conn)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	// TODO: simplify auth key validation by moving it to host validation only
 	if hostSess != nil && !hostSess.IsClientKeyAllowed(key) {
-		return nil, fmt.Errorf("public key not allowed")
+		return nil, nil, nil, fmt.Errorf("public key not allowed")
+	}
+
+	return auth, key, hostSess, nil
+}
+
+// prepare mints upstream credentials for a key whose ownership the client has
+// already proven. It re-runs authorization so the decision and the credentials
+// it produces cannot disagree; that costs one extra session lookup, on success
+// only. It does not open a connection.
+func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.ClientConfig, error) {
+	auth, _, hostSess, err := a.authorize(conn, pk)
+	if err != nil {
+		return nil, err
 	}
 
 	signers, err := a.newUserCertSigners(conn, auth)
@@ -213,7 +234,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 			}
 		}
 
-		return fmt.Errorf("ssh: host key mismatch")
+		return errUpstreamHostKeyMismatch
 	}
 
 	return &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}, nil
@@ -224,11 +245,7 @@ func (a *proxyAuth) dialUpstreamContext(ctx context.Context, conn ssh.ConnMetada
 	if err != nil {
 		return nil, err
 	}
-	dialer, ok := a.ConnDialer.(contextConnDialer)
-	if !ok {
-		return nil, fmt.Errorf("upstream dialer does not support cancellation")
-	}
-	return dialer.DialContext(ctx, id)
+	return a.ConnDialer.DialContext(ctx, id)
 }
 
 func (a *proxyAuth) upstreamIdentifier(conn ssh.ConnMetadata) (*api.Identifier, error) {

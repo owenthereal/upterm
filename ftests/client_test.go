@@ -69,9 +69,11 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 
 	err = c.Join(session, clientJoinURL)
 
-	// Test authorization failure - use assert for expected error validation
+	// Test authorization failure - use assert for expected error validation.
+	// uptermd reports the outcome in its own words: the upstream's error text
+	// names internal node addresses and is never relayed to the joiner.
 	require.Error(err, "connection should be rejected with wrong key")
-	assert.ErrorContains(err, "ssh: handshake failed", "should fail with SSH handshake error")
+	assert.ErrorContains(err, "unable to authenticate", "should fail with an SSH authentication error")
 }
 
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {

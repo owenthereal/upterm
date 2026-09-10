@@ -21,15 +21,67 @@ package version
 import (
 	"fmt"
 	"regexp"
+	"runtime/debug"
+	"strings"
 
 	"github.com/hashicorp/go-version"
 	"github.com/owenthereal/upterm/upterm"
 )
 
+// devVersion is what Version holds when no build-time version is available.
+const devVersion = "0.0.0+dev"
+
+// moduleName is the module these packages belong to. Update it alongside the
+// module path in go.mod, including if a major-version suffix is ever added.
+const moduleName = "github.com/owenthereal/upterm"
+
 // Version is the semantic version of upterm/uptermd
 // This is the single source of truth for both client and server versions
 // Can be overridden at build time with ldflags
-var Version = "0.0.0+dev"
+var Version = devVersion
+
+func init() {
+	if Version != devVersion {
+		return // set at build time via ldflags
+	}
+	// `go install github.com/owenthereal/upterm@latest` applies no ldflags, so
+	// the module version stamped into the binary is the only version there is.
+	// Without this those builds report 0.0.0+dev, which never matches a release
+	// tag, so `upterm upgrade` re-downloads on every invocation and bug reports
+	// carry no usable version.
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	if v, ok := versionFromBuildInfo(bi); ok {
+		Version = v
+	}
+}
+
+// versionFromBuildInfo reports the recorded version of this module, and only
+// this module. A program that embeds upterm's packages is its own main module
+// on its own unrelated version, and adopting that would have ServerSSHVersion
+// advertise it as an upterm version and CheckCompatibility compare against it.
+// Current() panics on an unparseable Version and a source build records
+// "(devel)", so only a version that parses is reported.
+func versionFromBuildInfo(bi *debug.BuildInfo) (string, bool) {
+	recorded := ""
+	if bi.Main.Path == moduleName {
+		recorded = bi.Main.Version
+	} else {
+		for _, dep := range bi.Deps {
+			if dep.Path == moduleName {
+				recorded = dep.Version
+				break
+			}
+		}
+	}
+	v := strings.TrimPrefix(recorded, "v")
+	if _, err := Parse(v); err != nil {
+		return "", false
+	}
+	return v, true
+}
 
 // Build-time variables set via ldflags
 var (

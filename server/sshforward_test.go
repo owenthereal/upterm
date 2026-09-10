@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -555,6 +557,156 @@ func TestSSHForwardOriginCloseWithPendingReply(t *testing.T) {
 	go ssh.DiscardRequests(br2)
 	_ = a2.Close()
 	_ = b2.Close()
+}
+
+// stalledSSHConn models a peer that has stopped reading: writes toward it block
+// until the transport is closed, which is the only thing that releases them.
+type stalledSSHConn struct {
+	ssh.Conn
+	closed    chan struct{}
+	channels  chan ssh.NewChannel
+	closeOnce sync.Once
+}
+
+func (c *stalledSSHConn) Close() error {
+	// A real mux stops delivering opens once its transport is gone.
+	c.closeOnce.Do(func() { close(c.closed); close(c.channels) })
+	return nil
+}
+
+func (c *stalledSSHConn) Wait() error {
+	<-c.closed
+	return io.EOF
+}
+
+// stalledNewChannel blocks in Reject the way a real one blocks writing to a
+// transport whose peer is not draining it. A nil release rejects at once.
+type stalledNewChannel struct {
+	ssh.NewChannel
+	release <-chan struct{}
+}
+
+func (c stalledNewChannel) Reject(ssh.RejectionReason, string) error {
+	if c.release != nil {
+		<-c.release
+		return net.ErrClosed
+	}
+	return nil
+}
+
+// Rejecting the opens the mux already buffered happens before the transport is
+// closed, so those are writes. The deadline has to stay enforced across them,
+// or a peer that stopped reading pins the connection and its workers forever.
+func TestSSHRejectChannelsBoundedThroughBufferedWrites(t *testing.T) {
+	conn := &stalledSSHConn{closed: make(chan struct{}), channels: make(chan ssh.NewChannel, 2)}
+	// The first open is answered by the select inside rejectSSHChannels and
+	// returns at once, so the deferred rejection below runs with the deadline
+	// still live. The second is what the mux had buffered, and it stalls.
+	conn.channels <- stalledNewChannel{}
+	conn.channels <- stalledNewChannel{release: conn.closed}
+	requests := make(chan *ssh.Request)
+	close(requests)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- rejectSSHChannels(ctx, sshPeer{conn, conn.channels, requests}, errors.New("upstream unavailable"))
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rejection outlived its deadline; a stalled peer pins the connection")
+	}
+}
+
+// The concurrent-open cap must bound opens in progress, not established
+// channels: every guest on a session holds a channel open on the host
+// connection for as long as it is joined.
+func TestSSHForwardEstablishedChannelsAreNotCapped(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	opened := make([]ssh.Channel, 0, maxSSHConcurrentChannelOpens+1)
+	for i := range maxSSHConcurrentChannelOpens + 1 {
+		a, ar, b, br := forwardTestChannel(t, client, server)
+		if a == nil || b == nil {
+			t.Fatalf("channel %d rejected while %d were open", i, len(opened))
+		}
+		go ssh.DiscardRequests(ar)
+		go ssh.DiscardRequests(br)
+		opened = append(opened, a, b)
+	}
+	for _, ch := range opened {
+		_ = ch.Close()
+	}
+}
+
+// recordingRequestSender stands in for a destination so a test can hold one
+// send open and observe exactly what want_reply each request carried.
+type recordingRequestSender struct {
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	names   []string
+	awaited map[string]bool
+}
+
+func (s *recordingRequestSender) SendRequest(name string, wantReply bool, _ []byte) (bool, []byte, error) {
+	s.mu.Lock()
+	s.names = append(s.names, name)
+	if s.awaited == nil {
+		s.awaited = map[string]bool{}
+	}
+	s.awaited[name] = wantReply
+	first := len(s.names) == 1
+	s.mu.Unlock()
+	if first {
+		close(s.entered)
+		<-s.release
+	}
+	return true, nil, nil
+}
+
+// Once the source is gone its reply cannot be delivered, so the tail behind it
+// goes out without want_reply. That is what removes the need to force the
+// sender free, and with it the CLOSE that used to race the request write.
+func TestSSHForwardTailAfterSourceCloseKeepsRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		sender := &recordingRequestSender{entered: make(chan struct{}), release: make(chan struct{})}
+		incoming := make(chan *ssh.Request)
+		aborts := make(chan struct{}, 1)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sshForwarder{ctx: ctx, cancel: cancel}.requests(
+				sender, incoming, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
+		}()
+
+		// Occupy the serial sender, so everything after this is queued rather
+		// than dispatched while the source is still connected.
+		incoming <- &ssh.Request{Type: "blocking"}
+		<-sender.entered
+		incoming <- &ssh.Request{Type: "tail"}
+		incoming <- &ssh.Request{Type: "unanswerable", WantReply: true}
+		close(incoming)
+		synctest.Wait() // the forwarder has observed the closed ingress
+		close(sender.release)
+		<-done
+
+		if got := sender.names; !slices.Equal(got, []string{"blocking", "tail", "unanswerable"}) {
+			t.Fatalf("requests reaching the destination: %q", got)
+		}
+		if sender.awaited["unanswerable"] {
+			t.Fatal("waited for a reply the departed source could not receive")
+		}
+		select {
+		case <-aborts:
+			t.Fatal("forced the sender free when no reply was awaited")
+		default:
+		}
+	})
 }
 
 func TestSSHForwardRequestQueueOverflow(t *testing.T) {

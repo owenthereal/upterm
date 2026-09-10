@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http/httptest"
@@ -32,6 +33,12 @@ type testSessionDialListener struct {
 
 func (l *testSessionDialListener) Dial(id string) (net.Conn, error) {
 	return l.Listener.Dial()
+}
+
+// Declared explicitly: bufconn.Listener promotes a DialContext(ctx) of its own,
+// which is the wrong shape for SessionDialListener.
+func (l *testSessionDialListener) DialContext(ctx context.Context, id string) (net.Conn, error) {
+	return l.Listener.DialContext(ctx)
 }
 
 func (l *testSessionDialListener) Listen(id string) (net.Listener, error) {
