@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/version"
@@ -18,9 +19,36 @@ import (
 // bites when a peer authenticates and then says nothing at all.
 const maxSSHRejectTimeout = 5 * time.Second
 
-// errUpstreamUnavailable is what a peer is told when the upstream dial fails.
-// The underlying error names internal socket paths and node addresses.
-var errUpstreamUnavailable = errors.New("upstream unavailable")
+// What an authenticated peer may be told about an upstream that would not
+// complete. Each is a fixed string uptermd owns, so no upstream error text is
+// ever relayed: a transport failure reads "read tcp <local>-><node>: i/o
+// timeout" and a dial failure names the session socket path.
+var (
+	errUpstreamUnavailable = errors.New("upstream unavailable")
+	errUpstreamAuthFailed  = errors.New("ssh: unable to authenticate with the upstream")
+)
+
+// sshAuthFailure is the message x/crypto composes when no auth method is left
+// (client_auth.go). It carries no addresses, but there is no exported error to
+// match on, so match the text: if it ever drifts the peer is simply told the
+// upstream is unavailable, which is the safe direction to fail in.
+const sshAuthFailure = "unable to authenticate"
+
+// upstreamFailureReason maps an upstream failure onto what the peer is told.
+// It is an allowlist: only outcomes recognized here are named, and everything
+// else — most importantly any transport error, which carries the address of an
+// internal node or socket — becomes the generic reason. The detail stays in the
+// connection log either way.
+func upstreamFailureReason(err error) error {
+	switch {
+	case errors.Is(err, errUpstreamHostKeyMismatch):
+		return errUpstreamHostKeyMismatch
+	case err != nil && strings.Contains(err.Error(), sshAuthFailure):
+		return errUpstreamAuthFailed
+	default:
+		return errUpstreamUnavailable
+	}
+}
 
 func (p *SSHRouting) serveStock(ln net.Listener) error {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -148,10 +176,8 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	peer := sshPeer{downstream, channels, requests}
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
-	// What the peer is told. A dial error names internal socket paths and node
-	// addresses, so it stays in the log; upstream handshake errors ("unable to
-	// authenticate", "host key mismatch") are already generic and worth passing
-	// through, and hosts and clients both act on them.
+	// What the peer is told; see upstreamFailureReason. A dial failure has no
+	// recognized outcome of its own, so it stays generic.
 	reason := errUpstreamUnavailable
 	upstreamRaw, err := p.Auth.dialUpstreamContext(upstreamCtx, downstream)
 	if err == nil {
@@ -166,7 +192,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 			var upstreamRequests <-chan *ssh.Request
 			upstream, upstreamChannels, upstreamRequests, err = ssh.NewClientConn(upstreamRaw, upstreamRaw.RemoteAddr().String(), clientConfig)
 			if err != nil {
-				reason = err
+				reason = upstreamFailureReason(err)
 			} else {
 				defer func() { _ = upstream.Close() }()
 				if err = upstreamRaw.SetDeadline(time.Time{}); err == nil {

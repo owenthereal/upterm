@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -68,6 +69,11 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 
 	return r.routing.Serve(ln)
 }
+
+// errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
+// A sentinel rather than an ad-hoc error so the failure can be recognized after
+// x/crypto has wrapped it, and reported to the peer by identity, not by text.
+var errUpstreamHostKeyMismatch = errors.New("ssh: host key mismatch")
 
 type proxyAuth struct {
 	NodeAddr       string
@@ -228,7 +234,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 			}
 		}
 
-		return fmt.Errorf("ssh: host key mismatch")
+		return errUpstreamHostKeyMismatch
 	}
 
 	return &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}, nil

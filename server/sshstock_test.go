@@ -233,19 +233,72 @@ func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
 		require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
 	})
 
-	// Dial errors name internal socket paths and node addresses; upstream
-	// handshake errors are generic and worth passing through unchanged.
-	t.Run("handshake reason passes through", func(t *testing.T) {
-		upstream, _ := stockTestUpstream(t, true, TestPrivateKeyContent)
-		_, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: upstream})
-		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
-		require.NoError(t, err)
-		defer func() { _ = client.Close() }()
-		ok, body, err := client.SendRequest("host-first-global", true, nil)
-		require.NoError(t, err)
-		require.False(t, ok)
-		require.Contains(t, string(body), "unable to authenticate")
+	// Only outcomes uptermd recognizes are named. Anything else, including a
+	// transport failure whose text carries the upstream's address, is generic.
+	t.Run("recognized outcomes only", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, hostKey, want string
+			reject              bool
+		}{
+			{name: "authentication", hostKey: TestPrivateKeyContent, reject: true, want: errUpstreamAuthFailed.Error()},
+			{name: "host key", hostKey: HostPrivateKeyContent, want: errUpstreamHostKeyMismatch.Error()},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				upstream, _ := stockTestUpstream(t, tc.reject, tc.hostKey)
+				_, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: upstream})
+				client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+				require.NoError(t, err)
+				defer func() { _ = client.Close() }()
+				ok, body, err := client.SendRequest("host-first-global", true, nil)
+				require.NoError(t, err)
+				require.False(t, ok)
+				require.Equal(t, tc.want, string(body))
+			})
+		}
+
+		// An upstream that accepts TCP and then says nothing fails the handshake
+		// at the transport layer, where the error reads "read tcp <local>-><node>".
+		t.Run("stalled transport", func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer func() { _ = ln.Close() }()
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					<-time.After(time.Minute)
+					_ = c.Close()
+				}
+			}()
+			_, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: ln.Addr().String()})
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+			ok, body, err := client.SendRequest("host-first-global", true, nil)
+			require.NoError(t, err)
+			require.False(t, ok)
+			require.Equal(t, errUpstreamUnavailable.Error(), string(body))
+			require.NotContains(t, string(body), ln.Addr().String())
+		})
 	})
+}
+
+func TestUpstreamFailureReasonAllowlist(t *testing.T) {
+	// A transport error carries the upstream's address and must never be named.
+	transport := fmt.Errorf("ssh: handshake failed: %w", &net.OpError{
+		Op: "read", Net: "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 2222},
+		Err:  errors.New("i/o timeout"),
+	})
+	require.Equal(t, errUpstreamUnavailable, upstreamFailureReason(transport))
+	require.NotContains(t, upstreamFailureReason(transport).Error(), "10.1.2.3")
+
+	require.Equal(t, errUpstreamHostKeyMismatch,
+		upstreamFailureReason(fmt.Errorf("ssh: handshake failed: %w", errUpstreamHostKeyMismatch)))
+	require.Equal(t, errUpstreamAuthFailed,
+		upstreamFailureReason(errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain")))
+	// Anything unrecognized, including a dial error naming a session socket.
+	require.Equal(t, errUpstreamUnavailable,
+		upstreamFailureReason(errors.New("dial unix /var/folders/x/uptermd123/sshd.sock: connect: connection refused")))
+	require.Equal(t, errUpstreamUnavailable, upstreamFailureReason(nil))
 }
 
 func TestHandshakeTimeoutValidation(t *testing.T) {
