@@ -1,6 +1,7 @@
 package memlistener
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -75,6 +76,10 @@ func (l *MemoryListener) ListenMem(network, address string, sz int) (net.Listene
 }
 
 func (l *MemoryListener) Dial(network, address string) (net.Conn, error) {
+	return l.DialContext(context.Background(), network, address)
+}
+
+func (l *MemoryListener) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	switch network {
 	case "mem", "memory":
 	default:
@@ -92,7 +97,7 @@ func (l *MemoryListener) Dial(network, address string) (net.Conn, error) {
 
 	ln := val.(*memlistener)
 
-	return ln.Dial()
+	return ln.DialContext(ctx)
 }
 
 func (l *MemoryListener) removeListener(address string) {

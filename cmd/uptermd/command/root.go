@@ -23,6 +23,8 @@ func Root() *cobra.Command {
 		RunE:  rootCmd.RunE,
 	}
 
+	cmd.PersistentFlags().Bool("stock-ssh", false, "use the stock SSH front door; false selects sshpiper")
+	cmd.PersistentFlags().Duration("handshake-timeout", server.DefaultHandshakeTimeout, "SSH establishment budget (stock SSH: half downstream, half upstream dial and handshake; sshpiper: total)")
 	cmd.PersistentFlags().String("config", "", "server config")
 
 	cmd.PersistentFlags().StringP("ssh-addr", "", utils.DefaultLocalhost("2222"), "ssh server address")

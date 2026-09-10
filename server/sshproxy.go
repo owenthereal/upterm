@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
@@ -15,6 +17,8 @@ import (
 )
 
 type sshProxy struct {
+	StockSSH            bool
+	HandshakeTimeout    time.Duration
 	HostSigners         []ssh.Signer
 	Signers             []ssh.Signer
 	NodeAddr            string
@@ -47,7 +51,9 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 
 	r.mux.Lock()
 	r.routing = &SSHRouting{
-		HostSigners: r.HostSigners,
+		HostSigners:      r.HostSigners,
+		StockSSH:         r.StockSSH,
+		HandshakeTimeout: r.HandshakeTimeout,
 		AuthPiper: &authPiper{
 			HostSigners:    r.HostSigners,
 			Signers:        r.Signers,
@@ -139,6 +145,27 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 }
 
 func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, challengeCtx ssh.ChallengeContext) (*ssh.Upstream, error) {
+	prepared, err := a.prepare(conn, pk)
+	if err != nil {
+		return nil, err
+	}
+	c, err := a.dialUpstream(conn)
+	if err != nil {
+		return nil, fmt.Errorf("error dialing upstream: %w", err)
+	}
+	return &ssh.Upstream{Conn: c, Address: c.RemoteAddr().String(), ClientConfig: *prepared}, nil
+}
+
+// prepare validates the offered key and mints its upstream credentials without
+// opening a connection. Stock SSH calls it for unsigned queries as well.
+func (a authPiper) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.ClientConfig, error) {
+	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
+		if conn.User() == "" {
+			return nil, fmt.Errorf("empty session ID for host connection")
+		}
+	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
+		return nil, fmt.Errorf("invalid SSH user format: %w", err)
+	}
 	checker := UserCertChecker{
 		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
 			return key, nil
@@ -185,11 +212,6 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 		return nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
 
-	c, err := a.dialUpstream(conn)
-	if err != nil {
-		return nil, fmt.Errorf("error dialing upstream: %w", err)
-	}
-
 	hostKeyCb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if hostSess == nil {
 			// check host keys for sideway connections
@@ -209,17 +231,30 @@ func (a authPiper) PublicKeyCallback(conn ssh.ConnMetadata, pk ssh.PublicKey, ch
 		return fmt.Errorf("ssh: host key mismatch")
 	}
 
-	return &ssh.Upstream{
-		Conn:    c,
-		Address: conn.RemoteAddr().String(),
-		ClientConfig: ssh.ClientConfig{
-			HostKeyCallback: hostKeyCb,
-			Auth:            []ssh.AuthMethod{ssh.PublicKeys(signers...)},
-		},
-	}, nil
+	return &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}, nil
 }
 
 func (a *authPiper) dialUpstream(conn ssh.ConnMetadata) (net.Conn, error) {
+	id, err := a.upstreamIdentifier(conn)
+	if err != nil {
+		return nil, err
+	}
+	return a.ConnDialer.Dial(id)
+}
+
+func (a *authPiper) dialUpstreamContext(ctx context.Context, conn ssh.ConnMetadata) (net.Conn, error) {
+	id, err := a.upstreamIdentifier(conn)
+	if err != nil {
+		return nil, err
+	}
+	dialer, ok := a.ConnDialer.(contextConnDialer)
+	if !ok {
+		return nil, fmt.Errorf("upstream dialer does not support cancellation")
+	}
+	return dialer.DialContext(ctx, id)
+}
+
+func (a *authPiper) upstreamIdentifier(conn ssh.ConnMetadata) (*api.Identifier, error) {
 	var (
 		user          = conn.User()
 		clientVersion = string(conn.ClientVersion())
@@ -247,12 +282,7 @@ func (a *authPiper) dialUpstream(conn ssh.ConnMetadata) (net.Conn, error) {
 		}
 	}
 
-	c, err := a.ConnDialer.Dial(id)
-	if err != nil {
-		return nil, err
-	}
-
-	return c, nil
+	return id, nil
 }
 
 func (a authPiper) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {

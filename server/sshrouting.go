@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,21 +17,24 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-var (
-	ErrListnerClosed        = errors.New("routing: listener closed")
-	pipeEstablishingTimeout = 60 * time.Second
-)
+const DefaultHandshakeTimeout = 60 * time.Second
+
+var ErrListnerClosed = errors.New("routing: listener closed")
 
 type SSHRouting struct {
-	HostSigners     []ssh.Signer
-	AuthPiper       *authPiper
-	Decoder         routing.Decoder
-	Logger          *slog.Logger
-	MetricsProvider provider.Provider
+	StockSSH         bool
+	HandshakeTimeout time.Duration
+	HostSigners      []ssh.Signer
+	AuthPiper        *authPiper
+	Decoder          routing.Decoder
+	Logger           *slog.Logger
+	MetricsProvider  provider.Provider
 
-	listener net.Listener
-	mux      sync.Mutex
-	doneChan chan struct{}
+	stockCancel context.CancelFunc
+	workers     sync.WaitGroup
+	listener    net.Listener
+	mux         sync.Mutex
+	doneChan    chan struct{}
 }
 
 type routingInstruments struct {
@@ -64,6 +68,12 @@ func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 }
 
 func (p *SSHRouting) Serve(ln net.Listener) error {
+	if p.HandshakeTimeout < 0 {
+		return fmt.Errorf("handshake-timeout must not be negative")
+	}
+	if p.StockSSH {
+		return p.serveStock(ln)
+	}
 	p.mux.Lock()
 	p.listener = ln
 	p.mux.Unlock()
@@ -148,26 +158,31 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 			inst.connections.Add(1)
 			inst.activeConnections.Add(1)
 
-			pipec := make(chan *ssh.PiperConn)
-			errorc := make(chan error)
-
+			type pipeResult struct {
+				conn *ssh.PiperConn
+				err  error
+			}
+			results := make(chan pipeResult)
+			establishment, cancel := context.WithTimeout(context.Background(), p.handshakeTimeout())
+			defer cancel()
 			go func() {
-				defer func() {
-					close(pipec)
-					close(errorc)
-				}()
-
-				pconn, err := ssh.NewSSHPiperConn(dconn, piperCfg)
-				if err != nil {
-					errorc <- err
+				conn, err := ssh.NewSSHPiperConn(dconn, piperCfg)
+				select {
+				case results <- pipeResult{conn, err}:
+				case <-establishment.Done():
+					if conn != nil {
+						conn.Close()
+					}
+				}
+			}()
+			select {
+			case result := <-results:
+				if result.err != nil {
+					logger.Debug("connection establishing failed", "error", result.err)
+					inst.errors.Add(1)
 					return
 				}
-
-				pipec <- pconn
-			}()
-
-			select {
-			case pconn := <-pipec:
+				pconn := result.conn
 				defer pconn.Close()
 
 				// NewSSHPiperConn returns only once both sides have
@@ -183,10 +198,7 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 					logger.Debug("error waiting for pipe", "error", err)
 					inst.errors.Add(1)
 				}
-			case err := <-errorc:
-				logger.Debug("connection establishing failed", "error", err)
-				inst.errors.Add(1)
-			case <-time.After(pipeEstablishingTimeout):
+			case <-establishment.Done():
 				logger.Debug("pipe establishing timeout")
 				inst.connectionTimeouts.Add(1)
 			}
@@ -198,8 +210,12 @@ func (p *SSHRouting) Shutdown() error {
 	p.mux.Lock()
 	lnerr := p.closeListenersLocked()
 	p.closeDoneChanLocked()
+	if p.stockCancel != nil {
+		p.stockCancel()
+	}
 	p.mux.Unlock()
 
+	p.workers.Wait()
 	return lnerr
 }
 
@@ -231,5 +247,15 @@ func (p *SSHRouting) closeDoneChanLocked() {
 }
 
 func (p *SSHRouting) closeListenersLocked() error {
+	if p.listener == nil {
+		return nil
+	}
 	return p.listener.Close()
+}
+
+func (p *SSHRouting) handshakeTimeout() time.Duration {
+	if p.HandshakeTimeout == 0 {
+		return DefaultHandshakeTimeout
+	}
+	return p.HandshakeTimeout
 }

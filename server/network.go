@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -171,4 +172,19 @@ func (d *unixSessionDialListener) Dial(sessionID string) (net.Conn, error) {
 
 func (d *unixSessionDialListener) socketPath(sessionID string) string {
 	return filepath.Join(d.SocketDir, sessionID+".sock")
+}
+
+// Context-aware dialing bounds establishment even when a memory listener has
+// not accepted yet. The original Dial methods remain available to embedders.
+func (l *memorySSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
+	return l.memln.DialContext(ctx, "mem", l.socketPath)
+}
+func (d *memorySessionDialListener) DialContext(ctx context.Context, id string) (net.Conn, error) {
+	return d.memln.DialContext(ctx, "mem", id)
+}
+func (d *unixSSHDDialListener) DialContext(ctx context.Context) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", d.SocketPath)
+}
+func (d *unixSessionDialListener) DialContext(ctx context.Context, id string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", d.socketPath(id))
 }
