@@ -159,6 +159,11 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	return g.Run()
 }
 
+// forceCommandDrainTimeout bounds how long a forced command's exit waits for its
+// output to finish reaching the guest. Flushing a pty buffer takes microseconds;
+// this only caps the case where something else is holding the pty open.
+const forceCommandDrainTimeout = 2 * time.Second
+
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
 	EventEmmiter   *emitter.Emitter
@@ -274,9 +279,18 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			return
 		}
 
+		// The copy below and the wait beneath it are both run.Group actors, and
+		// run.Group interrupts every actor as soon as any one of them returns. A
+		// forced command like `echo hi` exits almost as soon as it writes, so the
+		// wait routinely wins the race and its interrupt closes the pty before the
+		// copy has drained what the command already produced. The guest then sees
+		// a clean exit with no output at all. Measured on Linux, that lost the
+		// output roughly one run in ten.
+		outputDrained := make(chan struct{})
 		{
 			// reattach output
 			g.Add(func() error {
+				defer close(outputDrained)
 				_, err := io.Copy(sess, uio.NewContextReader(ctx, ptmx))
 				return ptyError(err)
 			}, func(err error) {
@@ -288,6 +302,19 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			g.Add(func() error {
 				err := ptmx.Wait()
 				cmdCode, cmdExited = exitCode(err)
+
+				// Hold this actor open until the output is drained, so the
+				// interrupts above cannot close the pty out from under the copy.
+				// The wait is bounded: a command can exit while a background child
+				// keeps the pty's slave side open, and hanging the session on that
+				// would be a worse failure than the one being fixed.
+				select {
+				case <-outputDrained:
+				case <-ctx.Done():
+				case <-time.After(forceCommandDrainTimeout):
+					h.logger.Warn("timed out draining forced command output", "timeout", forceCommandDrainTimeout)
+				}
+
 				return err
 			}, func(err error) {
 				cancel()
