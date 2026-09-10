@@ -76,8 +76,13 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 	t.Cleanup(func() {
 		_ = client.conn.Close()
 		_ = server.peer.conn.Close()
-		_ = client.conn.Wait()
-		_ = server.peer.conn.Wait()
+		waited := make(chan struct{})
+		go func() { _ = client.conn.Wait(); _ = server.peer.conn.Wait(); close(waited) }()
+		select {
+		case <-waited:
+		case <-time.After(time.Second):
+			t.Error("SSH mux did not finish after transport close")
+		}
 	})
 	return client, server.peer
 }
@@ -194,6 +199,12 @@ func forwardTestRequests(t *testing.T, sender sshRequestSender, requests <-chan 
 	if _, _, err := sender.SendRequest("second@upterm.test", false, []byte("two")); err != nil {
 		t.Fatal(err)
 	}
+	// Exceed the mux's input buffer while the first reply is still pending.
+	for i := range 40 {
+		if _, _, err := sender.SendRequest(fmt.Sprintf("opaque-%d", i), false, []byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	select {
 	case early := <-requests:
 		t.Fatalf("request overtook unanswered predecessor: %v", early)
@@ -212,12 +223,6 @@ func forwardTestRequests(t *testing.T, sender sshRequestSender, requests <-chan 
 	req = forwardTestReceive(t, requests)
 	if req.Type != "second@upterm.test" || req.WantReply || string(req.Payload) != "two" {
 		t.Fatalf("changed no-reply request: %+v", req)
-	}
-	// Exceed the mux's input buffer and verify every request is serviced in order.
-	for i := range 40 {
-		if _, _, err := sender.SendRequest(fmt.Sprintf("opaque-%d", i), false, []byte{byte(i)}); err != nil {
-			t.Fatal(err)
-		}
 	}
 	for i := range 40 {
 		req := forwardTestReceive(t, requests)
@@ -474,4 +479,195 @@ func TestSSHForwardOriginClosePreservesConnection(t *testing.T) {
 	go ssh.DiscardRequests(br2)
 	_ = a2.Close()
 	_ = b2.Close()
+}
+
+// Pending replies plus ingress beyond x/crypto's 16-entry queues used to pin
+// both muxes, so even closing the transports could not release the forwarder.
+func TestSSHForwardCancelWithQueuedRequests(t *testing.T) {
+	for _, kind := range []string{"global", "channel"} {
+		t.Run(kind, func(t *testing.T) {
+			client, server, cancel, done := forwardTestProxy(t)
+			senders := []sshRequestSender{client.conn, server.conn}
+			requests := []<-chan *ssh.Request{server.requests, client.requests}
+			if kind == "channel" {
+				a, ar, b, br := forwardTestChannel(t, client, server)
+				senders = []sshRequestSender{sshChannelRequestSender{a}, sshChannelRequestSender{b}}
+				requests = []<-chan *ssh.Request{br, ar}
+			}
+			pendingDone := make(chan bool, 2)
+			for i, sender := range senders {
+				go func() { ok, _, _ := sender.SendRequest("unanswered", true, nil); pendingDone <- ok }()
+				_ = forwardTestReceive(t, requests[i])
+			}
+			for range 40 {
+				for _, sender := range senders {
+					if _, _, err := sender.SendRequest("queued", false, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// Give both relay muxes time to consume the transmitted packets before
+			// cancellation; this is the scheduling window of the original deadlock.
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancel did not drain full request queues")
+			}
+			for range 2 {
+				if forwardTestReceive(t, pendingDone) {
+					t.Fatal("unanswered request succeeded")
+				}
+			}
+		})
+	}
+}
+
+func TestSSHForwardOriginCloseWithPendingReply(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	a, _, _, br := forwardTestChannel(t, client, server)
+	pendingDone := make(chan bool, 1)
+	go func() { ok, _ := a.SendRequest("unanswered", true, nil); pendingDone <- ok }()
+	pending := forwardTestReceive(t, br)
+	// Releasing the reply only in cleanup also lets the old implementation exit
+	// after the assertion fails; a successful run cannot depend on this reply.
+	defer pending.Reply(false, nil)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-br:
+		if ok {
+			t.Fatal("unexpected request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("origin CLOSE blocked by unanswered request")
+	}
+	if forwardTestReceive(t, pendingDone) {
+		t.Fatal("aborted request succeeded")
+	}
+	a2, ar2, b2, br2 := forwardTestChannel(t, client, server)
+	go ssh.DiscardRequests(ar2)
+	go ssh.DiscardRequests(br2)
+	_ = a2.Close()
+	_ = b2.Close()
+}
+
+func TestSSHForwardRequestQueueOverflow(t *testing.T) {
+	for _, size := range []string{"count", "bytes"} {
+		t.Run(size, func(t *testing.T) {
+			client, server, _, done := forwardTestProxy(t)
+			pendingDone := make(chan bool, 1)
+			go func() { ok, _, _ := client.conn.SendRequest("unanswered", true, nil); pendingDone <- ok }()
+			_ = forwardTestReceive(t, server.requests)
+			payload := []byte(nil)
+			count := 300
+			if size == "bytes" {
+				payload = make([]byte, 64*1024)
+				count = 20
+			}
+			for range count {
+				if _, _, err := client.conn.SendRequest("queued", false, payload); err != nil {
+					break
+				}
+			}
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "request queue") {
+					t.Fatalf("queue overflow error: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("unbounded queue kept connection alive")
+			}
+			if forwardTestReceive(t, pendingDone) {
+				t.Fatal("unanswered request succeeded")
+			}
+		})
+	}
+}
+
+func TestSSHForwardQueuedTailBeforeClose(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	_, ar, b, br := forwardTestChannel(t, client, server)
+	go ssh.DiscardRequests(br)
+	sent := make(chan error, 1)
+	go func() {
+		for i := range 40 {
+			if _, err := b.SendRequest("tail", false, []byte{byte(i)}); err != nil {
+				sent <- err
+				return
+			}
+		}
+		if _, err := b.SendRequest("exit-status", false, []byte{0, 0, 0, 37}); err != nil {
+			sent <- err
+			return
+		}
+		sent <- b.Close()
+	}()
+	for i := range 40 {
+		req := forwardTestReceive(t, ar)
+		if req.Type != "tail" || req.WantReply || !bytes.Equal(req.Payload, []byte{byte(i)}) {
+			t.Fatalf("queued tail %d changed: %+v", i, req)
+		}
+	}
+	req := forwardTestReceive(t, ar)
+	if req.Type != "exit-status" || !bytes.Equal(req.Payload, []byte{0, 0, 0, 37}) {
+		t.Fatalf("exit status changed: %+v", req)
+	}
+	select {
+	case _, ok := <-ar:
+		if ok {
+			t.Fatal("request after exit status")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("channel did not close")
+	}
+	if err := forwardTestReceive(t, sent); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A request which has already replied successfully must not be mistaken for
+// an unanswered request when its sender immediately sends status and CLOSE.
+func TestSSHForwardReplyThenStatusAndClose(t *testing.T) {
+	client, server, _, _ := forwardTestProxy(t)
+	for range 16 {
+		a, _, _, br := forwardTestChannel(t, client, server)
+		sent := make(chan error, 1)
+		go func() {
+			ok, err := a.SendRequest("before-status", true, nil)
+			if err != nil || !ok {
+				sent <- fmt.Errorf("request reply: %v %v", ok, err)
+				return
+			}
+			if _, err := a.SendRequest("exit-status", false, []byte{0, 0, 0, 37}); err != nil {
+				sent <- err
+				return
+			}
+			sent <- a.Close()
+		}()
+		request := forwardTestReceive(t, br)
+		if err := request.Reply(true, nil); err != nil {
+			t.Fatal(err)
+		}
+		status := forwardTestReceive(t, br)
+		if status.Type != "exit-status" || !bytes.Equal(status.Payload, []byte{0, 0, 0, 37}) {
+			t.Fatalf("status changed: %+v", status)
+		}
+		select {
+		case _, ok := <-br:
+			if ok {
+				t.Fatal("request after exit status")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("channel did not close")
+		}
+		if err := forwardTestReceive(t, sent); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

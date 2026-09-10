@@ -47,36 +47,45 @@ type sshPeer struct {
 // Closing either transport, or cancelling ctx, closes both connections so even
 // blocked channel opens, request replies and flow-controlled writes can finish.
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	forwarder := sshForwarder{ctx: ctx, cancel: cancel}
 	var workers sync.WaitGroup
 	exited := make(chan error, 2)
 	for _, peer := range []sshPeer{downstream, upstream} {
 		workers.Go(func() { exited <- peer.conn.Wait() })
 	}
-	workers.Go(func() { forwardSSHChannels(upstream.conn, downstream.channels) })
-	workers.Go(func() { forwardSSHChannels(downstream.conn, upstream.channels) })
-	workers.Go(func() { forwardSSHRequests(upstream.conn, downstream.requests) })
-	workers.Go(func() { forwardSSHRequests(downstream.conn, upstream.requests) })
+	workers.Go(func() { forwarder.channels(upstream.conn, downstream.channels) })
+	workers.Go(func() { forwarder.channels(downstream.conn, upstream.channels) })
+	workers.Go(func() { forwarder.requests(upstream.conn, downstream.requests, nil) })
+	workers.Go(func() { forwarder.requests(downstream.conn, upstream.requests, nil) })
 	var err error
 	select {
 	case <-ctx.Done():
-		err = ctx.Err()
+		err = context.Cause(ctx)
 	case err = <-exited:
 	}
+	cancel(err)
 	_ = downstream.conn.Close()
 	_ = upstream.conn.Close()
 	workers.Wait()
 	return err
 }
 
-func forwardSSHChannels(destination ssh.Conn, channels <-chan ssh.NewChannel) {
+type sshForwarder struct {
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+}
+
+func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChannel) {
 	var workers sync.WaitGroup
 	for channel := range channels {
-		workers.Go(func() { forwardSSHChannel(destination, channel) })
+		workers.Go(func() { f.channel(destination, channel) })
 	}
 	workers.Wait()
 }
 
-func forwardSSHChannel(destination ssh.Conn, incoming ssh.NewChannel) {
+func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel) {
 	// Accept only after the destination accepts, preserving CHANNEL_OPEN_FAILURE.
 	remote, remoteRequests, err := destination.OpenChannel(incoming.ChannelType(), incoming.ExtraData())
 	if err != nil {
@@ -96,20 +105,20 @@ func forwardSSHChannel(destination ssh.Conn, incoming ssh.NewChannel) {
 		return
 	}
 	var workers sync.WaitGroup
-	workers.Go(func() { forwardSSHChannelDirection(local, remote, remoteRequests) })
-	workers.Go(func() { forwardSSHChannelDirection(remote, local, localRequests) })
+	workers.Go(func() { f.channelDirection(local, remote, remoteRequests) })
+	workers.Go(func() { f.channelDirection(remote, local, localRequests) })
 	workers.Wait()
 }
 
-// Each direction closes its destination only after its source has closed and
-// both buffered data streams and requests have drained. In particular, EOF
+// Normal close waits until source data and requests have drained. An explicit
+// source CLOSE can instead abort a pending reply (see requests below). In particular, EOF
 // alone cannot close a channel: a command may still produce output and status
 // after stdin EOF. Treat either endpoint's CLOSE symmetrically so a caller can
 // close one channel without leaving its peer open for the connection's lifetime.
-func forwardSSHChannelDirection(destination, source ssh.Channel, requests <-chan *ssh.Request) {
+func (f sshForwarder) channelDirection(destination, source ssh.Channel, requests <-chan *ssh.Request) {
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	forwardSSHRequests(sshChannelRequestSender{destination}, requests)
+	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() })
 	streams.Wait()
 	_ = destination.Close()
 }
@@ -136,17 +145,86 @@ func (s sshChannelRequestSender) SendRequest(name string, wantReply bool, payloa
 	return ok, nil, err
 }
 
-// Replies are positional, so each direction must forward requests serially.
-// Keep draining after send errors: an unread request queue can block the entire
-// SSH mux, including unrelated channels and transport shutdown.
-func forwardSSHRequests(destination sshRequestSender, requests <-chan *ssh.Request) {
-	for request := range requests {
-		ok, payload, err := destination.SendRequest(request.Type, request.WantReply, request.Payload)
-		if err != nil {
-			ok, payload = false, nil
+// A peer can send requests without SSH flow control while a reply is pending.
+// Bound retained requests per direction; overflow closes the connection rather
+// than blocking ingress (which would also block the mux's shutdown path).
+const (
+	maxSSHQueuedRequests     = 256
+	maxSSHQueuedRequestBytes = 1 << 20
+)
+
+// requests keeps reading ingress independently of its single serial sender.
+// Closing a transport alone cannot release SendRequest when the mux is stuck
+// delivering an incoming request, so ingress continues draining on cancellation.
+// closeChannel is only set for channel requests: source CLOSE can abort an
+// unanswered WantReply, while ordinary tail requests drain before normal close.
+func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, closeChannel func()) {
+	jobs := make(chan *ssh.Request)
+	completed := make(chan struct{})
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		for request := range jobs {
+			ok, payload, err := destination.SendRequest(request.Type, request.WantReply, request.Payload)
+			if err != nil {
+				ok, payload = false, nil
+			}
+			// Clear the pending-reply state before replying to the source: once
+			// it receives success, it may immediately send exit-status and CLOSE.
+			completed <- struct{}{}
+			if request.WantReply {
+				_ = request.Reply(ok, payload)
+			}
 		}
-		if request.WantReply {
-			_ = request.Reply(ok, payload)
+	}()
+	defer func() { close(jobs); <-senderDone }()
+
+	var queue []*ssh.Request
+	var active *ssh.Request
+	queuedBytes := 0
+	cancelled := f.ctx.Done()
+	stopping := false
+	for incoming != nil || active != nil || len(queue) > 0 {
+		var send chan<- *ssh.Request
+		var next *ssh.Request
+		if active == nil && len(queue) > 0 {
+			send, next = jobs, queue[0]
+		}
+		select {
+		case request, ok := <-incoming:
+			if !ok {
+				incoming = nil
+				if active != nil && active.WantReply && closeChannel != nil {
+					closeChannel()
+				}
+				continue
+			}
+			if stopping {
+				continue
+			}
+			size := len(request.Type) + len(request.Payload)
+			if len(queue) == maxSSHQueuedRequests || queuedBytes+size > maxSSHQueuedRequestBytes {
+				f.cancel(errors.New("ssh: request queue limit exceeded"))
+				stopping, queue, queuedBytes = true, nil, 0
+				continue
+			}
+			queue = append(queue, request)
+			queuedBytes += size
+		case send <- next:
+			active = next
+			queue[0] = nil
+			queue = queue[1:]
+			queuedBytes -= len(next.Type) + len(next.Payload)
+			if incoming == nil && active.WantReply && closeChannel != nil {
+				closeChannel()
+			}
+		case <-completed:
+			active = nil
+		case <-cancelled:
+			// Discard queued work, but keep consuming ingress until the mux closes it.
+			// The connection owner closes both transports to release the active send.
+			stopping, queue, queuedBytes = true, nil, 0
+			cancelled = nil
 		}
 	}
 }
