@@ -175,7 +175,14 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		if opt.SSHProxyProtocol {
 			// Wrap the SSH listener with proxyproto.Listener to preserve the real client IP
 			// when connections are coming through a TCP proxy (e.g., AWS ELB, HAProxy).
-			sshln = &proxyproto.Listener{Listener: sshln}
+			// Internal node hops and the WebSocket bridge use plain SSH on
+			// this same listener, so PROXY headers must remain optional.
+			sshln = &proxyproto.Listener{
+				Listener: sshln,
+				ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+					return proxyproto.USE, nil
+				},
+			}
 		}
 	}
 
