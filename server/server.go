@@ -48,6 +48,23 @@ type Opt struct {
 	SentryDSN           string       `mapstructure:"sentry-dsn"`
 }
 
+// ResolvedRouting returns the effective routing mode. It resolves ModeAuto
+// against whether a Consul URL was configured, and supplies the ModeEmbedded
+// default for a zero value.
+func (opt *Opt) ResolvedRouting() routing.Mode {
+	switch opt.Routing {
+	case routing.ModeAuto:
+		if opt.ConsulURL != "" {
+			return routing.ModeConsul
+		}
+		return routing.ModeEmbedded
+	case "":
+		return routing.ModeEmbedded
+	default:
+		return opt.Routing
+	}
+}
+
 // Validate validates the server configuration
 func (opt *Opt) Validate() error {
 	// Basic validation
@@ -56,12 +73,7 @@ func (opt *Opt) Validate() error {
 	}
 
 	// Routing-specific validation
-	routingMode := opt.Routing
-	if routingMode == "" {
-		routingMode = routing.ModeEmbedded
-	}
-
-	switch routingMode {
+	switch routingMode := opt.ResolvedRouting(); routingMode {
 	case routing.ModeConsul:
 		return opt.validateConsulConfig()
 	case routing.ModeEmbedded:
@@ -195,10 +207,7 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 		}
 
 		// Determine session routing mode
-		sessionRouting := opt.Routing
-		if sessionRouting == "" {
-			sessionRouting = routing.ModeEmbedded // Default to embedded mode
-		}
+		sessionRouting := opt.ResolvedRouting()
 
 		// Create session manager with the appropriate routing mode
 		var sessionManager *SessionManager
