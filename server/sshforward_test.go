@@ -671,3 +671,140 @@ func TestSSHForwardReplyThenStatusAndClose(t *testing.T) {
 		}
 	}
 }
+
+// The producer completes CHANNEL_CLOSE (including its acknowledgement) before
+// closing its transport. All bytes were accepted by SSH before that disconnect.
+func forwardTestBufferedTransportClose(t *testing.T, receiver, producer sshPeer, stdout, stderr []byte) (ssh.Channel, <-chan *ssh.Request, <-chan error) {
+	t.Helper()
+	a, ar, b, br := forwardTestChannel(t, receiver, producer)
+	sent := make(chan error, 1)
+	go func() {
+		if _, err := b.Write(stdout); err != nil {
+			sent <- err
+			return
+		}
+		if _, err := b.Stderr().Write(stderr); err != nil {
+			sent <- err
+			return
+		}
+		if _, err := b.SendRequest("exit-status", false, []byte{0, 0, 0, 37}); err != nil {
+			sent <- err
+			return
+		}
+		if err := b.Close(); err != nil {
+			sent <- err
+			return
+		}
+		for request := range br {
+			_ = request.Reply(false, nil)
+		}
+		sent <- producer.conn.Close()
+	}()
+	return a, ar, sent
+}
+
+func TestSSHForwardTransportCloseDrainsBufferedData(t *testing.T) {
+	for _, direction := range []string{"upstream", "downstream"} {
+		for _, stream := range []string{"stdout", "stderr", "mixed", "pending-global"} {
+			t.Run(direction+"/"+stream, func(t *testing.T) {
+				client, server, _, done := forwardTestProxy(t)
+				receiver, producer := client, server
+				if direction == "downstream" {
+					receiver, producer = server, client
+				}
+				var stdout, stderr []byte
+				switch stream {
+				case "stdout":
+					stdout = bytes.Repeat([]byte("o"), 3*1024*1024)
+				case "stderr":
+					stderr = bytes.Repeat([]byte("e"), 3*1024*1024)
+				default:
+					stdout = bytes.Repeat([]byte("o"), 1536*1024)
+					stderr = bytes.Repeat([]byte("e"), 1536*1024)
+				}
+				var globalDone chan bool
+				if stream == "pending-global" {
+					globalDone = make(chan bool, 1)
+					go func() { ok, _, _ := producer.conn.SendRequest("pending-at-disconnect", true, nil); globalDone <- ok }()
+					_ = forwardTestReceive(t, receiver.requests)
+				}
+				a, ar, sent := forwardTestBufferedTransportClose(t, receiver, producer, stdout, stderr)
+				if err := forwardTestReceive(t, sent); err != nil {
+					t.Fatal(err)
+				}
+				// The downstream window holds only 2 MiB. With no reads yet, a completed
+				// forwarder here necessarily abandoned some of the 3 MiB already received.
+				select {
+				case err := <-done:
+					t.Fatalf("forwarder stopped before buffered output drained: %v", err)
+				case <-time.After(100 * time.Millisecond):
+				}
+				type readResult struct {
+					data []byte
+					err  error
+				}
+				extended := make(chan readResult, 1)
+				go func() { data, err := io.ReadAll(a.Stderr()); extended <- readResult{data, err} }()
+				got, err := io.ReadAll(a)
+				if err != nil || !bytes.Equal(got, stdout) {
+					t.Fatalf("stdout: got %d, want %d: %v", len(got), len(stdout), err)
+				}
+				ext := forwardTestReceive(t, extended)
+				if ext.err != nil || !bytes.Equal(ext.data, stderr) {
+					t.Fatalf("stderr: got %d, want %d: %v", len(ext.data), len(stderr), ext.err)
+				}
+				status := forwardTestReceive(t, ar)
+				if status.Type != "exit-status" || status.WantReply || !bytes.Equal(status.Payload, []byte{0, 0, 0, 37}) {
+					t.Fatalf("status changed: %+v", status)
+				}
+				select {
+				case _, ok := <-ar:
+					if ok {
+						t.Fatal("request after status")
+					}
+				case <-time.After(time.Second):
+					t.Fatal("channel did not close")
+				}
+				_ = forwardTestReceive(t, done)
+				if globalDone != nil && forwardTestReceive(t, globalDone) {
+					t.Fatal("unanswered global request succeeded")
+				}
+			})
+		}
+	}
+}
+
+func TestSSHForwardTransportDrainBounded(t *testing.T) {
+	for _, shutdown := range []string{"timeout", "cancel"} {
+		t.Run(shutdown, func(t *testing.T) {
+			client, server, cancel, done := forwardTestProxy(t)
+			_, _, sent := forwardTestBufferedTransportClose(t, client, server, bytes.Repeat([]byte("x"), 3*1024*1024), nil)
+			if err := forwardTestReceive(t, sent); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("no buffer drain grace: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if shutdown == "cancel" {
+				cancel()
+			}
+			limit := 7 * time.Second
+			if shutdown == "cancel" {
+				limit = time.Second
+			}
+			select {
+			case err := <-done:
+				if shutdown == "cancel" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel during drain: %v", err)
+				}
+				if shutdown == "timeout" && (err == nil || !strings.Contains(err.Error(), "drain timed out")) {
+					t.Fatalf("stalled drain: %v", err)
+				}
+			case <-time.After(limit):
+				t.Fatal("stalled reader prevented bounded shutdown")
+			}
+		})
+	}
+}

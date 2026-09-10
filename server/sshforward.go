@@ -29,6 +29,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -42,28 +43,76 @@ type sshPeer struct {
 	requests <-chan *ssh.Request
 }
 
-// forwardSSH owns both authenticated connections. It forwards the connection
-// protocol opaquely and returns only after all forwarding workers have stopped.
-// Closing either transport, or cancelling ctx, closes both connections so even
-// blocked channel opens, request replies and flow-controlled writes can finish.
+// An ordinary peer disconnect gets a bounded opportunity to deliver data
+// already buffered by SSH. A consumer stalled beyond this grace can lose the
+// remaining bytes. This deadline does not apply to live transports or EOF;
+// explicit cancellation, shutdown and queue overflow always interrupt it.
+const sshForwardDrainTimeout = 5 * time.Second
+
+// forwardSSH owns both authenticated connections and joins all workers before
+// returning. Ordinary transport completion first drains received channel data
+// and request tails toward the surviving peer; forced cancellation closes both
+// transports immediately to release blocked opens, requests and writes.
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	forwarder := sshForwarder{ctx: ctx, cancel: cancel}
 	var workers sync.WaitGroup
-	exited := make(chan error, 2)
-	for _, peer := range []sshPeer{downstream, upstream} {
-		workers.Go(func() { exited <- peer.conn.Wait() })
+	type peerExit struct {
+		index int
+		err   error
 	}
-	workers.Go(func() { forwarder.channels(upstream.conn, downstream.channels) })
-	workers.Go(func() { forwarder.channels(downstream.conn, upstream.channels) })
-	workers.Go(func() { forwarder.requests(upstream.conn, downstream.requests, nil) })
-	workers.Go(func() { forwarder.requests(downstream.conn, upstream.requests, nil) })
+	exited := make(chan peerExit, 2)
+	draining := make(chan struct{})
+	channelsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	requestsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	peers := []sshPeer{downstream, upstream}
+	for i, source := range peers {
+		destination := peers[1-i]
+		workers.Go(func() { exited <- peerExit{i, source.conn.Wait()} })
+		workers.Go(func() { forwarder.channels(destination.conn, source.channels, draining, channelsDone[i]) })
+		workers.Go(func() {
+			finished := sync.OnceFunc(func() { close(requestsDone[i]) })
+			defer finished()
+			// A disconnected source cannot receive an outstanding global reply. Do
+			// not hold up drain completion on that reply, but still drain all channel
+			// buffers before closing the destination transport to release its sender.
+			forwarder.requests(destination.conn, source.requests, finished)
+		})
+	}
 	var err error
+	closedPeer := -1
 	select {
 	case <-ctx.Done():
 		err = context.Cause(ctx)
-	case err = <-exited:
+	case exit := <-exited:
+		closedPeer, err = exit.index, exit.err
+	}
+	close(draining)
+	if closedPeer >= 0 {
+		timer := time.NewTimer(sshForwardDrainTimeout)
+		firstChannels, secondChannels := channelsDone[0], channelsDone[1]
+		sourceRequests := requestsDone[closedPeer]
+	drain:
+		for firstChannels != nil || secondChannels != nil || sourceRequests != nil {
+			select {
+			case <-firstChannels:
+				firstChannels = nil
+			case <-secondChannels:
+				secondChannels = nil
+			case <-sourceRequests:
+				sourceRequests = nil
+			case <-ctx.Done():
+				err = context.Cause(ctx)
+				break drain
+			case <-exited:
+				break drain // Neither transport can receive more data.
+			case <-timer.C:
+				err = errors.New("ssh: buffered data drain timed out")
+				break drain
+			}
+		}
+		timer.Stop()
 	}
 	cancel(err)
 	_ = downstream.conn.Close()
@@ -77,15 +126,61 @@ type sshForwarder struct {
 	cancel context.CancelCauseFunc
 }
 
-func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChannel) {
+// Once draining starts, stop opening channels and report completion of the
+// accepted channels independently of connection Wait. Keep rejecting incoming
+// opens until transport shutdown so the surviving mux never loses its reader.
+func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChannel, draining <-chan struct{}, done chan struct{}) {
 	var workers sync.WaitGroup
-	for channel := range channels {
-		workers.Go(func() { f.channel(destination, channel) })
+	var accepted sshChannelDrain
+	defer workers.Wait()
+	finish := func() { accepted.wait(); close(done) }
+	for {
+		select {
+		case <-draining:
+			go finish()
+			for channel := range channels {
+				_ = channel.Reject(ssh.ConnectionFailed, "SSH peer disconnected")
+			}
+			<-done
+			return
+		case channel, ok := <-channels:
+			if !ok {
+				finish()
+				return
+			}
+			workers.Go(func() { f.channel(destination, channel, &accepted) })
+		}
 	}
-	workers.Wait()
 }
 
-func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel) {
+// Pending channel opens have no accepted data to drain. Track accepted
+// channels separately so an unanswered open cannot delay ordinary shutdown.
+// The lock prevents new registrations after wait begins, including when an
+// in-flight OpenChannel succeeds just as its source disconnects.
+type sshChannelDrain struct {
+	mu      sync.Mutex
+	closing bool
+	workers sync.WaitGroup
+}
+
+func (d *sshChannelDrain) start() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing {
+		return false
+	}
+	d.workers.Add(1)
+	return true
+}
+
+func (d *sshChannelDrain) wait() {
+	d.mu.Lock()
+	d.closing = true
+	d.mu.Unlock()
+	d.workers.Wait()
+}
+
+func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, accepted *sshChannelDrain) {
 	// Accept only after the destination accepts, preserving CHANNEL_OPEN_FAILURE.
 	remote, remoteRequests, err := destination.OpenChannel(incoming.ChannelType(), incoming.ExtraData())
 	if err != nil {
@@ -97,6 +192,13 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel) {
 		}
 		return
 	}
+	if !accepted.start() {
+		_ = incoming.Reject(ssh.ConnectionFailed, "SSH peer disconnected")
+		_ = remote.Close()
+		ssh.DiscardRequests(remoteRequests)
+		return
+	}
+	defer accepted.workers.Done()
 	local, localRequests, err := incoming.Accept()
 	if err != nil {
 		_ = remote.Close()
@@ -156,9 +258,10 @@ const (
 // requests keeps reading ingress independently of its single serial sender.
 // Closing a transport alone cannot release SendRequest when the mux is stuck
 // delivering an incoming request, so ingress continues draining on cancellation.
-// closeChannel is only set for channel requests: source CLOSE can abort an
-// unanswered WantReply, while ordinary tail requests drain before normal close.
-func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, closeChannel func()) {
+// Source closure can abort an unanswered WantReply through abortPending. For
+// channels it closes the destination channel; for globals it waives waiting for
+// the reply during transport drain. Ordinary request tails still drain in order.
+func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func()) {
 	jobs := make(chan *ssh.Request)
 	completed := make(chan struct{})
 	senderDone := make(chan struct{})
@@ -194,8 +297,8 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 		case request, ok := <-incoming:
 			if !ok {
 				incoming = nil
-				if active != nil && active.WantReply && closeChannel != nil {
-					closeChannel()
+				if active != nil && active.WantReply && abortPending != nil {
+					abortPending()
 				}
 				continue
 			}
@@ -215,8 +318,8 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 			queue[0] = nil
 			queue = queue[1:]
 			queuedBytes -= len(next.Type) + len(next.Payload)
-			if incoming == nil && active.WantReply && closeChannel != nil {
-				closeChannel()
+			if incoming == nil && active.WantReply && abortPending != nil {
+				abortPending()
 			}
 		case <-completed:
 			active = nil
