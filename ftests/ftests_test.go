@@ -120,6 +120,8 @@ var ConnectionTestCases = []FtestCase{
 	testClientAttachReadOnly,
 	testClientLocalPortForwardDisabled,
 	testClientLocalPortForward,
+	testClientSlowGuestDropped,
+	testHostExitsWhileGuestHoldsConnection,
 }
 
 // CallbackTestCases contains all callback/event-related test functions
@@ -459,10 +461,16 @@ type Host struct {
 	SFTPDisabled             bool // Disable SFTP subsystem
 	inputCh                  chan string
 	outputCh                 chan string
+	done                     chan struct{}
 	ctx                      context.Context
 	cancel                   func()
 	wg                       sync.WaitGroup
 }
+
+// Done closes when Host.Run has returned. Host.Close only cancels and then
+// times out, so it cannot distinguish a clean exit from a hang — which is
+// exactly what a test of shutdown needs to know.
+func (c *Host) Done() <-chan struct{} { return c.done }
 
 func (c *Host) Close() {
 	// Cancel context to signal goroutines to stop
@@ -493,6 +501,7 @@ func (c *Host) init() {
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	c.inputCh = make(chan string)
 	c.outputCh = make(chan string)
+	c.done = make(chan struct{})
 }
 
 func (c *Host) Share(url string) error {
@@ -558,6 +567,7 @@ func (c *Host) Share(url string) error {
 		// output that may never come.
 		_ = stdoutw.Close()
 		_ = stdinr.Close()
+		close(c.done)
 		if err != nil {
 			testLogger.Error("error running host", "error", err)
 			errCh <- err
@@ -628,14 +638,18 @@ func (c *Host) InputOutput() (chan string, chan string) {
 
 type Client struct {
 	PrivateKeys []string
-	sshClient   *ssh.Client
-	session     *ssh.Session
-	sshStdin    io.WriteCloser
-	sshStdout   io.Reader
-	inputCh     chan string
-	outputCh    chan string
-	cancel      func()
-	wg          sync.WaitGroup
+	// NoDrainStdout leaves the session's stdout unread, modelling a guest that
+	// has stopped draining its SSH channel. Its window fills, and the host's
+	// write to it blocks.
+	NoDrainStdout bool
+	sshClient     *ssh.Client
+	session       *ssh.Session
+	sshStdin      io.WriteCloser
+	sshStdout     io.Reader
+	inputCh       chan string
+	outputCh      chan string
+	cancel        func()
+	wg            sync.WaitGroup
 }
 
 func (c *Client) init() {
@@ -645,6 +659,13 @@ func (c *Client) init() {
 
 func (c *Client) InputOutput() (chan string, chan string) {
 	return c.inputCh, c.outputCh
+}
+
+// WaitSession returns when the session's channel closes. It does not read
+// stdout, so a client left deliberately undrained can still observe that the
+// host disconnected it.
+func (c *Client) WaitSession() error {
+	return c.session.Wait()
 }
 
 // SFTP returns an SFTP client using the existing SSH connection.
@@ -748,7 +769,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	var g run.Group
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel // Store cancel function for cleanup
-	{
+	if !c.NoDrainStdout {
 		// output
 		g.Add(func() error {
 			w := writeFunc(func(pp []byte) (int, error) {
