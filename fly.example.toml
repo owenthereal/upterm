@@ -7,16 +7,26 @@ kill_signal = "SIGINT"
 kill_timeout = "5s"
 
 [build]
-dockerfile = "Dockerfile.uptermd"
-build-target = "uptermd-fly"
+# Pin to a release tag for reproducible deploys, e.g. "…/uptermd:v0.24.0".
+image = "ghcr.io/owenthereal/upterm/uptermd:latest"
 
-[experimental]
-entrypoint = ["uptermd-fly"]
+[env]
+UPTERMD_SSH_ADDR           = "[::]:2222"
+UPTERMD_WS_ADDR            = "[::]:8080"
+UPTERMD_METRIC_ADDR        = "[::]:9091"
+UPTERMD_SSH_PROXY_PROTOCOL = "true"
+UPTERMD_NODE_ADDR          = "${FLY_MACHINE_ID}.vm.${FLY_APP_NAME}.internal:2222"
+UPTERMD_ROUTING            = "auto"
+# Set automatically when you attach Consul with `fly consul attach`. Left empty
+# otherwise, in which case UPTERMD_ROUTING=auto selects embedded routing.
+UPTERMD_CONSUL_URL         = "${FLY_CONSUL_URL:-}"
+UPTERMD_CONSUL_SESSION_TTL = "1h"
 
 # Routing Configuration:
-# - If FLY_CONSUL_URL environment variable is set: uses Consul routing for multi-machine deployments
-# - If FLY_CONSUL_URL is not set: uses embedded routing for single-machine deployments (simpler setup)
-# For personal use, you don't need to set FLY_CONSUL_URL - embedded mode will be used automatically
+# UPTERMD_ROUTING=auto selects Consul routing when UPTERMD_CONSUL_URL is
+# non-empty, and embedded routing otherwise. Fly sets FLY_CONSUL_URL for you
+# when you run `fly consul attach`, so multi-machine deployments pick up Consul
+# automatically and single-machine ones need no extra configuration.
 
 # Resource allocation - adjust based on your needs
 [vm]

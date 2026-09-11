@@ -43,10 +43,16 @@ scoop install upterm
 
 `upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/owenthereal/upterm/releases) and put it in your executable path.
 
+### Go
+
+```console
+go install github.com/owenthereal/upterm/cmd/upterm@latest
+```
+
 ### From source
 
 ```console
-git clone git@github.com:owenthereal/upterm.git
+git clone https://github.com/owenthereal/upterm.git
 cd upterm
 go install ./cmd/upterm/...
 ```
@@ -128,6 +134,15 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 - Without `--accept`, each file operation prompts the host for approval via a dialog
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
+
+### Local TCP Forwarding
+
+Clients can use standard SSH local forwarding through a hosted session when the host opts in:
+
+```console
+upterm host --allow-local-tcp-forwarding
+ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
+```
 
 ### WebSocket Connection
 
@@ -239,7 +254,9 @@ Fly offers a generous free tier and excellent global performance. The official u
    flyctl auth login
    ```
 
-1. Copy and customize the [`fly.example.toml`](./fly.example.toml) file to `fly.toml` for your deployment configuration.
+1. Copy [`fly.example.toml`](./fly.example.toml) to `fly.toml` and set your app
+   name. It pulls the published `ghcr.io/owenthereal/upterm/uptermd` image, so
+   no local build is needed.
 1. Deploy your uptermd server:
 
   ```console
@@ -247,6 +264,33 @@ Fly offers a generous free tier and excellent global performance. The official u
   ```
 
 Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
+
+> **Upgrading from an earlier release:** `uptermd-fly` no longer exists. Replace your `[build] dockerfile`/`build-target` and `[experimental] entrypoint` settings with the `[build] image` and `[env]` blocks shown in [`fly.example.toml`](./fly.example.toml).
+
+### Variable expansion in configuration
+
+`uptermd` expands environment variable references in its text configuration
+values — flags, `UPTERMD_*` environment variables, and config files alike. This
+exists because the container image has no shell, so values that need a runtime
+value (a machine ID, a pod IP) cannot be interpolated before the process starts.
+
+Expansion applies to text values only. Boolean options — `--debug` and
+`--ssh-proxy-protocol` — are parsed before expansion runs, so a reference such
+as `UPTERMD_DEBUG=${DEBUG_ENABLED}` fails at startup with a parse error rather
+than being substituted. Give booleans a literal `true` or `false`.
+
+| Syntax | Meaning |
+| --- | --- |
+| `${NAME}` | Required. `uptermd` exits at startup if `NAME` is unset or empty. |
+| `${NAME:-default}` | Uses `default` when `NAME` is unset or empty. |
+| `$${` | A literal `${` (outside defaults only). |
+
+A `$` not followed by `{` is always literal, and substituted values are never
+rescanned — a password containing `${TOKEN}` is passed through untouched. The `$${` escape applies only outside defaults; a default value cannot contain `${` or `}`.
+
+Comma-separated lists are split before expansion, so a substituted value is always a single element — with `HOSTS=a.example.com,b.example.com`, setting `UPTERMD_HOSTNAME=${HOSTS}` produces one element, not two.
+
+If an existing configuration value contains a literal `${`, escape it as `$${`.
 
 ### Heroku
 
@@ -372,6 +416,49 @@ networks:
   Replace `<your cert resolver here>` with your actual Traefik certificate resolver for TLS.
 
 For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
+
+### Restricting Host Registration
+
+By default, any SSH client that can reach `uptermd` can register a session as a host.
+For private or invite-only deployments, the `--authorized-keys` flag (or `UPTERMD_AUTHORIZED_KEYS` environment variable) restricts host registration to a specific set of public keys.
+This mirrors OpenSSH's [`AuthorizedKeysFile`](https://man.openbsd.org/sshd_config#AuthorizedKeysFile) directive.
+
+```console
+uptermd --authorized-keys /etc/uptermd/authorized_keys
+```
+
+The flag accepts standard `authorized_keys`-formatted files (one key per line, comments allowed) and may be repeated to compose keys from multiple sources:
+
+```console
+uptermd --authorized-keys /etc/uptermd/team.keys --authorized-keys /etc/uptermd/ops.keys
+```
+
+Files are read once at startup; restart `uptermd` to pick up edits. Joiners (clients connecting to a session) are unaffected — they continue to be authorized by the host's own `authorized_keys`.
+
+For the Helm chart, populate the `authorized_keys` value:
+
+```yaml
+authorized_keys:
+  - "ssh-ed25519 AAAA... alice@laptop"
+  - "ssh-ed25519 BBBB... bob@desktop"
+```
+
+### Connection Establishment Budget
+
+The `--handshake-timeout` flag (or `UPTERMD_HANDSHAKE_TIMEOUT` environment variable) bounds how long a
+connection may take to be established, defaulting to `60s`. The budget is split evenly: the first half
+covers authenticating the incoming connection, the second half covers dialing the upstream and
+handshaking with it. A connection that exhausts either half is dropped.
+
+```console
+uptermd --handshake-timeout 90s
+```
+
+Raise it for clients on high-latency links or when the session store is slow to answer; lower it to shed
+half-open connections sooner. The value must be at least `1s`, since each half has to cover a complete SSH
+handshake, and less than `2m`, since each half must also fit inside the validity window of the short-lived
+user certificate `uptermd` mints while authenticating. `0` selects the default rather than disabling the
+timeout.
 
 ## :chart_with_upwards_trend: Monitoring
 
