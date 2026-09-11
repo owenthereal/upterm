@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1243,5 +1244,150 @@ func TestSSHForwardSimultaneousCloseWithPendingReplies(t *testing.T) {
 		a, _, b, _ := forwardTestChannel(t, direction[0], direction[1])
 		_ = a.Close()
 		_ = b.Close()
+	}
+}
+
+// TestSSHForwardAbortCutsBufferedData pins the documented exception to the
+// forwarder's data-before-CLOSE guarantee.
+//
+// channelDirection normally closes the destination only after both the request
+// tail and the data copy have drained, so a peer reading until CHANNEL_CLOSE
+// sees every forwarded byte. The abort path skips that: abortPending closes the
+// destination from inside requests, before streams.Wait(), to release a sender
+// whose source has gone away. Anything still queued behind a blocked Write is
+// lost, and copySSHChannel discards the resulting error.
+//
+// The other abort cases here (TestSSHForwardOriginCloseWithPendingReply,
+// TestSSHForwardSimultaneousCloseWithPendingReplies) have no data in flight, so
+// they never exercise that loss. This one stalls the destination so the copy is
+// blocked when the abort lands, and pins the truncation rather than leaving the
+// godoc's exception untested.
+//
+// The figures are stable because the pipeline saturates: the origin gets
+// exactly two windows accepted, the destination ends up holding exactly one,
+// and the missing window is the cut. Every assertion here is an upper bound, so
+// the gate that waits for two windows to be accepted is what keeps the case
+// from passing on a run where nothing moved — measured, not assumed.
+//
+// Every wait here is sized against forwardTestPair's absolute 10s transport
+// deadline: 3s to fill the pipeline, 1s of control, 3s for the abort to land.
+// Past that deadline the transports are gone and no bound can be informative,
+// so the waits stay inside it rather than outlasting it.
+func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
+	// A stalled destination absorbs about two windows before anything blocks:
+	// one in b's own buffer, and one more in the forwarder's source-side buffer
+	// because reading from a replenishes a's credit. Two windows therefore sits
+	// exactly at capacity and the copy finishes given a moment — measured, not
+	// assumed. Four leaves the origin unable to finish, which is what makes
+	// "the copy was blocked when the abort landed" true rather than incidental.
+	const sent = 4 * sshChannelWindow
+
+	client, server, _, _ := forwardTestProxy(t)
+	a, ar, b, br := forwardTestChannel(t, client, server)
+	go ssh.DiscardRequests(ar)
+
+	// b never reads, so the forwarder's copy blocks once b's window fills and
+	// a's own window stops being replenished. Neither write can complete.
+	// Writing in chunks publishes progress, which the gate below needs.
+	var accepted atomic.Int64
+	written := make(chan int, 1)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		total := 0
+		for total < sent {
+			n, err := a.Write(chunk)
+			total += n
+			accepted.Add(int64(n))
+			if err != nil {
+				break
+			}
+		}
+		written <- total
+	}()
+
+	// An unanswered request with a source that then disappears is what arms the
+	// abort. b receives it and deliberately never replies until cleanup.
+	pendingDone := make(chan bool, 1)
+	go func() { ok, _ := a.SendRequest("unanswered", true, nil); pendingDone <- ok }()
+	pending := forwardTestReceive(t, br)
+	defer func() { _ = pending.Reply(false, nil) }()
+
+	// Lower bound, and the load-bearing one. Every assertion below is an upper
+	// bound, so without this the case passes when nothing ever moved: a.Close()
+	// makes Write return 0, ReadAll returns 0, and 0 is under every ceiling.
+	// Waiting for two windows to be accepted means the forwarder has drained a
+	// window out of a and pushed it at b, so there is real data in the pipeline
+	// to cut.
+	//
+	// The budget is not ours to choose freely: forwardTestPair puts an absolute
+	// 10s deadline on both transports, so a wait longer than that cannot make
+	// progress, it can only turn a dead transport into a late and misleading
+	// "nothing to cut". Stay well inside it, and watch the writer as well as the
+	// clock — if it stops early the transport or channel ended, which is a
+	// different failure and deserves to say so.
+	gate := time.After(3 * time.Second)
+	for accepted.Load() < 2*sshChannelWindow {
+		select {
+		case <-writerDone:
+			t.Fatalf("origin stopped writing at %d of the %d bytes the pipeline needs; "+
+				"the channel or transport ended before the abort was armed", accepted.Load(), 2*sshChannelWindow)
+		case <-gate:
+			t.Fatalf("only %d of the %d bytes needed entered the forwarding path within the transport budget",
+				accepted.Load(), 2*sshChannelWindow)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	// Control: with the source still open, nothing closes the destination, and
+	// this outlasts sshRequestAbortGrace. Without it, the close below could be
+	// any incidental close rather than the abort.
+	select {
+	case _, ok := <-br:
+		if !ok {
+			t.Fatal("destination closed while the source was still open")
+		}
+		t.Fatal("unexpected second request")
+	case <-time.After(10 * sshRequestAbortGrace):
+	}
+
+	// What the origin had successfully written by the time the abort was armed.
+	// The destination must end up with strictly less than this.
+	inFlight := accepted.Load()
+
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// b's request channel closing is the abort landing: the forwarder closed
+	// the destination without waiting for the blocked copy.
+	select {
+	case _, ok := <-br:
+		if ok {
+			t.Fatal("unexpected request after source close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("abort did not close the destination while its data copy was blocked")
+	}
+
+	if forwardTestReceive(t, pendingDone) {
+		t.Fatal("aborted request succeeded")
+	}
+
+	// Whatever reached b's buffer before the abort is still readable; the rest
+	// is gone. Comparing against what the origin actually wrote — not against
+	// `sent` — is what makes this a statement about cut data rather than about
+	// an unfinished write.
+	got, err := io.ReadAll(b)
+	if err != nil {
+		t.Fatalf("draining destination after abort: %v", err)
+	}
+	if int64(len(got)) >= inFlight {
+		t.Fatalf("destination received %d bytes of the %d the origin wrote; expected the abort to cut the copy",
+			len(got), inFlight)
+	}
+	if n := forwardTestReceive(t, written); n >= sent {
+		t.Fatalf("origin wrote all %d bytes; the copy was never actually blocked", sent)
 	}
 }
