@@ -379,8 +379,11 @@ func testProxyWindowChange(t *testing.T, hostShareURL, hostNodeAddr, clientJoinU
 	// first, and getting that backwards is a live hazard in this area.
 	require.NoError(t, c.session.WindowChange(24, 120))
 
-	// WindowChange has no reply: stdin can reach stty before the host applies
-	// the resize. Take fresh samples until the exact requested size is seen.
+	// This checks eventual resize application. The proxy relays requests and
+	// data independently, and the host applies window events separately from
+	// copying stdin to the pty. WindowChange has no acknowledgement of that
+	// application, so a following stty can still see the old size. Sampling
+	// again tests resize delivery, not the proxy's packet ordering.
 	retry := time.NewTicker(50 * time.Millisecond)
 	defer retry.Stop()
 	for {

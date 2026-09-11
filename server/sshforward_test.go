@@ -328,6 +328,143 @@ func TestSSHForwardHalfCloseStreamsAndExitStatus(t *testing.T) {
 	}
 }
 
+// gatedSSHOutput holds the session's managed output copy until the test allows
+// consumption. Read the buffer only after Session.Wait joins that copy.
+type gatedSSHOutput struct {
+	buffer  bytes.Buffer
+	release <-chan struct{}
+}
+
+func (w *gatedSSHOutput) Write(p []byte) (int, error) {
+	<-w.release
+	return w.buffer.Write(p)
+}
+
+// Receiving exit-status is not the end of a Go session: Wait must also wait
+// for channel closure and its managed stdout/stderr copies. These cases test
+// those completion guarantees without assuming data/request wire order can be
+// observed through the separate readers exposed by ssh.Channel.
+func TestSSHForwardSessionWaitDrainsOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		bytesPerStream  int
+		eofBeforeStatus bool
+	}{
+		{"eof-before-status", 1024, true},
+		{"buffered-client-output", 1024, false},
+		// The combined 3 MiB exceeds the destination's 2 MiB window, but fits
+		// in the two hops' windows. The host can send status while forwarding
+		// is still blocked behind the guest's unread output.
+		{"flow-controlled-output", 1536 * 1024, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server, _, _ := forwardTestProxy(t)
+			sshClient := ssh.NewClient(client.conn, client.channels, client.requests)
+			type sessionResult struct {
+				session *ssh.Session
+				err     error
+			}
+			opened := make(chan sessionResult, 1)
+			go func() { session, err := sshClient.NewSession(); opened <- sessionResult{session, err} }()
+			incoming := forwardTestReceive(t, server.channels)
+			if incoming.ChannelType() != "session" {
+				t.Fatalf("channel type %q, want session", incoming.ChannelType())
+			}
+			host, requests, err := incoming.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := forwardTestReceive(t, opened)
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			session := result.session
+			t.Cleanup(func() { _ = session.Close(); _ = host.Close() })
+			release := make(chan struct{})
+			allowOutput := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(allowOutput)
+			stdout, stderr := &gatedSSHOutput{release: release}, &gatedSSHOutput{release: release}
+			session.Stdout, session.Stderr = stdout, stderr
+			if tc.eofBeforeStatus {
+				allowOutput()
+			}
+			started := make(chan error, 1)
+			go func() { started <- session.Start("test-output") }()
+			request := forwardTestReceive(t, requests)
+			if request.Type != "exec" || !request.WantReply {
+				t.Fatalf("unexpected start request: %+v", request)
+			}
+			if err := request.Reply(true, nil); err != nil {
+				t.Fatal(err)
+			}
+			go ssh.DiscardRequests(requests)
+			if err := forwardTestReceive(t, started); err != nil {
+				t.Fatal(err)
+			}
+			waited := make(chan error, 1)
+			go func() { waited <- session.Wait() }()
+			wantStdout := bytes.Repeat([]byte("o"), tc.bytesPerStream)
+			wantStderr := bytes.Repeat([]byte("e"), tc.bytesPerStream)
+			sent := make(chan error, 1)
+			go func() {
+				if _, err := host.Write(wantStdout); err != nil {
+					sent <- err
+					return
+				}
+				if _, err := host.Stderr().Write(wantStderr); err != nil {
+					sent <- err
+					return
+				}
+				if tc.eofBeforeStatus {
+					if err := host.CloseWrite(); err != nil {
+						sent <- err
+						return
+					}
+				}
+				if _, err := host.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{37})); err != nil {
+					sent <- err
+					return
+				}
+				// Session rejects unknown requests. Its reply proves it processed
+				// the preceding exit-status while the channel is still open.
+				ok, err := host.SendRequest("status-observed@upterm.test", true, nil)
+				if err == nil && ok {
+					err = errors.New("session accepted an unknown request")
+				}
+				sent <- err
+			}()
+			if err := forwardTestReceive(t, sent); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.eofBeforeStatus {
+				if err := host.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case err := <-waited:
+				t.Fatalf("Wait returned before channel closure or output consumption: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			allowOutput()
+			if tc.eofBeforeStatus {
+				if err := host.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = forwardTestReceive(t, waited)
+			var exit *ssh.ExitError
+			if !errors.As(err, &exit) || exit.ExitStatus() != 37 {
+				t.Fatalf("Wait returned %v, want exit status 37", err)
+			}
+			if !bytes.Equal(stdout.buffer.Bytes(), wantStdout) || !bytes.Equal(stderr.buffer.Bytes(), wantStderr) {
+				t.Fatalf("output truncated: stdout %d/%d bytes, stderr %d/%d bytes",
+					stdout.buffer.Len(), len(wantStdout), stderr.buffer.Len(), len(wantStderr))
+			}
+		})
+	}
+}
+
 func TestSSHForwardShutdownDrainsWorkers(t *testing.T) {
 	for _, shutdown := range []string{"cancel", "downstream", "upstream"} {
 		t.Run(shutdown, func(t *testing.T) {
