@@ -169,6 +169,13 @@ func requireStockSSH(t *testing.T, clientJoinURL string) string {
 // rejects a session without one. IdentitiesOnly keeps a developer's running
 // agent from offering a key the session does not permit, which would surface
 // as an auth failure that has nothing to do with this case.
+//
+// -F os.DevNull is what isolates this from the developer's own ~/.ssh/config.
+// IdentitiesOnly does not do that job: it only governs which keys are offered.
+// A wildcard Host * block carrying ProxyCommand, ProxyJump or ControlMaster
+// would otherwise redirect or multiplex this connection and fail a healthy
+// test. Note the isolation is partial — OpenSSH still reads the system-wide
+// /etc/ssh/ssh_config and offers no flag to suppress it.
 func stockSSHGuestArgs(t *testing.T, session *api.GetSessionResponse, clientJoinURL string) []string {
 	t.Helper()
 
@@ -180,6 +187,7 @@ func stockSSHGuestArgs(t *testing.T, session *api.GetSessionResponse, clientJoin
 
 	return []string{
 		"-tt",
+		"-F", os.DevNull,
 		"-p", port,
 		"-i", ClientPrivateKey,
 		"-o", "IdentitiesOnly=yes",
@@ -203,18 +211,30 @@ func trailingOutputCommand(lines, code int) []string {
 // checks that output written immediately before exit arrives complete.
 //
 // README.md documents `ssh TOKEN@uptermd.upterm.dev` as the way to join, so
-// OpenSSH is the default guest, not an exotic one. exit-status is a channel
-// request and can overtake buffered stdout inside the forwarder; the forwarder
-// only guarantees that forwarded data precedes CLOSE. So a guest that stopped
-// reading on exit-status would truncate here, and every Go-client test in this
-// package would still pass. This is the case that says it does not.
+// OpenSSH is the default guest, not an exotic one, and every other case in
+// this package drives a Go x/crypto client.
+//
+// What this establishes: a real OpenSSH guest receives every byte and the exit
+// status through the relay, under a high-volume command that exits the instant
+// it stops writing.
+//
+// What it does NOT establish: that a client which stopped reading on
+// exit-status would fail here. exit-status is a channel request and can
+// overtake buffered stdout inside the forwarder, which guarantees only that
+// forwarded data precedes CLOSE — but this test never constructs that race. It
+// does not force output to be undelivered at the moment the status is
+// processed, and the guest drains continuously into memory, so the backlog at
+// exit is small and scheduling-dependent. The discriminating power against
+// that specific defect is unmeasured. Pinning it needs a host that withholds
+// the trailing bytes until the client has demonstrably processed the status,
+// which this harness cannot do: the host is a real upterm host running a real
+// shell, with no way to inject a channel request mid-stream.
 func testProxyStockSSHClientTrailingOutput(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
-	// 200k lines of 12 bytes plus the pty's \r is ~2.6 MB. That is more than
-	// one x/crypto channel window of total output, but the window bounds
-	// unacked bytes rather than cumulative volume, and a bash loop writing a
-	// line at a time never saturates it. What the volume buys is a backlog at
-	// exit: a guest that stopped reading on exit-status would lose whatever
-	// backlog is in flight and miss the count below.
+	// 200k lines of 12 bytes plus the pty's \r is ~2.6 MB. The volume makes a
+	// backlog at exit likely rather than certain: the window bounds unacked
+	// bytes rather than cumulative volume, and a bash loop writing a line at a
+	// time never saturates it. See the note above for what that does and does
+	// not buy.
 	const (
 		wantLines = 200000
 		wantCode  = 42
