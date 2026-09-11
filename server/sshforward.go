@@ -78,7 +78,7 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
 			// not hold up drain completion on that reply, but still drain all channel
 			// buffers before closing the destination transport to release its sender.
 			// Zero grace: finished only signals drain completion, it writes nothing.
-			forwarder.requests(destination.conn, source.requests, finished, 0, nil)
+			forwarder.requests(destination.conn, source.requests, nil, finished, 0, nil)
 		})
 	}
 	var err error
@@ -286,7 +286,7 @@ type sshForwardChannel struct {
 func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	f.requests(sshChannelRequestSender{destination}, requests, func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
+	f.requests(sshChannelRequestSender{destination}, requests, nil, func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
 	streams.Wait()
 	// The source may send success and CLOSE back-to-back. Its reply worker
 	// must deliver that success before this direction closes the destination.
@@ -356,7 +356,17 @@ type sshRequestJob struct {
 // after sshRequestAbortGrace: for channels it closes the destination channel,
 // for globals it waives waiting for the reply during transport drain. Pass a
 // zero grace where abortPending writes nothing to the wire.
-func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, abortPending func(), grace time.Duration, replies *sync.Mutex) {
+//
+// sourceClosed, which may be nil, fires once when incoming closes: the point at
+// which the source can send nothing further. It is distinct from abortPending,
+// which fires only when a reply was outstanding at that moment, and it is
+// reported from the ingress loop rather than on return, because the serial
+// sender may still be blocked writing to a destination that has stopped
+// reading. A caller that needs to bound such a destination cannot wait for this
+// function to return. It runs synchronously on the ingress loop's goroutine, so
+// a slow sourceClosed delays further dispatch and cancellation handling until
+// it returns.
+func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ssh.Request, sourceClosed func(), abortPending func(), grace time.Duration, replies *sync.Mutex) {
 	jobs := make(chan sshRequestJob)
 	completed := make(chan struct{})
 	senderDone := make(chan struct{})
@@ -414,6 +424,9 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 		case request, ok := <-incoming:
 			if !ok {
 				incoming = nil
+				if sourceClosed != nil {
+					sourceClosed()
+				}
 				// The reply this send is waiting on can no longer be delivered.
 				// Let the destination answer anyway if it is merely slow; the
 				// same wait puts the request write safely ahead of the CLOSE

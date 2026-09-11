@@ -828,7 +828,7 @@ func TestSSHForwardTailAfterSourceCloseKeepsRequests(t *testing.T) {
 		go func() {
 			defer close(done)
 			sshForwarder{ctx: ctx, cancel: cancel}.requests(
-				sender, incoming, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
+				sender, incoming, nil, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
 		}()
 
 		// Occupy the serial sender, so everything after this is queued rather
@@ -1390,4 +1390,43 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	if n := forwardTestReceive(t, written); n >= sent {
 		t.Fatalf("origin wrote all %d bytes; the copy was never actually blocked", sent)
 	}
+}
+
+// The stalled-direction watchdog has to arm on source closure itself, not on
+// the teardown reaching a particular line: the serial sender can still be
+// blocked in SendRequest, and the deferred wait for it means requests would not
+// return.
+func TestRequestsReportsSourceClosureWhileTheSenderIsBlocked(t *testing.T) {
+	incoming := make(chan *ssh.Request)
+	blocked := make(chan struct{})
+	defer close(blocked)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	sender := senderFunc(func(string, bool, []byte) (bool, []byte, error) {
+		enterOnce.Do(func() { close(entered) })
+		<-blocked
+		return false, nil, nil
+	})
+
+	closed := make(chan struct{})
+	f := sshForwarder{ctx: t.Context(), cancel: func(error) {}}
+	go f.requests(sender, incoming, sync.OnceFunc(func() { close(closed) }), nil, 0, nil)
+
+	incoming <- &ssh.Request{Type: "window-change"}
+	<-entered // the sender has dispatched the request and is blocked in SendRequest
+	close(incoming)
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("source closure was not reported while the sender was blocked")
+	}
+}
+
+// senderFunc adapts a function to sshRequestSender.
+type senderFunc func(string, bool, []byte) (bool, []byte, error)
+
+func (s senderFunc) SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+	return s(name, wantReply, payload)
 }
