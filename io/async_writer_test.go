@@ -2,6 +2,7 @@ package io
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"slices"
 	"sync"
@@ -349,4 +350,78 @@ func TestAsyncWriterChunkStaysABoundedBuffer(t *testing.T) {
 	close(gate.release)
 	require.Eventually(t, func() bool { return len(gate.bytes()) == burst },
 		5*time.Second, time.Millisecond, "all bytes delivered")
+}
+
+func TestAsyncWriterFlushReturnsWhenIdle(t *testing.T) {
+	var rec recordingWriter
+	a := NewAsyncWriter(&rec, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Flush(ctx), "an idle sink flushes immediately")
+}
+
+func TestAsyncWriterFlushWaitsForDelivery(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("tail of the session"))
+	require.NoError(t, err)
+	<-gate.entered
+
+	flushed := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		flushed <- a.Flush(ctx)
+	}()
+
+	select {
+	case <-flushed:
+		t.Fatal("Flush returned before delivery completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate.release)
+	select {
+	case err := <-flushed:
+		require.NoError(t, err)
+		require.Equal(t, "tail of the session", string(gate.bytes()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("Flush never returned after delivery")
+	}
+}
+
+func TestAsyncWriterFlushGivesUpOnAStuckSink(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("never delivered"))
+	require.NoError(t, err)
+	<-gate.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, a.Flush(ctx), context.DeadlineExceeded,
+		"a stuck guest must not hold up shutdown")
+}
+
+func TestAsyncWriterFlushAfterCloseReturnsImmediately(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	_, err := a.Write([]byte("discarded"))
+	require.NoError(t, err)
+	<-gate.entered
+	require.NoError(t, a.Close())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Flush(ctx))
 }

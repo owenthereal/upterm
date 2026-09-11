@@ -1,6 +1,7 @@
 package io
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -127,6 +128,32 @@ func (a *AsyncWriter) Close() error {
 		a.signalIdle()
 	}
 	return nil
+}
+
+// Flush waits until everything written so far has been delivered, or until ctx
+// is done.
+//
+// It waits on the idle signal the drain publishes once it has emptied the
+// buffer and its last write has returned, rather than polling, and it honours
+// ctx so that one stuck guest cannot hold up the host's exit. A dead or closed
+// sink flushes to nil: there is nothing left to deliver and a guest that is
+// already gone is not a shutdown error.
+func (a *AsyncWriter) Flush(ctx context.Context) error {
+	for {
+		a.mu.Lock()
+		if a.err != nil || a.closed || (len(a.pending) == 0 && !a.writing) {
+			a.mu.Unlock()
+			return nil
+		}
+		idle := a.idle
+		a.mu.Unlock()
+
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // fail records a terminal error and releases everything waiting on this sink.
