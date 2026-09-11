@@ -340,6 +340,14 @@ func (w *gatedSSHOutput) Write(p []byte) (int, error) {
 	return w.buffer.Write(p)
 }
 
+// sshChannelWindow mirrors x/crypto's unexported channelWindowSize
+// (64 * channelMaxPacket, channel.go:19-24 at v0.55.0). It is a calibration,
+// not an invariant: nothing enforces that it still matches upstream. If
+// x/crypto raises its window, flow-controlled-output silently stops being a
+// flow-control case and merely duplicates buffered-client-output. Re-derive it
+// when bumping x/crypto.
+const sshChannelWindow = 64 * (1 << 15)
+
 // Receiving exit-status is not the end of a Go session: Wait must also wait
 // for channel closure and its managed stdout/stderr copies. These cases test
 // those completion guarantees without assuming data/request wire order can be
@@ -352,10 +360,11 @@ func TestSSHForwardSessionWaitDrainsOutput(t *testing.T) {
 	}{
 		{"eof-before-status", 1024, true},
 		{"buffered-client-output", 1024, false},
-		// The combined 3 MiB exceeds the destination's 2 MiB window, but fits
-		// in the two hops' windows. The host can send status while forwarding
-		// is still blocked behind the guest's unread output.
-		{"flow-controlled-output", 1536 * 1024, false},
+		// Three halves of one window across the two streams: more than one
+		// hop's window, so forwarding blocks behind the guest's unread output,
+		// but less than the two hops' windows combined, so the host's writes
+		// still complete and it can send status while that block persists.
+		{"flow-controlled-output", 3 * sshChannelWindow / 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server, _, _ := forwardTestProxy(t)

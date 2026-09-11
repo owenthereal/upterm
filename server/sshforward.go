@@ -248,11 +248,35 @@ type sshForwardChannel struct {
 	replies sync.Mutex
 }
 
+// channelDirection forwards one direction of one channel. It preserves:
+//
+//   - Byte order within each stream. stdin, stdout and stderr are each a
+//     single io.Copy in copySSHChannel.
+//   - Request order within this direction. requests dispatches from one serial
+//     sender, so replies come back in the order the requests were sent, as
+//     RFC 4254 section 4 requires.
+//   - Forwarded data before CLOSE. requests returns, then streams.Wait(), and
+//     only then destination.Close(). Every forwarded byte has returned from
+//     its Write before CLOSE is written, and x/crypto serializes channel
+//     packets and refuses writes once CLOSE has gone out. A peer that reads
+//     until CHANNEL_CLOSE cannot be truncated by this forwarder.
+//
+// It does not preserve the relative order of ordinary data, extended data and
+// requests, and cannot: that information is already gone when we see it.
+// x/crypto delivers incoming requests on a buffered Go channel (chanSize = 16)
+// while data lands in a byte buffer, so its mux read loop runs ahead and
+// buffers post-request bytes before the request is dequeued. Nothing ties a
+// request to an offset in the byte stream, so sequencing here would order
+// goroutine observations rather than recover packet order. Callers that need
+// a resize applied before subsequent stdin cannot get it from the proxy alone;
+// the host applies window events and copies stdin in separate actors.
+//
 // Normal close waits until source data and requests have drained. An explicit
-// source CLOSE can instead abort a pending reply (see requests below). In particular, EOF
-// alone cannot close a channel: a command may still produce output and status
-// after stdin EOF. Treat either endpoint's CLOSE symmetrically so a caller can
-// close one channel without leaving its peer open for the connection's lifetime.
+// source CLOSE can instead abort a pending reply (see requests below). In
+// particular, EOF alone cannot close a channel: a command may still produce
+// output and status after stdin EOF. Treat either endpoint's CLOSE
+// symmetrically so a caller can close one channel without leaving its peer
+// open for the connection's lifetime.
 func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
@@ -265,6 +289,9 @@ func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, r
 	_ = destination.Close()
 }
 
+// copySSHChannel copies ordinary data and extended data concurrently, so byte
+// order holds within each stream but not between them. See channelDirection.
+//
 // EOF covers both ordinary and extended data; sending it before stderr drains
 // would make subsequent stderr writes fail. CloseWrite preserves the other
 // direction, including output produced after the caller finishes writing stdin.
