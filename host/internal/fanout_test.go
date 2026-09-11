@@ -181,3 +181,101 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 	require.Equal(t, string(accepted.bytes()), string(guestOut.bytes()),
 		"output accepted by the fan-out was lost at teardown")
 }
+
+// Under parent cancellation the command and the session handlers would
+// otherwise be released together, so a guest's channel could close while the
+// flush was still delivering into it. Sessions therefore do not inherit the
+// parent's cancellation; only the SSH server actor's interrupt releases them,
+// after giving the command a bounded chance to finish.
+func TestSessionContextSurvivesParentCancellation(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	sessCtx, cancelSessions := context.WithCancel(sessionContext(parent))
+	defer cancelSessions()
+
+	cancelParent()
+
+	select {
+	case <-sessCtx.Done():
+		t.Fatal("sessions were released by the parent, ahead of the fan-out")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancelSessions()
+	select {
+	case <-sessCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the interrupt must still be able to release sessions")
+	}
+}
+
+func TestWaitClosedReturnsOnCloseAndOnTimeout(t *testing.T) {
+	closed := make(chan struct{})
+	close(closed)
+	start := time.Now()
+	waitClosed(closed, time.Minute)
+	require.Less(t, time.Since(start), time.Second, "an already-closed channel must not wait")
+
+	start = time.Now()
+	waitClosed(make(chan struct{}), 50*time.Millisecond)
+	require.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond,
+		"a command that never finishes must not hold shutdown open forever")
+}
+
+// Cancellation-led shutdown: the sessions must not be released until the
+// fan-out has finished delivering into them.
+//
+// This is the ordering ServeWithContext's last interrupt establishes, tested
+// without the SSH stack because what matters is the sequence, not the
+// transport. It is deterministic because the sink is gated: delivery is
+// provably outstanding when the release is attempted, which a functional test
+// cannot arrange — there, whether anything is still queued depends on window
+// and socket sizes that differ per platform.
+func TestReleaseSessionsWaitsForTheFanOut(t *testing.T) {
+	gate := make(chan struct{})
+	var guestOut recordingWriter
+	guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &guestOut},
+		uio.DefaultGuestBufferSize, nil)
+	defer func() { _ = guest.Close() }()
+
+	writers := uio.NewMultiWriter(5)
+	require.NoError(t, writers.Append(guest))
+	_, _ = writers.Write([]byte("tail of the session"))
+
+	released := make(chan struct{})
+	cmdDone := make(chan struct{})
+	go func() {
+		defer close(cmdDone)
+		flushCtx, cancel := context.WithTimeout(context.Background(), guestFlushTimeout)
+		defer cancel()
+		_ = writers.Shutdown(flushCtx)
+	}()
+	go func() {
+		defer close(released)
+		releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, func() {})
+	}()
+
+	select {
+	case <-released:
+		t.Fatal("sessions were released while output was still being delivered")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate)
+	select {
+	case <-released:
+		require.Equal(t, "tail of the session", string(guestOut.bytes()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("sessions were never released")
+	}
+}
+
+// gatedWriter delivers nothing until its gate is closed.
+type gatedWriter struct {
+	gate <-chan struct{}
+	rec  *recordingWriter
+}
+
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	<-g.gate
+	return g.rec.Write(p)
+}

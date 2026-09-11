@@ -46,6 +46,39 @@ type Server struct {
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
+// sessionContext derives the context guest sessions live under.
+//
+// It is deliberately detached from the parent. The fan-out's final flush
+// happens as the command's output copy returns, and a session context that died
+// with the parent would let HandleSession close a guest's channel while that
+// flush was still writing into it. Only the SSH server actor's interrupt
+// releases sessions, and it does so after giving the command a bounded chance
+// to finish.
+func sessionContext(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+
+// waitClosed waits for done, giving up after timeout.
+func waitClosed(done <-chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+// releaseSessions holds guest sessions open until the fan-out has finished
+// delivering into them, then releases them.
+//
+// Named rather than inlined into the interrupt so the ordering it establishes
+// can be tested on its own: it is the half of the mechanism that a detached
+// session context is useless without.
+func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release func()) {
+	waitClosed(cmdDone, timeout)
+	release()
+}
+
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	writers := uio.NewMultiWriter(5)
 
@@ -67,6 +100,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	}
 
 	var g run.Group
+	cmdDone := make(chan struct{})
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		teh := terminalEventHandler{
@@ -81,20 +115,21 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	}
 	{
 		g.Add(func() error {
+			defer close(cmdDone)
 			return cmd.Run()
 		}, func(err error) {
 			cmdCancel()
 		})
 	}
 	{
-		ctx, cancel := context.WithCancel(ctx)
+		sessCtx, cancel := context.WithCancel(sessionContext(ctx))
 		sh := sessionHandler{
 			forceCommand:          s.ForceCommand,
 			ptmx:                  ptmx,
 			eventEmmiter:          s.EventEmitter,
 			writers:               writers,
 			keepAliveDuration:     s.KeepAliveDuration,
-			ctx:                   ctx,
+			ctx:                   sessCtx,
 			logger:                s.Logger,
 			readonly:              s.ReadOnly,
 			sftpPermissionChecker: s.SFTPPermissionChecker,
@@ -151,10 +186,20 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		g.Add(func() error {
 			return server.Serve(l)
 		}, func(err error) {
+			// Let the fan-out finish delivering before the sessions are
+			// released. This is the last interrupt in the group, so waiting
+			// here holds up nothing else, and a command-led exit has already
+			// closed cmdDone by the time it runs.
+			//
 			// kill ssh sessionHandler
-			cancel()
-			// shut down ssh server
-			_ = server.Shutdown(ctx)
+			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
+
+			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
+			// connection WaitGroup until the context it is given is done, and
+			// on a command-led exit ctx is still live — a guest that keeps its
+			// SSH connection open after its channel closed would hang the host
+			// forever, and the deferred ReverseTunnel.Close would never run.
+			_ = server.Shutdown(sessCtx)
 		})
 	}
 
