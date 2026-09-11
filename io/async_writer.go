@@ -10,11 +10,14 @@ import (
 const (
 	// DefaultGuestBufferSize bounds how much output may sit in pending before a
 	// guest is dropped; the worst case for undelivered output is this plus one
-	// in-flight maxDrainChunk. It is generous on purpose: a stalled guest already
-	// sits behind up to 2 MiB of SSH window on each of the two legs between the
-	// host and itself, so it is megabytes behind before this is reached. The
-	// buffer exists to decouple the fan-out from a blocking write, not to store
-	// the session.
+	// in-flight maxDrainChunk. A guest merely slower than the host's terminal,
+	// rather than stalled, is throttled only by the host's own ingest rate, so
+	// backlog accrues at the difference between that rate and the guest's
+	// drain rate, and a sustained mismatch exhausts any finite cap: this
+	// number sets how long a slow guest survives, not whether. Total slack is
+	// roughly 5 MiB, the cap plus a 2 MiB SSH window on each of the two legs
+	// between host and guest. The buffer exists to decouple the fan-out from a
+	// blocking write, not to store the session.
 	DefaultGuestBufferSize = 1 << 20 // 1 MiB
 )
 

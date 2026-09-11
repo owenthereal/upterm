@@ -201,7 +201,8 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	closed := make(chan error, 1)
 	go func() { closed <- stalled.WaitSession() }()
 
-	expiry := time.Now().Add(burstLoopBudget(t))
+	budget := burstLoopBudget(t)
+	expiry := time.Now().Add(budget)
 
 	// The burst is produced a chunk at a time, and the next chunk is not asked
 	// for until the guest that is still reading has seen the last one. Blasting
@@ -217,7 +218,7 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	for chunk := 0; chunk < burstChunks && dropped == nil; chunk++ {
 		if time.Now().After(expiry) {
 			t.Fatalf("the stalled guest was not dropped within %s, after %d of %d bytes of output; raise burstBudget, and burstChunks with it if the whole ceiling was spent",
-				burstBudget, produced, burstChunks*burstChunkBytes)
+				budget, produced, burstChunks*burstChunkBytes)
 		}
 
 		hostInput <- "" // go-ahead for one chunk

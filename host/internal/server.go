@@ -190,8 +190,6 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			// released. This is the last interrupt in the group, so waiting
 			// here holds up nothing else, and a command-led exit has already
 			// closed cmdDone by the time it runs.
-			//
-			// kill ssh sessionHandler
 			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
 
 			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
