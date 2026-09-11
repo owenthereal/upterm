@@ -1245,3 +1245,91 @@ func TestSSHForwardSimultaneousCloseWithPendingReplies(t *testing.T) {
 		_ = b.Close()
 	}
 }
+
+// TestSSHForwardAbortCutsBufferedData pins the documented exception to the
+// forwarder's data-before-CLOSE guarantee.
+//
+// channelDirection normally closes the destination only after both the request
+// tail and the data copy have drained, so a peer reading until CHANNEL_CLOSE
+// sees every forwarded byte. The abort path skips that: abortPending closes the
+// destination from inside requests, before streams.Wait(), to release a sender
+// whose source has gone away. Anything still queued behind a blocked Write is
+// lost, and copySSHChannel discards the resulting error.
+//
+// The other abort cases here (TestSSHForwardOriginCloseWithPendingReply,
+// TestSSHForwardSimultaneousCloseWithPendingReplies) have no data in flight, so
+// they never exercise that loss. This one stalls the destination so the copy is
+// blocked when the abort lands, and pins the truncation rather than leaving the
+// godoc's exception untested.
+func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
+	// A stalled destination absorbs about two windows before anything blocks:
+	// one in b's own buffer, and one more in the forwarder's source-side buffer
+	// because reading from a replenishes a's credit. Two windows therefore sits
+	// exactly at capacity and the copy finishes given a moment — measured, not
+	// assumed. Four leaves the origin unable to finish, which is what makes
+	// "the copy was blocked when the abort landed" true rather than incidental.
+	const sent = 4 * sshChannelWindow
+
+	client, server, _, _ := forwardTestProxy(t)
+	a, ar, b, br := forwardTestChannel(t, client, server)
+	go ssh.DiscardRequests(ar)
+
+	// b never reads, so the forwarder's copy blocks once b's window fills and
+	// a's own window stops being replenished. Neither write can complete.
+	written := make(chan int, 1)
+	go func() {
+		n, _ := a.Write(bytes.Repeat([]byte("x"), sent))
+		written <- n
+	}()
+
+	// An unanswered request with a source that then disappears is what arms the
+	// abort. b receives it and deliberately never replies until cleanup.
+	pendingDone := make(chan bool, 1)
+	go func() { ok, _ := a.SendRequest("unanswered", true, nil); pendingDone <- ok }()
+	pending := forwardTestReceive(t, br)
+	defer func() { _ = pending.Reply(false, nil) }()
+
+	// Control: with the source still open, nothing closes the destination, and
+	// this outlasts sshRequestAbortGrace. Without it, the assertion below could
+	// be satisfied by any incidental close rather than by the abort.
+	select {
+	case _, ok := <-br:
+		if !ok {
+			t.Fatal("destination closed while the source was still open")
+		}
+		t.Fatal("unexpected second request")
+	case <-time.After(10 * sshRequestAbortGrace):
+	}
+
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// b's request channel closing is the abort landing: the forwarder closed
+	// the destination without waiting for the blocked copy.
+	select {
+	case _, ok := <-br:
+		if ok {
+			t.Fatal("unexpected request after source close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("abort did not close the destination while its data copy was blocked")
+	}
+
+	if forwardTestReceive(t, pendingDone) {
+		t.Fatal("aborted request succeeded")
+	}
+
+	// Whatever reached b's buffer before the abort is still readable; the rest
+	// is gone. Bounding it below `sent` is the truncation this documents.
+	got, err := io.ReadAll(b)
+	if err != nil {
+		t.Fatalf("draining destination after abort: %v", err)
+	}
+	if len(got) >= sent {
+		t.Fatalf("destination received %d of %d bytes; expected the abort to cut the copy", len(got), sent)
+	}
+	if n := forwardTestReceive(t, written); n >= sent {
+		t.Fatalf("origin wrote %d of %d bytes; the copy was never actually blocked", n, sent)
+	}
+}
