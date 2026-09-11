@@ -29,14 +29,15 @@ import (
 // ProxyTestCases pins the behaviour of the relay's front door at the SSH
 // connection-protocol layer.
 //
-// The relay forwards decrypted SSH *packets* today, so channel numbering,
-// windows, request ordering and close ordering all survive untouched and none
-// of the cases below can fail for a reason the front door is responsible for.
-// Replacing it with a stock golang.org/x/crypto proxy terminates the channel
-// layer on each side and re-originates every channel and every request, at
-// which point each of these becomes a way to lose data silently. They are
-// written against the piper first so that a failure afterwards means the
-// rewrite broke something, rather than meaning the test was never right.
+// These were written against the old sshpiper relay, which forwarded decrypted
+// SSH *packets*: channel numbering, windows, request ordering and close
+// ordering all survived untouched, so none of the cases below could fail for a
+// reason the front door was responsible for. #526 replaced it with a stock
+// golang.org/x/crypto proxy (server/sshforward.go), which terminates the
+// channel layer on each side and re-originates every channel and every
+// request — at which point each of these became a way to lose data silently.
+// Writing them against the piper first means a failure now indicates the
+// rewrite broke something, rather than that the test was never right.
 //
 // Not covered here, deliberately, because upterm's guest surface cannot reach
 // them and a test that cannot fail is worse than no test:
@@ -140,7 +141,7 @@ func shareHost(t *testing.T, h *Host, hostShareURL, hostNodeAddr string) *api.Ge
 //
 // The ws topologies would need `upterm proxy` as a ProxyCommand, which means
 // building and locating the CLI from a test. The ssh topologies are exactly
-// what README.md:77 tells a guest to type, and they are what this case is
+// what README.md tells a guest to type, and they are what this case is
 // about, so restricting to them costs no coverage that matters.
 func requireStockSSH(t *testing.T, clientJoinURL string) string {
 	t.Helper()
@@ -201,7 +202,7 @@ func trailingOutputCommand(lines, code int) []string {
 // testProxyStockSSHClientTrailingOutput joins with the system ssh binary and
 // checks that output written immediately before exit arrives complete.
 //
-// README.md:77 documents `ssh TOKEN@uptermd.upterm.dev` as the way to join, so
+// README.md documents `ssh TOKEN@uptermd.upterm.dev` as the way to join, so
 // OpenSSH is the default guest, not an exotic one. exit-status is a channel
 // request and can overtake buffered stdout inside the forwarder; the forwarder
 // only guarantees that forwarded data precedes CLOSE. So a guest that stopped
@@ -212,8 +213,8 @@ func testProxyStockSSHClientTrailingOutput(t *testing.T, hostShareURL, hostNodeA
 	// one x/crypto channel window of total output, but the window bounds
 	// unacked bytes rather than cumulative volume, and a bash loop writing a
 	// line at a time never saturates it. What the volume buys is a backlog at
-	// exit: a guest that stopped reading on exit-status would lose hundreds of
-	// lines and miss the count below.
+	// exit: a guest that stopped reading on exit-status would lose whatever
+	// backlog is in flight and miss the count below.
 	const (
 		wantLines = 200000
 		wantCode  = 42

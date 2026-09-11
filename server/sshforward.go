@@ -255,17 +255,23 @@ type sshForwardChannel struct {
 //   - Request order within this direction. requests dispatches from one serial
 //     sender, so replies come back in the order the requests were sent, as
 //     RFC 4254 section 4 requires.
-//   - Forwarded data before CLOSE. requests returns, then streams.Wait(), and
-//     only then destination.Close(). Every forwarded byte has returned from
-//     its Write before CLOSE is written, and x/crypto serializes channel
-//     packets and refuses writes once CLOSE has gone out. A peer that reads
-//     until CHANNEL_CLOSE cannot be truncated by this forwarder.
+//   - Forwarded data before CLOSE, on the ordinary path. requests returns,
+//     then streams.Wait(), and only then destination.Close(). Every forwarded
+//     byte has returned from its Write before CLOSE is written, and x/crypto
+//     serializes channel packets and refuses writes once CLOSE has gone out,
+//     so a peer reading until CHANNEL_CLOSE is not truncated here. The aborts
+//     are the exception: abortPending closes destination from inside requests,
+//     before streams.Wait(), and cancellation, request-queue overflow and
+//     sshForwardDrainTimeout close both transports outright. Each of those can
+//     cut a Write that has not returned, and copySSHChannel discards the error.
+//   - EOF before CLOSE, and half-close survives. See copySSHChannel.
 //
 // It does not preserve the relative order of ordinary data, extended data and
 // requests, and cannot: that information is already gone when we see it.
-// x/crypto delivers incoming requests on a buffered Go channel (chanSize = 16)
-// while data lands in a byte buffer, so its mux read loop runs ahead and
-// buffers post-request bytes before the request is dequeued. Nothing ties a
+// x/crypto delivers incoming requests on a buffered Go channel (chanSize = 16,
+// handshake.go:26 at v0.55.0) while data lands in a byte buffer, so its mux
+// read loop runs ahead and buffers post-request bytes before the request is
+// dequeued. Nothing ties a
 // request to an offset in the byte stream, so sequencing here would order
 // goroutine observations rather than recover packet order. Callers that need
 // a resize applied before subsequent stdin cannot get it from the proxy alone;
