@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -387,13 +388,44 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
 		// they reach the client. This prevents client terminals from responding
 		// to queries meant for the host terminal.
-		filteredOutput := uio.NewTerminalQueryFilter(sess)
-		if err := h.writers.Append(filteredOutput); err != nil {
-			_ = sess.Exit(1)
+		filtered := uio.NewTerminalQueryFilter(sess)
+
+		// And wrap that in a sink with its own goroutine and a bounded buffer,
+		// so this guest cannot hold up the fan-out for the host or anyone else.
+		// A guest that overflows is disconnected: a terminal stream is not
+		// resumable, so dropping bytes out of the middle would leave a corrupted
+		// screen it could not detect, while a closed session it can simply
+		// rejoin. See owenthereal/upterm#524.
+		onDrop := func(err error) {
+			if errors.Is(err, uio.ErrOverflow) {
+				h.logger.Warn("dropping guest: too far behind to keep up with output",
+					"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
+			} else {
+				h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+			}
+			// Closing the channel is what makes the drop real: it fails the
+			// blocked write, and it fails the stdin copy below, so run.Group
+			// returns and the deferred client-left event fires.
+			_ = sess.Close()
+		}
+
+		sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
+		if err := attachGuestOutput(h.writers, sink); err != nil {
+			if errors.Is(err, uio.ErrClosed) {
+				// The session is already tearing down. This guest arrived a
+				// moment too late, which is not its error.
+				_ = sess.Exit(0)
+			} else {
+				h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
+				_ = sess.Exit(1)
+			}
 			return
 		}
 
-		defer h.writers.Remove(filteredOutput)
+		defer func() {
+			h.writers.Remove(sink)
+			_ = sink.Close()
+		}()
 	}
 
 	{
@@ -453,6 +485,24 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	default:
 		_ = sess.Exit(0)
 	}
+}
+
+// attachGuestOutput attaches a guest's sink to the fan-out, releasing it if the
+// fan-out refuses.
+//
+// That release is the one path nothing else covers: the sink's goroutine is
+// idle rather than blocked in I/O, so neither closing the session nor the
+// fan-out's teardown can reach it — and a refused attach became reachable in
+// normal operation the moment MultiWriter learned to quiesce.
+//
+// It takes a built sink rather than building one so the caller, and a test,
+// keeps a handle on what it must release.
+func attachGuestOutput(writers *uio.MultiWriter, sink *uio.AsyncWriter) error {
+	if err := writers.Append(sink); err != nil {
+		_ = sink.Close()
+		return err
+	}
+	return nil
 }
 
 func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {
