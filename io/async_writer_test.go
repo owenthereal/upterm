@@ -264,3 +264,89 @@ func TestAsyncWriterCloseDoesNotWaitAndStopsTheDrain(t *testing.T) {
 	require.Eventually(t, func() bool { return a.stopped() },
 		2*time.Second, time.Millisecond, "the drain goroutine must exit")
 }
+
+func TestAsyncWriterCoalescesUpToTheChunkCap(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("first"))
+	require.NoError(t, err)
+	<-gate.entered // the drain holds "first"; everything below queues behind it
+
+	block := bytes.Repeat([]byte("y"), 32<<10)
+	const blocks = 8 // 256 KiB, four chunks' worth
+	for range blocks {
+		_, err := a.Write(block)
+		require.NoError(t, err)
+	}
+
+	close(gate.release)
+	wantLen := len("first") + blocks*len(block)
+	require.Eventually(t, func() bool { return len(gate.bytes()) == wantLen },
+		5*time.Second, time.Millisecond, "everything queued must be delivered")
+
+	sizes := gate.writeSizes()
+	require.Less(t, len(sizes), blocks, "queued writes should coalesce, not arrive one by one")
+	for _, n := range sizes {
+		require.LessOrEqual(t, n, maxDrainChunk, "no write may exceed the chunk cap")
+	}
+}
+
+// A burst that has been fully delivered must not leave its backing array behind
+// for the rest of the session. Advancing pending past the bytes taken walks the
+// slice to the end of its array, so this holds without any explicit release —
+// measured at 0-4096 bytes across bursts from 256 KiB to 1000 KiB. The bound
+// here is deliberately loose: it pins "the array is given back", not the exact
+// arithmetic of Go's size classes.
+func TestAsyncWriterReleasesPendingCapacityWhenItCatchesUp(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("first"))
+	require.NoError(t, err)
+	<-gate.entered
+
+	_, err = a.Write(bytes.Repeat([]byte("z"), 512<<10))
+	require.NoError(t, err)
+
+	close(gate.release)
+	require.Eventually(t, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.pending) == 0 && cap(a.pending) <= maxDrainChunk
+	}, 5*time.Second, time.Millisecond, "a one-off burst must not be retained for the session")
+}
+
+// The drain's chunk must stay a bounded buffer of its own rather than a window
+// into pending: `a.chunk = a.pending[:n]` would keep the guest's whole grown
+// array — up to max — reachable for as long as the write is in flight, which is
+// the memory term the 64 KiB cap exists to bound.
+//
+// This pins memory, not content. Delivered bytes cannot be rewritten under the
+// writer either way: pending only ever advances past the bytes taken, so every
+// later append lands beyond the range a window would cover. A content
+// comparison therefore cannot tell a copy from a window — capacity can.
+func TestAsyncWriterChunkStaysABoundedBuffer(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	// A burst far larger than one chunk, so a windowing takeChunk would inherit
+	// a correspondingly large capacity.
+	const burst = 512 << 10
+	_, err := a.Write(bytes.Repeat([]byte("a"), burst))
+	require.NoError(t, err)
+	<-gate.entered // the drain is inside Write, holding the first chunk
+
+	a.mu.Lock()
+	chunkCap := cap(a.chunk)
+	a.mu.Unlock()
+	require.Equal(t, maxDrainChunk, chunkCap,
+		"the chunk must not inherit pending's backing array")
+
+	close(gate.release)
+	require.Eventually(t, func() bool { return len(gate.bytes()) == burst },
+		5*time.Second, time.Millisecond, "all bytes delivered")
+}

@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	// DefaultGuestBufferSize is how much undelivered output one guest may hold
-	// before it is dropped. It is generous on purpose: a stalled guest already
+	// DefaultGuestBufferSize bounds how much output may sit in pending before a
+	// guest is dropped; the worst case for undelivered output is this plus one
+	// in-flight maxDrainChunk. It is generous on purpose: a stalled guest already
 	// sits behind up to 2 MiB of SSH window on each of the two legs between the
 	// host and itself, so it is megabytes behind before this is reached. The
 	// buffer exists to decouple the fan-out from a blocking write, not to store
@@ -46,7 +47,8 @@ type AsyncWriter struct {
 
 	// chunk is owned by the drain goroutine and never aliases pending. Handing
 	// out a sub-slice of pending instead would pin its whole grown backing
-	// array for the length of the write and defeat the release below.
+	// array for the length of the write, which is exactly what
+	// TestAsyncWriterChunkStaysABoundedBuffer guards against.
 	chunk []byte
 
 	mu      sync.Mutex
@@ -56,7 +58,7 @@ type AsyncWriter struct {
 	closed  bool
 	writing bool
 	// idle is closed and replaced every time the drain catches up, which is how
-	// Flush waits without polling. See flush.go.
+	// Flush waits without polling.
 	idle     chan struct{}
 	dropOnce sync.Once
 	done     chan struct{}
@@ -131,8 +133,8 @@ func (a *AsyncWriter) Close() error {
 // Callers must hold a.mu.
 //
 // onDrop runs on its own goroutine because the caller here is the pty copy that
-// feeds every attached guest: a callback that blocks would reintroduce the head
-// -of-line blocking this type removes.
+// feeds every attached guest: a callback that blocks would reintroduce the
+// head-of-line blocking this type removes.
 func (a *AsyncWriter) fail(err error) {
 	if a.err != nil {
 		return
