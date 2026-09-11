@@ -1268,6 +1268,11 @@ func TestSSHForwardSimultaneousCloseWithPendingReplies(t *testing.T) {
 // and the missing window is the cut. Every assertion here is an upper bound, so
 // the gate that waits for two windows to be accepted is what keeps the case
 // from passing on a run where nothing moved — measured, not assumed.
+//
+// Every wait here is sized against forwardTestPair's absolute 10s transport
+// deadline: 3s to fill the pipeline, 1s of control, 3s for the abort to land.
+// Past that deadline the transports are gone and no bound can be informative,
+// so the waits stay inside it rather than outlasting it.
 func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	// A stalled destination absorbs about two windows before anything blocks:
 	// one in b's own buffer, and one more in the forwarder's source-side buffer
@@ -1286,7 +1291,9 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	// Writing in chunks publishes progress, which the gate below needs.
 	var accepted atomic.Int64
 	written := make(chan int, 1)
+	writerDone := make(chan struct{})
 	go func() {
+		defer close(writerDone)
 		chunk := bytes.Repeat([]byte("x"), 64<<10)
 		total := 0
 		for total < sent {
@@ -1312,12 +1319,23 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	// makes Write return 0, ReadAll returns 0, and 0 is under every ceiling.
 	// Waiting for two windows to be accepted means the forwarder has drained a
 	// window out of a and pushed it at b, so there is real data in the pipeline
-	// to cut. A loaded scheduler delays this rather than defeating it.
-	deadline := time.After(30 * time.Second)
+	// to cut.
+	//
+	// The budget is not ours to choose freely: forwardTestPair puts an absolute
+	// 10s deadline on both transports, so a wait longer than that cannot make
+	// progress, it can only turn a dead transport into a late and misleading
+	// "nothing to cut". Stay well inside it, and watch the writer as well as the
+	// clock — if it stops early the transport or channel ended, which is a
+	// different failure and deserves to say so.
+	gate := time.After(3 * time.Second)
 	for accepted.Load() < 2*sshChannelWindow {
 		select {
-		case <-deadline:
-			t.Fatalf("only %d bytes entered the forwarding path; nothing to cut", accepted.Load())
+		case <-writerDone:
+			t.Fatalf("origin stopped writing at %d of the %d bytes the pipeline needs; "+
+				"the channel or transport ended before the abort was armed", accepted.Load(), 2*sshChannelWindow)
+		case <-gate:
+			t.Fatalf("only %d of the %d bytes needed entered the forwarding path within the transport budget",
+				accepted.Load(), 2*sshChannelWindow)
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -1349,7 +1367,7 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 		if ok {
 			t.Fatal("unexpected request after source close")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("abort did not close the destination while its data copy was blocked")
 	}
 
