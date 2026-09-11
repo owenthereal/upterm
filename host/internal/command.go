@@ -21,6 +21,12 @@ const (
 	outputIdleTimeout = 100 * time.Millisecond
 	// outputDrainTimeout bounds the total time spent draining after exit.
 	outputDrainTimeout = time.Second
+	// guestFlushTimeout bounds how long the fan-out waits for asynchronous
+	// guests to receive what it has already accepted, once the producer has
+	// stopped. A guest still behind when it expires loses the remainder; it is
+	// deliberately not dropped for that, because the session is ending and a
+	// slow last second is not an overflow.
+	guestFlushTimeout = time.Second
 )
 
 // activityWriter records when it last wrote, so a drain can stop once output
@@ -169,6 +175,19 @@ func (c *command) Run() error {
 		output := &activityWriter{Writer: c.writers}
 		done := make(chan struct{})
 		g.Add(func() error {
+			// Runs last, by LIFO. The copy has returned, so the producer has
+			// provably stopped and nothing further can enter the fan-out: this
+			// is the only point where a flush is a barrier rather than a guess.
+			// Putting it in the interrupt instead would race the producer, and
+			// waiting there for the copy would not even be bounded — cancelling
+			// the reader cannot release a copy blocked in the synchronous write
+			// to c.stdout, and run.Group calls interrupts one after another, so
+			// that wait would hold up the pty close behind it.
+			defer func() {
+				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(c.ctx), guestFlushTimeout)
+				defer cancelFlush()
+				_ = c.writers.Shutdown(flushCtx)
+			}()
 			defer close(done)
 			_, err := io.Copy(output, uio.NewContextReader(ctx, c.ptmx))
 			return ptyError(err)
