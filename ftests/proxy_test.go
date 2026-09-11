@@ -51,15 +51,15 @@ import (
 //     never sees a key it will refuse. testClientAuthorizedKeyNotMatching
 //     covers the relay-rejects case, which is the one that happens today.
 //
+// All three belong to the forwarder's own unit tests, against a stock SSH
+// server and client with no upterm involved.
+//
 // One case here does not use a Go client at all:
 // testProxyStockSSHClientTrailingOutput drives the system ssh binary, because
 // that is what README tells a guest to run and because a client that stopped
 // reading on exit-status would truncate output in a way no x/crypto client
 // test in this package can see. It skips where that binary or a direct ssh
 // endpoint is unavailable.
-//
-// All three belong to the forwarder's own unit tests, against a stock SSH
-// server and client with no upterm involved.
 var ProxyTestCases = []FtestCase{
 	testProxyExitStatus,
 	testProxyForcedCommandExitStatus,
@@ -208,9 +208,12 @@ func trailingOutputCommand(lines, code int) []string {
 // reading on exit-status would truncate here, and every Go-client test in this
 // package would still pass. This is the case that says it does not.
 func testProxyStockSSHClientTrailingOutput(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
-	// 200k lines of 12 bytes plus the pty's \r is ~2.6 MB, comfortably past
-	// x/crypto's 2 MB channel window, so output is still being forwarded when
-	// the command exits.
+	// 200k lines of 12 bytes plus the pty's \r is ~2.6 MB. That is more than
+	// one x/crypto channel window of total output, but the window bounds
+	// unacked bytes rather than cumulative volume, and a bash loop writing a
+	// line at a time never saturates it. What the volume buys is a backlog at
+	// exit: a guest that stopped reading on exit-status would lose hundreds of
+	// lines and miss the count below.
 	const (
 		wantLines = 200000
 		wantCode  = 42
