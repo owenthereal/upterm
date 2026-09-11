@@ -954,6 +954,15 @@ func writeTempFile(name, content string) (string, error) {
 		_ = file.Close()
 	}()
 
+	// The OpenSSH private key literals above end right after "-----END
+	// OPENSSH PRIVATE KEY-----" with no trailing newline. x/crypto's key
+	// parser tolerates that, but OpenSSH's own key loader rejects the file
+	// outright ("invalid format"), and ftests hands these keys to the real
+	// ssh binary as well as to x/crypto clients.
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
 	if _, err := file.Write([]byte(content)); err != nil {
 		return "", err
 	}

@@ -3,12 +3,15 @@ package ftests
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,14 +29,15 @@ import (
 // ProxyTestCases pins the behaviour of the relay's front door at the SSH
 // connection-protocol layer.
 //
-// The relay forwards decrypted SSH *packets* today, so channel numbering,
-// windows, request ordering and close ordering all survive untouched and none
-// of the cases below can fail for a reason the front door is responsible for.
-// Replacing it with a stock golang.org/x/crypto proxy terminates the channel
-// layer on each side and re-originates every channel and every request, at
-// which point each of these becomes a way to lose data silently. They are
-// written against the piper first so that a failure afterwards means the
-// rewrite broke something, rather than meaning the test was never right.
+// These were written against the old sshpiper relay, which forwarded decrypted
+// SSH *packets*: channel numbering, windows, request ordering and close
+// ordering all survived untouched, so none of the cases below could fail for a
+// reason the front door was responsible for. #526 replaced it with a stock
+// golang.org/x/crypto proxy (server/sshforward.go), which terminates the
+// channel layer on each side and re-originates every channel and every
+// request — at which point each of these became a way to lose data silently.
+// Writing them against the piper first means a failure now indicates the
+// rewrite broke something, rather than that the test was never right.
 //
 // Not covered here, deliberately, because upterm's guest surface cannot reach
 // them and a test that cannot fail is worse than no test:
@@ -50,9 +54,17 @@ import (
 //
 // All three belong to the forwarder's own unit tests, against a stock SSH
 // server and client with no upterm involved.
+//
+// One case here does not use a Go client at all:
+// testProxyStockSSHClientTrailingOutput drives the system ssh binary, because
+// that is what README tells a guest to run and because a client that stopped
+// reading on exit-status would truncate output in a way no x/crypto client
+// test in this package can see. It skips where that binary or a direct ssh
+// endpoint is unavailable.
 var ProxyTestCases = []FtestCase{
 	testProxyExitStatus,
 	testProxyForcedCommandExitStatus,
+	testProxyStockSSHClientTrailingOutput,
 	testProxyLargeTransfer,
 	testProxyWindowChange,
 	testProxyPreShellRequests,
@@ -122,6 +134,151 @@ func shareHost(t *testing.T, h *Host, hostShareURL, hostNodeAddr string) *api.Ge
 	t.Cleanup(h.Close)
 
 	return getAndVerifySession(t, h.AdminSocketFile, hostShareURL, hostNodeAddr)
+}
+
+// requireStockSSH skips unless the system ssh binary can reach this topology,
+// and returns its path.
+//
+// The ws topologies would need `upterm proxy` as a ProxyCommand, which means
+// building and locating the CLI from a test. The ssh topologies are exactly
+// what README.md tells a guest to type, and they are what this case is
+// about, so restricting to them costs no coverage that matters.
+func requireStockSSH(t *testing.T, clientJoinURL string) string {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("stock ssh guest case is POSIX-only")
+	}
+
+	u, err := url.Parse(clientJoinURL)
+	require.NoError(t, err)
+	if u.Scheme != "ssh" {
+		t.Skipf("stock ssh guest needs a direct ssh endpoint, got scheme %q", u.Scheme)
+	}
+
+	path, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh binary on PATH")
+	}
+	return path
+}
+
+// stockSSHGuestArgs builds the argv a guest would type, minus the binary.
+//
+// -tt forces a pty even though the test's stdin is not a terminal: upterm
+// rejects a session without one. IdentitiesOnly keeps a developer's running
+// agent from offering a key the session does not permit, which would surface
+// as an auth failure that has nothing to do with this case.
+//
+// -F os.DevNull is what isolates this from the developer's own ~/.ssh/config.
+// IdentitiesOnly does not do that job: it only governs which keys are offered.
+// A wildcard Host * block carrying ProxyCommand, ProxyJump or ControlMaster
+// would otherwise redirect or multiplex this connection and fail a healthy
+// test. Note the isolation is partial — OpenSSH still reads the system-wide
+// /etc/ssh/ssh_config and offers no flag to suppress it.
+func stockSSHGuestArgs(t *testing.T, session *api.GetSessionResponse, clientJoinURL string) []string {
+	t.Helper()
+
+	u, err := url.Parse(clientJoinURL)
+	require.NoError(t, err)
+
+	hostname, port, err := net.SplitHostPort(u.Host)
+	require.NoError(t, err)
+
+	return []string{
+		"-tt",
+		"-F", os.DevNull,
+		"-p", port,
+		"-i", ClientPrivateKey,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=" + os.DevNull,
+		"-o", "BatchMode=yes",
+		"-o", "LogLevel=ERROR",
+		session.SshUser + "@" + hostname,
+	}
+}
+
+// trailingOutputCommand writes lines numbered from zero and then exits, with
+// nothing in between, so exit-status is sent while output is still in flight.
+func trailingOutputCommand(lines, code int) []string {
+	return []string{"bash", "-c", fmt.Sprintf(
+		`i=0; while [ $i -lt %d ]; do printf 'line-%%06d\n' $i; i=$((i+1)); done; exit %d`,
+		lines, code)}
+}
+
+// testProxyStockSSHClientTrailingOutput joins with the system ssh binary and
+// checks that output written immediately before exit arrives complete.
+//
+// README.md documents `ssh TOKEN@uptermd.upterm.dev` as the way to join, so
+// OpenSSH is the default guest, not an exotic one, and every other case in
+// this package drives a Go x/crypto client.
+//
+// What this establishes: a real OpenSSH guest receives every byte and the exit
+// status through the relay, under a high-volume command that exits the instant
+// it stops writing.
+//
+// What it does NOT establish: that a client which stopped reading on
+// exit-status would fail here. exit-status is a channel request and can
+// overtake buffered stdout inside the forwarder, which guarantees only that
+// forwarded data precedes CLOSE — but this test never constructs that race. It
+// does not force output to be undelivered at the moment the status is
+// processed, and the guest drains continuously into memory, so the backlog at
+// exit is small and scheduling-dependent. The discriminating power against
+// that specific defect is unmeasured. Pinning it needs a host that withholds
+// the trailing bytes until the client has demonstrably processed the status,
+// which this harness cannot do: the host is a real upterm host running a real
+// shell, with no way to inject a channel request mid-stream.
+func testProxyStockSSHClientTrailingOutput(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	// 200k lines of 12 bytes plus the pty's \r is ~2.6 MB. The volume makes a
+	// backlog at exit likely rather than certain: the window bounds unacked
+	// bytes rather than cumulative volume, and a bash loop writing a line at a
+	// time never saturates it. See the note above for what that does and does
+	// not buy.
+	const (
+		wantLines = 200000
+		wantCode  = 42
+	)
+
+	sshPath := requireStockSSH(t, clientJoinURL)
+
+	adminSocketFile := setupAdminSocket(t)
+	session := shareHost(t, &Host{
+		Command:                  getTestShell(),
+		ForceCommand:             trailingOutputCommand(wantLines, wantCode),
+		PrivateKeys:              []string{HostPrivateKey},
+		AdminSocketFile:          adminSocketFile,
+		PermittedClientPublicKey: ClientPublicKeyContent,
+	}, hostShareURL, hostNodeAddr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, sshPath, stockSSHGuestArgs(t, session, clientJoinURL)...)
+
+	// Hold the guest's stdin open. ssh forwards its own stdin EOF, and the
+	// host ends the session on stdin EOF, so /dev/null would race the forced
+	// command's output. Nothing is ever written; cmd.Wait closes it.
+	stdin, err := cmd.StdinPipe()
+	require.NoError(t, err)
+	defer func() { _ = stdin.Close() }()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+
+	runErr := cmd.Run()
+	require.NoError(t, ctx.Err(), "stock ssh guest timed out; stderr: %s", stderr.String())
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, runErr, &exitErr,
+		"expected the forced command's exit code, got %v; stderr: %s", runErr, stderr.String())
+	assert.Equal(t, wantCode, exitErr.ExitCode(), "forced command's exit code should reach the stock ssh guest")
+
+	out := stdout.String()
+	assert.Equal(t, wantLines, strings.Count(out, "line-"),
+		"every line written before the exit should reach the stock ssh guest")
+	assert.Contains(t, out, fmt.Sprintf("line-%06d", wantLines-1),
+		"the last line written before the exit should not be truncated by an early close")
 }
 
 // testProxyExitStatus pins that an exit status, and the output that precedes
@@ -379,8 +536,11 @@ func testProxyWindowChange(t *testing.T, hostShareURL, hostNodeAddr, clientJoinU
 	// first, and getting that backwards is a live hazard in this area.
 	require.NoError(t, c.session.WindowChange(24, 120))
 
-	// WindowChange has no reply: stdin can reach stty before the host applies
-	// the resize. Take fresh samples until the exact requested size is seen.
+	// This checks eventual resize application. The proxy relays requests and
+	// data independently, and the host applies window events separately from
+	// copying stdin to the pty. WindowChange has no acknowledgement of that
+	// application, so a following stty can still see the old size. Sampling
+	// again tests resize delivery, not the proxy's packet ordering.
 	retry := time.NewTicker(50 * time.Millisecond)
 	defer retry.Stop()
 	for {
