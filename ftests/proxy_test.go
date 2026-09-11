@@ -168,14 +168,6 @@ func requireStockSSH(t *testing.T, clientJoinURL string) string {
 // rejects a session without one. IdentitiesOnly keeps a developer's running
 // agent from offering a key the session does not permit, which would surface
 // as an auth failure that has nothing to do with this case.
-//
-// ClientPrivateKey (the shared fixture every Go-client case in this package
-// dials with) is unusable here: its raw string literal ends right after
-// "-----END OPENSSH PRIVATE KEY-----" with no trailing newline, which
-// x/crypto's parser tolerates but OpenSSH's own key loader does not --
-// `ssh -i` on it fails closed with "invalid format" before a connection is
-// even attempted. Write a copy with the newline restored for the stock
-// client to use instead.
 func stockSSHGuestArgs(t *testing.T, session *api.GetSessionResponse, clientJoinURL string) []string {
 	t.Helper()
 
@@ -185,13 +177,10 @@ func stockSSHGuestArgs(t *testing.T, session *api.GetSessionResponse, clientJoin
 	hostname, port, err := net.SplitHostPort(u.Host)
 	require.NoError(t, err)
 
-	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
-	require.NoError(t, os.WriteFile(keyPath, []byte(ClientPrivateKeyContent+"\n"), 0600))
-
 	return []string{
 		"-tt",
 		"-p", port,
-		"-i", keyPath,
+		"-i", ClientPrivateKey,
 		"-o", "IdentitiesOnly=yes",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=" + os.DevNull,
