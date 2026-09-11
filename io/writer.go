@@ -1,6 +1,7 @@
 package io
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,17 @@ func NewMultiWriter(bufferSize int, writers ...io.Writer) *MultiWriter {
 	}
 }
 
+// ErrClosed is returned by Append once Shutdown has run. A guest that reaches
+// the door as the session is ending is refused rather than attached to a
+// fan-out nothing will flush again.
+var ErrClosed = errors.New("multiwriter: closed to new writers")
+
+// Flusher is implemented by attached writers that deliver asynchronously and so
+// can still be holding output when the producer stops.
+type Flusher interface {
+	Flush(ctx context.Context) error
+}
+
 // MultiWriter is a concurrent safe writer that allows appending/removing writers.
 // Newly appended writers get the last write to preserve last output.
 //
@@ -73,6 +85,11 @@ type MultiWriter struct {
 	writers   []io.Writer
 
 	buffer *buffer
+
+	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
+	// Append cannot interleave: an attach in progress either completes before
+	// the snapshot and is flushed, or finds this set and is refused.
+	closed bool
 }
 
 // Append attaches writers, handing each the replay buffer first so it starts
@@ -95,6 +112,10 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+
+	if t.closed {
+		return ErrClosed
+	}
 
 	for _, w := range writers {
 		for _, d := range t.buffer.Data() {
@@ -210,4 +231,46 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// Shutdown closes the fan-out to new writers and then waits for everything
+// already accepted to be delivered.
+//
+// The two halves are inseparable. Flushing a snapshot alone would leave a
+// window: the SSH server keeps serving while the flush runs, so a guest
+// attaching after the snapshot has its replay queued into a sink this call will
+// never flush, and teardown closes it before delivery. Quiescing under writeMu,
+// the same lock Append takes, leaves no such window — an attach is either
+// inside the snapshot or refused.
+//
+// Members that do not buffer are skipped: a synchronous writer is delivered by
+// definition. A sink that has already failed flushes to nil, because a guest
+// that is already gone is not a shutdown error.
+func (t *MultiWriter) Shutdown(ctx context.Context) error {
+	t.writeMu.Lock()
+	t.closed = true
+	t.membersMu.Lock()
+	writers := make([]io.Writer, len(t.writers))
+	copy(writers, t.writers)
+	t.membersMu.Unlock()
+	t.writeMu.Unlock()
+
+	var (
+		wg   sync.WaitGroup
+		errs = make([]error, len(writers))
+	)
+	for i, w := range writers {
+		f, ok := w.(Flusher)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = f.Flush(ctx)
+		}()
+	}
+	wg.Wait()
+
+	return errors.Join(errs...)
 }

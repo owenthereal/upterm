@@ -2,6 +2,7 @@ package io
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -313,4 +314,119 @@ func TestMultiWriterZeroSizedReplayBufferDoesNotPanic(t *testing.T) {
 	require.NoError(t, w.Append(&rec))
 	require.NotPanics(t, func() { _, _ = w.Write([]byte("output")) })
 	require.Equal(t, "output", string(rec.bytes()))
+}
+
+func TestMultiWriterShutdownFlushesAsyncMembers(t *testing.T) {
+	gate := newGateWriter()
+	sink := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(sink))
+	_, _ = w.Write([]byte("last line of the session"))
+	<-gate.entered
+
+	shutdown := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdown <- w.Shutdown(ctx)
+	}()
+
+	select {
+	case <-shutdown:
+		t.Fatal("Shutdown returned before the sink drained")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate.release)
+	select {
+	case err := <-shutdown:
+		require.NoError(t, err)
+		require.Equal(t, "last line of the session", string(gate.bytes()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown never returned")
+	}
+}
+
+// The SSH server keeps serving while the flush runs. Without the quiesce, a
+// guest attaching after the snapshot has its replay queued into a sink nobody
+// will flush, and teardown closes it before delivery: an empty screen and a
+// disconnect.
+func TestMultiWriterShutdownRefusesLaterAppends(t *testing.T) {
+	w := NewMultiWriter(5)
+	var before bytes.Buffer
+	require.NoError(t, w.Append(&before))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+
+	var after bytes.Buffer
+	require.ErrorIs(t, w.Append(&after), ErrClosed)
+}
+
+// The sequential case above proves the door is shut; this proves there is no
+// gap in front of it. An attach racing the quiesce must land on one side or
+// the other — attached and therefore flushed, or refused — never attached to a
+// snapshot that has already been taken, which is the outcome that leaves a
+// guest with a queued replay nobody will deliver.
+func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
+	for attempt := range 50 {
+		w := NewMultiWriter(5)
+		_, _ = w.Write([]byte("output"))
+
+		var out recordingWriter
+		sink := NewAsyncWriter(&out, DefaultGuestBufferSize, nil)
+
+		var (
+			wg        sync.WaitGroup
+			appendErr error
+		)
+		wg.Add(2)
+		go func() { defer wg.Done(); appendErr = w.Append(sink) }()
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = w.Shutdown(ctx)
+		}()
+		wg.Wait()
+
+		if appendErr == nil {
+			require.Equal(t, "output", string(out.bytes()),
+				"attempt %d: an attach that succeeded must have been flushed", attempt)
+		} else {
+			require.ErrorIs(t, appendErr, ErrClosed, "attempt %d", attempt)
+			require.Empty(t, out.bytes(), "attempt %d: a refused attach must receive nothing", attempt)
+		}
+		_ = sink.Close()
+	}
+}
+
+func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
+	w := NewMultiWriter(5)
+	var plain bytes.Buffer
+	require.NoError(t, w.Append(&plain))
+	_, _ = w.Write([]byte("output"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx), "a synchronous writer is delivered by definition")
+}
+
+func TestMultiWriterShutdownGivesUpOnAStuckSink(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+	sink := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(sink))
+	_, _ = w.Write([]byte("never delivered"))
+	<-gate.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, w.Shutdown(ctx), context.DeadlineExceeded)
 }
