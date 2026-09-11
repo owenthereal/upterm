@@ -19,8 +19,14 @@ func (c *buffer) Append(p []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// remove first element if queue is full
-	if len(c.queue) >= c.size {
+	// A buffer built with a non-positive size keeps nothing; without this the
+	// trim below slices an empty queue and panics.
+	if c.size <= 0 {
+		return
+	}
+
+	// remove leading elements until there is room
+	for len(c.queue) >= c.size {
 		c.queue = c.queue[1:]
 	}
 
@@ -30,18 +36,14 @@ func (c *buffer) Append(p []byte) {
 	c.queue = append(c.queue, pp)
 }
 
-func (c *buffer) Size() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.queue)
-}
-
 func (c *buffer) Data() [][]byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	result := make([][]byte, len(c.queue))
+	// Length, not capacity, was the bug: this returned len(queue) nil entries
+	// followed by the real ones, so every newly attached writer was handed that
+	// many zero-length writes before its replay.
+	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
 }
 
@@ -73,6 +75,15 @@ type MultiWriter struct {
 	buffer *buffer
 }
 
+// Append attaches writers, handing each the replay buffer first so it starts
+// from recent output rather than mid-screen.
+//
+// Both steps happen under writeMu, the fan-out lock, so attaching is atomic
+// with respect to a Write: a joining writer gets the replay and every write
+// after it, never a write that is also in its replay and never a gap between
+// them. Holding the fan-out lock here is only safe because attached guest
+// writers no longer block on I/O; under the old design it would have
+// reintroduced the deadlock #523 removed.
 func (t *MultiWriter) Append(writers ...io.Writer) error {
 	// Reject anything Remove could not later take back out, before it is
 	// attached and before it is written to.
@@ -82,14 +93,13 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 		}
 	}
 
-	// write last buffer to new writers
-	if t.buffer.Size() > 0 {
-		for _, w := range writers {
-			for _, d := range t.buffer.Data() {
-				_, err := w.Write(d)
-				if err != nil {
-					return err
-				}
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	for _, w := range writers {
+		for _, d := range t.buffer.Data() {
+			if _, err := w.Write(d); err != nil {
+				return err
 			}
 		}
 	}
@@ -169,10 +179,12 @@ func (t *MultiWriter) Remove(writers ...io.Writer) {
 // A writer removed between the snapshot and the write still receives this one
 // write. That is harmless: it is a session on its way out.
 //
-// Still outstanding: the writes are serial, so a guest that has stopped reading
-// holds up the fan-out for everyone until its write returns. Fixing that needs
-// per-writer buffering, so that a guest which cannot keep up is dropped rather
-// than allowed to slow the session down. Tracked in owenthereal/upterm#524.
+// Writers that buffer are what keep this serial loop honest: each attached
+// guest is an AsyncWriter, so its Write is a copy and a signal rather than SSH
+// I/O, and a guest that cannot keep up overflows and is dropped instead of
+// pacing everyone else. The host's own stdout is attached unwrapped and so is
+// written inline here, which is the one place back-pressure belongs: the pty
+// should not run ahead of the terminal that owns it.
 func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()

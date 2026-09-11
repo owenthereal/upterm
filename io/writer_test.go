@@ -252,3 +252,65 @@ func TestMultiWriterRemoveFirstWriter(t *testing.T) {
 	assert.Empty(t, first.String(), "the writer at index 0 should have been removed")
 	assert.Equal(t, "hello", second.String())
 }
+
+// A writer joining a live session must see a contiguous stream: no byte
+// delivered twice, none missing. Append replays the buffer and joins the member
+// list as two separate steps today, with no lock spanning them, so a concurrent
+// Write lands either side of the gap.
+func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
+	for attempt := range 50 {
+		w := NewMultiWriter(5)
+
+		produced := make(chan string, 1)
+		stop := make(chan struct{})
+		go func() {
+			var sent []byte
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					produced <- string(sent)
+					return
+				default:
+				}
+				p := []byte{byte('a' + i%26)}
+				sent = append(sent, p...)
+				_, _ = w.Write(p)
+			}
+		}()
+
+		time.Sleep(time.Duration(attempt%5) * time.Millisecond)
+		var joined bytes.Buffer
+		require.NoError(t, w.Append(&joined))
+		time.Sleep(time.Millisecond)
+		close(stop)
+		all := <-produced
+
+		got := joined.String()
+		require.NotEmpty(t, got, "a joining writer should receive the replay buffer")
+		require.Contains(t, all, got,
+			"attempt %d: a joining writer saw bytes that were duplicated or skipped", attempt)
+	}
+}
+
+// Data built its result with make([][]byte, len(queue)) and then appended, so it
+// returned N nil entries before the N real ones and every newly attached writer
+// received N zero-length writes.
+func TestMultiWriterReplayHasNoEmptyWrites(t *testing.T) {
+	w := NewMultiWriter(3)
+	_, _ = w.Write([]byte("one"))
+	_, _ = w.Write([]byte("two"))
+
+	var rec recordingWriter
+	require.NoError(t, w.Append(&rec))
+
+	require.Equal(t, []int{3, 3}, rec.writeSizes(), "replay must not emit empty writes")
+	require.Equal(t, "onetwo", string(rec.bytes()))
+}
+
+func TestMultiWriterZeroSizedReplayBufferDoesNotPanic(t *testing.T) {
+	w := NewMultiWriter(0)
+	var rec recordingWriter
+	require.NoError(t, w.Append(&rec))
+	require.NotPanics(t, func() { _, _ = w.Write([]byte("output")) })
+	require.Equal(t, "output", string(rec.bytes()))
+}
