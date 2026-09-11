@@ -430,3 +430,80 @@ func TestMultiWriterShutdownGivesUpOnAStuckSink(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, w.Shutdown(ctx), context.DeadlineExceeded)
 }
+
+// The issue, end to end at the fan-out level: one guest that has stopped
+// reading must not stall the host's terminal or any other guest, and must
+// itself be dropped rather than tolerated.
+//
+// Before per-guest buffering, the stuck writer held the serial fan-out inside
+// its Write and nothing after it in the slice received anything at all.
+func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
+	const sinkCap = 4 << 10
+
+	var hostStdout recordingWriter // attached unwrapped, as the host's own is
+
+	healthyOut := &recordingWriter{}
+	healthy := NewAsyncWriter(healthyOut, DefaultGuestBufferSize, nil)
+	defer func() { _ = healthy.Close() }()
+
+	stuckOut := newGateWriter()
+	defer close(stuckOut.release)
+	dropped := make(chan error, 1)
+	stuck := NewAsyncWriter(stuckOut, sinkCap, func(err error) { dropped <- err })
+	defer func() { _ = stuck.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(&hostStdout))
+	require.NoError(t, w.Append(stuck))
+	require.NoError(t, w.Append(healthy))
+
+	// Fill the stuck guest's buffer and keep going, as a `cat` of a large file
+	// would. Run on its own goroutine and race it against a timeout, the same
+	// way TestAsyncWriterWriteDoesNotBlockOnStuckWriter does: nothing here
+	// bounds an individual w.Write call, so a regression that reintroduces
+	// blocking would otherwise hang this goroutine until the package's
+	// -timeout killed the whole binary instead of failing just this test.
+	line := bytes.Repeat([]byte("x"), 1<<10)
+	var (
+		want     []byte
+		writeErr error
+		writeN   int
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 64 {
+			want = append(want, line...)
+			writeN, writeErr = w.Write(line)
+			if writeErr != nil || writeN != len(line) {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fan-out blocked on a stuck guest")
+	}
+	// require.FailNow, which these call on failure, must only run on the test
+	// goroutine, so the checks are made here rather than inside the goroutine
+	// above.
+	require.NoError(t, writeErr, "the fan-out never reports a guest's failure")
+	require.Equal(t, len(line), writeN)
+
+	select {
+	case err := <-dropped:
+		require.ErrorIs(t, err, ErrOverflow)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stuck guest was never dropped")
+	}
+
+	require.Equal(t, want, hostStdout.bytes(), "the host's terminal must see everything")
+	require.Eventually(t, func() bool { return bytes.Equal(healthyOut.bytes(), want) },
+		5*time.Second, time.Millisecond, "a healthy guest must see everything")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
+}
