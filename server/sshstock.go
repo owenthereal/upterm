@@ -51,6 +51,20 @@ func upstreamFailureReason(err error) error {
 	}
 }
 
+// abortScopeFor decides how far a stalled channel on this connection may
+// escalate, from the same client version the metrics below count. A host's
+// transport carries the reverse tunnel every guest's traffic rides, so a
+// stalled channel on it must never take it down; a guest's transport is that
+// guest's alone. Getting this backwards costs a host's whole session the first
+// time any one guest stops reading, so it is a function with a test rather than
+// a condition inline at the call.
+func abortScopeFor(clientVersion string) sshAbortScope {
+	if clientVersion == upterm.HostSSHClientVersion {
+		return abortChannel
+	}
+	return abortConnection
+}
+
 // isRecoverableAcceptError reports whether Accept is worth retrying. A timeout
 // comes from a deadline set on a wrapped listener; the rest are resource
 // exhaustion, which clears as open connections drain and which taking the
@@ -214,12 +228,13 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 				defer func() { _ = upstream.Close() }()
 				if err = upstreamRaw.SetDeadline(time.Time{}); err == nil {
 					cancel()
-					if string(downstream.ClientVersion()) == upterm.HostSSHClientVersion {
+					clientVersion := string(downstream.ClientVersion())
+					if clientVersion == upterm.HostSSHClientVersion {
 						inst.authenticatedHost.Add(1)
 					} else {
 						inst.authenticatedClient.Add(1)
 					}
-					return forwardSSH(ctx, peer, sshPeer{upstream, upstreamChannels, upstreamRequests})
+					return forwardSSH(ctx, peer, sshPeer{upstream, upstreamChannels, upstreamRequests}, abortScopeFor(clientVersion))
 				}
 			}
 		}

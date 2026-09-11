@@ -49,14 +49,75 @@ type sshPeer struct {
 // explicit cancellation, shutdown and queue overflow always interrupt it.
 const sshForwardDrainTimeout = 5 * time.Second
 
+// A stalled channel whose source has closed is bounded, but how far the bound
+// may escalate depends on whose connection it is.
+type sshAbortScope int
+
+const (
+	// abortChannel closes the stalled channel and stops there. This is the
+	// scope for a host connection, whose transport carries the reverse tunnel
+	// every guest's traffic rides: tearing it down over one stalled channel
+	// would end the session for everyone attached.
+	abortChannel sshAbortScope = iota
+
+	// abortConnection may additionally cancel the forwarder, closing both
+	// transports. This is the scope for a guest connection, which is that one
+	// guest's: forwardSSH runs per accepted downstream connection with its own
+	// dialed upstream, so cancelling ends that guest and nothing else.
+	//
+	// Nothing else, but not nothing: it ends every channel on that connection,
+	// not just the stalled one, and ends them abruptly. The escalation fires
+	// while both transports are still live, so closedPeer stays -1 above and
+	// forwardSSH skips its drain loop entirely — the other channels lose
+	// whatever SSH had buffered for them, with no grace at all. Weigh that
+	// against sshForwardChannelDrainTimeout before shortening it.
+	abortConnection
+)
+
+const (
+	// sshForwardChannelDrainTimeout bounds how long a direction whose source
+	// has closed may stay blocked writing to a destination that has stopped
+	// reading. It matches sshForwardDrainTimeout and carries the same
+	// trade-off: a consumer stalled beyond the grace can lose bytes it had not
+	// yet received.
+	//
+	// It bounds total drain time, not lack of progress: a destination draining
+	// steadily but slowly is treated exactly like one that stopped, because the
+	// copy below is a plain io.Copy and reports nothing until it finishes. So
+	// this is also the deadline by which a merely slow consumer is declared
+	// stalled — five seconds of real drain is the budget, not five seconds of
+	// silence.
+	sshForwardChannelDrainTimeout = 5 * time.Second
+
+	// sshForwardChannelAbortGrace is how long the CLOSE sent after that has to
+	// take effect. A peer that is reading its socket at all answers a CLOSE in
+	// microseconds; one that does not is not reading the socket either, and
+	// only transport teardown can release the write.
+	//
+	// What follows the grace is the expensive step, and only on a guest
+	// connection: abortConnection cancels the forwarder, which takes down every
+	// other channel on that connection without draining any of them. The grace
+	// is short because a peer that has not answered by now will not, not
+	// because the next step is cheap.
+	sshForwardChannelAbortGrace = time.Second
+)
+
+var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after source close")
+
 // forwardSSH owns both authenticated connections and joins all workers before
 // returning. Ordinary transport completion first drains received channel data
 // and request tails toward the surviving peer; forced cancellation closes both
 // transports immediately to release blocked opens, requests and writes.
-func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
+func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	forwarder := sshForwarder{ctx: ctx, cancel: cancel}
+	forwarder := sshForwarder{
+		ctx:          ctx,
+		cancel:       cancel,
+		scope:        scope,
+		drainTimeout: sshForwardChannelDrainTimeout,
+		abortGrace:   sshForwardChannelAbortGrace,
+	}
 	var workers sync.WaitGroup
 	type peerExit struct {
 		index int
@@ -125,6 +186,12 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer) error {
 type sshForwarder struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+	scope  sshAbortScope
+
+	// Fields rather than direct reads of the constants above, so tests can run
+	// the watchdog on a timescale that does not dominate the suite.
+	drainTimeout time.Duration
+	abortGrace   time.Duration
 }
 
 // A peer can pipeline channel opens without waiting for confirmation, and each
@@ -261,9 +328,12 @@ type sshForwardChannel struct {
 //     serializes channel packets and refuses writes once CLOSE has gone out,
 //     so a peer reading until CHANNEL_CLOSE is not truncated here. The aborts
 //     are the exception: abortPending closes destination from inside requests,
-//     before streams.Wait(), and cancellation, request-queue overflow and
-//     sshForwardDrainTimeout close both transports outright. Each of those can
-//     cut a Write that has not returned, and copySSHChannel discards the error.
+//     before streams.Wait(); abortStalledDirection closes it from a watchdog
+//     once the source has closed and the copy has not drained within
+//     sshForwardChannelDrainTimeout; and cancellation, request-queue overflow
+//     and sshForwardDrainTimeout close both transports outright. Each of those
+//     can cut a Write that has not returned, and copySSHChannel discards the
+//     error.
 //   - EOF before CLOSE, and half-close survives. See copySSHChannel.
 //
 // It does not preserve the relative order of ordinary data, extended data and
@@ -283,16 +353,79 @@ type sshForwardChannel struct {
 // output and status after stdin EOF. Treat either endpoint's CLOSE
 // symmetrically so a caller can close one channel without leaving its peer
 // open for the connection's lifetime.
+//
+// That symmetry is not enough on its own when the destination has stopped
+// reading: the copy below stays blocked in its Write, so the close at the end
+// is never reached and the pair is stranded for the connection's lifetime.
+// abortStalledDirection bounds it.
 func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
+	finished := make(chan struct{})
+	defer close(finished)
+	sourceClosed := make(chan struct{})
+	go f.abortStalledDirection(destination, sourceClosed, finished)
+
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	f.requests(sshChannelRequestSender{destination}, requests, nil, func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
+	f.requests(sshChannelRequestSender{destination}, requests,
+		sync.OnceFunc(func() { close(sourceClosed) }),
+		func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
 	streams.Wait()
 	// The source may send success and CLOSE back-to-back. Its reply worker
 	// must deliver that success before this direction closes the destination.
 	destination.replies.Lock()
 	defer destination.replies.Unlock()
 	_ = destination.Close()
+}
+
+// abortStalledDirection releases a direction whose source has closed but whose
+// destination has stopped accepting bytes.
+//
+// It is a watchdog rather than a step in the teardown because every step of
+// that teardown is itself a transport write a stalled peer can block. Close
+// marshals CHANNEL_CLOSE and calls writePacket, which takes the channel's write
+// mutex and writes to the transport — the same mutex a blocked Write already
+// holds — so a sequential abort would never reach its own timer in the case it
+// exists for. requests has the same problem one step earlier, behind two
+// barriers rather than one: a request still dispatched to that blocked sender
+// keeps active non-nil, so its loop does not even reach its own exit condition
+// while completed never fires, and past the loop its deferred wait for the
+// sender would hold it anyway. Neither barrier lifts until the write does.
+func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClosed, finished <-chan struct{}) {
+	select {
+	case <-finished:
+		return
+	case <-f.ctx.Done():
+		return
+	case <-sourceClosed:
+	}
+	if waitAny(finished, f.ctx.Done(), f.drainTimeout) {
+		return
+	}
+	// In its own goroutine, for the reason above. A write blocked on an
+	// exhausted window does not hold the channel's write mutex, so this is
+	// enough whenever the peer is still reading its socket: it answers the
+	// CLOSE, and x/crypto's channel teardown fails the pending write.
+	go func() { _ = destination.Close() }()
+	if waitAny(finished, f.ctx.Done(), f.abortGrace) {
+		return
+	}
+	if f.scope == abortConnection {
+		f.cancel(errSSHChannelDrainStalled)
+	}
+}
+
+// waitAny reports whether done or cancelled fired before timeout elapsed.
+func waitAny(done, cancelled <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-cancelled:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // copySSHChannel copies ordinary data and extended data concurrently, so byte
