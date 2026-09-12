@@ -40,9 +40,13 @@ docker_build:
 	docker buildx build -t $(REPO):$(TAG) -f Dockerfile.uptermd $(DOCKER_BUILD_FLAGS) .
 
 GO_TEST_FLAGS ?= ""
+# The bound is a guard against a hung test, not a performance budget. ftests is
+# what sets it: on the Consul job it runs both suites in one binary and had
+# grown to 126s of the old 180s before this timeout was last touched, leaving
+# less headroom than runner-to-runner variance.
 .PHONY: test
 test:
-	go test $$(go list ./... | grep -v /e2e) -timeout=180s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
+	go test $$(go list ./... | grep -v /e2e) -timeout=300s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
 
 # E2E tests require tmux and UPTERM_E2E_SERVER env var
 # Example: UPTERM_E2E_SERVER=ssh://uptermd.upterm.dev:22 make test-e2e

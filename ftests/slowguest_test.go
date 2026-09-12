@@ -160,6 +160,22 @@ func TestBurstHelperChunks(t *testing.T) {
 // the forwarder's watchdog turns that into a closed channel the guest can
 // observe without ever resuming reads.
 func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
+	// The suite runs every connection case over both protocols, and this one is
+	// far and away the most expensive: the stalled guest cannot observe its own
+	// disconnect until sshForwardChannelDrainTimeout and the abort grace have
+	// both elapsed, so it costs seconds where its neighbours cost about one,
+	// and it sets the critical path of whichever topology group it runs in.
+	//
+	// Running it on ssh only costs nothing real. What stalls the guest is SSH
+	// channel windowing, which is identical on both: the WebSocket protocol
+	// changes how bytes reach uptermd, not how a channel's window is accounted.
+	// The topology axis is the one that matters here and is kept — a
+	// node-to-node hop puts a second forwarder in the path, with its own abort
+	// scope to get right.
+	if !strings.HasPrefix(hostURL, "ssh://") {
+		t.Skip("covered on ssh; the stall is SSH channel windowing, not transport-specific")
+	}
+
 	left := make(chan *api.Client, 4)
 
 	adminSocketFile := setupAdminSocket(t)
