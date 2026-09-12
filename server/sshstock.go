@@ -234,7 +234,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 					} else {
 						inst.authenticatedClient.Add(1)
 					}
-					return forwardSSH(ctx, peer, sshPeer{upstream, upstreamChannels, upstreamRequests}, abortScopeFor(clientVersion))
+					return forwardSSH(ctx, peer, sshPeer{upstream, upstreamChannels, upstreamRequests}, abortScopeFor(clientVersion), inst.stalledChannelAborts)
 				}
 			}
 		}

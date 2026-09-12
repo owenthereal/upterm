@@ -92,6 +92,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Stdout,
 		s.EventEmitter,
 		writers,
+		s.Logger,
 		s.ForceForwardingInputForTesting,
 	)
 	ptmx, err := cmd.Start(cmdCtx)

@@ -446,6 +446,109 @@ func TestAsyncWriterFlushGivesUpOnAStuckSink(t *testing.T) {
 		"a stuck guest must not hold up shutdown")
 }
 
+// stepWriter delivers one write per token, so a test can park the drain at a
+// chosen point in a backlog and observe what has and has not been delivered
+// while it is standing still.
+type stepWriter struct {
+	recordingWriter
+	step chan struct{}
+}
+
+func newStepWriter() *stepWriter { return &stepWriter{step: make(chan struct{})} }
+
+func (s *stepWriter) Write(p []byte) (int, error) {
+	<-s.step
+	return s.recordingWriter.Write(p)
+}
+
+// release lets exactly one write through, waits for it to land, and reports the
+// running total. It waits on progress rather than on an expected size: the
+// drain coalesces whatever is pending when it takes a chunk, so how the backlog
+// divides into writes is not fixed.
+func (s *stepWriter) release(t *testing.T) int {
+	t.Helper()
+	before := len(s.bytes())
+	select {
+	case s.step <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain never reached its next write")
+	}
+	var after int
+	require.Eventually(t, func() bool { after = len(s.bytes()); return after > before },
+		5*time.Second, time.Millisecond, "the released write never landed")
+	return after
+}
+
+// Flush must not return until a whole backlog has been delivered, not merely
+// until the write that was in flight when it was called returns.
+//
+// The observation point is the whole test. Releasing the backlog all at once
+// proves nothing: the drain finishes it in microseconds, so a Flush that
+// returned far too early still looks correct by the time an assertion runs —
+// measured, with both mechanisms below deliberately broken, and it passed.
+// Stepping one write at a time and asserting while the drain is parked is what
+// makes an early return observable.
+//
+// Two mechanisms hold the contract up: the drain publishes idle only on the
+// pass that finds pending empty, and Flush re-checks the condition rather than
+// trusting a single wake-up. Either alone is sufficient, so no single mutation
+// fails this — it guards the contract, not one of its two supports.
+func TestAsyncWriterFlushSpansAMultiChunkBacklog(t *testing.T) {
+	step := newStepWriter()
+	a := NewAsyncWriter(step, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	// One small write to park the drain, then four chunks' worth behind it at
+	// io.Copy's write size, so delivery provably takes more than one pass.
+	const blocks = 8
+	block := bytes.Repeat([]byte("x"), 32<<10)
+	_, err := a.Write([]byte("first"))
+	require.NoError(t, err)
+	for range blocks {
+		_, err := a.Write(block)
+		require.NoError(t, err)
+	}
+	total := len("first") + blocks*len(block)
+
+	flushed := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		flushed <- a.Flush(ctx)
+	}()
+
+	// Step the backlog through one write at a time, and after every write that
+	// leaves something owed, require that Flush is still waiting. Checking only
+	// once would not do it: Flush may not even have parked before the first
+	// write completes, so an early return would happen later in the backlog,
+	// where a single check is not looking — measured, with both mechanisms
+	// broken, and it passed.
+	delivered := step.release(t)
+	require.Less(t, delivered, total, "the backlog must not fit in one write")
+	for delivered < total {
+		select {
+		case err := <-flushed:
+			t.Fatalf("Flush returned with %d of %d bytes delivered: %v", delivered, total, err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		delivered = step.release(t)
+	}
+
+	select {
+	case err := <-flushed:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Flush never returned after the backlog drained")
+	}
+
+	// Compared as a count: the failure is a short delivery, and asserting on the
+	// bytes themselves would render a quarter of a megabyte.
+	require.Equal(t, total, len(step.bytes()),
+		"Flush returned with part of the backlog still undelivered")
+	require.Greater(t, len(step.writeSizes()), 1,
+		"the backlog must have taken more than one pass, or this proves nothing")
+}
+
 func TestAsyncWriterFlushAfterCloseReturnsImmediately(t *testing.T) {
 	gate := newGateWriter()
 	defer close(gate.release)

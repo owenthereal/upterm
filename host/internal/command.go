@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -27,6 +28,13 @@ const (
 	// deliberately not dropped for that, because the session is ending and a
 	// slow last second is not an overflow.
 	guestFlushTimeout = time.Second
+	// guestFlushLogTimeout bounds how long exit waits for the warning about
+	// that flush to be written. Generous for any handler that is working, so
+	// the line lands before the host tears down and stays in order with what
+	// follows it; short enough that a handler blocked on a stopped terminal
+	// cannot hold the exit open. Both halves matter — fire-and-forget loses the
+	// line, waiting outright hangs the host.
+	guestFlushLogTimeout = 100 * time.Millisecond
 )
 
 // activityWriter records when it last wrote, so a drain can stop once output
@@ -77,6 +85,7 @@ func newCommand(
 	stdout *os.File,
 	eventEmitter *emitter.Emitter,
 	writers *uio.MultiWriter,
+	logger *slog.Logger,
 	forceForwardingInputForTesting bool,
 ) *command {
 	return &command{
@@ -87,6 +96,7 @@ func newCommand(
 		stdout:                         stdout,
 		eventEmitter:                   eventEmitter,
 		writers:                        writers,
+		logger:                         logger,
 		forceForwardingInputForTesting: forceForwardingInputForTesting,
 	}
 }
@@ -105,6 +115,7 @@ type command struct {
 	writers *uio.MultiWriter
 
 	eventEmitter *emitter.Emitter
+	logger       *slog.Logger
 
 	ctx context.Context
 
@@ -186,7 +197,40 @@ func (c *command) Run() error {
 			defer func() {
 				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(c.ctx), guestFlushTimeout)
 				defer cancelFlush()
-				_ = c.writers.Shutdown(flushCtx)
+				if err := c.writers.Shutdown(flushCtx); err != nil {
+					// Not a host failure, and nothing to do about it here: a
+					// guest still stuck when the deadline expires loses its tail
+					// by design, and a guest already gone flushes to nil. Worth
+					// a line because otherwise the only evidence is a guest
+					// whose last screenful never arrived, which looks from the
+					// outside exactly like output the command never produced.
+					//
+					// Written off this goroutine but waited for, under a bound.
+					//
+					// This defer is the output actor's return path, and
+					// run.Group cannot finish until it returns, so writing here
+					// directly would let a handler blocked on a stopped
+					// terminal hang the host's exit and leave guestFlushTimeout
+					// bounding nothing. Not waiting at all trades that for a
+					// quieter fault: Go abandons runnable goroutines at process
+					// exit, so the one diagnostic this path produces could be
+					// lost, or land after the shutdown lines it should precede,
+					// with a perfectly healthy logger.
+					//
+					// Waiting under a bound is the only form with neither
+					// failure. One goroutine per call of Run, which is once per
+					// host process.
+					logged := make(chan struct{})
+					go func() {
+						defer close(logged)
+						c.logger.Warn("gave up delivering final output to a guest",
+							"timeout", guestFlushTimeout, "error", err)
+					}()
+					select {
+					case <-logged:
+					case <-time.After(guestFlushLogTimeout):
+					}
+				}
 			}()
 			defer close(done)
 			_, err := io.Copy(output, uio.NewContextReader(ctx, c.ptmx))

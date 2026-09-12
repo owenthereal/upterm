@@ -101,7 +101,7 @@ func forwardTestStockClientHost(t *testing.T) (string, sshPeer) {
 			return
 		}
 		// A stock OpenSSH client is a guest, so its connection is the abort unit.
-		_ = forwardSSH(ctx, sshPeer{serverConn, channels, requests}, upstream, abortConnection)
+		_ = forwardSSH(ctx, sshPeer{serverConn, channels, requests}, upstream, abortConnection, discardCounter)
 	}()
 
 	return listener.Addr().String(), host

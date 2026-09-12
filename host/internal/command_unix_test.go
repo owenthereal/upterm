@@ -55,6 +55,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		false, // Should not be needed for real TTY
 	)
 

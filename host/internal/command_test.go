@@ -62,6 +62,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		true, // Force stdin forwarding even though it's not a TTY
 	)
 
@@ -167,6 +168,7 @@ func TestCommand_ContextCancellation(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		false,
 	)
 
@@ -253,6 +255,7 @@ func TestCommand_DrainsOutputAfterExit(t *testing.T) {
 
 	const lastLine = "written just before exit"
 	cmd := &command{
+		logger:  discardLogger(),
 		stdin:   stdinr,
 		stdout:  stdoutw,
 		writers: uio.NewMultiWriter(5),
