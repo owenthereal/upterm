@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,13 +160,65 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 
 	require.NoError(t, cmd.Run())
 
-	// Waited for rather than read once: the line is emitted off the output
-	// actor's return path, so that a blocked logger cannot hang the host's
-	// exit. Run returning therefore says nothing about whether it has landed.
-	require.Eventually(t, func() bool {
-		return strings.Contains(string(logs.bytes()), "gave up delivering final output to a guest")
-	}, 5*time.Second, time.Millisecond,
+	// No Eventually, deliberately. The line is written off the actor's return
+	// path so a blocked handler cannot hang the exit, but it is waited for
+	// under a bound, so with a working handler it has landed by the time Run
+	// returns. Asserting immediately is what pins that: a fire-and-forget
+	// version passes under Eventually and still loses the line at process
+	// exit, which is the whole failure being guarded against.
+	require.Contains(t, string(logs.bytes()), "gave up delivering final output to a guest",
 		"a guest that lost its tail left no trace in the host log")
+}
+
+// The other half of that bound: a handler that never returns must not hold the
+// host open. Exit waits for the warning, so the wait needs its own ceiling, or
+// guestFlushTimeout would bound the flush and then the logger would hang the
+// process anyway — with stdout redirected and stderr on a stopped terminal,
+// which is exactly the shape of session this whole change exists for.
+func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
+	stdinr, stdinw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdinr.Close() }()
+	defer func() { _ = stdinw.Close() }()
+	stdoutr, stdoutw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdoutr.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
+
+	// Stuck guest, so the flush fails and there is a warning to write at all.
+	guestGate := make(chan struct{})
+	defer close(guestGate)
+	guest := uio.NewAsyncWriter(&gatedWriter{gate: guestGate, rec: &recordingWriter{}},
+		uio.DefaultGuestBufferSize, nil)
+	defer func() { _ = guest.Close() }()
+
+	writers := uio.NewMultiWriter(5)
+	require.NoError(t, writers.Append(guest))
+
+	// And a handler that never returns from Write.
+	logGate := make(chan struct{})
+	defer close(logGate)
+	cmd := &command{
+		logger:  slog.New(slog.NewTextHandler(&gatedWriter{gate: logGate, rec: &recordingWriter{}}, nil)),
+		stdin:   stdinr,
+		stdout:  stdoutw,
+		writers: writers,
+		ctx:     t.Context(),
+		ptmx: &exitedPTY{
+			pending:   [][]byte{[]byte("never delivered\r\n")},
+			readDelay: 20 * time.Millisecond,
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a blocked logger held the host's exit open")
+	}
 }
 
 // The shutdown barrier: waitIdle can return while the producer is still going,

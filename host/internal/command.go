@@ -28,6 +28,13 @@ const (
 	// deliberately not dropped for that, because the session is ending and a
 	// slow last second is not an overflow.
 	guestFlushTimeout = time.Second
+	// guestFlushLogTimeout bounds how long exit waits for the warning about
+	// that flush to be written. Generous for any handler that is working, so
+	// the line lands before the host tears down and stays in order with what
+	// follows it; short enough that a handler blocked on a stopped terminal
+	// cannot hold the exit open. Both halves matter — fire-and-forget loses the
+	// line, waiting outright hangs the host.
+	guestFlushLogTimeout = 100 * time.Millisecond
 )
 
 // activityWriter records when it last wrote, so a drain can stop once output
@@ -198,17 +205,31 @@ func (c *command) Run() error {
 					// whose last screenful never arrived, which looks from the
 					// outside exactly like output the command never produced.
 					//
-					// Off this goroutine, because this defer is the output
-					// actor's return path: run.Group cannot finish until it
-					// returns, so a slog handler blocked on a stopped terminal
-					// would hang the host's exit outright and make
-					// guestFlushTimeout bound nothing. One goroutine per call
-					// of Run, which is once per host process, so the objection
-					// to fire-and-forget logging on the forwarder's uncapped
-					// channels does not arise here. The host has real teardown
-					// left to do, so a working logger has ample time to write.
-					go c.logger.Warn("gave up delivering final output to a guest",
-						"timeout", guestFlushTimeout, "error", err)
+					// Written off this goroutine but waited for, under a bound.
+					//
+					// This defer is the output actor's return path, and
+					// run.Group cannot finish until it returns, so writing here
+					// directly would let a handler blocked on a stopped
+					// terminal hang the host's exit and leave guestFlushTimeout
+					// bounding nothing. Not waiting at all trades that for a
+					// quieter fault: Go abandons runnable goroutines at process
+					// exit, so the one diagnostic this path produces could be
+					// lost, or land after the shutdown lines it should precede,
+					// with a perfectly healthy logger.
+					//
+					// Waiting under a bound is the only form with neither
+					// failure. One goroutine per call of Run, which is once per
+					// host process.
+					logged := make(chan struct{})
+					go func() {
+						defer close(logged)
+						c.logger.Warn("gave up delivering final output to a guest",
+							"timeout", guestFlushTimeout, "error", err)
+					}()
+					select {
+					case <-logged:
+					case <-time.After(guestFlushLogTimeout):
+					}
 				}
 			}()
 			defer close(done)
