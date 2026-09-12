@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -159,7 +160,13 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 	}
 
 	require.NoError(t, cmd.Run())
-	require.Contains(t, string(logs.bytes()), "gave up delivering final output to a guest",
+
+	// Waited for rather than read once: the line is emitted off the output
+	// actor's return path, so that a blocked logger cannot hang the host's
+	// exit. Run returning therefore says nothing about whether it has landed.
+	require.Eventually(t, func() bool {
+		return strings.Contains(string(logs.bytes()), "gave up delivering final output to a guest")
+	}, 5*time.Second, time.Millisecond,
 		"a guest that lost its tail left no trace in the host log")
 }
 

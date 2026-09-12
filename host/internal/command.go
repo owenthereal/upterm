@@ -197,7 +197,17 @@ func (c *command) Run() error {
 					// a line because otherwise the only evidence is a guest
 					// whose last screenful never arrived, which looks from the
 					// outside exactly like output the command never produced.
-					c.logger.Warn("gave up delivering final output to a guest",
+					//
+					// Off this goroutine, because this defer is the output
+					// actor's return path: run.Group cannot finish until it
+					// returns, so a slog handler blocked on a stopped terminal
+					// would hang the host's exit outright and make
+					// guestFlushTimeout bound nothing. One goroutine per call
+					// of Run, which is once per host process, so the objection
+					// to fire-and-forget logging on the forwarder's uncapped
+					// channels does not arise here. The host has real teardown
+					// left to do, so a working logger has ample time to write.
+					go c.logger.Warn("gave up delivering final output to a guest",
 						"timeout", guestFlushTimeout, "error", err)
 				}
 			}()

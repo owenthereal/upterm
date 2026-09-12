@@ -432,30 +432,37 @@ func (f sshForwarder) abortStalledDirection(destination ssh.Channel, finished <-
 	// enough whenever the peer is still reading its socket: it answers the
 	// CLOSE, and x/crypto's channel teardown fails the pending write.
 	go func() { _ = destination.Close() }()
-	// Reported after the close is under way, and from a goroutine, because a
-	// slog handler is one more thing that can block: a daemon whose stderr is a
-	// pipe nobody drains blocks in Write like any other backpressured sink.
-	// Logging on this path would make the bound this watchdog exists to provide
-	// conditional on the logger being drained, which is the exact shape of
-	// problem it was written to avoid.
-	//
-	// It is the daemon's only account of a dropped guest. The host logs why it
-	// stopped feeding one, but from here the guest simply stops, and which of
-	// the two happened is the difference between a slow viewer and a broken
-	// forwarder.
-	go f.log().Warn("closing a stalled SSH channel; its source closed and the copy never drained",
-		"drain_timeout", f.drainTimeout)
-	if f.settledWithin(finished, f.abortGrace) {
-		return
-	}
-	if f.scope == abortConnection {
+
+	cancelledConnection := false
+	if !f.settledWithin(finished, f.abortGrace) && f.scope == abortConnection {
+		// The expensive step: every other channel on this connection goes with
+		// it, undrained.
 		f.cancel(errSSHChannelDrainStalled)
-		// The expensive step, and the one worth a line of its own: every other
-		// channel on this connection goes with it, undrained. Ordered after the
-		// cancel for the same reason as above.
-		go f.log().Warn("stalled SSH channel did not answer CLOSE; cancelled the connection",
-			"abort_grace", f.abortGrace)
+		cancelledConnection = true
 	}
+
+	// Last, once every bound this function exists to apply has been applied,
+	// and synchronously.
+	//
+	// A slog handler is one more thing that can block — a daemon whose stderr
+	// is a pipe nobody drains blocks in Write like any other backpressured sink
+	// — so logging before the close or the cancel would make those bounds
+	// conditional on the logger being drained, which is the shape of problem
+	// this watchdog was written to prevent. Logging from a goroutine instead
+	// would fix that and buy a worse one: a handler that stays backpressured
+	// leaves one abandoned goroutine per stall, and established channels are
+	// deliberately uncapped. Placed here it holds the watchdog's own goroutine,
+	// which has finished its work and was about to exit anyway, and adds
+	// nothing that was not already there.
+	//
+	// This is the daemon's only account of a dropped guest. The host logs why
+	// it stopped feeding one, but from here the guest simply stops, and which
+	// of the two happened is the difference between a slow viewer and a broken
+	// forwarder.
+	f.log().Warn("closed a stalled SSH channel; its source closed and the copy never drained",
+		"drain_timeout", f.drainTimeout,
+		"abort_grace", f.abortGrace,
+		"cancelled_connection", cancelledConnection)
 }
 
 // log is nil-safe so that every way of building a forwarder, including test
