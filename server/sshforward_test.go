@@ -1733,6 +1733,10 @@ func (s *syncBuffer) String() string {
 // is otherwise indistinguishable from one that hung up: the host logs why it
 // stopped feeding a guest, but nothing here recorded that the forwarder then
 // closed the channel, or that it took the whole connection down behind it.
+//
+// Waited for rather than read once, because each line is emitted from its own
+// goroutine — the abort must not be able to block behind a logger, so it is
+// started first and reported afterwards.
 func TestChannelDirectionLogsBothEscalationSteps(t *testing.T) {
 	var logs syncBuffer
 	cancelled := make(chan error, 1)
@@ -1756,9 +1760,13 @@ func TestChannelDirectionLogsBothEscalationSteps(t *testing.T) {
 		t.Fatal("a stalled direction was never aborted")
 	}
 
-	require.Contains(t, logs.String(), "closing a stalled SSH channel",
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "closing a stalled SSH channel")
+	}, 5*time.Second, time.Millisecond,
 		"closing a stalled channel left no trace in the daemon log")
-	require.Contains(t, logs.String(), "cancelling the connection",
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "cancelled the connection")
+	}, 5*time.Second, time.Millisecond,
 		"taking a whole connection down left no trace in the daemon log")
 
 	gate.releaseAll()

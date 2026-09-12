@@ -427,26 +427,34 @@ func (f sshForwarder) abortStalledDirection(destination ssh.Channel, finished <-
 	if f.settledWithin(finished, f.drainTimeout) {
 		return
 	}
-	// The daemon's only account of a dropped guest: the host logs why it
-	// stopped feeding one, but from here the guest simply stops, and which of
-	// the two happened is the difference between a slow viewer and a broken
-	// forwarder.
-	f.log().Warn("closing a stalled SSH channel; its source closed and the copy never drained",
-		"drain_timeout", f.drainTimeout)
 	// In its own goroutine, for the reason above. A write blocked on an
 	// exhausted window does not hold the channel's write mutex, so this is
 	// enough whenever the peer is still reading its socket: it answers the
 	// CLOSE, and x/crypto's channel teardown fails the pending write.
 	go func() { _ = destination.Close() }()
+	// Reported after the close is under way, and from a goroutine, because a
+	// slog handler is one more thing that can block: a daemon whose stderr is a
+	// pipe nobody drains blocks in Write like any other backpressured sink.
+	// Logging on this path would make the bound this watchdog exists to provide
+	// conditional on the logger being drained, which is the exact shape of
+	// problem it was written to avoid.
+	//
+	// It is the daemon's only account of a dropped guest. The host logs why it
+	// stopped feeding one, but from here the guest simply stops, and which of
+	// the two happened is the difference between a slow viewer and a broken
+	// forwarder.
+	go f.log().Warn("closing a stalled SSH channel; its source closed and the copy never drained",
+		"drain_timeout", f.drainTimeout)
 	if f.settledWithin(finished, f.abortGrace) {
 		return
 	}
 	if f.scope == abortConnection {
-		// The expensive step, and the one worth a line on its own: every other
-		// channel on this connection goes with it, undrained.
-		f.log().Warn("stalled SSH channel did not answer CLOSE; cancelling the connection",
-			"abort_grace", f.abortGrace)
 		f.cancel(errSSHChannelDrainStalled)
+		// The expensive step, and the one worth a line of its own: every other
+		// channel on this connection goes with it, undrained. Ordered after the
+		// cancel for the same reason as above.
+		go f.log().Warn("stalled SSH channel did not answer CLOSE; cancelled the connection",
+			"abort_grace", f.abortGrace)
 	}
 }
 
