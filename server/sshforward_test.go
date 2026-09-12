@@ -1456,6 +1456,18 @@ func newChannelGate() *channelGate {
 	return &channelGate{closed: make(chan struct{})}
 }
 
+// closeCalled reports whether the gated channel has been closed. With Write
+// gated, channelDirection never reaches its own Close, so this is only ever
+// true because the watchdog acted.
+func (g *channelGate) closeCalled() bool {
+	select {
+	case <-g.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 // releaseAll unblocks every gated method, so a test can require that the code
 // under test actually unwinds rather than merely that it fired a callback.
 func (g *channelGate) releaseAll() {
@@ -1646,6 +1658,50 @@ func TestChannelDirectionAbortsAStalledDestination(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Once the connection is draining, forwardSSH owns the bound on a stalled
+// channel and the watchdog must keep its hands off.
+//
+// Both bounds arm within moments of each other on a shutdown, and before this
+// they ran on identical timeouts — sshForwardChannelDrainTimeout equalled
+// sshForwardDrainTimeout — so which one resolved the stall came down to
+// scheduling. Closing the channel first completes the drain loop and suppresses
+// the "drain timed out" error TestSSHForwardTransportDrainBounded requires,
+// which is how this surfaced: as an error-message flake on Windows CI, on a
+// test that had nothing to do with this change.
+//
+// Nothing is lost by standing down. forwardSSH closes both transports when its
+// own timer expires, which releases a blocked write more thoroughly than
+// closing one channel does.
+func TestChannelDirectionYieldsAStalledChannelToTheTransportDrain(t *testing.T) {
+	cancelled := make(chan error, 1)
+	f := newTestForwarder(t, abortConnection, cancelled)
+
+	// Already draining when the direction starts, so the watchdog has to decline
+	// at its first decision point rather than mid-wait.
+	draining := make(chan struct{})
+	close(draining)
+	f.draining = draining
+
+	gate := newChannelGate()
+	gate.write = make(chan struct{})
+	destination, source, requests, closeSource := forwardTestDirection(t, gate)
+
+	go f.channelDirection(destination, source, requests)
+	closeSource()
+	close(requests)
+
+	// Well past f.drainTimeout plus f.abortGrace, which together are 150ms here.
+	select {
+	case err := <-cancelled:
+		t.Fatalf("the watchdog aborted a draining connection: %v", err)
+	case <-time.After(time.Second):
+	}
+	require.False(t, gate.closeCalled(),
+		"the watchdog closed a channel a draining connection was already bounding")
+
+	gate.releaseAll()
 }
 
 // gateFirstChannelConn gates the first channel opened on this connection and

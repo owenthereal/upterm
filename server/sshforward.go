@@ -77,9 +77,15 @@ const (
 const (
 	// sshForwardChannelDrainTimeout bounds how long a direction whose source
 	// has closed may stay blocked writing to a destination that has stopped
-	// reading. It matches sshForwardDrainTimeout and carries the same
-	// trade-off: a consumer stalled beyond the grace can lose bytes it had not
-	// yet received.
+	// reading, on a connection that is otherwise live. It carries the same
+	// trade-off as sshForwardDrainTimeout: a consumer stalled beyond the grace
+	// can lose bytes it had not yet received.
+	//
+	// The two are equal by coincidence of judgement, not by design, and nothing
+	// should be read into the match. They never apply at once —
+	// abortStalledDirection stands down as soon as the connection starts
+	// draining — and that separation is deliberate: when both were armed on one
+	// stall, which fired first decided which error the shutdown reported.
 	//
 	// It bounds total drain time, not lack of progress: a destination draining
 	// steadily but slowly is treated exactly like one that stopped, because the
@@ -111,10 +117,12 @@ var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after sou
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	draining := make(chan struct{})
 	forwarder := sshForwarder{
 		ctx:          ctx,
 		cancel:       cancel,
 		scope:        scope,
+		draining:     draining,
 		drainTimeout: sshForwardChannelDrainTimeout,
 		abortGrace:   sshForwardChannelAbortGrace,
 	}
@@ -124,7 +132,6 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 		err   error
 	}
 	exited := make(chan peerExit, 2)
-	draining := make(chan struct{})
 	channelsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	requestsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	peers := []sshPeer{downstream, upstream}
@@ -187,6 +194,11 @@ type sshForwarder struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 	scope  sshAbortScope
+
+	// draining closes when the connection starts shutting down, which is what
+	// hands the stalled-channel bound over to forwardSSH. Nil in tests that
+	// exercise a single direction, where nothing else owns that bound.
+	draining <-chan struct{}
 
 	// Fields rather than direct reads of the constants above, so tests can run
 	// the watchdog on a timescale that does not dominate the suite.
@@ -390,15 +402,26 @@ func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, r
 // keeps active non-nil, so its loop does not even reach its own exit condition
 // while completed never fires, and past the loop its deferred wait for the
 // sender would hold it anyway. Neither barrier lifts until the write does.
+//
+// It stands down the moment the connection itself begins draining, because
+// from there forwardSSH's own bound owns the stall: it allows
+// sshForwardDrainTimeout for the channel buffers and then closes both
+// transports, which releases a blocked write more thoroughly than closing one
+// channel does. Two bounds on the same stall would otherwise race — they are
+// armed within moments of each other and, before this, ran on identical
+// timeouts — and the winner decides which error the shutdown reports. The
+// transport's is the one callers are contracted to see.
 func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClosed, finished <-chan struct{}) {
 	select {
 	case <-finished:
 		return
 	case <-f.ctx.Done():
 		return
+	case <-f.draining:
+		return
 	case <-sourceClosed:
 	}
-	if waitAny(finished, f.ctx.Done(), f.drainTimeout) {
+	if f.settledWithin(finished, f.drainTimeout) {
 		return
 	}
 	// In its own goroutine, for the reason above. A write blocked on an
@@ -406,7 +429,7 @@ func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClose
 	// enough whenever the peer is still reading its socket: it answers the
 	// CLOSE, and x/crypto's channel teardown fails the pending write.
 	go func() { _ = destination.Close() }()
-	if waitAny(finished, f.ctx.Done(), f.abortGrace) {
+	if f.settledWithin(finished, f.abortGrace) {
 		return
 	}
 	if f.scope == abortConnection {
@@ -414,14 +437,18 @@ func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClose
 	}
 }
 
-// waitAny reports whether done or cancelled fired before timeout elapsed.
-func waitAny(done, cancelled <-chan struct{}, timeout time.Duration) bool {
+// settledWithin reports whether this direction finished, the connection began
+// draining, or the context was cancelled before timeout elapsed — the three
+// ways the watchdog stops being the thing that has to act.
+func (f sshForwarder) settledWithin(finished <-chan struct{}, timeout time.Duration) bool {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-finished:
 		return true
-	case <-cancelled:
+	case <-f.draining:
+		return true
+	case <-f.ctx.Done():
 		return true
 	case <-timer.C:
 		return false
