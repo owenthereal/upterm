@@ -37,6 +37,7 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		false,
 	)
 
@@ -85,6 +86,7 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		false,
 	)
 
@@ -173,6 +175,7 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 		stdoutw,
 		ee,
 		writers,
+		discardLogger(),
 		false,
 	)
 

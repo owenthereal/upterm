@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -77,6 +78,7 @@ func newCommand(
 	stdout *os.File,
 	eventEmitter *emitter.Emitter,
 	writers *uio.MultiWriter,
+	logger *slog.Logger,
 	forceForwardingInputForTesting bool,
 ) *command {
 	return &command{
@@ -87,6 +89,7 @@ func newCommand(
 		stdout:                         stdout,
 		eventEmitter:                   eventEmitter,
 		writers:                        writers,
+		logger:                         logger,
 		forceForwardingInputForTesting: forceForwardingInputForTesting,
 	}
 }
@@ -105,6 +108,7 @@ type command struct {
 	writers *uio.MultiWriter
 
 	eventEmitter *emitter.Emitter
+	logger       *slog.Logger
 
 	ctx context.Context
 
@@ -186,7 +190,16 @@ func (c *command) Run() error {
 			defer func() {
 				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(c.ctx), guestFlushTimeout)
 				defer cancelFlush()
-				_ = c.writers.Shutdown(flushCtx)
+				if err := c.writers.Shutdown(flushCtx); err != nil {
+					// Not a host failure, and nothing to do about it here: a
+					// guest still stuck when the deadline expires loses its tail
+					// by design, and a guest already gone flushes to nil. Worth
+					// a line because otherwise the only evidence is a guest
+					// whose last screenful never arrived, which looks from the
+					// outside exactly like output the command never produced.
+					c.logger.Warn("gave up delivering final output to a guest",
+						"timeout", guestFlushTimeout, "error", err)
+				}
 			}()
 			defer close(done)
 			_, err := io.Copy(output, uio.NewContextReader(ctx, c.ptmx))

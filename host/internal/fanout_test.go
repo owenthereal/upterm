@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"sync"
@@ -99,6 +100,7 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 	require.NoError(t, writers.Append(guest))
 
 	cmd := &command{
+		logger:  discardLogger(),
 		stdin:   stdinr,
 		stdout:  stdoutw,
 		writers: writers,
@@ -114,6 +116,51 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 	// No Eventually: the guarantee is that this has already happened.
 	require.Contains(t, string(guestOut.bytes()), lastLine,
 		"Run returned with output still queued for an attached guest")
+}
+
+// A guest too stuck to receive its tail must leave a trace.
+//
+// The flush is best-effort by design: the deadline expires, the host exits, and
+// there is nothing to be done about it here. That is exactly why the error was
+// easy to discard — and why discarding it is wrong. Without a line, a guest
+// whose last screenful never arrived looks from the outside like output the
+// command never produced.
+func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
+	stdinr, stdinw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdinr.Close() }()
+	defer func() { _ = stdinw.Close() }()
+	stdoutr, stdoutw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdoutr.Close() }()
+	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
+
+	// Never released, so the flush can only end at its deadline.
+	gate := make(chan struct{})
+	defer close(gate)
+	guest := uio.NewAsyncWriter(&gatedWriter{gate: gate, rec: &recordingWriter{}},
+		uio.DefaultGuestBufferSize, nil)
+	defer func() { _ = guest.Close() }()
+
+	writers := uio.NewMultiWriter(5)
+	require.NoError(t, writers.Append(guest))
+
+	var logs recordingWriter
+	cmd := &command{
+		logger:  slog.New(slog.NewTextHandler(&logs, nil)),
+		stdin:   stdinr,
+		stdout:  stdoutw,
+		writers: writers,
+		ctx:     t.Context(),
+		ptmx: &exitedPTY{
+			pending:   [][]byte{[]byte("never delivered\r\n")},
+			readDelay: 20 * time.Millisecond,
+		},
+	}
+
+	require.NoError(t, cmd.Run())
+	require.Contains(t, string(logs.bytes()), "gave up delivering final output to a guest",
+		"a guest that lost its tail left no trace in the host log")
 }
 
 // The shutdown barrier: waitIdle can return while the producer is still going,
@@ -156,6 +203,7 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 		pending = append(pending, []byte{byte('a' + i%26)})
 	}
 	cmd := &command{
+		logger:  discardLogger(),
 		stdin:   stdinr,
 		stdout:  stdoutw,
 		writers: writers,
