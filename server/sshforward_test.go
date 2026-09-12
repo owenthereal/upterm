@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/go-kit/kit/metrics"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -108,7 +108,7 @@ func forwardTestProxy(t *testing.T) (sshPeer, sshPeer, context.CancelFunc, <-cha
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardLogger())
+		done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -1169,7 +1169,7 @@ func TestSSHForwardSuccessReplyBeforePeerClose(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardLogger()) }()
+			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardCounter) }()
 			t.Cleanup(func() { cancel(); _ = forwardTestReceive(t, done) })
 			a, ar, b, br := forwardTestChannel(t, origin, destination)
 			type response struct {
@@ -1588,8 +1588,6 @@ func forwardTestDirection(t *testing.T, gate *channelGate) (destination, source 
 		func() { _ = producerNear.Close() }
 }
 
-func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
-
 // newTestForwarder builds a forwarder whose cancel is observable and whose
 // timers are short enough to run in a test.
 func newTestForwarder(t *testing.T, scope sshAbortScope, cancelled chan<- error) sshForwarder {
@@ -1719,35 +1717,46 @@ func TestChannelDirectionYieldsAStalledChannelToTheTransportDrain(t *testing.T) 
 	gate.releaseAll()
 }
 
-// syncBuffer collects log output written from the watchdog's goroutine.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf []byte
+// recordingCounter records Add calls per label set, so a test can assert which
+// series an abort landed in. The zero value is unusable; use newRecordingCounter.
+type recordingCounter struct {
+	mu     *sync.Mutex
+	counts map[string]float64
+	key    string
 }
 
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.buf = append(s.buf, p...)
-	return len(p), nil
+func newRecordingCounter() *recordingCounter {
+	return &recordingCounter{mu: new(sync.Mutex), counts: map[string]float64{}}
 }
 
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return string(s.buf)
+// With returns a view sharing this counter's state, keyed by its label values.
+func (c *recordingCounter) With(labelValues ...string) metrics.Counter {
+	return &recordingCounter{mu: c.mu, counts: c.counts, key: strings.Join(labelValues, "=")}
 }
 
-// The abort has to say so, and has to say whether it took the connection with
-// it. From the daemon's side a dropped guest is otherwise indistinguishable
-// from one that hung up: the host logs why it stopped feeding a guest, but
-// nothing here recorded that the forwarder then closed the channel, or that
-// every other channel on that connection went down undrained behind it.
-func TestChannelDirectionLogsBothEscalationSteps(t *testing.T) {
-	var logs syncBuffer
+func (c *recordingCounter) Add(delta float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.counts[c.key] += delta
+}
+
+func (c *recordingCounter) value(key string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[key]
+}
+
+// The abort has to be recorded, and has to record whether it took the
+// connection with it. From the daemon's side a dropped guest is otherwise
+// indistinguishable from one that hung up: the host logs why it stopped
+// feeding a guest, but nothing here counted that the forwarder then closed the
+// channel, or that every other channel on that connection went down undrained
+// behind it.
+func TestChannelDirectionCountsAnAbortAndItsEscalation(t *testing.T) {
+	aborts := newRecordingCounter()
 	cancelled := make(chan error, 1)
 	f := newTestForwarder(t, abortConnection, cancelled)
-	f.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	f.aborts = aborts
 
 	gate := newChannelGate()
 	gate.write = make(chan struct{})
@@ -1766,15 +1775,47 @@ func TestChannelDirectionLogsBothEscalationSteps(t *testing.T) {
 		t.Fatal("a stalled direction was never aborted")
 	}
 
-	// Waited for, not read once: the line is written after the cancel that this
-	// test observes, on the same goroutine, so receiving the cancel says
-	// nothing about whether the line has landed yet.
+	// Waited for, not read once: the counter is incremented after the cancel
+	// this test observes, on the same goroutine, so receiving the cancel says
+	// nothing about whether the increment has happened yet.
 	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "closed a stalled SSH channel")
+		return aborts.value("escalation=connection") == 1
 	}, 5*time.Second, time.Millisecond,
-		"closing a stalled channel left no trace in the daemon log")
-	require.Contains(t, logs.String(), "cancelled_connection=true",
-		"taking a whole connection down left no trace in the daemon log")
+		"a stalled channel that took its connection down was not counted")
+	require.Zero(t, aborts.value("escalation=channel"),
+		"an abort that cancelled the connection must not also count as channel-only")
+
+	gate.releaseAll()
+}
+
+// The same abort on a host's connection stops at the channel, and is counted as
+// such: the scope is the whole reason this distinction exists, and a counter
+// that collapsed it would report a session-ending event and a routine one as
+// the same thing.
+func TestChannelDirectionCountsAChannelScopedAbortSeparately(t *testing.T) {
+	aborts := newRecordingCounter()
+	cancelled := make(chan error, 1)
+	f := newTestForwarder(t, abortChannel, cancelled)
+	f.aborts = aborts
+
+	gate := newChannelGate()
+	gate.write = make(chan struct{})
+	destination, source, requests, closeSource := forwardTestDirection(t, gate)
+
+	go f.channelDirection(destination, source, requests)
+	closeSource()
+	close(requests)
+
+	require.Eventually(t, func() bool {
+		return aborts.value("escalation=channel") == 1
+	}, 5*time.Second, time.Millisecond, "a channel-scoped abort was not counted")
+
+	select {
+	case err := <-cancelled:
+		t.Fatalf("a host's connection was cancelled over one stalled channel: %v", err)
+	default:
+	}
+	require.Zero(t, aborts.value("escalation=connection"))
 
 	gate.releaseAll()
 }
@@ -1866,7 +1907,7 @@ func TestHostScopedAbortLeavesTheTunnelWorking(t *testing.T) {
 	upstream.conn = &gateFirstChannelConn{Conn: upstream.conn, gate: gate}
 
 	forwarded := make(chan error, 1)
-	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardLogger()) }()
+	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardCounter) }()
 
 	// The stalled channel: opened first, so it gets the gate.
 	stalled := openTestChannel(t, client)

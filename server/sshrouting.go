@@ -68,6 +68,12 @@ type routingInstruments struct {
 	// included.
 	authenticatedHost   metrics.Counter
 	authenticatedClient metrics.Counter
+	// stalledChannelAborts counts channels the forwarder had to close because
+	// their source had gone and the destination had stopped reading, labelled
+	// by whether the connection went with them. It is a counter and not a log
+	// line because it is recorded on a watchdog goroutine nothing joins; see
+	// abortStalledDirection.
+	stalledChannelAborts metrics.Counter
 }
 
 func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
@@ -80,9 +86,13 @@ func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 		connectionTimeouts:  p.NewCounter("routing_connection_timeout_count"),
 		authenticatedHost:   authenticated.With("kind", "host"),
 		authenticatedClient: authenticated.With("kind", "client"),
+		stalledChannelAborts: newLabeledCounter(p,
+			"routing_stalled_channel_aborts_count", "escalation"),
 	}
 	inst.authenticatedHost.Add(0) // export both series from startup
 	inst.authenticatedClient.Add(0)
+	inst.stalledChannelAborts.With("escalation", "channel").Add(0)
+	inst.stalledChannelAborts.With("escalation", "connection").Add(0)
 	return inst
 }
 
