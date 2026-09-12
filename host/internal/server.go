@@ -379,6 +379,16 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	}
 
+	// Everything this handler sends the guest itself goes here rather than to
+	// sess, so it stays behind whatever is already queued for delivery. In the
+	// fan-out path that is the guest's sink: the replay is handed over during
+	// attach and delivered by the sink's goroutine, so a direct write to sess
+	// races it — arriving ahead of the replay, or between the packets of a chunk
+	// already in flight. The forced-command path has no such queue and no
+	// concurrent writer, since its copy is a run.Group actor that has not
+	// started yet.
+	guestOutput := io.Writer(sess)
+
 	if len(h.forceCommand) > 0 {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
@@ -469,6 +479,8 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			h.writers.Remove(sink)
 			_ = sink.Close()
 		}()
+
+		guestOutput = sink
 	}
 
 	{
@@ -493,7 +505,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// if a readonly session has been requested, don't connect stdin
 	if h.readonly {
 		// write to client to notify them that they have connected to a read-only session
-		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+		_, _ = io.WriteString(guestOutput, "\r\n=== Attached to read-only session ===\r\n\r\n")
 
 		// Still read the client's input, discarding it. Reading is what
 		// tells us the client has gone (EOF), and it keeps the channel
