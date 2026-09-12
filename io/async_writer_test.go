@@ -295,29 +295,64 @@ func TestAsyncWriterCoalescesUpToTheChunkCap(t *testing.T) {
 }
 
 // A burst that has been fully delivered must not leave its backing array behind
-// for the rest of the session. Advancing pending past the bytes taken walks the
-// slice to the end of its array, so this holds without any explicit release —
-// measured at 0-4096 bytes across bursts from 256 KiB to 1000 KiB. The bound
-// here is deliberately loose: it pins "the array is given back", not the exact
-// arithmetic of Go's size classes.
-func TestAsyncWriterReleasesPendingCapacityWhenItCatchesUp(t *testing.T) {
+// for the rest of the session.
+//
+// The assertion is that pending is nil, not that its capacity is small, because
+// capacity is not what holds the memory. Advancing past the bytes taken shrinks
+// length and capacity but leaves the slice pointing inside the array append
+// grew, and Go frees an allocation only as a whole. Under this burst, written
+// the way io.Copy writes it, re-slicing alone ends at 72 KiB of capacity with
+// 589 KiB still resident; dropping the slice returns all but 5 KiB. A nil slice
+// holds no pointer, so nil is the release.
+func TestAsyncWriterReleasesPendingBufferWhenItCatchesUp(t *testing.T) {
 	gate := newGateWriter()
 	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
 	defer func() { _ = a.Close() }()
 
 	_, err := a.Write([]byte("first"))
 	require.NoError(t, err)
-	<-gate.entered
+	<-gate.entered // the drain is parked in the writer, so the burst piles up behind it
 
-	_, err = a.Write(bytes.Repeat([]byte("z"), 512<<10))
-	require.NoError(t, err)
+	// Written at io.Copy's chunk size rather than in one call: growing by
+	// repeated append is what leaves pending owning an array far larger than the
+	// bytes it still owes.
+	block := bytes.Repeat([]byte("z"), 32<<10)
+	for written := 0; written < 512<<10; written += len(block) {
+		_, err = a.Write(block)
+		require.NoError(t, err)
+	}
 
 	close(gate.release)
 	require.Eventually(t, func() bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		return len(a.pending) == 0 && cap(a.pending) <= maxDrainChunk
+		return a.pending == nil
 	}, 5*time.Second, time.Millisecond, "a one-off burst must not be retained for the session")
+}
+
+// Close discards what it never delivered, and discarding means releasing: a
+// sink closed mid-burst that stayed reachable — through a deferred Close, or a
+// caller still holding it — would otherwise pin the whole buffer.
+func TestAsyncWriterCloseReleasesUndeliveredOutput(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+
+	_, err := a.Write([]byte("first"))
+	require.NoError(t, err)
+	<-gate.entered // the drain is parked, so nothing below is delivered
+
+	_, err = a.Write(bytes.Repeat([]byte("z"), 512<<10))
+	require.NoError(t, err)
+
+	require.NoError(t, a.Close())
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Compared rather than passed to require.Nil: the failure is a held buffer,
+	// and require.Nil would render every byte of it.
+	require.True(t, a.pending == nil, "Close must release the output it discards")
 }
 
 // The drain's chunk must stay a bounded buffer of its own rather than a window
