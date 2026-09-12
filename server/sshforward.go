@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -114,7 +115,7 @@ var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after sou
 // returning. Ordinary transport completion first drains received channel data
 // and request tails toward the surviving peer; forced cancellation closes both
 // transports immediately to release blocked opens, requests and writes.
-func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope) error {
+func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, logger *slog.Logger) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	draining := make(chan struct{})
@@ -123,6 +124,7 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 		cancel:       cancel,
 		scope:        scope,
 		draining:     draining,
+		logger:       logger,
 		drainTimeout: sshForwardChannelDrainTimeout,
 		abortGrace:   sshForwardChannelAbortGrace,
 	}
@@ -199,6 +201,8 @@ type sshForwarder struct {
 	// hands the stalled-channel bound over to forwardSSH. Nil in tests that
 	// exercise a single direction, where nothing else owns that bound.
 	draining <-chan struct{}
+
+	logger *slog.Logger
 
 	// Fields rather than direct reads of the constants above, so tests can run
 	// the watchdog on a timescale that does not dominate the suite.
@@ -373,13 +377,20 @@ type sshForwardChannel struct {
 func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, requests <-chan *ssh.Request) {
 	finished := make(chan struct{})
 	defer close(finished)
-	sourceClosed := make(chan struct{})
-	go f.abortStalledDirection(destination, sourceClosed, finished)
+
+	// Armed on source closure rather than started with the direction. The
+	// watchdog has nothing to do until then, and a daemon carries two
+	// directions for every live channel: starting eagerly parks that many
+	// goroutines on a select, for the whole life of each channel, against a
+	// case that almost never arrives. requests calls this from inside its own
+	// loop, so finished is still open when it runs.
+	armWatchdog := sync.OnceFunc(func() {
+		go f.abortStalledDirection(destination, finished)
+	})
 
 	var streams sync.WaitGroup
 	streams.Go(func() { copySSHChannel(destination, source) })
-	f.requests(sshChannelRequestSender{destination}, requests,
-		sync.OnceFunc(func() { close(sourceClosed) }),
+	f.requests(sshChannelRequestSender{destination}, requests, armWatchdog,
 		func() { _ = destination.Close() }, sshRequestAbortGrace, &source.replies)
 	streams.Wait()
 	// The source may send success and CLOSE back-to-back. Its reply worker
@@ -389,8 +400,9 @@ func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, r
 	_ = destination.Close()
 }
 
-// abortStalledDirection releases a direction whose source has closed but whose
-// destination has stopped accepting bytes.
+// abortStalledDirection releases a direction whose destination has stopped
+// accepting bytes. channelDirection arms it once the source has closed, so
+// reaching here already means that has happened.
 //
 // It is a watchdog rather than a step in the teardown because every step of
 // that teardown is itself a transport write a stalled peer can block. Close
@@ -411,19 +423,16 @@ func (f sshForwarder) channelDirection(destination, source *sshForwardChannel, r
 // armed within moments of each other and, before this, ran on identical
 // timeouts — and the winner decides which error the shutdown reports. The
 // transport's is the one callers are contracted to see.
-func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClosed, finished <-chan struct{}) {
-	select {
-	case <-finished:
-		return
-	case <-f.ctx.Done():
-		return
-	case <-f.draining:
-		return
-	case <-sourceClosed:
-	}
+func (f sshForwarder) abortStalledDirection(destination ssh.Channel, finished <-chan struct{}) {
 	if f.settledWithin(finished, f.drainTimeout) {
 		return
 	}
+	// The daemon's only account of a dropped guest: the host logs why it
+	// stopped feeding one, but from here the guest simply stops, and which of
+	// the two happened is the difference between a slow viewer and a broken
+	// forwarder.
+	f.log().Warn("closing a stalled SSH channel; its source closed and the copy never drained",
+		"drain_timeout", f.drainTimeout)
 	// In its own goroutine, for the reason above. A write blocked on an
 	// exhausted window does not hold the channel's write mutex, so this is
 	// enough whenever the peer is still reading its socket: it answers the
@@ -433,8 +442,21 @@ func (f sshForwarder) abortStalledDirection(destination ssh.Channel, sourceClose
 		return
 	}
 	if f.scope == abortConnection {
+		// The expensive step, and the one worth a line on its own: every other
+		// channel on this connection goes with it, undrained.
+		f.log().Warn("stalled SSH channel did not answer CLOSE; cancelling the connection",
+			"abort_grace", f.abortGrace)
 		f.cancel(errSSHChannelDrainStalled)
 	}
+}
+
+// log is nil-safe so that every way of building a forwarder, including test
+// literals, can escalate without arranging a logger first.
+func (f sshForwarder) log() *slog.Logger {
+	if f.logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return f.logger
 }
 
 // settledWithin reports whether this direction finished, the connection began

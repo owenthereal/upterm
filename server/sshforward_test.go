@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -105,7 +106,10 @@ func forwardTestProxy(t *testing.T) (sshPeer, sshPeer, context.CancelFunc, <-cha
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	stopped := make(chan struct{})
-	go func() { defer close(stopped); done <- forwardSSH(ctx, downstream, upstream, abortConnection) }()
+	go func() {
+		defer close(stopped)
+		done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardLogger())
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -1165,7 +1169,7 @@ func TestSSHForwardSuccessReplyBeforePeerClose(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection) }()
+			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection, discardLogger()) }()
 			t.Cleanup(func() { cancel(); _ = forwardTestReceive(t, done) })
 			a, ar, b, br := forwardTestChannel(t, origin, destination)
 			type response struct {
@@ -1575,6 +1579,8 @@ func forwardTestDirection(t *testing.T, gate *channelGate) (destination, source 
 		func() { _ = producerNear.Close() }
 }
 
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
 // newTestForwarder builds a forwarder whose cancel is observable and whose
 // timers are short enough to run in a test.
 func newTestForwarder(t *testing.T, scope sshAbortScope, cancelled chan<- error) sshForwarder {
@@ -1704,6 +1710,60 @@ func TestChannelDirectionYieldsAStalledChannelToTheTransportDrain(t *testing.T) 
 	gate.releaseAll()
 }
 
+// syncBuffer collects log output written from the watchdog's goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf = append(s.buf, p...)
+	return len(p), nil
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.buf)
+}
+
+// Both escalation steps have to say so. From the daemon's side a dropped guest
+// is otherwise indistinguishable from one that hung up: the host logs why it
+// stopped feeding a guest, but nothing here recorded that the forwarder then
+// closed the channel, or that it took the whole connection down behind it.
+func TestChannelDirectionLogsBothEscalationSteps(t *testing.T) {
+	var logs syncBuffer
+	cancelled := make(chan error, 1)
+	f := newTestForwarder(t, abortConnection, cancelled)
+	f.logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	gate := newChannelGate()
+	gate.write = make(chan struct{})
+	// Close gated too, so the peer never answers and the grace has to expire.
+	gate.close = make(chan struct{})
+	destination, source, requests, closeSource := forwardTestDirection(t, gate)
+
+	go f.channelDirection(destination, source, requests)
+	closeSource()
+	close(requests)
+
+	select {
+	case err := <-cancelled:
+		require.ErrorIs(t, err, errSSHChannelDrainStalled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled direction was never aborted")
+	}
+
+	require.Contains(t, logs.String(), "closing a stalled SSH channel",
+		"closing a stalled channel left no trace in the daemon log")
+	require.Contains(t, logs.String(), "cancelling the connection",
+		"taking a whole connection down left no trace in the daemon log")
+
+	gate.releaseAll()
+}
+
 // gateFirstChannelConn gates the first channel opened on this connection and
 // leaves every later one alone, so one stalled channel and one healthy channel
 // share a transport.
@@ -1791,7 +1851,7 @@ func TestHostScopedAbortLeavesTheTunnelWorking(t *testing.T) {
 	upstream.conn = &gateFirstChannelConn{Conn: upstream.conn, gate: gate}
 
 	forwarded := make(chan error, 1)
-	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel) }()
+	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel, discardLogger()) }()
 
 	// The stalled channel: opened first, so it gets the gate.
 	stalled := openTestChannel(t, client)
