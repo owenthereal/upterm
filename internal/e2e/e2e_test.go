@@ -262,7 +262,6 @@ func extractScpPortFlag(sshCmd string) string {
 	return ""
 }
 
-
 // TestSync validates bidirectional real-time PTY sync between host and client.
 func TestSync(t *testing.T) {
 	h := newTestHarness(t, 200)
