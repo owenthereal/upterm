@@ -1329,9 +1329,17 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	// Lower bound, and the load-bearing one. Every assertion below is an upper
 	// bound, so without this the case passes when nothing ever moved: a.Close()
 	// makes Write return 0, ReadAll returns 0, and 0 is under every ceiling.
-	// Waiting for two windows to be accepted means the forwarder has drained a
-	// window out of a and pushed it at b, so there is real data in the pipeline
-	// to cut.
+	// Passing a full window means the forwarder has drained a window out of a
+	// and pushed it at b, so there is real data in the pipeline to cut.
+	//
+	// Half a window past that, rather than a second whole one. Two windows is
+	// the pipeline's theoretical maximum, and waiting for the maximum makes the
+	// gate a throughput test: under load it lands one 64 KiB chunk short and
+	// fails a case that had in fact filled the pipeline. Measured on macOS at
+	// 3 of 40 runs before the change this test arrived in, and 1 of 40 after,
+	// so it is the gate rather than anything it guards. The margin above one
+	// window is what proves the forwarder is pushing, and half a window is an
+	// unambiguous margin.
 	//
 	// The budget is not ours to choose freely: forwardTestPair puts an absolute
 	// 10s deadline on both transports, so a wait longer than that cannot make
@@ -1339,15 +1347,16 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	// "nothing to cut". Stay well inside it, and watch the writer as well as the
 	// clock — if it stops early the transport or channel ended, which is a
 	// different failure and deserves to say so.
+	const loaded = sshChannelWindow + sshChannelWindow/2
 	gate := time.After(3 * time.Second)
-	for accepted.Load() < 2*sshChannelWindow {
+	for accepted.Load() < loaded {
 		select {
 		case <-writerDone:
 			t.Fatalf("origin stopped writing at %d of the %d bytes the pipeline needs; "+
-				"the channel or transport ended before the abort was armed", accepted.Load(), 2*sshChannelWindow)
+				"the channel or transport ended before the abort was armed", accepted.Load(), loaded)
 		case <-gate:
 			t.Fatalf("only %d of the %d bytes needed entered the forwarding path within the transport budget",
-				accepted.Load(), 2*sshChannelWindow)
+				accepted.Load(), loaded)
 		case <-time.After(time.Millisecond):
 		}
 	}
