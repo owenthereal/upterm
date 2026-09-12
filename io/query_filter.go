@@ -27,17 +27,17 @@ type TerminalQueryFilter struct {
 type queryFilterState int
 
 const (
-	qfStateNormal      queryFilterState = iota
-	qfStateEsc                          // saw ESC
-	qfStateCSI                          // saw ESC [
-	qfStateCSIParam                     // parsing CSI parameters
-	qfStateOSC                          // saw ESC ]
-	qfStateOSCParam                     // saw OSC number
-	qfStateOSCSemi                      // saw OSC number ;
-	qfStateOSCQuery                     // saw OSC N ; ? (query for color)
-	qfStateOSCQueryEsc                  // saw ESC in OSC query (possible ST)
-	qfStateOSCContent                   // saw OSC N ; <non-?> (not a query, pass through)
-	qfStateOSCContentEsc                // saw ESC in OSC content (possible ST)
+	qfStateNormal        queryFilterState = iota
+	qfStateEsc                            // saw ESC
+	qfStateCSI                            // saw ESC [
+	qfStateCSIParam                       // parsing CSI parameters
+	qfStateOSC                            // saw ESC ]
+	qfStateOSCParam                       // saw OSC number
+	qfStateOSCSemi                        // saw OSC number ;
+	qfStateOSCQuery                       // saw OSC N ; ? (query for color)
+	qfStateOSCQueryEsc                    // saw ESC in OSC query (possible ST)
+	qfStateOSCContent                     // saw OSC N ; <non-?> (not a query, pass through)
+	qfStateOSCContentEsc                  // saw ESC in OSC content (possible ST)
 )
 
 // NewTerminalQueryFilter creates a filter that removes terminal query

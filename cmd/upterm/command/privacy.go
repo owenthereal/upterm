@@ -18,9 +18,10 @@ var (
 // detected CI environments to prevent accidental exposure in build logs.
 //
 // Usage:
-//   upterm host --hide-client-ip              # Explicit flag
-//   UPTERM_HIDE_CLIENT_IP=true upterm host    # Environment variable (auto-bound)
-//   upterm host                               # Auto-detects CI (GitHub Actions, etc.)
+//
+//	upterm host --hide-client-ip              # Explicit flag
+//	UPTERM_HIDE_CLIENT_IP=true upterm host    # Environment variable (auto-bound)
+//	upterm host                               # Auto-detects CI (GitHub Actions, etc.)
 func shouldHideClientIP() bool {
 	// If flag is set (either via CLI flag or via UPTERM_HIDE_CLIENT_IP env var bound by viper)
 	if flagHideClientIP {
@@ -35,15 +36,15 @@ func shouldHideClientIP() bool {
 // by checking for common CI environment variables.
 func isCI() bool {
 	ciEnvVars := []string{
-		"CI",             // Generic CI indicator (GitHub Actions, GitLab CI, etc.)
-		"GITHUB_ACTIONS", // GitHub Actions
-		"GITLAB_CI",      // GitLab CI
-		"CIRCLECI",       // CircleCI
-		"TRAVIS",         // Travis CI
-		"JENKINS_URL",    // Jenkins
-		"BUILDKITE",      // Buildkite
-		"TF_BUILD",       // Azure Pipelines
-		"TEAMCITY_VERSION", // TeamCity
+		"CI",                     // Generic CI indicator (GitHub Actions, GitLab CI, etc.)
+		"GITHUB_ACTIONS",         // GitHub Actions
+		"GITLAB_CI",              // GitLab CI
+		"CIRCLECI",               // CircleCI
+		"TRAVIS",                 // Travis CI
+		"JENKINS_URL",            // Jenkins
+		"BUILDKITE",              // Buildkite
+		"TF_BUILD",               // Azure Pipelines
+		"TEAMCITY_VERSION",       // TeamCity
 		"BITBUCKET_BUILD_NUMBER", // Bitbucket Pipelines
 	}
 

@@ -18,7 +18,7 @@ import (
 
 // SFTPSession tracks permission state for a single SFTP session
 type SFTPSession struct {
-	readOnly          bool                      // Only allow downloads (no upload/delete)
+	readOnly          bool                       // Only allow downloads (no upload/delete)
 	permissionChecker hostsftp.PermissionChecker // Optional: prompts user for permission (nil = auto-allow)
 	clientInfo        hostsftp.ClientInfo        // Client information for permission dialogs
 }
