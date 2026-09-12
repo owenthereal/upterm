@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -45,6 +46,39 @@ type Server struct {
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
 }
 
+// sessionContext derives the context guest sessions live under.
+//
+// It is deliberately detached from the parent. The fan-out's final flush
+// happens as the command's output copy returns, and a session context that died
+// with the parent would let HandleSession close a guest's channel while that
+// flush was still writing into it. Only the SSH server actor's interrupt
+// releases sessions, and it does so after giving the command a bounded chance
+// to finish.
+func sessionContext(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+
+// waitClosed waits for done, giving up after timeout.
+func waitClosed(done <-chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+// releaseSessions holds guest sessions open until the fan-out has finished
+// delivering into them, then releases them.
+//
+// Named rather than inlined into the interrupt so the ordering it establishes
+// can be tested on its own: it is the half of the mechanism that a detached
+// session context is useless without.
+func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release func()) {
+	waitClosed(cmdDone, timeout)
+	release()
+}
+
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	writers := uio.NewMultiWriter(5)
 
@@ -66,6 +100,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	}
 
 	var g run.Group
+	cmdDone := make(chan struct{})
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		teh := terminalEventHandler{
@@ -80,20 +115,21 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 	}
 	{
 		g.Add(func() error {
+			defer close(cmdDone)
 			return cmd.Run()
 		}, func(err error) {
 			cmdCancel()
 		})
 	}
 	{
-		ctx, cancel := context.WithCancel(ctx)
+		sessCtx, cancel := context.WithCancel(sessionContext(ctx))
 		sh := sessionHandler{
 			forceCommand:          s.ForceCommand,
 			ptmx:                  ptmx,
 			eventEmmiter:          s.EventEmitter,
 			writers:               writers,
 			keepAliveDuration:     s.KeepAliveDuration,
-			ctx:                   ctx,
+			ctx:                   sessCtx,
 			logger:                s.Logger,
 			readonly:              s.ReadOnly,
 			sftpPermissionChecker: s.SFTPPermissionChecker,
@@ -150,10 +186,18 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		g.Add(func() error {
 			return server.Serve(l)
 		}, func(err error) {
-			// kill ssh sessionHandler
-			cancel()
-			// shut down ssh server
-			_ = server.Shutdown(ctx)
+			// Let the fan-out finish delivering before the sessions are
+			// released. This is the last interrupt in the group, so waiting
+			// here holds up nothing else, and a command-led exit has already
+			// closed cmdDone by the time it runs.
+			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
+
+			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
+			// connection WaitGroup until the context it is given is done, and
+			// on a command-led exit ctx is still live — a guest that keeps its
+			// SSH connection open after its channel closed would hang the host
+			// forever, and the deferred ReverseTunnel.Close would never run.
+			_ = server.Shutdown(sessCtx)
 		})
 	}
 
@@ -335,6 +379,16 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	}
 
+	// Everything this handler sends the guest itself goes here rather than to
+	// sess, so it stays behind whatever is already queued for delivery. In the
+	// fan-out path that is the guest's sink: the replay is handed over during
+	// attach and delivered by the sink's goroutine, so a direct write to sess
+	// races it — arriving ahead of the replay, or between the packets of a chunk
+	// already in flight. The forced-command path has no such queue and no
+	// concurrent writer, since its copy is a run.Group actor that has not
+	// started yet.
+	guestOutput := io.Writer(sess)
+
 	if len(h.forceCommand) > 0 {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
@@ -387,13 +441,46 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
 		// they reach the client. This prevents client terminals from responding
 		// to queries meant for the host terminal.
-		filteredOutput := uio.NewTerminalQueryFilter(sess)
-		if err := h.writers.Append(filteredOutput); err != nil {
-			_ = sess.Exit(1)
+		filtered := uio.NewTerminalQueryFilter(sess)
+
+		// And wrap that in a sink with its own goroutine and a bounded buffer,
+		// so this guest cannot hold up the fan-out for the host or anyone else.
+		// A guest that overflows is disconnected: a terminal stream is not
+		// resumable, so dropping bytes out of the middle would leave a corrupted
+		// screen it could not detect, while a closed session it can simply
+		// rejoin. See owenthereal/upterm#524.
+		onDrop := func(err error) {
+			if errors.Is(err, uio.ErrOverflow) {
+				h.logger.Warn("dropping guest: too far behind to keep up with output",
+					"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
+			} else {
+				h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+			}
+			// Closing the channel is what makes the drop real: it fails the
+			// blocked write, and it fails the stdin copy below, so run.Group
+			// returns and the deferred client-left event fires.
+			_ = sess.Close()
+		}
+
+		sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
+		if err := attachGuestOutput(h.writers, sink); err != nil {
+			if errors.Is(err, uio.ErrClosed) {
+				// The session is already tearing down. This guest arrived a
+				// moment too late, which is not its error.
+				_ = sess.Exit(0)
+			} else {
+				h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
+				_ = sess.Exit(1)
+			}
 			return
 		}
 
-		defer h.writers.Remove(filteredOutput)
+		defer func() {
+			h.writers.Remove(sink)
+			_ = sink.Close()
+		}()
+
+		guestOutput = sink
 	}
 
 	{
@@ -418,7 +505,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// if a readonly session has been requested, don't connect stdin
 	if h.readonly {
 		// write to client to notify them that they have connected to a read-only session
-		_, _ = io.WriteString(sess, "\r\n=== Attached to read-only session ===\r\n\r\n")
+		_, _ = io.WriteString(guestOutput, "\r\n=== Attached to read-only session ===\r\n\r\n")
 
 		// Still read the client's input, discarding it. Reading is what
 		// tells us the client has gone (EOF), and it keeps the channel
@@ -453,6 +540,24 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	default:
 		_ = sess.Exit(0)
 	}
+}
+
+// attachGuestOutput attaches a guest's sink to the fan-out, releasing it if the
+// fan-out refuses.
+//
+// That release is the one path nothing else covers: the sink's goroutine is
+// idle rather than blocked in I/O, so neither closing the session nor the
+// fan-out's teardown can reach it — and a refused attach became reachable in
+// normal operation the moment MultiWriter learned to quiesce.
+//
+// It takes a built sink rather than building one so the caller, and a test,
+// keeps a handle on what it must release.
+func attachGuestOutput(writers *uio.MultiWriter, sink *uio.AsyncWriter) error {
+	if err := writers.Append(sink); err != nil {
+		_ = sink.Close()
+		return err
+	}
+	return nil
 }
 
 func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {

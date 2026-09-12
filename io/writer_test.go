@@ -2,6 +2,7 @@ package io
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -251,4 +252,258 @@ func TestMultiWriterRemoveFirstWriter(t *testing.T) {
 
 	assert.Empty(t, first.String(), "the writer at index 0 should have been removed")
 	assert.Equal(t, "hello", second.String())
+}
+
+// A writer joining a live session must see a contiguous stream: no byte
+// delivered twice, none missing. Append replays the buffer and joins the member
+// list as two separate steps today, with no lock spanning them, so a concurrent
+// Write lands either side of the gap.
+func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
+	for attempt := range 50 {
+		w := NewMultiWriter(5)
+
+		produced := make(chan string, 1)
+		stop := make(chan struct{})
+		go func() {
+			var sent []byte
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					produced <- string(sent)
+					return
+				default:
+				}
+				p := []byte{byte('a' + i%26)}
+				sent = append(sent, p...)
+				_, _ = w.Write(p)
+			}
+		}()
+
+		time.Sleep(time.Duration(attempt%5) * time.Millisecond)
+		var joined bytes.Buffer
+		require.NoError(t, w.Append(&joined))
+		time.Sleep(time.Millisecond)
+		close(stop)
+		all := <-produced
+
+		got := joined.String()
+		require.NotEmpty(t, got, "a joining writer should receive the replay buffer")
+		require.Contains(t, all, got,
+			"attempt %d: a joining writer saw bytes that were duplicated or skipped", attempt)
+	}
+}
+
+// Data built its result with make([][]byte, len(queue)) and then appended, so it
+// returned N nil entries before the N real ones and every newly attached writer
+// received N zero-length writes.
+func TestMultiWriterReplayHasNoEmptyWrites(t *testing.T) {
+	w := NewMultiWriter(3)
+	_, _ = w.Write([]byte("one"))
+	_, _ = w.Write([]byte("two"))
+
+	var rec recordingWriter
+	require.NoError(t, w.Append(&rec))
+
+	require.Equal(t, []int{3, 3}, rec.writeSizes(), "replay must not emit empty writes")
+	require.Equal(t, "onetwo", string(rec.bytes()))
+}
+
+func TestMultiWriterZeroSizedReplayBufferDoesNotPanic(t *testing.T) {
+	w := NewMultiWriter(0)
+	var rec recordingWriter
+	require.NoError(t, w.Append(&rec))
+	require.NotPanics(t, func() { _, _ = w.Write([]byte("output")) })
+	require.Equal(t, "output", string(rec.bytes()))
+}
+
+func TestMultiWriterShutdownFlushesAsyncMembers(t *testing.T) {
+	gate := newGateWriter()
+	sink := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(sink))
+	_, _ = w.Write([]byte("last line of the session"))
+	<-gate.entered
+
+	shutdown := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdown <- w.Shutdown(ctx)
+	}()
+
+	select {
+	case <-shutdown:
+		t.Fatal("Shutdown returned before the sink drained")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate.release)
+	select {
+	case err := <-shutdown:
+		require.NoError(t, err)
+		require.Equal(t, "last line of the session", string(gate.bytes()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown never returned")
+	}
+}
+
+// The SSH server keeps serving while the flush runs. Without the quiesce, a
+// guest attaching after the snapshot has its replay queued into a sink nobody
+// will flush, and teardown closes it before delivery: an empty screen and a
+// disconnect.
+func TestMultiWriterShutdownRefusesLaterAppends(t *testing.T) {
+	w := NewMultiWriter(5)
+	var before bytes.Buffer
+	require.NoError(t, w.Append(&before))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+
+	var after bytes.Buffer
+	require.ErrorIs(t, w.Append(&after), ErrClosed)
+}
+
+// The sequential case above proves the door is shut; this proves there is no
+// gap in front of it. An attach racing the quiesce must land on one side or
+// the other — attached and therefore flushed, or refused — never attached to a
+// snapshot that has already been taken, which is the outcome that leaves a
+// guest with a queued replay nobody will deliver.
+func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
+	for attempt := range 50 {
+		w := NewMultiWriter(5)
+		_, _ = w.Write([]byte("output"))
+
+		var out recordingWriter
+		sink := NewAsyncWriter(&out, DefaultGuestBufferSize, nil)
+
+		var (
+			wg        sync.WaitGroup
+			appendErr error
+		)
+		wg.Add(2)
+		go func() { defer wg.Done(); appendErr = w.Append(sink) }()
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = w.Shutdown(ctx)
+		}()
+		wg.Wait()
+
+		if appendErr == nil {
+			require.Equal(t, "output", string(out.bytes()),
+				"attempt %d: an attach that succeeded must have been flushed", attempt)
+		} else {
+			require.ErrorIs(t, appendErr, ErrClosed, "attempt %d", attempt)
+			require.Empty(t, out.bytes(), "attempt %d: a refused attach must receive nothing", attempt)
+		}
+		_ = sink.Close()
+	}
+}
+
+func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
+	w := NewMultiWriter(5)
+	var plain bytes.Buffer
+	require.NoError(t, w.Append(&plain))
+	_, _ = w.Write([]byte("output"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx), "a synchronous writer is delivered by definition")
+}
+
+func TestMultiWriterShutdownGivesUpOnAStuckSink(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+	sink := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(sink))
+	_, _ = w.Write([]byte("never delivered"))
+	<-gate.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, w.Shutdown(ctx), context.DeadlineExceeded)
+}
+
+// The issue, end to end at the fan-out level: one guest that has stopped
+// reading must not stall the host's terminal or any other guest, and must
+// itself be dropped rather than tolerated.
+//
+// Before per-guest buffering, the stuck writer held the serial fan-out inside
+// its Write and nothing after it in the slice received anything at all.
+func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
+	const sinkCap = 4 << 10
+
+	var hostStdout recordingWriter // attached unwrapped, as the host's own is
+
+	healthyOut := &recordingWriter{}
+	healthy := NewAsyncWriter(healthyOut, DefaultGuestBufferSize, nil)
+	defer func() { _ = healthy.Close() }()
+
+	stuckOut := newGateWriter()
+	defer close(stuckOut.release)
+	dropped := make(chan error, 1)
+	stuck := NewAsyncWriter(stuckOut, sinkCap, func(err error) { dropped <- err })
+	defer func() { _ = stuck.Close() }()
+
+	w := NewMultiWriter(5)
+	require.NoError(t, w.Append(&hostStdout))
+	require.NoError(t, w.Append(stuck))
+	require.NoError(t, w.Append(healthy))
+
+	// Fill the stuck guest's buffer and keep going, as a `cat` of a large file
+	// would. Run on its own goroutine and race it against a timeout, the same
+	// way TestAsyncWriterWriteDoesNotBlockOnStuckWriter does: nothing here
+	// bounds an individual w.Write call, so a regression that reintroduces
+	// blocking would otherwise hang this goroutine until the package's
+	// -timeout killed the whole binary instead of failing just this test.
+	line := bytes.Repeat([]byte("x"), 1<<10)
+	var (
+		want     []byte
+		writeErr error
+		writeN   int
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 64 {
+			want = append(want, line...)
+			writeN, writeErr = w.Write(line)
+			if writeErr != nil || writeN != len(line) {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fan-out blocked on a stuck guest")
+	}
+	// require.FailNow, which these call on failure, must only run on the test
+	// goroutine, so the checks are made here rather than inside the goroutine
+	// above.
+	require.NoError(t, writeErr, "the fan-out never reports a guest's failure")
+	require.Equal(t, len(line), writeN)
+
+	select {
+	case err := <-dropped:
+		require.ErrorIs(t, err, ErrOverflow)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stuck guest was never dropped")
+	}
+
+	require.Equal(t, want, hostStdout.bytes(), "the host's terminal must see everything")
+	require.Eventually(t, func() bool { return bytes.Equal(healthyOut.bytes(), want) },
+		5*time.Second, time.Millisecond, "a healthy guest must see everything")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
 }

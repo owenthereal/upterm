@@ -1,6 +1,7 @@
 package io
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,8 +20,14 @@ func (c *buffer) Append(p []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// remove first element if queue is full
-	if len(c.queue) >= c.size {
+	// A buffer built with a non-positive size keeps nothing; without this the
+	// trim below slices an empty queue and panics.
+	if c.size <= 0 {
+		return
+	}
+
+	// remove leading elements until there is room
+	for len(c.queue) >= c.size {
 		c.queue = c.queue[1:]
 	}
 
@@ -30,18 +37,14 @@ func (c *buffer) Append(p []byte) {
 	c.queue = append(c.queue, pp)
 }
 
-func (c *buffer) Size() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.queue)
-}
-
 func (c *buffer) Data() [][]byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	result := make([][]byte, len(c.queue))
+	// Length, not capacity, was the bug: this returned len(queue) nil entries
+	// followed by the real ones, so every newly attached writer was handed that
+	// many zero-length writes before its replay.
+	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
 }
 
@@ -50,6 +53,17 @@ func NewMultiWriter(bufferSize int, writers ...io.Writer) *MultiWriter {
 		writers: writers,
 		buffer:  &buffer{size: bufferSize},
 	}
+}
+
+// ErrClosed is returned by Append once Shutdown has run. A guest that reaches
+// the door as the session is ending is refused rather than attached to a
+// fan-out nothing will flush again.
+var ErrClosed = errors.New("multiwriter: closed to new writers")
+
+// Flusher is implemented by attached writers that deliver asynchronously and so
+// can still be holding output when the producer stops.
+type Flusher interface {
+	Flush(ctx context.Context) error
 }
 
 // MultiWriter is a concurrent safe writer that allows appending/removing writers.
@@ -71,8 +85,22 @@ type MultiWriter struct {
 	writers   []io.Writer
 
 	buffer *buffer
+
+	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
+	// Append cannot interleave: an attach in progress either completes before
+	// the snapshot and is flushed, or finds this set and is refused.
+	closed bool
 }
 
+// Append attaches writers, handing each the replay buffer first so it starts
+// from recent output rather than mid-screen.
+//
+// Both steps happen under writeMu, the fan-out lock, so attaching is atomic
+// with respect to a Write: a joining writer gets the replay and every write
+// after it, never a write that is also in its replay and never a gap between
+// them. Holding the fan-out lock here is only safe because attached guest
+// writers no longer block on I/O; under the old design it would have
+// reintroduced the deadlock #523 removed.
 func (t *MultiWriter) Append(writers ...io.Writer) error {
 	// Reject anything Remove could not later take back out, before it is
 	// attached and before it is written to.
@@ -82,14 +110,17 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 		}
 	}
 
-	// write last buffer to new writers
-	if t.buffer.Size() > 0 {
-		for _, w := range writers {
-			for _, d := range t.buffer.Data() {
-				_, err := w.Write(d)
-				if err != nil {
-					return err
-				}
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	if t.closed {
+		return ErrClosed
+	}
+
+	for _, w := range writers {
+		for _, d := range t.buffer.Data() {
+			if _, err := w.Write(d); err != nil {
+				return err
 			}
 		}
 	}
@@ -169,10 +200,12 @@ func (t *MultiWriter) Remove(writers ...io.Writer) {
 // A writer removed between the snapshot and the write still receives this one
 // write. That is harmless: it is a session on its way out.
 //
-// Still outstanding: the writes are serial, so a guest that has stopped reading
-// holds up the fan-out for everyone until its write returns. Fixing that needs
-// per-writer buffering, so that a guest which cannot keep up is dropped rather
-// than allowed to slow the session down. Tracked in owenthereal/upterm#524.
+// Writers that buffer are what keep this serial loop honest: each attached
+// guest is an AsyncWriter, so its Write is a copy and a signal rather than SSH
+// I/O, and a guest that cannot keep up overflows and is dropped instead of
+// pacing everyone else. The host's own stdout is attached unwrapped and so is
+// written inline here, which is the one place back-pressure belongs: the pty
+// should not run ahead of the terminal that owns it.
 func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -198,4 +231,46 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// Shutdown closes the fan-out to new writers and then waits for everything
+// already accepted to be delivered.
+//
+// The two halves are inseparable. Flushing a snapshot alone would leave a
+// window: the SSH server keeps serving while the flush runs, so a guest
+// attaching after the snapshot has its replay queued into a sink this call will
+// never flush, and teardown closes it before delivery. Quiescing under writeMu,
+// the same lock Append takes, leaves no such window — an attach is either
+// inside the snapshot or refused.
+//
+// Members that do not buffer are skipped: a synchronous writer is delivered by
+// definition. A sink that has already failed flushes to nil, because a guest
+// that is already gone is not a shutdown error.
+func (t *MultiWriter) Shutdown(ctx context.Context) error {
+	t.writeMu.Lock()
+	t.closed = true
+	t.membersMu.Lock()
+	writers := make([]io.Writer, len(t.writers))
+	copy(writers, t.writers)
+	t.membersMu.Unlock()
+	t.writeMu.Unlock()
+
+	var (
+		wg   sync.WaitGroup
+		errs = make([]error, len(writers))
+	)
+	for i, w := range writers {
+		f, ok := w.(Flusher)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = f.Flush(ctx)
+		}()
+	}
+	wg.Wait()
+
+	return errors.Join(errs...)
 }

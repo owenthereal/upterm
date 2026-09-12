@@ -17,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -60,6 +61,12 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 			accepted <- result{err: err}
 			return
 		}
+		// The deadline bounds the handshake, not the test. Left armed it
+		// expires mid-test on anything that runs longer, breaking the transport
+		// in a way that reads as the failure the test was looking for. Clearing
+		// it here is what sshstock.go does after its own handshake; the tests
+		// carry their own explicit bounds.
+		_ = conn.SetDeadline(time.Time{})
 		accepted <- result{peer: sshPeer{sc, channels, requests}}
 	}()
 	conn, err := net.Dial("tcp", listener.Addr().String())
@@ -71,6 +78,7 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	server := <-accepted
 	if server.err != nil {
 		t.Fatal(server.err)
@@ -97,7 +105,7 @@ func forwardTestProxy(t *testing.T) (sshPeer, sshPeer, context.CancelFunc, <-cha
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	stopped := make(chan struct{})
-	go func() { defer close(stopped); done <- forwardSSH(ctx, downstream, upstream) }()
+	go func() { defer close(stopped); done <- forwardSSH(ctx, downstream, upstream, abortConnection) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -828,7 +836,7 @@ func TestSSHForwardTailAfterSourceCloseKeepsRequests(t *testing.T) {
 		go func() {
 			defer close(done)
 			sshForwarder{ctx: ctx, cancel: cancel}.requests(
-				sender, incoming, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
+				sender, incoming, nil, func() { aborts <- struct{}{} }, sshRequestAbortGrace, nil)
 		}()
 
 		// Occupy the serial sender, so everything after this is queued rather
@@ -1157,7 +1165,7 @@ func TestSSHForwardSuccessReplyBeforePeerClose(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- forwardSSH(ctx, downstream, upstream) }()
+			go func() { done <- forwardSSH(ctx, downstream, upstream, abortConnection) }()
 			t.Cleanup(func() { cancel(); _ = forwardTestReceive(t, done) })
 			a, ar, b, br := forwardTestChannel(t, origin, destination)
 			type response struct {
@@ -1389,5 +1397,476 @@ func TestSSHForwardAbortCutsBufferedData(t *testing.T) {
 	}
 	if n := forwardTestReceive(t, written); n >= sent {
 		t.Fatalf("origin wrote all %d bytes; the copy was never actually blocked", sent)
+	}
+}
+
+// The stalled-direction watchdog has to arm on source closure itself, not on
+// the teardown reaching a particular line: the serial sender can still be
+// blocked in SendRequest, and the deferred wait for it means requests would not
+// return.
+func TestRequestsReportsSourceClosureWhileTheSenderIsBlocked(t *testing.T) {
+	incoming := make(chan *ssh.Request)
+	blocked := make(chan struct{})
+	defer close(blocked)
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	sender := senderFunc(func(string, bool, []byte) (bool, []byte, error) {
+		enterOnce.Do(func() { close(entered) })
+		<-blocked
+		return false, nil, nil
+	})
+
+	closed := make(chan struct{})
+	f := sshForwarder{ctx: t.Context(), cancel: func(error) {}}
+	go f.requests(sender, incoming, sync.OnceFunc(func() { close(closed) }), nil, 0, nil)
+
+	incoming <- &ssh.Request{Type: "window-change"}
+	<-entered // the sender has dispatched the request and is blocked in SendRequest
+	close(incoming)
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("source closure was not reported while the sender was blocked")
+	}
+}
+
+// senderFunc adapts a function to sshRequestSender.
+type senderFunc func(string, bool, []byte) (bool, []byte, error)
+
+func (s senderFunc) SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+	return s(name, wantReply, payload)
+}
+
+// channelGate blocks whichever of a channel's methods the test chooses, the way
+// x/crypto's channel blocks when the window is exhausted (Write) or the socket
+// is full (any of them, since each is a transport write under the channel's
+// write mutex). A nil gate channel means that method is not blocked.
+type channelGate struct {
+	write   chan struct{}
+	request chan struct{}
+	close   chan struct{}
+
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newChannelGate() *channelGate {
+	return &channelGate{closed: make(chan struct{})}
+}
+
+// closeCalled reports whether the gated channel has been closed. With Write
+// gated, channelDirection never reaches its own Close, so this is only ever
+// true because the watchdog acted.
+func (g *channelGate) closeCalled() bool {
+	select {
+	case <-g.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseAll unblocks every gated method, so a test can require that the code
+// under test actually unwinds rather than merely that it fired a callback.
+func (g *channelGate) releaseAll() {
+	for _, c := range []chan struct{}{g.write, g.request, g.close} {
+		if c != nil {
+			close(c)
+		}
+	}
+}
+
+type gatedChannel struct {
+	ssh.Channel
+	gate *channelGate
+}
+
+func (g gatedChannel) Write(p []byte) (int, error) {
+	if g.gate.write != nil {
+		<-g.gate.write
+	}
+	return g.Channel.Write(p)
+}
+
+func (g gatedChannel) SendRequest(name string, wantReply bool, payload []byte) (bool, error) {
+	if g.gate.request != nil {
+		<-g.gate.request
+	}
+	return g.Channel.SendRequest(name, wantReply, payload)
+}
+
+func (g gatedChannel) Close() error {
+	if g.gate.close != nil {
+		<-g.gate.close
+	}
+	g.gate.closeOnce.Do(func() { close(g.gate.closed) })
+	return g.Channel.Close()
+}
+
+// openTestChannel opens a "session" channel on a peer's connection and discards
+// the requests that come back on it. Something on the far side has to be
+// accepting concurrently: OpenChannel blocks until the peer answers.
+func openTestChannel(t *testing.T, peer sshPeer) ssh.Channel {
+	t.Helper()
+	channel, requests, err := peer.conn.OpenChannel("session", nil)
+	require.NoError(t, err)
+	go ssh.DiscardRequests(requests)
+	t.Cleanup(func() { _ = channel.Close() })
+	return channel
+}
+
+// acceptTestChannel accepts the next channel offered to a peer and discards its
+// requests, reporting nil once the peer stops offering any. It reports rather
+// than fails because its callers run it on goroutines of their own, where the
+// testing package forbids FailNow.
+func acceptTestChannel(peer sshPeer) ssh.Channel {
+	incoming, ok := <-peer.channels
+	if !ok {
+		return nil
+	}
+	channel, requests, err := incoming.Accept()
+	if err != nil {
+		return nil
+	}
+	go ssh.DiscardRequests(requests)
+	return channel
+}
+
+// forwardTestDirection builds one direction the way the forwarder really sees
+// it: a source on one connection and a destination on another, never two ends
+// of the same channel.
+//
+// Three things here are not optional. OpenChannel blocks until the peer
+// accepts, so the accept has to run concurrently or the fixture deadlocks
+// against itself. Source and destination must be independent connections, or
+// the copy feeds forwarded bytes straight back into the source. And the source
+// end is closed by its own peer, because the returned request channel is a
+// plain Go channel — closing it signals source closure to channelDirection but
+// produces no EOF on a real stream.
+func forwardTestDirection(t *testing.T, gate *channelGate) (destination, source *sshForwardChannel, requests chan *ssh.Request, closeSource func()) {
+	t.Helper()
+
+	open := func(peerA, peerB sshPeer) (near, far ssh.Channel) {
+		t.Helper()
+		accepted := make(chan ssh.Channel, 1)
+		go func() { accepted <- acceptTestChannel(peerB) }()
+		near = openTestChannel(t, peerA)
+		far = <-accepted
+		require.NotNil(t, far, "the peer failed to accept the channel")
+		return near, far
+	}
+
+	// The producer connection: its far end is what channelDirection reads.
+	producerNear, producerFar := open(forwardTestPair(t, nil, nil))
+	// The consumer connection: its far end is what channelDirection writes to,
+	// gated so the test can stall it.
+	consumerNear, _ := open(forwardTestPair(t, nil, nil))
+
+	// Give the source something to forward, so the copy is inside the
+	// destination's Write by the time the source closes.
+	_, err := producerNear.Write([]byte("shell output"))
+	require.NoError(t, err)
+
+	return &sshForwardChannel{Channel: gatedChannel{Channel: consumerNear, gate: gate}},
+		&sshForwardChannel{Channel: producerFar},
+		make(chan *ssh.Request),
+		func() { _ = producerNear.Close() }
+}
+
+// newTestForwarder builds a forwarder whose cancel is observable and whose
+// timers are short enough to run in a test.
+func newTestForwarder(t *testing.T, scope sshAbortScope, cancelled chan<- error) sshForwarder {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(nil) })
+	return sshForwarder{
+		ctx:          ctx,
+		scope:        scope,
+		drainTimeout: 100 * time.Millisecond,
+		abortGrace:   50 * time.Millisecond,
+		cancel: func(err error) {
+			cancel(err)
+			select {
+			case cancelled <- err:
+			default:
+			}
+		},
+	}
+}
+
+func TestChannelDirectionAbortsAStalledDestination(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*channelGate)
+	}{
+		// The plain case: the guest stopped reading, so the window is
+		// exhausted and the copy is stuck in Write.
+		{"write blocked", func(g *channelGate) { g.write = make(chan struct{}) }},
+		// Close blocked too, which is what a full socket looks like: Close is a
+		// transport write under the same mutex the blocked Write holds. A
+		// sequential abort could never reach its own timer here.
+		{"write and close blocked", func(g *channelGate) {
+			g.write = make(chan struct{})
+			g.close = make(chan struct{})
+		}},
+		// SendRequest blocked, so the request pump cannot return. The watchdog
+		// arms on observed source closure, not on that return.
+		{"write and requests blocked", func(g *channelGate) {
+			g.write = make(chan struct{})
+			g.request = make(chan struct{})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cancelled := make(chan error, 1)
+			f := newTestForwarder(t, abortConnection, cancelled)
+
+			gate := newChannelGate()
+			tt.setup(gate)
+			destination, source, requests, closeSource := forwardTestDirection(t, gate)
+
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				f.channelDirection(destination, source, requests)
+			}()
+
+			if gate.request != nil {
+				// Gating SendRequest proves nothing unless a request is
+				// actually in flight through the serial sender.
+				requests <- &ssh.Request{Type: "window-change"}
+			}
+			closeSource()
+			close(requests) // source CLOSE, with no reply pending
+
+			select {
+			case err := <-cancelled:
+				require.ErrorIs(t, err, errSSHChannelDrainStalled)
+			case <-time.After(10 * time.Second):
+				t.Fatal("a stalled direction was never aborted")
+			}
+
+			// Cancelling proves the watchdog fired; it does not prove the
+			// direction unwinds. Release the gates and require that it does,
+			// or the goroutines this change exists to free are still stuck.
+			gate.releaseAll()
+			select {
+			case <-returned:
+			case <-time.After(10 * time.Second):
+				t.Fatal("channelDirection never returned after the abort")
+			}
+		})
+	}
+}
+
+// Once the connection is draining, forwardSSH owns the bound on a stalled
+// channel and the watchdog must keep its hands off.
+//
+// Both bounds arm within moments of each other on a shutdown, and before this
+// they ran on identical timeouts — sshForwardChannelDrainTimeout equalled
+// sshForwardDrainTimeout — so which one resolved the stall came down to
+// scheduling. Closing the channel first completes the drain loop and suppresses
+// the "drain timed out" error TestSSHForwardTransportDrainBounded requires,
+// which is how this surfaced: as an error-message flake on Windows CI, on a
+// test that had nothing to do with this change.
+//
+// Nothing is lost by standing down. forwardSSH closes both transports when its
+// own timer expires, which releases a blocked write more thoroughly than
+// closing one channel does.
+func TestChannelDirectionYieldsAStalledChannelToTheTransportDrain(t *testing.T) {
+	cancelled := make(chan error, 1)
+	f := newTestForwarder(t, abortConnection, cancelled)
+
+	// Already draining when the direction starts, so the watchdog has to decline
+	// at its first decision point rather than mid-wait.
+	draining := make(chan struct{})
+	close(draining)
+	f.draining = draining
+
+	gate := newChannelGate()
+	gate.write = make(chan struct{})
+	destination, source, requests, closeSource := forwardTestDirection(t, gate)
+
+	go f.channelDirection(destination, source, requests)
+	closeSource()
+	close(requests)
+
+	// Well past f.drainTimeout plus f.abortGrace, which together are 150ms here.
+	select {
+	case err := <-cancelled:
+		t.Fatalf("the watchdog aborted a draining connection: %v", err)
+	case <-time.After(time.Second):
+	}
+	require.False(t, gate.closeCalled(),
+		"the watchdog closed a channel a draining connection was already bounding")
+
+	gate.releaseAll()
+}
+
+// gateFirstChannelConn gates the first channel opened on this connection and
+// leaves every later one alone, so one stalled channel and one healthy channel
+// share a transport.
+type gateFirstChannelConn struct {
+	ssh.Conn
+	gate *channelGate
+	once sync.Once
+}
+
+func (c *gateFirstChannelConn) OpenChannel(name string, data []byte) (ssh.Channel, <-chan *ssh.Request, error) {
+	ch, reqs, err := c.Conn.OpenChannel(name, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	gated := false
+	c.once.Do(func() { gated = true })
+	if !gated {
+		return ch, reqs, nil
+	}
+	return gatedChannel{Channel: ch, gate: c.gate}, reqs, nil
+}
+
+// forwardTestPeers builds the two connection pairs a forwarder sits between and
+// returns, in order: the client whose channel opens travel through the
+// forwarder, the forwarder's own downstream and upstream peers, and a snapshot
+// of everything the far upstream end has read from the channels it accepted.
+//
+// The client is returned separately from downstream because downstream is the
+// forwarder's own endpoint: a channel opened there travels out to the client
+// without the forwarder ever seeing it.
+func forwardTestPeers(t *testing.T) (client, downstream, upstream sshPeer, upstreamReceived func() string) {
+	t.Helper()
+	client, downstream = forwardTestPair(t, nil, nil)
+	upstream, far := forwardTestPair(t, nil, nil)
+	var mu sync.Mutex
+	var received []byte
+	// Read every channel the far upstream end is offered, for as long as it is
+	// offered any. Delivery is what "the tunnel still works" means, and nothing
+	// else on this side of the forwarder would consume these bytes.
+	go func() {
+		for {
+			channel := acceptTestChannel(far)
+			if channel == nil {
+				return
+			}
+			go func() {
+				chunk := make([]byte, 4096)
+				for {
+					n, err := channel.Read(chunk)
+					mu.Lock()
+					received = append(received, chunk[:n]...)
+					mu.Unlock()
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return client, downstream, upstream, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return string(received)
+	}
+}
+
+// The forwarder also carries the host's connection, whose transport is the
+// reverse tunnel every guest's traffic rides. Cancelling that over one stalled
+// channel would end the session for everyone attached.
+//
+// This one has to go through forwardSSH rather than channelDirection, and the
+// two channels have to share the forwarded connection pair. A second direction
+// on its own connections proves nothing: the escalation closes *transports*, so
+// only a channel on the same transport can show that it survived. And survival
+// has to be delivery — channelDirection returns on failure just as readily as
+// on success.
+func TestHostScopedAbortLeavesTheTunnelWorking(t *testing.T) {
+	gate := newChannelGate()
+	gate.write = make(chan struct{})
+	defer close(gate.write)
+
+	// gateFirstChannelConn wraps the upstream so the first channel the
+	// forwarder opens is gated and the rest are untouched.
+	client, downstream, upstream, upstreamReceived := forwardTestPeers(t)
+	upstream.conn = &gateFirstChannelConn{Conn: upstream.conn, gate: gate}
+
+	forwarded := make(chan error, 1)
+	go func() { forwarded <- forwardSSH(t.Context(), downstream, upstream, abortChannel) }()
+
+	// The stalled channel: opened first, so it gets the gate.
+	stalled := openTestChannel(t, client)
+	_, err := stalled.Write([]byte("output for a guest that stopped reading"))
+	require.NoError(t, err)
+	require.NoError(t, stalled.Close()) // source CLOSE, arming the watchdog
+
+	select {
+	case <-gate.closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled channel was never closed")
+	}
+
+	// That CLOSE gets a grace before a connection-scoped forwarder would give
+	// up and cancel, taking both transports with it. Outlast the grace before
+	// asking whether the transport survived, or the assertions below run in the
+	// window where even the wrong scope has not torn anything down yet.
+	time.Sleep(2 * sshForwardChannelAbortGrace)
+
+	// The tunnel is still up and still carrying traffic for everyone else.
+	live := openTestChannel(t, client)
+	const payload = "output for a guest that is still attached"
+	_, err = live.Write([]byte(payload))
+	require.NoError(t, err, "the shared transport was torn down")
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(upstreamReceived(), payload)
+	}, 10*time.Second, 10*time.Millisecond,
+		"a stalled channel took the tunnel down with it")
+
+	select {
+	case err := <-forwarded:
+		t.Fatalf("the forwarder exited: %v", err)
+	default:
+	}
+}
+
+func TestChannelDirectionDoesNotAbortADrainingDestination(t *testing.T) {
+	cancelled := make(chan error, 1)
+	f := newTestForwarder(t, abortConnection, cancelled)
+
+	// Nothing gated: the destination accepts its bytes and closes normally.
+	destination, source, requests, closeSource := forwardTestDirection(t, newChannelGate())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.channelDirection(destination, source, requests)
+	}()
+
+	// A direction whose source is still connected is simply idle, however long
+	// it stays that way. Outlast both watchdog timers before touching it: one
+	// that armed on anything other than source closure would close every live
+	// channel on the connection a drain timeout after it opened.
+	escalation := f.drainTimeout + f.abortGrace
+	select {
+	case err := <-cancelled:
+		t.Fatalf("a direction whose source was still connected escalated: %v", err)
+	case <-time.After(4 * escalation):
+	}
+
+	closeSource()
+	close(requests)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an ordinary close should not wait out the drain timeout")
+	}
+	// Outlast the timers again rather than sampling: the direction returns in
+	// microseconds, so a watchdog that escalated regardless of that return
+	// would still be counting down at this point.
+	select {
+	case err := <-cancelled:
+		t.Fatalf("an ordinary close escalated: %v", err)
+	case <-time.After(4 * escalation):
 	}
 }

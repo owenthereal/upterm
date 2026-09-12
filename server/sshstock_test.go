@@ -336,6 +336,36 @@ func TestStockSSHAcceptRetriesResourceExhaustion(t *testing.T) {
 		"every recoverable accept failure should be retried, not returned")
 }
 
+// Only the host gets the narrow scope. Swapping these two constants leaves
+// every behavioural test in the package green — the forwarder tests hand
+// forwardSSH a scope directly — while costing a host every guest attached to
+// its session the first time one of them stops reading.
+func TestAbortScopeForClientVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		clientVersion string
+		want          sshAbortScope
+	}{
+		// A host's transport carries the reverse tunnel; it must survive.
+		{"host", upterm.HostSSHClientVersion, abortChannel},
+		// Everything else is one guest's own connection.
+		{"guest", upterm.ClientSSHClientVersion, abortConnection},
+		{"unknown client", "SSH-2.0-OpenSSH_9.6", abortConnection},
+		{"empty", "", abortConnection},
+		// Near-misses must not be mistaken for the host: the check is exact,
+		// and a prefix or suffix match would hand a guest the host's scope.
+		{"host prefix", upterm.HostSSHClientVersion + "-2", abortConnection},
+		{"host suffix", "x" + upterm.HostSSHClientVersion, abortConnection},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, abortScopeFor(tt.clientVersion))
+		})
+	}
+	// The two scopes must stay distinguishable; a single-valued type would make
+	// every assertion above vacuous.
+	require.NotEqual(t, abortChannel, abortConnection)
+}
+
 func TestRecoverableAcceptErrors(t *testing.T) {
 	syscallErr := func(errno syscall.Errno) error {
 		return &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", errno)}
