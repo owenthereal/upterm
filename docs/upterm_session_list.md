@@ -6,7 +6,7 @@ List shared sessions
 
 List shared sessions.
 
-Sockets are stored in: /run/user/1000/upterm
+Sockets are stored in: /run/user/1000/upterm/sessions
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
 in constrained environments where XDG directories are unavailable.

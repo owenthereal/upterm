@@ -6,6 +6,12 @@ Display terminal session by name
 
 Display terminal session by name.
 
+A session that has ended still answers, from the record it left behind: its
+admin socket died with its process, but its outcome did not.
+
+Output formats:
+  -o json                           JSON output
+
 ```
 upterm session info [flags]
 ```
@@ -15,6 +21,9 @@ upterm session info [flags]
 ```
   # Display session by name:
   upterm session info NAME
+
+  # Output as JSON:
+  upterm session info NAME -o json
 ```
 
 ### Options
@@ -22,6 +31,7 @@ upterm session info [flags]
 ```
   -h, --help             help for info
       --hide-client-ip   Hide client IP addresses from output (auto-enabled in CI environments).
+  -o, --output string    Output format: json
 ```
 
 ### Options inherited from parent commands

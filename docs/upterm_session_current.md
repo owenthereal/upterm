@@ -9,7 +9,7 @@ Display the current terminal session.
 By default, reads the admin socket path from $UPTERM_ADMIN_SOCKET (automatically set
 when you run 'upterm host').
 
-Sockets are stored in: /run/user/1000/upterm
+Sockets are stored in: /run/user/1000/upterm/sessions
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
 in constrained environments where XDG directories are unavailable.

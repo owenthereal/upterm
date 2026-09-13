@@ -15,7 +15,7 @@ Host a terminal session via a reverse SSH tunnel to the Upterm server.
 .PP
 The session links the host and client IO to a command's IO. Authentication with the
 Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
+  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
   2. SSH Agent keys
   3. Auto-generated ephemeral key (if no keys found)
 
@@ -37,12 +37,20 @@ containing client public keys.
 	Specify a authorize_keys file listing authorized public keys for connection.
 
 .PP
-\fB--authorized-user\fP=
-	Authorize users by fetching their public keys from a code-hosting service. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
+\fB--codeberg-user\fP=[]
+	Authorize specified Codeberg users by allowing their public keys to connect.
 
 .PP
 \fB-f\fP, \fB--force-command\fP=""
 	Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
+
+.PP
+\fB--github-user\fP=[]
+	Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.
+
+.PP
+\fB--gitlab-user\fP=[]
+	Authorize specified GitLab users by allowing their public keys to connect.
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]
@@ -53,16 +61,24 @@ containing client public keys.
 	Hide client IP addresses from output (auto-enabled in CI environments).
 
 .PP
-\fB--known-hosts\fP="~/.ssh/known_hosts"
+\fB--known-hosts\fP="/Users/owen/.ssh/known_hosts"
 	Specify a file containing known keys for remote hosts (required).
+
+.PP
+\fB--name\fP=""
+	Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.
 
 .PP
 \fB--no-sftp\fP[=false]
 	Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
 
 .PP
-\fB-i\fP, \fB--private-key\fP=[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]
-	Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.
+\fB-i\fP, \fB--private-key\fP=[/Users/owen/.ssh/id_ed25519]
+	Specify private key files for public key authentication with the upterm server (required).
+
+.PP
+\fB--pty-size\fP=""
+	Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.
 
 .PP
 \fB--proxy\fP=""
@@ -80,6 +96,14 @@ containing client public keys.
 \fB--skip-host-key-check\fP[=false]
 	Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
 
+.PP
+\fB--srht-user\fP=[]
+	Authorize specified SourceHut users by allowing their public keys to connect.
+
+.PP
+\fB--term\fP=""
+	Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when there is no terminal.
+
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 \fB--debug\fP[=false]
@@ -96,9 +120,6 @@ containing client public keys.
 
   # Host a terminal session allowing only specified public key(s) to connect:
   upterm host --authorized-keys PATH_TO_AUTHORIZED_KEY_FILE
-
-  # Authorize a user by fetching their public keys from a code-hosting service:
-  upterm host --authorized-user github:username
 
   # Host a session executing a custom command:
   upterm host -- docker run --rm -ti ubuntu bash
