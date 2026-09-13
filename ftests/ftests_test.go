@@ -198,12 +198,12 @@ func (suite *FtestSuite) runTestCategory(testCases []FtestCase) {
 
 	for _, protocol := range protocols {
 		suite.T().Run(protocol, func(t *testing.T) {
-			suite.runTestsForProtocol(protocol, testCases)
+			suite.runTestsForProtocol(t, protocol, testCases)
 		})
 	}
 }
 
-func (suite *FtestSuite) runTestsForProtocol(protocol string, testCases []FtestCase) {
+func (suite *FtestSuite) runTestsForProtocol(t *testing.T, protocol string, testCases []FtestCase) {
 	topologies := []struct {
 		name      string
 		hostURL   string
@@ -222,7 +222,7 @@ func (suite *FtestSuite) runTestsForProtocol(protocol string, testCases []FtestC
 	}
 
 	for _, topo := range topologies {
-		suite.T().Run(topo.name, func(t *testing.T) {
+		t.Run(topo.name, func(t *testing.T) {
 			for _, testFunc := range testCases {
 				testName := funcName(testFunc)
 				t.Run(testName, func(t *testing.T) {
