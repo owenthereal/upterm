@@ -230,7 +230,10 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			// cancel the command: a network blip would destroy work that is
 			// still running perfectly well. Park until the session ends for a
 			// reason that is actually the session's.
-			if s.OnGuestServerStopped != nil {
+
+			// Our own Shutdown makes Serve return ErrServerClosed, which is
+			// the session ending, not the tunnel; any other error lost guests.
+			if s.OnGuestServerStopped != nil && !errors.Is(err, gssh.ErrServerClosed) {
 				s.OnGuestServerStopped(err)
 			}
 			<-sessCtx.Done()
