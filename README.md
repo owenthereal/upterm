@@ -132,6 +132,22 @@ This mirrors functionality provided by tmate:
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
 
+### Running Without a Terminal
+
+Host a session from a script or CI step with nothing attached to its terminal. `--accept` skips the confirmation prompt, `--name` gives the session a local name you choose, and `--pty-size` pins the terminal geometry so the command renders the same for every client:
+
+```console
+upterm host --accept --name build-shell --pty-size 132x43 -- bash &
+```
+
+Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
+
+```console
+upterm session info build-shell -o json
+```
+
+The `status` field is `starting`, `ready`, `disconnected` or `ended`, and `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed` or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`.
+
 ### File Transfer (SFTP/SCP)
 
 Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:
@@ -219,7 +235,7 @@ For comprehensive details on configuring and using this integration, visit the [
 **Solution**: To rectify this, add the following line to your `~/.tmux.conf`:
 
 ```conf
-set-option -ga update-environment " UPTERM_ADMIN_SOCKET"
+set-option -ga update-environment " UPTERM_ADMIN_SOCKET UPTERM_SESSION_NAME"
 ```
 
 ### Identifying Upterm Session
