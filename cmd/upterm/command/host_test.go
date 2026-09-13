@@ -83,7 +83,7 @@ func Test_ValidateSessionNameFlag_RejectsANameWhoseSocketPathWouldNotFit(t *test
 
 	err := validateSessionNameFlag(strings.Repeat("a", 60))
 	require.ErrorIs(t, err, sessiondir.ErrSocketPathTooLong)
-	require.ErrorContains(t, err, "limit 104")
+	require.ErrorContains(t, err, "limit 103")
 }
 
 func Test_parseURL(t *testing.T) {

@@ -16,7 +16,7 @@ import (
 
 // shortTempRoot returns a temp directory short enough to hold a session's
 // admin socket. t.TempDir() on macOS hands out a /var/folders/<hash>/T/
-// <TestName> path already past the 104-byte unix socket limit once a session's
+// <TestName> path already past the 103-byte unix socket limit once a session's
 // own components are appended — the very limit Claim now enforces — so the
 // temp root is used directly. Windows has no /tmp and its t.TempDir() is long
 // for the same reason, so the temp root is used directly there too.
@@ -295,8 +295,42 @@ func Test_Claim_RejectsANameWhoseSocketPathWouldNotFit(t *testing.T) {
 
 	_, err := claim(t, runtimeRoot, stateRoot, strings.Repeat("a", 60))
 	require.ErrorIs(t, err, ErrSocketPathTooLong)
-	require.ErrorContains(t, err, "limit 104")
+	require.ErrorContains(t, err, "limit 103")
 
 	_, statErr := os.Stat(sessionsRoot(runtimeRoot))
 	require.True(t, os.IsNotExist(statErr), "a refused claim must not create anything")
+}
+
+// Test_CheckSocketPath_BoundaryAtDarwinSunPathLimit pins the exact byte
+// boundary a unix socket address can hold: darwin's sun_path is a 104-byte
+// buffer that must also hold a trailing NUL, so 103 is the longest path that
+// actually binds there. The padding is derived from filepath.Join's own
+// output rather than a hard-coded root string, so the test does not depend on
+// how long the temp dir prefix happens to be.
+func Test_CheckSocketPath_BoundaryAtDarwinSunPathLimit(t *testing.T) {
+	// shortTempRoot, not t.TempDir(): the latter hands out a
+	// /var/folders/<hash>/T/<TestName> prefix that is already past the
+	// boundary this test is trying to approach from below.
+	base := shortTempRoot(t)
+	name := "a"
+
+	pathLen := func(runtimeRoot string) int {
+		return len(filepath.Join(sessionsRoot(runtimeRoot), name, adminSocketFile))
+	}
+
+	// Grow the runtime root one byte at a time until the resulting admin
+	// socket path is exactly 103 bytes.
+	pad := 0
+	for pathLen(filepath.Join(base, strings.Repeat("d", pad))) < 103 {
+		pad++
+	}
+
+	runtimeRootAt103 := filepath.Join(base, strings.Repeat("d", pad))
+	require.Equal(t, 103, pathLen(runtimeRootAt103), "test setup must hit the boundary exactly")
+	require.NoError(t, CheckSocketPath(runtimeRootAt103, name))
+
+	runtimeRootAt104 := filepath.Join(base, strings.Repeat("d", pad+1))
+	require.Equal(t, 104, pathLen(runtimeRootAt104), "test setup must hit the boundary exactly")
+	err := CheckSocketPath(runtimeRootAt104, name)
+	require.ErrorIs(t, err, ErrSocketPathTooLong)
 }

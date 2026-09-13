@@ -58,11 +58,12 @@ const maxNameLen = 64
 
 // maxSocketPath is the longest a unix socket path may be, in bytes.
 //
-// The true limit is sizeof(sun_path), which differs by platform: 104 on
-// darwin, 108 on linux and on Windows' AF_UNIX. The tightest is applied
-// uniformly so that one constant governs every platform — a name that works on
-// Linux and fails on macOS is a worse contract than one refused everywhere.
-const maxSocketPath = 104
+// darwin's sun_path is a 104-byte buffer that must also hold the terminating
+// NUL, so 103 is the longest path that actually binds there; linux and
+// windows' AF_UNIX allow 107 the same way, out of a 108-byte buffer. One
+// constant, the tightest, governs every platform — a name that works on Linux
+// and fails on macOS is a worse contract than one refused everywhere.
+const maxSocketPath = 103
 
 // maxGeneratedBase bounds the basename a generated name is built from. Far
 // below maxNameLen on purpose: a default name the user never chose must never
