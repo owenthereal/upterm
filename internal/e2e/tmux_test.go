@@ -70,7 +70,8 @@ func TestTmux(t *testing.T) {
 
 			// Resize the outer terminals and require the nested tmux window to
 			// adopt the new dimensions delivered through Upterm's PTY handling.
-			out, err := exec.CommandContext(t.Context(), "tmux", "resize-window", "-t", h.session.Name+":0", "-x", "161", "-y", "20").CombinedOutput()
+			// The pane ID identifies its window regardless of the user's base-index.
+			out, err := exec.CommandContext(t.Context(), "tmux", "resize-window", "-t", h.host.Id, "-x", "161", "-y", "20").CombinedOutput()
 			require.NoError(t, err, "%s", out)
 			out, err = exec.CommandContext(t.Context(), "tmux", "display-message", "-p", "-t", h.host.Id, "#{pane_width}x#{pane_height}").Output()
 			require.NoError(t, err)

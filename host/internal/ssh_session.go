@@ -11,9 +11,10 @@ import (
 // breaking cursor positioning in programs such as GNU Screen (#288, #278).
 func rawSessionHandler(srv *gssh.Server, conn *ssh.ServerConn, newChan ssh.NewChannel, ctx gssh.Context) {
 	channel := &sessionChannel{NewChannel: newChan}
-	// Only the session configuration is needed by DefaultSessionHandler. Build
-	// it per channel so the captured output cannot leak to another session on
-	// the same connection, and do not copy the running server's mutexes.
+	// These are the fields DefaultSessionHandler reads in charm.land/ssh v0.4.3;
+	// recheck them when upgrading the dependency. Build this configuration per
+	// channel so the captured output cannot leak to another session on the same
+	// connection, and do not copy the running server's mutexes.
 	sessionServer := &gssh.Server{
 		Handler: func(sess gssh.Session) {
 			srv.Handler(&rawSession{Session: sess, channel: channel.channel})
