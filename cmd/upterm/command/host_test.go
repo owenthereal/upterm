@@ -253,6 +253,39 @@ func Test_authorizationRequested(t *testing.T) {
 	assert.False(t, authorizationRequested())
 }
 
+// Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that shareRunE does not
+// re-wrap an error AuthorizedKeysFromFile has already described.
+func Test_hostCmd_authorizedKeysErrorNamesTheFileOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	missing := filepath.Join(dir, "nope")
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"host", "--accept", "--authorized-keys", missing, "--", "true"})
+
+	err := root.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error reading authorized keys file "+missing)
+	assert.NotContains(t, err.Error(), "error reading authorized keys: error reading authorized keys")
+}
+
+// Test_hostCmd_legacyFlagsAreRegisteredAndHidden pins the MarkHidden loop
+// against legacyUserFlags: the loop's only failure mode is a name that is not a
+// registered flag, which MarkHidden reports by returning an error nobody reads.
+func Test_hostCmd_legacyFlagsAreRegisteredAndHidden(t *testing.T) {
+	cmd := hostCmd()
+
+	for _, lf := range legacyUserFlags {
+		t.Run(lf.flag, func(t *testing.T) {
+			flag := cmd.PersistentFlags().Lookup(lf.flag)
+			require.NotNil(t, flag, "legacyUserFlags names a flag that is not registered")
+			assert.True(t, flag.Hidden, "superseded flags stay working but hidden")
+		})
+	}
+}
+
 func Test_countKeys_ignoresNilEntries(t *testing.T) {
 	assert.Zero(t, countKeys(nil))
 	assert.Zero(t, countKeys([]*host.AuthorizedKey{nil}))
@@ -359,4 +392,43 @@ func Test_hostCmd_guardRefusesWhenRequestedButEmpty(t *testing.T) {
 
 		assert.ErrorContains(t, root.Execute(), wantErr)
 	})
+}
+
+// Test_hostCmd_guardCoversEveryAuthorizationFlag drives every flag that asks
+// for a restriction, because authorizationRequested() is a list of names and a
+// name missing from it fails open: an empty value supplies the flag, resolves
+// no keys, errors nowhere earlier, and the session then accepts any client
+// holding the token. Only --github-user was covered before, so mutating the
+// other three names left the whole suite green.
+func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
+	const wantErr = "authorization was requested but no public keys were resolved"
+
+	// A port nothing can accept on: should the guard ever fail to fire, the
+	// command proceeds to dial and the test fails loudly instead of hanging or
+	// reaching a real server.
+	const unreachable = "ssh://127.0.0.1:1"
+
+	flags := []string{"authorized-keys", "authorized-user"}
+	for _, lf := range legacyUserFlags {
+		flags = append(flags, lf.flag)
+	}
+	require.Len(t, flags, 6, "every authorization flag must be exercised")
+
+	for _, name := range flags {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+			root := Root()
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			// An empty value, including for --authorized-keys: pflag records
+			// Changed, shareRunE reads no file and parses no reference, so the
+			// guard is the only thing standing between this and a session that
+			// accepts anyone. (An empty authorized_keys *file* fails earlier,
+			// inside AuthorizedKeysFromFile — covered above.)
+			root.SetArgs([]string{"host", "--accept", "--server", unreachable, "--" + name, "", "--", "true"})
+
+			assert.ErrorContains(t, root.Execute(), wantErr)
+		})
+	}
 }

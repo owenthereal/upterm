@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -357,9 +358,17 @@ func splitCSV(name, s string) ([]string, error) {
 		return nil, nil
 	}
 
-	parts, err := csv.NewReader(strings.NewReader(s)).Read()
+	reader := csv.NewReader(strings.NewReader(s))
+	parts, err := reader.Read()
 	if err != nil {
 		return nil, fmt.Errorf("%s: cannot parse %q as a comma-separated list: %w", name, s, err)
+	}
+
+	// Read returns one record. Anything behind it — UPTERM_AUTHORIZED_USER set
+	// to "github:alice\ngithub:bob", say — would otherwise be dropped in
+	// silence, shortening an authorization list without a word.
+	if _, err := reader.Read(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: cannot parse %q as a comma-separated list: unexpected newline; separate values with commas", name, s)
 	}
 
 	out := make([]string, 0, len(parts))
@@ -400,9 +409,33 @@ func toScalarString(name string, val any) (string, error) {
 	case string:
 		return v, nil
 	case []any, []string, map[string]any:
-		return "", fmt.Errorf("%s: expected a single value, got %T", name, v)
+		return "", fmt.Errorf("%s: expected a single value, got %T%s", name, v, scalarHint(name, v))
 	default:
 		// For all other scalar types (int, float, etc.), use fmt.Sprintf.
 		return fmt.Sprintf("%v", v), nil
 	}
+}
+
+// scalarHint names the fix for a collection supplied where a scalar belongs.
+// `force-command: ["/bin/bash", "-l"]` was this repo's own documented form, so
+// the error has to say what to write instead and not merely what is wrong. The
+// suggestion is built from the value itself rather than hardcoded, so it is
+// never a suggestion for a different flag.
+func scalarHint(name string, val any) string {
+	const hint = "; write it as a single string"
+
+	var parts []string
+	switch v := val.(type) {
+	case []any:
+		for _, elem := range v {
+			parts = append(parts, fmt.Sprint(elem))
+		}
+	case []string:
+		parts = v
+	}
+	if len(parts) == 0 {
+		return hint
+	}
+
+	return fmt.Sprintf("%s, e.g. %s: %q", hint, name, strings.Join(parts, " "))
 }

@@ -98,6 +98,9 @@ Host a session with specified client public key(s) authorized to connect:
 upterm host --authorized-keys PATH_TO_PUBLIC_KEY
 ```
 
+Or authorize users by `provider:username`, fetching their public keys from a
+code-hosting service:
+
 ```console
 upterm host --authorized-user github:username
 upterm host --authorized-user gitlab:username

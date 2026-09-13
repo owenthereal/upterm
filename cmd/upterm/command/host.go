@@ -141,9 +141,9 @@ containing client public keys.`,
 	// Superseded by --authorized-user. Kept working and hidden rather than
 	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a
 	// deprecation notice would appear in logs they cannot act on.
-	for _, name := range []string{"codeberg-user", "github-user", "gitlab-user", "srht-user"} {
+	for _, lf := range legacyUserFlags {
 		// Only errors on an unknown flag name, all of which are registered above.
-		_ = cmd.PersistentFlags().MarkHidden(name)
+		_ = cmd.PersistentFlags().MarkHidden(lf.flag)
 	}
 
 	return cmd
@@ -237,9 +237,12 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	var authorizedKeys []*host.AuthorizedKey
 	if flagAuthorizedKeys != "" {
+		// Not wrapped: AuthorizedKeysFromFile already names both the action and
+		// the file, so a wrap here reads "error reading authorized keys: error
+		// reading authorized keys file /typo: ...".
 		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
 		if err != nil {
-			return fmt.Errorf("error reading authorized keys: %w", err)
+			return err
 		}
 		authorizedKeys = append(authorizedKeys, aks)
 	}
@@ -401,15 +404,20 @@ func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
 }
 
-// legacyUserFlags maps the hidden per-provider flags onto the reference grammar.
+// legacyUserFlags maps the hidden per-provider flags onto the reference
+// grammar. It is the single source of truth for those flag names: the
+// MarkHidden loop in hostCmd and authorizationRequested's fail-closed check
+// both iterate it, because a name hand-copied into either of those and then
+// misspelled would drop a requested restriction rather than fail visibly.
 var legacyUserFlags = []struct {
+	flag     string
 	provider string
 	values   *[]string
 }{
-	{"codeberg", &flagCodebergUsers},
-	{"github", &flagGitHubUsers},
-	{"gitlab", &flagGitLabUsers},
-	{"srht", &flagSourceHutUsers},
+	{"codeberg-user", "codeberg", &flagCodebergUsers},
+	{"github-user", "github", &flagGitHubUsers},
+	{"gitlab-user", "gitlab", &flagGitLabUsers},
+	{"srht-user", "srht", &flagSourceHutUsers},
 }
 
 func collectUserRefs() ([]host.UserRef, error) {
@@ -441,11 +449,15 @@ func collectUserRefs() ([]host.UserRef, error) {
 // authorizationRequested reports whether the user asked to restrict who may
 // join, from any configuration origin.
 func authorizationRequested() bool {
-	for _, name := range []string{
-		"authorized-keys", "authorized-user",
-		"codeberg-user", "github-user", "gitlab-user", "srht-user",
-	} {
+	for _, name := range []string{"authorized-keys", "authorized-user"} {
 		if suppliedFlags[name] {
+			return true
+		}
+	}
+	// Derived, never re-listed: a legacy flag missing from this check reaches
+	// the tunnel with no restriction at all.
+	for _, lf := range legacyUserFlags {
+		if suppliedFlags[lf.flag] {
 			return true
 		}
 	}

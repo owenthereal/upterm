@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/owenthereal/upterm/utils"
@@ -83,6 +84,19 @@ func Test_toStringSlice(t *testing.T) {
 			val:           `"/tmp/unterminated`,
 			wantErrSubstr: "cannot parse",
 		},
+		{
+			// csv.Reader.Read returns the first record only, so a newline-
+			// separated UPTERM_AUTHORIZED_USER used to drop everything after
+			// the first line and shorten the authorization list in silence.
+			name:          "a second line is an error rather than a truncation",
+			val:           "github:alice\ngithub:bob",
+			wantErrSubstr: "unexpected newline",
+		},
+		{
+			name: "a trailing newline is not a second line",
+			val:  "github:alice,github:bob\n",
+			want: []string{"github:alice", "github:bob"},
+		},
 	}
 
 	for _, c := range cases {
@@ -110,19 +124,29 @@ func Test_toScalarString(t *testing.T) {
 		{name: "string", val: "/bin/bash -l", want: "/bin/bash -l"},
 		{name: "int", val: 8443, want: "8443"},
 		{
-			name:          "yaml sequence is an error",
+			// The message has to name the fix, not only the problem: this was
+			// the form exampleConfig() documented until strict ingestion
+			// landed, so existing configs hit it.
+			name:          "yaml sequence is an error naming the single-string form",
 			val:           []any{"/bin/bash", "-l"},
-			wantErrSubstr: "expected a single value, got []interface {}",
+			wantErrSubstr: `expected a single value, got []interface {}; write it as a single string, e.g. force-command: "/bin/bash -l"`,
 		},
 		{
-			name:          "string slice is an error",
+			name:          "string slice is an error naming the single-string form",
 			val:           []string{"/bin/bash", "-l"},
-			wantErrSubstr: "expected a single value, got []string",
+			wantErrSubstr: `expected a single value, got []string; write it as a single string, e.g. force-command: "/bin/bash -l"`,
+		},
+		{
+			// An empty collection has nothing to suggest, so the advice stands
+			// alone rather than suggesting `force-command: ""`.
+			name:          "empty sequence is an error with no example",
+			val:           []any{},
+			wantErrSubstr: "expected a single value, got []interface {}; write it as a single string",
 		},
 		{
 			name:          "mapping is an error",
 			val:           map[string]any{"a": "b"},
-			wantErrSubstr: "expected a single value, got map[string]interface {}",
+			wantErrSubstr: "expected a single value, got map[string]interface {}; write it as a single string",
 		},
 	}
 
@@ -144,7 +168,7 @@ func Test_bindFlagsToEnv_scalarFlagRejectsYAMLList(t *testing.T) {
 
 	_, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "force-command")
-	assert.ErrorContains(t, err, "expected a single value")
+	assert.ErrorContains(t, err, `expected a single value, got []interface {}; write it as a single string, e.g. force-command: "/bin/bash -l"`)
 }
 
 func Test_bindFlagsToEnv_badEnvValueNamesTheEnvVar(t *testing.T) {
@@ -320,14 +344,28 @@ func Test_isConfigCommand(t *testing.T) {
 func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	withConfig(t, "authorized-user: [unclosed\n")
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
+	// `config edit` launches $VISUAL. `true` exits 0 without touching the file,
+	// which keeps the test from opening an editor while still exercising the
+	// whole handler, including its post-edit validation warning.
+	t.Setenv("VISUAL", "true")
 
-	// `upterm config path` must still reach its handler: it is one of the
-	// commands you need in order to repair a broken config file.
-	root.SetArgs([]string{"config", "path"})
-	assert.NoError(t, root.Execute())
+	// All three must stay reachable: they are the commands you need in order to
+	// repair a broken config file. view and edit are the ones that read or
+	// rewrite its contents, so losing either leaves a user with a bricked file
+	// and no way to see or fix it from upterm.
+	for _, args := range [][]string{
+		{"config", "path"},
+		{"config", "view"},
+		{"config", "edit"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			root := Root()
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			root.SetArgs(args)
+			assert.NoError(t, root.Execute())
+		})
+	}
 
 	// Every other command must refuse, rather than silently dropping a
 	// requested authorization restriction. Use `version` rather than
