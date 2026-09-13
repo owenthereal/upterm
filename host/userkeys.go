@@ -2,13 +2,20 @@ package host
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/auth"
+	"github.com/cli/go-gh/v2/pkg/config"
 	"github.com/hashicorp/go-multierror"
 )
 
@@ -215,7 +222,174 @@ func checkStatus(resp *http.Response, ref UserRef) error {
 	}
 }
 
-// githubUserKeys is implemented in Task 5.
+// credentialTimeout bounds credential resolution, which may shell out to `gh`
+// and touch a system keyring that can block on a locked keychain. It is a
+// variable so tests can shrink it.
+var credentialTimeout = 5 * time.Second
+
+// hostScopedTokenFunc is a variable so tests can pin credential resolution.
+var hostScopedTokenFunc = hostScopedToken
+
+// hostScopedToken returns a token stored specifically for hostname, ignoring
+// GH_ENTERPRISE_TOKEN and GITHUB_ENTERPRISE_TOKEN. Those variables are not
+// host-scoped: go-gh returns them for *any* non-github.com host, so honoring
+// them would send one enterprise instance's token to another.
+func hostScopedToken(ctx context.Context, hostname string) (string, error) {
+	normalized := auth.NormalizeHostname(hostname)
+
+	if cfg, err := config.Read(nil); err == nil {
+		if token, err := cfg.Get([]string{"hosts", normalized, "oauth_token"}); err == nil && token != "" {
+			return token, nil
+		}
+	}
+
+	return keyringToken(ctx, normalized)
+}
+
+// keyringToken shells out to `gh auth token`, bounded and cancellable.
+//
+// A missing `gh` or a non-zero exit means "no credential stored" — an ordinary
+// answer. A context error means the lookup could not be completed, which must
+// not be reported as absence: silently fetching anonymously would treat "could
+// not check" as "confirmed none".
+func keyringToken(ctx context.Context, hostname string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("credential lookup for %s did not complete: %w", hostname, err)
+	}
+
+	// Match go-gh's executable selection: GH_PATH wins over PATH. Searching
+	// PATH only would invoke a different binary than `gh` itself would, or fall
+	// back to anonymous despite working keyring credentials.
+	ghExe := os.Getenv("GH_PATH")
+	if ghExe == "" {
+		var err error
+		ghExe, err = exec.LookPath("gh")
+		if err != nil {
+			return "", nil
+		}
+	}
+
+	// A keyring lookup can block indefinitely on a locked keychain, which would
+	// otherwise outlast the HTTP client's timeout and ignore cancellation.
+	ctx, cancel := context.WithTimeout(ctx, credentialTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ghExe, "auth", "token", "--secure-storage", "--hostname", hostname)
+	// Killing the process is not sufficient. If a descendant inherited the
+	// output pipes, Output blocks until they close, which a surviving
+	// grandchild can defer indefinitely. WaitDelay bounds that wait and makes
+	// Output return exec.ErrWaitDelay instead of hanging.
+	cmd.WaitDelay = credentialTimeout
+
+	out, err := cmd.Output()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("credential lookup for %s did not complete: %w", hostname, ctxErr)
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return "", fmt.Errorf("credential lookup for %s did not complete: %w", hostname, err)
+		}
+		// An ordinary non-zero exit means no credential is stored.
+		return "", nil
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// resolveToken picks the credential for ref.
+//
+// The default branch deliberately does not call auth.TokenForHost: its final
+// step shells out to `gh` with no context we can cancel, so a hung subprocess
+// would outlive the caller. auth.TokenFromEnvOrConfig covers the same
+// environment-then-config precedence without spawning anything, and the
+// keyring step is then performed by our own cancellable implementation.
+func resolveToken(ctx context.Context, ref UserRef, hostname string) (string, error) {
+	switch ref.Mode {
+	case CredentialHostScoped:
+		return hostScopedTokenFunc(ctx, hostname)
+	case CredentialDefault:
+		if token, _ := auth.TokenFromEnvOrConfig(hostname); token != "" {
+			return token, nil
+		}
+		return keyringToken(ctx, hostname)
+	default:
+		return "", nil
+	}
+}
+
+// githubUserKeys reads a user's keys from the GitHub REST API, which works on
+// instances whose web UI requires a login. Without a credential it falls back
+// to the anonymous .keys endpoint.
+//
+// It uses api.NewHTTPClient rather than api.RESTClient because the redirect
+// cap must live in CheckRedirect, which ClientOptions does not expose and
+// RESTClient keeps unexported. That means building the API URL here, which is
+// also what makes non-default ports work.
 func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
-	return f.genericUserKeys(ctx, ref)
+	apiURL, clientHost, origin, err := githubClientConfig(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	hostname, _ := splitHostPort(ref.ResolveHost())
+
+	token, err := resolveToken(ctx, ref, hostname)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		if ref.Mode == CredentialHostScoped {
+			f.Logger.Warn("no credential stored for host; fetching keys anonymously",
+				"host", hostname, "fix", "gh auth login --hostname "+hostname)
+		}
+		return f.genericUserKeys(ctx, ref)
+	}
+
+	// clientHost is the *normalized* hostname with no port. go-gh matches it
+	// against the port-less req.URL.Hostname(), so passing host:port — or an
+	// unnormalized alias like foo.github.com, whose requests go to
+	// api.github.com — silently drops the token.
+	client, err := api.NewHTTPClient(api.ClientOptions{
+		Host:      clientHost,
+		AuthToken: token,
+		Timeout:   fetchTimeout,
+		Transport: &fetchTransport{origin: origin, base: f.Transport, logger: f.Logger},
+	})
+	if err != nil {
+		return nil, err
+	}
+	client.CheckRedirect = redirectPolicy(f.Logger)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := checkStatus(resp, ref); err != nil {
+		return nil, err
+	}
+
+	body, err := readKeysBody(resp.Body, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	var keys []struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &keys); err != nil {
+		return nil, fmt.Errorf("error decoding keys from %s: %w", ref.ResolveHost(), err)
+	}
+
+	lines := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lines = append(lines, k.Key)
+	}
+
+	return parseAuthorizedKeys([]byte(strings.Join(lines, "\n")), ref.Display())
 }
