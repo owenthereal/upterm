@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -260,6 +261,15 @@ func Test_bindFlagsToEnv_malformedConfigIsFatal(t *testing.T) {
 }
 
 func Test_bindFlagsToEnv_unreadableConfigIsFatal(t *testing.T) {
+	// Windows has no POSIX permission bits: os.Chmod only toggles the
+	// read-only attribute and cannot make a directory unreadable, so the config
+	// stays readable and there is nothing to assert. The root check below does
+	// not cover it either, because os.Geteuid returns -1 there.
+	// Test_bindFlagsToEnv_configThatIsNotAFileIsFatal covers the same
+	// read-error-is-fatal rule on every platform.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot make a directory unreadable on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses directory permissions")
 	}
@@ -271,6 +281,22 @@ func Test_bindFlagsToEnv_unreadableConfigIsFatal(t *testing.T) {
 	confDir := filepath.Dir(utils.UptermConfigFilePath())
 	require.NoError(t, os.Chmod(confDir, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(confDir, 0o755) })
+
+	_, err := bindFlagsToEnv(newTestCmd())
+	assert.ErrorContains(t, err, "failed to read config file")
+}
+
+// Test_bindFlagsToEnv_configThatIsNotAFileIsFatal pins the same rule as the
+// test above — a read failure that is not "does not exist" aborts rather than
+// silently continuing — without depending on POSIX permissions, so it also
+// runs on Windows.
+func Test_bindFlagsToEnv_configThatIsNotAFileIsFatal(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// A directory standing where the config file belongs. Opening it succeeds
+	// and reading it fails with something that is not fs.ErrNotExist on every
+	// platform, which is exactly the case errors.Is must not mistake for absence.
+	require.NoError(t, os.MkdirAll(utils.UptermConfigFilePath(), 0o755))
 
 	_, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "failed to read config file")
