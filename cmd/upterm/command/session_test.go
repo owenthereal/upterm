@@ -343,59 +343,81 @@ func Test_lookup_UnknownName(t *testing.T) {
 	require.ErrorContains(t, err, "no session named")
 }
 
-func Test_sessionInfo_OneShapeAcrossStates(t *testing.T) {
+// Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer pins the JSON a
+// caller actually receives, state by state.
+//
+// The previous version of this test filled in every optional field before
+// comparing, which made it tautological: it compared one struct's tags with
+// the same struct's tags and would have passed however lookup behaved. What is
+// worth pinning is the opposite — that each state emits the keys it can answer
+// and no others, so a key appearing or vanishing is a change to the contract
+// rather than a change in the weather.
+func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 	setupSessionRoots(t)
+
+	// Present in every state, so a caller can read them without first working
+	// out which state it got.
+	mandatory := []string{"name", "launchId", "status", "clientCount"}
 
 	for _, tc := range []struct {
 		name  string
 		build func(*testing.T, string)
+		want  []string
 	}{
-		{"starting", buildStarting},
-		{"ready", buildReady},
-		{"disconnected", buildDisconnected},
-		{"exited", buildEndedAfterExit},
-		{"killed", buildEndedAfterKill},
+		{
+			// No session ID yet, so there is nothing to ask the admin socket
+			// and no connect string to hand back.
+			name:  "starting",
+			build: buildStarting,
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason"},
+		},
+		{
+			// The one state whose socket answers, and the only one that can
+			// carry a connect string.
+			name:  "ready",
+			build: buildReady,
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "sshCommand"},
+		},
+		{
+			// A session ID but no socket: the ID stays, the live detail does
+			// not appear from nowhere.
+			name:  "disconnected",
+			build: buildDisconnected,
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId"},
+		},
+		{
+			// The only state that can carry an exit code, because it is the
+			// only one whose command reported one.
+			name:  "exited",
+			build: buildEndedAfterExit,
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "exitCode"},
+		},
+		{
+			// Killed before it could publish an outcome: the same shape as a
+			// clean exit, minus the code nobody recorded.
+			name:  "killed",
+			build: buildEndedAfterKill,
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason"},
+		},
 	} {
-		tc.build(t, tc.name)
+		t.Run(tc.name, func(t *testing.T) {
+			tc.build(t, tc.name)
+
+			got := lookupJSON(t, tc.name)
+			require.Equal(t,
+				slices.Sorted(slices.Values(tc.want)),
+				slices.Sorted(maps.Keys(got)),
+				"the keys %s publishes are part of the contract", tc.name)
+
+			for _, key := range mandatory {
+				require.Contains(t, got, key,
+					"%s must answer %q whatever else it can say", tc.name, key)
+			}
+
+			// No case here was signalled, so nothing may claim it was: signal
+			// and exitCode are the two fields automation branches on.
+			require.NotContains(t, got, "signal",
+				"%s was not signalled and must not say it was", tc.name)
+		})
 	}
-
-	var want []string
-	for _, name := range []string{"starting", "ready", "disconnected", "exited", "killed"} {
-		info, err := lookup(context.Background(), name)
-		require.NoError(t, err)
-
-		got := canonicalKeys(t, info)
-		if want == nil {
-			want = got
-			continue
-		}
-		require.Equal(t, want, got,
-			"%s: a caller must not have to parse two formats depending on whether it asked while the process was running", name)
-	}
-	require.NotEmpty(t, want)
-}
-
-// canonicalKeys is the JSON key set of a result with every optional field
-// populated. Comparing the raw key sets would only compare which fields each
-// state happens to fill in; the claim under test is that there is one shape,
-// not one set of values.
-func canonicalKeys(t *testing.T, info sessionInfo) []string {
-	t.Helper()
-
-	info.LaunchID = "launch"
-	info.SessionID = "session"
-	info.Command = "command"
-	info.ForceCommand = "force"
-	info.SSHCommand = "ssh"
-	info.ConnectedClients = []string{"client"}
-	info.Reason = "reason"
-	code := 0
-	info.ExitCode = &code
-
-	raw, err := json.Marshal(info)
-	require.NoError(t, err)
-
-	var m map[string]any
-	require.NoError(t, json.Unmarshal(raw, &m))
-	return slices.Sorted(maps.Keys(m))
 }

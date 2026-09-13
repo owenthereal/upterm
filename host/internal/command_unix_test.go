@@ -311,3 +311,57 @@ func Test_Command_SlowStdoutPipeStillGetsItsTail(t *testing.T) {
 	require.Contains(t, string(got), "TAIL-MARKER",
 		"a slow but healthy stdout must still receive the command's last output")
 }
+
+// inheritedTerm is what the test's own environment carries, so that a case
+// asserting the host's TERM won is asserting that it beat something.
+const inheritedTerm = "upterm-inherited-term"
+
+// Test_Command_TermIsAppendedSoItBeatsTheInheritedOne covers wiring that is
+// load-bearing and was untested: --term reaches the command, and it does so by
+// being appended to the environment rather than prepended. exec.Cmd keeps the
+// last duplicate key, so a prepended TERM would be silently overridden by the
+// inherited one and the flag would do nothing at all.
+func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		term string
+		want string
+	}{
+		{name: "the host names a term", term: "vt100", want: "TERM=vt100"},
+		{name: "the host names none", term: "", want: "TERM=" + inheritedTerm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TERM", inheritedTerm)
+
+			// Never written to, and never a terminal, so Run does not forward
+			// it and nothing here has to feed it.
+			stdinr, stdinw, err := os.Pipe()
+			require.NoError(t, err)
+			defer func() { _ = stdinr.Close() }()
+			defer func() { _ = stdinw.Close() }()
+
+			writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+			out := &recordingWriter{}
+			require.NoError(t, writers.Append(out))
+
+			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+			require.NoError(t, err)
+			defer func() { _ = devNull.Close() }()
+
+			cmd := newCommand(
+				"sh", []string{"-c", "echo TERM=$TERM"},
+				nil, termsize.Default, false, tc.term,
+				stdinr, devNull, emitter.New(1), writers, testLogger(t), false,
+			)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			_, err = cmd.Start(ctx)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Run())
+
+			require.Contains(t, string(out.bytes()), tc.want)
+		})
+	}
+}

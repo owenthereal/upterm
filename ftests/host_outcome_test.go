@@ -15,6 +15,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -88,6 +89,12 @@ type outcomeRun struct {
 	name      string
 	stateRoot string
 
+	// relay is the server the host tunnels through, kept so a case can take it
+	// away mid-session. Shutting it down is the only honest way to produce a
+	// lost tunnel: anything the host could be told to do instead would be
+	// testing the instruction rather than the failure.
+	relay TestServer
+
 	// stdout is the read end of the host's stdout. The host's sink for a
 	// non-terminal stdout is asynchronous and bounded, so a test that does not
 	// read it loses output rather than blocking the host.
@@ -144,6 +151,7 @@ func newOutcomeRun(t *testing.T, command []string) *outcomeRun {
 		},
 		name:      name,
 		stateRoot: utils.UptermStateDir(),
+		relay:     ts,
 		stdout:    stdoutr,
 		closeWriters: func() {
 			_ = stdoutw.Close()
@@ -366,6 +374,90 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	run.closeWriters()
 
 	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
+}
+
+// Test_Host_GivesTheCommandTheSessionName covers wiring rather than an
+// outcome: the host puts the claimed name in the command's environment so that
+// a script inside the session can name itself to `upterm session info`. A typo
+// in the variable would be invisible everywhere else.
+func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
+	run := newOutcomeRun(t, []string{"sh", "-c", "echo NAME=$" + upterm.HostSessionNameEnvVar})
+
+	collected := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(run.stdout)
+		collected <- string(b)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	err := run.host.Run(ctx)
+	// The host's stdout sink is flushed as Run returns, so closing the write
+	// ends here is what turns the read above into an EOF rather than a hang.
+	run.closeWriters()
+	t.Logf("host run returned: %v", err)
+
+	select {
+	case out := <-collected:
+		require.Contains(t, out, "NAME="+run.name,
+			"the command must be able to find out which session it is running in")
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host stdout did not reach EOF within %s", outcomeTimeout)
+	}
+}
+
+// Test_Host_LostTunnelIsAStateNotAnOutcome is the Host-level counterpart to
+// the internal tunnel tests: the relay is taken away under a live session, and
+// the command has to survive it. A lost tunnel drops the guests and publishes
+// "disconnected"; the session still ends for the reason it is eventually
+// stopped for, not for the network.
+func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
+	run := newOutcomeRun(t, []string{"sh", "-c", "echo READY; sleep 300"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(io.Discard, run.stdout)
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
+		return err == nil && rec != nil && rec.Status == sessiondir.StatusReady
+	}, outcomeTimeout, outcomePollInterval,
+		"the session must be ready before the tunnel can be lost from under it")
+
+	require.NoError(t, run.relay.Shutdown())
+
+	require.Eventually(t, func() bool {
+		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
+		return err == nil && rec != nil && rec.Status == sessiondir.StatusDisconnected
+	}, 20*time.Second, outcomePollInterval,
+		"a host that lost its tunnel must publish disconnected, and must not have exited")
+
+	// Still running, which is the whole claim: the command outlived the
+	// network. Now end it the way an operator would.
+	cancel()
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
+	run.closeWriters()
+	<-drained
+
+	rec := run.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Equal(t, sessiondir.ReasonStopped, rec.Reason,
+		"a session stopped by its operator must not be reported as the network's fault")
+	require.Nil(t, rec.ExitCode)
 }
 
 func Test_Host_NeverPublishesReadyWhenClaimRefusesTheSocketPath(t *testing.T) {
