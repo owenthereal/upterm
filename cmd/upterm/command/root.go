@@ -1,7 +1,10 @@
 package command
 
 import (
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -12,6 +15,13 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
+
+// suppliedFlags records which flags were supplied from any origin: explicit
+// command-line flags, environment variables, or the config file. The
+// fail-closed guard in host.go needs the union, because pflag's
+// SliceValue.Replace never sets flag.Changed and the sync loop below skips
+// flags that already are Changed.
+var suppliedFlags = map[string]bool{}
 
 func Root() *cobra.Command {
 	rootCmd := &cobra.Command{
@@ -59,9 +69,11 @@ Environment Variables:
   $ UPTERM_HIDE_CLIENT_IP=true upterm host`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Bind all flags to environment variables with UPTERM_ prefix
-			if err := bindFlagsToEnv(cmd); err != nil {
+			supplied, err := bindFlagsToEnv(cmd)
+			if err != nil && !isConfigCommand(cmd) {
 				return err
 			}
+			suppliedFlags = supplied
 
 			debug, _ := cmd.Flags().GetBool("debug")
 
@@ -113,51 +125,185 @@ Environment Variables:
 //
 //	--hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var -> hide-client-ip in config.yaml
 //	--read-only flag -> UPTERM_READ_ONLY env var -> read-only in config.yaml
-func bindFlagsToEnv(cmd *cobra.Command) error {
+func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
+	supplied := make(map[string]bool)
+
+	// Seed from the command line first; the sync loop below never visits these.
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if flag.Changed {
+			supplied[flag.Name] = true
+		}
+	})
+
 	v := viper.New()
 
-	// Configure config file
 	configPath := utils.UptermConfigFilePath()
 	v.SetConfigFile(configPath)
 
-	// Try to read config file (silent fail if not exists, but warn on parse errors)
 	if err := v.ReadInConfig(); err != nil {
-		// Only warn if the file exists but can't be parsed
-		if _, statErr := os.Stat(configPath); statErr == nil {
-			// File exists but couldn't be read - log warning if we have logger
-			if logger := uptermctx.Logger(cmd.Context()); logger != nil {
-				logger.Warn("Failed to read config file", "path", configPath, "error", err)
-			}
+		// Only a confirmed "does not exist" is benign. Probing with os.Stat
+		// instead would treat a permission error as absence — if a parent
+		// directory is unreadable, both the read and the stat fail, ingestion
+		// continues, and a config-only authorization restriction silently
+		// disappears. viper returns the underlying *fs.PathError here, so
+		// errors.Is separates the two cases exactly.
+		if !errors.Is(err, fs.ErrNotExist) {
+			return supplied, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 		}
-		// Otherwise silently continue - config file is optional
 	}
 
-	// Visit all flags and bind them to viper
+	// Snapshot the config's keys BEFORE binding any flags. viper's AllKeys
+	// merges v.pflags as well as v.config, so taking this after BindPFlag would
+	// report every bound flag as present in the config file — and every
+	// ordinary run would then fail with "config key has no value".
+	configKeys := make(map[string]bool)
+	for _, k := range v.AllKeys() {
+		configKeys[k] = true
+	}
+
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		if flag.Name != "help" {
-			// Ignore binding errors - not all flags support environment variable binding
 			_ = v.BindPFlag(flag.Name, flag)
 		}
 	})
 
-	// Enable automatic environment variable reading
 	v.AutomaticEnv()
-	// Replace hyphens with underscores for env var names (--hide-client-ip -> HIDE_CLIENT_IP)
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	// Set prefix so all env vars start with UPTERM_ (UPTERM_HIDE_CLIENT_IP)
 	v.SetEnvPrefix("UPTERM")
 
-	// Sync viper values back to flags
-	// Priority: flags (if changed) > env vars > config file > defaults
+	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		if flag.Name != "help" && !flag.Changed && v.IsSet(flag.Name) {
-			val := v.Get(flag.Name)
-			// Ignore setting errors - not all flag types can be set from strings
-			_ = cmd.Flags().Set(flag.Name, toString(val))
+		if bindErr != nil || flag.Name == "help" {
+			return
 		}
+
+		// Presence is recorded before any attempt to resolve a value, because
+		// the two are different questions. viper reports IsSet false for
+		// `authorized-user:` with no value and for UPTERM_AUTHORIZED_USER=''
+		// (allowEmptyEnv defaults to false), and InConfig reports false for the
+		// null case too. Only AllKeys and a direct LookupEnv see them. Treating
+		// either as "absent" would drop a requested restriction and start an
+		// unrestricted session.
+		inConfig := configKeys[flag.Name]
+		if inConfig || envSupplied(flag.Name) {
+			supplied[flag.Name] = true
+		}
+
+		if flag.Changed {
+			return
+		}
+
+		if !v.IsSet(flag.Name) {
+			if inConfig {
+				bindErr = fmt.Errorf("%s: config key has no value; give it one or remove it", flag.Name)
+			}
+			return
+		}
+
+		val := v.Get(flag.Name)
+
+		if sv, ok := flag.Value.(pflag.SliceValue); ok {
+			elems, err := toStringSlice(flag.Name, val)
+			if err != nil {
+				bindErr = err
+				return
+			}
+			if err := sv.Replace(elems); err != nil {
+				bindErr = fmt.Errorf("failed to set %s: %w", flag.Name, err)
+				return
+			}
+			supplied[flag.Name] = true
+			return
+		}
+
+		if err := cmd.Flags().Set(flag.Name, toString(val)); err != nil {
+			bindErr = fmt.Errorf("failed to set %s: %w", flag.Name, err)
+			return
+		}
+		supplied[flag.Name] = true
 	})
 
-	return nil
+	return supplied, bindErr
+}
+
+// envSupplied reports whether the UPTERM_ variable for name is set, even to an
+// empty string. viper's getEnv treats an empty variable as unset unless
+// allowEmptyEnv is enabled, which would silently drop a supplied-but-empty
+// authorization source.
+func envSupplied(name string) bool {
+	key := "UPTERM_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	_, ok := os.LookupEnv(key)
+	return ok
+}
+
+// toStringSlice converts a config or environment value into flag elements.
+//
+// It deliberately avoids viper's GetStringSlice: that is cast.ToStringSlice,
+// which routes a plain string through strings.Fields — splitting on whitespace
+// rather than commas, so UPTERM_AUTHORIZED_USER=a,b would collapse into one
+// element — and discards conversion errors, turning a YAML mapping into a
+// silent nil.
+func toStringSlice(name string, val any) ([]string, error) {
+	switch v := val.(type) {
+	case string:
+		return splitCSV(name, v)
+	case []string:
+		return v, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for i, elem := range v {
+			s, ok := elem.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d]: expected a string, got %T", name, i, elem)
+			}
+			if strings.TrimSpace(s) == "" {
+				return nil, fmt.Errorf("%s[%d]: empty value", name, i)
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s: expected a list or comma-separated string, got %T", name, val)
+	}
+}
+
+// splitCSV parses the comma-separated form used on the command line and in
+// environment variables, which have no other encoding available.
+//
+// It uses encoding/csv because that is what pflag's own string-slice parsing
+// uses: a plain strings.Split would silently break values that are valid
+// today, such as UPTERM_PRIVATE_KEY='"/tmp/key,one"'.
+func splitCSV(name, s string) ([]string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+
+	parts, err := csv.NewReader(strings.NewReader(s)).Read()
+	if err != nil {
+		return nil, fmt.Errorf("%s: cannot parse %q as a comma-separated list: %w", name, s, err)
+	}
+
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("%s: empty element in %q", name, s)
+		}
+		out = append(out, part)
+	}
+	return out, nil
+}
+
+// isConfigCommand reports whether cmd is `upterm config` or one of its
+// subcommands. Those must stay reachable when the config file is malformed:
+// they are the tools for repairing it.
+func isConfigCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == "config" {
+			return true
+		}
+	}
+	return false
 }
 
 // toString converts a value to string for flag setting.
