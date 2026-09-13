@@ -13,9 +13,11 @@ import (
 //   - OSC 10/11/12 queries (foreground/background/cursor color): ESC ] N ; ? BEL/ST
 //   - CSI 5 n (device status request)
 //   - CSI 6 n (cursor position request)
+//   - CSI 14 t / CSI 18 t (text area size in pixels / characters)
 //   - CSI c / CSI 0 c (primary device attributes)
 //   - CSI > c / CSI > 0 c (secondary device attributes)
 //   - CSI = c / CSI = 0 c (tertiary device attributes)
+//   - CSI > q / CSI > 0 q (terminal name and version)
 type TerminalQueryFilter struct {
 	w      io.Writer
 	state  queryFilterState
@@ -252,6 +254,21 @@ func (f *TerminalQueryFilter) isCSIQuery(finalByte byte) bool {
 	params := f.seqBuf[2 : n-1]
 
 	switch finalByte {
+	case 'q':
+		// XTVERSION replies from guests can arrive after tmux has consumed
+		// the host's reply, so tmux treats them as shell input instead.
+		if len(params) == 1 && params[0] == '>' {
+			return true
+		}
+		if len(params) == 2 && params[0] == '>' && params[1] == '0' {
+			return true
+		}
+	case 't':
+		// tmux queries its terminal size on attachment. A guest answering a
+		// replayed query injects a late reply into the shared shell's input.
+		if len(params) == 2 && params[0] == '1' && (params[1] == '4' || params[1] == '8') {
+			return true
+		}
 	case 'n':
 		// CSI 5 n - Device Status Report
 		// CSI 6 n - Cursor Position Request
