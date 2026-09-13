@@ -308,8 +308,11 @@ func Test_Fetcher_reportsEveryFailureAtOnce(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "/alice.keys")
-	assert.Contains(t, err.Error(), "/bob.keys")
+	// Verify both failures are reported together. The error message contains
+	// ref.Raw (the original token as the user wrote it) so they can grep their
+	// config or command line. For raw URLs, this is the pre-.keys input.
+	assert.Contains(t, err.Error(), "/alice")
+	assert.Contains(t, err.Error(), "/bob")
 }
 
 func Test_Fetcher_dedup(t *testing.T) {

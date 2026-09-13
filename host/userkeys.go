@@ -125,7 +125,7 @@ func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*Author
 
 		ak, err := f.fetch(ctx, ref)
 		if err != nil {
-			errs = multierror.Append(errs, fmt.Errorf("%s: %w", ref.KeysURL(), err))
+			errs = multierror.Append(errs, fmt.Errorf("%s: %w", ref.Raw, err))
 			continue
 		}
 		result = append(result, ak)
