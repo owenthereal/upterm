@@ -135,7 +135,7 @@ type command struct {
 	// it. run.Group.Run returns whichever actor finished first, and the output
 	// copy returns nil on pty EOF at the same instant the command exits, so
 	// reading a status off Run is a coin toss. HandleSession learned this the
-	// hard way; see host/internal/server.go:345-354.
+	// hard way; see HandleSession.
 	resultMu sync.Mutex
 	result   CommandResult
 

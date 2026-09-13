@@ -28,11 +28,13 @@ func Test_ClosedStdoutReaderDoesNotKillProcess(t *testing.T) {
 		}
 
 		// Also cover shutdown, which is where a session-scoped policy would
-		// have reopened the hole. run.SignalHandler — the same primitive
-		// host_unix.go uses — calls signal.Stop on its own channel when its
-		// interrupt path runs, so cancelling the context here exercises that
-		// stop. The second burst below then pins that an unrelated handler's
-		// signal.Stop does not strip the process-wide SIGPIPE conversion.
+		// have reopened the hole. run.SignalHandler is the primitive the host
+		// used before it grew its own signal actor, and it calls signal.Stop
+		// on its own channel when its interrupt path runs — so cancelling the
+		// context here exercises that stop. The host no longer uses it, and
+		// that is not what this is about: the point is that *any* unrelated
+		// handler's signal.Stop must not strip the process-wide SIGPIPE
+		// conversion, which the second burst below pins.
 		ctx, cancel := context.WithCancel(context.Background())
 		var g run.Group
 		g.Add(run.SignalHandler(ctx, os.Interrupt, syscall.SIGTERM))

@@ -104,16 +104,18 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	labelWidth := 18
 	valueWidth := max(width-labelWidth-2, 20)
 
-	// Name, if the session has one, is the first thing a user looks for
-	// when they came here from 'upterm session list' or set --name
-	// themselves, so it is shown before the Session ID row.
-	if detail.Name != "" {
-		renderWrappedRow(&b, "Name:", detail.Name, labelWidth, valueWidth, ValueStyle)
-	}
-
 	// Title
 	b.WriteString(TitleStyle.Render(fmt.Sprintf("Session: %s", detail.SessionID)))
 	b.WriteString("\n\n")
+
+	// Name, if the session has one, is the first thing a user looks for when
+	// they came here from 'upterm session list' or set --name themselves — so
+	// it leads the labelled rows, under the title rather than above it. Above
+	// it, the row sat outside the block it belongs to and read like a heading
+	// for the heading.
+	if detail.Name != "" {
+		renderWrappedRow(&b, "Name:", detail.Name, labelWidth, valueWidth, ValueStyle)
+	}
 
 	// Basic fields (skip empty fields to reduce noise)
 	renderWrappedRow(&b, "Command:", detail.Command, labelWidth, valueWidth, ValueStyle)

@@ -228,6 +228,11 @@ type Host struct {
 	// Name is the session's local name. It determines the socket paths, so
 	// they are known before the server is ever contacted. It is unrelated to
 	// the server-assigned session ID in the connect string.
+	//
+	// Ignored when AdminSocketFile is set: supplying a socket is how a caller
+	// says it is managing the paths itself, so Run claims no name and there is
+	// nothing for this to name. SessionDir stays nil in that case, and no
+	// record is published.
 	Name string
 
 	// SessionDir is claimed by Run and readable afterwards. Nil when

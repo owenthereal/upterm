@@ -447,7 +447,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
-		ptmx, err = h.startForceCommand(ctx, ptyReq.Term)
+		ptmx, err = h.startForceCommand(ctx, ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
@@ -631,11 +631,14 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 // startForceCommand runs the forced command for a guest on its own pty.
 // CommandEnv wins over anything the host inherited, and the guest's own TERM
 // wins over both.
-func (h *sessionHandler) startForceCommand(ctx context.Context, term string) (PTY, error) {
+func (h *sessionHandler) startForceCommand(ctx context.Context, term string, width, height int) (PTY, error) {
 	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
 	cmd.Env = append(os.Environ(), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
-	// Opens at the default: this is a remote attach, and the real size comes
-	// from the SSH client's window-change requests once the session is up.
-	return startPty(cmd, termsize.Default, false)
+	// The guest's own geometry, taken from its pty request. A full-screen
+	// program reads its window size before the first window-change request
+	// arrives, so opening at the default drew that first frame at 80x24 on a
+	// terminal that is nothing of the sort. A request that carries no usable
+	// size falls back inside startPty.
+	return startPty(cmd, termsize.Size{Cols: width, Rows: height}, false)
 }

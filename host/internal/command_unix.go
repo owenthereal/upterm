@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
-	"unsafe"
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
@@ -31,21 +30,6 @@ func signalName(err error) string {
 		}
 	}
 	return ""
-}
-
-// tcgetpgrp returns the foreground process group of the terminal on fd.
-//
-// Not unix.IoctlGetInt: that reads into a Go int, and the kernel writes a
-// 4-byte pid_t. On a big-endian 64-bit target (s390x is a release
-// architecture) the value lands in the high half and the comparison in
-// ownsTerminal can never succeed.
-func tcgetpgrp(fd int) (int, error) {
-	var pgrp int32
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TIOCGPGRP), uintptr(unsafe.Pointer(&pgrp)))
-	if errno != 0 {
-		return 0, errno
-	}
-	return int(pgrp), nil
 }
 
 // ownsTerminal reports whether f is a terminal this process is in the

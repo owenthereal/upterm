@@ -256,6 +256,14 @@ const releaseTimeout = 5 * time.Second
 // directory is deliberately left behind: it holds the outcome, which has to
 // outlive the session that produced it.
 //
+// Call it at most once, and call nothing else on the Dir afterwards. Both
+// rules exist because the name is free the instant this returns and a
+// successor may already own it: a second Release would RemoveAll the
+// successor's directory, and an Update after Release would overwrite the
+// successor's record with this run's outcome. Neither is detectable from
+// here — the successor's files are at the same paths, which is the point of a
+// name — so the ordering is the caller's to keep.
+//
 // The lock is always dropped, even when the registry lock cannot be had. A
 // teardown that can block forever is worse than a directory left behind: the
 // directory is reapable by anyone later, whereas a Host.Run that never returns
