@@ -1,0 +1,239 @@
+package sessiondir
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func roots(t *testing.T) (runtimeRoot, stateRoot string) {
+	t.Helper()
+	root := t.TempDir()
+	runtimeRoot = filepath.Join(root, "run")
+	stateRoot = filepath.Join(root, "state")
+	require.NoError(t, os.MkdirAll(runtimeRoot, 0700))
+	require.NoError(t, os.MkdirAll(stateRoot, 0700))
+	return runtimeRoot, stateRoot
+}
+
+func claim(t *testing.T, runtimeRoot, stateRoot, name string) (*Dir, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return Claim(ctx, ClaimOptions{
+		RuntimeRoot: runtimeRoot,
+		StateRoot:   stateRoot,
+		Name:        name,
+		Command:     []string{"bash"},
+	})
+}
+
+func Test_ValidateName(t *testing.T) {
+	for _, ok := range []string{"demo", "claude-9f2c", "a", "A1_b.c-d"} {
+		require.NoError(t, ValidateName(ok), "name %q", ok)
+	}
+	for _, bad := range []string{
+		"", ".", "..", "../evil", "a/b", `a\b`, ".hidden", ".registry.lock",
+		"-leading-dash", "with space", "with\x00nul",
+	} {
+		require.ErrorIs(t, ValidateName(bad), ErrInvalidName, "name %q", bad)
+	}
+
+	// Bounded length.
+	long := make([]byte, 200)
+	for i := range long {
+		long[i] = 'a'
+	}
+	require.ErrorIs(t, ValidateName(string(long)), ErrInvalidName)
+}
+
+func Test_Claim_RejectsTraversalWithoutTouchingAnything(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	// A sibling that must survive a traversal attempt.
+	sibling := filepath.Join(filepath.Dir(runtimeRoot), "precious")
+	require.NoError(t, os.MkdirAll(sibling, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "keep"), []byte("x"), 0600))
+
+	for _, bad := range []string{"..", "../precious", "../../"} {
+		_, err := claim(t, runtimeRoot, stateRoot, bad)
+		require.ErrorIs(t, err, ErrInvalidName, "name %q", bad)
+	}
+
+	_, err := os.Stat(filepath.Join(sibling, "keep"))
+	require.NoError(t, err, "a rejected name must not touch the filesystem")
+}
+
+func Test_Claim_CreatesDistinctNamespaces(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+
+	require.Equal(t, filepath.Join(runtimeRoot, "sessions", "demo", "admin.sock"), d.AdminSocket())
+	require.Equal(t, filepath.Join(stateRoot, "results", "demo", "session.json"), d.RecordPath())
+	require.NotEmpty(t, d.LaunchID())
+}
+
+func Test_Claim_PublishesUnknownResultImmediately(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+
+	rec, err := ReadRecord(stateRoot, "demo")
+	require.NoError(t, err, "the record must exist the moment the name is claimed")
+	require.Equal(t, ReasonUnknown, rec.Reason)
+	require.Equal(t, StatusStarting, rec.Status)
+	require.Equal(t, d.LaunchID(), rec.LaunchID)
+	require.Nil(t, rec.ExitCode)
+}
+
+func Test_Claim_SupersedesAPreviousRunsResult(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	first, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	code := 0
+	require.NoError(t, first.Update(func(r *Record) {
+		r.Status = StatusEnding
+		r.Reason = ReasonExited
+		r.ExitCode = &code
+	}))
+	require.NoError(t, first.Release(context.Background()))
+
+	second, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = second.Release(context.Background()) }()
+
+	rec, err := ReadRecord(stateRoot, "demo")
+	require.NoError(t, err)
+	require.Equal(t, ReasonUnknown, rec.Reason,
+		"a new claim must not leave the previous run's success looking current")
+	require.Equal(t, second.LaunchID(), rec.LaunchID)
+	require.Nil(t, rec.ExitCode,
+		"status and outcome move together or the tear is back")
+}
+
+func Test_Claim_RejectsLiveDuplicate(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+
+	_, err = claim(t, runtimeRoot, stateRoot, "demo")
+	require.ErrorIs(t, err, ErrNameInUse)
+}
+
+func Test_Claim_RecoversStaleDirectory(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	require.NoError(t, d.releaseKeepingDir()) // exactly what a crash leaves
+
+	d2, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err, "a stale directory must be recovered, not reported in use")
+	require.NoError(t, d2.Release(context.Background()))
+}
+
+func Test_Release_KeepsTheResultEvenWhenRootsCoincide(t *testing.T) {
+	// The case that matters: on Windows and under the $HOME/.upterm fallback
+	// the runtime and state roots are the same directory.
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(root, 0700))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	d, err := Claim(ctx, ClaimOptions{
+		RuntimeRoot: root, StateRoot: root, Name: "demo", Command: []string{"bash"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Release(context.Background()))
+
+	_, err = ReadRecord(root, "demo")
+	require.NoError(t, err, "cleanup must not delete the completion record")
+}
+
+func Test_Claim_ConcurrentClaimsYieldOneOwner(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	const n = 8
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		winners []*Dir
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, err := claim(t, runtimeRoot, stateRoot, "demo")
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			winners = append(winners, d)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	require.Len(t, winners, 1, "exactly one claimer may own a name")
+	require.NoError(t, winners[0].Release(context.Background()))
+}
+
+func Test_Reap_RemovesOnlyFreeDirectories(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	live, err := claim(t, runtimeRoot, stateRoot, "live")
+	require.NoError(t, err)
+	defer func() { _ = live.Release(context.Background()) }()
+
+	stale, err := claim(t, runtimeRoot, stateRoot, "stale")
+	require.NoError(t, err)
+	require.NoError(t, stale.releaseKeepingDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, Reap(ctx, runtimeRoot))
+
+	_, err = os.Stat(filepath.Join(runtimeRoot, "sessions", "live"))
+	require.NoError(t, err, "a held directory must survive a reap")
+
+	_, err = os.Stat(filepath.Join(runtimeRoot, "sessions", "stale"))
+	require.True(t, os.IsNotExist(err), "a free directory must be reaped")
+}
+
+func Test_LockRegistry_HonoursContext(t *testing.T) {
+	runtimeRoot, _ := roots(t)
+
+	held, err := lockRegistry(context.Background(), filepath.Join(runtimeRoot, "sessions"))
+	require.NoError(t, err)
+	defer releaseRegistry(held)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = lockRegistry(ctx, filepath.Join(runtimeRoot, "sessions"))
+	require.Error(t, err, "contention must time out rather than spin forever")
+	require.Less(t, time.Since(start), 5*time.Second)
+}
+
+func Test_GenerateName(t *testing.T) {
+	require.Regexp(t, `^claude-[0-9a-f]{4}$`, GenerateName([]string{"/usr/local/bin/claude", "--x"}))
+	require.Regexp(t, `^session-[0-9a-f]{4}$`, GenerateName(nil))
+
+	// A command whose basename is not a legal name must still produce one.
+	require.NoError(t, ValidateName(GenerateName([]string{"../weird"})))
+	require.NoError(t, ValidateName(GenerateName([]string{".hidden"})))
+}
