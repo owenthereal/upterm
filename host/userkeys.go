@@ -346,16 +346,21 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref U
 		return nil, err
 	}
 
-	hostname, _ := splitHostPort(ref.ResolveHost())
+	// Resolve credentials under the full authority, port included. The origin
+	// fetchTransport lets a token reach is port-qualified, so it treats
+	// ghe.corp.com:8443 as intended and does not strip there. Looking the
+	// credential up under a port-less key would therefore hand a token stored
+	// for the GHES on ghe.corp.com to whatever answers on :8443.
+	authority := ref.ResolveHost()
 
-	token, err := resolveToken(ctx, ref, hostname)
+	token, err := resolveToken(ctx, ref, authority)
 	if err != nil {
 		return nil, err
 	}
 	if token == "" {
 		if ref.Mode == CredentialHostScoped {
 			logger.Warn("no credential stored for host; fetching keys anonymously",
-				"host", hostname, "fix", "gh auth login --hostname "+hostname)
+				"host", authority, "fix", "gh auth login --hostname "+authority)
 		}
 		return f.genericUserKeys(ctx, logger, ref)
 	}

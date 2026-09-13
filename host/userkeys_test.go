@@ -984,6 +984,57 @@ func Test_githubUserKeys_honorsContextCancellation(t *testing.T) {
 	}
 }
 
+func Test_githubUserKeys_doesNotSendAPortlessCredentialToAnotherPort(t *testing.T) {
+	// A credential stored for ghe.corp.com is stored for the GHES on 443.
+	// ghe.corp.com:8443 is a different origin — possibly an unrelated service
+	// on the same box — so that token must not be sent there.
+	//
+	// The lookup key is what decides it: fetchTransport compares against the
+	// port-qualified origin and therefore considers :8443 intended, so a
+	// port-less lookup hands the token straight over rather than stripping it.
+	// Both directions matter: the second subtest stops a future "fix" that
+	// simply never authenticates against a port-qualified host.
+	cases := []struct {
+		name     string
+		storedAt string
+		wantAuth string
+	}{
+		{
+			name:     "stored for the port-less host is not sent to another port",
+			storedAt: "ghe.corp.com",
+			wantAuth: "",
+		},
+		{
+			name:     "stored for the exact authority is sent",
+			storedAt: "ghe.corp.com:8443",
+			wantAuth: "token scoped-token",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			restore := hostScopedTokenFunc
+			hostScopedTokenFunc = func(_ context.Context, hostname string) (string, error) {
+				if hostname == c.storedAt {
+					return "scoped-token", nil
+				}
+				return "", nil
+			}
+			t.Cleanup(func() { hostScopedTokenFunc = restore })
+
+			ref, err := ParseUserRef("github:alice@ghe.corp.com:8443")
+			require.NoError(t, err)
+
+			rec := &recordingRT{body: `[{"key":"` + testPublicKey + `"}]`}
+			f := &Fetcher{Logger: testLogger(), Transport: rec}
+			_, _ = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+
+			require.Len(t, rec.reqs, 1)
+			assert.Equal(t, c.wantAuth, rec.reqs[0].Header.Get("Authorization"))
+		})
+	}
+}
+
 func Test_hostScopedToken_readsHostScopedStorageOnly(t *testing.T) {
 	// GH_ENTERPRISE_TOKEN applies to every enterprise host, so honoring it
 	// would send one instance's token to another.
