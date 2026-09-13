@@ -224,7 +224,35 @@ func (c *command) Run() error {
 	}
 	{
 		// output
-		if err := c.writers.Append(c.stdout); err != nil {
+		//
+		// A stdout that is a terminal stays synchronous: the pty should not run
+		// ahead of the screen that owns it, and a human watching wants complete
+		// output more than they want the command to finish sooner.
+		//
+		// A stdout that is not a terminal is a pipe, a file or a log. A pipe
+		// nobody drains blocks forever, and MultiWriter.Write holds writeMu
+		// across the fan-out, so that block stops every other writer and every
+		// new attach: the session wedges. Bounding it makes the worst case "the
+		// log loses output", which is what a log is for.
+		//
+		// c.stdout belongs to whoever constructed the Host. Nothing here closes
+		// it, dups it, or changes its flags — and so nothing here can release a
+		// drain goroutine already blocked writing to it. See the note below.
+		hostOut := io.Writer(c.stdout)
+		var hostSink *uio.AsyncWriter
+		if !term.IsTerminal(int(c.stdout.Fd())) {
+			// Capture the logger, not c. A closure over the command retains
+			// the command, its pty and the whole fan-out for as long as the
+			// parked writer lives, which makes the "bounded" claim below false
+			// by a wide margin.
+			logger := c.logger
+			hostSink = uio.NewAsyncWriter(c.stdout, uio.DefaultGuestBufferSize, func(err error) {
+				logger.Warn("host stdout dropped; session continues", "error", err)
+			})
+			hostOut = hostSink
+		}
+
+		if err := c.writers.Append(hostOut); err != nil {
 			return err
 		}
 		ctx, cancel := context.WithCancel(c.ctx)
@@ -280,6 +308,16 @@ func (c *command) Run() error {
 					case <-time.After(logTimeout):
 					}
 				}
+
+				// Shutdown only flushes writers that are still attached, and
+				// AsyncWriter.Close discards whatever is pending. So the order is
+				// flush, then remove, then close. An earlier draft removed and
+				// closed in the interrupt, which both skipped the flush and threw
+				// away a slow stdout's tail.
+				c.writers.Remove(hostOut)
+				if hostSink != nil {
+					_ = hostSink.Close()
+				}
 			}()
 			defer close(done)
 			_, err := io.Copy(output, uio.NewContextReader(ctx, c.ptmx))
@@ -292,7 +330,6 @@ func (c *command) Run() error {
 			// EOF until closed, and a background child can keep a Unix pty
 			// open, so the wait is bounded.
 			output.waitIdle(done, outputIdleTimeout, outputDrainTimeout)
-			c.writers.Remove(c.stdout)
 			cancel()
 		})
 	}

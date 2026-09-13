@@ -265,9 +265,11 @@ func (t *MultiWriter) Remove(writers ...io.Writer) {
 // Writers that buffer are what keep this serial loop honest: each attached
 // guest is an AsyncWriter, so its Write is a copy and a signal rather than SSH
 // I/O, and a guest that cannot keep up overflows and is dropped instead of
-// pacing everyone else. The host's own stdout is attached unwrapped and so is
-// written inline here, which is the one place back-pressure belongs: the pty
-// should not run ahead of the terminal that owns it.
+// pacing everyone else. The host's own stdout is attached unwrapped only when
+// it is a terminal, which is the one place back-pressure belongs: the pty
+// should not run ahead of the screen that owns it. A non-terminal stdout is
+// wrapped, because a pipe nobody drains would otherwise block here with
+// writeMu held and wedge the whole session.
 func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()

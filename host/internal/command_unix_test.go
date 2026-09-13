@@ -5,6 +5,7 @@ package internal
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,4 +179,126 @@ func Test_Command_StdinCloseDoesNotEndSession(t *testing.T) {
 
 	require.Contains(t, string(out.bytes()), "ALIVE",
 		"the command must run to completion after stdin dies")
+}
+
+func Test_Command_UndrainedStdoutPipeDoesNotWedgeSession(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = pr.Close() }() // deliberately never read
+
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	watcher := &recordingWriter{}
+	require.NoError(t, writers.Append(watcher))
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer func() { _ = devNull.Close() }()
+
+	cmd := newCommand(
+		"sh", []string{"-c", "for i in $(seq 1 5000); do echo 0123456789012345678901234567890123456789; done; echo DONE"},
+		nil, termsize.Default, false, "xterm-256color",
+		devNull, pw, emitter.New(1), writers, testLogger(t), false,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, err = cmd.Start(ctx)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("session wedged on an undrained stdout pipe")
+	}
+
+	require.Contains(t, string(watcher.bytes()), "DONE",
+		"output must keep flowing to other writers while stdout is blocked")
+}
+
+func Test_Command_SlowStdoutPipeStillGetsItsTail(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+
+	// A reader that starts blocked, so backpressure is observable rather than
+	// hoped for, then drains slowly but never stops.
+	//
+	// Review fix: the previous version emitted ~2 KB, which fits entirely in a
+	// pipe buffer. Nothing was ever pending at shutdown, so the test passed
+	// without exercising the flush path it is named for. The command now emits
+	// well past any pipe buffer, and the reader is held until it has.
+	var (
+		mu      sync.Mutex
+		got     []byte
+		read    = make(chan struct{})
+		release = make(chan struct{})
+	)
+	go func() {
+		defer close(read)
+		<-release
+		buf := make([]byte, 256)
+		for {
+			n, err := pr.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				got = append(got, buf[:n]...)
+				mu.Unlock()
+				time.Sleep(time.Millisecond)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+
+	// Watch the fan-out so the test can tell when the command has produced
+	// enough to have filled the pipe and backed up into the sink.
+	progress := &recordingWriter{}
+	require.NoError(t, writers.Append(progress))
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer func() { _ = devNull.Close() }()
+
+	// 4000 lines of 64 bytes is ~256 KiB: far past a 64 KiB pipe buffer, and
+	// still comfortably inside the 1 MiB sink, so this is the slow-reader case
+	// and not the overflow case.
+	cmd := newCommand(
+		"sh", []string{"-c",
+			"i=0; while [ $i -lt 4000 ]; do echo 0123456789012345678901234567890123456789012345678901234567890123; i=$((i+1)); done; echo TAIL-MARKER"},
+		nil, termsize.Default, false, "xterm-256color",
+		devNull, pw, emitter.New(1), writers, testLogger(t), false,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, err = cmd.Start(ctx)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	// Wait until the fan-out has seen more than a pipe buffer's worth, which
+	// means the sink is holding output the reader has not taken. Only then let
+	// the reader start: now the tail genuinely has to survive shutdown.
+	require.Eventually(t, func() bool {
+		return len(progress.bytes()) > 128<<10
+	}, 30*time.Second, 10*time.Millisecond, "command did not produce enough to create backpressure")
+	close(release)
+
+	require.NoError(t, <-done)
+
+	_ = pw.Close()
+	<-read
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, string(got), "TAIL-MARKER",
+		"a slow but healthy stdout must still receive the command's last output")
 }
