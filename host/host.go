@@ -19,6 +19,7 @@ import (
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -212,7 +213,10 @@ type Host struct {
 	ForceForwardingInputForTesting bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
-	ProxyURL *url.URL
+	ProxyURL   *url.URL
+	PtySize    termsize.Size
+	PinPtySize bool
+	Term       string
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -391,6 +395,9 @@ func (c *Host) Run(ctx context.Context) error {
 			ReadOnly:                       c.ReadOnly,
 			AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
 			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
+			PtySize:                        c.PtySize,
+			PinPtySize:                     c.PinPtySize,
+			Term:                           c.Term,
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
 		}

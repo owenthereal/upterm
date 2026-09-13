@@ -20,6 +20,7 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/crypto/ssh"
 )
@@ -37,6 +38,9 @@ type Server struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	PtySize                 termsize.Size
+	PinPtySize              bool
+	Term                    string
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
@@ -88,6 +92,9 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Command[0],
 		s.Command[1:],
 		s.CommandEnv,
+		s.PtySize,
+		s.PinPtySize,
+		s.Term,
 		s.Stdin,
 		s.Stdout,
 		s.EventEmitter,
@@ -584,6 +591,7 @@ func (h *sessionHandler) startForceCommand(ctx context.Context, term string) (PT
 	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
 	cmd.Env = append(os.Environ(), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
-	// Pass nil for stdin since this is a remote attach - size will come from SSH client
-	return startPty(cmd, nil)
+	// Opens at the default: this is a remote attach, and the real size comes
+	// from the SSH client's window-change requests once the session is up.
+	return startPty(cmd, termsize.Default, false)
 }

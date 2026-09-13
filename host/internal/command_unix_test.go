@@ -10,6 +10,7 @@ import (
 
 	ptylib "github.com/creack/pty"
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +52,9 @@ func TestCommand_Unix_PTY(t *testing.T) {
 		"head",
 		[]string{"-n", "1"},
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		tty,
 		stdoutw,
 		ee,

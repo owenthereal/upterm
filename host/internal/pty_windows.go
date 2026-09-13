@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/charmbracelet/x/conpty"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"golang.org/x/sys/windows"
 	"golang.org/x/term"
 )
@@ -23,24 +24,13 @@ var (
 )
 
 // startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
-	// Get the actual terminal size from stdin if available
-	// Otherwise, use default dimensions
-	height := conpty.DefaultHeight
-	width := conpty.DefaultWidth
-
-	if stdin != nil {
-		// Try to get the terminal size from stdin
-		h, w, err := getPtysize(stdin)
-		if err == nil && w > 0 && h > 0 {
-			width = w
-			height = h
-		}
-		// If GetSize fails or returns invalid dimensions, we'll use the defaults
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+	if !size.Valid() {
+		size = termsize.Default
 	}
 
 	// conpty.New expects (width, height, flags)
-	cpty, err := conpty.New(width, height, 0)
+	cpty, err := conpty.New(size.Cols, size.Rows, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create conpty: %w", err)
 	}
@@ -71,6 +61,7 @@ func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
 		handle: handle,
 		pid:    pid,
 		job:    job,
+		pinned: pinned,
 	}, nil
 }
 
@@ -82,6 +73,7 @@ type pty struct {
 	job                 syscall.Handle // Job object handle
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
+	pinned              bool
 	sync.RWMutex
 }
 
@@ -91,6 +83,15 @@ func (p *pty) Setsize(h, w int) error {
 
 	if p.conptyClosed || p.cpty == nil {
 		return nil // Silently ignore resize on closed pty
+	}
+
+	// --pty-size promises the geometry will not move. Every resize in the
+	// process funnels through here — the host's SIGWINCH handler and a guest's
+	// window-change request both reach it via event.go — so this is the only
+	// place the promise has to be kept. Reporting success is deliberate: a
+	// client asking to resize a pinned session has done nothing wrong.
+	if p.pinned {
+		return nil
 	}
 
 	return p.cpty.Resize(w, h)

@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 // PTY represents a pseudo-terminal abstraction that works across platforms.
@@ -87,4 +90,23 @@ func exitCode(err error) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// ResolvePtySize decides the geometry a session's pty opens with.
+//
+// An explicit request wins outright, because a pinned size is a promise the
+// geometry will not move. Otherwise the host's terminal is asked, which is the
+// historical behavior. With neither, the default stands: a session with no
+// terminal still needs a size, and inheriting the kernel's is how a headless
+// TUI ends up rendering into a guess.
+func ResolvePtySize(stdin *os.File, want termsize.Size) termsize.Size {
+	if want.Valid() {
+		return want
+	}
+	if stdin != nil {
+		if h, w, err := getPtysize(stdin); err == nil && w > 0 && h > 0 {
+			return termsize.Size{Cols: w, Rows: h}
+		}
+	}
+	return termsize.Default
 }

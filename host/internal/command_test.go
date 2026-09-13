@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,6 +59,9 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 		shellCmd,
 		shellArgs,
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		stdinr,
 		stdoutw,
 		ee,
@@ -164,6 +168,9 @@ func TestCommand_ContextCancellation(t *testing.T) {
 		shellCmd,
 		shellArgs,
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		os.Stdin,
 		stdoutw,
 		ee,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,9 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 		"cmd",
 		[]string{"/c", "echo", "test"},
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		os.Stdin,
 		stdoutw,
 		ee,
@@ -82,6 +86,9 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 		"ping",
 		[]string{"-n", "100", "127.0.0.1"},
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		os.Stdin,
 		stdoutw,
 		ee,
@@ -171,6 +178,9 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 		"cmd",
 		[]string{"/c", "echo", "ConPTY test successful"},
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		os.Stdin, // Pass stdin so startPty can attempt to get size
 		stdoutw,
 		ee,

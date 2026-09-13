@@ -12,6 +12,7 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/term"
 )
@@ -81,6 +82,9 @@ func newCommand(
 	name string,
 	args []string,
 	env []string,
+	ptySize termsize.Size,
+	pinPtySize bool,
+	term string,
 	stdin *os.File,
 	stdout *os.File,
 	eventEmitter *emitter.Emitter,
@@ -92,6 +96,9 @@ func newCommand(
 		name:                           name,
 		args:                           args,
 		env:                            env,
+		ptySize:                        ptySize,
+		pinPtySize:                     pinPtySize,
+		term:                           term,
 		stdin:                          stdin,
 		stdout:                         stdout,
 		eventEmitter:                   eventEmitter,
@@ -105,6 +112,10 @@ type command struct {
 	name string
 	args []string
 	env  []string
+
+	ptySize    termsize.Size
+	pinPtySize bool
+	term       string
 
 	cmd  *exec.Cmd
 	ptmx PTY
@@ -140,10 +151,15 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = setupCommand(ctx, c.name, c.args)
 	c.cmd.Env = append(os.Environ(), c.env...)
+	if c.term != "" {
+		// Appended, not prepended: exec.Cmd keeps the last duplicate key, so
+		// prepending would let an inherited TERM win and this would silently
+		// do nothing.
+		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
+	}
 
 	var err error
-	// Pass stdin so startPty can get the initial terminal size
-	c.ptmx, err = startPty(c.cmd, c.stdin)
+	c.ptmx, err = startPty(c.cmd, ResolvePtySize(c.stdin, c.ptySize), c.pinPtySize)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

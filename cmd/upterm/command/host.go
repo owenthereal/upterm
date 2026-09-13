@@ -21,6 +21,7 @@ import (
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -70,6 +71,8 @@ var (
 	flagProxy                   string
 	flagNoSFTP                  bool
 	flagAllowLocalTCPForwarding bool
+	flagPtySize                 string
+	flagTerm                    string
 )
 
 func hostCmd() *cobra.Command {
@@ -139,6 +142,8 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
+	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
+	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when there is no terminal.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -303,6 +308,22 @@ func shareRunE(c *cobra.Command, args []string) error {
 		sftpPermissionChecker = &DialogPermissionChecker{}
 	}
 
+	var ptySize termsize.Size
+	if flagPtySize != "" {
+		ptySize, err = termsize.Parse(flagPtySize)
+		if err != nil {
+			return err
+		}
+	}
+
+	term := flagTerm
+	if term == "" && !tui.IsTTY() {
+		// With no terminal there is no TERM worth inheriting, and a command on
+		// a pty with TERM unset or "dumb" renders as if it had no cursor
+		// addressing at all.
+		term = "xterm-256color"
+	}
+
 	h := &host.Host{
 		Host:                    flagServer,
 		Command:                 args,
@@ -320,6 +341,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 		Logger:                  logger.Logger,
 		ReadOnly:                flagReadOnly,
 		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
+		PtySize:                 ptySize,
+		PinPtySize:              flagPtySize != "",
+		Term:                    term,
 		SFTPDisabled:            flagNoSFTP,
 		SFTPPermissionChecker:   sftpPermissionChecker,
 	}
