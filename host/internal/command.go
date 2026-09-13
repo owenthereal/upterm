@@ -252,6 +252,16 @@ func (c *command) Run() error {
 			hostOut = hostSink
 		}
 
+		// The bound, since the comment above promises one. A pipe nobody
+		// drains parks this sink's drain goroutine in that write until the
+		// process exits: Close cannot release it, and both ways to force the
+		// write to return were rejected — a deadline, which Fd() has already
+		// disabled, and a dup, which would set O_NONBLOCK on the caller's own
+		// pipe. At most one such goroutine per Run. It retains the sink, its
+		// in-flight chunk and the logger the drop callback closes over,
+		// blocks nothing else, and ends when the pipe drains, the reader
+		// closes it, or the process exits.
+
 		if err := c.writers.Append(hostOut); err != nil {
 			return err
 		}
