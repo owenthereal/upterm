@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTerminalQueryFilter(t *testing.T) {
@@ -309,6 +310,71 @@ func TestTerminalQueryFilter_TertiaryDeviceAttributes(t *testing.T) {
 			assert.NoError(err)
 			assert.Equal(len(tt.input), n)
 			assert.Equal(tt.expected, buf.Bytes())
+		})
+	}
+}
+
+// The OSC number guard only tripped once oscCmd passed 99, and a run of zeros
+// never raises it, so "ESC ]" followed by zeros accumulated forever: the bytes
+// were held out of the replay ring and handed whole to every joining writer.
+func TestTerminalQueryFilter_OSCNumberIsBounded(t *testing.T) {
+	var buf bytes.Buffer
+	filter := NewTerminalQueryFilter(&buf)
+
+	input := append([]byte("\x1b]"), bytes.Repeat([]byte("0"), 2048)...)
+	for i, b := range input {
+		n, err := filter.Write([]byte{b})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		require.LessOrEqual(t, len(filter.Pending()), 9, "after byte %d", i)
+	}
+
+	// None of it is a query, so all of it reaches the writer.
+	require.Equal(t, string(input), buf.String())
+}
+
+// Pending is replayed to every joiner ahead of the ring, so whatever the
+// filter is holding has to stay small whatever the stream does.
+func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
+	const runLength = 2048
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "CSI parameters",
+			input: append([]byte("\x1b["), bytes.Repeat([]byte("1;"), runLength)...),
+		},
+		{
+			name:  "OSC content",
+			input: append([]byte("\x1b]0;"), bytes.Repeat([]byte("x"), runLength)...),
+		},
+		{
+			name:  "OSC content of escapes",
+			input: append([]byte("\x1b]0;"), bytes.Repeat([]byte{0x1b}, runLength)...),
+		},
+		{
+			name:  "OSC query",
+			input: append([]byte("\x1b]11;?"), bytes.Repeat([]byte("?"), runLength)...),
+		},
+		{
+			name:  "OSC number",
+			input: append([]byte("\x1b]"), bytes.Repeat([]byte("0"), runLength)...),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			for i, b := range tt.input {
+				_, err := filter.Write([]byte{b})
+				require.NoError(t, err)
+				require.LessOrEqual(t, len(filter.Pending()), maxPendingBytes,
+					"after byte %d", i)
+			}
 		})
 	}
 }

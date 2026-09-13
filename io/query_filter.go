@@ -77,9 +77,21 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// maxPendingBytes is the most the filter will ever be holding, and so the most
+// Pending can return. Every state that accumulates gives up at a bound of its
+// own: 32 bytes of CSI parameters, 32 of an OSC colour query, 256 of OSC
+// content, and 8 of an OSC number. The largest is the OSC content bound, plus
+// the byte that overshoots it and the ESC of a string terminator that turned
+// out not to be one; 260 covers that with room to spare.
+//
+// It matters because Pending is replayed to every joining writer ahead of the
+// ring: what the filter holds is output no reader has seen yet, and it is held
+// outside the ring's byte budget.
+const maxPendingBytes = 260
+
 // Pending returns a copy of the bytes of an escape sequence the filter is
 // still holding because it has not yet seen the sequence's end. They are
-// not in the underlying writer yet.
+// not in the underlying writer yet. The result never exceeds maxPendingBytes.
 func (f *TerminalQueryFilter) Pending() []byte {
 	return slices.Clone(f.seqBuf)
 }
@@ -157,6 +169,13 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 
 	case qfStateOSCParam:
 		f.seqBuf = append(f.seqBuf, b)
+		// The oscCmd guard below counts value, not digits, so a run of zeros
+		// slips past it forever. An OSC number is four digits at the outside,
+		// making "ESC ] dddd ;" seven bytes, so anything past eight is not one.
+		if len(f.seqBuf) > 8 {
+			f.flushAndReset()
+			return
+		}
 		if b >= '0' && b <= '9' {
 			// Check before updating to prevent overflow (OSC commands are 1-3 digits)
 			if f.oscCmd > 99 {
@@ -216,6 +235,12 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 		// Not ST, continue as content (the ESC might be part of content)
 		f.state = qfStateOSCContent
+		// The content bound belongs here too: a run of ESCs bounces between
+		// these two states and would otherwise never reach the check in
+		// qfStateOSCContent, which only runs for ordinary content bytes.
+		if len(f.seqBuf) > 256 {
+			f.flushAndReset()
+		}
 
 	case qfStateOSCQuery:
 		f.seqBuf = append(f.seqBuf, b)
