@@ -380,6 +380,26 @@ func (c *Host) Run(ctx context.Context) error {
 	// double close.
 	var adminOnce, cmdOnce sync.Once
 
+	// Bound here, not inside the group. A bind failure is a startup failure and
+	// has to be reported as one: inside the group it raced the command's start,
+	// and whichever actor lost the race decided the classification — the same
+	// unusable socket path was published as startup_failed on one run and
+	// signaled on the next. Returning the error here also hands the deferred
+	// writer above the reason it already assumes at this point.
+	//
+	// adminReady therefore closes before the group exists. The ready actor
+	// still waits on both channels: which of the two facts is established
+	// first is not something readiness should depend on.
+	adminServer := internal.AdminServer{
+		Session:     session,
+		ClientRepo:  clientRepo,
+		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
+	}
+	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
+		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)
+		return err
+	}
+
 	var g run.Group
 	{
 		// Handle OS signals for graceful shutdown
@@ -388,15 +408,10 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := internal.AdminServer{
-			Session:     session,
-			ClientRepo:  clientRepo,
-			OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
-		}
 		g.Add(func() error {
-			return s.Serve(ctx, c.AdminSocketFile)
+			return adminServer.Serve(ctx)
 		}, func(err error) {
-			_ = s.Shutdown(ctx)
+			_ = adminServer.Shutdown(ctx)
 			cancel()
 		})
 	}

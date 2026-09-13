@@ -368,14 +368,14 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
 }
 
-func Test_Host_NeverPublishesReadyWhenAdminSocketCannotBind(t *testing.T) {
+func Test_Host_NeverPublishesReadyWhenClaimRefusesTheSocketPath(t *testing.T) {
 	run := newOutcomeRun(t, []string{"sh", "-c", "sleep 300"})
 
 	// A runtime root deep enough that <root>/upterm/sessions/<name>/admin.sock
-	// is longer than a unix socket path may be. Claim still succeeds — mkdir
-	// has no such limit — so the failure lands where it is wanted: in
-	// net.Listen, after the name is claimed and the tunnel is up. The state
-	// root is left short, because the record still has to be readable.
+	// is longer than a unix socket path may be. Claim refuses it up front, so
+	// the run never reaches the tunnel — which is the point of checking there:
+	// this used to fail in net.Listen with the name already claimed, the
+	// record already published, and the classification racing the command.
 	deep := filepath.Join(shortXDGDir(t), strings.Repeat("d", 120))
 	require.NoError(t, os.MkdirAll(deep, 0700))
 	t.Setenv("XDG_RUNTIME_DIR", deep)
@@ -397,12 +397,20 @@ func Test_Host_NeverPublishesReadyWhenAdminSocketCannotBind(t *testing.T) {
 	run.closeWriters()
 	<-drained
 	t.Logf("host run returned: %v", err)
-	require.Error(t, err, "a host whose admin socket cannot bind must not report success")
+	require.ErrorIs(t, err, sessiondir.ErrSocketPathTooLong,
+		"a name whose admin socket cannot be bound must be refused, not attempted")
 
 	seen := <-statuses
 	require.NotContains(t, seen, sessiondir.StatusReady,
 		"a session that never bound its admin socket must never have been published as ready")
-	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
+
+	// The claim failed, so this run published nothing at all: the record under
+	// the short state root is the one the *previous* claim in newOutcomeRun
+	// would have left, and there is none. Reading it must say "no such
+	// session" rather than report an outcome.
+	_, readErr := sessiondir.ReadRecord(run.stateRoot, run.name)
+	require.True(t, os.IsNotExist(readErr),
+		"a refused claim must leave no record behind, got %v", readErr)
 }
 
 func Test_Host_NeverPublishesReadyWhenCommandCannotStart(t *testing.T) {
@@ -430,5 +438,10 @@ func Test_Host_NeverPublishesReadyWhenCommandCannotStart(t *testing.T) {
 	seen := <-statuses
 	require.NotContains(t, seen, sessiondir.StatusReady,
 		"a session whose command never started must never have been published as ready")
-	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
+
+	rec := run.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Equal(t, sessiondir.ReasonStartupFailed, rec.Reason,
+		"a command that never started is a startup failure, not an outcome of its own")
+	require.Nil(t, rec.ExitCode)
 }
