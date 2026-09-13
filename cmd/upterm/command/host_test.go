@@ -169,6 +169,71 @@ func Test_collectUserRefs_reportsEveryBadReference(t *testing.T) {
 	assert.ErrorContains(t, err, "refusing to fetch keys over http://")
 }
 
+// Test_collectUserRefs_legacyFlagsMatchTheNewForm pins the compatibility
+// requirement that --codeberg-user alice and --authorized-user codeberg:alice
+// are the same request. It covers all four legacy flags because the only way
+// the translation can break is a swapped entry in the legacyUserFlags table,
+// which a github-only test would not catch.
+func Test_collectUserRefs_legacyFlagsMatchTheNewForm(t *testing.T) {
+	origAuthorized := flagAuthorizedUsers
+	origCodeberg := flagCodebergUsers
+	origGitHub := flagGitHubUsers
+	origGitLab := flagGitLabUsers
+	origSourceHut := flagSourceHutUsers
+	t.Cleanup(func() {
+		flagAuthorizedUsers = origAuthorized
+		flagCodebergUsers = origCodeberg
+		flagGitHubUsers = origGitHub
+		flagGitLabUsers = origGitLab
+		flagSourceHutUsers = origSourceHut
+	})
+
+	t.Setenv("GH_HOST", "github.com")
+
+	resetAllUserFlags := func() {
+		flagAuthorizedUsers = nil
+		flagCodebergUsers = nil
+		flagGitHubUsers = nil
+		flagGitLabUsers = nil
+		flagSourceHutUsers = nil
+	}
+
+	cases := []struct {
+		name     string
+		provider string
+		values   *[]string
+	}{
+		{"codeberg", "codeberg", &flagCodebergUsers},
+		{"github", "github", &flagGitHubUsers},
+		{"gitlab", "gitlab", &flagGitLabUsers},
+		{"srht", "srht", &flagSourceHutUsers},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// legacy form
+			resetAllUserFlags()
+			*c.values = []string{"alice"}
+			viaLegacy, err := collectUserRefs()
+			require.NoError(t, err)
+			require.Len(t, viaLegacy, 1)
+
+			// new form
+			resetAllUserFlags()
+			flagAuthorizedUsers = []string{c.provider + ":alice"}
+			viaNew, err := collectUserRefs()
+			require.NoError(t, err)
+			require.Len(t, viaNew, 1)
+
+			// Compare the whole UserRef, not just Display(): a swapped provider
+			// in legacyUserFlags would still produce a plausible-looking Display()
+			// string for the wrong provider, so only a full comparison catches it.
+			assert.Equal(t, viaNew[0], viaLegacy[0],
+				"the legacy flag must translate to exactly the new-form reference")
+		})
+	}
+}
+
 func Test_authorizationRequested(t *testing.T) {
 	orig := suppliedFlags
 	t.Cleanup(func() { suppliedFlags = orig })
