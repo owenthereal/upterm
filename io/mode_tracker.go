@@ -125,8 +125,20 @@ func (m *ModeTracker) step(b byte) {
 			m.state = msNormal
 		}
 	case msCharset:
-		m.charsetG0 = []byte{0x1b, '(', b}
-		m.state = msNormal
+		switch {
+		case b == 0x1b:
+			// The designation was abandoned. Recording the ESC as the
+			// designator both loses whatever sequence it opened and leaves
+			// the snapshot ending mid-escape.
+			m.state = msEsc
+			m.reset()
+		case b < 0x30 || b > 0x7e:
+			// Not a designator at all; no charset was selected.
+			m.state = msNormal
+		default:
+			m.charsetG0 = []byte{0x1b, '(', b}
+			m.state = msNormal
+		}
 	case msCSI:
 		if b >= 0x40 && b <= 0x7e {
 			if !m.overflow {

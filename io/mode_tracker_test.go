@@ -77,6 +77,16 @@ func Test_ModeTracker_ScrollRegionFollowsTheScreenBuffer(t *testing.T) {
 	}
 }
 
+// An ESC after "ESC (" abandons the designation. Recording it as the
+// designator produced the snapshot "\x1b(\x1b", which both loses the sequence
+// that followed and leaves the joiner's terminal mid-escape.
+func Test_ModeTracker_CharsetAbandonedByEsc(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b(\x1b[?1049h"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1b[?1049h", string(m.Snapshot()))
+}
+
 func Test_ModeTracker_SplitAcrossWrites(t *testing.T) {
 	m := NewModeTracker()
 	for _, chunk := range []string{"\x1b", "[?10", "49h"} {
