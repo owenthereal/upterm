@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -81,6 +82,24 @@ func Test_MultiWriter_JoinerSeesSplitSequenceWhole(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "before\x1b[?1049hafter", late.String())
+}
+
+func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
+	w := NewMultiWriter(16) // far too small to still hold the mode sequences
+
+	_, err := w.Write([]byte("\x1b[?1049h\x1b[?2004h"))
+	require.NoError(t, err)
+	_, err = w.Write([]byte("0123456789abcdefghij"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	got := late.String()
+	require.True(t, strings.HasPrefix(got, "\x1b[?1049h\x1b[?2004h"),
+		"replay must open with the mode snapshot, got %q", got)
+	require.True(t, strings.HasSuffix(got, "defghij"),
+		"replay must still end with the ring's tail, got %q", got)
 }
 
 func Test_MultiWriter(t *testing.T) {

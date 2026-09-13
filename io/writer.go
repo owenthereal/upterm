@@ -85,6 +85,7 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 		writers: writers,
 		buffer:  b,
 		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
+		modes:   NewModeTracker(),
 	}
 }
 
@@ -126,6 +127,10 @@ type MultiWriter struct {
 	// writeMu.
 	replay *TerminalQueryFilter
 
+	// modes records terminal state the ring loses once it scrolls out, so a
+	// joining writer can be restored to it before the replay.
+	modes *ModeTracker
+
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
@@ -158,6 +163,11 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	}
 
 	for _, w := range writers {
+		if snap := t.modes.Snapshot(); len(snap) > 0 {
+			if _, err := w.Write(snap); err != nil {
+				return err
+			}
+		}
 		for _, d := range t.buffer.Data() {
 			if _, err := w.Write(d); err != nil {
 				return err
@@ -262,6 +272,7 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	_, _ = t.modes.Write(p)
 	_, _ = t.replay.Write(p)
 
 	t.membersMu.Lock()

@@ -1,0 +1,197 @@
+package io
+
+import (
+	"bytes"
+	"sort"
+	"strconv"
+)
+
+// maxSequenceBytes caps how much of an in-progress escape sequence the tracker
+// will hold. Real mode sequences are a handful of bytes; anything longer is
+// either not a mode sequence or is a stream that will never terminate it, and
+// neither is worth unbounded memory in a process whose entire point is running
+// unattended.
+const maxSequenceBytes = 64
+
+// restorable lists the DEC private modes worth putting a reattaching terminal
+// back into. Everything else is ignored, which is what keeps both the tracked
+// set and the emitted snapshot bounded by a constant rather than by whatever
+// the command decided to emit.
+var restorable = map[int]struct{}{
+	1:    {}, // DECCKM, application cursor keys
+	7:    {}, // DECAWM, autowrap
+	25:   {}, // DECTCEM, cursor visibility
+	47:   {}, // legacy alternate screen
+	1000: {}, // X11 mouse: button events
+	1002: {}, // mouse: button + drag
+	1003: {}, // mouse: any motion
+	1004: {}, // focus reporting
+	1005: {}, // UTF-8 mouse encoding
+	1006: {}, // SGR mouse encoding
+	1047: {}, // alternate screen
+	1048: {}, // save/restore cursor
+	1049: {}, // alternate screen + cursor, the common one
+	2004: {}, // bracketed paste
+}
+
+// restorableModes returns the tracked mode numbers. It exists for tests.
+func restorableModes() []int {
+	out := make([]int, 0, len(restorable))
+	for n := range restorable {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// ModeTracker watches terminal output and remembers the modes set on it, so a
+// reader joining later can be put into the same modes before it is handed the
+// replay ring.
+//
+// It is deliberately not a terminal emulator: it reconstructs no screen and no
+// cursor position. Anything it does not recognise passes through unrecorded.
+//
+// Not safe for concurrent use. MultiWriter owns one and only touches it under
+// writeMu.
+type ModeTracker struct {
+	decPrivate   map[int]bool
+	scrollRegion []byte // last DECSTBM, verbatim
+	charsetG0    []byte // last "ESC ( X", verbatim
+
+	seq      []byte
+	overflow bool // current sequence exceeded maxSequenceBytes; discard it
+	state    modeState
+}
+
+type modeState int
+
+const (
+	msNormal modeState = iota
+	msEsc
+	msCSI
+	msCharset
+)
+
+func NewModeTracker() *ModeTracker {
+	return &ModeTracker{decPrivate: map[int]bool{}}
+}
+
+// bufferedBytes reports the parser's current accumulation. It exists for tests.
+func (m *ModeTracker) bufferedBytes() int { return len(m.seq) }
+
+// Write consumes output and records mode changes. It never fails and never
+// alters the stream; callers use it as an observer, not a filter.
+func (m *ModeTracker) Write(p []byte) (int, error) {
+	for _, b := range p {
+		m.step(b)
+	}
+	return len(p), nil
+}
+
+func (m *ModeTracker) step(b byte) {
+	switch m.state {
+	case msNormal:
+		if b == 0x1b {
+			m.state = msEsc
+			m.reset()
+		}
+	case msEsc:
+		switch b {
+		case 0x1b:
+			// ESC ESC: restart rather than fall out of sync.
+			m.reset()
+		case '[':
+			m.state = msCSI
+			m.reset()
+		case '(':
+			m.state = msCharset
+		default:
+			m.state = msNormal
+		}
+	case msCharset:
+		m.charsetG0 = []byte{0x1b, '(', b}
+		m.state = msNormal
+	case msCSI:
+		if b >= 0x40 && b <= 0x7e {
+			if !m.overflow {
+				m.finishCSI(b)
+			}
+			m.state = msNormal
+			m.reset()
+			return
+		}
+		if b == 0x1b {
+			// An ESC inside a CSI means the sequence was abandoned. Recover
+			// rather than swallow everything that follows.
+			m.state = msEsc
+			m.reset()
+			return
+		}
+		if len(m.seq) >= maxSequenceBytes {
+			// Stop accumulating but stay in msCSI, so the sequence's real
+			// terminator still returns the parser to normal.
+			m.overflow = true
+			return
+		}
+		m.seq = append(m.seq, b)
+	}
+}
+
+func (m *ModeTracker) reset() {
+	m.seq = m.seq[:0]
+	m.overflow = false
+}
+
+func (m *ModeTracker) finishCSI(final byte) {
+	params := m.seq
+
+	switch final {
+	case 'h', 'l':
+		// Only DEC private modes, marked by a leading '?'.
+		if len(params) == 0 || params[0] != '?' {
+			return
+		}
+		set := final == 'h'
+		for _, field := range bytes.Split(params[1:], []byte{';'}) {
+			n, err := strconv.Atoi(string(field))
+			if err != nil {
+				continue
+			}
+			if _, ok := restorable[n]; !ok {
+				continue
+			}
+			m.decPrivate[n] = set
+		}
+	case 'r':
+		// DECSTBM, stored verbatim including a bare reset.
+		seq := make([]byte, 0, len(params)+3)
+		seq = append(seq, 0x1b, '[')
+		seq = append(seq, params...)
+		seq = append(seq, 'r')
+		m.scrollRegion = seq
+	}
+}
+
+// Snapshot returns the bytes that put a fresh terminal into the recorded modes.
+// Its length is bounded by len(restorable) plus the two verbatim sequences.
+func (m *ModeTracker) Snapshot() []byte {
+	nums := make([]int, 0, len(m.decPrivate))
+	for n := range m.decPrivate {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+
+	var out []byte
+	for _, n := range nums {
+		out = append(out, 0x1b, '[', '?')
+		out = append(out, []byte(strconv.Itoa(n))...)
+		if m.decPrivate[n] {
+			out = append(out, 'h')
+		} else {
+			out = append(out, 'l')
+		}
+	}
+	out = append(out, m.scrollRegion...)
+	out = append(out, m.charsetG0...)
+	return out
+}
