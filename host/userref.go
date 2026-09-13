@@ -330,17 +330,39 @@ func githubAPIPrefix(host string) string {
 		if port != "" {
 			return "https://" + net.JoinHostPort(normalized, port) + "/api/v3/"
 		}
-		return "https://" + normalized + "/api/v3/"
+		return "https://" + bracketIfIPv6(normalized) + "/api/v3/"
 	}
 
 	return "https://api." + normalized + "/"
 }
 
 // splitHostPort splits host[:port], returning an empty port when absent.
+//
+// The hostname always comes back unbracketed, matching net.SplitHostPort and
+// url.URL.Hostname. That matters because go-gh attaches its token by comparing
+// ClientOptions.Host against req.URL.Hostname(): a bracketed IPv6 literal would
+// match nothing there and the request would go out anonymously. Rebuilding a
+// URL authority from the result therefore needs bracketIfIPv6 or
+// net.JoinHostPort, which restore the brackets a URL requires.
 func splitHostPort(host string) (string, string) {
 	hostname, port, err := net.SplitHostPort(host)
 	if err != nil {
+		// No port: net.SplitHostPort rejects a bracket-only authority, so the
+		// brackets are still attached and must come off here.
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			return host[1 : len(host)-1], ""
+		}
 		return host, ""
 	}
 	return hostname, port
+}
+
+// bracketIfIPv6 wraps an IPv6 literal in the brackets a URL authority requires.
+// net.JoinHostPort does this already when there is a port; this covers the
+// portless case.
+func bracketIfIPv6(host string) string {
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }

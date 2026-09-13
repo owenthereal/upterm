@@ -230,6 +230,11 @@ func Test_githubAPIPrefix(t *testing.T) {
 		{name: "tenancy subdomain normalizes", host: "sub.acme.ghe.com", want: "https://api.acme.ghe.com/"},
 		{name: "enterprise server", host: "ghe.corp.com", want: "https://ghe.corp.com/api/v3/"},
 		{name: "enterprise server with a port", host: "ghe.corp.com:8443", want: "https://ghe.corp.com:8443/api/v3/"},
+		// The brackets must survive into the URL either way — an IPv6 authority
+		// is invalid without them — even though splitHostPort strips them off
+		// the hostname it returns.
+		{name: "ipv6 literal", host: "[2001:db8::1]", want: "https://[2001:db8::1]/api/v3/"},
+		{name: "ipv6 literal with a port", host: "[2001:db8::1]:8443", want: "https://[2001:db8::1]:8443/api/v3/"},
 	}
 
 	for _, c := range cases {
@@ -291,6 +296,24 @@ func Test_githubClientConfig(t *testing.T) {
 			wantAPIURL:     "https://ghe.corp.com:8443/api/v3/users/alice/keys?per_page=100",
 			wantClientHost: "ghe.corp.com",
 			wantOrigin:     "ghe.corp.com:8443",
+		},
+		{
+			// The authority keeps its brackets (an IPv6 URL is invalid without
+			// them) but clientHost must not: go-gh compares it against
+			// req.URL.Hostname(), which is always unbracketed, so brackets here
+			// mean the token is silently never attached.
+			name:           "bracketed ipv6 literal with no port",
+			ref:            "github:alice@[2001:db8::1]",
+			wantAPIURL:     "https://[2001:db8::1]/api/v3/users/alice/keys?per_page=100",
+			wantClientHost: "2001:db8::1",
+			wantOrigin:     "[2001:db8::1]",
+		},
+		{
+			name:           "bracketed ipv6 literal with a port",
+			ref:            "github:alice@[2001:db8::1]:8443",
+			wantAPIURL:     "https://[2001:db8::1]:8443/api/v3/users/alice/keys?per_page=100",
+			wantClientHost: "2001:db8::1",
+			wantOrigin:     "[2001:db8::1]:8443",
 		},
 	}
 

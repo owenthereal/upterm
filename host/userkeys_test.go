@@ -1035,6 +1035,31 @@ func Test_githubUserKeys_doesNotSendAPortlessCredentialToAnotherPort(t *testing.
 	}
 }
 
+func Test_githubUserKeys_authenticatesAgainstABracketedIPv6Host(t *testing.T) {
+	// A GHES reachable only by IPv6 literal. go-gh attaches the token by
+	// comparing ClientOptions.Host against req.URL.Hostname(), which strips the
+	// brackets, so a bracketed clientHost matches nothing and the request goes
+	// out anonymously — a private instance then answers 401 and the reference
+	// looks broken rather than misconfigured.
+	for _, ref := range []string{"github:alice@[2001:db8::1]", "github:alice@[2001:db8::1]:8443"} {
+		t.Run(ref, func(t *testing.T) {
+			pinHostScopedToken(t, "v6-token")
+
+			parsed, err := ParseUserRef(ref)
+			require.NoError(t, err)
+
+			rec := &recordingRT{body: `[{"key":"` + testPublicKey + `"}]`}
+			f := &Fetcher{Logger: testLogger(), Transport: rec}
+			_, err = f.AuthorizedKeys(t.Context(), []UserRef{parsed})
+			require.NoError(t, err)
+
+			require.Len(t, rec.reqs, 1)
+			assert.Equal(t, "token v6-token", rec.reqs[0].Header.Get("Authorization"),
+				"the token must reach an IPv6 GHES, bracketed authority or not")
+		})
+	}
+}
+
 func Test_hostScopedToken_readsHostScopedStorageOnly(t *testing.T) {
 	// GH_ENTERPRISE_TOKEN applies to every enterprise host, so honoring it
 	// would send one instance's token to another.
