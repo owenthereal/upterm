@@ -9,6 +9,8 @@ import (
 )
 
 func main() {
+	command.InstallSignalPolicy()
+
 	if err := command.Root().Execute(); err != nil {
 		// Don't log errors that have already been displayed to the user
 		var silentErr command.SilentError

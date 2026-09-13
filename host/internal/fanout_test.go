@@ -34,6 +34,11 @@ func (r *recordingWriter) bytes() []byte {
 	return slices.Clone(r.written)
 }
 
+func testLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 // A guest that reaches the door after the fan-out has quiesced is refused, and
 // the sink built for it must not outlive the attempt.
 //

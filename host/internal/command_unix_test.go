@@ -19,7 +19,16 @@ import (
 
 // TestCommand_Unix_PTY verifies Unix-specific PTY functionality.
 // This test validates that a real PTY is properly detected as a TTY
-// and stdin forwarding is enabled.
+// and that stdin read from one is forwarded to the command.
+//
+// It cannot also assert that being a TTY is on its own enough to turn
+// forwarding on, because that is no longer the rule: Run forwards from a
+// terminal it is in the foreground of, and a pty pair opened in-process is the
+// controlling terminal of no session, so tcgetpgrp on it fails and ownsTerminal
+// is false. Making it true would need setsid plus TIOCSCTTY, which would detach
+// the test binary from its own terminal. Foreground ownership is observable
+// only where there is a real session to be in the foreground of, which is what
+// the tmux cases in internal/e2e are for.
 func TestCommand_Unix_PTY(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -45,7 +54,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	ee := &emitter.Emitter{}
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
-	// Create command with real PTY (ForceForwardingInputForTesting not needed)
+	// Create command with real PTY
 	// Use 'head -n 1' which exits immediately after reading one line
 	// This is more reliable than 'read' which has timing issues with bash initialization
 	cmd := newCommand(
@@ -60,7 +69,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 		ee,
 		writers,
 		discardLogger(),
-		false, // Should not be needed for real TTY
+		true, // an in-process pty is nobody's foreground; see the doc comment
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -124,4 +133,49 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		assert.Fail("no output captured - PTY may not be forwarding data correctly")
 	}
+}
+
+func Test_Command_StdinCloseDoesNotEndSession(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	out := &recordingWriter{}
+	require.NoError(t, writers.Append(out))
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer func() { _ = devNull.Close() }()
+
+	cmd := newCommand(
+		"sh", []string{"-c", "sleep 0.5; echo ALIVE"},
+		nil, termsize.Default, false, "xterm-256color",
+		r, devNull, emitter.New(1), writers, testLogger(t), true,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = cmd.Start(ctx)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	// Kill stdin while the command is still running. Only the write end is
+	// closed here: Run reads c.stdin's descriptor, so closing the read end
+	// concurrently is a data race on os.File, not a scenario. EOF is the
+	// pointed case anyway — the copy returns a nil error, and returning nil
+	// would end the session exactly as surely as returning one.
+	require.NoError(t, w.Close())
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("command did not finish")
+	}
+	require.NoError(t, r.Close())
+
+	require.Contains(t, string(out.bytes()), "ALIVE",
+		"the command must run to completion after stdin dies")
 }

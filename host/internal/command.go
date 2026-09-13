@@ -167,11 +167,22 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 	return c.ptmx, nil
 }
 
-func (c *command) Run() error {
-	// Set stdin in raw mode.
-	isTty := term.IsTerminal(int(c.stdin.Fd()))
+// logInputEnded records that input forwarding stopped. It is not an error for
+// the session, only the end of one of its inputs.
+func (c *command) logInputEnded(err error) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.Debug("stdin forwarding ended; session continues", "error", err)
+}
 
-	if isTty {
+func (c *command) Run() error {
+	// Not "is stdin a terminal" but "is stdin a terminal we are entitled to
+	// touch". Backgrounded, these are someone else's terminal's settings.
+	owns := ownsTerminal(c.stdin)
+
+	if owns {
+		// Set stdin in raw mode.
 		oldState, err := term.MakeRaw(int(c.stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
@@ -180,20 +191,33 @@ func (c *command) Run() error {
 	}
 
 	var g run.Group
-	if isTty {
+	if owns {
 		// Setup terminal resize handling (platform-specific)
 		c.setupTerminalResize(&g, c.stdin, c.ptmx, c.eventEmitter)
 	}
 
-	// Forward stdin if it's a TTY or if forced for testing.
-	// Do not forward stdin if it's not a TTY to avoid blocking indefinitely on io.Copy,
-	// since non-TTY stdin (pipes, redirects) may never receive EOF in daemon-like scenarios.
-	if isTty || c.forceForwardingInputForTesting {
+	// Forward stdin only from a terminal we own, or when forced for testing.
+	// A pipe or a redirect is nobody's terminal and may never see EOF, and a
+	// terminal we are not in the foreground of is not ours to read.
+	if owns || c.forceForwardingInputForTesting {
 		// input - forward stdin to PTY
 		ctx, cancel := context.WithCancel(c.ctx)
 		g.Add(func() error {
+			// The copy ending is not the session ending. stdin can die on its
+			// own — a backgrounded process, a closed terminal, plain EOF —
+			// while the command is perfectly healthy.
+			//
+			// Returning here would end the session either way: run.Group
+			// interrupts every actor as soon as any one of them returns, and it
+			// never looks at the error. Returning nil would be exactly as fatal
+			// as returning the error. So park until the session is cancelled,
+			// which the interrupt below does.
 			_, err := io.Copy(c.ptmx, uio.NewContextReader(ctx, c.stdin))
-			return err
+			if err != nil {
+				c.logInputEnded(err)
+			}
+			<-ctx.Done()
+			return nil
 		}, func(err error) {
 			cancel()
 		})

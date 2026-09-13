@@ -375,6 +375,63 @@ func TestAuthorizedKeys(t *testing.T) {
 		"unauthorized client should be rejected")
 }
 
+// TestBackgroundedHost validates that `upterm host … &` survives being put in
+// the background: the job keeps running rather than stopping on SIGTTIN, the
+// pane it was launched from stays usable, and the session is reachable.
+func TestBackgroundedHost(t *testing.T) {
+	h := newTestHarness(t, 200)
+
+	// startHost only knows how to launch in the foreground, and the trailing
+	// `&` is the entire point here, so send the line directly.
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s -- bash --rcfile %s --noprofile &",
+		h.serverURL, h.keyFile, h.rcFile)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second),
+		"backgrounded host failed to establish a session")
+
+	output, err := h.host.Capture(h.ctx)
+	require.NoError(t, err)
+	sshCmd := extractSSHCommand(output)
+	require.NotEmpty(t, sshCmd, "failed to extract SSH command from output:\n%s", output)
+
+	// 1. The prompt came back and the job is running. A host stopped by SIGTTIN
+	// would be reported as `Stopped (tty input)` instead.
+	require.NoError(t, h.host.SendLine(h.ctx, "jobs"))
+	require.NoError(t, h.waitForText(h.host, "Running", 10*time.Second),
+		"backgrounded host is not running")
+	jobsOutput, err := h.host.Capture(h.ctx)
+	require.NoError(t, err)
+	require.NotContains(t, ansiEscapeRe.ReplaceAllString(jobsOutput, ""), "Stopped",
+		"backgrounded host was stopped by the terminal")
+
+	// 2. The pane's terminal is still cooked. A background process that had
+	// been allowed to call tcsetattr would have left it in raw mode.
+	cooked := fmt.Sprintf("COOKED_%d", time.Now().UnixNano())
+	require.NoError(t, h.host.SendLine(h.ctx, "echo "+cooked))
+	require.NoError(t, h.waitForText(h.host, cooked, 10*time.Second),
+		"the pane's terminal is no longer usable")
+
+	// 3. The session is reachable: a guest sees the command's prompt.
+	client := h.splitPane(h.host)
+	h.connectClient(client, sshCmd)
+
+	// 4. After `fg`, input from the pane still does not reach the command.
+	//
+	// This pins the stage-1 limit rather than papering over it: terminal
+	// ownership is decided once, in command.Run, so a session started in the
+	// background registers no input actor and `fg` cannot create one
+	// afterwards. Getting a local terminal onto a backgrounded session is what
+	// `upterm attach` is for, which is stage 2.
+	require.NoError(t, h.host.SendLine(h.ctx, "fg"))
+	time.Sleep(time.Second)
+	require.NoError(t, h.host.SendLine(h.ctx, "echo FG_MARKER"))
+	time.Sleep(3 * time.Second)
+	clientOutput, err := client.Capture(h.ctx)
+	require.NoError(t, err)
+	require.NotContains(t, clientOutput, "FG_MARKER",
+		"fg must not restore input forwarding to a backgrounded session")
+}
+
 // TestSessionInfo validates that the TUI displays correct session information.
 func TestSessionInfo(t *testing.T) {
 	h := newTestHarness(t, 200)

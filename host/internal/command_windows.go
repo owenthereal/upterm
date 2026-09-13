@@ -9,7 +9,15 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	"golang.org/x/term"
 )
+
+// ownsTerminal reports whether f is a terminal this process may touch. Windows
+// has no process groups in this sense and no SIGTTIN, so there is nothing to
+// be in the foreground of: being a terminal is the whole of the question.
+func ownsTerminal(f *os.File) bool {
+	return f != nil && term.IsTerminal(int(f.Fd()))
+}
 
 // setupTerminalResize polls for terminal size changes on Windows
 // Windows doesn't have SIGWINCH signals like Unix, so we poll for terminal size changes
