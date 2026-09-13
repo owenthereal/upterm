@@ -594,6 +594,40 @@ func Test_githubUserKeys_stripsCredentialOnCrossOriginRedirect(t *testing.T) {
 	assert.Empty(t, gotAuth, "the GitHub path must also follow cross-origin redirects anonymously")
 }
 
+func Test_Fetcher_zeroValueLoggerDoesNotPanic(t *testing.T) {
+	// Fetcher is exported, so a third-party caller can construct &Fetcher{}
+	// with no Logger set. Exercise both call sites that log through it
+	// (fetchTransport.RoundTrip's credential strip and redirectPolicy's
+	// cross-origin hop) to confirm AuthorizedKeys defaults the logger rather
+	// than panicking on the first nil *slog.Logger.Debug call.
+	var gotAuth string
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer target.Close()
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(origin.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Transport: tlsPool(t, origin, target)}
+
+	var aks []*AuthorizedKey
+	require.NotPanics(t, func() {
+		aks, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	})
+	require.NoError(t, err)
+	require.Len(t, aks, 1)
+	assert.Empty(t, gotAuth, "the credential must still be stripped across the redirect")
+}
+
 func Test_githubUserKeys_refusesRedirectToPlaintext(t *testing.T) {
 	var plaintextHits int
 	plaintext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -222,7 +222,11 @@ func githubClientConfig(ref UserRef) (apiURL, clientHost, origin string, err err
 	host := ref.ResolveHost()
 	hostname, _ := splitHostPort(host)
 
-	apiURL = githubAPIPrefix(host) + "users/" + url.PathEscape(ref.User) + "/keys"
+	// per_page=100 is the API maximum. Without it the endpoint defaults to 30
+	// and returns no Link: rel="next" following here, so a user with 31+
+	// public keys would silently lose the rest on the authenticated path
+	// while the anonymous .keys fallback returns all of them.
+	apiURL = githubAPIPrefix(host) + "users/" + url.PathEscape(ref.User) + "/keys?per_page=100"
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
 		return "", "", "", err

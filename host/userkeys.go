@@ -117,6 +117,14 @@ func AuthorizedKeysFromUserRefs(ctx context.Context, refs []UserRef, logger *slo
 // Any failure fails the whole call: continuing with a partial set can, in the
 // limit, degrade "only alice may join" into "anyone may join".
 func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*AuthorizedKey, error) {
+	if f.Logger == nil {
+		// Fetcher is exported, so a third-party caller can construct &Fetcher{}
+		// directly. fetchTransport.RoundTrip and redirectPolicy call
+		// logger.Debug with no nil guard (unlike base, which is nil-checked),
+		// so every downstream construction needs a real logger.
+		f.Logger = slog.New(slog.DiscardHandler)
+	}
+
 	var (
 		result []*AuthorizedKey
 		errs   error
@@ -353,6 +361,11 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedK
 		AuthToken: token,
 		Timeout:   fetchTimeout,
 		Transport: &fetchTransport{origin: origin, base: f.Transport, logger: f.Logger},
+		// go-gh otherwise respects GH_DEBUG and installs httpretty with
+		// RequestHeader: true, which writes "Authorization: token ghp_…" to a
+		// hardcoded os.Stderr — printing the credential to the terminal, or
+		// into a CI build log, on any host where that variable is set.
+		LogIgnoreEnv: true,
 	})
 	if err != nil {
 		return nil, err
