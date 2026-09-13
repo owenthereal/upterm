@@ -467,7 +467,13 @@ func Test_githubUserKeys_propagatesCredentialLookupFailure(t *testing.T) {
 func shortCredentialTimeout(t *testing.T) {
 	t.Helper()
 	restore := credentialTimeout
-	credentialTimeout = 200 * time.Millisecond
+	// 1s, not a tighter value: keyringToken applies credentialTimeout as a
+	// deadline from the moment it is called, so it must cover the stub's own
+	// process startup as well as the post-cancel WaitDelay. Writing a fresh
+	// executable and running it measures ~270ms on macOS, which is why 200ms
+	// killed the stub before it could touch its marker file and the test's
+	// Eventually never fired.
+	credentialTimeout = 1 * time.Second
 	t.Cleanup(func() { credentialTimeout = restore })
 }
 
