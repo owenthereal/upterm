@@ -24,8 +24,13 @@ const (
 	fetchTimeout = 5 * time.Second
 	// maxRedirects bounds a single fetch's redirect chain.
 	maxRedirects = 5
-	// maxKeysBody bounds how much of a response we will parse as keys.
+	// maxKeysBody bounds how much of a response we will parse as keys. On the
+	// paginated GitHub path it bounds the sum of every page, so a hostile
+	// Link: rel="next" chain cannot make us read unboundedly.
 	maxKeysBody = 1 << 20
+	// maxKeyPages bounds how many Link: rel="next" hops one GitHub key listing
+	// may take. At per_page=100 that is 1000 keys, far past any real account.
+	maxKeyPages = 10
 )
 
 // fetchTransport enforces two invariants on every request, including every
@@ -117,12 +122,15 @@ func AuthorizedKeysFromUserRefs(ctx context.Context, refs []UserRef, logger *slo
 // Any failure fails the whole call: continuing with a partial set can, in the
 // limit, degrade "only alice may join" into "anyone may join".
 func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*AuthorizedKey, error) {
-	if f.Logger == nil {
-		// Fetcher is exported, so a third-party caller can construct &Fetcher{}
-		// directly. fetchTransport.RoundTrip and redirectPolicy call
-		// logger.Debug with no nil guard (unlike base, which is nil-checked),
-		// so every downstream construction needs a real logger.
-		f.Logger = slog.New(slog.DiscardHandler)
+	// Fetcher is exported, so a third-party caller can construct &Fetcher{}
+	// directly. fetchTransport.RoundTrip and redirectPolicy call logger.Debug
+	// with no nil guard (unlike base, which is nil-checked), so every
+	// downstream construction needs a real logger. The default is a local
+	// rather than an assignment to f.Logger: a Fetcher shared between
+	// goroutines would otherwise be written to while another fetch reads it.
+	logger := f.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 
 	var (
@@ -138,7 +146,7 @@ func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*Author
 		}
 		seen[key] = true
 
-		ak, err := f.fetch(ctx, ref)
+		ak, err := f.fetch(ctx, logger, ref)
 		if err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("%s: %w", ref.Raw, err))
 			continue
@@ -152,22 +160,22 @@ func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*Author
 	return result, nil
 }
 
-func (f *Fetcher) fetch(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+func (f *Fetcher) fetch(ctx context.Context, logger *slog.Logger, ref UserRef) (*AuthorizedKey, error) {
 	if ref.Provider == "github" {
-		return f.githubUserKeys(ctx, ref)
+		return f.githubUserKeys(ctx, logger, ref)
 	}
-	return f.genericUserKeys(ctx, ref)
+	return f.genericUserKeys(ctx, logger, ref)
 }
 
 // genericUserKeys reads the {base}/{user}.keys endpoint every supported forge
 // serves, anonymously.
-func (f *Fetcher) genericUserKeys(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+func (f *Fetcher) genericUserKeys(ctx context.Context, logger *slog.Logger, ref UserRef) (*AuthorizedKey, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ref.KeysURL(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := newFetchClient("", f.Transport, f.Logger).Do(req)
+	resp, err := newFetchClient("", f.Transport, logger).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +340,7 @@ func resolveToken(ctx context.Context, ref UserRef, hostname string) (string, er
 // cap must live in CheckRedirect, which ClientOptions does not expose and
 // RESTClient keeps unexported. That means building the API URL here, which is
 // also what makes non-default ports work.
-func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref UserRef) (*AuthorizedKey, error) {
 	apiURL, clientHost, origin, err := githubClientConfig(ref)
 	if err != nil {
 		return nil, err
@@ -346,10 +354,10 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedK
 	}
 	if token == "" {
 		if ref.Mode == CredentialHostScoped {
-			f.Logger.Warn("no credential stored for host; fetching keys anonymously",
+			logger.Warn("no credential stored for host; fetching keys anonymously",
 				"host", hostname, "fix", "gh auth login --hostname "+hostname)
 		}
-		return f.genericUserKeys(ctx, ref)
+		return f.genericUserKeys(ctx, logger, ref)
 	}
 
 	// clientHost is the *normalized* hostname with no port. go-gh matches it
@@ -360,49 +368,110 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedK
 		Host:      clientHost,
 		AuthToken: token,
 		Timeout:   fetchTimeout,
-		Transport: &fetchTransport{origin: origin, base: f.Transport, logger: f.Logger},
+		Transport: &fetchTransport{origin: origin, base: f.Transport, logger: logger},
 		// go-gh otherwise respects GH_DEBUG and installs httpretty with
-		// RequestHeader: true, which writes "Authorization: token ghp_…" to a
-		// hardcoded os.Stderr — printing the credential to the terminal, or
-		// into a CI build log, on any host where that variable is set.
+		// RequestHeader/ResponseBody: true, which dumps the instance URL, the
+		// request headers and the whole key payload to a hardcoded os.Stderr —
+		// onto the terminal, or into a CI build log, on any machine where that
+		// variable happens to be exported. httpretty's default sanitizer
+		// redacts the Authorization *value* (so the token itself survives
+		// today), but that is an indirect dependency's default rather than
+		// something this package should depend on, and GH_DEBUG is the gh CLI's
+		// switch, not upterm's.
 		LogIgnoreEnv: true,
 	})
 	if err != nil {
 		return nil, err
 	}
-	client.CheckRedirect = redirectPolicy(f.Logger)
+	client.CheckRedirect = redirectPolicy(logger)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	// Every page goes through this one client, so each request is policed by
+	// the same fetchTransport (https-only, credential confined to origin) and
+	// the same redirect cap as the first. A next URL is server-supplied, so
+	// building a second client for it would be how a cross-origin next hop
+	// escapes those rules.
+	var (
+		lines []string
+		total int
+	)
+	for pageURL, page := apiURL, 1; pageURL != ""; page++ {
+		if page > maxKeyPages {
+			return nil, fmt.Errorf("key listing from %s spans more than %d pages", ref.ResolveHost(), maxKeyPages)
+		}
+
+		body, next, err := readKeyPage(ctx, client, ref, pageURL)
+		if err != nil {
+			return nil, err
+		}
+
+		// readKeyPage bounds each page; this bounds the chain as a whole.
+		total += len(body)
+		if total > maxKeysBody {
+			return nil, fmt.Errorf("key listing from %s exceeds %d bytes", ref.ResolveHost(), maxKeysBody)
+		}
+
+		var keys []struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(body, &keys); err != nil {
+			return nil, fmt.Errorf("error decoding keys from %s: %w", ref.ResolveHost(), err)
+		}
+		for _, k := range keys {
+			lines = append(lines, k.Key)
+		}
+
+		pageURL = next
+	}
+
+	return parseAuthorizedKeys([]byte(strings.Join(lines, "\n")), ref.Display())
+}
+
+// readKeyPage fetches one page of a GitHub key listing and reports the next
+// page's URL, if the response advertised one.
+func readKeyPage(ctx context.Context, client *http.Client, ref UserRef, pageURL string) ([]byte, string, error) {
+	// A fresh request per page, built with the context, so cancellation and the
+	// client's per-request timeout still apply to page 2 and beyond.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if err := checkStatus(resp, ref); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	body, err := readKeysBody(resp.Body, ref)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	var keys []struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(body, &keys); err != nil {
-		return nil, fmt.Errorf("error decoding keys from %s: %w", ref.ResolveHost(), err)
-	}
+	return body, nextPageURL(resp.Header.Get("Link")), nil
+}
 
-	lines := make([]string, 0, len(keys))
-	for _, k := range keys {
-		lines = append(lines, k.Key)
+// nextPageURL extracts the rel="next" target from a Link header.
+//
+// Absent or malformed means "no more pages" rather than an error: a listing
+// that otherwise succeeded should not fail over a header we could not read.
+// What keeps that safe is that truncation can only deny access, and that a
+// next URL we *do* follow is still subject to every rule the first request
+// was — it is requested through the same policed client.
+func nextPageURL(link string) string {
+	for _, segment := range strings.Split(link, ",") {
+		if !strings.Contains(segment, `rel="next"`) {
+			continue
+		}
+		start := strings.Index(segment, "<")
+		end := strings.Index(segment, ">")
+		if start < 0 || end < start {
+			continue
+		}
+		return strings.TrimSpace(segment[start+1 : end])
 	}
-
-	return parseAuthorizedKeys([]byte(strings.Join(lines, "\n")), ref.Display())
+	return ""
 }

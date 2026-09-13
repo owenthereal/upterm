@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 func testLogger() *slog.Logger {
@@ -342,6 +344,28 @@ func Test_Fetcher_dedup(t *testing.T) {
 	assert.ElementsMatch(t, []string{"/team-a/alice.keys", "/team-b/alice.keys"}, paths)
 }
 
+func Test_Fetcher_dedupsIdenticalProviderRefs(t *testing.T) {
+	// The raw-URL case above exercises dedupKey's URL branch only. A
+	// provider reference takes the other branch, built from provider, resolved
+	// host, user and credential mode.
+	var hits int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(testPublicKey))
+	}))
+	defer server.Close()
+
+	ref, err := ParseUserRef("gitea:alice@" + strings.TrimPrefix(server.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref, ref})
+	require.NoError(t, err)
+
+	require.Len(t, aks, 1)
+	assert.Equal(t, 1, hits, "the same reference twice must be fetched once")
+}
+
 func Test_Fetcher_honorsContextCancellation(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -549,7 +573,6 @@ func Test_githubUserKeys_authenticatedRequestReachesTheAPIOrigin(t *testing.T) {
 	// still pass. Only github.com separates them: the reference names
 	// github.com while the request goes to api.github.com.
 	pinGitHubHost(t, "github.com")
-	pinHostScopedToken(t, "")
 	t.Setenv("GH_TOKEN", "ambient-token")
 
 	rec := &recordingRT{body: `[{"key":"` + testPublicKey + `"}]`}
@@ -592,6 +615,283 @@ func Test_githubUserKeys_stripsCredentialOnCrossOriginRedirect(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, gotAuth, "the GitHub path must also follow cross-origin redirects anonymously")
+}
+
+// Test_githubUserKeys_capsRedirects pins client.CheckRedirect on the GitHub
+// path. It is installed by a different route than the generic client's —
+// api.NewHTTPClient returns a client with no redirect policy and ClientOptions
+// cannot express one — so the other GitHub redirect tests all survive its
+// removal: they assert properties that fetchTransport enforces per request,
+// which is blind to the length of a chain. Without the line, Go's default
+// 10-hop cap applies instead of ours.
+func Test_githubUserKeys_capsRedirects(t *testing.T) {
+	var hops int
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hops < 6 {
+			hops++
+			http.Redirect(w, r, server.URL+"/hop", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer server.Close()
+
+	// A credential must be in play, or the fetch falls back to the anonymous
+	// .keys endpoint and never builds the go-gh client under test.
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(server.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+
+	assert.ErrorContains(t, err, "stopped after 5 redirects")
+}
+
+// Test_githubUserKeys_ignoresGHDebug pins LogIgnoreEnv: true.
+//
+// Without it, go-gh honors GH_DEBUG and installs httpretty, which dumps every
+// request and response — the enterprise URL, the request headers and the whole
+// key payload — to a hardcoded os.Stderr. go-gh reads os.Stderr inside
+// api.NewHTTPClient (opts.Log = os.Stderr) rather than capturing it at init, so
+// swapping the package-level variable before the fetch does capture it.
+//
+// The assertion that discriminates is the silence, not the absence of the
+// token: httpretty's default sanitizer redacts an Authorization value to
+// "token ████…", so a token-only assertion passes with the line removed. That
+// redaction is an indirect dependency's default, one SkipSanitize away from
+// changing, which is why the token is also asserted on directly below.
+func Test_githubUserKeys_ignoresGHDebug(t *testing.T) {
+	const token = "ghp_pinningLogIgnoreEnv0123456789"
+
+	t.Setenv("GH_DEBUG", "api")
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer server.Close()
+
+	// A file, not an os.Pipe: httpretty's output can exceed a pipe's buffer,
+	// and nothing would be draining it while the fetch is in flight.
+	capture, err := os.CreateTemp(t.TempDir(), "stderr")
+	require.NoError(t, err)
+	defer func() { _ = capture.Close() }()
+
+	realStderr := os.Stderr
+	os.Stderr = capture
+	t.Cleanup(func() { os.Stderr = realStderr })
+
+	pinHostScopedToken(t, token)
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(server.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
+
+	// Restored before asserting, so a failure can still be reported.
+	os.Stderr = realStderr
+
+	require.NoError(t, err)
+	require.Len(t, aks, 1)
+
+	logged, err := os.ReadFile(capture.Name())
+	require.NoError(t, err)
+	assert.Empty(t, string(logged),
+		"a key fetch must write nothing to stderr, whatever GH_DEBUG says")
+	assert.NotContains(t, string(logged), token,
+		"the credential must never reach stderr")
+}
+
+// generateTestPublicKey returns a second valid public key, so a test can tell
+// the keys from one page apart from another's.
+func generateTestPublicKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	sshPub, err := ssh.NewPublicKey(pub)
+	require.NoError(t, err)
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
+}
+
+func marshalKeys(keys []ssh.PublicKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(k))))
+	}
+	return out
+}
+
+func Test_githubUserKeys_followsLinkPagination(t *testing.T) {
+	// per_page=100 alone only raises the ceiling. An account past that ceiling
+	// would authorize a truncated set on the authenticated path while the
+	// anonymous .keys fallback returns everyone — "can my colleague join?"
+	// answered by whether a token happened to resolve.
+	secondPageKey := generateTestPublicKey(t)
+
+	var gotQueries []string
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQueries = append(gotQueries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Query().Get("page") == "" {
+			next := server.URL + "/api/v3/users/alice/keys?per_page=100&page=2"
+			w.Header().Set("Link", `<`+next+`>; rel="next", <`+next+`>; rel="last"`)
+			_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"key":"` + secondPageKey + `"}]`))
+	}))
+	defer server.Close()
+
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(server.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.NoError(t, err)
+
+	require.Len(t, aks, 1)
+	assert.ElementsMatch(t, []string{testPublicKey, secondPageKey}, marshalKeys(aks[0].PublicKeys))
+	assert.Equal(t, []string{"per_page=100", "per_page=100&page=2"}, gotQueries,
+		"the next page must be requested exactly as advertised, and the chain must stop without one")
+}
+
+func Test_githubUserKeys_boundsThePageChain(t *testing.T) {
+	// A server that always advertises another page would otherwise loop for as
+	// long as it keeps answering.
+	var hits int
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", fmt.Sprintf(`<%s/api/v3/users/alice/keys?per_page=100&page=%d>; rel="next"`, server.URL, hits+1))
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer server.Close()
+
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(server.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+
+	assert.ErrorContains(t, err, fmt.Sprintf("spans more than %d pages", maxKeyPages))
+	assert.Equal(t, maxKeyPages, hits, "the cap must stop the chain rather than the server")
+}
+
+func Test_githubUserKeys_crossOriginNextPageIsAnonymous(t *testing.T) {
+	// The next URL is whatever the server says, so it is subject to the same
+	// rules as the first request: it is fetched through the same policed
+	// client. Here the two servers share a hostname and differ only in port —
+	// the case go-gh's isSameDomain waves through, so the credential is
+	// attached and then stripped by fetchTransport's origin check.
+	elsewhereKey := generateTestPublicKey(t)
+
+	var (
+		elsewhereHits int
+		gotAuth       string
+	)
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhereHits++
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"key":"` + elsewhereKey + `"}]`))
+	}))
+	defer elsewhere.Close()
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `<`+elsewhere.URL+`/api/v3/users/alice/keys?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer origin.Close()
+
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(origin.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, origin, elsewhere)}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.NoError(t, err)
+
+	require.Len(t, aks, 1)
+	require.Equal(t, 1, elsewhereHits, "the advertised page must actually be requested")
+	assert.Empty(t, gotAuth, "a server-supplied next URL outside the origin must be fetched anonymously")
+	assert.ElementsMatch(t, []string{testPublicKey, elsewhereKey}, marshalKeys(aks[0].PublicKeys))
+}
+
+func Test_githubUserKeys_refusesAPlaintextNextPage(t *testing.T) {
+	var plaintextHits int
+	plaintext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plaintextHits++
+	}))
+	defer plaintext.Close()
+
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `<`+plaintext.URL+`/keys?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"key":"` + testPublicKey + `"}]`))
+	}))
+	defer secure.Close()
+
+	pinHostScopedToken(t, "tok")
+
+	ref, err := ParseUserRef("github:alice@" + strings.TrimPrefix(secure.URL, "https://"))
+	require.NoError(t, err)
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, secure)}
+	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+
+	assert.ErrorContains(t, err, "refusing to fetch keys over http://")
+	assert.Zero(t, plaintextHits, "rejection must precede contacting the plaintext destination")
+}
+
+func Test_nextPageURL(t *testing.T) {
+	cases := []struct {
+		name string
+		link string
+		want string
+	}{
+		{name: "absent header", link: "", want: ""},
+		{
+			name: "next among several relations",
+			link: `<https://api.github.com/user/keys?page=2>; rel="next", <https://api.github.com/user/keys?page=9>; rel="last"`,
+			want: "https://api.github.com/user/keys?page=2",
+		},
+		{
+			name: "prev only",
+			link: `<https://api.github.com/user/keys?page=1>; rel="prev"`,
+			want: "",
+		},
+		{
+			name: "next last in the list",
+			link: `<https://api.github.com/user/keys?page=1>; rel="first", <https://api.github.com/user/keys?page=3>; rel="next"`,
+			want: "https://api.github.com/user/keys?page=3",
+		},
+		// Malformed means "no more pages": a listing that otherwise succeeded
+		// should not fail over an unreadable header, and stopping early can
+		// only deny access, never grant it.
+		{name: "missing angle brackets", link: `https://api.github.com/x; rel="next"`, want: ""},
+		{name: "unterminated url", link: `<https://api.github.com/x; rel="next"`, want: ""},
+		{name: "relation without a url", link: `rel="next"`, want: ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, nextPageURL(c.link))
+		})
+	}
 }
 
 func Test_Fetcher_zeroValueLoggerDoesNotPanic(t *testing.T) {
