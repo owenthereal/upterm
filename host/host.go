@@ -293,6 +293,10 @@ func (c *Host) Run(ctx context.Context) error {
 
 	if c.SessionDir != nil {
 		dir := c.SessionDir
+		// c.Logger, not the enriched logger built below: this is registered
+		// before that one exists, deliberately, so that it also covers the
+		// early returns between here and there.
+		logger := c.Logger
 		// Registered here so it runs however Run exits, including the early
 		// returns below. It closes over the variables rather than their values,
 		// which is why they are declared above rather than beside it.
@@ -300,15 +304,25 @@ func (c *Host) Run(ctx context.Context) error {
 			releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancelRelease()
 
-			_ = dir.Update(func(r *sessiondir.Record) {
+			// Neither failure can be returned — Run's error belongs to the
+			// session, not to its bookkeeping — and neither may be silent.
+			// A record that was not published means `session info` reports the
+			// wrong outcome for this run, and a directory that was not released
+			// means the name stays taken until something reaps it. Both are
+			// invisible from outside the process without a line here.
+			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
 				r.Status = sessiondir.StatusEnding
 				r.Reason = runReason
 				r.ExitCode = runExitCode
 				r.Signal = runSignal
-			})
-			_ = dir.Release(releaseCtx)
+			}); err != nil {
+				logger.Warn("failed to publish final session record", "error", err)
+			}
+			if err := dir.Release(releaseCtx); err != nil {
+				logger.Warn("failed to release session directory", "error", err)
+			}
 		}()
 	}
 

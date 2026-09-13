@@ -14,6 +14,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -136,7 +137,29 @@ Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, sessio
 	return cmd
 }
 
+// reapSessions removes the runtime directories of sessions whose owner is
+// gone. A crash leaves a directory and a free lock behind, and nothing else
+// ever cleans it up: without this, `Reap` exists but is never called, and a
+// name stays taken until the next Claim happens to recover it.
+//
+// `list` is where it belongs because it is the one command that already walks
+// every name, and a name with no process behind it should not be in the list
+// it prints.
+//
+// It never fails the listing. A reap that cannot take the registry lock is a
+// tidiness failure; refusing to show a user their sessions over it would be a
+// worse answer than showing one stale entry.
+func reapSessions(ctx context.Context) {
+	if err := sessiondir.Reap(ctx, utils.UptermRuntimeDir()); err != nil {
+		if logger := uptermctx.Logger(ctx); logger != nil {
+			logger.Debug("failed to reap stale session directories", "error", err)
+		}
+	}
+}
+
 func listRunE(c *cobra.Command, args []string) error {
+	reapSessions(c.Context())
+
 	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir())
 	if err != nil {
 		return err

@@ -49,11 +49,14 @@ type Record struct {
 	ForceCommand []string  `json:"force_command,omitempty"`
 	StartedAt    time.Time `json:"started_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	FinishedAt   time.Time `json:"finished_at,omitempty"`
-	Status       string    `json:"status"`
-	Reason       string    `json:"reason"`
-	ExitCode     *int      `json:"exit_code,omitempty"`
-	Signal       string    `json:"signal,omitempty"`
+	// omitzero, not omitempty: omitempty does nothing for a struct, so a
+	// record that has not finished carried finished_at: "0001-01-01T00:00:00Z"
+	// — a date, and one a reader could easily take for a real one.
+	FinishedAt time.Time `json:"finished_at,omitzero"`
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason"`
+	ExitCode   *int      `json:"exit_code,omitempty"`
+	Signal     string    `json:"signal,omitempty"`
 }
 
 // Update mutates the record and republishes it atomically.

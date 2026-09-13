@@ -306,6 +306,36 @@ func Test_lookup_EndedAfterKill(t *testing.T) {
 		"a killed session left no outcome behind, and inventing one would be worse than saying so")
 }
 
+// Test_reapSessions_RemovesTheDirectoryOfADeadOwner covers the wiring rather
+// than sessiondir.Reap itself: Reap was fully tested and never called, so a
+// crashed host held its name until something else happened to reclaim it.
+func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
+	setupSessionRoots(t)
+
+	sessions := sessiondir.SessionsRoot(utils.UptermRuntimeDir())
+
+	// A live session, whose directory must survive: the point of a reap is
+	// that it distinguishes "nobody holds this name" from "this name exists".
+	live := claimSession(t, "live")
+	releaseAtEnd(t, live)
+
+	// What a SIGKILLed host leaves behind — the directory and a lock file
+	// nobody holds. Built by hand because every in-process route to it either
+	// keeps the lock held or removes the directory on the way out.
+	stale := filepath.Join(sessions, "stale")
+	require.NoError(t, os.MkdirAll(stale, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "lock"), nil, 0600))
+
+	reapSessions(context.Background())
+
+	_, err := os.Stat(stale)
+	require.True(t, os.IsNotExist(err),
+		"a session directory whose owner is gone must be reaped, got %v", err)
+
+	_, err = os.Stat(filepath.Join(sessions, "live"))
+	require.NoError(t, err, "a live session's directory must survive a reap")
+}
+
 func Test_lookup_UnknownName(t *testing.T) {
 	setupSessionRoots(t)
 

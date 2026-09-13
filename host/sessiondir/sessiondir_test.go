@@ -2,6 +2,7 @@ package sessiondir
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -117,6 +118,19 @@ func Test_Claim_PublishesUnknownResultImmediately(t *testing.T) {
 	require.Equal(t, StatusStarting, rec.Status)
 	require.Equal(t, d.LaunchID(), rec.LaunchID)
 	require.Nil(t, rec.ExitCode)
+
+	// Against the bytes, not the struct: a session that has not finished must
+	// carry no finish time at all. Round-tripping through Record would hide
+	// the failure this guards, which is finished_at published as the zero
+	// time — "0001-01-01T00:00:00Z" is a date, and automation reading the key
+	// rather than the value would take it for one.
+	raw, err := os.ReadFile(d.RecordPath())
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.NotContains(t, fields, "finished_at",
+		"an unfinished session must not publish a finish time")
+	require.Contains(t, fields, "started_at", "the keys that are always present still are")
 }
 
 func Test_Claim_SupersedesAPreviousRunsResult(t *testing.T) {
