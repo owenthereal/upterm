@@ -14,24 +14,29 @@ import (
 const maxSequenceBytes = 64
 
 // restorable lists the DEC private modes worth putting a reattaching terminal
-// back into. Everything else is ignored, which is what keeps both the tracked
-// set and the emitted snapshot bounded by a constant rather than by whatever
-// the command decided to emit.
-var restorable = map[int]struct{}{
-	1:    {}, // DECCKM, application cursor keys
-	7:    {}, // DECAWM, autowrap
-	25:   {}, // DECTCEM, cursor visibility
-	47:   {}, // legacy alternate screen
-	1000: {}, // X11 mouse: button events
-	1002: {}, // mouse: button + drag
-	1003: {}, // mouse: any motion
-	1004: {}, // focus reporting
-	1005: {}, // UTF-8 mouse encoding
-	1006: {}, // SGR mouse encoding
-	1047: {}, // alternate screen
-	1048: {}, // save/restore cursor
-	1049: {}, // alternate screen + cursor, the common one
-	2004: {}, // bracketed paste
+// back into, mapped to the value a terminal holds them at before anything has
+// touched them. Everything else is ignored, which is what keeps both the
+// tracked set and the emitted snapshot bounded by a constant rather than by
+// whatever the command decided to emit.
+//
+// The defaults are what let Snapshot stay quiet about state a joiner is
+// already in: it joins with a terminal at its own defaults, so replaying them
+// back to it is bytes that say nothing.
+var restorable = map[int]bool{
+	1:    false, // DECCKM, application cursor keys
+	7:    true,  // DECAWM, autowrap
+	25:   true,  // DECTCEM, cursor visibility
+	47:   false, // legacy alternate screen
+	1000: false, // X11 mouse: button events
+	1002: false, // mouse: button + drag
+	1003: false, // mouse: any motion
+	1004: false, // focus reporting
+	1005: false, // UTF-8 mouse encoding
+	1006: false, // SGR mouse encoding
+	1047: false, // alternate screen
+	1048: false, // save/restore cursor
+	1049: false, // alternate screen + cursor, the common one
+	2004: false, // bracketed paste
 }
 
 // restorableModes returns the tracked mode numbers. It exists for tests.
@@ -105,6 +110,11 @@ func (m *ModeTracker) step(b byte) {
 			m.reset()
 		case '(':
 			m.state = msCharset
+		case 'c':
+			// RIS, a hard reset: the terminal is back at power-on, so
+			// everything recorded before it is no longer true of it.
+			m.resetToDefaults()
+			m.state = msNormal
 		default:
 			m.state = msNormal
 		}
@@ -142,6 +152,14 @@ func (m *ModeTracker) reset() {
 	m.overflow = false
 }
 
+// resetToDefaults forgets everything recorded, which is what a terminal does
+// to itself on RIS or DECSTR.
+func (m *ModeTracker) resetToDefaults() {
+	clear(m.decPrivate)
+	m.scrollRegion = nil
+	m.charsetG0 = nil
+}
+
 func (m *ModeTracker) finishCSI(final byte) {
 	params := m.seq
 
@@ -169,11 +187,19 @@ func (m *ModeTracker) finishCSI(final byte) {
 		seq = append(seq, params...)
 		seq = append(seq, 'r')
 		m.scrollRegion = seq
+	case 'p':
+		// DECSTR, a soft reset. Its parameter is the intermediate '!', which
+		// is what separates it from the several other CSI ... p sequences.
+		if len(params) == 1 && params[0] == '!' {
+			m.resetToDefaults()
+		}
 	}
 }
 
-// Snapshot returns the bytes that put a fresh terminal into the recorded modes.
-// Its length is bounded by len(restorable) plus the two verbatim sequences.
+// Snapshot returns the bytes that put a fresh terminal into the recorded
+// modes. State already at the terminal's default is left out, so a session
+// that never changed anything replays nothing. Its length is bounded by
+// len(restorable) plus the two verbatim sequences.
 func (m *ModeTracker) Snapshot() []byte {
 	nums := make([]int, 0, len(m.decPrivate))
 	for n := range m.decPrivate {
@@ -183,6 +209,10 @@ func (m *ModeTracker) Snapshot() []byte {
 
 	var out []byte
 	for _, n := range nums {
+		if m.decPrivate[n] == restorable[n] {
+			// Already where a joining terminal starts.
+			continue
+		}
 		out = append(out, 0x1b, '[', '?')
 		out = append(out, []byte(strconv.Itoa(n))...)
 		if m.decPrivate[n] {

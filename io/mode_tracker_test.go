@@ -19,9 +19,12 @@ func Test_ModeTracker_DECPrivateModes(t *testing.T) {
 
 func Test_ModeTracker_LastWriteWins(t *testing.T) {
 	m := NewModeTracker()
-	_, err := m.Write([]byte("\x1b[?1049h\x1b[?1049l"))
+
+	// 25 is on by default, so the trailing l is the one that has to survive
+	// for the snapshot to say anything at all.
+	_, err := m.Write([]byte("\x1b[?25l\x1b[?25h\x1b[?25l"))
 	require.NoError(t, err)
-	require.Equal(t, "\x1b[?1049l", string(m.Snapshot()))
+	require.Equal(t, "\x1b[?25l", string(m.Snapshot()))
 }
 
 func Test_ModeTracker_MultipleParamsInOneSequence(t *testing.T) {
@@ -97,4 +100,60 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	// Every restorable mode set at once, plus scroll region and charset, must
 	// still be trivially smaller than a guest's sink.
 	require.Less(t, len(m.Snapshot()), 1024)
+}
+
+func Test_ModeTracker_EmitsOnlyNonDefaultState(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "a mode set and then cleared is back at its default",
+			input: "\x1b[?2004h\x1b[?2004l",
+			want:  "",
+		},
+		{
+			name:  "a hidden cursor differs from the default",
+			input: "\x1b[?25l",
+			want:  "\x1b[?25l",
+		},
+		{
+			name:  "autowrap on is the default",
+			input: "\x1b[?7h",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, string(m.Snapshot()))
+		})
+	}
+}
+
+func Test_ModeTracker_ResetClearsEverything(t *testing.T) {
+	tests := []struct {
+		name  string
+		reset string
+	}{
+		{name: "RIS", reset: "\x1bc"},
+		{name: "DECSTR", reset: "\x1b[!p"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[1;23r\x1b(0"))
+			require.NoError(t, err)
+			require.NotEmpty(t, m.Snapshot(), "the state a reset clears must be there first")
+
+			_, err = m.Write([]byte(tt.reset))
+			require.NoError(t, err)
+			require.Empty(t, m.Snapshot())
+		})
+	}
 }
