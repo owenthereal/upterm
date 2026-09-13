@@ -11,7 +11,9 @@ import (
 	"time"
 
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // recordingWriter accumulates what it is given. The drain runs on its own
@@ -37,6 +39,13 @@ func (r *recordingWriter) bytes() []byte {
 func testLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func testSigners(t *testing.T) []ssh.Signer {
+	t.Helper()
+	signers, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	return signers
 }
 
 // A guest that reaches the door after the fan-out has quiesced is refused, and

@@ -482,6 +482,14 @@ func (c *Host) Run(ctx context.Context) error {
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
 			OnCommandStarted:               func() { cmdOnce.Do(func() { close(cmdReady) }) },
+			OnGuestServerStopped: func(err error) {
+				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
+				if c.SessionDir != nil {
+					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+						r.Status = sessiondir.StatusDisconnected
+					})
+				}
+			},
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())

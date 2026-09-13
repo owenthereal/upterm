@@ -51,6 +51,12 @@ type Server struct {
 	// fail to start.
 	OnCommandStarted func()
 
+	// OnGuestServerStopped is called when the guest listener stops serving,
+	// which in practice means the reverse tunnel is gone. The session does not
+	// end: the command keeps running and keeps its pty. Reporting it is the
+	// caller's job, because internal must not know about on-disk state.
+	OnGuestServerStopped func(error)
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
@@ -216,7 +222,19 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			},
 		}
 		g.Add(func() error {
-			return server.Serve(l)
+			err := server.Serve(l)
+
+			// A tunnel that goes away takes the guests with it and nothing
+			// else. Returning here would end the run.Group — which interrupts
+			// every actor regardless of the error — and the interrupts would
+			// cancel the command: a network blip would destroy work that is
+			// still running perfectly well. Park until the session ends for a
+			// reason that is actually the session's.
+			if s.OnGuestServerStopped != nil {
+				s.OnGuestServerStopped(err)
+			}
+			<-sessCtx.Done()
+			return nil
 		}, func(err error) {
 			// Let the fan-out finish delivering before the sessions are
 			// released. This is the last interrupt in the group, so waiting
