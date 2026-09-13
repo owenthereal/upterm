@@ -308,3 +308,26 @@ func Test_githubClientConfig(t *testing.T) {
 		})
 	}
 }
+
+// Test_ProviderList_namesEveryProvider is the anti-drift pin. ProviderList
+// feeds both the parser's error messages and the --authorized-user help text,
+// so a provider added to the providers map and forgotten in providerOrder
+// would be silently unadvertised in both.
+func Test_ProviderList_namesEveryProvider(t *testing.T) {
+	assert.Len(t, providerOrder, len(providers),
+		"providerOrder and providers must stay in step")
+
+	listed := ProviderList()
+	for name := range providers {
+		assert.Contains(t, providerOrder, name,
+			"provider %q is supported but never listed to users", name)
+		assert.Contains(t, listed, name,
+			"provider %q is missing from ProviderList()", name)
+	}
+
+	// The host-required split is the likeliest first mistake a user makes, so
+	// it is part of the contract, not incidental formatting.
+	assert.Equal(t,
+		"github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required)",
+		listed)
+}

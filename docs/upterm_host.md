@@ -53,7 +53,7 @@ upterm host [flags]
       --accept                       Automatically accept client connections without prompts.
       --allow-local-tcp-forwarding   Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.
       --authorized-keys string       Specify a authorize_keys file listing authorized public keys for connection.
-      --authorized-user strings      Authorize users by fetching their public keys from a code-hosting service. Repeatable. Forms: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, srht:dave, or an https:// URL.
+      --authorized-user strings      Authorize users by fetching their public keys from a code-hosting service. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
   -f, --force-command string         Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
   -h, --help                         help for host
       --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).

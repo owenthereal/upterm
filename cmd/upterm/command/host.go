@@ -134,9 +134,13 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 
+	// The provider list comes from host.ProviderList so --help, the generated
+	// docs and the parser's own error messages cannot disagree about which
+	// services are supported.
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagAuthorizedUsers, "authorized-user",
 		"Authorize users by fetching their public keys from a code-hosting service. Repeatable. "+
-			"Forms: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, srht:dave, or an https:// URL.")
+			"Providers: "+host.ProviderList()+". "+
+			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
 
 	// Superseded by --authorized-user. Kept working and hidden rather than
 	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a

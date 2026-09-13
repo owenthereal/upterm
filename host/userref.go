@@ -50,7 +50,27 @@ var providers = map[string]providerInfo{
 	"srht":     {defaultHost: "meta.sr.ht", userPrefix: "~"},
 }
 
-const providerList = "github, gitlab, gitea, forgejo, codeberg, srht"
+// providerOrder fixes the order providers are listed to users. Map iteration
+// is randomized, so it cannot be derived from providers alone; a test pins the
+// two together so a new provider cannot be added to one and missed in the other.
+var providerOrder = []string{"github", "gitlab", "codeberg", "srht", "gitea", "forgejo"}
+
+// ProviderList names every supported provider and marks the ones that need an
+// explicit host. It is the single source for both parse errors and the
+// --authorized-user flag's help text, so the two cannot drift apart.
+func ProviderList() string {
+	var optional, required []string
+	for _, name := range providerOrder {
+		if providers[name].defaultHost == "" {
+			required = append(required, name)
+			continue
+		}
+		optional = append(optional, name)
+	}
+
+	return fmt.Sprintf("%s (host optional), %s (host required)",
+		strings.Join(optional, ", "), strings.Join(required, ", "))
+}
 
 // defaultGitHubHost is a variable so tests can pin it. It returns whatever
 // go-gh considers the default host, which honors GH_HOST.
@@ -76,12 +96,12 @@ func ParseUserRef(s string) (UserRef, error) {
 
 	provider, rest, found := strings.Cut(s, ":")
 	if !found {
-		return UserRef{}, fmt.Errorf("%s: missing provider; use one of %s, or an https:// URL", s, providerList)
+		return UserRef{}, fmt.Errorf("%s: missing provider; use one of %s, or an https:// URL", s, ProviderList())
 	}
 
 	info, ok := providers[provider]
 	if !ok {
-		return UserRef{}, fmt.Errorf("%s: unknown provider %q; use one of %s", s, provider, providerList)
+		return UserRef{}, fmt.Errorf("%s: unknown provider %q; use one of %s", s, provider, ProviderList())
 	}
 
 	user, host := rest, ""

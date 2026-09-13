@@ -108,12 +108,14 @@ upterm host --authorized-user srht:username
 upterm host --authorized-user codeberg:username
 ```
 
-Self-hosted instances are supported by naming the host. Keys are always
-fetched over HTTPS:
+Self-hosted instances are supported by naming the host. `gitea` and `forgejo`
+always require one, since there is no default instance. Keys are always fetched
+over HTTPS:
 
 ```console
 upterm host --authorized-user github:username@ghe.example.com
 upterm host --authorized-user gitea:username@git.example.com
+upterm host --authorized-user forgejo:username@git.example.com
 upterm host --authorized-user https://git.example.com/username
 ```
 
