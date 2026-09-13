@@ -176,7 +176,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 				return true
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
-				"session":      gssh.DefaultSessionHandler,
+				"session":      rawSessionHandler,
 				"direct-tcpip": gssh.DirectTCPIPHandler,
 			},
 			SubsystemHandlers: subsystemHandlers,
