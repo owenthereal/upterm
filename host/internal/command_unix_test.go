@@ -230,6 +230,15 @@ func Test_Command_SlowStdoutPipeStillGetsItsTail(t *testing.T) {
 	// pipe buffer. Nothing was ever pending at shutdown, so the test passed
 	// without exercising the flush path it is named for. The command now emits
 	// well past any pipe buffer, and the reader is held until it has.
+	//
+	// The pace is not what creates the backpressure — holding the reader until
+	// the fan-out has passed the threshold below is. What the pace has to do is
+	// leave the flush room to finish inside guestFlushTimeout, which is one
+	// second: at 1ms per 256-byte chunk the ~198 KB still to drain took ~0.94s,
+	// so under -race with the whole suite loading the machine the flush expired,
+	// Close discarded the tail, and the test blamed production code for a timing
+	// budget. 100µs keeps the same slow-reader shape with an order of magnitude
+	// of headroom.
 	var (
 		mu      sync.Mutex
 		got     []byte
@@ -246,7 +255,7 @@ func Test_Command_SlowStdoutPipeStillGetsItsTail(t *testing.T) {
 				mu.Lock()
 				got = append(got, buf[:n]...)
 				mu.Unlock()
-				time.Sleep(time.Millisecond)
+				time.Sleep(100 * time.Microsecond)
 			}
 			if err != nil {
 				return
