@@ -47,6 +47,24 @@ func Test_MultiWriter_ReplayTrimsPartialLeadingChunk(t *testing.T) {
 	require.Equal(t, "aabbbbbb", late.String())
 }
 
+func Test_MultiWriter_ReplayStripsTerminalQueries(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+
+	live := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(live))
+
+	_, err := w.Write([]byte("before\x1b[6nafter"))
+	require.NoError(t, err)
+
+	// Live output is untouched: filtering live output is the session handler's
+	// job, per attached client, not the fan-out's.
+	require.Equal(t, "before\x1b[6nafter", live.String())
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "beforeafter", late.String())
+}
+
 func Test_MultiWriter(t *testing.T) {
 	assert := assert.New(t)
 

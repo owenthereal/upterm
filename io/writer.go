@@ -68,12 +68,23 @@ func (c *buffer) Data() [][]byte {
 	return append(result, c.queue...)
 }
 
+// bufferWriter adapts the replay ring to io.Writer so a filter can sit in
+// front of it.
+type bufferWriter struct{ b *buffer }
+
+func (w bufferWriter) Write(p []byte) (int, error) {
+	w.b.Append(p)
+	return len(p), nil
+}
+
 // NewMultiWriter returns a fan-out whose replay ring holds the most recent
 // replayBytes bytes of output.
 func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
+	b := &buffer{max: replayBytes}
 	return &MultiWriter{
 		writers: writers,
-		buffer:  &buffer{max: replayBytes},
+		buffer:  b,
+		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
 	}
 }
 
@@ -107,6 +118,13 @@ type MultiWriter struct {
 	writers   []io.Writer
 
 	buffer *buffer
+
+	// replay is the producer-side path into the ring. Terminal queries are
+	// stripped here rather than on the way out: a query that was live an hour
+	// ago is not live now, and answering it on replay feeds a reply to whatever
+	// the command is doing today. Stateful across writes; only touched under
+	// writeMu.
+	replay *TerminalQueryFilter
 
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
@@ -232,7 +250,7 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
-	t.buffer.Append(p)
+	_, _ = t.replay.Write(p)
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
