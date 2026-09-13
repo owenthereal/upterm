@@ -50,6 +50,9 @@ const (
 // with .registry.lock), and a bounded length.
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+// maxNameLen is the length nameRe bounds names to, 1 + 63. Change both together.
+const maxNameLen = 64
+
 // ValidateName reports whether name is a single safe path component.
 func ValidateName(name string) error {
 	if !nameRe.MatchString(name) {
@@ -395,6 +398,13 @@ func GenerateName(command []string) string {
 		if b := filepath.Base(command[0]); ValidateName(b) == nil {
 			base = b
 		}
+	}
+	// The suffix costs "-" plus four hex characters, so a basename that is
+	// itself at the limit would push the result past it and Claim would then
+	// reject a name the caller never chose. nameRe admits only ASCII, so
+	// cutting bytes cannot split a character.
+	if len(base) > maxNameLen-5 {
+		base = base[:maxNameLen-5]
 	}
 	return fmt.Sprintf("%s-%s", base, randomHex(2))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -236,4 +237,10 @@ func Test_GenerateName(t *testing.T) {
 	// A command whose basename is not a legal name must still produce one.
 	require.NoError(t, ValidateName(GenerateName([]string{"../weird"})))
 	require.NoError(t, ValidateName(GenerateName([]string{".hidden"})))
+
+	// A basename at the length limit must still leave room for the suffix.
+	long := strings.Repeat("a", 64)
+	name := GenerateName([]string{long})
+	require.NoError(t, ValidateName(name))
+	require.Regexp(t, `^a{59}-[0-9a-f]{4}$`, name)
 }
