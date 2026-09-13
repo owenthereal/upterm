@@ -4,10 +4,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -70,6 +72,18 @@ func Test_ResolveSessionName_RejectsUnsafeExplicitName(t *testing.T) {
 	require.Error(t, validateSessionNameFlag("a/b"))
 	require.NoError(t, validateSessionNameFlag(""))
 	require.NoError(t, validateSessionNameFlag("demo"))
+}
+
+func Test_ValidateSessionNameFlag_RejectsANameWhoseSocketPathWouldNotFit(t *testing.T) {
+	// A runtime root deep enough that a legal 60-character name overflows a
+	// unix socket address. The limit belongs at flag validation because the
+	// only other place it can surface is net.Listen, which runs after the
+	// tunnel is up — a session that looked like it was starting normally.
+	t.Setenv("XDG_RUNTIME_DIR", string(filepath.Separator)+strings.Repeat("d", 80))
+
+	err := validateSessionNameFlag(strings.Repeat("a", 60))
+	require.ErrorIs(t, err, sessiondir.ErrSocketPathTooLong)
+	require.ErrorContains(t, err, "limit 104")
 }
 
 func Test_parseURL(t *testing.T) {

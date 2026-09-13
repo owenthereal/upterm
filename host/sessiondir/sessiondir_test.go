@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -12,9 +13,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// shortTempRoot returns a temp directory short enough to hold a session's
+// admin socket. t.TempDir() on macOS hands out a /var/folders/<hash>/T/
+// <TestName> path already past the 104-byte unix socket limit once a session's
+// own components are appended — the very limit Claim now enforces — so the
+// temp root is used directly. Windows has no /tmp and its t.TempDir() is long
+// for the same reason, so the temp root is used directly there too.
+func shortTempRoot(t *testing.T) string {
+	t.Helper()
+
+	base := "/tmp"
+	if runtime.GOOS == "windows" {
+		base = ""
+	}
+	root, err := os.MkdirTemp(base, "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
+}
+
+// roots returns runtime and state roots a session can actually be claimed in.
 func roots(t *testing.T) (runtimeRoot, stateRoot string) {
 	t.Helper()
-	root := t.TempDir()
+
+	root := shortTempRoot(t)
 	runtimeRoot = filepath.Join(root, "run")
 	stateRoot = filepath.Join(root, "state")
 	require.NoError(t, os.MkdirAll(runtimeRoot, 0700))
@@ -149,7 +171,7 @@ func Test_Claim_RecoversStaleDirectory(t *testing.T) {
 func Test_Release_KeepsTheResultEvenWhenRootsCoincide(t *testing.T) {
 	// The case that matters: on Windows and under the $HOME/.upterm fallback
 	// the runtime and state roots are the same directory.
-	root := t.TempDir()
+	root := shortTempRoot(t)
 	require.NoError(t, os.MkdirAll(root, 0700))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -238,9 +260,29 @@ func Test_GenerateName(t *testing.T) {
 	require.NoError(t, ValidateName(GenerateName([]string{"../weird"})))
 	require.NoError(t, ValidateName(GenerateName([]string{".hidden"})))
 
-	// A basename at the length limit must still leave room for the suffix.
+	// A basename at the length limit must still leave room for the suffix —
+	// and for the runtime root the name ends up under, which is why the cut is
+	// well short of what ValidateName alone would accept.
 	long := strings.Repeat("a", 64)
 	name := GenerateName([]string{long})
 	require.NoError(t, ValidateName(name))
-	require.Regexp(t, `^a{59}-[0-9a-f]{4}$`, name)
+	require.Regexp(t, `^a{20}-[0-9a-f]{4}$`, name)
+}
+
+func Test_Claim_RejectsANameWhoseSocketPathWouldNotFit(t *testing.T) {
+	_, stateRoot := roots(t)
+
+	// A runtime root deep enough that a perfectly legal 60-character name puts
+	// <root>/sessions/<name>/admin.sock past the limit. The refusal has to
+	// happen here: at bind time it would land after the tunnel is up, with the
+	// name already claimed and the record already published.
+	runtimeRoot := filepath.Join(t.TempDir(), strings.Repeat("d", 40))
+	require.NoError(t, os.MkdirAll(runtimeRoot, 0700))
+
+	_, err := claim(t, runtimeRoot, stateRoot, strings.Repeat("a", 60))
+	require.ErrorIs(t, err, ErrSocketPathTooLong)
+	require.ErrorContains(t, err, "limit 104")
+
+	_, statErr := os.Stat(sessionsRoot(runtimeRoot))
+	require.True(t, os.IsNotExist(statErr), "a refused claim must not create anything")
 }

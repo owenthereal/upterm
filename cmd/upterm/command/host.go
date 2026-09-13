@@ -23,6 +23,7 @@ import (
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -181,7 +182,14 @@ func validateSessionNameFlag(name string) error {
 	if name == "" {
 		return nil
 	}
-	return sessiondir.ValidateName(name)
+	if err := sessiondir.ValidateName(name); err != nil {
+		return err
+	}
+	// A legal name can still be unusable, because the admin socket path is the
+	// name plus a runtime root the user did not pick. Checked here so the
+	// limit is reported before the session starts rather than by a bind that
+	// fails once the tunnel is already up.
+	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
 }
 
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {

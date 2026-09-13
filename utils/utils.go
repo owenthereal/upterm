@@ -77,7 +77,8 @@ func xdgDirWithFallback(envVar, xdgPath string) string {
 //  1. $XDG_RUNTIME_DIR/upterm (if XDG_RUNTIME_DIR is explicitly set)
 //  2. Platform default if accessible:
 //     - Linux:   /run/user/1000/upterm (requires login session)
-//     - macOS:   $TMPDIR/upterm (e.g., /var/folders/.../T/upterm)
+//     - macOS:   ~/Library/Application Support/upterm (adrg/xdg has no
+//     separate runtime directory there, so it reuses the state path)
 //     - Windows: %LOCALAPPDATA%\upterm
 //  3. Fallback: $HOME/.upterm (for non-interactive environments)
 //  4. Final fallback: os.TempDir()/.upterm (if HOME unavailable)

@@ -22,6 +22,9 @@ var (
 	// ErrInvalidName is returned for a name that is not a single safe path
 	// component.
 	ErrInvalidName = errors.New("sessiondir: invalid session name")
+	// ErrSocketPathTooLong is returned when a name is legal but would put the
+	// session's admin socket past what a unix socket address can hold.
+	ErrSocketPathTooLong = errors.New("sessiondir: session socket path is too long")
 )
 
 const (
@@ -53,10 +56,41 @@ var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 // maxNameLen is the length nameRe bounds names to, 1 + 63. Change both together.
 const maxNameLen = 64
 
+// maxSocketPath is the longest a unix socket path may be, in bytes.
+//
+// The true limit is sizeof(sun_path), which differs by platform: 104 on
+// darwin, 108 on linux and on Windows' AF_UNIX. The tightest is applied
+// uniformly so that one constant governs every platform — a name that works on
+// Linux and fails on macOS is a worse contract than one refused everywhere.
+const maxSocketPath = 104
+
+// maxGeneratedBase bounds the basename a generated name is built from. Far
+// below maxNameLen on purpose: a default name the user never chose must never
+// be the thing that pushes the admin socket past maxSocketPath, and the
+// runtime root that path sits under is not something GenerateName can see.
+const maxGeneratedBase = 20
+
 // ValidateName reports whether name is a single safe path component.
 func ValidateName(name string) error {
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("%w: %q must match %s", ErrInvalidName, name, nameRe)
+	}
+	return nil
+}
+
+// CheckSocketPath reports whether a name's admin socket would fit in a unix
+// socket address under runtimeRoot. The name is expected to have passed
+// ValidateName already.
+//
+// Length is a property of the name *and* where it lives, so it cannot be
+// folded into ValidateName: the same name is fine under /run/user/1000 and
+// impossible under ~/Library/Application Support. It is exported so the CLI
+// can refuse an over-long --name at flag validation, because the alternative
+// is a bind failure minutes later, after the tunnel is already up.
+func CheckSocketPath(runtimeRoot, name string) error {
+	path := filepath.Join(sessionsRoot(runtimeRoot), name, adminSocketFile)
+	if len(path) > maxSocketPath {
+		return fmt.Errorf("%w: %q gives %d bytes, limit %d", ErrSocketPathTooLong, path, len(path), maxSocketPath)
 	}
 	return nil
 }
@@ -131,6 +165,13 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 	// Before any filesystem operation: this name becomes a path and then a
 	// RemoveAll target.
 	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	// Also before any filesystem operation, and for a related reason: a name
+	// whose admin socket cannot be bound is unusable, and finding that out at
+	// bind time means finding it out after the tunnel is up, with the name
+	// already claimed. Refusing here leaves nothing behind.
+	if err := CheckSocketPath(opts.RuntimeRoot, name); err != nil {
 		return nil, err
 	}
 
@@ -411,12 +452,13 @@ func GenerateName(command []string) string {
 			base = b
 		}
 	}
-	// The suffix costs "-" plus four hex characters, so a basename that is
-	// itself at the limit would push the result past it and Claim would then
-	// reject a name the caller never chose. nameRe admits only ASCII, so
-	// cutting bytes cannot split a character.
-	if len(base) > maxNameLen-5 {
-		base = base[:maxNameLen-5]
+	// Cut to maxGeneratedBase rather than to what nameRe would still accept.
+	// Staying inside ValidateName is not enough: the name also becomes a path
+	// under a runtime root of unknown depth, and a default name the caller
+	// never chose must not be what makes Claim refuse the session. nameRe
+	// admits only ASCII, so cutting bytes cannot split a character.
+	if len(base) > maxGeneratedBase {
+		base = base[:maxGeneratedBase]
 	}
 	return fmt.Sprintf("%s-%s", base, randomHex(2))
 }
