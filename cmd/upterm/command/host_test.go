@@ -286,6 +286,86 @@ func Test_hostCmd_legacyFlagsAreRegisteredAndHidden(t *testing.T) {
 	}
 }
 
+// Test_hostCmd_authorizedUserNewlineIsAnError pins the reported defect: pflag's
+// own stringSliceValue.Set reads only the first CSV record, so a newline used
+// to silently drop everything after it ("github:alice\ngithub:bob" became
+// just "github:alice") and the command proceeded to dial with bob never
+// authorized. --server points at a port nothing can accept on, so if the
+// value were ever silently truncated instead of rejected, this test would
+// fail by observing a dial/connection error instead of a parse error naming
+// the flag.
+func Test_hostCmd_authorizedUserNewlineIsAnError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{
+		"host", "--accept", "--server", "ssh://127.0.0.1:1",
+		"--authorized-user", "github:alice\ngithub:bob",
+		"--", "true",
+	})
+
+	err := root.Execute()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "authorized-user")
+	assert.ErrorContains(t, err, "unexpected newline")
+}
+
+// Test_hostCmd_githubUserNewlineIsAnError is the same regression as
+// Test_hostCmd_authorizedUserNewlineIsAnError, but for a legacy per-provider
+// flag, since all five authorization flags share the same value type.
+func Test_hostCmd_githubUserNewlineIsAnError(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{
+		"host", "--accept", "--server", "ssh://127.0.0.1:1",
+		"--github-user", "alice\nbob",
+		"--", "true",
+	})
+
+	err := root.Execute()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "github-user")
+	assert.ErrorContains(t, err, "unexpected newline")
+}
+
+// Test_hostCmd_authorizedUserFlag_repeatedAppends pins pflag's repeat-flag
+// semantics: the first Set replaces the (empty) default and every subsequent
+// Set appends, so `--authorized-user a --authorized-user b` must yield both
+// rather than just the last one.
+func Test_hostCmd_authorizedUserFlag_repeatedAppends(t *testing.T) {
+	orig := flagAuthorizedUsers
+	t.Cleanup(func() { flagAuthorizedUsers = orig })
+
+	cmd := hostCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("authorized-user", "github:alice"))
+	require.NoError(t, cmd.PersistentFlags().Set("authorized-user", "github:bob"))
+
+	assert.Equal(t, []string{"github:alice", "github:bob"}, flagAuthorizedUsers)
+
+	refs, err := collectUserRefs()
+	require.NoError(t, err)
+	assert.Len(t, refs, 2)
+}
+
+// Test_hostCmd_authorizedUserFlag_quotedCommaSurvives pins that switching to
+// splitCSV did not regress pflag's own CSV-quoting behavior: a single element
+// containing a comma, written with CSV quotes, must still come through as one
+// element rather than being split on the embedded comma.
+func Test_hostCmd_authorizedUserFlag_quotedCommaSurvives(t *testing.T) {
+	orig := flagAuthorizedUsers
+	t.Cleanup(func() { flagAuthorizedUsers = orig })
+
+	cmd := hostCmd()
+	require.NoError(t, cmd.PersistentFlags().Set("authorized-user", `"gitea:bob,carol@git.corp.com"`))
+
+	assert.Equal(t, []string{"gitea:bob,carol@git.corp.com"}, flagAuthorizedUsers)
+}
+
 func Test_countKeys_ignoresNilEntries(t *testing.T) {
 	assert.Zero(t, countKeys(nil))
 	assert.Zero(t, countKeys([]*host.AuthorizedKey{nil}))
