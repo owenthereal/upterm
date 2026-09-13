@@ -73,6 +73,9 @@ const maxGeneratedBase = 20
 
 // ValidateName reports whether name is a single safe path component.
 func ValidateName(name string) error {
+	if len(name) > maxNameLen {
+		return fmt.Errorf("%w: %q is longer than %d bytes", ErrInvalidName, name, maxNameLen)
+	}
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("%w: %q must match %s", ErrInvalidName, name, nameRe)
 	}

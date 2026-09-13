@@ -73,7 +73,9 @@ func Test_ValidateName(t *testing.T) {
 	for i := range long {
 		long[i] = 'a'
 	}
-	require.ErrorIs(t, ValidateName(string(long)), ErrInvalidName)
+	err := ValidateName(string(long))
+	require.ErrorIs(t, err, ErrInvalidName)
+	require.ErrorContains(t, err, "longer than 64 bytes")
 }
 
 func Test_Claim_RejectsTraversalWithoutTouchingAnything(t *testing.T) {
