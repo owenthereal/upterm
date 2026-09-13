@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -222,4 +224,152 @@ func Test_fetchClient_followsCrossOriginRedirectAnonymously(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Empty(t, gotAuth, "cross-origin redirects must be followed anonymously")
+}
+
+func rawRef(t *testing.T, server *httptest.Server, path string) UserRef {
+	t.Helper()
+	ref, err := ParseUserRef(server.URL + path)
+	require.NoError(t, err)
+	return ref
+}
+
+func Test_Fetcher_genericPath(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		body          string
+		wantErrSubstr string
+		wantKeys      int
+	}{
+		{name: "keys returned", status: 200, body: testPublicKey + "\n", wantKeys: 1},
+		{name: "zero-length body is refused", status: 200, body: "", wantErrSubstr: "no public keys found"},
+		{name: "whitespace body is refused", status: 200, body: "\n\n", wantErrSubstr: "ssh: no key found"},
+		{name: "html body is refused", status: 200, body: "<html>Sign in</html>", wantErrSubstr: "ssh: no key found"},
+		{name: "not found", status: 404, wantErrSubstr: "user not found on"},
+		{name: "unauthorized", status: 401, wantErrSubstr: "requires authentication"},
+		{name: "forbidden", status: 403, wantErrSubstr: "requires authentication"},
+		{name: "server error", status: 500, wantErrSubstr: "HTTP 500"},
+		{
+			name:          "oversized body is rejected rather than truncated",
+			status:        200,
+			body:          strings.Repeat("x", maxKeysBody+1),
+			wantErrSubstr: "exceeds",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer server.Close()
+
+			f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+			aks, err := f.AuthorizedKeys(t.Context(), []UserRef{rawRef(t, server, "/alice")})
+
+			if c.wantErrSubstr != "" {
+				assert.ErrorContains(t, err, c.wantErrSubstr)
+				assert.Nil(t, aks)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, aks, 1)
+			assert.Len(t, aks[0].PublicKeys, c.wantKeys)
+		})
+	}
+}
+
+func Test_Fetcher_commentIsTheResolvedIdentity(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(testPublicKey))
+	}))
+	defer server.Close()
+
+	ref := rawRef(t, server, "/alice")
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.NoError(t, err)
+	require.Len(t, aks, 1)
+	assert.Equal(t, ref.Display(), aks[0].Comment)
+}
+
+func Test_Fetcher_reportsEveryFailureAtOnce(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	_, err := f.AuthorizedKeys(t.Context(), []UserRef{
+		rawRef(t, server, "/alice"),
+		rawRef(t, server, "/bob"),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/alice.keys")
+	assert.Contains(t, err.Error(), "/bob.keys")
+}
+
+func Test_Fetcher_dedup(t *testing.T) {
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_, _ = w.Write([]byte(testPublicKey))
+	}))
+	defer server.Close()
+
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+	_, err := f.AuthorizedKeys(t.Context(), []UserRef{
+		rawRef(t, server, "/team-a/alice"),
+		rawRef(t, server, "/team-b/alice"),
+		rawRef(t, server, "/team-a/alice"),
+	})
+	require.NoError(t, err)
+
+	// Distinct raw URLs are distinct endpoints even when the trailing name
+	// matches; only the exact repeat is deduplicated.
+	assert.ElementsMatch(t, []string{"/team-a/alice.keys", "/team-b/alice.keys"}, paths)
+}
+
+func Test_Fetcher_honorsContextCancellation(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	f := &Fetcher{Logger: testLogger(), Transport: tlsPool(t, server)}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.AuthorizedKeys(ctx, []UserRef{rawRef(t, server, "/alice")})
+		done <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("fetch did not honor context cancellation")
+	}
+}
+
+func Test_dedupKey_separatesCredentialModes(t *testing.T) {
+	pinGitHubHost(t, "ghe.corp.com")
+
+	implicit, err := ParseUserRef("github:alice")
+	require.NoError(t, err)
+	explicit, err := ParseUserRef("github:alice@ghe.corp.com")
+	require.NoError(t, err)
+
+	// Same host, different credential policy: keying on the resolved reference
+	// alone would let input order decide which policy applies.
+	require.Equal(t, implicit.ResolveHost(), explicit.ResolveHost())
+	assert.NotEqual(t, dedupKey(implicit), dedupKey(explicit))
 }

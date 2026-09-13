@@ -1,11 +1,15 @@
 package host
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/go-multierror"
 )
 
 const (
@@ -87,4 +91,131 @@ func newFetchClient(origin string, base http.RoundTripper, logger *slog.Logger) 
 		Transport:     &fetchTransport{origin: origin, base: base, logger: logger},
 		CheckRedirect: redirectPolicy(logger),
 	}
+}
+
+// Fetcher resolves user references to authorized keys.
+type Fetcher struct {
+	Logger *slog.Logger
+	// Transport, when set, is the base round tripper for every request. Tests
+	// use it to trust httptest certificates; production leaves it nil.
+	Transport http.RoundTripper
+}
+
+// AuthorizedKeysFromUserRefs resolves refs using a default Fetcher.
+func AuthorizedKeysFromUserRefs(ctx context.Context, refs []UserRef, logger *slog.Logger) ([]*AuthorizedKey, error) {
+	return (&Fetcher{Logger: logger}).AuthorizedKeys(ctx, refs)
+}
+
+// AuthorizedKeys fetches every reference, reporting all failures together.
+// Any failure fails the whole call: continuing with a partial set can, in the
+// limit, degrade "only alice may join" into "anyone may join".
+func (f *Fetcher) AuthorizedKeys(ctx context.Context, refs []UserRef) ([]*AuthorizedKey, error) {
+	var (
+		result []*AuthorizedKey
+		errs   error
+		seen   = make(map[string]bool)
+	)
+
+	for _, ref := range refs {
+		key := dedupKey(ref)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		ak, err := f.fetch(ctx, ref)
+		if err != nil {
+			errs = multierror.Append(errs, fmt.Errorf("%s: %w", ref.KeysURL(), err))
+			continue
+		}
+		result = append(result, ak)
+	}
+
+	if errs != nil {
+		return nil, errs
+	}
+	return result, nil
+}
+
+func (f *Fetcher) fetch(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+	if ref.Provider == "github" {
+		return f.githubUserKeys(ctx, ref)
+	}
+	return f.genericUserKeys(ctx, ref)
+}
+
+// genericUserKeys reads the {base}/{user}.keys endpoint every supported forge
+// serves, anonymously.
+func (f *Fetcher) genericUserKeys(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ref.KeysURL(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := newFetchClient("", f.Transport, f.Logger).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := checkStatus(resp, ref); err != nil {
+		return nil, err
+	}
+
+	body, err := readKeysBody(resp.Body, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseAuthorizedKeys(body, ref.Display())
+}
+
+// readKeysBody reads at most maxKeysBody bytes, rejecting anything larger
+// rather than truncating. A silently truncated body can still parse into a
+// shorter-but-valid key set, quietly dropping people who should be authorized.
+func readKeysBody(r io.Reader, ref UserRef) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxKeysBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxKeysBody {
+		return nil, fmt.Errorf("response from %s exceeds %d bytes", ref.ResolveHost(), maxKeysBody)
+	}
+	return body, nil
+}
+
+// dedupKey identifies a fetch. Raw URLs take their own branch: they have no
+// provider, user or credential mode, so the tuple below would collapse
+// distinct endpoints such as /team-a/alice.keys and /team-b/alice.keys.
+// Credential mode is part of the key because github:alice under GH_HOST and
+// github:alice@thathost resolve to the same host under different policies.
+func dedupKey(ref UserRef) string {
+	if ref.URL != "" {
+		return "url\x00" + ref.KeysURL()
+	}
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d",
+		ref.Provider, ref.ResolveHost(), ref.User, ref.Mode)
+}
+
+func checkStatus(resp *http.Response, ref UserRef) error {
+	host := ref.ResolveHost()
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("user not found on %s", host)
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		if ref.Provider == "github" {
+			return fmt.Errorf("%s requires authentication; run: gh auth login --hostname %s", host, host)
+		}
+		return fmt.Errorf("%s requires authentication (HTTP %d)", host, resp.StatusCode)
+	default:
+		return fmt.Errorf("unexpected response from %s: HTTP %d", host, resp.StatusCode)
+	}
+}
+
+// githubUserKeys is implemented in Task 5.
+func (f *Fetcher) githubUserKeys(ctx context.Context, ref UserRef) (*AuthorizedKey, error) {
+	return f.genericUserKeys(ctx, ref)
 }
