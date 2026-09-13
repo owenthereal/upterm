@@ -18,6 +18,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/version"
@@ -221,6 +222,16 @@ type Host struct {
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+
+	// Name is the session's local name. It determines the socket paths, so
+	// they are known before the server is ever contacted. It is unrelated to
+	// the server-assigned session ID in the connect string.
+	Name string
+
+	// SessionDir is claimed by Run and readable afterwards. Nil when
+	// AdminSocketFile was supplied, which is how tests drive Host without
+	// taking a name.
+	SessionDir *sessiondir.Dir
 }
 
 func (c *Host) Run(ctx context.Context) error {
@@ -239,6 +250,26 @@ func (c *Host) Run(ctx context.Context) error {
 	var aks []ssh.PublicKey
 	for _, ak := range c.AuthorizedKeys {
 		aks = append(aks, ak.PublicKeys...)
+	}
+
+	if c.AdminSocketFile == "" {
+		runtimeDir, err := utils.CreateUptermRuntimeDir()
+		if err != nil {
+			return err
+		}
+
+		dir, err := sessiondir.Claim(ctx, sessiondir.ClaimOptions{
+			RuntimeRoot:  runtimeDir,
+			StateRoot:    utils.UptermStateDir(),
+			Name:         c.Name,
+			Command:      c.Command,
+			ForceCommand: c.ForceCommand,
+		})
+		if err != nil {
+			return err
+		}
+		c.SessionDir = dir
+		c.AdminSocketFile = dir.AdminSocket()
 	}
 
 	logger := c.Logger.With("server", u.String())
@@ -268,19 +299,6 @@ func (c *Host) Run(ctx context.Context) error {
 	// Check for version compatibility
 	if result := version.CheckCompatibility(serverVersion); !result.Compatible {
 		displayVersionWarning(c.Stdout, logger, result)
-	}
-
-	if c.AdminSocketFile == "" {
-		dir, err := utils.CreateUptermRuntimeDir()
-		if err != nil {
-			return err
-		}
-
-		c.AdminSocketFile = filepath.Join(dir, AdminSocketFile(sessResp.SessionID))
-
-		defer func() {
-			_ = os.Remove(c.AdminSocketFile)
-		}()
 	}
 
 	logger = logger.With("session", sessResp.SessionID)

@@ -2,21 +2,12 @@ package host
 
 import (
 	"context"
-	"fmt"
 	"net"
 
 	"github.com/owenthereal/upterm/host/api"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
-
-const (
-	AdminSockExt = ".sock"
-)
-
-func AdminSocketFile(sessionID string) string {
-	return fmt.Sprintf("%s%s", sessionID, AdminSockExt)
-}
 
 func AdminClient(socket string) (api.AdminServiceClient, error) {
 	// Use mtls

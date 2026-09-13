@@ -58,6 +58,20 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 	}
 }
 
+func Test_ResolveSessionName(t *testing.T) {
+	require.Equal(t, "mine", resolveSessionName("mine", []string{"bash"}))
+	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))
+}
+
+func Test_ResolveSessionName_RejectsUnsafeExplicitName(t *testing.T) {
+	// The CLI must refuse early with a readable message rather than letting
+	// Claim reject it after the process is already underway.
+	require.Error(t, validateSessionNameFlag(".."))
+	require.Error(t, validateSessionNameFlag("a/b"))
+	require.NoError(t, validateSessionNameFlag(""))
+	require.NoError(t, validateSessionNameFlag("demo"))
+}
+
 func Test_parseURL(t *testing.T) {
 	cases := []struct {
 		name       string

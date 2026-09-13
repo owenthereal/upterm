@@ -7,13 +7,13 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -58,7 +58,7 @@ func list() *cobra.Command {
 Sockets are stored in: %s
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.`, runtimeDir),
+in constrained environments where XDG directories are unavailable.`, sessiondir.SessionsRoot(runtimeDir)),
 		Example: `  # List shared sessions:
   upterm session list`,
 		RunE: listRunE,
@@ -103,7 +103,7 @@ Output formats:
   -o json                           JSON output
   -o go-template='{{.ClientCount}}' Custom Go template
 
-Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, runtimeDir),
+Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, sessiondir.SessionsRoot(runtimeDir)),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
@@ -151,7 +151,10 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("missing session name")
 	}
 
-	adminSocket := filepath.Join(utils.UptermRuntimeDir(), host.AdminSocketFile(args[0]))
+	adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), args[0])
+	if err != nil {
+		return err
+	}
 	detail, err := fetchSessionDetail(c.Context(), adminSocket)
 	if err != nil {
 		return err
@@ -226,19 +229,25 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 func listSessions(ctx context.Context, dir string) ([]tui.SessionDetail, error) {
 	var result []tui.SessionDetail
 
-	files, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(sessiondir.SessionsRoot(dir))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
 		return nil, err
 	}
 
 	currentAdminSocket := currentAdminSocketFile()
-	for _, file := range files {
-		// continue if the file is not SESSION.sock
-		if filepath.Ext(file.Name()) != host.AdminSockExt {
+	for _, entry := range entries {
+		if !entry.IsDir() || sessiondir.ValidateName(entry.Name()) != nil {
 			continue
 		}
 
-		adminSocket := filepath.Join(dir, file.Name())
+		adminSocket, err := sessiondir.AdminSocketPath(dir, entry.Name())
+		if err != nil {
+			continue
+		}
+
 		sess, err := session(ctx, adminSocket)
 		if err != nil {
 			continue

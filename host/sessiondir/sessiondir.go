@@ -64,6 +64,18 @@ func ValidateName(name string) error {
 func sessionsRoot(runtimeRoot string) string { return filepath.Join(runtimeRoot, sessionsDirName) }
 func resultsRoot(stateRoot string) string    { return filepath.Join(stateRoot, resultsDirName) }
 
+// SessionsRoot returns the directory session runtime directories live in.
+func SessionsRoot(runtimeRoot string) string { return sessionsRoot(runtimeRoot) }
+
+// AdminSocketPath returns a named session's admin socket without claiming it,
+// so a caller can look up a session it does not own.
+func AdminSocketPath(runtimeRoot, name string) (string, error) {
+	if err := ValidateName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(sessionsRoot(runtimeRoot), name, adminSocketFile), nil
+}
+
 // ClaimOptions configures a claim.
 type ClaimOptions struct {
 	RuntimeRoot  string

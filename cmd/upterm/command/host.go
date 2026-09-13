@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
@@ -73,6 +74,7 @@ var (
 	flagAllowLocalTCPForwarding bool
 	flagPtySize                 string
 	flagTerm                    string
+	flagName                    string
 )
 
 func hostCmd() *cobra.Command {
@@ -144,6 +146,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when there is no terminal.")
+	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -164,11 +167,32 @@ containing client public keys.`,
 	return cmd
 }
 
+func resolveSessionName(explicit string, command []string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return sessiondir.GenerateName(command)
+}
+
+// validateSessionNameFlag rejects an unusable --name before anything is
+// started, so the user sees one clear error rather than a failure partway
+// through startup.
+func validateSessionNameFlag(name string) error {
+	if name == "" {
+		return nil
+	}
+	return sessiondir.ValidateName(name)
+}
+
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	var result error
 
 	if flagReadOnly && flagAllowLocalTCPForwarding {
 		result = multierror.Append(result, fmt.Errorf("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host"))
+	}
+
+	if err := validateSessionNameFlag(flagName); err != nil {
+		result = multierror.Append(result, err)
 	}
 
 	if flagServer == "" {
@@ -326,6 +350,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	h := &host.Host{
 		Host:                    flagServer,
+		Name:                    resolveSessionName(flagName, args),
 		Command:                 args,
 		ForceCommand:            forceCommand,
 		Signers:                 signers,
