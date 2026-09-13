@@ -9,32 +9,53 @@ import (
 	"sync"
 )
 
+// DefaultReplayBytes bounds the replay ring handed to a joining writer.
+//
+// It must stay well under DefaultGuestBufferSize: Append replays into a joining
+// writer before attaching it, so a ring at or above a guest's sink size would
+// overflow that guest with its own replay and drop it at the door.
+const DefaultReplayBytes = 256 << 10
+
 type buffer struct {
 	mu sync.Mutex
 
 	queue [][]byte
-	size  int
+	max   int // cap in bytes
+	size  int // bytes currently held
 }
 
 func (c *buffer) Append(p []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// A buffer built with a non-positive size keeps nothing; without this the
-	// trim below slices an empty queue and panics.
-	if c.size <= 0 {
+	if c.max <= 0 {
 		return
 	}
 
-	// remove leading elements until there is room
-	for len(c.queue) >= c.size {
-		c.queue = c.queue[1:]
+	// A single write larger than the ring keeps only its tail.
+	if len(p) > c.max {
+		p = p[len(p)-c.max:]
 	}
 
 	pp := make([]byte, len(p))
 	copy(pp, p)
-
 	c.queue = append(c.queue, pp)
+	c.size += len(pp)
+
+	// Trim from the front, re-slicing the oldest chunk rather than dropping it
+	// when it is larger than the excess, so the ring holds exactly max bytes
+	// rather than the largest prefix of whole chunks that fits.
+	for c.size > c.max {
+		excess := c.size - c.max
+		head := c.queue[0]
+		if len(head) > excess {
+			c.queue[0] = head[excess:]
+			c.size -= excess
+			break
+		}
+		c.queue = c.queue[1:]
+		c.size -= len(head)
+	}
 }
 
 func (c *buffer) Data() [][]byte {
@@ -42,16 +63,17 @@ func (c *buffer) Data() [][]byte {
 	defer c.mu.Unlock()
 
 	// Length, not capacity, was the bug: this returned len(queue) nil entries
-	// followed by the real ones, so every newly attached writer was handed that
-	// many zero-length writes before its replay.
+	// followed by the real ones.
 	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
 }
 
-func NewMultiWriter(bufferSize int, writers ...io.Writer) *MultiWriter {
+// NewMultiWriter returns a fan-out whose replay ring holds the most recent
+// replayBytes bytes of output.
+func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	return &MultiWriter{
 		writers: writers,
-		buffer:  &buffer{size: bufferSize},
+		buffer:  &buffer{max: replayBytes},
 	}
 }
 

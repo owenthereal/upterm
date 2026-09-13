@@ -25,7 +25,7 @@ import (
 // The stalled guest is what makes this deterministic rather than a race: the
 // blocking path blocks every time.
 func TestHandleSessionDoesNotBlockOnAStalledReadOnlyGuest(t *testing.T) {
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	_, err := writers.Write([]byte("output from before this guest joined"))
 	require.NoError(t, err)
 

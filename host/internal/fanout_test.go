@@ -41,7 +41,7 @@ func (r *recordingWriter) bytes() []byte {
 // pass just as happily with the release deleted. A closed sink refuses writes,
 // which is the observable consequence of its goroutine being released.
 func TestAttachGuestOutputReleasesTheSinkWhenRefused(t *testing.T) {
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, writers.Shutdown(ctx))
@@ -96,7 +96,7 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 		uio.DefaultGuestBufferSize, nil)
 	defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	require.NoError(t, writers.Append(guest))
 
 	cmd := &command{
@@ -142,7 +142,7 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 		uio.DefaultGuestBufferSize, nil)
 	defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	require.NoError(t, writers.Append(guest))
 
 	// The handler is slow but working, and the bound is far above its delay.
@@ -198,7 +198,7 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 		uio.DefaultGuestBufferSize, nil)
 	defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	require.NoError(t, writers.Append(guest))
 
 	// And a handler that never returns from Write.
@@ -258,7 +258,7 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 		uio.DefaultGuestBufferSize, nil)
 	defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	require.NoError(t, writers.Append(&accepted))
 	require.NoError(t, writers.Append(guest))
 
@@ -349,7 +349,7 @@ func TestReleaseSessionsWaitsForTheFanOut(t *testing.T) {
 		uio.DefaultGuestBufferSize, nil)
 	defer func() { _ = guest.Close() }()
 
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	require.NoError(t, writers.Append(guest))
 	_, _ = writers.Write([]byte("tail of the session"))
 

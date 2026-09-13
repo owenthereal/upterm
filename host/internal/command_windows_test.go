@@ -26,7 +26,7 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Use a simple command
 	cmd := newCommand(
@@ -75,7 +75,7 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Use a long-running command that won't exit on its own
 	cmd := newCommand(
@@ -163,7 +163,7 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Run a simple command through ConPTY
 	// Use 'cmd /c echo' which is simple and reliable on Windows

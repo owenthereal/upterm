@@ -80,7 +80,7 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()

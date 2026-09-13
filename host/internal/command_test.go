@@ -37,7 +37,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	assert.False(term.IsTerminal(int(stdinr.Fd())), "stdin should not be a TTY for this test")
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Create command WITH ForceForwardingInputForTesting
 	// Use a command that reads from stdin and outputs it (cross-platform)
@@ -145,7 +145,7 @@ func TestCommand_ContextCancellation(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Use a long-running command that will only exit when interrupted
 	var shellCmd string
@@ -258,7 +258,7 @@ func TestCommand_DrainsOutputAfterExit(t *testing.T) {
 		logger:  discardLogger(),
 		stdin:   stdinr,
 		stdout:  stdoutw,
-		writers: uio.NewMultiWriter(5),
+		writers: uio.NewMultiWriter(uio.DefaultReplayBytes),
 		ctx:     context.Background(),
 		ptmx: &exitedPTY{
 			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},

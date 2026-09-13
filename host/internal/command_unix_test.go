@@ -42,7 +42,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Create command with real PTY (ForceForwardingInputForTesting not needed)
 	// Use 'head -n 1' which exits immediately after reading one line

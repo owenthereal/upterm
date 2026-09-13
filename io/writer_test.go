@@ -13,11 +13,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func Test_MultiWriter_ReplayIsByteBounded(t *testing.T) {
+	w := NewMultiWriter(10)
+	for _, s := range []string{"aaaaa", "bbbbb", "ccccc"} {
+		_, err := w.Write([]byte(s))
+		require.NoError(t, err)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "bbbbbccccc", late.String())
+}
+
+func Test_MultiWriter_ReplayTrimsOversizedWrite(t *testing.T) {
+	w := NewMultiWriter(4)
+	_, err := w.Write([]byte("abcdefgh"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "efgh", late.String())
+}
+
+func Test_MultiWriter_ReplayTrimsPartialLeadingChunk(t *testing.T) {
+	w := NewMultiWriter(8)
+	for _, s := range []string{"aaaaaa", "bbbbbb"} {
+		_, err := w.Write([]byte(s))
+		require.NoError(t, err)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "aabbbbbb", late.String())
+}
+
 func Test_MultiWriter(t *testing.T) {
 	assert := assert.New(t)
 
 	w1 := bytes.NewBuffer(nil)
-	w := NewMultiWriter(1, w1)
+	w := NewMultiWriter(6, w1)
 
 	r := bytes.NewBufferString("hello1")
 	_, _ = io.Copy(w, r)
@@ -297,7 +331,7 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 // returned N nil entries before the N real ones and every newly attached writer
 // received N zero-length writes.
 func TestMultiWriterReplayHasNoEmptyWrites(t *testing.T) {
-	w := NewMultiWriter(3)
+	w := NewMultiWriter(6)
 	_, _ = w.Write([]byte("one"))
 	_, _ = w.Write([]byte("two"))
 
@@ -373,7 +407,7 @@ func TestMultiWriterShutdownRefusesLaterAppends(t *testing.T) {
 // guest with a queued replay nobody will deliver.
 func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
 	for attempt := range 50 {
-		w := NewMultiWriter(5)
+		w := NewMultiWriter(6)
 		_, _ = w.Write([]byte("output"))
 
 		var out recordingWriter
