@@ -404,12 +404,19 @@ func TestBackgroundedHost(t *testing.T) {
 	require.NotContains(t, ansiEscapeRe.ReplaceAllString(jobsOutput, ""), "Stopped",
 		"backgrounded host was stopped by the terminal")
 
-	// 2. The pane's terminal is still cooked. A background process that had
-	// been allowed to call tcsetattr would have left it in raw mode.
+	// 2. The pane still belongs to its own shell: a line typed into it reaches
+	// bash and bash's output comes back. A background host that had registered
+	// an input actor would be reading the same terminal and would eat some or
+	// all of these keystrokes.
+	//
+	// The marker is split across a shell concatenation so that the typed line
+	// does not itself contain it. Matching on text we just sent would match the
+	// terminal's echo of our own keystrokes and prove nothing about the shell
+	// having run anything; only bash's output spells the marker whole.
 	cooked := fmt.Sprintf("COOKED_%d", time.Now().UnixNano())
-	require.NoError(t, h.host.SendLine(h.ctx, "echo "+cooked))
+	require.NoError(t, h.host.SendLine(h.ctx, fmt.Sprintf(`echo "COO""%s"`, strings.TrimPrefix(cooked, "COO"))))
 	require.NoError(t, h.waitForText(h.host, cooked, 10*time.Second),
-		"the pane's terminal is no longer usable")
+		"the pane's shell did not run a typed line; the backgrounded host is stealing its input")
 
 	// 3. The session is reachable: a guest sees the command's prompt.
 	client := h.splitPane(h.host)
@@ -430,6 +437,16 @@ func TestBackgroundedHost(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, clientOutput, "FG_MARKER",
 		"fg must not restore input forwarding to a backgrounded session")
+
+	// ...and the session is still alive, so the absence above is the input path
+	// staying closed rather than the host having died at `fg`. Assertion 3
+	// proved liveness before `fg`; this proves it after. Same split-marker
+	// trick: in the guest pane local echo is off, but only the remote shell
+	// having run the line spells the marker whole.
+	alive := fmt.Sprintf("ALIVE_%d", time.Now().UnixNano())
+	require.NoError(t, client.SendLine(h.ctx, fmt.Sprintf(`echo "ALI""%s"`, strings.TrimPrefix(alive, "ALI"))))
+	require.NoError(t, h.waitForText(client, alive, 10*time.Second),
+		"the session did not survive fg, so the FG_MARKER assertion above proved nothing")
 }
 
 // TestSessionInfo validates that the TUI displays correct session information.
