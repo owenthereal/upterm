@@ -25,12 +25,13 @@ var (
 
 // calculateColumns returns table columns sized for the given terminal width
 func calculateColumns(width int) []table.Column {
-	// Fixed column
+	// Fixed columns
 	const markerWidth = 2
+	const nameWidth = 18
 	// Table adds ~3 chars padding per column (borders + spacing)
-	const columnPadding = 12 // 4 columns * 3
+	const columnPadding = 15 // 5 columns * 3
 
-	available := width - markerWidth - columnPadding
+	available := width - markerWidth - nameWidth - columnPadding
 	if available <= 0 {
 		available = 40 // fallback minimum
 	}
@@ -42,6 +43,7 @@ func calculateColumns(width int) []table.Column {
 
 	return []table.Column{
 		{Title: "", Width: markerWidth},
+		{Title: "NAME", Width: nameWidth},
 		{Title: "SESSION ID", Width: sessionIDWidth},
 		{Title: "COMMAND", Width: commandWidth},
 		{Title: "HOST", Width: hostWidth},
@@ -62,7 +64,7 @@ func NewSessionListModel(sessions []SessionDetail) SessionListModel {
 			marker = "*"
 			cursorIdx = i
 		}
-		rows[i] = table.Row{marker, s.SessionID, s.Command, s.Host}
+		rows[i] = table.Row{marker, s.Name, s.SessionID, s.Command, s.Host}
 	}
 
 	t := table.New(

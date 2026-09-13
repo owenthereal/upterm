@@ -102,3 +102,23 @@ func Test_FormatSessionDetail_authorizedKeys(t *testing.T) {
 	}
 	assert.True(t, foundIndentedKey, "key fingerprints should be indented in output")
 }
+
+func Test_FormatSessionDetail_name(t *testing.T) {
+	withName := SessionDetail{
+		Name:      "demo",
+		SessionID: "abc",
+		Command:   "bash",
+		Host:      "ssh://example.com:22",
+	}
+	output := FormatSessionDetail(withName)
+	assert.Contains(t, output, "demo")
+	assert.Contains(t, output, "Name:")
+
+	withoutName := SessionDetail{
+		SessionID: "abc",
+		Command:   "bash",
+		Host:      "ssh://example.com:22",
+	}
+	output = FormatSessionDetail(withoutName)
+	assert.NotContains(t, output, "Name:")
+}

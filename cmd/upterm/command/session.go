@@ -260,6 +260,7 @@ func listSessions(ctx context.Context, dir string) ([]tui.SessionDetail, error) 
 
 		detail.IsCurrent = adminSocket == currentAdminSocket
 		detail.AdminSocket = adminSocket
+		detail.Name = entry.Name()
 		result = append(result, detail)
 	}
 

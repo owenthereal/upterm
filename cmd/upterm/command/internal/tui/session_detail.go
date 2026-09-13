@@ -41,6 +41,7 @@ func RunModel(model tea.Model) (tea.Model, error) {
 type SessionDetail struct {
 	IsCurrent        bool
 	AdminSocket      string
+	Name             string
 	SessionID        string
 	Command          string
 	ForceCommand     string
@@ -99,13 +100,20 @@ func renderWrappedRow(b *strings.Builder, label string, value string, labelWidth
 func renderSessionDetail(detail SessionDetail, width int) string {
 	var b strings.Builder
 
-	// Title
-	b.WriteString(TitleStyle.Render(fmt.Sprintf("Session: %s", detail.SessionID)))
-	b.WriteString("\n\n")
-
 	// Layout constants
 	labelWidth := 18
 	valueWidth := max(width-labelWidth-2, 20)
+
+	// Name, if the session has one, is the first thing a user looks for
+	// when they came here from 'upterm session list' or set --name
+	// themselves, so it is shown before the Session ID row.
+	if detail.Name != "" {
+		renderWrappedRow(&b, "Name:", detail.Name, labelWidth, valueWidth, ValueStyle)
+	}
+
+	// Title
+	b.WriteString(TitleStyle.Render(fmt.Sprintf("Session: %s", detail.SessionID)))
+	b.WriteString("\n\n")
 
 	// Basic fields (skip empty fields to reduce noise)
 	renderWrappedRow(&b, "Command:", detail.Command, labelWidth, valueWidth, ValueStyle)

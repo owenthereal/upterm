@@ -348,17 +348,21 @@ func shareRunE(c *cobra.Command, args []string) error {
 		term = "xterm-256color"
 	}
 
+	name := resolveSessionName(flagName, args)
+
 	h := &host.Host{
-		Host:                    flagServer,
-		Name:                    resolveSessionName(flagName, args),
-		Command:                 args,
-		ForceCommand:            forceCommand,
-		Signers:                 signers,
-		HostKeyCallback:         hkcb,
-		AuthorizedKeys:          authorizedKeys,
-		KeepAliveDuration:       50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-		ProxyURL:                proxyURL,
-		SessionCreatedCallback:  displaySessionCallback,
+		Host:              flagServer,
+		Name:              name,
+		Command:           args,
+		ForceCommand:      forceCommand,
+		Signers:           signers,
+		HostKeyCallback:   hkcb,
+		AuthorizedKeys:    authorizedKeys,
+		KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
+		ProxyURL:          proxyURL,
+		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
+			return displaySession(ctx, s, name)
+		},
 		ClientJoinedCallback:    clientJoinedCallback,
 		ClientLeftCallback:      clientLeftCallback,
 		Stdin:                   os.Stdin,
@@ -404,12 +408,13 @@ func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
-func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
+func displaySession(ctx context.Context, session *api.GetSessionResponse, name string) error {
 	// Build session detail (includes SCP commands if SFTP is enabled)
 	detail, err := buildSessionDetail(session)
 	if err != nil {
 		return fmt.Errorf("failed to build session detail: %w", err)
 	}
+	detail.Name = name
 
 	// With --accept, just print session info and continue (no interactive confirmation needed)
 	if flagAccept {

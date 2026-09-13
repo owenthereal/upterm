@@ -398,10 +398,15 @@ func (c *Host) Run(ctx context.Context) error {
 		logger.Info("Starting sshd server")
 		defer logger.Info("Finishing sshd server")
 
+		commandEnv := []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)}
+		if c.SessionDir != nil {
+			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
+		}
+
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer := internal.Server{
 			Command:                        c.Command,
-			CommandEnv:                     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
+			CommandEnv:                     commandEnv,
 			ForceCommand:                   c.ForceCommand,
 			Signers:                        c.Signers,
 			AuthorizedKeys:                 aks,
