@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"log/slog"
@@ -272,6 +274,44 @@ func (c *Host) Run(ctx context.Context) error {
 		c.AdminSocketFile = dir.AdminSocket()
 	}
 
+	var (
+		sessionID   string
+		runReason   = sessiondir.ReasonStartupFailed
+		runExitCode *int
+		runSignal   string
+	)
+
+	// shutdownRequested records that *we* initiated the teardown — a signal or
+	// a cancelled context — as distinct from the wait status that results.
+	//
+	// This distinction is load-bearing. Cancelling a running command makes our
+	// own teardown kill it, so the wait reports a signal on Unix and an
+	// ordinary non-zero exit on Windows. Classifying off the wait status alone
+	// would report "signaled" or "exited 137" for something the operator asked
+	// for, on a platform-dependent basis.
+	var shutdownRequested atomic.Bool
+
+	if c.SessionDir != nil {
+		dir := c.SessionDir
+		// Registered here so it runs however Run exits, including the early
+		// returns below. It closes over the variables rather than their values,
+		// which is why they are declared above rather than beside it.
+		defer func() {
+			releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancelRelease()
+
+			_ = dir.Update(func(r *sessiondir.Record) {
+				r.SessionID = sessionID
+				r.FinishedAt = time.Now().UTC()
+				r.Status = sessiondir.StatusEnding
+				r.Reason = runReason
+				r.ExitCode = runExitCode
+				r.Signal = runSignal
+			})
+			_ = dir.Release(releaseCtx)
+		}()
+	}
+
 	logger := c.Logger.With("server", u.String())
 	logger.Info("Establishing reverse tunnel")
 	rt := internal.ReverseTunnel{
@@ -304,6 +344,11 @@ func (c *Host) Run(ctx context.Context) error {
 	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
 
+	// The ID, but not readiness: the session is registered and nothing more.
+	// Nothing has accepted it, the admin socket is unbound and the command
+	// does not exist yet.
+	sessionID = sessResp.SessionID
+
 	session := &api.GetSessionResponse{
 		SessionId:      sessResp.SessionID,
 		Host:           u.String(),
@@ -326,17 +371,27 @@ func (c *Host) Run(ctx context.Context) error {
 
 	logger = logger.With("cmd", c.Command, "force_cmd", c.ForceCommand)
 
+	// Readiness is a claim about facts, so it waits for the facts to report
+	// themselves: the admin socket bound and the command started. Registering
+	// the actors that do those things establishes neither.
+	adminReady := make(chan struct{})
+	cmdReady := make(chan struct{})
+	// sync.Once on each, since a callback that fires twice must not panic on a
+	// double close.
+	var adminOnce, cmdOnce sync.Once
+
 	var g run.Group
 	{
 		// Handle OS signals for graceful shutdown
 		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
-		setupSignalHandler(&g, ctx)
+		setupSignalHandler(&g, ctx, &shutdownRequested)
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
 		s := internal.AdminServer{
-			Session:    session,
-			ClientRepo: clientRepo,
+			Session:     session,
+			ClientRepo:  clientRepo,
+			OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
 		}
 		g.Add(func() error {
 			return s.Serve(ctx, c.AdminSocketFile)
@@ -394,6 +449,9 @@ func (c *Host) Run(ctx context.Context) error {
 			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}
+	// Hoisted out of the block below so the classification after g.Run can ask
+	// it what the command actually did.
+	var sshServer internal.Server
 	{
 		logger.Info("Starting sshd server")
 		defer logger.Info("Finishing sshd server")
@@ -404,7 +462,7 @@ func (c *Host) Run(ctx context.Context) error {
 		}
 
 		ctx, cancel := context.WithCancel(ctx)
-		sshServer := internal.Server{
+		sshServer = internal.Server{
 			Command:                        c.Command,
 			CommandEnv:                     commandEnv,
 			ForceCommand:                   c.ForceCommand,
@@ -423,6 +481,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Term:                           c.Term,
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
+			OnCommandStarted:               func() { cmdOnce.Do(func() { close(cmdReady) }) },
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())
@@ -430,8 +489,63 @@ func (c *Host) Run(ctx context.Context) error {
 			cancel()
 		})
 	}
+	{
+		ready := make(chan struct{})
+		g.Add(func() error {
+			select {
+			case <-adminReady:
+			case <-ready:
+				return nil
+			}
+			select {
+			case <-cmdReady:
+			case <-ready:
+				return nil
+			}
 
-	return g.Run()
+			// Both acknowledged. Only now is every claim a reader makes off
+			// "ready" true: the session is registered, the user accepted it,
+			// the admin socket is bound, and the command is running.
+			if c.SessionDir != nil {
+				_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+					r.SessionID = sessionID
+					r.Status = sessiondir.StatusReady
+				})
+			}
+
+			<-ready
+			return nil
+		}, func(err error) {
+			close(ready)
+		})
+	}
+
+	err = g.Run()
+
+	// The command's own outcome, and the cause that initiated teardown, are
+	// two different questions. Precedence is explicit because the wait status
+	// cannot answer the second: our own teardown kills the command, so a
+	// requested shutdown surfaces as a signal on Unix and as an ordinary
+	// non-zero exit on Windows.
+	res := sshServer.CommandResult()
+	switch {
+	case shutdownRequested.Load():
+		// We asked for this. Whatever the wait says, the reason is that it was
+		// stopped — and the exit code of a process we killed is not the
+		// command's own outcome, so it is deliberately not reported.
+		runReason = sessiondir.ReasonStopped
+	case res.Exited:
+		code := res.Code
+		runExitCode = &code
+		runReason = sessiondir.ReasonExited
+	case res.Signal != "":
+		runSignal = res.Signal
+		runReason = sessiondir.ReasonSignaled
+	default:
+		runReason = sessiondir.ReasonStartupFailed
+	}
+
+	return err
 }
 
 func keyType(t string) string {

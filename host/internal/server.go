@@ -45,9 +45,28 @@ type Server struct {
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
 
+	// OnCommandStarted, if set, is called once the hosted command is running.
+	// Readiness is a claim about facts, and this is one of the two facts it
+	// rests on: until this fires, "ready" would mean a command that may still
+	// fail to start.
+	OnCommandStarted func()
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+
+	// cmd is the hosted command, kept so its outcome can be read after
+	// ServeWithContext returns.
+	cmd *command
+}
+
+// CommandResult returns the hosted command's outcome. Valid after
+// ServeWithContext returns.
+func (s *Server) CommandResult() CommandResult {
+	if s.cmd == nil {
+		return CommandResult{}
+	}
+	return s.cmd.Result()
 }
 
 // sessionContext derives the context guest sessions live under.
@@ -102,9 +121,13 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Logger,
 		s.ForceForwardingInputForTesting,
 	)
+	s.cmd = cmd
 	ptmx, err := cmd.Start(cmdCtx)
 	if err != nil {
 		return fmt.Errorf("error starting command: %w", err)
+	}
+	if s.OnCommandStarted != nil {
+		s.OnCommandStarted()
 	}
 
 	var g run.Group

@@ -2,16 +2,23 @@ package command
 
 import (
 	"context"
+	"encoding/json"
+	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 )
 
 func TestBuildSessionDetailSSH(t *testing.T) {
@@ -100,4 +107,265 @@ func captureProxyArgs(t *testing.T, shell, ssh, command string) []string {
 	args, err := os.ReadFile(argsFile)
 	require.NoError(t, err, "command: %s\nSSH output: %s", command, output)
 	return strings.Split(strings.TrimSuffix(string(args), "\x00"), "\x00")
+}
+
+// The cases below are built from the files a real run leaves behind, using
+// only the calls the host itself makes. A synthetic record would not exercise
+// what is actually under test, which is what the lock and the record say
+// *together*: the record alone says "ready" long after a killed session is
+// gone.
+
+// setupSessionRoots points the XDG roots at a directory short enough to hold a
+// session's admin socket. t.TempDir() on macOS hands out a /var/folders path
+// that overflows the 104-byte unix socket limit once the session's own
+// components are appended, and its Windows equivalent is long enough to do the
+// same, so the temp root is used directly there.
+func setupSessionRoots(t *testing.T) {
+	t.Helper()
+
+	root := "/tmp"
+	if runtime.GOOS == "windows" {
+		root = ""
+	}
+
+	dir, err := os.MkdirTemp(root, "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+}
+
+func claimSession(t *testing.T, name string) *sessiondir.Dir {
+	t.Helper()
+
+	d, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+		RuntimeRoot: utils.UptermRuntimeDir(),
+		StateRoot:   utils.UptermStateDir(),
+		Name:        name,
+		Command:     []string{"bash"},
+	})
+	require.NoError(t, err)
+	return d
+}
+
+// releaseAtEnd gives the name back once the test is done with it, for the
+// cases that deliberately keep the lock held while lookup runs.
+func releaseAtEnd(t *testing.T, d *sessiondir.Dir) {
+	t.Helper()
+	t.Cleanup(func() { _ = d.Release(context.Background()) })
+}
+
+// buildStarting: claimed, lock held, nothing published beyond the claim.
+func buildStarting(t *testing.T, name string) {
+	t.Helper()
+	releaseAtEnd(t, claimSession(t, name))
+}
+
+// buildReady: claimed, published ready, and an admin socket that answers.
+func buildReady(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-1"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-1",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+}
+
+// buildDisconnected: claimed, published disconnected by the tunnel-loss path,
+// no socket answering.
+func buildDisconnected(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusDisconnected
+		r.SessionID = "sid-2"
+	}))
+}
+
+// buildEndedAfterExit: what a normal shutdown leaves — the outcome published,
+// then the name given back.
+func buildEndedAfterExit(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	code := 3
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusEnding
+		r.Reason = sessiondir.ReasonExited
+		r.ExitCode = &code
+	}))
+	require.NoError(t, d.Release(context.Background()))
+}
+
+// buildEndedAfterKill: what a SIGKILL leaves — the lock free and the record
+// still saying "ready", because nothing got the chance to write anything else.
+// Release leaves the record behind, which is all this needs.
+func buildEndedAfterKill(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+	}))
+	require.NoError(t, d.Release(context.Background()))
+}
+
+type stubAdminServer struct {
+	api.UnimplementedAdminServiceServer
+	resp *api.GetSessionResponse
+}
+
+func (s *stubAdminServer) GetSession(context.Context, *api.GetSessionRequest) (*api.GetSessionResponse, error) {
+	return s.resp, nil
+}
+
+func serveStubAdmin(t *testing.T, socket string, resp *api.GetSessionResponse) {
+	t.Helper()
+
+	ln, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+
+	srv := grpc.NewServer()
+	api.RegisterAdminServiceServer(srv, &stubAdminServer{resp: resp})
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(srv.Stop)
+}
+
+// lookupJSON returns what a caller of `session info -o json` would parse.
+func lookupJSON(t *testing.T, name string) map[string]any {
+	t.Helper()
+
+	info, err := lookup(context.Background(), name)
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(info)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	return m
+}
+
+func Test_lookup_Starting(t *testing.T) {
+	setupSessionRoots(t)
+	buildStarting(t, "starting")
+
+	got := lookupJSON(t, "starting")
+	require.Equal(t, sessiondir.StatusStarting, got["status"])
+	require.Equal(t, "starting", got["name"])
+}
+
+func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
+	setupSessionRoots(t)
+	buildReady(t, "ready")
+
+	got := lookupJSON(t, "ready")
+	require.Equal(t, sessiondir.StatusReady, got["status"])
+	require.Equal(t, "sid-1", got["sessionId"])
+	require.NotEmpty(t, got["sshCommand"], "a live session that answered carries its connect string")
+}
+
+func Test_lookup_Disconnected(t *testing.T) {
+	setupSessionRoots(t)
+	buildDisconnected(t, "disconnected")
+
+	got := lookupJSON(t, "disconnected")
+	require.Equal(t, sessiondir.StatusDisconnected, got["status"],
+		"a held name keeps the status its owner published")
+}
+
+func Test_lookup_EndedAfterNormalExit(t *testing.T) {
+	setupSessionRoots(t)
+	buildEndedAfterExit(t, "exited")
+
+	got := lookupJSON(t, "exited")
+	require.Equal(t, statusEnded, got["status"])
+	require.Equal(t, sessiondir.ReasonExited, got["reason"])
+	require.Equal(t, float64(3), got["exitCode"])
+}
+
+func Test_lookup_EndedAfterKill(t *testing.T) {
+	setupSessionRoots(t)
+	buildEndedAfterKill(t, "killed")
+
+	got := lookupJSON(t, "killed")
+	require.Equal(t, statusEnded, got["status"],
+		"nobody holds the name, so the session is over whatever its record still says")
+	require.Equal(t, sessiondir.ReasonUnknown, got["reason"],
+		"a killed session left no outcome behind, and inventing one would be worse than saying so")
+}
+
+func Test_lookup_UnknownName(t *testing.T) {
+	setupSessionRoots(t)
+
+	_, err := lookup(context.Background(), "never-claimed")
+	require.ErrorContains(t, err, "no session named")
+}
+
+func Test_sessionInfo_OneShapeAcrossStates(t *testing.T) {
+	setupSessionRoots(t)
+
+	for _, tc := range []struct {
+		name  string
+		build func(*testing.T, string)
+	}{
+		{"starting", buildStarting},
+		{"ready", buildReady},
+		{"disconnected", buildDisconnected},
+		{"exited", buildEndedAfterExit},
+		{"killed", buildEndedAfterKill},
+	} {
+		tc.build(t, tc.name)
+	}
+
+	var want []string
+	for _, name := range []string{"starting", "ready", "disconnected", "exited", "killed"} {
+		info, err := lookup(context.Background(), name)
+		require.NoError(t, err)
+
+		got := canonicalKeys(t, info)
+		if want == nil {
+			want = got
+			continue
+		}
+		require.Equal(t, want, got,
+			"%s: a caller must not have to parse two formats depending on whether it asked while the process was running", name)
+	}
+	require.NotEmpty(t, want)
+}
+
+// canonicalKeys is the JSON key set of a result with every optional field
+// populated. Comparing the raw key sets would only compare which fields each
+// state happens to fill in; the claim under test is that there is one shape,
+// not one set of values.
+func canonicalKeys(t *testing.T, info sessionInfo) []string {
+	t.Helper()
+
+	info.LaunchID = "launch"
+	info.SessionID = "session"
+	info.Command = "command"
+	info.ForceCommand = "force"
+	info.SSHCommand = "ssh"
+	info.ConnectedClients = []string{"client"}
+	info.Reason = "reason"
+	code := 0
+	info.ExitCode = &code
+
+	raw, err := json.Marshal(info)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	return slices.Sorted(maps.Keys(m))
 }

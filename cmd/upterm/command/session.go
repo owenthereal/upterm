@@ -72,12 +72,22 @@ func show() *cobra.Command {
 		Use:     "info",
 		Aliases: []string{"i"},
 		Short:   "Display terminal session by name",
-		Long:    `Display terminal session by name.`,
+		Long: `Display terminal session by name.
+
+A session that has ended still answers, from the record it left behind: its
+admin socket died with its process, but its outcome did not.
+
+Output formats:
+  -o json                           JSON output`,
 		Example: `  # Display session by name:
-  upterm session info NAME`,
+  upterm session info NAME
+
+  # Output as JSON:
+  upterm session info NAME -o json`,
 		RunE: infoRunE,
 	}
 
+	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
@@ -146,22 +156,174 @@ func fetchSessionDetail(ctx context.Context, adminSocket string) (tui.SessionDet
 	return buildSessionDetail(sess)
 }
 
+// sessionInfo is the single shape `session info -o json` returns, live or not.
+// A caller must not have to parse two formats depending on whether it happened
+// to ask while the process was still running.
+type sessionInfo struct {
+	Name             string   `json:"name"`
+	LaunchID         string   `json:"launchId,omitempty"`
+	Status           string   `json:"status"`
+	SessionID        string   `json:"sessionId,omitempty"`
+	Command          string   `json:"command,omitempty"`
+	ForceCommand     string   `json:"forceCommand,omitempty"`
+	SSHCommand       string   `json:"sshCommand,omitempty"`
+	ClientCount      int      `json:"clientCount"`
+	ConnectedClients []string `json:"connectedClients,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
+	ExitCode         *int     `json:"exitCode,omitempty"`
+	Signal           string   `json:"signal,omitempty"`
+}
+
+// statusEnded is the reader's inference, not a status any session writes:
+// sessiondir records what a session published, and "ended" is what a free lock
+// means regardless of what the record still says.
+const statusEnded = "ended"
+
+// lookup resolves a session by name.
+//
+// Record and ownership come from one Inspect call, under the registry lock. An
+// earlier draft read them separately, which could mix generations — A's record
+// with B's ownership — and, more immediately, could dereference a nil record:
+// ReadRecord returns not-found, a claim completes, IsHeld returns true.
+func lookup(ctx context.Context, name string) (sessionInfo, error) {
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermRuntimeDir(), utils.UptermStateDir(), name)
+	if err != nil {
+		return sessionInfo{}, err
+	}
+
+	if rec == nil {
+		// No record at all, held or not: not found within retained history.
+		// Checked before either branch uses rec, which is the nil dereference
+		// the earlier draft had.
+		return sessionInfo{}, fmt.Errorf("no session named %q", name)
+	}
+
+	if !held {
+		// Nobody owns the name. Whatever the record says about status — and
+		// after a SIGKILL it frequently says "ready" — this session is over.
+		// Only its outcome is still meaningful.
+		return infoFromRecord(rec, statusEnded), nil
+	}
+
+	// Held: the recorded status is current and refines liveness — starting,
+	// ready or disconnected.
+	info := infoFromRecord(rec, rec.Status)
+
+	// A record with no session ID has not reached ready, so there is nothing
+	// for the admin socket to confirm and nothing to compare against. Skip it
+	// rather than issue a query whose generation check could not succeed.
+	if rec.SessionID == "" {
+		return info, nil
+	}
+
+	adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
+	if err != nil {
+		return sessionInfo{}, err
+	}
+
+	// Live detail is a second observation, taken outside the lock, so it is
+	// validated rather than merged on faith: between Inspect and this call the
+	// session could have ended and a replacement claimed the name. The session
+	// ID is the generation marker.
+	if sess, err := session(ctx, adminSocket); err == nil && sess.SessionId == rec.SessionID {
+		info = withLiveDetail(info, sess)
+	}
+	return info, nil
+}
+
+// infoFromRecord reports what the record knows, under the status the caller
+// has decided on.
+func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
+	return sessionInfo{
+		Name:         rec.Name,
+		LaunchID:     rec.LaunchID,
+		Status:       status,
+		SessionID:    rec.SessionID,
+		Command:      strings.Join(rec.Command, " "),
+		ForceCommand: strings.Join(rec.ForceCommand, " "),
+		Reason:       rec.Reason,
+		ExitCode:     rec.ExitCode,
+		Signal:       rec.Signal,
+	}
+}
+
+// withLiveDetail adds what only a running session can answer: who is connected
+// and how to join them.
+func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
+	detail, err := buildSessionDetail(sess)
+	if err != nil {
+		// The record's own view stands. A host URL we cannot parse is a reason
+		// to report less, not to fail a lookup that already has an answer.
+		return info
+	}
+
+	info.Command = detail.Command
+	info.ForceCommand = detail.ForceCommand
+	info.SSHCommand = detail.SSHCommand
+	info.ConnectedClients = detail.ConnectedClients
+	info.ClientCount = len(detail.ConnectedClients)
+	return info
+}
+
 func infoRunE(c *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing session name")
 	}
+	name := args[0]
 
-	adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), args[0])
-	if err != nil {
-		return err
-	}
-	detail, err := fetchSessionDetail(c.Context(), adminSocket)
+	info, err := lookup(c.Context(), name)
 	if err != nil {
 		return err
 	}
 
-	tui.PrintSessionDetail(detail)
+	if flagOutput != "" {
+		if flagOutput != "json" {
+			return fmt.Errorf("invalid output format %q: must be 'json'", flagOutput)
+		}
+
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(info)
+	}
+
+	// withLiveDetail is the only thing that sets SSHCommand, and it runs only
+	// when the admin socket answered *and* its session ID matched. So this is
+	// "live, and the session we asked about" without repeating the check — and
+	// it is worth a second query, because the socket answers with more than
+	// the record holds: the host URL, the authorized keys, the SFTP commands.
+	if info.SSHCommand != "" {
+		adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
+		if err != nil {
+			return err
+		}
+		if detail, err := fetchSessionDetail(c.Context(), adminSocket); err == nil {
+			detail.Name = name
+			detail.AdminSocket = adminSocket
+			tui.PrintSessionDetail(detail)
+			return nil
+		}
+	}
+
+	printSessionSummary(info)
 	return nil
+}
+
+// printSessionSummary prints what the record knows, for a session whose admin
+// socket is gone. Answering only while the process is alive would make
+// `session info` useless for the question people ask it afterwards, which is
+// how the thing ended.
+func printSessionSummary(info sessionInfo) {
+	fmt.Printf("Name:      %s\n", info.Name)
+	fmt.Printf("Status:    %s\n", info.Status)
+	if info.Reason != "" {
+		fmt.Printf("Reason:    %s\n", info.Reason)
+	}
+	if info.ExitCode != nil {
+		fmt.Printf("Exit code: %d\n", *info.ExitCode)
+	}
+	if info.Signal != "" {
+		fmt.Printf("Signal:    %s\n", info.Signal)
+	}
 }
 
 func currentRunE(c *cobra.Command, args []string) error {

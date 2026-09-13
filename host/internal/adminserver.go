@@ -12,7 +12,13 @@ import (
 type AdminServer struct {
 	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
-	srv        *grpc.Server
+
+	// OnListening, if set, is called once the socket is bound. It is the other
+	// half of readiness: a caller told "ready" must be able to connect, which
+	// registering the actor does not establish and binding does.
+	OnListening func()
+
+	srv *grpc.Server
 	sync.Mutex
 }
 
@@ -20,6 +26,11 @@ func (s *AdminServer) Serve(ctx context.Context, sock string) error {
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return err
+	}
+
+	// Bound, so a caller that is told "ready" can connect.
+	if s.OnListening != nil {
+		s.OnListening()
 	}
 
 	s.Lock()

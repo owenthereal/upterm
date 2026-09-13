@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -130,6 +131,14 @@ type command struct {
 
 	ctx context.Context
 
+	// result is the command's own outcome, recorded by the actor that waits on
+	// it. run.Group.Run returns whichever actor finished first, and the output
+	// copy returns nil on pty EOF at the same instant the command exits, so
+	// reading a status off Run is a coin toss. HandleSession learned this the
+	// hard way; see host/internal/server.go:345-354.
+	resultMu sync.Mutex
+	result   CommandResult
+
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	forceForwardingInputForTesting bool
@@ -138,6 +147,26 @@ type command struct {
 	// A test asserting the warning has landed when Run returns needs a bound
 	// that a loaded CI scheduler cannot miss.
 	flushLogTimeoutForTesting time.Duration
+}
+
+func (c *command) recordResult(err error) {
+	code, exited := exitCode(err)
+
+	res := CommandResult{Exited: exited, Code: code}
+	if !exited {
+		res.Signal = signalName(err)
+	}
+
+	c.resultMu.Lock()
+	c.result = res
+	c.resultMu.Unlock()
+}
+
+// Result returns the command's outcome. Safe after Run returns.
+func (c *command) Result() CommandResult {
+	c.resultMu.Lock()
+	defer c.resultMu.Unlock()
+	return c.result
 }
 
 // setupCommand creates an exec.Cmd with the given context, name, and args.
@@ -353,11 +382,12 @@ func (c *command) Run() error {
 
 			select {
 			case err := <-done:
+				c.recordResult(err)
 				return err
 			case <-ctx.Done():
 				// Context cancelled, kill the process and wait for it to exit
 				_ = c.ptmx.Kill()
-				<-done // Wait for the process to actually exit
+				c.recordResult(<-done) // Wait for the process to actually exit
 				return ctx.Err()
 			}
 		}, func(err error) {

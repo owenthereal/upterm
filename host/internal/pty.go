@@ -61,6 +61,17 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d", e.Code)
 }
 
+// CommandResult is a command's own outcome, as distinct from the session's
+// shutdown cause.
+type CommandResult struct {
+	// Exited is true when the command terminated under its own control.
+	Exited bool
+	// Code is its status; meaningful only when Exited.
+	Code int
+	// Signal names the signal that killed it, when it was killed.
+	Signal string
+}
+
 // exitCode reports the status a PTY's process exited with, given the error
 // from Wait. The second return is false when the process did not exit under
 // its own control: exec reports -1 for a process stopped by a signal, which is
