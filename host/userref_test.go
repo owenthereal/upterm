@@ -133,6 +133,13 @@ func Test_ParseUserRef_errors(t *testing.T) {
 		{name: "plaintext url", in: "http://git.corp.com/bob", wantErrSubstr: "refusing to fetch keys over http://"},
 		{name: "url with credentials", in: "https://u:p@git.corp.com/bob", wantErrSubstr: "must not contain credentials"},
 		{name: "url with query", in: "https://git.corp.com/bob?x=1", wantErrSubstr: "must not contain a query or fragment"},
+		{
+			// An empty query has RawQuery == "" yet url.String() still renders
+			// the "?", so only ForceQuery distinguishes it from no query at all.
+			name:          "url with an empty forced query",
+			in:            "https://git.corp.com/bob?",
+			wantErrSubstr: "must not contain a query or fragment",
+		},
 		{name: "url with fragment", in: "https://git.corp.com/bob#f", wantErrSubstr: "must not contain a query or fragment"},
 		{name: "url without a path", in: "https://git.corp.com", wantErrSubstr: "must include a user path"},
 		{name: "port on github.com", in: "github:alice@github.com:8443", wantErrSubstr: "does not accept a port"},
@@ -142,7 +149,42 @@ func Test_ParseUserRef_errors(t *testing.T) {
 		{name: "host with a query", in: "gitea:alice@git.corp.com?x=1", wantErrSubstr: "expected host or host:port"},
 		{name: "host with a fragment", in: "gitea:alice@git.corp.com#f", wantErrSubstr: "expected host or host:port"},
 		{name: "non-numeric port", in: "gitea:alice@git.corp.com:http", wantErrSubstr: "invalid port"},
+		{
+			// net.SplitHostPort reports no error for an empty port, and
+			// KeysURL() would then emit https://ghe.corp.com:/alice.keys —
+			// a working endpoint whose dedup key differs from the same host
+			// without the colon.
+			name:          "empty port",
+			in:            "github:alice@ghe.corp.com:",
+			wantErrSubstr: `invalid port "" in host "ghe.corp.com:"`,
+		},
+		{name: "port above the maximum", in: "gitea:alice@git.corp.com:99999", wantErrSubstr: "invalid port"},
+		{name: "port zero", in: "gitea:alice@git.corp.com:0", wantErrSubstr: "invalid port"},
+		{name: "negative port", in: "gitea:alice@git.corp.com:-1", wantErrSubstr: "invalid port"},
+		{
+			// Atoi accepts "007" as 7, so the authority names port 7 while the
+			// dedup key and Display() say 007.
+			name:          "port with leading zeros",
+			in:            "gitea:alice@git.corp.com:007",
+			wantErrSubstr: "invalid port",
+		},
+		{name: "two port sections", in: "gitea:alice@git.corp.com:1:2", wantErrSubstr: "expected host or host:port"},
 		{name: "url without a host", in: "https:///alice", wantErrSubstr: "URL must include a host"},
+		{
+			// The ~ is SourceHut's, and stripping it everywhere turned
+			// github:~alice into github:alice without a word.
+			name:          "tilde on a provider that has no tilde form",
+			in:            "github:~alice",
+			wantErrSubstr: "unexpected '~' prefix",
+		},
+		{
+			// TrimPrefix removes one ~, and KeysURL() re-adds SourceHut's, so
+			// this used to request https://meta.sr.ht/~~alice.keys.
+			name:          "doubled tilde on sourcehut",
+			in:            "srht:~~alice",
+			wantErrSubstr: "unexpected '~' prefix",
+		},
+		{name: "sourcehut tilde with no name", in: "srht:~", wantErrSubstr: "missing username"},
 	}
 
 	for _, c := range cases {

@@ -93,9 +93,19 @@ func ParseUserRef(s string) (UserRef, error) {
 		explicitHost = true
 	}
 
-	user = strings.TrimPrefix(user, "~")
+	// Only SourceHut writes the ~ as part of the name, and KeysURL() re-adds it
+	// from providerInfo.userPrefix. Stripping unconditionally turned
+	// github:~alice into github:alice silently.
+	if info.userPrefix == "~" {
+		user = strings.TrimPrefix(user, "~")
+	}
 	if user == "" {
 		return UserRef{}, fmt.Errorf("%s: missing username", s)
+	}
+	// A ~ still leading here is either a provider that has no tilde form or a
+	// doubled ~~, which would request https://meta.sr.ht/~~alice.keys.
+	if strings.HasPrefix(user, "~") {
+		return UserRef{}, fmt.Errorf("%s: invalid username %q: unexpected '~' prefix", s, user)
 	}
 	if strings.ContainsAny(user, "/?#") {
 		return UserRef{}, fmt.Errorf("%s: invalid username %q", s, user)
@@ -153,8 +163,21 @@ func validateHost(host string) error {
 	if hostname == "" {
 		return fmt.Errorf("invalid host %q: expected host or host:port", host)
 	}
-	if port != "" {
-		if _, err := strconv.Atoi(port); err != nil {
+
+	// Whether a port section exists cannot be read off port alone:
+	// net.SplitHostPort reports an empty port for "host:" without error, and
+	// reports no port at all for "host:1:2". Both used to pass. An empty port
+	// is not harmless — KeysURL() then emits https://host:/alice.keys, which
+	// works and whose dedup key differs from the same host without the colon.
+	if strings.LastIndex(host, ":") > strings.LastIndex(host, "]") {
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			return fmt.Errorf("invalid host %q: expected host or host:port", host)
+		}
+		// Itoa round trip as well as the range check: it rejects "007" and
+		// "+7", which Atoi accepts and which then name a different authority
+		// than the port they denote.
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 			return fmt.Errorf("invalid port %q in host %q", port, host)
 		}
 	}
@@ -172,7 +195,10 @@ func parseRawURLRef(s string) (UserRef, error) {
 	if u.User != nil {
 		return UserRef{}, fmt.Errorf("%s: URL must not contain credentials", s)
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery as well as RawQuery: "https://git.corp.com/alice?" has an empty
+	// RawQuery yet still renders the "?" back out of url.String(), so the
+	// request would carry a query the spec forbids.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return UserRef{}, fmt.Errorf("%s: URL must not contain a query or fragment", s)
 	}
 	if u.Hostname() == "" {
@@ -222,10 +248,11 @@ func githubClientConfig(ref UserRef) (apiURL, clientHost, origin string, err err
 	host := ref.ResolveHost()
 	hostname, _ := splitHostPort(host)
 
-	// per_page=100 is the API maximum. Without it the endpoint defaults to 30
-	// and returns no Link: rel="next" following here, so a user with 31+
-	// public keys would silently lose the rest on the authenticated path
-	// while the anonymous .keys fallback returns all of them.
+	// per_page=100 is the API maximum; githubUserKeys then follows
+	// Link: rel="next" for whatever does not fit. Both halves matter: the
+	// endpoint defaults to 30 per page, and a user with more keys than one
+	// page holds would otherwise silently lose the rest on the authenticated
+	// path while the anonymous .keys fallback returns all of them.
 	apiURL = githubAPIPrefix(host) + "users/" + url.PathEscape(ref.User) + "/keys?per_page=100"
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
