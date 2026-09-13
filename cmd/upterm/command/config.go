@@ -225,8 +225,7 @@ func exampleConfig() string {
 
 # Force a specific command for clients (default: none)
 # When set, clients cannot run arbitrary commands.
-# Use YAML array syntax: ["command", "arg1", "arg2"]
-# force-command: ["/bin/bash", "-l"]
+# force-command: "/bin/bash -l"
 
 # Path to authorized_keys file for client authentication (default: none)
 # authorized-keys: /path/to/authorized_keys

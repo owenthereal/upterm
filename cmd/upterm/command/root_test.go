@@ -28,6 +28,8 @@ func newTestCmd() *cobra.Command {
 	cmd.Flags().StringSlice("authorized-user", nil, "")
 	cmd.Flags().StringSlice("private-key", nil, "")
 	cmd.Flags().String("server", "", "")
+	cmd.Flags().String("force-command", "", "")
+	cmd.Flags().Bool("debug", false, "")
 	return cmd
 }
 
@@ -94,6 +96,102 @@ func Test_toStringSlice(t *testing.T) {
 			assert.Equal(t, c.want, got)
 		})
 	}
+}
+
+func Test_toScalarString(t *testing.T) {
+	cases := []struct {
+		name          string
+		val           any
+		want          string
+		wantErrSubstr string
+	}{
+		{name: "bool true", val: true, want: "true"},
+		{name: "bool false", val: false, want: "false"},
+		{name: "string", val: "/bin/bash -l", want: "/bin/bash -l"},
+		{name: "int", val: 8443, want: "8443"},
+		{
+			name:          "yaml sequence is an error",
+			val:           []any{"/bin/bash", "-l"},
+			wantErrSubstr: "expected a single value, got []interface {}",
+		},
+		{
+			name:          "string slice is an error",
+			val:           []string{"/bin/bash", "-l"},
+			wantErrSubstr: "expected a single value, got []string",
+		},
+		{
+			name:          "mapping is an error",
+			val:           map[string]any{"a": "b"},
+			wantErrSubstr: "expected a single value, got map[string]interface {}",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := toScalarString("force-command", c.val)
+			if c.wantErrSubstr != "" {
+				assert.ErrorContains(t, err, c.wantErrSubstr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, c.want, got)
+		})
+	}
+}
+
+func Test_bindFlagsToEnv_scalarFlagRejectsYAMLList(t *testing.T) {
+	withConfig(t, `force-command: ["/bin/bash", "-l"]`+"\n")
+
+	_, err := bindFlagsToEnv(newTestCmd())
+	assert.ErrorContains(t, err, "force-command")
+	assert.ErrorContains(t, err, "expected a single value")
+}
+
+func Test_bindFlagsToEnv_badEnvValueNamesTheEnvVar(t *testing.T) {
+	withConfig(t, "")
+	t.Setenv("UPTERM_DEBUG", "yes")
+
+	_, err := bindFlagsToEnv(newTestCmd())
+	assert.ErrorContains(t, err, "UPTERM_DEBUG")
+	assert.ErrorContains(t, err, "debug")
+}
+
+func Test_bindFlagsToEnv_badConfigValueNamesTheConfigFile(t *testing.T) {
+	withConfig(t, "debug: yes\n")
+
+	_, err := bindFlagsToEnv(newTestCmd())
+	assert.ErrorContains(t, err, utils.UptermConfigFilePath())
+	assert.ErrorContains(t, err, "debug")
+}
+
+func Test_bindFlagsToEnv_unknownConfigKeyIsFatal(t *testing.T) {
+	withConfig(t, "authorized_user:\n  - github:alice\n")
+
+	_, err := bindFlagsToEnv(newTestCmd())
+	assert.ErrorContains(t, err, `unknown config key "authorized_user"`)
+}
+
+func Test_bindFlagsToEnv_unknownConfigKeyAcrossWholeCommandTree(t *testing.T) {
+	// authorized-user lives on hostCmd's PersistentFlags, not root's. Running a
+	// non-host command must still recognize it as a known key, or every config
+	// containing it would be rejected by commands other than "host".
+	withConfig(t, "authorized-user:\n  - github:alice\n")
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"version"})
+	assert.NoError(t, root.Execute())
+}
+
+func Test_bindFlagsToEnv_unknownConfigKeySparesConfigPath(t *testing.T) {
+	withConfig(t, "authorized_user:\n  - github:alice\n")
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"config", "path"})
+	assert.NoError(t, root.Execute())
 }
 
 func Test_bindFlagsToEnv_yamlListIsNotFlattened(t *testing.T) {

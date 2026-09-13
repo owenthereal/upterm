@@ -114,7 +114,10 @@ Environment Variables:
 	return rootCmd
 }
 
-// bindFlagsToEnv binds all command flags to config file and environment variables.
+// bindFlagsToEnv binds cmd's flags to the config file and environment
+// variables, and reports which flags were supplied from any origin
+// (command line, environment, or config file) in the returned map.
+//
 // Configuration priority (highest to lowest):
 //  1. Command-line flags
 //  2. Environment variables with UPTERM_ prefix
@@ -125,6 +128,12 @@ Environment Variables:
 //
 //	--hide-client-ip flag -> UPTERM_HIDE_CLIENT_IP env var -> hide-client-ip in config.yaml
 //	--read-only flag -> UPTERM_READ_ONLY env var -> read-only in config.yaml
+//
+// The returned error is fatal: a malformed config file, a config key with no
+// known flag, a config key with no value, or a value that a flag rejects all
+// abort the command rather than silently ignoring the problem. Callers
+// should let every command fail this way except `upterm config ...`, which
+// must stay reachable to repair the file (see isConfigCommand).
 func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	supplied := make(map[string]bool)
 
@@ -159,6 +168,21 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	configKeys := make(map[string]bool)
 	for _, k := range v.AllKeys() {
 		configKeys[k] = true
+	}
+
+	// A config key with no matching flag anywhere in the command tree is
+	// rejected outright. This is the last silent-drop path in ingestion:
+	// `authorized_user:` (wrong separator), `authorized-users:` (plural), or a
+	// key nested under a parent mapping would otherwise never be looked at,
+	// authorizationRequested() would report false, and the session would
+	// accept any client with no error or warning. There is no logger to warn
+	// with either — it is installed after PersistentPreRunE calls this
+	// function — so this has to be an error.
+	known := knownFlagNames(cmd)
+	for k := range configKeys {
+		if !known[k] {
+			return supplied, fmt.Errorf("unknown config key %q in %s; remove it or correct the spelling", k, configPath)
+		}
 	}
 
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
@@ -209,15 +233,21 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 				return
 			}
 			if err := sv.Replace(elems); err != nil {
-				bindErr = fmt.Errorf("failed to set %s: %w", flag.Name, err)
+				bindErr = bindSetError(flag.Name, strings.Join(elems, ","), valueOrigin(flag.Name, configPath, inConfig), err)
 				return
 			}
 			supplied[flag.Name] = true
 			return
 		}
 
-		if err := cmd.Flags().Set(flag.Name, toString(val)); err != nil {
-			bindErr = fmt.Errorf("failed to set %s: %w", flag.Name, err)
+		scalar, err := toScalarString(flag.Name, val)
+		if err != nil {
+			bindErr = err
+			return
+		}
+
+		if err := cmd.Flags().Set(flag.Name, scalar); err != nil {
+			bindErr = bindSetError(flag.Name, scalar, valueOrigin(flag.Name, configPath, inConfig), err)
 			return
 		}
 		supplied[flag.Name] = true
@@ -226,14 +256,63 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	return supplied, bindErr
 }
 
+// envVarName returns the UPTERM_-prefixed environment variable name that
+// corresponds to a flag name.
+func envVarName(name string) string {
+	return "UPTERM_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+}
+
 // envSupplied reports whether the UPTERM_ variable for name is set, even to an
 // empty string. viper's getEnv treats an empty variable as unset unless
 // allowEmptyEnv is enabled, which would silently drop a supplied-but-empty
 // authorization source.
 func envSupplied(name string) bool {
-	key := "UPTERM_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
-	_, ok := os.LookupEnv(key)
+	_, ok := os.LookupEnv(envVarName(name))
 	return ok
+}
+
+// valueOrigin names where flag.Name's value came from, for use in an error
+// message. The environment variable is preferred when both happen to be set,
+// because it also outranks the config file in actual precedence.
+func valueOrigin(name, configPath string, inConfig bool) string {
+	if envSupplied(name) {
+		return envVarName(name)
+	}
+	if inConfig {
+		return configPath
+	}
+	return "an unknown source"
+}
+
+// bindSetError reports a flag-set failure together with the origin of the
+// value that caused it. Without this, a bad UPTERM_DEBUG=yes or config value
+// reads as a bug in upterm rather than a bad input: pflag's own error (e.g.
+// `invalid argument "yes" for "--debug" flag: ...`) never says where "yes"
+// came from.
+func bindSetError(name, display, origin string, err error) error {
+	return fmt.Errorf("%s: cannot use value %q (from %s): %w", name, display, origin, err)
+}
+
+// knownFlagNames returns the union of flag names across the whole command
+// tree rooted at cmd.Root(). bindFlagsToEnv is called with whichever
+// subcommand is actually running, and a subcommand's own flags (e.g. host's
+// --authorized-user, which is persistent on hostCmd rather than root) would
+// otherwise be invisible when validating a config key from a sibling command
+// such as `upterm version`.
+func knownFlagNames(cmd *cobra.Command) map[string]bool {
+	names := make(map[string]bool)
+
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		c.Flags().VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
+		c.PersistentFlags().VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(cmd.Root())
+
+	return names
 }
 
 // toStringSlice converts a config or environment value into flag elements.
@@ -306,22 +385,24 @@ func isConfigCommand(cmd *cobra.Command) bool {
 	return false
 }
 
-// toString converts a value to string for flag setting.
-// Handles bool and string slice types specially, uses fmt.Sprintf for others.
-func toString(val any) string {
+// toScalarString converts a config or environment value for a non-slice
+// flag. It rejects the collection types rather than letting fmt.Sprintf
+// render them: fmt.Sprintf("%v", []any{"/bin/bash","-l"}) yields
+// "[/bin/bash -l]", which pflag's stringValue accepts without error and
+// shlex then splits into "[/bin/bash" — a silently broken force command.
+func toScalarString(name string, val any) (string, error) {
 	switch v := val.(type) {
 	case bool:
 		if v {
-			return "true"
+			return "true", nil
 		}
-		return "false"
+		return "false", nil
 	case string:
-		return v
-	case []string:
-		// For string slice flags (e.g., --private-key), join with commas
-		return strings.Join(v, ",")
+		return v, nil
+	case []any, []string, map[string]any:
+		return "", fmt.Errorf("%s: expected a single value, got %T", name, v)
 	default:
-		// For all other types (int, float, etc.), use fmt.Sprintf
-		return fmt.Sprintf("%v", v)
+		// For all other scalar types (int, float, etc.), use fmt.Sprintf.
+		return fmt.Sprintf("%v", v), nil
 	}
 }
