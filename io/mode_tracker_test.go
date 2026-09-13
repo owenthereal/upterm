@@ -41,6 +41,42 @@ func Test_ModeTracker_ScrollRegionAndCharset(t *testing.T) {
 	require.Equal(t, "\x1b[5;20r\x1b(0", string(m.Snapshot()))
 }
 
+// Each screen buffer owns its scroll region. Replaying the alternate screen's
+// margins to a joiner that is on the normal screen -- or the normal screen's
+// after an alt-screen switch -- confines it to rows it never asked for.
+func Test_ModeTracker_ScrollRegionFollowsTheScreenBuffer(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "margins set before the switch belong to the normal screen",
+			input: "\x1b[1;23r\x1b[?1049h",
+			want:  "\x1b[1;23r\x1b[?1049h",
+		},
+		{
+			name:  "margins set after the switch belong to the alternate screen",
+			input: "\x1b[?1049h\x1b[5;10r",
+			want:  "\x1b[?1049h\x1b[5;10r",
+		},
+		{
+			name:  "leaving the alternate screen discards its margins",
+			input: "\x1b[1;23r\x1b[?1049h\x1b[5;10r\x1b[?1049l",
+			want:  "\x1b[1;23r",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, string(m.Snapshot()))
+		})
+	}
+}
+
 func Test_ModeTracker_SplitAcrossWrites(t *testing.T) {
 	m := NewModeTracker()
 	for _, chunk := range []string{"\x1b", "[?10", "49h"} {
@@ -89,7 +125,10 @@ func Test_ModeTracker_BoundsUnterminatedSequence(t *testing.T) {
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	m := NewModeTracker()
 
+	// The worst case is both screen buffers carrying margins, so the normal
+	// screen's are set before the modes switch to the alternate one.
 	var b strings.Builder
+	b.WriteString("\x1b[1;99999r")
 	for _, mode := range restorableModes() {
 		fmt.Fprintf(&b, "\x1b[?%dh", mode)
 	}
@@ -97,8 +136,8 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	_, err := m.Write([]byte(b.String()))
 	require.NoError(t, err)
 
-	// Every restorable mode set at once, plus scroll region and charset, must
-	// still be trivially smaller than a guest's sink.
+	// Every restorable mode set at once, plus both scroll regions and the
+	// charset, must still be trivially smaller than a guest's sink.
 	require.Less(t, len(m.Snapshot()), 1024)
 }
 

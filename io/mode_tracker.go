@@ -59,9 +59,15 @@ func restorableModes() []int {
 // Not safe for concurrent use. MultiWriter owns one and only touches it under
 // writeMu.
 type ModeTracker struct {
-	decPrivate   map[int]bool
-	scrollRegion []byte // last DECSTBM, verbatim
-	charsetG0    []byte // last "ESC ( X", verbatim
+	decPrivate map[int]bool
+
+	// Each screen buffer has its own margins, so the two DECSTBMs are kept
+	// apart: replaying the alternate screen's to a joiner sitting on the
+	// normal one, or the reverse, confines it to rows nothing set.
+	mainRegion []byte // last DECSTBM on the normal screen, verbatim
+	altRegion  []byte // last DECSTBM on the alternate screen, verbatim
+
+	charsetG0 []byte // last "ESC ( X", verbatim
 
 	seq      []byte
 	overflow bool // current sequence exceeded maxSequenceBytes; discard it
@@ -156,8 +162,22 @@ func (m *ModeTracker) reset() {
 // to itself on RIS or DECSTR.
 func (m *ModeTracker) resetToDefaults() {
 	clear(m.decPrivate)
-	m.scrollRegion = nil
+	m.mainRegion = nil
+	m.altRegion = nil
 	m.charsetG0 = nil
+}
+
+// altScreenModes are the DEC private modes that put the alternate screen
+// buffer on show. Any one of them is enough.
+var altScreenModes = []int{47, 1047, 1049}
+
+func (m *ModeTracker) altActive() bool {
+	for _, n := range altScreenModes {
+		if m.decPrivate[n] {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *ModeTracker) finishCSI(final byte) {
@@ -169,6 +189,7 @@ func (m *ModeTracker) finishCSI(final byte) {
 		if len(params) == 0 || params[0] != '?' {
 			return
 		}
+		wasAlt := m.altActive()
 		set := final == 'h'
 		for _, field := range bytes.Split(params[1:], []byte{';'}) {
 			n, err := strconv.Atoi(string(field))
@@ -180,13 +201,23 @@ func (m *ModeTracker) finishCSI(final byte) {
 			}
 			m.decPrivate[n] = set
 		}
+		if m.altActive() != wasAlt {
+			// A fresh alternate screen has no margins, and the ones it had
+			// are gone the moment it is left.
+			m.altRegion = nil
+		}
 	case 'r':
-		// DECSTBM, stored verbatim including a bare reset.
+		// DECSTBM, stored verbatim including a bare reset, against whichever
+		// screen buffer is showing.
 		seq := make([]byte, 0, len(params)+3)
 		seq = append(seq, 0x1b, '[')
 		seq = append(seq, params...)
 		seq = append(seq, 'r')
-		m.scrollRegion = seq
+		if m.altActive() {
+			m.altRegion = seq
+		} else {
+			m.mainRegion = seq
+		}
 	case 'p':
 		// DECSTR, a soft reset. Its parameter is the intermediate '!', which
 		// is what separates it from the several other CSI ... p sequences.
@@ -199,7 +230,12 @@ func (m *ModeTracker) finishCSI(final byte) {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the two verbatim sequences.
+// len(restorable) plus the three verbatim sequences.
+//
+// The order is the order the stream would have had to use to reach this
+// state: the normal screen's margins, then the modes -- which is where a
+// switch to the alternate screen happens -- then the alternate screen's own
+// margins, and only while it is the one showing.
 func (m *ModeTracker) Snapshot() []byte {
 	nums := make([]int, 0, len(m.decPrivate))
 	for n := range m.decPrivate {
@@ -207,7 +243,7 @@ func (m *ModeTracker) Snapshot() []byte {
 	}
 	sort.Ints(nums)
 
-	var out []byte
+	out := append([]byte(nil), m.mainRegion...)
 	for _, n := range nums {
 		if m.decPrivate[n] == restorable[n] {
 			// Already where a joining terminal starts.
@@ -221,7 +257,9 @@ func (m *ModeTracker) Snapshot() []byte {
 			out = append(out, 'l')
 		}
 	}
-	out = append(out, m.scrollRegion...)
+	if m.altActive() {
+		out = append(out, m.altRegion...)
+	}
 	out = append(out, m.charsetG0...)
 	return out
 }
