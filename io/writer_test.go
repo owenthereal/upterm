@@ -102,6 +102,57 @@ func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
 		"replay must still end with the ring's tail, got %q", got)
 }
 
+// The snapshot is replayed ahead of the ring, so it has to describe the
+// terminal as of the ring's first byte. Fed at the ring's entrance instead,
+// the tracker described the state after it, and a mode set inside the ring
+// window was applied twice: "qqq ESC(0 qqq" reached a joiner as
+// "ESC(0 qqq ESC(0 qqq", drawing all six characters in the graphics charset
+// instead of three.
+func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.T) {
+	w := NewMultiWriter(64)
+
+	_, err := w.Write([]byte("qqq\x1b(0qqq"))
+	require.NoError(t, err)
+
+	// Nothing has left the ring, so the ring carries the charset switch
+	// itself and the snapshot has nothing to add.
+	early := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(early))
+	require.Equal(t, "qqq\x1b(0qqq", early.String())
+
+	// Push it out of the ring: now it survives only in the snapshot, and
+	// still only once.
+	plain := strings.Repeat("z", 64)
+	_, err = w.Write([]byte(plain))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b(0"+plain, late.String())
+}
+
+// A write larger than the ring drops everything queued and its own leading
+// bytes. Both left the ring, and the queued bytes left first: handing them to
+// the tracker the other way round makes it believe the older sequence is the
+// newer one.
+func Test_MultiWriter_OversizedWriteEvictsInStreamOrder(t *testing.T) {
+	w := NewMultiWriter(8)
+
+	_, err := w.Write([]byte("\x1b[?2004h"))
+	require.NoError(t, err)
+
+	_, err = w.Write([]byte("\x1b[?2004ltrailing"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	// Bracketed paste ends back off, which is where a joining terminal
+	// already is, so the snapshot says nothing and the ring is all there is.
+	// Out of order it would open with a stale "\x1b[?2004h".
+	require.Equal(t, "trailing", late.String())
+}
+
 func Test_MultiWriter(t *testing.T) {
 	assert := assert.New(t)
 

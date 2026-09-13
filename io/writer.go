@@ -22,18 +22,51 @@ type buffer struct {
 	queue [][]byte
 	max   int // cap in bytes
 	size  int // bytes currently held
+
+	// onEvict is handed every byte that leaves the ring, in stream order.
+	// What it feeds is state the replay can no longer reconstruct from the
+	// ring itself; see NewMultiWriter.
+	onEvict func([]byte)
 }
 
+// Append copies p into the ring and hands whatever that pushed out to
+// onEvict, in stream order, before returning.
 func (c *buffer) Append(p []byte) {
+	evicted := c.push(p)
+	if c.onEvict == nil {
+		return
+	}
+
+	// Called outside c.mu: what onEvict feeds is not this type's to lock, and
+	// a callback under a lock invites one. Order is still the stream's, since
+	// Append is only ever reached under the fan-out's writeMu. The slices
+	// handed over are read before this returns and not retained, so the ones
+	// that alias p are safe.
+	for _, e := range evicted {
+		c.onEvict(e)
+	}
+}
+
+// push does Append's bookkeeping and returns the evicted bytes for it to
+// deliver.
+func (c *buffer) push(p []byte) [][]byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.max <= 0 {
-		return
+		// Nothing is kept, so everything handed over has already left.
+		return [][]byte{p}
 	}
 
-	// A single write larger than the ring keeps only its tail.
+	var evicted [][]byte
+
+	// A single write larger than the ring keeps only its tail. Everything
+	// queued is older than the prefix being dropped, so it leaves first.
 	if len(p) > c.max {
+		evicted = append(evicted, c.queue...)
+		evicted = append(evicted, p[:len(p)-c.max])
+		c.queue = c.queue[:0]
+		c.size = 0
 		p = p[len(p)-c.max:]
 	}
 
@@ -49,13 +82,17 @@ func (c *buffer) Append(p []byte) {
 		excess := c.size - c.max
 		head := c.queue[0]
 		if len(head) > excess {
+			evicted = append(evicted, head[:excess])
 			c.queue[0] = head[excess:]
 			c.size -= excess
 			break
 		}
+		evicted = append(evicted, head)
 		c.queue = c.queue[1:]
 		c.size -= len(head)
 	}
+
+	return evicted
 }
 
 func (c *buffer) Data() [][]byte {
@@ -81,11 +118,22 @@ func (w bufferWriter) Write(p []byte) (int, error) {
 // replayBytes bytes of output.
 func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	b := &buffer{max: replayBytes}
+	modes := NewModeTracker()
+
+	// The tracker watches what leaves the ring, not what enters it. Append
+	// replays the snapshot ahead of the ring's bytes, so the state it
+	// describes has to be the state as of the ring's first byte, with the
+	// ring itself carrying everything after. Fed at the entrance it described
+	// the state after the ring, and any mode set inside the ring window was
+	// applied twice: once by the snapshot, far too early, and again by the
+	// replay.
+	b.onEvict = func(p []byte) { _, _ = modes.Write(p) }
+
 	return &MultiWriter{
 		writers: writers,
 		buffer:  b,
 		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
-		modes:   NewModeTracker(),
+		modes:   modes,
 	}
 }
 
@@ -128,7 +176,8 @@ type MultiWriter struct {
 	replay *TerminalQueryFilter
 
 	// modes records terminal state the ring loses once it scrolls out, so a
-	// joining writer can be restored to it before the replay.
+	// joining writer can be restored to it before the replay. It is fed by
+	// the ring's evictions rather than by Write; see NewMultiWriter.
 	modes *ModeTracker
 
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
@@ -274,7 +323,6 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
-	_, _ = t.modes.Write(p)
 	_, _ = t.replay.Write(p)
 
 	t.membersMu.Lock()
