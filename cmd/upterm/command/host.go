@@ -59,6 +59,7 @@ var (
 	flagPrivateKeys             []string
 	flagKnownHostsFilename      string
 	flagAuthorizedKeys          string
+	flagAuthorizedUsers         []string
 	flagCodebergUsers           []string
 	flagGitHubUsers             []string
 	flagGitLabUsers             []string
@@ -129,6 +130,18 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
+
+	cmd.PersistentFlags().StringSliceVar(&flagAuthorizedUsers, "authorized-user", nil,
+		"Authorize users by fetching their public keys from a code-hosting service. Repeatable. "+
+			"Forms: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, srht:dave, or an https:// URL.")
+
+	// Superseded by --authorized-user. Kept working and hidden rather than
+	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a
+	// deprecation notice would appear in logs they cannot act on.
+	for _, name := range []string{"codeberg-user", "github-user", "gitlab-user", "srht-user"} {
+		// Only errors on an unknown flag name, all of which are registered above.
+		_ = cmd.PersistentFlags().MarkHidden(name)
+	}
 
 	return cmd
 }
@@ -214,6 +227,11 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("logger not available")
 	}
 
+	refs, err := collectUserRefs()
+	if err != nil {
+		return err
+	}
+
 	var authorizedKeys []*host.AuthorizedKey
 	if flagAuthorizedKeys != "" {
 		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
@@ -222,33 +240,19 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 		authorizedKeys = append(authorizedKeys, aks)
 	}
-	if flagCodebergUsers != nil {
-		codebergUserKeys, err := host.CodebergUserAuthorizedKeys(flagCodebergUsers)
+
+	if len(refs) > 0 {
+		userKeys, err := host.AuthorizedKeysFromUserRefs(c.Context(), refs, logger.Logger)
 		if err != nil {
-			return fmt.Errorf("error reading Codeberg user keys: %w", err)
+			return fmt.Errorf("error reading user keys: %w", err)
 		}
-		authorizedKeys = append(authorizedKeys, codebergUserKeys...)
+		authorizedKeys = append(authorizedKeys, userKeys...)
 	}
-	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger.Logger)
-		if err != nil {
-			return fmt.Errorf("error reading GitHub user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
-	}
-	if flagGitLabUsers != nil {
-		gitLabUserKeys, err := host.GitLabUserAuthorizedKeys(flagGitLabUsers)
-		if err != nil {
-			return fmt.Errorf("error reading GitLab user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
-	}
-	if flagSourceHutUsers != nil {
-		sourceHutUserKeys, err := host.SourceHutUserAuthorizedKeys(flagSourceHutUsers)
-		if err != nil {
-			return fmt.Errorf("error reading SourceHut user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, sourceHutUserKeys...)
+
+	// An empty authorized-key set means "allow anyone with the session token"
+	// downstream. If the user asked for a restriction, never fall back to that.
+	if authorizationRequested() && countKeys(authorizedKeys) == 0 {
+		return fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
 	}
 
 	signers, cleanup, err := host.Signers(flagPrivateKeys)
@@ -392,4 +396,65 @@ func defaultPrivateKeys(homeDir string) []string {
 
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
+}
+
+// legacyUserFlags maps the hidden per-provider flags onto the reference grammar.
+var legacyUserFlags = []struct {
+	provider string
+	values   *[]string
+}{
+	{"codeberg", &flagCodebergUsers},
+	{"github", &flagGitHubUsers},
+	{"gitlab", &flagGitLabUsers},
+	{"srht", &flagSourceHutUsers},
+}
+
+func collectUserRefs() ([]host.UserRef, error) {
+	raw := append([]string{}, flagAuthorizedUsers...)
+	for _, lf := range legacyUserFlags {
+		for _, user := range *lf.values {
+			raw = append(raw, lf.provider+":"+user)
+		}
+	}
+
+	var (
+		refs []host.UserRef
+		errs error
+	)
+	for _, s := range raw {
+		ref, err := host.ParseUserRef(s)
+		if err != nil {
+			errs = multierror.Append(errs, err)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	if errs != nil {
+		return nil, errs
+	}
+	return refs, nil
+}
+
+// authorizationRequested reports whether the user asked to restrict who may
+// join, from any configuration origin.
+func authorizationRequested() bool {
+	for _, name := range []string{
+		"authorized-keys", "authorized-user",
+		"codeberg-user", "github-user", "gitlab-user", "srht-user",
+	} {
+		if suppliedFlags[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func countKeys(aks []*host.AuthorizedKey) int {
+	var n int
+	for _, ak := range aks {
+		if ak != nil {
+			n += len(ak.PublicKeys)
+		}
+	}
+	return n
 }
