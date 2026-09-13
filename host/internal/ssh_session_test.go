@@ -36,14 +36,14 @@ func TestRawSessionOutput(t *testing.T) {
 
 	raw, err := net.DialTimeout("tcp", ln.Addr().String(), 10*time.Second)
 	require.NoError(t, err)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	require.NoError(t, raw.SetDeadline(time.Now().Add(10*time.Second)))
 	conn, chans, reqs, err := ssh.NewClientConn(raw, ln.Addr().String(), &ssh.ClientConfig{
 		User: "guest", HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()),
 	})
 	require.NoError(t, err)
 	client := ssh.NewClient(conn, chans, reqs)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var inputs []io.WriteCloser
 	var outputs []io.Reader
@@ -52,7 +52,7 @@ func TestRawSessionOutput(t *testing.T) {
 	for range 2 {
 		sess, err := client.NewSession()
 		require.NoError(t, err)
-		defer sess.Close()
+		defer func() { _ = sess.Close() }()
 		require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
 		input, err := sess.StdinPipe()
 		require.NoError(t, err)

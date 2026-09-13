@@ -33,12 +33,12 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 			defer cancel()
 			stdin, input, err := os.Pipe()
 			require.NoError(t, err)
-			defer stdin.Close()
-			defer input.Close()
+			defer func() { _ = stdin.Close() }()
+			defer func() { _ = input.Close() }()
 			stdout, hostOutput, err := os.Pipe()
 			require.NoError(t, err)
-			defer stdout.Close()
-			defer hostOutput.Close()
+			defer func() { _ = stdout.Close() }()
+			defer func() { _ = hostOutput.Close() }()
 			require.NoError(t, stdout.SetReadDeadline(time.Now().Add(10*time.Second)))
 
 			_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -63,7 +63,7 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 			}
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
-			defer ln.Close()
+			defer func() { _ = ln.Close() }()
 			done := make(chan error, 1)
 			go func() { done <- srv.ServeWithContext(ctx, ln) }()
 			defer func() {
@@ -89,7 +89,7 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 
 			raw, err := net.DialTimeout("tcp", ln.Addr().String(), 10*time.Second)
 			require.NoError(t, err)
-			defer raw.Close()
+			defer func() { _ = raw.Close() }()
 			require.NoError(t, raw.SetDeadline(time.Now().Add(10*time.Second)))
 			conn, chans, reqs, err := ssh.NewClientConn(raw, ln.Addr().String(), &ssh.ClientConfig{
 				User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(guestSigner)},
@@ -97,10 +97,10 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 			})
 			require.NoError(t, err)
 			client := ssh.NewClient(conn, chans, reqs)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			sess, err := client.NewSession()
 			require.NoError(t, err)
-			defer sess.Close()
+			defer func() { _ = sess.Close() }()
 			require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
 			guestInput, err := sess.StdinPipe()
 			require.NoError(t, err)

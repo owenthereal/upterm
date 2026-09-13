@@ -75,6 +75,21 @@ func TestTerminalQueryFilter(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name:     "filters terminal version query",
+			input:    []byte("\x1b[>q"),
+			expected: nil,
+		},
+		{
+			name:     "filters terminal version query with explicit default",
+			input:    []byte("\x1b[>0q"),
+			expected: nil,
+		},
+		{
+			name:     "passes cursor style and LED controls",
+			input:    []byte("\x1b[0 q\x1b[5 q\x1b[0q\x1b[1q"),
+			expected: []byte("\x1b[0 q\x1b[5 q\x1b[0q\x1b[1q"),
+		},
+		{
 			name:     "passes regular CSI sequences",
 			input:    []byte("\x1b[2J"), // clear screen
 			expected: []byte("\x1b[2J"),
@@ -223,6 +238,11 @@ func TestTerminalQueryFilter_SplitWrites(t *testing.T) {
 		{
 			name:     "tmux size queries split across writes",
 			writes:   [][]byte{[]byte("before\x1b[1"), []byte("8t\x1b"), []byte("[14"), []byte("tafter")},
+			expected: []byte("beforeafter"),
+		},
+		{
+			name:     "tmux version queries split across writes",
+			writes:   [][]byte{[]byte("before\x1b[>"), []byte("q\x1b"), []byte("[>0"), []byte("qafter")},
 			expected: []byte("beforeafter"),
 		},
 		{
