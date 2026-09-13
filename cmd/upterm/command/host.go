@@ -59,6 +59,7 @@ var (
 	flagPrivateKeys             []string
 	flagKnownHostsFilename      string
 	flagAuthorizedKeys          string
+	flagAuthorizedUsers         []string
 	flagCodebergUsers           []string
 	flagGitHubUsers             []string
 	flagGitLabUsers             []string
@@ -93,6 +94,9 @@ containing client public keys.`,
   # Host a terminal session allowing only specified public key(s) to connect:
   upterm host --authorized-keys PATH_TO_AUTHORIZED_KEY_FILE
 
+  # Authorize a user by fetching their public keys from a code-hosting service:
+  upterm host --authorized-user github:username
+
   # Host a session executing a custom command:
   upterm host -- docker run --rm -ti ubuntu bash
 
@@ -119,16 +123,32 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required).")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
 	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
-	cmd.PersistentFlags().StringSliceVar(&flagCodebergUsers, "codeberg-user", nil, "Authorize specified Codeberg users by allowing their public keys to connect.")
-	cmd.PersistentFlags().StringSliceVar(&flagGitHubUsers, "github-user", nil, "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
-	cmd.PersistentFlags().StringSliceVar(&flagGitLabUsers, "gitlab-user", nil, "Authorize specified GitLab users by allowing their public keys to connect.")
-	cmd.PersistentFlags().StringSliceVar(&flagSourceHutUsers, "srht-user", nil, "Authorize specified SourceHut users by allowing their public keys to connect.")
+	registerAuthUserFlag(cmd.PersistentFlags(), &flagCodebergUsers, "codeberg-user", "Authorize specified Codeberg users by allowing their public keys to connect.")
+	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
+	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
+	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
+
+	// The provider list comes from host.ProviderList so --help, the generated
+	// docs and the parser's own error messages cannot disagree about which
+	// services are supported.
+	registerAuthUserFlag(cmd.PersistentFlags(), &flagAuthorizedUsers, "authorized-user",
+		"Authorize users by fetching their public keys from a code-hosting service. Repeatable. "+
+			"Providers: "+host.ProviderList()+". "+
+			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
+
+	// Superseded by --authorized-user. Kept working and hidden rather than
+	// deprecated: action-upterm wraps these flags and users pin it at @v1, so a
+	// deprecation notice would appear in logs they cannot act on.
+	for _, lf := range legacyUserFlags {
+		// Only errors on an unknown flag name, all of which are registered above.
+		_ = cmd.PersistentFlags().MarkHidden(lf.flag)
+	}
 
 	return cmd
 }
@@ -214,41 +234,35 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("logger not available")
 	}
 
+	refs, err := collectUserRefs()
+	if err != nil {
+		return err
+	}
+
 	var authorizedKeys []*host.AuthorizedKey
 	if flagAuthorizedKeys != "" {
+		// Not wrapped: AuthorizedKeysFromFile already names both the action and
+		// the file, so a wrap here reads "error reading authorized keys: error
+		// reading authorized keys file /typo: ...".
 		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
 		if err != nil {
-			return fmt.Errorf("error reading authorized keys: %w", err)
+			return err
 		}
 		authorizedKeys = append(authorizedKeys, aks)
 	}
-	if flagCodebergUsers != nil {
-		codebergUserKeys, err := host.CodebergUserAuthorizedKeys(flagCodebergUsers)
+
+	if len(refs) > 0 {
+		userKeys, err := host.AuthorizedKeysFromUserRefs(c.Context(), refs, logger.Logger)
 		if err != nil {
-			return fmt.Errorf("error reading Codeberg user keys: %w", err)
+			return fmt.Errorf("error reading user keys: %w", err)
 		}
-		authorizedKeys = append(authorizedKeys, codebergUserKeys...)
+		authorizedKeys = append(authorizedKeys, userKeys...)
 	}
-	if flagGitHubUsers != nil {
-		gitHubUserKeys, err := host.GitHubUserAuthorizedKeys(flagGitHubUsers, logger.Logger)
-		if err != nil {
-			return fmt.Errorf("error reading GitHub user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, gitHubUserKeys...)
-	}
-	if flagGitLabUsers != nil {
-		gitLabUserKeys, err := host.GitLabUserAuthorizedKeys(flagGitLabUsers)
-		if err != nil {
-			return fmt.Errorf("error reading GitLab user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, gitLabUserKeys...)
-	}
-	if flagSourceHutUsers != nil {
-		sourceHutUserKeys, err := host.SourceHutUserAuthorizedKeys(flagSourceHutUsers)
-		if err != nil {
-			return fmt.Errorf("error reading SourceHut user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, sourceHutUserKeys...)
+
+	// An empty authorized-key set means "allow anyone with the session token"
+	// downstream. If the user asked for a restriction, never fall back to that.
+	if authorizationRequested() && countKeys(authorizedKeys) == 0 {
+		return fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
 	}
 
 	signers, cleanup, err := host.Signers(flagPrivateKeys)
@@ -392,4 +406,74 @@ func defaultPrivateKeys(homeDir string) []string {
 
 func defaultKnownHost(homeDir string) string {
 	return filepath.Join(homeDir, ".ssh", "known_hosts")
+}
+
+// legacyUserFlags maps the hidden per-provider flags onto the reference
+// grammar. It is the single source of truth for those flag names: the
+// MarkHidden loop in hostCmd and authorizationRequested's fail-closed check
+// both iterate it, because a name hand-copied into either of those and then
+// misspelled would drop a requested restriction rather than fail visibly.
+var legacyUserFlags = []struct {
+	flag     string
+	provider string
+	values   *[]string
+}{
+	{"codeberg-user", "codeberg", &flagCodebergUsers},
+	{"github-user", "github", &flagGitHubUsers},
+	{"gitlab-user", "gitlab", &flagGitLabUsers},
+	{"srht-user", "srht", &flagSourceHutUsers},
+}
+
+func collectUserRefs() ([]host.UserRef, error) {
+	raw := append([]string{}, flagAuthorizedUsers...)
+	for _, lf := range legacyUserFlags {
+		for _, user := range *lf.values {
+			raw = append(raw, lf.provider+":"+user)
+		}
+	}
+
+	var (
+		refs []host.UserRef
+		errs error
+	)
+	for _, s := range raw {
+		ref, err := host.ParseUserRef(s)
+		if err != nil {
+			errs = multierror.Append(errs, err)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	if errs != nil {
+		return nil, errs
+	}
+	return refs, nil
+}
+
+// authorizationRequested reports whether the user asked to restrict who may
+// join, from any configuration origin.
+func authorizationRequested() bool {
+	for _, name := range []string{"authorized-keys", "authorized-user"} {
+		if suppliedFlags[name] {
+			return true
+		}
+	}
+	// Derived, never re-listed: a legacy flag missing from this check reaches
+	// the tunnel with no restriction at all.
+	for _, lf := range legacyUserFlags {
+		if suppliedFlags[lf.flag] {
+			return true
+		}
+	}
+	return false
+}
+
+func countKeys(aks []*host.AuthorizedKey) int {
+	var n int
+	for _, ak := range aks {
+		if ak != nil {
+			n += len(ak.PublicKeys)
+		}
+	}
+	return n
 }

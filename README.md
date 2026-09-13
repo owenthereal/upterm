@@ -98,14 +98,30 @@ Host a session with specified client public key(s) authorized to connect:
 upterm host --authorized-keys PATH_TO_PUBLIC_KEY
 ```
 
-Authorize specified GitHub, GitLab, SourceHut, Codeberg users with their corresponding public keys:
+Or authorize users by `provider:username`, fetching their public keys from a
+code-hosting service:
 
 ```console
-upterm host --github-user username
-upterm host --gitlab-user username
-upterm host --srht-user username
-upterm host --codeberg-user username
+upterm host --authorized-user github:username
+upterm host --authorized-user gitlab:username
+upterm host --authorized-user srht:username
+upterm host --authorized-user codeberg:username
 ```
+
+Self-hosted instances are supported by naming the host. `gitea` and `forgejo`
+always require one, since there is no default instance. Keys are always fetched
+over HTTPS:
+
+```console
+upterm host --authorized-user github:username@ghe.example.com
+upterm host --authorized-user gitea:username@git.example.com
+upterm host --authorized-user forgejo:username@git.example.com
+upterm host --authorized-user https://git.example.com/username
+```
+
+For a GitHub Enterprise Server instance that requires a login, authenticate
+first with `gh auth login --hostname ghe.example.com`; only credentials stored
+for that host are used.
 
 ### Force command
 

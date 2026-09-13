@@ -225,11 +225,21 @@ func exampleConfig() string {
 
 # Force a specific command for clients (default: none)
 # When set, clients cannot run arbitrary commands.
-# Use YAML array syntax: ["command", "arg1", "arg2"]
-# force-command: ["/bin/bash", "-l"]
+# force-command: "/bin/bash -l"
 
 # Path to authorized_keys file for client authentication (default: none)
 # authorized-keys: /path/to/authorized_keys
+
+# Authorize users by fetching their public keys from a code-hosting service
+# (default: none). Forms:
+#   github:alice                 GitHub (honors GH_HOST when no host is given)
+#   github:bob@ghe.example.com   GitHub Enterprise Server
+#   gitea:carol@git.example.com  self-hosted Gitea or Forgejo (host required)
+#   gitlab:erin, codeberg:frank, srht:dave
+#   https://git.example.com/bob  any forge serving {url}.keys
+# authorized-user:
+#   - github:alice
+#   - gitea:carol@git.example.com
 
 # Paths to private key files (default: generates ephemeral key)
 # private-key:

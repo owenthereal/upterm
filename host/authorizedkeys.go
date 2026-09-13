@@ -2,24 +2,9 @@ package host
 
 import (
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
-	"time"
 
-	"log/slog"
-
-	"github.com/cli/go-gh/v2/pkg/api"
 	"golang.org/x/crypto/ssh"
-)
-
-const (
-	codebergKeysUrlFmt  = "https://codeberg.org/%s"
-	gitHubKeysUrlFmt    = "https://github.com/%s"
-	gitLabKeysUrlFmt    = "https://gitlab.com/%s"
-	sourceHutKeysUrlFmt = "https://meta.sr.ht/~%s"
 )
 
 type AuthorizedKey struct {
@@ -30,48 +15,10 @@ type AuthorizedKey struct {
 func AuthorizedKeysFromFile(file string) (*AuthorizedKey, error) {
 	authorizedKeysBytes, err := os.ReadFile(file)
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("error reading authorized keys file %s: %w", file, err)
 	}
 
 	return parseAuthorizedKeys(authorizedKeysBytes, file)
-}
-
-func CodebergUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(codebergKeysUrlFmt, usernames)
-}
-
-func GitHubUserAuthorizedKeys(usernames []string, logger *slog.Logger) ([]*AuthorizedKey, error) {
-	var (
-		authorizedKeys []*AuthorizedKey
-		seen           = make(map[string]bool)
-	)
-	for _, username := range usernames {
-		if _, found := seen[username]; !found {
-			seen[username] = true
-
-			pks, err := githubUserPublicKeys(username, logger)
-			if err != nil {
-				return nil, err
-			}
-
-			aks, err := parseAuthorizedKeys(pks, username)
-			if err != nil {
-				return nil, err
-			}
-
-			authorizedKeys = append(authorizedKeys, aks)
-		}
-	}
-
-	return authorizedKeys, nil
-}
-
-func GitLabUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(gitLabKeysUrlFmt, usernames)
-}
-
-func SourceHutUserAuthorizedKeys(usernames []string) ([]*AuthorizedKey, error) {
-	return usersPublicKeys(sourceHutKeysUrlFmt, usernames)
 }
 
 func parseAuthorizedKeys(keysBytes []byte, comment string) (*AuthorizedKey, error) {
@@ -86,76 +33,16 @@ func parseAuthorizedKeys(keysBytes []byte, comment string) (*AuthorizedKey, erro
 		keysBytes = rest
 	}
 
+	// An empty body parses "successfully" into zero keys, and an empty
+	// authorized-key set means "allow anyone" downstream
+	// (host/internal/server.go). Refuse it here so neither an empty file nor a
+	// zero-length HTTP response can silently open a session.
+	if len(authorizedKeys) == 0 {
+		return nil, fmt.Errorf("no public keys found in %s", comment)
+	}
+
 	return &AuthorizedKey{
 		PublicKeys: authorizedKeys,
 		Comment:    comment,
 	}, nil
-}
-
-func githubUserPublicKeys(username string, logger *slog.Logger) ([]byte, error) {
-	client, err := api.DefaultRESTClient()
-	if err != nil {
-		if strings.Contains(err.Error(), "authentication token not found for host") {
-			// fallback to use the public GH API
-			logger.Warn("no GitHub token found, falling back to public API", "error", err)
-			return userPublicKeys(gitHubKeysUrlFmt, username)
-		}
-
-		return nil, err
-	}
-
-	keys := []struct {
-		Key string `json:"key"`
-	}{}
-	if err := client.Get(fmt.Sprintf("users/%s/keys", url.PathEscape(username)), &keys); err != nil {
-		return nil, err
-	}
-
-	var authorizedKeys []string
-	for _, key := range keys {
-		authorizedKeys = append(authorizedKeys, key.Key)
-	}
-
-	return []byte(strings.Join(authorizedKeys, "\n")), nil
-}
-
-func usersPublicKeys(urlFmt string, usernames []string) ([]*AuthorizedKey, error) {
-	var (
-		authorizedKeys []*AuthorizedKey
-		seen           = make(map[string]bool)
-	)
-	for _, username := range usernames {
-		if _, found := seen[username]; !found {
-			seen[username] = true
-
-			keyBytes, err := userPublicKeys(urlFmt, username)
-			if err != nil {
-				return nil, fmt.Errorf("[%s]: %s", username, err)
-			}
-			userKeys, err := parseAuthorizedKeys(keyBytes, username)
-			if err != nil {
-				return nil, fmt.Errorf("[%s]: %s", username, err)
-			}
-
-			authorizedKeys = append(authorizedKeys, userKeys)
-		}
-	}
-	return authorizedKeys, nil
-}
-
-func userPublicKeys(urlFmt string, username string) ([]byte, error) {
-	path := url.PathEscape(fmt.Sprintf("%s.keys", username))
-
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	resp, err := client.Get(fmt.Sprintf(urlFmt, path))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	return io.ReadAll(resp.Body)
 }
