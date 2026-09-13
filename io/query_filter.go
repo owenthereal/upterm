@@ -2,6 +2,7 @@ package io
 
 import (
 	"io"
+	"slices"
 )
 
 // TerminalQueryFilter wraps an io.Writer and filters out terminal query
@@ -74,6 +75,13 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// Pending returns a copy of the bytes of an escape sequence the filter is
+// still holding because it has not yet seen the sequence's end. They are
+// not in the underlying writer yet.
+func (f *TerminalQueryFilter) Pending() []byte {
+	return slices.Clone(f.seqBuf)
 }
 
 // processByte processes a single byte, appending non-filtered output to f.outBuf.

@@ -163,6 +163,18 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 				return err
 			}
 		}
+
+		// A partial escape sequence the filter is still holding is live output,
+		// not history: it is not in the ring yet, so the loop above never sees
+		// it. A joiner that misses it would see only the tail once the
+		// remainder arrives live, which is garbage on its terminal. Replaying
+		// the lead-in lets the joiner's own filter (or terminal) see the
+		// sequence whole.
+		if pending := t.replay.Pending(); len(pending) > 0 {
+			if _, err := w.Write(pending); err != nil {
+				return err
+			}
+		}
 	}
 
 	t.membersMu.Lock()

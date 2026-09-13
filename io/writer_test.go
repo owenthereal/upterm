@@ -65,6 +65,24 @@ func Test_MultiWriter_ReplayStripsTerminalQueries(t *testing.T) {
 	require.Equal(t, "beforeafter", late.String())
 }
 
+// A joiner that attaches mid-sequence must see the sequence whole, not just
+// the tail the live fan-out delivers after it joins. The lead-in the filter
+// is still holding is not in the ring yet, so Append must hand it over too.
+func Test_MultiWriter_JoinerSeesSplitSequenceWhole(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+
+	_, err := w.Write([]byte("before\x1b["))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	_, err = w.Write([]byte("?1049hafter"))
+	require.NoError(t, err)
+
+	require.Equal(t, "before\x1b[?1049hafter", late.String())
+}
+
 func Test_MultiWriter(t *testing.T) {
 	assert := assert.New(t)
 
