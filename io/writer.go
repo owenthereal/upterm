@@ -16,6 +16,17 @@ import (
 // overflow that guest with its own replay and drop it at the door.
 const DefaultReplayBytes = 256 << 10
 
+// ringChunkSize is the size a replay chunk is grown to before another is
+// started, which is what bounds the ring's chunk count as well as its bytes.
+//
+// A chunk is only closed once the next write no longer fits in it, so any two
+// adjacent closed chunks hold more than ringChunkSize bytes between them:
+// that caps the queue at 2*max/ringChunkSize + 2 chunks, the two being the
+// partially trimmed head and the still-growing tail. A stream of one-byte
+// writes, which is the case that motivated this, packs them full and reaches
+// only max/ringChunkSize + 1.
+const ringChunkSize = 4096
+
 type buffer struct {
 	mu sync.Mutex
 
@@ -70,10 +81,23 @@ func (c *buffer) push(p []byte) [][]byte {
 		p = p[len(p)-c.max:]
 	}
 
-	pp := make([]byte, len(p))
-	copy(pp, p)
-	c.queue = append(c.queue, pp)
-	c.size += len(pp)
+	// Grow the tail chunk in place where p fits in it, so a producer writing a
+	// byte at a time does not get a chunk per byte. Only the spare capacity
+	// past the tail's length is written, and that is never part of a slice
+	// Data has already handed out: the ring only ever appends after what it
+	// has already returned, and only ever trims in front of it.
+	if tail := len(c.queue) - 1; len(p) < ringChunkSize && tail >= 0 &&
+		len(c.queue[tail])+len(p) <= ringChunkSize &&
+		cap(c.queue[tail])-len(c.queue[tail]) >= len(p) {
+		c.queue[tail] = append(c.queue[tail], p...)
+	} else {
+		// A write of ringChunkSize or more gets a chunk of its own; a smaller
+		// one gets room to be grown into.
+		chunk := make([]byte, len(p), max(len(p), ringChunkSize))
+		copy(chunk, p)
+		c.queue = append(c.queue, chunk)
+	}
+	c.size += len(p)
 
 	// Trim from the front, re-slicing the oldest chunk rather than dropping it
 	// when it is larger than the excess, so the ring holds exactly max bytes

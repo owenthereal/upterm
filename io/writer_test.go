@@ -48,6 +48,69 @@ func Test_MultiWriter_ReplayTrimsPartialLeadingChunk(t *testing.T) {
 	require.Equal(t, "aabbbbbb", late.String())
 }
 
+// The ring bounded its bytes but not its chunks, so a producer writing one
+// byte at a time filled it with one chunk per byte: megabytes of slice
+// headers, and a joining writer handed that many separate Write calls with
+// the fan-out lock held for all of them.
+func Test_MultiWriter_ReplayChunkCountIsBounded(t *testing.T) {
+	const ring = 64 << 10
+
+	w := NewMultiWriter(ring)
+	want := make([]byte, 0, ring)
+	for i := 0; i < ring; i++ {
+		b := byte('a' + i%26)
+		_, err := w.Write([]byte{b})
+		require.NoError(t, err)
+		want = append(want, b)
+	}
+
+	require.LessOrEqual(t, len(w.buffer.Data()), ring/ringChunkSize+2)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, string(want), late.String())
+}
+
+// Coalescing into the tail chunk must leave what Data already handed out
+// alone: those slices are what a joiner is being written, and a chunk that
+// grew or shifted under one would replay the wrong bytes.
+func Test_MultiWriter_ReplayTrimsACoalescedTail(t *testing.T) {
+	// Bigger than one chunk, so the ring's head is a coalesced tail by the
+	// time the trimming starts on it.
+	const ring = ringChunkSize + 1000
+
+	w := NewMultiWriter(ring)
+	var all []byte
+	write := func(n int) {
+		for i := 0; i < n; i++ {
+			b := byte('a' + len(all)%26)
+			_, err := w.Write([]byte{b})
+			require.NoError(t, err)
+			all = append(all, b)
+		}
+	}
+
+	write(100)
+	handedOut := w.buffer.Data()
+	before := make([]string, len(handedOut))
+	for i, chunk := range handedOut {
+		before[i] = string(chunk)
+	}
+
+	// Enough to coalesce into that tail, open new chunks, and then trim the
+	// front of the coalesced one.
+	write(ring)
+
+	for i, chunk := range handedOut {
+		require.Equal(t, before[i], string(chunk),
+			"chunk %d changed after it had been handed to a joiner", i)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, string(all[len(all)-ring:]), late.String())
+}
+
 func Test_MultiWriter_ReplayStripsTerminalQueries(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 
@@ -444,7 +507,9 @@ func TestMultiWriterReplayHasNoEmptyWrites(t *testing.T) {
 	var rec recordingWriter
 	require.NoError(t, w.Append(&rec))
 
-	require.Equal(t, []int{3, 3}, rec.writeSizes(), "replay must not emit empty writes")
+	// Chunk boundaries are the ring's business -- small writes are coalesced
+	// -- but none of them may be empty.
+	require.NotContains(t, rec.writeSizes(), 0, "replay must not emit empty writes")
 	require.Equal(t, "onetwo", string(rec.bytes()))
 }
 
