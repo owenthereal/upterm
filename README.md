@@ -146,7 +146,7 @@ Look the session up by name while it runs and after it ends. The record outlives
 upterm session info build-shell -o json
 ```
 
-The `status` field is `starting`, `ready`, `disconnected` or `ended`, and `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed` or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`.
+The `status` field is `starting`, `ready`, `disconnected` or `ended`, and `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`. Records outlive the sessions that wrote them for seven days, and `upterm session list` prunes the ones past that.
 
 ### File Transfer (SFTP/SCP)
 
