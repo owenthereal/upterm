@@ -281,6 +281,11 @@ func captureStdout(t *testing.T, fn func()) string {
 		collected <- buf.String()
 	}()
 
+	// Registered before fn runs, because a require failure inside it calls
+	// Goexit: the close below would be skipped and the copier would sit on a
+	// pipe whose write end nobody ever closes. Closing twice is harmless.
+	defer func() { _ = w.Close() }()
+
 	fn()
 
 	require.NoError(t, w.Close())
