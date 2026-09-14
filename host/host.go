@@ -318,7 +318,7 @@ func (c *Host) Run(ctx context.Context) error {
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
-				r.Status = sessiondir.StatusEnding
+				advanceStatus(r, sessiondir.StatusEnding)
 				r.Reason = runReason
 				r.ExitCode = runExitCode
 				r.Signal = runSignal
@@ -520,7 +520,7 @@ func (c *Host) Run(ctx context.Context) error {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 				if c.SessionDir != nil {
 					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
-						r.Status = sessiondir.StatusDisconnected
+						advanceStatus(r, sessiondir.StatusDisconnected)
 					})
 				}
 			},
@@ -551,7 +551,7 @@ func (c *Host) Run(ctx context.Context) error {
 			if c.SessionDir != nil {
 				_ = c.SessionDir.Update(func(r *sessiondir.Record) {
 					r.SessionID = sessionID
-					r.Status = sessiondir.StatusReady
+					advanceStatus(r, sessiondir.StatusReady)
 				})
 			}
 
