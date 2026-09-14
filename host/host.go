@@ -387,6 +387,11 @@ func (c *Host) Run(ctx context.Context) error {
 		ProxyURL:          c.ProxyURL,
 		Logger:            logger.With("component", "reverse-tunnel"),
 	}
+	// Deferred before Establish, not after: Close is nil-safe on a partially
+	// established tunnel, and a dial that succeeds but then fails inside
+	// Establish -- at createSession or Listen -- must still close the SSH
+	// client rather than leak it.
+	defer rt.Close()
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
 		// Log the error before returning to ensure it's captured in logs
@@ -394,7 +399,6 @@ func (c *Host) Run(ctx context.Context) error {
 		logger.Error("Failed to establish reverse tunnel", "error", err)
 		return err
 	}
-	defer rt.Close()
 
 	// Check server version compatibility after establishing connection
 	serverVersion := string(rt.ServerVersion())
