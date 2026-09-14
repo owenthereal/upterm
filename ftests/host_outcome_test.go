@@ -312,6 +312,50 @@ func Test_Host_PublishesZeroExit(t *testing.T) {
 	require.Equal(t, 0, *res.ExitCode)
 }
 
+// Test_Host_CanRunTwice pins that running a Host does not consume it. A
+// supervisor that restarts a session, and a test that reuses its fixture,
+// both call Run again on the same value -- and the bookkeeping Run leaves
+// behind used to make the second run publish into the first run's released
+// directory, which by then may belong to somebody else entirely.
+func Test_Host_CanRunTwice(t *testing.T) {
+	run := newOutcomeRun(t, []string{"sh", "-c", "exit 0"})
+
+	// One drain for both runs: the pipe stays open between them, since the
+	// second run writes to the same stdout the first one did.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(io.Discard, run.stdout)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	t.Logf("first host run returned: %v", run.host.Run(ctx))
+	first := run.record(t)
+
+	t.Logf("second host run returned: %v", run.host.Run(ctx))
+	second := run.record(t)
+
+	run.closeWriters()
+	<-drained
+
+	require.NotEqual(t, first.LaunchID, second.LaunchID,
+		"the second run must claim the name for itself rather than inherit the first run's claim")
+	for i, rec := range []*sessiondir.Record{first, second} {
+		require.Equal(t, sessiondir.ReasonExited, rec.Reason, "run %d", i+1)
+		require.NotNil(t, rec.ExitCode, "run %d", i+1)
+		require.Equal(t, 0, *rec.ExitCode, "run %d", i+1)
+	}
+
+	// The same roots newOutcomeRun pointed the host at, by way of the
+	// environment it set.
+	_, held, err := sessiondir.Inspect(ctx, utils.UptermRuntimeDir(), run.stateRoot, run.name)
+	require.NoError(t, err)
+	require.False(t, held,
+		"a host that has returned must leave its name free, however many times it has run")
+}
+
 func Test_Host_PublishesSignalTermination(t *testing.T) {
 	res := runHostForOutcome(t, []string{"sh", "-c", "kill -TERM $$"})
 	require.Equal(t, sessiondir.ReasonSignaled, res.Reason,

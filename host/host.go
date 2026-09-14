@@ -235,12 +235,21 @@ type Host struct {
 	// record is published.
 	Name string
 
-	// SessionDir is claimed by Run and readable afterwards. Nil when
-	// AdminSocketFile was supplied, which is how tests drive Host without
-	// taking a name.
+	// SessionDir is claimed by Run and readable for as long as Run is
+	// running. Run clears it on the way out: the directory is released by
+	// then, a released Dir may not be touched again, and leaving it here
+	// would be leaving a handle to a name that now belongs to whoever claimed
+	// it next. Nil when AdminSocketFile was supplied, which is how tests
+	// drive Host without taking a name.
 	SessionDir *sessiondir.Dir
 }
 
+// Run hosts one session and returns when it ends.
+//
+// It may be called again afterwards: everything Run claims, it gives back
+// before returning, including the two fields it fills in on the Host itself.
+// A caller that supplied AdminSocketFile keeps it across runs, since managing
+// the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) error {
 	u, err := url.Parse(c.Host)
 	if err != nil {
@@ -258,6 +267,10 @@ func (c *Host) Run(ctx context.Context) error {
 	for _, ak := range c.AuthorizedKeys {
 		aks = append(aks, ak.PublicKeys...)
 	}
+
+	// Whether this run took the name, as opposed to being handed a socket to
+	// use. Only the run that claimed it may give it back.
+	var claimedDir bool
 
 	if c.AdminSocketFile == "" {
 		runtimeDir, err := utils.CreateUptermRuntimeDir()
@@ -277,6 +290,7 @@ func (c *Host) Run(ctx context.Context) error {
 		}
 		c.SessionDir = dir
 		c.AdminSocketFile = dir.AdminSocket()
+		claimedDir = true
 	}
 
 	var (
@@ -327,6 +341,19 @@ func (c *Host) Run(ctx context.Context) error {
 			}
 			if err := dir.Release(releaseCtx); err != nil {
 				logger.Warn("failed to release session directory", "error", err)
+			}
+
+			// Run's own bookkeeping, undone. Left in place, a second Run on
+			// this Host would skip the claim above and spend the whole session
+			// updating and finally releasing a Dir that is already released —
+			// and the name is free the instant Release returns, so those
+			// writes would land on a successor's record and that release would
+			// delete a live successor's runtime directory. The socket path is
+			// only cleared if this run was the one that derived it; a caller
+			// that supplied its own keeps it.
+			c.SessionDir = nil
+			if claimedDir {
+				c.AdminSocketFile = ""
 			}
 		}()
 	}
