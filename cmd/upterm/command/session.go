@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
@@ -25,6 +26,18 @@ var (
 	flagAdminSocket string
 	flagOutput      string
 )
+
+// sessionQueryTimeout bounds every wait a read-only session command makes on
+// something another process owns: a registry lock, or an answer from an admin
+// socket.
+//
+// Cobra's Execute leaves the command context as context.Background(), so
+// without this these commands have no deadline at all — and both things they
+// wait on can be held indefinitely by a process that is stopped rather than
+// slow, which no amount of patience resolves. Ten seconds is far longer than
+// either takes when the owner is alive, and short enough that a person waiting
+// on `session list` gets an answer instead of a hang.
+const sessionQueryTimeout = 10 * time.Second
 
 // sessionTemplateData holds data for template output
 type sessionTemplateData struct {
@@ -157,8 +170,22 @@ func reapSessions(ctx context.Context) {
 	}
 }
 
+// tidySessions clears away what dead sessions left behind, before a listing
+// shows it to anyone.
+//
+// Bounded, because it waits on a registry lock whose holder may be a process
+// that is stopped rather than slow. Tidying is not what the user asked for: a
+// list with one stale entry in it is a better answer than a list that never
+// arrives.
+func tidySessions(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
+	defer cancel()
+
+	reapSessions(ctx)
+}
+
 func listRunE(c *cobra.Command, args []string) error {
-	reapSessions(c.Context())
+	tidySessions(c.Context())
 
 	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir())
 	if err != nil {
@@ -301,7 +328,13 @@ func infoRunE(c *cobra.Command, args []string) error {
 	}
 	name := args[0]
 
-	info, live, err := lookup(c.Context(), name)
+	// One deadline for the whole lookup, which waits on the registry and then
+	// on the admin socket: budgeting them separately would let a name that is
+	// slow twice take twice as long.
+	ctx, cancel := context.WithTimeout(c.Context(), sessionQueryTimeout)
+	defer cancel()
+
+	info, live, err := lookup(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -441,7 +474,10 @@ func listSessions(ctx context.Context, dir string) ([]tui.SessionDetail, error) 
 			continue
 		}
 
-		sess, err := session(ctx, adminSocket)
+		// Per socket, not once for the walk: a listing that hit the budget on
+		// its first stopped host would then report nothing at all, when what
+		// it owes the user is every session that can still answer.
+		sess, err := sessionWithTimeout(ctx, adminSocket)
 		if err != nil {
 			continue
 		}
@@ -586,6 +622,17 @@ func session(ctx context.Context, adminSocket string) (*api.GetSessionResponse, 
 	}
 
 	return c.GetSession(ctx, &api.GetSessionRequest{})
+}
+
+// sessionWithTimeout asks one admin socket for its session and gives up after
+// sessionQueryTimeout. A host that was stopped rather than killed leaves a
+// socket that accepts a connection and never answers on it, and an answer
+// that never comes must cost a caller a pause rather than the command.
+func sessionWithTimeout(ctx context.Context, adminSocket string) (*api.GetSessionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
+	defer cancel()
+
+	return session(ctx, adminSocket)
 }
 
 func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {
