@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -81,6 +82,26 @@ func Test_hostKeyCallback(t *testing.T) {
 	err = cb("127.0.0.1:23", addr, pk)
 	assert.Error(t, err, "key mismatched error is expected")
 	assert.Contains(t, err.Error(), "Offending ED25519 key in "+tempfile)
+}
+
+func Test_hostKeyCallbackStdinEOF(t *testing.T) {
+	knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+	stdout := new(bytes.Buffer)
+	cb, err := NewPromptingHostKeyCallback(strings.NewReader(""), stdout, knownHostsFile)
+	require.NoError(t, err)
+
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
+	require.NoError(t, err)
+	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
+
+	err = cb("127.0.0.1:22", addr, pk)
+	assert.ErrorIs(t, err, io.EOF)
+	assert.ErrorContains(t, err, "could not read host-key confirmation from stdin")
+	assert.Contains(t, stdout.String(), "Are you sure you want to continue connecting")
+
+	content, err := os.ReadFile(knownHostsFile)
+	require.NoError(t, err)
+	assert.Empty(t, content, "an unconfirmed host key must not be trusted")
 }
 
 func Test_hostKeyCallbackIPv6WithPort(t *testing.T) {
