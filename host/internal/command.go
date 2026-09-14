@@ -134,7 +134,7 @@ func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = setupCommand(ctx, c.name, c.args)
-	c.cmd.Env = append(c.env, os.Environ()...)
+	c.cmd.Env = append(os.Environ(), c.env...)
 
 	var err error
 	// Pass stdin so startPty can get the initial terminal size

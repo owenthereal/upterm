@@ -126,6 +126,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		sessCtx, cancel := context.WithCancel(sessionContext(ctx))
 		sh := sessionHandler{
 			forceCommand:          s.ForceCommand,
+			commandEnv:            s.CommandEnv,
 			ptmx:                  ptmx,
 			eventEmmiter:          s.EventEmitter,
 			writers:               writers,
@@ -310,6 +311,7 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 
 type sessionHandler struct {
 	forceCommand      []string
+	commandEnv        []string
 	ptmx              PTY
 	eventEmmiter      *emitter.Emitter
 	writers           *uio.MultiWriter
@@ -394,7 +396,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
-		ptmx, err = startAttachCmd(ctx, h.forceCommand, ptyReq.Term)
+		ptmx, err = h.startForceCommand(ctx, ptyReq.Term)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
@@ -575,11 +577,13 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 	eventEmmiter.Emit(upterm.EventClientLeft, sessionID)
 }
 
-func startAttachCmd(ctx context.Context, c []string, term string) (PTY, error) {
-	cmd := setupCommand(ctx, c[0], c[1:])
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TERM=%s", term))
+// startForceCommand runs the forced command for a guest on its own pty.
+// CommandEnv wins over anything the host inherited, and the guest's own TERM
+// wins over both.
+func (h *sessionHandler) startForceCommand(ctx context.Context, term string) (PTY, error) {
+	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
+	cmd.Env = append(os.Environ(), h.commandEnv...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
 	// Pass nil for stdin since this is a remote attach - size will come from SSH client
-	pty, err := startPty(cmd, nil)
-
-	return pty, err
+	return startPty(cmd, nil)
 }
