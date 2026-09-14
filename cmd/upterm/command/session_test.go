@@ -1,8 +1,10 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"maps"
 	"net"
 	"os"
@@ -11,12 +13,14 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
@@ -223,30 +227,73 @@ func buildEndedAfterKill(t *testing.T, name string) {
 
 type stubAdminServer struct {
 	api.UnimplementedAdminServiceServer
-	resp *api.GetSessionResponse
+
+	mu    sync.Mutex
+	resps []*api.GetSessionResponse
 }
 
+// GetSession answers with the next response in the sequence and repeats the
+// last one. A socket that changes its answer between two queries is what a
+// replacement session claiming the name looks like from the outside, and
+// there is no other way for a test to stage it.
 func (s *stubAdminServer) GetSession(context.Context, *api.GetSessionRequest) (*api.GetSessionResponse, error) {
-	return s.resp, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	resp := s.resps[0]
+	if len(s.resps) > 1 {
+		s.resps = s.resps[1:]
+	}
+	return resp, nil
 }
 
-func serveStubAdmin(t *testing.T, socket string, resp *api.GetSessionResponse) {
+func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionResponse) {
 	t.Helper()
 
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 
 	srv := grpc.NewServer()
-	api.RegisterAdminServiceServer(srv, &stubAdminServer{resp: resp})
+	api.RegisterAdminServiceServer(srv, &stubAdminServer{resps: resps})
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
+}
+
+// captureStdout collects what fn prints. `session info` answers on stdout, so
+// which session it printed is only observable there.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	// Drained concurrently: the printed detail is larger than a pipe buffer is
+	// guaranteed to be, and fn writing into a full pipe nobody reads would
+	// deadlock the test rather than fail it.
+	collected := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		collected <- buf.String()
+	}()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out := <-collected
+	require.NoError(t, r.Close())
+	return out
 }
 
 // lookupJSON returns what a caller of `session info -o json` would parse.
 func lookupJSON(t *testing.T, name string) map[string]any {
 	t.Helper()
 
-	info, err := lookup(context.Background(), name)
+	info, _, err := lookup(context.Background(), name)
 	require.NoError(t, err)
 
 	raw, err := json.Marshal(info)
@@ -274,6 +321,82 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 	require.Equal(t, sessiondir.StatusReady, got["status"])
 	require.Equal(t, "sid-1", got["sessionId"])
 	require.NotEmpty(t, got["sshCommand"], "a live session that answered carries its connect string")
+
+	_, live, err := lookup(context.Background(), "ready")
+	require.NoError(t, err)
+	require.NotNil(t, live, "a socket that answered for the recorded session hands its response back")
+	require.Equal(t, "sid-1", live.SessionId,
+		"the response a caller may print is the one that was validated")
+}
+
+// Test_lookup_ReadyWithSocketAnsweringForAnotherSession is the case the
+// returned response exists to make safe: the name is held and the socket
+// answers, but for a different session than the record describes. There is
+// nothing here a caller may print as this session's live detail.
+func Test_lookup_ReadyWithSocketAnsweringForAnotherSession(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "mismatched")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-recorded"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-other",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+
+	info, live, err := lookup(context.Background(), "mismatched")
+	require.NoError(t, err)
+	require.Nil(t, live, "an answer about another session is not this session's live detail")
+	require.Empty(t, info.SSHCommand, "and none of it may reach the caller by another route")
+	require.Equal(t, "sid-recorded", info.SessionID)
+}
+
+// Test_infoRunE_PrintsTheSessionItValidated pins what `session info` prints
+// when the socket's answer changes underneath it. The lookup validates one
+// response by session ID; printing a second, freshly fetched one answers "what
+// is NAME?" with whatever holds the name at that instant, which after a
+// replacement claim is a session the user never asked about.
+func Test_infoRunE_PrintsTheSessionItValidated(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "replaced")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-validated"
+	}))
+	serveStubAdmin(t, d.AdminSocket(),
+		&api.GetSessionResponse{
+			SessionId: "sid-validated",
+			Host:      "ssh://127.0.0.1:2222",
+			NodeAddr:  "127.0.0.1:2222",
+			Command:   []string{"bash"},
+		},
+		// The successor that took the name over between the two queries.
+		&api.GetSessionResponse{
+			SessionId: "sid-replacement",
+			Host:      "ssh://127.0.0.1:2222",
+			NodeAddr:  "127.0.0.1:2222",
+			Command:   []string{"bash"},
+		},
+	)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	out := captureStdout(t, func() {
+		require.NoError(t, infoRunE(cmd, []string{"replaced"}))
+	})
+
+	require.Contains(t, out, "sid-validated",
+		"the session the lookup validated is the one the answer is about")
+	require.NotContains(t, out, "sid-replacement",
+		"a session that claimed the name after the lookup is not the answer to that lookup")
 }
 
 func Test_lookup_Disconnected(t *testing.T) {
@@ -339,7 +462,7 @@ func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
 func Test_lookup_UnknownName(t *testing.T) {
 	setupSessionRoots(t)
 
-	_, err := lookup(context.Background(), "never-claimed")
+	_, _, err := lookup(context.Background(), "never-claimed")
 	require.ErrorContains(t, err, "no session named")
 }
 

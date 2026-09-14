@@ -208,24 +208,30 @@ const statusEnded = "ended"
 // earlier draft read them separately, which could mix generations — A's record
 // with B's ownership — and, more immediately, could dereference a nil record:
 // ReadRecord returns not-found, a claim completes, IsHeld returns true.
-func lookup(ctx context.Context, name string) (sessionInfo, error) {
+//
+// The response is the one this lookup validated, and is nil unless the admin
+// socket answered and its session ID matched the record. Handing it back is
+// what stops a caller that wants the full live detail from asking again: a
+// second query returns whatever holds the name at that instant, which need
+// not be the session the first one confirmed.
+func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermRuntimeDir(), utils.UptermStateDir(), name)
 	if err != nil {
-		return sessionInfo{}, err
+		return sessionInfo{}, nil, err
 	}
 
 	if rec == nil {
 		// No record at all, held or not: not found within retained history.
 		// Checked before either branch uses rec, which is the nil dereference
 		// the earlier draft had.
-		return sessionInfo{}, fmt.Errorf("no session named %q", name)
+		return sessionInfo{}, nil, fmt.Errorf("no session named %q", name)
 	}
 
 	if !held {
 		// Nobody owns the name. Whatever the record says about status — and
 		// after a SIGKILL it frequently says "ready" — this session is over.
 		// Only its outcome is still meaningful.
-		return infoFromRecord(rec, statusEnded), nil
+		return infoFromRecord(rec, statusEnded), nil, nil
 	}
 
 	// Held: the recorded status is current and refines liveness — starting,
@@ -236,22 +242,23 @@ func lookup(ctx context.Context, name string) (sessionInfo, error) {
 	// for the admin socket to confirm and nothing to compare against. Skip it
 	// rather than issue a query whose generation check could not succeed.
 	if rec.SessionID == "" {
-		return info, nil
+		return info, nil, nil
 	}
 
 	adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
 	if err != nil {
-		return sessionInfo{}, err
+		return sessionInfo{}, nil, err
 	}
 
 	// Live detail is a second observation, taken outside the lock, so it is
 	// validated rather than merged on faith: between Inspect and this call the
 	// session could have ended and a replacement claimed the name. The session
 	// ID is the generation marker.
-	if sess, err := session(ctx, adminSocket); err == nil && sess.SessionId == rec.SessionID {
-		info = withLiveDetail(info, sess)
+	sess, err := session(ctx, adminSocket)
+	if err != nil || sess.SessionId != rec.SessionID {
+		return info, nil, nil
 	}
-	return info, nil
+	return withLiveDetail(info, sess), sess, nil
 }
 
 // infoFromRecord reports what the record knows, under the status the caller
@@ -294,7 +301,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 	}
 	name := args[0]
 
-	info, err := lookup(c.Context(), name)
+	info, live, err := lookup(c.Context(), name)
 	if err != nil {
 		return err
 	}
@@ -309,17 +316,18 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return enc.Encode(info)
 	}
 
-	// withLiveDetail is the only thing that sets SSHCommand, and it runs only
-	// when the admin socket answered *and* its session ID matched. So this is
-	// "live, and the session we asked about" without repeating the check — and
-	// it is worth a second query, because the socket answers with more than
-	// the record holds: the host URL, the authorized keys, the SFTP commands.
-	if info.SSHCommand != "" {
+	// The full detail is worth printing over the summary, because the socket
+	// answered with more than the record holds: the host URL, the authorized
+	// keys, the SFTP commands. It is built from the response the lookup
+	// validated rather than from a fresh query, so what gets printed is the
+	// session that was asked about even if another one has since taken the
+	// name.
+	if live != nil {
 		adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
 		if err != nil {
 			return err
 		}
-		if detail, err := fetchSessionDetail(c.Context(), adminSocket); err == nil {
+		if detail, err := buildSessionDetail(live); err == nil {
 			detail.Name = name
 			detail.AdminSocket = adminSocket
 			tui.PrintSessionDetail(detail)
