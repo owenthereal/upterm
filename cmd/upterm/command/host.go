@@ -175,6 +175,36 @@ func resolveSessionName(explicit string, command []string) string {
 	return sessiondir.GenerateName(command)
 }
 
+// maxGeneratedNameAttempts bounds the retry below. A generated name is a
+// command plus four random hex digits, so a collision is already unlikely and
+// two in a row is a signal that something other than luck is wrong — a name
+// being recreated as fast as it is claimed, say. Retrying forever would turn
+// that into a spin instead of an error.
+const maxGeneratedNameAttempts = 5
+
+// runWithGeneratedNameRetry hosts a session under a name, drawing a new name
+// when a generated one turns out to be taken.
+//
+// The distinction is intent. A name the user typed is the answer to their
+// question, so a collision is theirs to hear about; hosting under some other
+// name would be answering a question they did not ask, and `upterm session
+// info` would then not find what they went looking for. A generated name
+// carries no intent at all — it is upterm's own dice roll — and losing that
+// roll is not a reason to refuse to host.
+func runWithGeneratedNameRetry(explicit string, command []string, run func(name string) error) error {
+	var err error
+	for attempt := 0; attempt < maxGeneratedNameAttempts; attempt++ {
+		err = run(resolveSessionName(explicit, command))
+		if err == nil {
+			return nil
+		}
+		if explicit != "" || !errors.Is(err, sessiondir.ErrNameInUse) {
+			return err
+		}
+	}
+	return err
+}
+
 // validateSessionNameFlag rejects an unusable --name before anything is
 // started, so the user sees one clear error rather than a failure partway
 // through startup.
@@ -356,36 +386,39 @@ func shareRunE(c *cobra.Command, args []string) error {
 		term = "xterm-256color"
 	}
 
-	name := resolveSessionName(flagName, args)
+	// A fresh Host per attempt, because every field that names the session —
+	// Name and the banner the callback prints — belongs to the name this
+	// attempt drew, and because Run fills fields in on the Host it is given.
+	err = runWithGeneratedNameRetry(flagName, args, func(name string) error {
+		h := &host.Host{
+			Host:              flagServer,
+			Name:              name,
+			Command:           args,
+			ForceCommand:      forceCommand,
+			Signers:           signers,
+			HostKeyCallback:   hkcb,
+			AuthorizedKeys:    authorizedKeys,
+			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
+			ProxyURL:          proxyURL,
+			SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
+				return displaySession(ctx, s, name)
+			},
+			ClientJoinedCallback:    clientJoinedCallback,
+			ClientLeftCallback:      clientLeftCallback,
+			Stdin:                   os.Stdin,
+			Stdout:                  os.Stdout,
+			Logger:                  logger.Logger,
+			ReadOnly:                flagReadOnly,
+			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
+			PtySize:                 ptySize,
+			PinPtySize:              flagPtySize != "",
+			Term:                    term,
+			SFTPDisabled:            flagNoSFTP,
+			SFTPPermissionChecker:   sftpPermissionChecker,
+		}
 
-	h := &host.Host{
-		Host:              flagServer,
-		Name:              name,
-		Command:           args,
-		ForceCommand:      forceCommand,
-		Signers:           signers,
-		HostKeyCallback:   hkcb,
-		AuthorizedKeys:    authorizedKeys,
-		KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-		ProxyURL:          proxyURL,
-		SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
-			return displaySession(ctx, s, name)
-		},
-		ClientJoinedCallback:    clientJoinedCallback,
-		ClientLeftCallback:      clientLeftCallback,
-		Stdin:                   os.Stdin,
-		Stdout:                  os.Stdout,
-		Logger:                  logger.Logger,
-		ReadOnly:                flagReadOnly,
-		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
-		PtySize:                 ptySize,
-		PinPtySize:              flagPtySize != "",
-		Term:                    term,
-		SFTPDisabled:            flagNoSFTP,
-		SFTPPermissionChecker:   sftpPermissionChecker,
-	}
-
-	err = h.Run(c.Context())
+		return h.Run(c.Context())
+	})
 
 	// Handle user actions specially - no help menu
 	var userDiscardedErr UserDiscardedError

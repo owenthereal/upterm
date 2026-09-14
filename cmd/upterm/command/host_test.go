@@ -1,6 +1,8 @@
 package command
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -63,6 +65,72 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 func Test_ResolveSessionName(t *testing.T) {
 	require.Equal(t, "mine", resolveSessionName("mine", []string{"bash"}))
 	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))
+}
+
+// Test_runWithGeneratedNameRetry covers the difference between a name upterm
+// picked and a name the user typed. A generated name that collides is a lost
+// dice roll and re-rolling is what the user wants; an explicit one that
+// collides is the answer to their question.
+func Test_runWithGeneratedNameRetry(t *testing.T) {
+	inUse := func(name string) error {
+		return fmt.Errorf("claiming %s: %w", name, sessiondir.ErrNameInUse)
+	}
+
+	t.Run("a generated name is retried with a fresh one", func(t *testing.T) {
+		var names []string
+		err := runWithGeneratedNameRetry("", []string{"bash"}, func(name string) error {
+			names = append(names, name)
+			if len(names) < 3 {
+				return inUse(name)
+			}
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.Len(t, names, 3)
+
+		distinct := map[string]bool{}
+		for _, n := range names {
+			distinct[n] = true
+		}
+		require.Len(t, distinct, 3, "retrying the name that was taken would collide again")
+	})
+
+	t.Run("an explicit name is never retried", func(t *testing.T) {
+		var names []string
+		err := runWithGeneratedNameRetry("mine", []string{"bash"}, func(name string) error {
+			names = append(names, name)
+			return inUse(name)
+		})
+
+		require.ErrorIs(t, err, sessiondir.ErrNameInUse)
+		require.Equal(t, []string{"mine"}, names,
+			"hosting under a different name would answer a question the user did not ask")
+	})
+
+	t.Run("retrying is bounded", func(t *testing.T) {
+		var names []string
+		err := runWithGeneratedNameRetry("", []string{"bash"}, func(name string) error {
+			names = append(names, name)
+			return fmt.Errorf("attempt %d: %w", len(names), inUse(name))
+		})
+
+		require.Len(t, names, maxGeneratedNameAttempts)
+		require.ErrorIs(t, err, sessiondir.ErrNameInUse)
+		require.ErrorContains(t, err, "attempt 5", "the last failure is the one the user sees")
+	})
+
+	t.Run("any other failure is final", func(t *testing.T) {
+		refused := errors.New("dial tcp: connection refused")
+		var calls int
+		err := runWithGeneratedNameRetry("", []string{"bash"}, func(string) error {
+			calls++
+			return refused
+		})
+
+		require.ErrorIs(t, err, refused)
+		require.Equal(t, 1, calls, "a fresh name fixes a collision and nothing else")
+	})
 }
 
 func Test_ResolveSessionName_RejectsUnsafeExplicitName(t *testing.T) {
