@@ -12,17 +12,17 @@ import (
 
 // installOnce keeps the drain goroutine below to one per process. The
 // disposition it installs is process-wide, so installing it twice buys
-// nothing and leaks a goroutine per call -- and Run may be called repeatedly,
+// nothing and leaks a goroutine per call — and Run may be called repeatedly,
 // by a supervisor or a test.
 var installOnce sync.Once
 
-// InstallSignalPolicy sets the process-wide signal dispositions a host needs
-// before it writes anything. Run calls it; an embedder may call it earlier,
-// and calling it twice is free.
+// InstallSignalPolicy sets the process-wide signal dispositions a host needs.
+// Starting a host installs it; an embedder that writes to the same stdout
+// before then may call it earlier, and calling it twice is free.
 //
 // SIGPIPE is fatal for writes to fd 1 and 2 and only for those; Go turns it
 // into EPIPE everywhere else. So `upterm host … | head` would kill the whole
-// session the instant head exits, taking the hosted command with it -- the one
+// session the instant head exits, taking the hosted command with it — the one
 // failure mode headless operation must not have. Calling Notify converts it to
 // EPIPE, and the error then travels the ordinary path: the stdout sink fails
 // and is dropped.
@@ -30,7 +30,7 @@ var installOnce sync.Once
 // It belongs to this package rather than to the CLI, which is where it used to
 // live and still is: an application that embeds Host.Run with Stdout set to
 // its own os.Stdout never runs upterm's main, so it inherited the fatal
-// disposition and died on its reader's close -- before the sink could report
+// disposition and died on its reader's close — before the sink could report
 // the broken pipe and before the final session record was published.
 //
 // Process-wide and permanent is the point. Scoping it to a session would leave

@@ -8,9 +8,9 @@ import (
 )
 
 // Test_advanceStatus_NeverMovesBackwards pins the rule rather than the race
-// that motivates it. The publishers are concurrent by construction -- a lost
+// that motivates it. The publishers are concurrent by construction — a lost
 // tunnel and the ready actor race, and neither can be ordered against the
-// other -- so a test of the race could only ever be a test of a scheduler.
+// other — so a test of the race could only ever be a test of a scheduler.
 // What can be pinned is that whichever of them writes second cannot undo the
 // other, which is what the table below states for every ordered pair.
 func Test_advanceStatus_NeverMovesBackwards(t *testing.T) {

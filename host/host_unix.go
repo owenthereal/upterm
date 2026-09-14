@@ -32,8 +32,13 @@ import (
 // end of a session would reopen both holes for any other session still
 // running.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
-	// First, and before the group exists: a host that dies of SIGPIPE on its
-	// first write publishes nothing at all. See InstallSignalPolicy.
+	// Before the group, since this is where the host takes over process-wide
+	// signal state and the actors below are what write for the rest of the
+	// session. Run does write to Stdout ahead of this — the version warning,
+	// and whatever a SessionCreatedCallback prints — so an embedder that wants
+	// the conversion in force from its own first byte calls
+	// InstallSignalPolicy itself, which is why it is exported; upterm's own
+	// main does.
 	InstallSignalPolicy()
 
 	{

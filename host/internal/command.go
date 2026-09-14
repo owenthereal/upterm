@@ -132,7 +132,7 @@ type command struct {
 
 	// ownsTerminal is the package function of the same name, held in a field
 	// so a test can take the terminal away mid-run. Losing the foreground is a
-	// job-control event -- ^Z then bg -- that no in-process pty can be made to
+	// job-control event — ^Z then bg — that no in-process pty can be made to
 	// produce, and the rule it is asked about is only interesting when the
 	// answer changes between the start of Run and its end.
 	ownsTerminal func(*os.File) bool
@@ -190,7 +190,7 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 	// The session's own variables go last, and that is the whole rule for all
 	// three of them. exec.Cmd keeps the last duplicate key, so appending is
 	// what makes UPTERM_SESSION_NAME, UPTERM_ADMIN_SOCKET and TERM describe
-	// *this* session rather than whatever the host inherited -- and inheriting
+	// *this* session rather than whatever the host inherited — and inheriting
 	// them is the ordinary case, not an exotic one: a host started inside
 	// another upterm session, or a multiplexer told to forward the variables,
 	// hands us somebody else's session, and TERM comes from whichever terminal
@@ -236,7 +236,7 @@ func (c *command) Run() error {
 			// on, leaves the host in the background of a terminal somebody
 			// else is now using. SIGTTOU is ignored for the reasons in
 			// host_unix.go, so nothing would stop this tcsetattr from
-			// succeeding -- it would write this session's stale termios over
+			// succeeding — it would write this session's stale termios over
 			// theirs, and the usual symptom is a shell that has lost its echo.
 			//
 			// The settings belong to whoever is in the foreground now. If we

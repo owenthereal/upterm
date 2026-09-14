@@ -334,7 +334,7 @@ func Test_Host_PublishesZeroExit(t *testing.T) {
 
 // Test_Host_CanRunTwice pins that running a Host does not consume it. A
 // supervisor that restarts a session, and a test that reuses its fixture,
-// both call Run again on the same value -- and the bookkeeping Run leaves
+// both call Run again on the same value — and the bookkeeping Run leaves
 // behind used to make the second run publish into the first run's released
 // directory, which by then may belong to somebody else entirely.
 func Test_Host_CanRunTwice(t *testing.T) {
@@ -387,7 +387,7 @@ func Test_Host_PublishesSignalTermination(t *testing.T) {
 // session nobody wanted from one that broke. The interactive confirmation
 // runs in SessionCreatedCallback, after the relay has created the session and
 // before the command exists, so declining it returns an error from a place
-// where every error used to be a startup failure -- and `upterm session info`
+// where every error used to be a startup failure — and `upterm session info`
 // then reported a fault for an operator who simply said no.
 //
 // The plain-error case is the control: without it, "abandoned" could be what

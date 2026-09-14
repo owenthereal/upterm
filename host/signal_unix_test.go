@@ -18,16 +18,16 @@ import (
 
 // Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder covers the process-wide
 // policy from the side that owns it. SIGPIPE is fatal for writes to fd 1 and
-// 2, so `upterm host … | head` -- or any embedder whose stdout reader goes
-// away -- died the instant the reader closed, before the sink could see EPIPE
+// 2, so `upterm host … | head` — or any embedder whose stdout reader goes
+// away — died the instant the reader closed, before the sink could see EPIPE
 // and before the final record was published. The conversion was installed by
 // the CLI's main, which an embedder of Host.Run never runs.
 //
 // The child is therefore an embedder: it calls setupSignalHandler and nothing
-// else, which is the smallest thing a program can do with this package that
-// has to be enough. Installing the policy anywhere further in -- inside
-// Run's actors, say -- would leave a startup banner written before the group
-// exists unprotected.
+// else, which is the smallest thing a program can do with this package and
+// has to be enough. Installed deeper in — inside one of Run's actors, say —
+// the policy would cover only what those actors write and leave the teardown
+// that outlives the group unprotected.
 func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 	if os.Getenv("UPTERM_HOST_SIGPIPE_CHILD") == "1" {
 		// Never run: the group's actors are not what is under test, and the

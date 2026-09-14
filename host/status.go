@@ -19,7 +19,7 @@ var statusOrder = []string{
 // publishes "ready" as soon as the admin socket and the command report
 // themselves, and nothing writes "disconnected" a second time. Written
 // unconditionally, a tunnel lost during startup left "ready" standing for the
-// rest of the session -- `upterm session list` showing a session anyone could
+// rest of the session — `upterm session list` showing a session anyone could
 // join, for a session nobody could reach.
 //
 // Ordering the two writes instead would mean making a fact about the network
@@ -27,8 +27,8 @@ var statusOrder = []string{
 // has. Refusing to move backwards needs no ordering at all: whichever writes
 // second cannot undo the other.
 //
-// A status this version does not recognise -- an empty one, or one a newer
-// version wrote -- ranks as the earliest, so the session's own progress is
+// A status this version does not recognise — an empty one, or one a newer
+// version wrote — ranks as the earliest, so the session's own progress is
 // still publishable over it rather than frozen on a value nothing here
 // understands.
 func advanceStatus(r *sessiondir.Record, to string) {
