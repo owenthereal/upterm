@@ -22,6 +22,11 @@ import (
 // replaces run.SignalHandler: the flag has to be set before the group unwinds,
 // and a handler that only cancels cannot do that.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
+	// Nothing to install on this platform, but called on both so that the
+	// policy is a property of starting a host rather than of being Unix. See
+	// InstallSignalPolicy.
+	InstallSignalPolicy()
+
 	{
 		// Only the *parent* context counts here — the one the caller passed to
 		// Run. Actor contexts are internal cleanup and must never reach this

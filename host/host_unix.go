@@ -22,15 +22,20 @@ import (
 // replaces run.SignalHandler: the flag has to be set before the group unwinds,
 // and a handler that only cancels cannot do that.
 //
-// It also changes process-wide state that outlives the session: SIGTTIN and
-// SIGTTOU are ignored for the rest of the process's life and are never
-// restored. An embedder that calls Host.Run in-process inherits that, and so
-// does everything else in the same process — a library of its own that reads a
-// background terminal would find the read returning EIO instead of the
-// caller being stopped. Nothing here can scope it: the disposition is per
-// process, and restoring it at the end of a session would reopen the hole for
-// any other session still running.
+// It also changes process-wide state that outlives the session: SIGPIPE is
+// converted to EPIPE, and SIGTTIN and SIGTTOU are ignored, for the rest of the
+// process's life and are never restored. An embedder that calls Host.Run
+// in-process inherits all three, and so does everything else in the same
+// process — a library of its own that reads a background terminal would find
+// the read returning EIO instead of the caller being stopped. Nothing here can
+// scope any of it: the dispositions are per process, and restoring them at the
+// end of a session would reopen both holes for any other session still
+// running.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
+	// First, and before the group exists: a host that dies of SIGPIPE on its
+	// first write publishes nothing at all. See InstallSignalPolicy.
+	InstallSignalPolicy()
+
 	{
 		// Only the *parent* context counts here — the one the caller passed to
 		// Run. Actor contexts are internal cleanup and must never reach this
