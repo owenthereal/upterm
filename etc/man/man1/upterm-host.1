@@ -15,7 +15,7 @@ Host a terminal session via a reverse SSH tunnel to the Upterm server.
 .PP
 The session links the host and client IO to a command's IO. Authentication with the
 Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   2. SSH Agent keys
   3. Auto-generated ephemeral key (if no keys found)
 
@@ -53,7 +53,7 @@ containing client public keys.
 	Hide client IP addresses from output (auto-enabled in CI environments).
 
 .PP
-\fB--known-hosts\fP="/Users/owen/.ssh/known_hosts"
+\fB--known-hosts\fP="~/.ssh/known_hosts"
 	Specify a file containing known keys for remote hosts (required).
 
 .PP
@@ -61,8 +61,8 @@ containing client public keys.
 	Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
 
 .PP
-\fB-i\fP, \fB--private-key\fP=[/Users/owen/.ssh/id_ed25519]
-	Specify private key files for public key authentication with the upterm server (required).
+\fB-i\fP, \fB--private-key\fP=[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]
+	Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.
 
 .PP
 \fB-r\fP, \fB--read-only\fP[=false]

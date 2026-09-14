@@ -79,7 +79,7 @@ func hostCmd() *cobra.Command {
 
 The session links the host and client IO to a command's IO. Authentication with the
 Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   2. SSH Agent keys
   3. Auto-generated ephemeral key (if no keys found)
 

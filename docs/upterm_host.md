@@ -8,7 +8,7 @@ Host a terminal session via a reverse SSH tunnel to the Upterm server.
 
 The session links the host and client IO to a command's IO. Authentication with the
 Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   2. SSH Agent keys
   3. Auto-generated ephemeral key (if no keys found)
 
@@ -57,9 +57,9 @@ upterm host [flags]
   -f, --force-command string         Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
   -h, --help                         help for host
       --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).
-      --known-hosts string           Specify a file containing known keys for remote hosts (required). (default "/Users/owen/.ssh/known_hosts")
+      --known-hosts string           Specify a file containing known keys for remote hosts (required). (default "~/.ssh/known_hosts")
       --no-sftp                      Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
-  -i, --private-key strings          Specify private key files for public key authentication with the upterm server (required). (default [/Users/owen/.ssh/id_ed25519])
+  -i, --private-key strings          Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default. (default [~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}])
   -r, --read-only                    Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
       --server string                Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
       --skip-host-key-check          Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.

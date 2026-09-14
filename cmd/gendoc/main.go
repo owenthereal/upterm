@@ -19,6 +19,16 @@ func main() {
 	// to generate docs with generic paths instead of machine-specific paths.
 	// See Makefile 'docs' target for proper environment variable setup.
 	rootCmd := command.Root()
+	// SSH defaults depend on the generator's home directory and available keys.
+	// Change only their display metadata so the CLI keeps discovering local keys.
+	for _, cmd := range rootCmd.Commands() {
+		if cmd.Name() == "host" {
+			privateKey := cmd.PersistentFlags().Lookup("private-key")
+			privateKey.DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
+			privateKey.Usage += " Only existing files are included by default."
+			cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
+		}
+	}
 
 	if err := doc.GenMarkdownTree(rootCmd, "./docs"); err != nil {
 		logger.Error("failed generating markdown docs", "error", err)
