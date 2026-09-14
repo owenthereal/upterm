@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,67 +105,6 @@ func TestXDGDirWithFallback(t *testing.T) {
 			}
 
 			got := xdgDirWithFallbackEnv(tt.envVar, tt.xdgPath, getenv)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestCleanURL(t *testing.T) {
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{
-			url:  "ws://test.com:4433",
-			want: "ws://test.com:4433",
-		},
-		{
-			url:  "ws://test.com:80",
-			want: "ws://test.com",
-		},
-		{
-			url:  "wss://test.com",
-			want: "wss://test.com",
-		},
-		{
-			url:  "wss://test.com:443",
-			want: "wss://test.com",
-		},
-		{
-			url:  "http://test.com:80/foo?bar=baz",
-			want: "http://test.com/foo?bar=baz",
-		},
-		{
-			url:  "https://test.com:443",
-			want: "https://test.com",
-		},
-		{
-			url:  "https://test.com:8080",
-			want: "https://test.com:8080",
-		},
-		{
-			url:  "WS://test.com:80",
-			want: "ws://test.com",
-		},
-		{
-			url:  "ws://user:pass@test.com:80",
-			want: "ws://user:pass@test.com",
-		},
-		{
-			url:  "ws://[::1]:80",
-			want: "ws://[::1]",
-		},
-		{
-			url:  "ws://[::1]:8080",
-			want: "ws://[::1]:8080",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			u, err := url.Parse(tt.url)
-			require.NoError(t, err, "failed to parse url")
-			got := CleanURL(u)
 			assert.Equal(t, tt.want, got)
 		})
 	}

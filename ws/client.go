@@ -5,11 +5,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	chshare "github.com/jpillora/chisel/share"
 	"github.com/owenthereal/upterm/upterm"
-	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -21,6 +21,9 @@ func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool) (*s
 	if err != nil {
 		return nil, err
 	}
+	// u.Host keeps the port that `upterm host` appends to portless ws/wss
+	// server URLs: known_hosts checking requires host:port and keys the
+	// entry as [host]:443. Only the dial URL inside NewWSConn drops it.
 	c, chans, reqs, err := ssh.NewClientConn(conn, u.Host, config)
 	if err != nil {
 		return nil, err
@@ -36,10 +39,11 @@ func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
 	u, _ = url.Parse(u.String()) // clone
 	user := u.User
 	u.User = nil // ws spec doesn't support basic auth
+	stripDefaultPort(u)
 
 	encodedNodeAddr, _ := user.Password()
 	header := webSocketDialHeader(user.Username(), encodedNodeAddr, isUptermClient)
-	wsc, _, err := websocket.DefaultDialer.Dial(utils.CleanURL(u), header)
+	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
 	if err != nil {
 		return nil, err
 	}
@@ -63,4 +67,21 @@ func webSocketDialHeader(sessionID, encodedNodeAddr string, isClient bool) http.
 	header.Add(upterm.HeaderUptermClientVersion, ver)
 
 	return header
+}
+
+// wsDefaultPorts maps a WebSocket scheme to the port dialed when the URL has none.
+var wsDefaultPorts = map[string]string{
+	"ws":  "80",
+	"wss": "443",
+}
+
+// stripDefaultPort drops an explicit default port from u's host. The dialer
+// copies the host verbatim into the Host header, and some firewalls and
+// virtual-host matchers reject "example.com:443" where browsers and curl
+// send "example.com". The address actually dialed does not change.
+func stripDefaultPort(u *url.URL) {
+	port := u.Port()
+	if port != "" && port == wsDefaultPorts[u.Scheme] {
+		u.Host = strings.TrimSuffix(u.Host, ":"+port)
+	}
 }
