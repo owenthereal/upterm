@@ -123,6 +123,7 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
+		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())
@@ -176,6 +177,7 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 			readDelay: 20 * time.Millisecond,
 		},
 		flushLogTimeoutForTesting: 30 * time.Second,
+		ownsTerminal:              ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())
@@ -228,6 +230,7 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 			pending:   [][]byte{[]byte("never delivered\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
+		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	done := make(chan error, 1)
@@ -299,6 +302,7 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 			// that ends the wait while the copy is still producing.
 			readDelay: 20 * time.Millisecond,
 		},
+		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())

@@ -271,6 +271,7 @@ func TestCommand_DrainsOutputAfterExit(t *testing.T) {
 			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
+		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	captured := make(chan string, 1)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -413,4 +414,98 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 
 	require.Contains(t, string(out.bytes()), "NAME=inner-session SOCKET=/inner/admin.sock",
 		"the session's own environment must beat the one it inherited")
+}
+
+// Test_Command_RestoresTheTerminalOnlyWhenStillOwned covers the end of the
+// terminal's life rather than the start of it. Run puts a terminal it owns
+// into raw mode and arms the restore in the same breath, but by the time the
+// command exits the host may have been backgrounded -- ^Z then bg, or a shell
+// that moved on -- and SIGTTOU is ignored, so the restoring tcsetattr succeeds
+// against whatever holds the terminal now, writing this session's stale
+// termios over theirs.
+//
+// Ownership is injected because job control cannot be staged in-process: a pty
+// pair opened here is the controlling terminal of no session, so the real
+// ownsTerminal answers false for it either way and the transition the rule is
+// about never happens.
+func Test_Command_RestoresTheTerminalOnlyWhenStillOwned(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// owns is built per case because the interesting one is stateful: true
+		// when Run asks on the way in, false when the deferred restore asks on
+		// the way out.
+		owns        func() func(*os.File) bool
+		wantRestore bool
+	}{
+		{
+			name:        "the host is still in the foreground",
+			owns:        func() func(*os.File) bool { return func(*os.File) bool { return true } },
+			wantRestore: true,
+		},
+		{
+			name: "the host lost the foreground while the command ran",
+			owns: func() func(*os.File) bool {
+				var asked int
+				return func(*os.File) bool {
+					asked++
+					return asked == 1
+				}
+			},
+			wantRestore: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ptmx, tty, err := ptylib.Open()
+			require.NoError(t, err)
+			defer func() { _ = ptmx.Close() }()
+			defer func() { _ = tty.Close() }()
+
+			fd := int(tty.Fd())
+			original, err := term.GetState(fd)
+			require.NoError(t, err)
+
+			// What raw looks like on this pty, taken from MakeRaw itself and
+			// then undone. Hard-coding termios flags here would be asserting
+			// against a copy of golang.org/x/term rather than against the fact
+			// under test, which is only "raw was applied and then left alone".
+			previous, err := term.MakeRaw(fd)
+			require.NoError(t, err)
+			raw, err := term.GetState(fd)
+			require.NoError(t, err)
+			require.NoError(t, term.Restore(fd, previous))
+
+			writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+			out := &recordingWriter{}
+			require.NoError(t, writers.Append(out))
+
+			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+			require.NoError(t, err)
+			defer func() { _ = devNull.Close() }()
+
+			cmd := newCommand(
+				"sh", []string{"-c", "exit 0"},
+				nil, termsize.Default, false, "",
+				tty, devNull, emitter.New(1), writers, testLogger(t), false,
+			)
+			cmd.ownsTerminal = tc.owns()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			_, err = cmd.Start(ctx)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Run())
+
+			got, err := term.GetState(fd)
+			require.NoError(t, err)
+
+			if tc.wantRestore {
+				require.True(t, reflect.DeepEqual(original, got),
+					"a terminal we still own must be handed back the way we found it")
+				return
+			}
+			require.True(t, reflect.DeepEqual(raw, got),
+				"a terminal we no longer own must be left to whoever holds it now")
+		})
+	}
 }

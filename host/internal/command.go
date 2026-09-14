@@ -106,6 +106,7 @@ func newCommand(
 		writers:                        writers,
 		logger:                         logger,
 		forceForwardingInputForTesting: forceForwardingInputForTesting,
+		ownsTerminal:                   ownsTerminal,
 	}
 }
 
@@ -128,6 +129,13 @@ type command struct {
 
 	eventEmitter *emitter.Emitter
 	logger       *slog.Logger
+
+	// ownsTerminal is the package function of the same name, held in a field
+	// so a test can take the terminal away mid-run. Losing the foreground is a
+	// job-control event -- ^Z then bg -- that no in-process pty can be made to
+	// produce, and the rule it is asked about is only interesting when the
+	// answer changes between the start of Run and its end.
+	ownsTerminal func(*os.File) bool
 
 	ctx context.Context
 
@@ -214,7 +222,7 @@ func (c *command) logInputEnded(err error) {
 func (c *command) Run() error {
 	// Not "is stdin a terminal" but "is stdin a terminal we are entitled to
 	// touch". Backgrounded, these are someone else's terminal's settings.
-	owns := ownsTerminal(c.stdin)
+	owns := c.ownsTerminal(c.stdin)
 
 	if owns {
 		// Set stdin in raw mode.
@@ -222,7 +230,23 @@ func (c *command) Run() error {
 		if err != nil {
 			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
 		}
-		defer func() { _ = term.Restore(int(c.stdin.Fd()), oldState) }()
+		defer func() {
+			// Asked again rather than remembered, because the answer can
+			// change while the command runs: ^Z then bg, or a shell that moved
+			// on, leaves the host in the background of a terminal somebody
+			// else is now using. SIGTTOU is ignored for the reasons in
+			// host_unix.go, so nothing would stop this tcsetattr from
+			// succeeding -- it would write this session's stale termios over
+			// theirs, and the usual symptom is a shell that has lost its echo.
+			//
+			// The settings belong to whoever is in the foreground now. If we
+			// are ever foregrounded again, the shell's job control puts ours
+			// back as part of resuming us.
+			if !c.ownsTerminal(c.stdin) {
+				return
+			}
+			_ = term.Restore(int(c.stdin.Fd()), oldState)
+		}()
 	}
 
 	var g run.Group
