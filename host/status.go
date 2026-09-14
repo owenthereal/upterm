@@ -5,6 +5,12 @@ import "github.com/owenthereal/upterm/host/sessiondir"
 // statusOrder is the sequence a session's status moves through. Position is
 // the whole of the meaning here: advanceStatus compares indices, so the order
 // of this slice is the rule.
+//
+// ready < disconnected encodes stage 1's assumption that a lost tunnel ends
+// the session: there is no path back from disconnected to ready. A later
+// stage that reconnects must revisit this ordering, not just its callers --
+// otherwise the reconnect's "ready" publish finds advanceStatus refusing to
+// move backwards and becomes a silent no-op.
 var statusOrder = []string{
 	sessiondir.StatusStarting,
 	sessiondir.StatusReady,
