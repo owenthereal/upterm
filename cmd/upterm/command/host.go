@@ -79,7 +79,7 @@ func hostCmd() *cobra.Command {
 
 The session links the host and client IO to a command's IO. Authentication with the
 Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_dsa, ~/.ssh/id_ecdsa, ~/.ssh/id_ed25519, ~/.ssh/id_rsa
+  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
   2. SSH Agent keys
   3. Auto-generated ephemeral key (if no keys found)
 
@@ -120,8 +120,12 @@ containing client public keys.`,
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
+	// Keep help and generated docs portable without changing the runtime defaults.
+	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
+	cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
+
 	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagCodebergUsers, "codeberg-user", "Authorize specified Codeberg users by allowing their public keys to connect.")
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
