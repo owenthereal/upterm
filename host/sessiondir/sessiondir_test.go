@@ -45,6 +45,22 @@ func roots(t *testing.T) (runtimeRoot, stateRoot string) {
 	return runtimeRoot, stateRoot
 }
 
+// splitRoots returns two runtime roots over one state root: what a login
+// session and a cron job see on the same Linux box, where XDG_RUNTIME_DIR
+// differs between them and the state directory does not.
+func splitRoots(t *testing.T) (runtimeA, runtimeB, stateRoot string) {
+	t.Helper()
+
+	root := shortTempRoot(t)
+	runtimeA = filepath.Join(root, "runA")
+	runtimeB = filepath.Join(root, "runB")
+	stateRoot = filepath.Join(root, "state")
+	for _, dir := range []string{runtimeA, runtimeB, stateRoot} {
+		require.NoError(t, os.MkdirAll(dir, 0700))
+	}
+	return runtimeA, runtimeB, stateRoot
+}
+
 func claim(t *testing.T, runtimeRoot, stateRoot, name string) (*Dir, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -170,6 +186,42 @@ func Test_Claim_RejectsLiveDuplicate(t *testing.T) {
 
 	_, err = claim(t, runtimeRoot, stateRoot, "demo")
 	require.ErrorIs(t, err, ErrNameInUse)
+}
+
+func Test_Claim_RefusesANameHeldUnderAnotherRuntimeRoot(t *testing.T) {
+	// Ownership has to span both roots, because the record does. Two hosts
+	// that disagree about the runtime root agree about results/demo, and the
+	// second would publish over the first's outcome while it is still running.
+	runtimeA, runtimeB, stateRoot := splitRoots(t)
+
+	a, err := claim(t, runtimeA, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = a.Release(context.Background()) }()
+
+	_, err = claim(t, runtimeB, stateRoot, "demo")
+	require.ErrorIs(t, err, ErrNameInUse, "one state root means one owner, whatever the runtime root is")
+
+	_, statErr := os.Stat(filepath.Join(sessionsRoot(runtimeB), "demo"))
+	require.True(t, os.IsNotExist(statErr), "a refused claim must leave no runtime directory behind")
+
+	rec, err := ReadRecord(stateRoot, "demo")
+	require.NoError(t, err)
+	require.Equal(t, a.LaunchID(), rec.LaunchID, "the holder's record must still be the holder's")
+}
+
+func Test_Release_FreesTheRecordSide(t *testing.T) {
+	// The other half of ownership spanning both roots: a name given back has
+	// to be claimable from anywhere, not just from the root that gave it back.
+	runtimeA, runtimeB, stateRoot := splitRoots(t)
+	ctx := context.Background()
+
+	a, err := claim(t, runtimeA, stateRoot, "demo")
+	require.NoError(t, err)
+	require.NoError(t, a.Release(ctx))
+
+	b, err := claim(t, runtimeB, stateRoot, "demo")
+	require.NoError(t, err, "Release must free the name on both roots")
+	require.NoError(t, b.Release(ctx))
 }
 
 func Test_Claim_RecoversStaleDirectory(t *testing.T) {

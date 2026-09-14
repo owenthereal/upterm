@@ -1,6 +1,22 @@
 // Package sessiondir owns the on-disk identity of a session: which name it
 // holds, where its sockets live, whether the process that claimed it is still
 // alive, and how it ended.
+//
+// A name is owned on both roots, not just the runtime one. The two roots move
+// independently: on Linux a login session and a cron job get different
+// XDG_RUNTIME_DIRs and the same state directory, so a name guarded only under
+// RuntimeRoot would let two hosts each hold "their" lock and publish into one
+// results/<name>/session.json — and once the first ended, its exit code is
+// what a reader finds for the second, still running.
+//
+// So there are two registry locks, and exactly one order between them: the
+// sessions registry (RuntimeRoot/sessions/.registry.lock) is taken before the
+// results registry (StateRoot/results/.registry.lock), and no function takes
+// the sessions registry while holding the results registry. Claim and Inspect
+// take both, in that order; Release and Reap take only the sessions registry;
+// Prune takes only the results registry. A per-name lock is only ever acquired
+// under the registry that guards the directory it lives in, because a lock
+// inside a directory cannot protect that directory from removal.
 package sessiondir
 
 import (
@@ -38,6 +54,9 @@ const (
 
 	registryLockFile = ".registry.lock"
 	sessionLockFile  = "lock"
+	// resultLockFile may share sessionLockFile's name because the two live in
+	// different directories, one per root, even when the roots coincide.
+	resultLockFile   = "lock"
 	adminSocketFile  = "admin.sock"
 	attachSocketFile = "attach.sock"
 	recordFile       = "session.json"
@@ -124,14 +143,16 @@ type ClaimOptions struct {
 }
 
 // Dir is a claimed session name and the paths that belong to it. The claim
-// lasts as long as its lock file stays open.
+// lasts as long as its two lock files stay open: one per root, because a name
+// is owned on both. See the package comment for the order they are taken in.
 type Dir struct {
-	name      string
-	launchID  string
-	startedAt time.Time
-	runtime   string
-	state     string
-	lockFile  *os.File
+	name       string
+	launchID   string
+	startedAt  time.Time
+	runtime    string
+	state      string
+	lockFile   *os.File
+	resultLock *os.File
 
 	// mu guards record. Update does read-modify-write in memory rather than
 	// against the file, so concurrent updates cannot lose one another.
@@ -161,6 +182,10 @@ func (d *Dir) LogPath() string      { return filepath.Join(d.state, logFileName)
 // were written afterwards, a process that claimed the name and then died would
 // leave the previous run's exit code sitting there looking current — reporting
 // success for a run that never started.
+//
+// The same two reasons apply to the results side, which is claimed the same
+// way under its own registry: the name is not ours until both roots say so,
+// and the record is published before either registry is given back.
 func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 	name := opts.Name
 	if name == "" {
@@ -187,7 +212,6 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 	defer releaseRegistry(reg)
 
 	sessRuntime := filepath.Join(sessRoot, name)
-	sessState := filepath.Join(resultsRoot(opts.StateRoot), name)
 
 	if err := os.Mkdir(sessRuntime, 0700); err != nil {
 		if !os.IsExist(err) {
@@ -196,7 +220,7 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		// The name exists. It is stale if nobody holds its lock, and stale is
 		// recoverable: requiring a manual reap after every crash is not a
 		// contract anyone can live with.
-		held, err := nameIsHeld(sessRuntime)
+		held, err := lockIsHeld(filepath.Join(sessRuntime, sessionLockFile))
 		if err != nil {
 			return nil, err
 		}
@@ -211,10 +235,6 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		}
 	}
 
-	if err := os.MkdirAll(sessState, 0700); err != nil {
-		return nil, err
-	}
-
 	lf, err := os.OpenFile(filepath.Join(sessRuntime, sessionLockFile), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
@@ -227,14 +247,60 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		}
 		return nil, fmt.Errorf("%w: %s", ErrNameInUse, name)
 	}
+	// The runtime lock is ours from here until the Dir below takes ownership of
+	// it, so every failure in between has to hand it back.
+	dropRuntimeLock := func() {
+		_ = unlock(lf)
+		_ = lf.Close()
+	}
+
+	// The results registry, taken second and — by the order of these defers —
+	// released first. Holding it across the results lock and the initial
+	// publication is what makes the record side of the name atomic: a reader
+	// under any runtime root sees the name unclaimed or fully published, never
+	// mid-claim.
+	resRoot := resultsRoot(opts.StateRoot)
+	resReg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		dropRuntimeLock()
+		return nil, err
+	}
+	defer releaseRegistry(resReg)
+
+	sessState := filepath.Join(resRoot, name)
+	if err := os.MkdirAll(sessState, 0700); err != nil {
+		dropRuntimeLock()
+		return nil, err
+	}
+
+	rlf, err := os.OpenFile(filepath.Join(sessState, resultLockFile), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		dropRuntimeLock()
+		return nil, err
+	}
+	ok, err = tryLock(rlf)
+	if err != nil || !ok {
+		_ = rlf.Close()
+		dropRuntimeLock()
+		// Nothing can have claimed the runtime directory we just made — the
+		// sessions registry is still held — so removing it leaves a refused
+		// claim with nothing behind, rather than a directory that will look
+		// stale to the next reaper.
+		_ = os.RemoveAll(sessRuntime)
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", ErrNameInUse, name)
+	}
 
 	d := &Dir{
-		name:      name,
-		launchID:  randomHex(8),
-		startedAt: time.Now().UTC(),
-		runtime:   sessRuntime,
-		state:     sessState,
-		lockFile:  lf,
+		name:       name,
+		launchID:   randomHex(8),
+		startedAt:  time.Now().UTC(),
+		runtime:    sessRuntime,
+		state:      sessState,
+		lockFile:   lf,
+		resultLock: rlf,
 	}
 
 	// One publication, so there is no window in which the name is claimed but
@@ -256,9 +322,10 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 // releaseTimeout bounds how long teardown will wait for the registry lock.
 const releaseTimeout = 5 * time.Second
 
-// Release gives the name back and removes the runtime directory. The state
-// directory is deliberately left behind: it holds the outcome, which has to
-// outlive the session that produced it.
+// Release gives the name back on both roots and removes the runtime directory.
+// The results directory is deliberately left behind, only its lock dropped: it
+// holds the outcome, which has to outlive the session that produced it, and it
+// goes when Prune finds it old enough rather than when the session ends.
 //
 // Call it at most once, and call nothing else on the Dir afterwards. Both
 // rules exist because the name is free the instant this returns and a
@@ -296,25 +363,56 @@ func (d *Dir) Release(ctx context.Context) error {
 		// Give the name back without removing anything. The directory is left
 		// for the next Claim or Reap, which is recoverable; a teardown that
 		// blocks forever is not.
-		_ = unlock(d.lockFile)
-		_ = d.lockFile.Close()
+		_ = d.dropLocks()
 		return fmt.Errorf("sessiondir: leaving %s for later reaping: %w", d.runtime, err)
 	}
 	defer releaseRegistry(reg)
 
 	_ = unlock(d.lockFile)
 	_ = d.lockFile.Close()
-	return os.RemoveAll(d.runtime)
+	err = os.RemoveAll(d.runtime)
+
+	// The results lock goes last, and needs no registry of its own: it only
+	// ever protects the results directory from a Prune, and Prune removes a
+	// directory only after finding its lock free. Dropping it after the
+	// runtime directory is gone means the name is never observably free on the
+	// results side while this run's directory still exists.
+	_ = unlock(d.resultLock)
+	_ = d.resultLock.Close()
+	return err
+}
+
+// dropLocks gives both halves of the name back, whatever either one does. A
+// name left held on one root and free on the other is exactly the split this
+// package's two locks exist to prevent, so a failure on one side must not skip
+// the other.
+func (d *Dir) dropLocks() error {
+	err := unlock(d.lockFile)
+	if cerr := d.lockFile.Close(); err == nil {
+		err = cerr
+	}
+	if rerr := unlock(d.resultLock); err == nil {
+		err = rerr
+	}
+	if cerr := d.resultLock.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // Inspect reads a name's record and ownership as one observation.
 //
-// Both under the registry lock, because they are two facts about one thing and
-// a caller that reads them separately can mix generations: read A's record,
-// then observe B's ownership. Under the lock a name is either unclaimed or
-// fully published, since Claim holds the lock across mkdir, lock and the
-// initial publication — so held implies rec != nil, and a caller need not
+// All of it under both registry locks, because they are facts about one thing
+// and a caller that reads them separately can mix generations: read A's
+// record, then observe B's ownership. Under the locks a name is either
+// unclaimed or fully published, since Claim holds both across mkdir, lock and
+// the initial publication — so held implies rec != nil, and a caller need not
 // defend against a record that vanished between the two reads.
+//
+// Ownership is the disjunction of the two roots. A holder under a runtime root
+// this caller cannot see still owns the record it is publishing into, so
+// reporting the name as free would offer it to a second host and report the
+// live session's record as nobody's.
 func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Record, held bool, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, false, err
@@ -327,14 +425,22 @@ func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Rec
 	}
 	defer releaseRegistry(reg)
 
-	path := filepath.Join(sessRoot, name)
-	if _, statErr := os.Stat(path); statErr == nil {
-		held, err = nameIsHeld(path)
+	resRoot := resultsRoot(stateRoot)
+	resReg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		return nil, false, err
+	}
+	defer releaseRegistry(resReg)
+
+	held, err = lockIsHeld(filepath.Join(sessRoot, name, sessionLockFile))
+	if err != nil {
+		return nil, false, err
+	}
+	if !held {
+		held, err = lockIsHeld(filepath.Join(resRoot, name, resultLockFile))
 		if err != nil {
 			return nil, false, err
 		}
-	} else if !os.IsNotExist(statErr) {
-		return nil, false, statErr
 	}
 
 	rec, err = readRecordLocked(stateRoot, name)
@@ -348,15 +454,10 @@ func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Rec
 	return rec, held, err
 }
 
-// releaseKeepingDir drops the lock without removing anything, leaving exactly
-// what a crashed process leaves. It exists for tests and for the failure paths
-// in Claim.
-func (d *Dir) releaseKeepingDir() error {
-	if err := unlock(d.lockFile); err != nil {
-		return err
-	}
-	return d.lockFile.Close()
-}
+// releaseKeepingDir drops both locks without removing anything, leaving
+// exactly what a crashed process leaves — a crash drops every lock the process
+// held, on both roots. It exists for tests and for the failure paths in Claim.
+func (d *Dir) releaseKeepingDir() error { return d.dropLocks() }
 
 // Reap removes session directories whose owner is gone.
 func Reap(ctx context.Context, runtimeRoot string) error {
@@ -380,7 +481,7 @@ func Reap(ctx context.Context, runtimeRoot string) error {
 			continue
 		}
 		path := filepath.Join(sessRoot, e.Name())
-		held, err := nameIsHeld(path)
+		held, err := lockIsHeld(filepath.Join(path, sessionLockFile))
 		if err != nil || held {
 			continue
 		}
@@ -390,11 +491,19 @@ func Reap(ctx context.Context, runtimeRoot string) error {
 	return nil
 }
 
-// nameIsHeld reports whether a session directory's lock is held. Only valid
-// with the registry lock held.
-func nameIsHeld(sessRuntime string) (bool, error) {
-	lf, err := os.OpenFile(filepath.Join(sessRuntime, sessionLockFile), os.O_CREATE|os.O_RDWR, 0600)
+// lockIsHeld reports whether the lock file at path is held by someone else. It
+// serves both roots, and is only valid with that root's registry lock held.
+//
+// A name with no directory under this root is nobody's, which is the answer a
+// caller wants rather than the ENOENT that creating the lock file under a
+// missing parent would give: a session claimed under another runtime root has
+// no directory under this one.
+func lockIsHeld(path string) (bool, error) {
+	lf, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	defer func() { _ = lf.Close() }()

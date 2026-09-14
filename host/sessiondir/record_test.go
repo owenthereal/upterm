@@ -205,6 +205,23 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 	require.Nil(t, rec, "a name that never existed yields no record, not an error")
 }
 
+func Test_Inspect_SeesAHolderUnderAnotherRuntimeRoot(t *testing.T) {
+	// A reader that shares only the state root still has to see the holder,
+	// or it reports the live session's record as nobody's and offers the name.
+	runtimeA, runtimeB, stateRoot := splitRoots(t)
+	ctx := context.Background()
+
+	a, err := claim(t, runtimeA, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = a.Release(ctx) }()
+
+	rec, held, err := Inspect(ctx, runtimeB, stateRoot, "demo")
+	require.NoError(t, err)
+	require.True(t, held, "a name held under another runtime root is held")
+	require.NotNil(t, rec, "held implies a readable record, across roots as within one")
+	require.Equal(t, StatusStarting, rec.Status)
+}
+
 func Test_Release_DoesNotDeleteAReplacement(t *testing.T) {
 	// The interleaving that an unlock-before-registry-lock ordering allows:
 	// A unlocks, B claims and recreates the directory, A then acquires the
@@ -227,7 +244,7 @@ func Test_Release_DoesNotDeleteAReplacement(t *testing.T) {
 	// session lock, which is the property that makes the interleaving
 	// impossible rather than merely unlikely.
 	time.Sleep(50 * time.Millisecond)
-	held, err := nameIsHeld(filepath.Join(sessionsRoot(runtimeRoot), "demo"))
+	held, err := lockIsHeld(filepath.Join(sessionsRoot(runtimeRoot), "demo", sessionLockFile))
 	require.NoError(t, err)
 	require.True(t, held, "the session lock must be held until the registry lock is acquired")
 
