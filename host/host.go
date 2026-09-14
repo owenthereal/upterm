@@ -262,6 +262,13 @@ var ErrSessionAbandoned = errors.New("session abandoned before the command start
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) error {
+	// First, before anything here can write a byte. The version warning below
+	// and whatever a SessionCreatedCallback prints both go to Stdout well
+	// before the signal actor is assembled, and for an embedder whose reader
+	// has gone away a single one of those writes is fatal. See
+	// InstallSignalPolicy; calling it again from setupSignalHandler is free.
+	InstallSignalPolicy()
+
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)

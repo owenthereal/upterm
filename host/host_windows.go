@@ -22,9 +22,9 @@ import (
 // replaces run.SignalHandler: the flag has to be set before the group unwinds,
 // and a handler that only cancels cannot do that.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
-	// Nothing to install on this platform, but called on both so that the
-	// policy is a property of starting a host rather than of being Unix. See
-	// InstallSignalPolicy.
+	// Nothing to install on this platform, and Run has called it already in
+	// any case. Called on both so that the policy is a property of setting up
+	// a host's signals rather than of being Unix. See InstallSignalPolicy.
 	InstallSignalPolicy()
 
 	{

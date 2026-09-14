@@ -32,13 +32,10 @@ import (
 // end of a session would reopen both holes for any other session still
 // running.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
-	// Before the group, since this is where the host takes over process-wide
-	// signal state and the actors below are what write for the rest of the
-	// session. Run does write to Stdout ahead of this — the version warning,
-	// and whatever a SessionCreatedCallback prints — so an embedder that wants
-	// the conversion in force from its own first byte calls
-	// InstallSignalPolicy itself, which is why it is exported; upterm's own
-	// main does.
+	// Run has already done this by the time it gets here, and the Once makes
+	// saying so again free. It is repeated because this function, not Run, is
+	// where the host takes over process-wide signal state: a future caller
+	// that assembles its own group would otherwise inherit half the policy.
 	InstallSignalPolicy()
 
 	{

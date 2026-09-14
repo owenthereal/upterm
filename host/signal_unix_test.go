@@ -6,15 +6,23 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/oklog/run"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
+
+// childTimeout bounds the child below. It is a hang detector: the child dials
+// a port nothing listens on and exits, so anything approaching this means it
+// is stuck rather than slow.
+const childTimeout = 30 * time.Second
 
 // Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder covers the process-wide
 // policy from the side that owns it. SIGPIPE is fatal for writes to fd 1 and
@@ -23,19 +31,34 @@ import (
 // and before the final record was published. The conversion was installed by
 // the CLI's main, which an embedder of Host.Run never runs.
 //
-// The child is therefore an embedder: it calls setupSignalHandler and nothing
-// else, which is the smallest thing a program can do with this package and
-// has to be enough. Installed deeper in — inside one of Run's actors, say —
-// the policy would cover only what those actors write and leave the teardown
-// that outlives the group unprotected.
+// The child is therefore an embedder: it builds a Host over the process's own
+// stdout and calls Run, and Run is what has to install the policy. Calling
+// setupSignalHandler directly instead would assert something narrower than
+// this test's name — Run writes to Stdout before it ever assembles the signal
+// actor, so the policy has to be in force before that, and only a call
+// through Run can show it is.
+//
+// No relay: the host dials a port nothing listens on, so Run returns from
+// Establish. Everything this test is about has already happened by then.
 func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 	if os.Getenv("UPTERM_HOST_SIGPIPE_CHILD") == "1" {
-		// Never run: the group's actors are not what is under test, and the
-		// policy has to be in force by the time the group is assembled rather
-		// than by the time it runs.
-		var g run.Group
-		var shutdownRequested atomic.Bool
-		setupSignalHandler(&g, context.Background(), &shutdownRequested)
+		h := &Host{
+			// Port 1 is privileged and unbound: the dial fails fast and
+			// locally, without a relay to stand up or a network to reach.
+			Host:    "ssh://127.0.0.1:1",
+			Command: []string{"true"},
+			// Supplying a socket is how a caller says it manages the paths
+			// itself, which keeps this run from claiming a session name. The
+			// path is never bound, so nothing is created under it.
+			AdminSocketFile: filepath.Join(os.TempDir(), "upterm-sigpipe-child-admin.sock"),
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Stdout:          os.Stdout,
+		}
+		if err := h.Run(context.Background()); err == nil {
+			_, _ = fmt.Fprintln(os.Stderr, "the host reached a relay that should not exist")
+			os.Exit(1)
+		}
 
 		for i := 0; i < 1000; i++ {
 			fmt.Println(strings.Repeat("x", 1024))
@@ -45,7 +68,10 @@ func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 		os.Exit(7)
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder")
+	ctx, cancel := context.WithTimeout(context.Background(), childTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder")
 	cmd.Env = append(os.Environ(), "UPTERM_HOST_SIGPIPE_CHILD=1")
 
 	stdout, err := cmd.StdoutPipe()
@@ -54,6 +80,11 @@ func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 	cmd.Stderr = &stderr
 
 	require.NoError(t, cmd.Start())
+	// Belt and braces with the context above, which only kills the child once
+	// childTimeout expires: a child that outlives this test for any other
+	// reason goes with it.
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
 	// Close the read end immediately: every subsequent child write is a
 	// broken-pipe write to fd 1.
 	require.NoError(t, stdout.Close())
