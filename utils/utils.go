@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,4 +252,39 @@ func ShortenHomePath(path string) string {
 		return "~" + after
 	}
 	return path
+}
+
+// defaultPorts maps a URL scheme to its default port.
+var defaultPorts = map[string]string{
+	"http":  "80",
+	"https": "443",
+	"ws":    "80",
+	"wss":   "443",
+}
+
+// CleanURL returns u as a string with the default port for its scheme removed.
+// For example, "wss://example.com:443" becomes "wss://example.com".
+// A non-default port, userinfo, path, query and fragment are preserved.
+func CleanURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+
+	v, _ := url.Parse(u.String())
+	v.Scheme = strings.ToLower(v.Scheme)
+
+	port := v.Port()
+	if port == "" || port != defaultPorts[v.Scheme] {
+		return v.String()
+	}
+
+	// Drop the default port. Hostname() strips the brackets from an IPv6
+	// literal, so put them back.
+	host := v.Hostname()
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	v.Host = host
+
+	return v.String()
 }

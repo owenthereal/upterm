@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	chshare "github.com/jpillora/chisel/share"
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -38,7 +39,7 @@ func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
 
 	encodedNodeAddr, _ := user.Password()
 	header := webSocketDialHeader(user.Username(), encodedNodeAddr, isUptermClient)
-	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	wsc, _, err := websocket.DefaultDialer.Dial(utils.CleanURL(u), header)
 	if err != nil {
 		return nil, err
 	}
