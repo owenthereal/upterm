@@ -170,18 +170,36 @@ func reapSessions(ctx context.Context) {
 	}
 }
 
+// pruneRecords drops the records of sessions that ended long enough ago that
+// nobody is still asking how they went. Nothing sweeps in the background, so
+// without a call from here every record a session ever wrote stays forever.
+//
+// `list` is where it belongs for the same reason the reap is: it is the one
+// command a person runs to see the state of things, and it already pays to
+// walk the directory.
+//
+// It never fails the listing, again for the same reason.
+func pruneRecords(ctx context.Context) {
+	if err := sessiondir.Prune(ctx, utils.UptermStateDir(), sessiondir.RecordRetention); err != nil {
+		if logger := uptermctx.Logger(ctx); logger != nil {
+			logger.Debug("failed to prune expired session records", "error", err)
+		}
+	}
+}
+
 // tidySessions clears away what dead sessions left behind, before a listing
 // shows it to anyone.
 //
-// Bounded, because it waits on a registry lock whose holder may be a process
-// that is stopped rather than slow. Tidying is not what the user asked for: a
-// list with one stale entry in it is a better answer than a list that never
-// arrives.
+// Bounded, because both halves wait on a registry lock whose holder may be a
+// process that is stopped rather than slow. Tidying is not what the user asked
+// for: a list with one stale entry in it is a better answer than a list that
+// never arrives.
 func tidySessions(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
 	defer cancel()
 
 	reapSessions(ctx)
+	pruneRecords(ctx)
 }
 
 func listRunE(c *cobra.Command, args []string) error {

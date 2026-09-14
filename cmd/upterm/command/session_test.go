@@ -459,6 +459,52 @@ func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
 	require.NoError(t, err, "a live session's directory must survive a reap")
 }
 
+// buildAgedRecord leaves what a finished session leaves — an unheld results
+// directory with the outcome in it — and backdates the record, since its own
+// updated_at is what Prune dates an entry by. It returns the record's path.
+func buildAgedRecord(t *testing.T, name string, age time.Duration) string {
+	t.Helper()
+
+	d := claimSession(t, name)
+	path := d.RecordPath()
+	require.NoError(t, d.Release(context.Background()))
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	var rec sessiondir.Record
+	require.NoError(t, json.Unmarshal(raw, &rec))
+	rec.UpdatedAt = time.Now().UTC().Add(-age)
+
+	raw, err = json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0600))
+
+	return path
+}
+
+// Test_tidySessions_PrunesOldRecords covers the wiring rather than
+// sessiondir.Prune itself: Prune was fully tested and never called, so every
+// record a session ever wrote outlived its retention window indefinitely.
+//
+// It drives tidySessions rather than listRunE because listRunE goes on to run
+// the TUI, which is not what this is about.
+func Test_tidySessions_PrunesOldRecords(t *testing.T) {
+	setupSessionRoots(t)
+
+	expired := buildAgedRecord(t, "expired", sessiondir.RecordRetention+time.Hour)
+	recent := buildAgedRecord(t, "recent", time.Hour)
+
+	tidySessions(context.Background())
+
+	_, err := os.Stat(expired)
+	require.True(t, os.IsNotExist(err),
+		"a record older than the retention window must be pruned, got %v", err)
+
+	_, err = os.Stat(recent)
+	require.NoError(t, err, "a record still inside the window is the history this command answers from")
+}
+
 func Test_lookup_UnknownName(t *testing.T) {
 	setupSessionRoots(t)
 
