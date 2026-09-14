@@ -1,13 +1,68 @@
 package host
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
+
+func TestSignersFallback(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir := t.TempDir()
+	invalid := filepath.Join(dir, "invalid")
+	require.NoError(t, os.WriteFile(invalid, []byte("not a private key"), 0600))
+
+	for _, tc := range []struct {
+		name string
+		keys []string
+	}{
+		{name: "no keys"},
+		{name: "missing key", keys: []string{filepath.Join(dir, "missing")}},
+		{name: "invalid key", keys: []string{invalid}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			signers, cleanup, err := Signers(tc.keys)
+			if cleanup != nil {
+				t.Cleanup(cleanup)
+			}
+			require.NoError(t, err)
+			require.Len(t, signers, 1, "generate a temporary key when no keys can be loaded")
+			message := []byte("authenticate with a generated key")
+			signature, err := signers[0].Sign(rand.Reader, message)
+			require.NoError(t, err)
+			require.NoError(t, signers[0].PublicKey().Verify(message, signature))
+		})
+	}
+}
+
+func TestSignersPreservesFileKey(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	block, err := ssh.MarshalPrivateKey(privateKey, "")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key")
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(block), 0600))
+
+	signers, cleanup, err := Signers([]string{filepath.Join(dir, "missing"), keyFile})
+	if cleanup != nil {
+		t.Cleanup(cleanup)
+	}
+	require.NoError(t, err)
+	require.Len(t, signers, 1)
+	want, err := ssh.NewPublicKey(publicKey)
+	require.NoError(t, err)
+	require.Equal(t, want.Marshal(), signers[0].PublicKey().Marshal())
+}
 
 const (
 	// Passphrase is "1234"

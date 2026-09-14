@@ -43,7 +43,7 @@ func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
 		signers, err = SignersFromFiles(privateKeys)
 	}
 
-	if err != nil {
+	if len(signers) == 0 || err != nil {
 		signers, err = utils.CreateSigners(nil)
 	}
 
