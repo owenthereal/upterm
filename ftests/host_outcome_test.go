@@ -363,6 +363,7 @@ func Test_Host_CanRunTwice(t *testing.T) {
 	require.NotEqual(t, first.LaunchID, second.LaunchID,
 		"the second run must claim the name for itself rather than inherit the first run's claim")
 	for i, rec := range []*sessiondir.Record{first, second} {
+		require.Equal(t, sessiondir.StatusEnding, rec.Status, "run %d", i+1)
 		require.Equal(t, sessiondir.ReasonExited, rec.Reason, "run %d", i+1)
 		require.NotNil(t, rec.ExitCode, "run %d", i+1)
 		require.Equal(t, 0, *rec.ExitCode, "run %d", i+1)
@@ -551,6 +552,16 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 		return err == nil && rec != nil && rec.Status == sessiondir.StatusDisconnected
 	}, 20*time.Second, outcomePollInterval,
 		"a host that lost its tunnel must publish disconnected, and must not have exited")
+
+	// And it stays disconnected while the session runs on. Nothing may talk
+	// the record back into "ready" once the tunnel that ready describes is
+	// gone: a reader of `upterm session list` would be offered a session
+	// nobody can reach.
+	require.Never(t, func() bool {
+		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
+		return err != nil || rec == nil || rec.Status != sessiondir.StatusDisconnected
+	}, time.Second, outcomePollInterval,
+		"a session whose tunnel is gone must not be published as ready again")
 
 	// Still running, which is the whole claim: the command outlived the
 	// network. Now end it the way an operator would.
