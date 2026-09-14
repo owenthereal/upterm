@@ -59,8 +59,11 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		publicKeys     [][]byte
 		authorizedKeys [][]byte
 	)
+	if len(c.Signers) > 0 {
+		// SSH only tries the first auth method of each type, so group all keys.
+		auths = append(auths, ssh.PublicKeys(c.Signers...))
+	}
 	for _, signer := range c.Signers {
-		auths = append(auths, ssh.PublicKeys(signer))
 		publicKeys = append(publicKeys, ssh.MarshalAuthorizedKey(signer.PublicKey()))
 	}
 	for _, ak := range c.AuthorizedKeys {
