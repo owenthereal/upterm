@@ -62,6 +62,23 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 	}
 }
 
+// Test_UserDiscardedError_IsAnAbandonedSession pins how declining the
+// confirmation prompt is recorded. displaySession returns this error from
+// SessionCreatedCallback, and Host classifies such an error as a failed
+// startup unless it wraps ErrSessionAbandoned — so without the unwrap the
+// record tells whoever reads it that something broke, for a session where the
+// operator simply said no.
+func Test_UserDiscardedError_IsAnAbandonedSession(t *testing.T) {
+	err := error(UserDiscardedError{})
+
+	require.ErrorIs(t, err, host.ErrSessionAbandoned)
+
+	// shareRunE reads the same error the other way round to exit cleanly. An
+	// unwrap that broke that would turn a discard into a failure at the shell.
+	var discarded UserDiscardedError
+	require.ErrorAs(t, fmt.Errorf("session created callback: %w", err), &discarded)
+}
+
 func Test_ResolveSessionName(t *testing.T) {
 	require.Equal(t, "mine", resolveSessionName("mine", []string{"bash"}))
 	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))

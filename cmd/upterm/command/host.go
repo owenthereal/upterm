@@ -35,6 +35,17 @@ func (e UserDiscardedError) Error() string {
 	return "session discarded by user"
 }
 
+// Unwrap makes a discard an abandoned startup rather than a failed one.
+//
+// displaySession returns this from SessionCreatedCallback, and Host records
+// every error from there as startup_failed unless it wraps ErrSessionAbandoned.
+// Nothing failed here: the operator was shown the session and said no, and a
+// record saying otherwise sends whoever reads it looking for a fault that
+// never happened.
+func (e UserDiscardedError) Unwrap() error {
+	return host.ErrSessionAbandoned
+}
+
 // UserInterruptedError represents a user's Ctrl+C interruption
 type UserInterruptedError struct{}
 

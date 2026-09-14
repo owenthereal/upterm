@@ -2,7 +2,11 @@
 
 package command
 
-// InstallSignalPolicy sets process-wide signal dispositions. Windows has no
-// SIGPIPE to convert — a write to a broken pipe already surfaces as an ordinary
-// error — so there is nothing to install here.
-func InstallSignalPolicy() {}
+import "github.com/owenthereal/upterm/host"
+
+// InstallSignalPolicy sets the process-wide signal dispositions a host needs.
+// See the Unix file for why main calls it; the platform difference now lives
+// in host, which has nothing to install on Windows.
+func InstallSignalPolicy() {
+	host.InstallSignalPolicy()
+}
