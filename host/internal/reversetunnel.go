@@ -34,9 +34,18 @@ type ReverseTunnel struct {
 	Logger          *slog.Logger
 
 	ln net.Listener
+
+	// stopKeepAlive ends the goroutine Establish starts. Nil until then.
+	stopKeepAlive context.CancelFunc
 }
 
 func (c *ReverseTunnel) Close() {
+	// Stopped before the client is closed, so the ticker cannot start a ping
+	// into a connection that is going away. Nil when Establish never got far
+	// enough to start one.
+	if c.stopKeepAlive != nil {
+		c.stopKeepAlive()
+	}
 	_ = c.ln.Close()
 	_ = c.Client.Close()
 }
@@ -114,7 +123,14 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	// make sure connection is alive
-	go keepAlive(ctx, c.KeepAliveDuration, func() {
+	//
+	// On the tunnel's own lifetime, not the caller's. ctx belongs to the
+	// session, which outlives a tunnel that is closed before it ends, and
+	// Close had no way to stop this: the ticker went on pinging a closed
+	// client and logging an error every interval for the rest of the session.
+	keepAliveCtx, stopKeepAlive := context.WithCancel(ctx)
+	c.stopKeepAlive = stopKeepAlive
+	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() {
 		// TODO: ping with session ID
 		_, _, err := c.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		if err != nil {
