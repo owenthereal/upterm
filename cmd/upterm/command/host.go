@@ -53,6 +53,13 @@ func (e UserInterruptedError) Error() string {
 	return "interrupted by user"
 }
 
+// Unwrap makes an interruption an abandoned startup rather than a failed
+// one, for the same reason UserDiscardedError.Unwrap does: nothing failed,
+// the operator hit Ctrl+C at the prompt instead of answering it.
+func (e UserInterruptedError) Unwrap() error {
+	return host.ErrSessionAbandoned
+}
+
 // SilentError wraps an error that has already been displayed to the user.
 // main.go checks for this type to avoid duplicate logging.
 type SilentError struct {
