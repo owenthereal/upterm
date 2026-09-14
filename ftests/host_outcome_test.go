@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
@@ -105,12 +108,23 @@ type outcomeRun struct {
 	closeWriters func()
 }
 
+// outcomeOption adjusts the host a case runs, for the things that are not the
+// command it hosts.
+type outcomeOption func(*outcomeRun)
+
+// withSessionCreatedCallback stands in for the interactive confirmation: the
+// CLI asks the operator there, and it is the only hook that can refuse a
+// session after the relay has created it but before the command exists.
+func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse) error) outcomeOption {
+	return func(r *outcomeRun) { r.host.SessionCreatedCallback = cb }
+}
+
 // newOutcomeRun builds a Host that claims a session directory for real.
 //
 // Deliberately not the ftests.Host wrapper: that requires an AdminSocketFile,
 // and supplying one is exactly what makes Host.Run skip the claim these tests
 // are about.
-func newOutcomeRun(t *testing.T, command []string) *outcomeRun {
+func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outcomeRun {
 	t.Helper()
 
 	skipWithoutPOSIXShell(t, command)
@@ -137,7 +151,7 @@ func newOutcomeRun(t *testing.T, command []string) *outcomeRun {
 
 	name := uniqueSessionName(t)
 
-	return &outcomeRun{
+	run := &outcomeRun{
 		host: &host.Host{
 			Host:              "ssh://" + ts.SSHAddr(),
 			Name:              name,
@@ -159,6 +173,12 @@ func newOutcomeRun(t *testing.T, command []string) *outcomeRun {
 			_ = stdinr.Close()
 		},
 	}
+
+	for _, opt := range opts {
+		opt(run)
+	}
+
+	return run
 }
 
 // record reads what the run published. It works after Release, which is the
@@ -175,10 +195,10 @@ func (r *outcomeRun) record(t *testing.T) *sessiondir.Record {
 // runHostForOutcome runs a host to completion and returns the record it left.
 // Run's own error is not the assertion: a command that exits non-zero fails
 // the group, and that is the case under test rather than a test failure.
-func runHostForOutcome(t *testing.T, command []string) *sessiondir.Record {
+func runHostForOutcome(t *testing.T, command []string, opts ...outcomeOption) *sessiondir.Record {
 	t.Helper()
 
-	run := newOutcomeRun(t, command)
+	run := newOutcomeRun(t, command, opts...)
 
 	drained := make(chan struct{})
 	go func() {
@@ -361,6 +381,46 @@ func Test_Host_PublishesSignalTermination(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonSignaled, res.Reason,
 		"a signalled command must not be reported as exited -1")
 	require.Nil(t, res.ExitCode)
+}
+
+// Test_Host_PublishesStartupAbandonedWhenTheCallbackDeclines separates a
+// session nobody wanted from one that broke. The interactive confirmation
+// runs in SessionCreatedCallback, after the relay has created the session and
+// before the command exists, so declining it returns an error from a place
+// where every error used to be a startup failure -- and `upterm session info`
+// then reported a fault for an operator who simply said no.
+//
+// The plain-error case is the control: without it, "abandoned" could be what
+// this path reports for everything.
+func Test_Host_PublishesStartupAbandonedWhenTheCallbackDeclines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "the operator declined the session",
+			err:  fmt.Errorf("declined: %w", host.ErrSessionAbandoned),
+			want: sessiondir.ReasonStartupAbandoned,
+		},
+		{
+			name: "the callback could not do its job",
+			err:  errors.New("no terminal to ask on"),
+			want: sessiondir.ReasonStartupFailed,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := runHostForOutcome(t, []string{"sh", "-c", "exit 0"},
+				withSessionCreatedCallback(func(context.Context, *api.GetSessionResponse) error {
+					return tc.err
+				}))
+
+			require.Equal(t, sessiondir.StatusEnding, rec.Status)
+			require.Equal(t, tc.want, rec.Reason)
+			require.Nil(t, rec.ExitCode,
+				"the command never started, so there is no exit code to report")
+		})
+	}
 }
 
 func Test_Host_PublishesStartupFailure(t *testing.T) {

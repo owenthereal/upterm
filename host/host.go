@@ -3,6 +3,7 @@ package host
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -244,6 +245,16 @@ type Host struct {
 	SessionDir *sessiondir.Dir
 }
 
+// ErrSessionAbandoned marks a session given up before its command started, as
+// opposed to one that failed to start. A SessionCreatedCallback error that
+// wraps it is recorded as startup_abandoned rather than startup_failed.
+//
+// Declining the interactive confirmation is the case it exists for: the
+// operator was shown the session and said no, nothing went wrong, and a
+// record saying otherwise sends whoever reads it looking for a fault that
+// never happened.
+var ErrSessionAbandoned = errors.New("session abandoned before the command started")
+
 // Run hosts one session and returns when it ends.
 //
 // It may be called again afterwards: everything Run claims, it gives back
@@ -408,6 +419,13 @@ func (c *Host) Run(ctx context.Context) error {
 
 	if c.SessionCreatedCallback != nil {
 		if err := c.SessionCreatedCallback(ctx, session); err != nil {
+			// runReason is startup_failed at this point, which is right for a
+			// callback that broke and wrong for one that declined on the
+			// operator's behalf. Nothing failed in that case, and the record
+			// is all a later reader has to tell the two apart by.
+			if errors.Is(err, ErrSessionAbandoned) {
+				runReason = sessiondir.ReasonStartupAbandoned
+			}
 			return err
 		}
 	}
