@@ -39,15 +39,23 @@ type ReverseTunnel struct {
 	stopKeepAlive context.CancelFunc
 }
 
+// Close releases whatever Establish took, and works on a tunnel that never
+// established anything. Establish gives up at three different points — the
+// dial, the session request, the listen — and each leaves a different subset
+// of these set; a Close that assumed the successful one would turn a failed
+// dial into a nil dereference in the caller's teardown.
 func (c *ReverseTunnel) Close() {
 	// Stopped before the client is closed, so the ticker cannot start a ping
-	// into a connection that is going away. Nil when Establish never got far
-	// enough to start one.
+	// into a connection that is going away.
 	if c.stopKeepAlive != nil {
 		c.stopKeepAlive()
 	}
-	_ = c.ln.Close()
-	_ = c.Client.Close()
+	if c.ln != nil {
+		_ = c.ln.Close()
+	}
+	if c.Client != nil {
+		_ = c.Client.Close()
+	}
 }
 
 func (c *ReverseTunnel) Listener() net.Listener {
@@ -128,6 +136,14 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	// session, which outlives a tunnel that is closed before it ends, and
 	// Close had no way to stop this: the ticker went on pinging a closed
 	// client and logging an error every interval for the rest of the session.
+	//
+	// A second Establish on the same tunnel replaces the first keepalive
+	// rather than orphaning it: overwriting the cancel would leave the
+	// previous goroutine with nothing able to stop it, which is the bug this
+	// field exists to fix, one level up.
+	if c.stopKeepAlive != nil {
+		c.stopKeepAlive()
+	}
 	keepAliveCtx, stopKeepAlive := context.WithCancel(ctx)
 	c.stopKeepAlive = stopKeepAlive
 	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() {
