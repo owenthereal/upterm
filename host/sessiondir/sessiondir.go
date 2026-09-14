@@ -524,11 +524,12 @@ func lockIsHeld(path string) (bool, error) {
 // The critical sections it guards are a handful of syscalls, so contention is
 // rare and brief — but "rare and brief" is not "never", and a suspended owner
 // would otherwise spin a caller at full tilt forever.
-func lockRegistry(ctx context.Context, sessRoot string) (*os.File, error) {
-	if err := os.MkdirAll(sessRoot, 0700); err != nil {
+func lockRegistry(ctx context.Context, root string) (*os.File, error) {
+	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(sessRoot, registryLockFile), os.O_CREATE|os.O_RDWR, 0600)
+	path := filepath.Join(root, registryLockFile)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +550,10 @@ func lockRegistry(ctx context.Context, sessRoot string) (*os.File, error) {
 		case <-ctx.Done():
 			timer.Stop()
 			_ = f.Close()
-			return nil, fmt.Errorf("sessiondir: waiting for the session registry lock: %w", ctx.Err())
+			// Named: this guards both the sessions and the results registry,
+			// and a caller timing out needs to know which one is contended
+			// rather than a fixed phrase that is wrong for half its callers.
+			return nil, fmt.Errorf("sessiondir: waiting for the registry lock %s: %w", path, ctx.Err())
 		case <-timer.C:
 		}
 

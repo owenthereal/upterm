@@ -306,8 +306,9 @@ func Test_Reap_RemovesOnlyFreeDirectories(t *testing.T) {
 
 func Test_LockRegistry_HonoursContext(t *testing.T) {
 	runtimeRoot, _ := roots(t)
+	sessionsRoot := filepath.Join(runtimeRoot, "sessions")
 
-	held, err := lockRegistry(context.Background(), filepath.Join(runtimeRoot, "sessions"))
+	held, err := lockRegistry(context.Background(), sessionsRoot)
 	require.NoError(t, err)
 	defer releaseRegistry(held)
 
@@ -315,9 +316,14 @@ func Test_LockRegistry_HonoursContext(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err = lockRegistry(ctx, filepath.Join(runtimeRoot, "sessions"))
+	_, err = lockRegistry(ctx, sessionsRoot)
 	require.Error(t, err, "contention must time out rather than spin forever")
 	require.Less(t, time.Since(start), 5*time.Second)
+
+	// lockRegistry now guards two different registries (sessions and
+	// results); the error must say which one timed out rather than a fixed
+	// "the session registry lock" that is wrong half the time.
+	require.Contains(t, err.Error(), filepath.Join(sessionsRoot, registryLockFile))
 }
 
 func Test_GenerateName(t *testing.T) {
