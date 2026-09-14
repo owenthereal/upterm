@@ -4,6 +4,7 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
@@ -364,4 +366,51 @@ func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
 			require.Contains(t, string(out.bytes()), tc.want)
 		})
 	}
+}
+
+// Test_Command_SessionEnvBeatsTheInheritedOne pins the same rule for the
+// variables that tell a script which session it is running in. A host started
+// inside another upterm session -- or one whose variables were forwarded by
+// the README's tmux tip -- inherits somebody else's UPTERM_SESSION_NAME and
+// UPTERM_ADMIN_SOCKET, and `upterm session info` run inside the inner session
+// would then report the outer one.
+func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
+	t.Setenv(upterm.HostSessionNameEnvVar, "outer-session")
+	t.Setenv(upterm.HostAdminSocketEnvVar, "/outer/admin.sock")
+
+	// Never written to, and never a terminal, so Run does not forward it and
+	// nothing here has to feed it.
+	stdinr, stdinw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdinr.Close() }()
+	defer func() { _ = stdinw.Close() }()
+
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	out := &recordingWriter{}
+	require.NoError(t, writers.Append(out))
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer func() { _ = devNull.Close() }()
+
+	cmd := newCommand(
+		"sh", []string{"-c", fmt.Sprintf("echo NAME=$%s SOCKET=$%s",
+			upterm.HostSessionNameEnvVar, upterm.HostAdminSocketEnvVar)},
+		[]string{
+			upterm.HostSessionNameEnvVar + "=inner-session",
+			upterm.HostAdminSocketEnvVar + "=/inner/admin.sock",
+		},
+		termsize.Default, false, "",
+		stdinr, devNull, emitter.New(1), writers, testLogger(t), false,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = cmd.Start(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Run())
+
+	require.Contains(t, string(out.bytes()), "NAME=inner-session SOCKET=/inner/admin.sock",
+		"the session's own environment must beat the one it inherited")
 }

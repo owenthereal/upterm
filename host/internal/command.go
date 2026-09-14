@@ -179,11 +179,17 @@ func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 func (c *command) Start(ctx context.Context) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = setupCommand(ctx, c.name, c.args)
+	// The session's own variables go last, and that is the whole rule for all
+	// three of them. exec.Cmd keeps the last duplicate key, so appending is
+	// what makes UPTERM_SESSION_NAME, UPTERM_ADMIN_SOCKET and TERM describe
+	// *this* session rather than whatever the host inherited -- and inheriting
+	// them is the ordinary case, not an exotic one: a host started inside
+	// another upterm session, or a multiplexer told to forward the variables,
+	// hands us somebody else's session, and TERM comes from whichever terminal
+	// launched the host. Prepended instead, --term would silently do nothing
+	// and `upterm session info` inside the session would name the outer one.
 	c.cmd.Env = append(os.Environ(), c.env...)
 	if c.term != "" {
-		// Appended, not prepended: exec.Cmd keeps the last duplicate key, so
-		// prepending would let an inherited TERM win and this would silently
-		// do nothing.
 		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
 	}
 

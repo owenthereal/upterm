@@ -380,7 +380,14 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 // outcome: the host puts the claimed name in the command's environment so that
 // a script inside the session can name itself to `upterm session info`. A typo
 // in the variable would be invisible everywhere else.
+//
+// The environment it runs in already carries both session variables, which is
+// what a host started inside another session sees. They have to lose to this
+// session's own, so the assertion below is about precedence as much as wiring.
 func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
+	t.Setenv(upterm.HostSessionNameEnvVar, "outer-session")
+	t.Setenv(upterm.HostAdminSocketEnvVar, "/outer/admin.sock")
+
 	run := newOutcomeRun(t, []string{"sh", "-c", "echo NAME=$" + upterm.HostSessionNameEnvVar})
 
 	collected := make(chan string, 1)
