@@ -270,3 +270,58 @@ func Test_ReadResult_MissingIsNotFound(t *testing.T) {
 	require.True(t, os.IsNotExist(err),
 		"an absent record means not found within retained history, which is a lookup failure and distinct from a recorded unknown")
 }
+
+// backdate republishes a record with an older UpdatedAt, through the same
+// writer the session itself publishes with so the file keeps the shape Prune
+// reads. Ageing a record is the only way to test retention without sleeping
+// through it.
+func backdate(t *testing.T, stateRoot, name string, age time.Duration) {
+	t.Helper()
+
+	rec, err := ReadRecord(stateRoot, name)
+	require.NoError(t, err)
+	rec.UpdatedAt = time.Now().UTC().Add(-age)
+	require.NoError(t, writeJSONAtomic(filepath.Join(resultsRoot(stateRoot), name, recordFile), rec))
+}
+
+func Test_Prune_RemovesOnlyOldFreeRecords(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	ctx := context.Background()
+
+	const past = RecordRetention + 24*time.Hour
+
+	// Old and free: the only one retention is about.
+	oldFree, err := claim(t, runtimeRoot, stateRoot, "old-free")
+	require.NoError(t, err)
+	require.NoError(t, oldFree.Release(ctx))
+	backdate(t, stateRoot, "old-free", past)
+
+	// Old and held. A session that has been up for longer than the retention
+	// window is still a session, and its record is where it is publishing.
+	oldHeld, err := claim(t, runtimeRoot, stateRoot, "old-held")
+	require.NoError(t, err)
+	defer func() { _ = oldHeld.Release(ctx) }()
+	backdate(t, stateRoot, "old-held", past)
+
+	// Recent and free: the ordinary finished session, still within history.
+	recentFree, err := claim(t, runtimeRoot, stateRoot, "recent-free")
+	require.NoError(t, err)
+	require.NoError(t, recentFree.Release(ctx))
+
+	// A record that cannot be dated is left alone rather than guessed at.
+	unparsable := filepath.Join(resultsRoot(stateRoot), "unparsable")
+	require.NoError(t, os.MkdirAll(unparsable, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(unparsable, recordFile), []byte("{not json"), 0600))
+
+	require.NoError(t, Prune(ctx, stateRoot, RecordRetention))
+
+	entries, err := os.ReadDir(resultsRoot(stateRoot))
+	require.NoError(t, err)
+	var survived []string
+	for _, e := range entries {
+		if e.IsDir() {
+			survived = append(survived, e.Name())
+		}
+	}
+	require.ElementsMatch(t, []string{"old-held", "recent-free", "unparsable"}, survived)
+}

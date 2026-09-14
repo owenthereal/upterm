@@ -1,6 +1,7 @@
 package sessiondir
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ const (
 // that survives a process which never replaced it. It is what lets a caller
 // tell "we do not know how this ended" from "no such session", which is an
 // absent record — and an absent record means only "not found within retained
-// history", since records are pruned.
+// history", since Prune removes anything unheld and older than RecordRetention.
 const (
 	ReasonUnknown          = "unknown"
 	ReasonExited           = "exited"
@@ -109,6 +110,61 @@ func readRecordLocked(stateRoot, name string) (*Record, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// RecordRetention is how long a record outlives the session that wrote it.
+// Nothing sweeps in the background, so this is only as true as the next call
+// to Prune.
+const RecordRetention = 7 * 24 * time.Hour
+
+// Prune removes records that nobody holds and that nothing has written to for
+// olderThan.
+//
+// Under the results registry, so a directory cannot be removed out from under
+// a Claim that is midway through taking it — the same reason Reap runs under
+// the sessions registry. A held name is skipped whatever its record says: a
+// session that has been up longer than the retention window is still publishing
+// into that directory.
+//
+// One bad entry is not a failed prune. A record that cannot be read or parsed
+// is left alone rather than dated by guesswork, and a removal that fails is
+// left for the next call; only failing to take the registry or to list the
+// directory at all is an error, since neither says anything about one entry.
+func Prune(ctx context.Context, stateRoot string, olderThan time.Duration) error {
+	resRoot := resultsRoot(stateRoot)
+	reg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		return err
+	}
+	defer releaseRegistry(reg)
+
+	entries, err := os.ReadDir(resRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() || ValidateName(e.Name()) != nil {
+			continue
+		}
+		dir := filepath.Join(resRoot, e.Name())
+		held, err := lockIsHeld(filepath.Join(dir, resultLockFile))
+		if err != nil || held {
+			continue
+		}
+		rec, err := readRecordLocked(stateRoot, e.Name())
+		if err != nil {
+			continue
+		}
+		if time.Since(rec.UpdatedAt) > olderThan {
+			_ = os.RemoveAll(dir)
+		}
+	}
+
+	return nil
 }
 
 const (
