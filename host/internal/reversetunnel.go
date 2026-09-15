@@ -161,7 +161,16 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	// only thing that fails a request already on the wire. Nil-safe like
 	// Close, since every teardown path here has to survive a tunnel that never
 	// finished establishing.
+	//
+	// The keepalive is stopped first so its ctx ends before the client does:
+	// a ping already in flight then fails because ctx was cancelled, not
+	// because the relay went quiet, and keepAlive's own check for that keeps
+	// it from reporting a relay that was merely slow to answer
+	// cancel-streamlocal-forward as dead.
 	closeClient := func() {
+		if c.stopKeepAlive != nil {
+			c.stopKeepAlive()
+		}
 		if client != nil {
 			_ = client.Close()
 		}

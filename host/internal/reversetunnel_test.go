@@ -285,3 +285,44 @@ func Test_KeepAlive_StopsAfterAFailedPing(t *testing.T) {
 	}
 	require.Empty(t, dead, "a tunnel dies once")
 }
+
+// A force close cancels the keepalive before it closes the client (see
+// Establish's closeClient), so a ping already in flight fails because ctx
+// ended rather than because the relay went quiet. keepAlive has to tell the
+// two apart: only the second is a dead relay.
+func Test_KeepAlive_DoesNotReportADeadRelayWhenStopped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	release := make(chan struct{})
+	wantErr := errors.New("ssh: EOF")
+
+	var pings atomic.Int32
+	dead := make(chan error, 2)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		keepAlive(ctx, 20*time.Millisecond, func() error {
+			pings.Add(1)
+			<-release
+			return wantErr
+		}, func(err error) { dead <- err })
+	}()
+
+	require.Eventually(t, func() bool { return pings.Load() > 0 }, time.Second, time.Millisecond,
+		"the ping never started")
+
+	// Cancel while the ping is still in flight, the way the force close's
+	// stopKeepAlive now runs before it closes the client that would fail
+	// this same ping. Only then does the ping resolve, and it resolves with
+	// an error -- the one closing the client would produce.
+	cancel()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("keepAlive did not return once its context ended")
+	}
+
+	require.Empty(t, dead, "a ping that failed only because ctx ended must not be reported as a dead relay")
+}
