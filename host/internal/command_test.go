@@ -45,10 +45,13 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	var shellCmd string
 	var shellArgs []string
 	if runtime.GOOS == "windows" {
-		// Windows: Use 'findstr' with regex that matches any line
-		// This reads stdin line by line and outputs matching lines
-		shellCmd = "findstr"
-		shellArgs = []string{"/r", ".*"}
+		// Windows: cmd reads one line into a variable and echoes it, which is
+		// what 'head -n 1' does below -- it ends itself once it has the line,
+		// rather than waiting for stdin to end. Delayed expansion (/v:on) is
+		// what makes !line! read the variable when the echo runs instead of
+		// when cmd parsed the line, before the read.
+		shellCmd = "cmd"
+		shellArgs = []string{"/v:on", "/c", "set /p line=&echo !line!"}
 	} else {
 		// Unix: Use 'head' which reads exactly one line then exits
 		shellCmd = "head"
@@ -110,8 +113,9 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	// Give a moment for data to be fully written and copied through the PTY
 	time.Sleep(50 * time.Millisecond)
 
-	// Close stdin so 'more' on Windows will exit after reading
-	// On Unix, 'head -n 1' exits immediately after reading one line
+	// Nothing waits on this: both commands end once they have their line, and
+	// a session no longer ends because its stdin did. The write end is simply
+	// finished with.
 	_ = stdinw.Close()
 
 	// The command should complete after receiving input
@@ -126,7 +130,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 		_ = stdoutw.Close()
 		select {
 		case output := <-outputCh:
-			// head -n 1 should output exactly the line we sent
+			// Either command echoes back the one line it read
 			assert.Contains(output, testInput, "should see our piped input in output, proving stdin was forwarded")
 		case <-time.After(2 * time.Second):
 			assert.Fail("stdout never reached EOF")
