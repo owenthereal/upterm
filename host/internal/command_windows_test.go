@@ -11,6 +11,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -240,4 +241,62 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 		<-errCh // Wait for goroutine to finish
 		assert.Fail("command did not complete within timeout")
 	}
+}
+
+// Test_Command_SessionEnvBeatsTheInheritedOne is the Windows half of the case
+// of the same name in command_unix_test.go: a host started inside another
+// upterm session inherits somebody else's UPTERM_SESSION_NAME and
+// UPTERM_ADMIN_SOCKET, and `upterm session info` run inside the inner session
+// would then report the outer one.
+//
+// The rule is the same here and the machinery is not, which is why this is
+// not a copy for its own sake. Start appends the session's variables to
+// os.Environ(), and what makes the later of two values win on Unix is
+// os/exec's dedup -- which nothing on this platform goes through, because
+// startPty hands the environment to conpty.Spawn instead of to
+// exec.Cmd.Start. What decides it here is that call's own dedup, matching
+// names case-insensitively as this platform's environment does.
+func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
+	t.Setenv(upterm.HostSessionNameEnvVar, "outer-session")
+	t.Setenv(upterm.HostAdminSocketEnvVar, `C:\outer\admin.sock`)
+
+	// Never written to, and never a terminal, so Run does not forward it and
+	// nothing here has to feed it.
+	stdinr, stdinw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = stdinr.Close() }()
+	defer func() { _ = stdinw.Close() }()
+
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	out := &recordingWriter{}
+	require.NoError(t, writers.Append(out))
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer func() { _ = devNull.Close() }()
+
+	// cmd expands %VAR% from the environment it was started with, which is the
+	// one under test. Each piece is its own argument so that the command line
+	// carries no quotes for cmd to reinterpret.
+	cmd := newCommand(
+		"cmd", []string{"/c", "echo",
+			"NAME=%" + upterm.HostSessionNameEnvVar + "%",
+			"SOCKET=%" + upterm.HostAdminSocketEnvVar + "%"},
+		[]string{
+			upterm.HostSessionNameEnvVar + "=inner-session",
+			upterm.HostAdminSocketEnvVar + `=C:\inner\admin.sock`,
+		},
+		termsize.Default, false, "",
+		stdinr, devNull, emitter.New(1), writers, testLogger(t), false,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = cmd.Start(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Run())
+
+	require.Contains(t, string(out.bytes()), `NAME=inner-session SOCKET=C:\inner\admin.sock`,
+		"the session's own environment must beat the one it inherited")
 }
