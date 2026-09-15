@@ -17,6 +17,7 @@ import (
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
+	"github.com/owenthereal/upterm/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -312,7 +313,14 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
 		}
 	} else {
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", scheme, user, hostPort, user, host+":"+port)
+		userSplit := strings.SplitN(user, ":", 2)
+		if len(userSplit) == 1 {
+			u.User = url.User(userSplit[0])
+		} else {
+			u.User = url.UserPassword(userSplit[0], userSplit[1])
+		}
+		ws.StripDefaultPort(u)
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s' %s@%s", u.String(), user, host+":"+port)
 	}
 
 	var clients []string
