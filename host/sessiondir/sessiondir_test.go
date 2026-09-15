@@ -367,6 +367,10 @@ func Test_Claim_RejectsANameWhoseSocketPathWouldNotFit(t *testing.T) {
 // actually binds there. The padding is derived from filepath.Join's own
 // output rather than a hard-coded root string, so the test does not depend on
 // how long the temp dir prefix happens to be.
+//
+// The path measured is the attach socket's, the longest of the two a session
+// binds in that directory. A check against the shorter one would accept the
+// last runtime root here and then fail to bind attach.sock under it.
 func Test_CheckSocketPath_BoundaryAtDarwinSunPathLimit(t *testing.T) {
 	// shortTempRoot, not t.TempDir(): the latter hands out a
 	// /var/folders/<hash>/T/<TestName> prefix that is already past the
@@ -375,10 +379,10 @@ func Test_CheckSocketPath_BoundaryAtDarwinSunPathLimit(t *testing.T) {
 	name := "a"
 
 	pathLen := func(runtimeRoot string) int {
-		return len(filepath.Join(sessionsRoot(runtimeRoot), name, adminSocketFile))
+		return len(filepath.Join(sessionsRoot(runtimeRoot), name, attachSocketFile))
 	}
 
-	// Grow the runtime root one byte at a time until the resulting admin
+	// Grow the runtime root one byte at a time until the resulting attach
 	// socket path is exactly 103 bytes.
 	pad := 0
 	for pathLen(filepath.Join(base, strings.Repeat("d", pad))) < 103 {

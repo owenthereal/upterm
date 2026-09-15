@@ -40,7 +40,7 @@ var (
 	// component.
 	ErrInvalidName = errors.New("sessiondir: invalid session name")
 	// ErrSocketPathTooLong is returned when a name is legal but would put the
-	// session's admin socket past what a unix socket address can hold.
+	// session's sockets past what a unix socket address can hold.
 	ErrSocketPathTooLong = errors.New("sessiondir: session socket path is too long")
 )
 
@@ -87,8 +87,8 @@ const maxSocketPath = 103
 
 // maxGeneratedBase bounds the basename a generated name is built from. Far
 // below maxNameLen on purpose: a default name the user never chose must never
-// be the thing that pushes the admin socket past maxSocketPath, and the
-// runtime root that path sits under is not something GenerateName can see.
+// be the thing that pushes a session's sockets past maxSocketPath, and the
+// runtime root those paths sit under is not something GenerateName can see.
 const maxGeneratedBase = 20
 
 // ValidateName reports whether name is a single safe path component.
@@ -102,9 +102,17 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// CheckSocketPath reports whether a name's admin socket would fit in a unix
-// socket address under runtimeRoot. The name is expected to have passed
-// ValidateName already.
+// CheckSocketPath reports whether a name's sockets would fit in a unix socket
+// address under runtimeRoot. The name is expected to have passed ValidateName
+// already.
+//
+// It measures attach.sock, the longest name a session puts in its directory,
+// rather than admin.sock, the one bound first. Both hang off the same parent,
+// so the shorter fitting says nothing about the longer: a name checked against
+// admin.sock could be accepted here and still be one byte too long to bind,
+// with the name already claimed and its directory already made. One byte of
+// name is the whole cost, and the error quotes the path it measured so that
+// byte is visible to whoever has to shorten something.
 //
 // Length is a property of the name *and* where it lives, so it cannot be
 // folded into ValidateName: the same name is fine under /run/user/1000 and
@@ -112,7 +120,7 @@ func ValidateName(name string) error {
 // can refuse an over-long --name at flag validation, because the alternative
 // is a bind failure minutes later, after the tunnel is already up.
 func CheckSocketPath(runtimeRoot, name string) error {
-	path := filepath.Join(sessionsRoot(runtimeRoot), name, adminSocketFile)
+	path := filepath.Join(sessionsRoot(runtimeRoot), name, attachSocketFile)
 	if len(path) > maxSocketPath {
 		return fmt.Errorf("%w: %q gives %d bytes, limit %d", ErrSocketPathTooLong, path, len(path), maxSocketPath)
 	}
@@ -198,9 +206,9 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		return nil, err
 	}
 	// Also before any filesystem operation, and for a related reason: a name
-	// whose admin socket cannot be bound is unusable, and finding that out at
-	// bind time means finding it out after the tunnel is up, with the name
-	// already claimed. Refusing here leaves nothing behind.
+	// whose sockets cannot be bound is unusable, and finding that out at bind
+	// time means finding it out after the tunnel is up, with the name already
+	// claimed. Refusing here leaves nothing behind.
 	if err := CheckSocketPath(opts.RuntimeRoot, name); err != nil {
 		return nil, err
 	}
