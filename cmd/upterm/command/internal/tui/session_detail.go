@@ -105,8 +105,15 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	labelWidth := 18
 	valueWidth := max(width-labelWidth-2, 20)
 
-	// Title
-	b.WriteString(TitleStyle.Render(fmt.Sprintf("Session: %s", detail.SessionID)))
+	// Title. A session that has not reached ready has no session ID yet, and a
+	// heading with nothing after it says less than nothing — so it falls back
+	// to the name, which is what such a session was looked up by in the first
+	// place.
+	title := detail.SessionID
+	if title == "" {
+		title = detail.Name
+	}
+	b.WriteString(TitleStyle.Render(fmt.Sprintf("Session: %s", title)))
 	b.WriteString("\n\n")
 
 	// Name, if the session has one, is the first thing a user looks for when
@@ -118,12 +125,24 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 		renderWrappedRow(&b, "Name:", detail.Name, labelWidth, valueWidth, ValueStyle)
 	}
 
+	// Status, where the caller knows one. For a session whose admin socket
+	// this environment cannot reach it is the only thing below that is not
+	// blank, and it is what distinguishes a session still starting, or running
+	// under another XDG_RUNTIME_DIR, from one that is broken.
+	if detail.Status != "" {
+		renderWrappedRow(&b, "Status:", detail.Status, labelWidth, valueWidth, ValueStyle)
+	}
+
 	// Basic fields (skip empty fields to reduce noise)
-	renderWrappedRow(&b, "Command:", detail.Command, labelWidth, valueWidth, ValueStyle)
+	if detail.Command != "" {
+		renderWrappedRow(&b, "Command:", detail.Command, labelWidth, valueWidth, ValueStyle)
+	}
 	if detail.ForceCommand != "" {
 		renderWrappedRow(&b, "Force Command:", detail.ForceCommand, labelWidth, valueWidth, ValueStyle)
 	}
-	renderWrappedRow(&b, "Host:", detail.Host, labelWidth, valueWidth, ValueStyle)
+	if detail.Host != "" {
+		renderWrappedRow(&b, "Host:", detail.Host, labelWidth, valueWidth, ValueStyle)
+	}
 	if detail.AuthorizedKeys != "" {
 		renderWrappedRow(&b, "Authorized Keys:", detail.AuthorizedKeys, labelWidth, valueWidth, ValueStyle)
 	}
@@ -133,24 +152,35 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	cmdIndent := 4
 	cmdWidth := max(width-cmdIndent-2, 20)
 
-	b.WriteString("\n")
-	b.WriteString(LabelStyle.Render("➤ SSH:") + "\n")
-	for _, line := range wrapLines(detail.SSHCommand, cmdWidth) {
-		b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+	writeCommand := func(label, command string) {
+		// Every block is gated on the command it would print. Only a session
+		// that answered for itself has one, and a "➤ SSH:" heading over a
+		// single empty line offers a way to join that does not exist.
+		if command == "" {
+			return
+		}
+		b.WriteString(LabelStyle.Render(label) + "\n")
+		for _, line := range wrapLines(command, cmdWidth) {
+			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+		}
 	}
 
 	// SFTP and SCP commands (only shown if SFTP is enabled)
-	if detail.SFTPEnabled {
-		b.WriteString(LabelStyle.Render("➤ SFTP:") + "\n")
-		for _, line := range wrapLines(detail.SFTPCommand, cmdWidth) {
-			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
-		}
-		b.WriteString(LabelStyle.Render("➤ SCP:") + "\n")
-		for _, line := range wrapLines(detail.SCPUpload, cmdWidth) {
-			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
-		}
-		for _, line := range wrapLines(detail.SCPDownload, cmdWidth) {
-			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+	sftp := detail.SFTPEnabled && detail.SFTPCommand != ""
+	if detail.SSHCommand != "" || sftp {
+		b.WriteString("\n")
+	}
+
+	writeCommand("➤ SSH:", detail.SSHCommand)
+	if sftp {
+		writeCommand("➤ SFTP:", detail.SFTPCommand)
+		if detail.SCPUpload != "" || detail.SCPDownload != "" {
+			b.WriteString(LabelStyle.Render("➤ SCP:") + "\n")
+			for _, cmd := range []string{detail.SCPUpload, detail.SCPDownload} {
+				for _, line := range wrapLines(cmd, cmdWidth) {
+					b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
+				}
+			}
 		}
 	}
 

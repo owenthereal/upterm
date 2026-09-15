@@ -122,3 +122,47 @@ func Test_FormatSessionDetail_name(t *testing.T) {
 	output = FormatSessionDetail(withoutName)
 	assert.NotContains(t, output, "Name:")
 }
+
+// Test_FormatSessionDetail_withoutALiveAnswer renders what `upterm session
+// list` hands this view for a session whose admin socket belongs to another
+// environment: a name, a status and a command, and nothing else.
+//
+// Everything such a session cannot fill in has to be absent rather than blank.
+// A title with no session ID after it, a "Host:" with nothing after it and an
+// "➤ SSH:" heading over an empty line read as a session that is broken, when
+// what it is is a session running somewhere this shell cannot reach.
+func Test_FormatSessionDetail_withoutALiveAnswer(t *testing.T) {
+	output := FormatSessionDetail(SessionDetail{
+		Name:    "build-shell",
+		Status:  "starting",
+		Command: "bash",
+	})
+
+	assert.Contains(t, output, "Status:")
+	assert.Contains(t, output, "starting")
+	assert.Contains(t, output, "Session: build-shell",
+		"with no session ID, the title carries the name the session was looked up by")
+	assert.NotContains(t, output, "Host:")
+	assert.NotContains(t, output, "SSH:")
+	assert.NotContains(t, output, "SFTP:")
+
+	for _, line := range strings.Split(output, "\n") {
+		assert.NotRegexp(t, `:\s*$`, line, "a label with no value must not be printed at all")
+	}
+
+	// And nothing above was bought by dropping a row a live session does fill
+	// in: the status joins those rather than replacing them.
+	live := FormatSessionDetail(SessionDetail{
+		Name:       "build-shell",
+		Status:     "ready",
+		SessionID:  "sid-1",
+		Command:    "bash",
+		Host:       "ssh://example.com:22",
+		SSHCommand: "ssh sid-1@example.com",
+	})
+	assert.Contains(t, live, "Session: sid-1")
+	assert.Contains(t, live, "Status:")
+	assert.Contains(t, live, "ready")
+	assert.Contains(t, live, "Host:")
+	assert.Contains(t, live, "SSH:")
+}

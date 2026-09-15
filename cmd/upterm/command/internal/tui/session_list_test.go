@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,16 +31,24 @@ func Test_NewSessionListModel_RowsCarryStatus(t *testing.T) {
 		"the longest status a session publishes has to fit without being cut")
 }
 
-// Test_calculateColumns_FitsAnEightyColumnTerminal guards the budget the
+// Test_SessionListModel_FitsAnEightyColumnTerminal guards the budget the
 // STATUS column is taken from. Eighty is both the conventional width and what
 // getTermWidth falls back to when stdout is not a terminal, so a table that
 // overflows it wraps every row in the output a pipe gets.
-func Test_calculateColumns_FitsAnEightyColumnTerminal(t *testing.T) {
-	// bubbles pads each cell by one column on each side; the budget reserves
-	// three per column, which is why taking twelve of them still fits.
-	total := 0
-	for _, c := range calculateColumns(80) {
-		total += c.Width + 2
-	}
-	require.LessOrEqual(t, total, 80, "the rendered table must fit the width it was sized for")
+func Test_SessionListModel_FitsAnEightyColumnTerminal(t *testing.T) {
+	// Measured, not modelled: how far bubbles pads a cell is bubbles' business,
+	// and a change to it is exactly what this is here to catch. The width is
+	// delivered as a resize because the one NewSessionListModel starts from is
+	// whatever terminal the test happens to run under.
+	m := NewSessionListModel([]SessionDetail{{
+		Name:      "build-shell",
+		Status:    "disconnected",
+		SessionID: "0dc0b3ce-8f4f-4a2b-9d12-1f9b1c2d3e4f",
+		Command:   "bash -lc 'make test'",
+		Host:      "ssh://uptermd.upterm.dev:22",
+	}})
+	resized, _ := m.Update(tea.WindowSizeMsg{Width: 80})
+
+	require.LessOrEqual(t, lipgloss.Width(resized.(SessionListModel).table.View()), 80,
+		"the rendered table must fit the width it was sized for")
 }
