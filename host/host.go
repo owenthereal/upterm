@@ -24,6 +24,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"golang.org/x/term"
 )
 
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
@@ -117,6 +118,16 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	cert, isCert := key.(*ssh.Certificate)
 	if isCert {
 		key = cert.SignatureKey
+	}
+
+	// Prompting requires an interactive terminal. When stdin is a file that is
+	// definitively not a terminal (daemonized, redirected, or closed), the
+	// read below fails with a bare EOF that tells the user nothing about how
+	// to proceed, so fail fast with actionable guidance instead. Other
+	// io.Reader implementations are left alone: we cannot tell whether they
+	// are interactive, so the read loop below decides.
+	if f, ok := cb.stdin.(*os.File); ok && !term.IsTerminal(int(f.Fd())) {
+		return fmt.Errorf("cannot ask to confirm the %s host key of %s: stdin is not a terminal (upterm may be running daemonized or with stdin redirected); re-run with --skip-host-key-check to automatically accept new host keys, or pre-populate %s", keyType(key.Type()), hostname, cb.file)
 	}
 
 	fp := utils.FingerprintSHA256(key)

@@ -287,3 +287,27 @@ func Test_autoAcceptingHostKeyCallbackValidatesKnownKeys(t *testing.T) {
 	assert.Error(t, err, "should reject mismatched key to prevent MITM")
 	assert.Contains(t, err.Error(), "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED")
 }
+
+func Test_promptForConfirmation_RequiresTerminal(t *testing.T) {
+	// /dev/null is an *os.File that is never a terminal, simulating a
+	// daemonized process or redirected stdin.
+	devNull, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, devNull.Close()) })
+
+	cb := hostKeyCallback{
+		stdin:  devNull,
+		stdout: io.Discard,
+		file:   filepath.Join(t.TempDir(), "known_hosts"),
+	}
+
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
+	require.NoError(t, err)
+
+	addr := &net.TCPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+	err = cb.promptForConfirmation("uptermd.upterm.dev:443", addr, pk)
+	require.Error(t, err)
+	// The error must tell the user how to proceed instead of a bare EOF.
+	assert.Contains(t, err.Error(), "--skip-host-key-check")
+	assert.Contains(t, err.Error(), "stdin is not a terminal")
+}
