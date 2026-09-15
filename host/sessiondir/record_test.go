@@ -176,6 +176,16 @@ func Test_ReadRecord_DuringNameReuseNeverMixesLaunches(t *testing.T) {
 	}
 }
 
+// Test_Inspect_LivenessComesFromTheLockNotTheRecord pins where a reader learns
+// that a session is alive: the lock beside its record, never the status the
+// record happens to carry.
+//
+// The held case also covers a holder that claimed under some other runtime
+// root, which used to be a test of its own. Inspect takes no runtime root
+// now, so there is nothing such a test could vary — a claim's runtime root
+// cannot reach this function at all. Two *state* roots still make a
+// difference, and Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot is
+// where that lives.
 func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 	runtimeRoot, stateRoot := roots(t)
 	ctx := context.Background()
@@ -185,8 +195,9 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 
 	rec, held, err := Inspect(ctx, stateRoot, "demo")
 	require.NoError(t, err)
-	require.True(t, held)
+	require.True(t, held, "a name whose result lock is held is held, wherever it was claimed")
 	require.NotNil(t, rec, "held implies a published record, since Claim publishes under the lock")
+	require.Equal(t, StatusStarting, rec.Status)
 
 	// A SIGKILL leaves the record saying whatever was last written, which may
 	// well be "ready". Only the lock knows the process is gone.
@@ -206,11 +217,10 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 }
 
 func Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot(t *testing.T) {
-	// The mirror image of the test below: one runtime root, two state roots,
-	// which is what a second shell with a different XDG_STATE_HOME gives on a
-	// machine where XDG_RUNTIME_DIR is per-user and shared. The runtime lock
-	// says someone claimed this name here; only the lock beside the record
-	// says who wrote that record.
+	// One runtime root, two state roots: what a second shell with a different
+	// XDG_STATE_HOME gives on a machine where XDG_RUNTIME_DIR is per-user and
+	// shared. The runtime lock says someone claimed this name here; only the
+	// lock beside the record says who wrote that record.
 	root := shortTempRoot(t)
 	runtimeRoot := filepath.Join(root, "run")
 	stateA := filepath.Join(root, "stateA")
@@ -243,26 +253,6 @@ func Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, held, "the live session is held under the root it publishes into")
 	require.NotNil(t, rec)
-	require.Equal(t, StatusStarting, rec.Status)
-}
-
-func Test_Inspect_SeesAHolderUnderAnotherRuntimeRoot(t *testing.T) {
-	// A reader that shares only the state root still has to see the holder,
-	// or it reports the live session's record as nobody's and offers the name.
-	// Inspect names no runtime root at all, so the second root splitRoots
-	// hands out goes unused: what it stood for was the reader's own, and the
-	// reader no longer has one.
-	runtimeA, _, stateRoot := splitRoots(t)
-	ctx := context.Background()
-
-	a, err := claim(t, runtimeA, stateRoot, "demo")
-	require.NoError(t, err)
-	defer func() { _ = a.Release(ctx) }()
-
-	rec, held, err := Inspect(ctx, stateRoot, "demo")
-	require.NoError(t, err)
-	require.True(t, held, "a name held under another runtime root is held")
-	require.NotNil(t, rec, "held implies a readable record, across roots as within one")
 	require.Equal(t, StatusStarting, rec.Status)
 }
 
