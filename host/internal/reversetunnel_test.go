@@ -152,12 +152,13 @@ func Test_BoundedListener_CloseForcesTheTransportAfterGrace(t *testing.T) {
 		inner := &blockingListener{release: make(chan struct{}), closeErr: errors.New("ssh: connection lost")}
 
 		forced := make(chan struct{})
-		ln := newBoundedListener(inner, 20*time.Millisecond, func() {
+		ln := newBoundedListener(inner, 50*time.Millisecond, func() {
 			close(forced)
 			close(inner.release)
 		})
 
 		closed := make(chan error, 1)
+		start := time.Now()
 		go func() { closed <- ln.Close() }()
 
 		select {
@@ -167,10 +168,37 @@ func Test_BoundedListener_CloseForcesTheTransportAfterGrace(t *testing.T) {
 			t.Fatal("Close waited on the relay instead of the grace")
 		}
 
+		// The grace is what Close waits, not merely something it waits less
+		// than forever: a wrapper that gave the relay minutes would satisfy
+		// the deadline above and still hang a teardown.
+		require.Less(t, time.Since(start), 2*time.Second, "Close took far longer than the grace it promises")
+
 		select {
 		case <-forced:
 		default:
 			t.Fatal("the grace expired without the transport being forced")
+		}
+	})
+
+	t.Run("a force that does not free the listener still returns", func(t *testing.T) {
+		// x/crypto releases the pending request when the transport goes, but
+		// that is its business and not a promise to this package. Nothing here
+		// releases the inner Close, so this is what Close does when forcing
+		// achieves nothing.
+		inner := &blockingListener{release: make(chan struct{})}
+		t.Cleanup(func() { close(inner.release) })
+
+		ln := newBoundedListener(inner, 50*time.Millisecond, func() {})
+
+		closed := make(chan error, 1)
+		go func() { closed <- ln.Close() }()
+
+		select {
+		case err := <-closed:
+			require.ErrorContains(t, err, "after its transport was closed",
+				"Close says why it gave up rather than reporting a clean close")
+		case <-time.After(10 * time.Second):
+			t.Fatal("Close waited on a listener that forcing the transport had not freed")
 		}
 	})
 

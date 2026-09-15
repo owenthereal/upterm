@@ -30,6 +30,9 @@ const (
 	// listener from a run.Group interrupt, so the wait held up the whole
 	// teardown: no final publication, no Release, and `session info` still
 	// reporting a ready session on a name nothing will give back.
+	//
+	// Closing costs at most twice this: the wait on the relay, then the same
+	// again on the transport that was closed to end it.
 	listenerCloseGrace = 5 * time.Second
 )
 
@@ -245,9 +248,11 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 	return &resp, nil
 }
 
-// boundedListener is a forwarded listener whose Close cannot outlive the
-// grace. Accept and Addr are the wrapped listener's own: only Close is a
-// request-response with the relay, and only Close is at risk.
+// boundedListener is a forwarded listener whose Close cannot outlive twice the
+// grace: once waiting on the relay, once waiting on the transport it forces
+// when the relay does not answer. Accept and Addr are the wrapped listener's
+// own: only Close is a request-response with the relay, and only Close is at
+// risk.
 type boundedListener struct {
 	net.Listener
 
@@ -262,28 +267,35 @@ func newBoundedListener(ln net.Listener, grace time.Duration, force func()) net.
 	return &boundedListener{Listener: ln, grace: grace, force: force}
 }
 
-// Close returns what the forwarded listener returned, having waited at most
-// the grace for the relay to answer before forcing the transport.
+// Close returns what the forwarded listener returned, or says that even
+// forcing the transport did not free it. Either way it returns.
 //
 // The inner Close runs on its own goroutine because there is nothing to cancel
 // it with: it is parked either on the mutex x/crypto serialises global
 // requests with, or on the reply channel for its own. Closing the transport
 // ends both — the mux loop closes that channel on its way out, and every
-// pending request returns EOF — so the result is still collected afterwards
-// rather than guessed at.
+// pending request returns EOF — so the result is collected afterwards rather
+// than guessed at. That collection gets the same grace and no more: it is
+// released by an implementation detail of x/crypto, and this is the teardown
+// path, where continuing on a bad answer beats waiting for a good one.
 func (l *boundedListener) Close() error {
 	closed := make(chan error, 1)
 	go func() { closed <- l.Listener.Close() }()
 
-	timer := time.NewTimer(l.grace)
-	defer timer.Stop()
+	select {
+	case err := <-closed:
+		return err
+	case <-time.After(l.grace):
+	}
+
+	l.force()
 
 	select {
 	case err := <-closed:
 		return err
-	case <-timer.C:
-		l.force()
-		return <-closed
+	case <-time.After(l.grace):
+		// The goroutine is abandoned holding the listener, and nothing else.
+		return fmt.Errorf("ssh: forwarded listener still open %s after its transport was closed", l.grace)
 	}
 }
 
