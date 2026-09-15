@@ -183,7 +183,7 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 	d, err := claim(t, runtimeRoot, stateRoot, "demo")
 	require.NoError(t, err)
 
-	rec, held, err := Inspect(ctx, runtimeRoot, stateRoot, "demo")
+	rec, held, err := Inspect(ctx, stateRoot, "demo")
 	require.NoError(t, err)
 	require.True(t, held)
 	require.NotNil(t, rec, "held implies a published record, since Claim publishes under the lock")
@@ -193,13 +193,13 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 	require.NoError(t, d.Update(func(r *Record) { r.Status = StatusReady }))
 	require.NoError(t, d.releaseKeepingDir())
 
-	rec, held, err = Inspect(ctx, runtimeRoot, stateRoot, "demo")
+	rec, held, err = Inspect(ctx, stateRoot, "demo")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, StatusReady, rec.Status, "the stale record still claims ready")
 	require.False(t, held, "liveness must come from the lock, not the record")
 
-	rec, held, err = Inspect(ctx, runtimeRoot, stateRoot, "never-existed")
+	rec, held, err = Inspect(ctx, stateRoot, "never-existed")
 	require.NoError(t, err)
 	require.False(t, held)
 	require.Nil(t, rec, "a name that never existed yields no record, not an error")
@@ -233,13 +233,13 @@ func Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = a.Release(ctx) }()
 
-	rec, held, err := Inspect(ctx, runtimeRoot, stateB, "demo")
+	rec, held, err := Inspect(ctx, stateB, "demo")
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.Equal(t, StatusReady, rec.Status, "B's record is stale, not rewritten")
 	require.False(t, held, "an unrelated claim under this runtime root must not revive a dead session")
 
-	rec, held, err = Inspect(ctx, runtimeRoot, stateA, "demo")
+	rec, held, err = Inspect(ctx, stateA, "demo")
 	require.NoError(t, err)
 	require.True(t, held, "the live session is held under the root it publishes into")
 	require.NotNil(t, rec)
@@ -249,14 +249,17 @@ func Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot(t *testing.T) {
 func Test_Inspect_SeesAHolderUnderAnotherRuntimeRoot(t *testing.T) {
 	// A reader that shares only the state root still has to see the holder,
 	// or it reports the live session's record as nobody's and offers the name.
-	runtimeA, runtimeB, stateRoot := splitRoots(t)
+	// Inspect names no runtime root at all, so the second root splitRoots
+	// hands out goes unused: what it stood for was the reader's own, and the
+	// reader no longer has one.
+	runtimeA, _, stateRoot := splitRoots(t)
 	ctx := context.Background()
 
 	a, err := claim(t, runtimeA, stateRoot, "demo")
 	require.NoError(t, err)
 	defer func() { _ = a.Release(ctx) }()
 
-	rec, held, err := Inspect(ctx, runtimeB, stateRoot, "demo")
+	rec, held, err := Inspect(ctx, stateRoot, "demo")
 	require.NoError(t, err)
 	require.True(t, held, "a name held under another runtime root is held")
 	require.NotNil(t, rec, "held implies a readable record, across roots as within one")

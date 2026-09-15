@@ -14,9 +14,10 @@
 // results registry (StateRoot/results/.registry.lock), and no function takes
 // the sessions registry while holding the results registry. Claim takes both,
 // in that order; Release and Reap take only the sessions registry; Inspect and
-// Prune take only the results registry. A per-name lock is only ever acquired
-// under the registry that guards the directory it lives in, because a lock
-// inside a directory cannot protect that directory from removal.
+// Prune take only the results registry, which is why neither is given a
+// runtime root at all. A per-name lock is only ever acquired under the
+// registry that guards the directory it lives in, because a lock inside a
+// directory cannot protect that directory from removal.
 package sessiondir
 
 import (
@@ -420,9 +421,10 @@ func (d *Dir) dropLocks() error {
 // lend its liveness to a SIGKILLed session's record under (R, stateB), which
 // reported a dead session as ready and its name as held by it.
 //
-// runtimeRoot is therefore unused, and kept only so callers can go on naming a
-// session by the pair of roots it lives under.
-func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Record, held bool, err error) {
+// So there is no runtime root in this signature. One used to be taken, for
+// symmetry with Claim, and read by nothing: a parameter this function may not
+// consult is an invitation to go back to consulting it.
+func Inspect(ctx context.Context, stateRoot, name string) (rec *Record, held bool, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, false, err
 	}

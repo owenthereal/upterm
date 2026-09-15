@@ -260,7 +260,7 @@ const statusEnded = "ended"
 // second query returns whatever holds the name at that instant, which need
 // not be the session the first one confirmed.
 func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
-	rec, held, err := sessiondir.Inspect(ctx, utils.UptermRuntimeDir(), utils.UptermStateDir(), name)
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
 		return sessionInfo{}, nil, err
 	}

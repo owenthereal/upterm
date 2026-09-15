@@ -369,9 +369,10 @@ func Test_Host_CanRunTwice(t *testing.T) {
 		require.Equal(t, 0, *rec.ExitCode, "run %d", i+1)
 	}
 
-	// The same roots newOutcomeRun pointed the host at, by way of the
-	// environment it set.
-	_, held, err := sessiondir.Inspect(ctx, utils.UptermRuntimeDir(), run.stateRoot, run.name)
+	// The same state root newOutcomeRun pointed the host at, by way of the
+	// environment it set. Ownership lives beside the record, so that root is
+	// the whole of what this asks about.
+	_, held, err := sessiondir.Inspect(ctx, run.stateRoot, run.name)
 	require.NoError(t, err)
 	require.False(t, held,
 		"a host that has returned must leave its name free, however many times it has run")
