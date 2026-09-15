@@ -524,6 +524,13 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 
 		produced := make(chan string, 1)
 		stop := make(chan struct{})
+		// Closed after the first write. The joiner must not be attached
+		// before the producer has run at all: on a loaded runner (or with one
+		// P) the goroutine can otherwise be starved past the whole window,
+		// see stop already closed on its first iteration, and hand back
+		// nothing -- which failed the non-empty assertion below in CI while
+		// proving nothing about atomicity.
+		started := make(chan struct{})
 		go func() {
 			var sent []byte
 			for i := 0; ; i++ {
@@ -536,9 +543,13 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 				p := []byte{byte('a' + i%26)}
 				sent = append(sent, p...)
 				_, _ = w.Write(p)
+				if i == 0 {
+					close(started)
+				}
 			}
 		}()
 
+		<-started
 		time.Sleep(time.Duration(attempt%5) * time.Millisecond)
 		var joined bytes.Buffer
 		require.NoError(t, w.Append(&joined))
