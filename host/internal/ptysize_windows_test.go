@@ -23,9 +23,17 @@ import (
 // window, so the lines MODE reads out of GetConsoleScreenBufferInfo are the
 // pty's rows rather than a scrollback height. The labels below are the English
 // ones, which is what the runner this is written for speaks.
+//
+// What arrives here is VT, not the screen, so the labels are looked for in the
+// text with the escape sequences taken out first: conhost may lay out the gap
+// between a label and its number as spaces or as a cursor-forward sequence,
+// and that sequence carries digits of its own -- a pattern that simply skipped
+// to the next number would read the column count out of ESC[10C.
+var ansiSequence = regexp.MustCompile(`\x1b\[[^\x40-\x7e]*[\x40-\x7e]|\x1b\][^\x07]*\x07`)
+
 var (
-	modeConLines   = regexp.MustCompile(`Lines:\s+(\d+)`)
-	modeConColumns = regexp.MustCompile(`Columns:\s+(\d+)`)
+	modeConLines   = regexp.MustCompile(`Lines:\s*(\d+)`)
+	modeConColumns = regexp.MustCompile(`Columns:\s*(\d+)`)
 )
 
 // resizeDelay is how long a resizing case waits before resizing.
@@ -133,12 +141,25 @@ func readPtyInBackground(p PTY) *ptyOutput {
 func awaitModeCon(t *testing.T, p PTY, out *ptyOutput) (rows, cols int) {
 	t.Helper()
 
-	require.NoError(t, p.Wait(), "the command must run to completion")
+	// Bounded, because Wait is a WaitForSingleObject(INFINITE) on the process
+	// handle: a cmd that never exits would otherwise hold this goroutine until
+	// the whole package's test timeout expired, and take every other result in
+	// the binary down with it.
+	const exitTimeout = 30 * time.Second
+	waited := make(chan error, 1)
+	go func() { waited <- p.Wait() }()
+	select {
+	case err := <-waited:
+		require.NoError(t, err, "the command must run to completion")
+	case <-time.After(exitTimeout):
+		t.Fatalf("the command did not exit within %s; pty output was %q", exitTimeout, out.String())
+	}
 
 	const settle = 10 * time.Second
 	deadline := time.Now().Add(settle)
 	for {
-		got := out.String()
+		raw := out.String()
+		got := ansiSequence.ReplaceAllString(raw, "")
 		lines := modeConLines.FindStringSubmatch(got)
 		columns := modeConColumns.FindStringSubmatch(got)
 		if lines != nil && columns != nil {
@@ -149,7 +170,7 @@ func awaitModeCon(t *testing.T, p PTY, out *ptyOutput) (rows, cols int) {
 			return r, c
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("mode con did not report a geometry within %s of exiting; pty output was %q", settle, got)
+			t.Fatalf("mode con did not report a geometry within %s of exiting; pty output was %q", settle, raw)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
