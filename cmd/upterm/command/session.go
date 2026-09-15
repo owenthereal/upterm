@@ -63,16 +63,21 @@ func sessionCmd() *cobra.Command {
 
 func list() *cobra.Command {
 	runtimeDir := utils.UptermRuntimeDir()
+	stateDir := utils.UptermStateDir()
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls", "l"},
 		Short:   "List shared sessions",
 		Long: fmt.Sprintf(`List shared sessions.
 
+Which sessions exist comes from the records in: %s
+A session started under a different XDG_RUNTIME_DIR is listed from there too,
+though only a socket under this one can add its connection details.
+
 Sockets are stored in: %s
 
 Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
-in constrained environments where XDG directories are unavailable.`, sessiondir.SessionsRoot(runtimeDir)),
+in constrained environments where XDG directories are unavailable.`, sessiondir.ResultsRoot(stateDir), sessiondir.SessionsRoot(runtimeDir)),
 		Example: `  # List shared sessions:
   upterm session list`,
 		RunE: listRunE,

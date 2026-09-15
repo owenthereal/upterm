@@ -133,6 +133,12 @@ func resultsRoot(stateRoot string) string    { return filepath.Join(stateRoot, r
 // SessionsRoot returns the directory session runtime directories live in.
 func SessionsRoot(runtimeRoot string) string { return sessionsRoot(runtimeRoot) }
 
+// ResultsRoot returns the directory session records live in, which is where
+// ListLive finds the sessions that exist. Exported for the reason SessionsRoot
+// is: `session list` says in its help where the names it prints came from, and
+// that is this directory rather than any one runtime root.
+func ResultsRoot(stateRoot string) string { return resultsRoot(stateRoot) }
+
 // AdminSocketPath returns a named session's admin socket without claiming it,
 // so a caller can look up a session it does not own.
 func AdminSocketPath(runtimeRoot, name string) (string, error) {
