@@ -166,7 +166,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
-	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset.")
+	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
@@ -194,6 +194,11 @@ containing client public keys.`,
 // likely to be driven from supports.
 const defaultTerm = "xterm-256color"
 
+// dumbTerm is the terminfo entry for a terminal that can do nothing: no cursor
+// addressing, no clearing, no scrolling regions. Inherited into a pty it is
+// worse than no answer, because a command that asks the database believes it.
+const dumbTerm = "dumb"
+
 // resolveTerm picks the TERM the hosted command runs under: the flag, then
 // whatever this process inherited, then defaultTerm.
 //
@@ -203,11 +208,18 @@ const defaultTerm = "xterm-256color"
 // terminal — the one case where the inherited value is certainly right. The
 // command is given a pty upterm allocates either way, so what stdout happens
 // to be says nothing about what TERM it should see.
+//
+// An inherited dumbTerm counts as nothing inherited. It is what a CI runner,
+// a cron job or an editor's shell pane exports, and the session upterm hosts
+// is a pty with a real terminal on the other end of it — passing "dumb"
+// through would leave a full-screen command rendering as line noise for a
+// guest whose terminal could have shown it. The flag is not filtered: a user
+// who types --term dumb is answering the question, not failing to.
 func resolveTerm(flag, inherited string) string {
 	if flag != "" {
 		return flag
 	}
-	if inherited != "" {
+	if inherited != "" && inherited != dumbTerm {
 		return inherited
 	}
 	return defaultTerm

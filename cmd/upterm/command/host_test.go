@@ -386,6 +386,20 @@ func Test_resolveTerm(t *testing.T) {
 			name: "no TERM anywhere falls back to the default",
 			want: defaultTerm,
 		},
+		{
+			// dumb declares no capabilities, so inheriting it into the pty
+			// upterm allocates renders a full-screen command as line noise.
+			// It is an absent answer, not an answer to be respected.
+			name:      "a dumb TERM counts as no TERM",
+			inherited: "dumb",
+			want:      defaultTerm,
+		},
+		{
+			name:      "the flag may still ask for dumb",
+			flag:      "dumb",
+			inherited: "xterm",
+			want:      "dumb",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, resolveTerm(tc.flag, tc.inherited))

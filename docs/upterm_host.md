@@ -65,7 +65,7 @@ upterm host [flags]
   -r, --read-only                    Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
       --server string                Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
       --skip-host-key-check          Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
-      --term string                  Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when TERM is unset.
+      --term string                  Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when TERM is unset or dumb.
 ```
 
 ### Options inherited from parent commands
