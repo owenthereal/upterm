@@ -479,10 +479,19 @@ func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
 func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 	setupSessionRoots(t)
 
-	// Claimed with no admin socket bound, which is every session before it
-	// reaches ready and every session whose socket this environment cannot
-	// see.
-	releaseAtEnd(t, claimSession(t, "elsewhere"))
+	// Claimed with no admin socket bound, which is every session whose socket
+	// this environment cannot see.
+	d := claimSession(t, "elsewhere")
+	releaseAtEnd(t, d)
+
+	// Ready, with a session ID: without one the lookup stops at its first
+	// guard and never gets as far as the socket, so the row under test would
+	// be the row any unstarted session gets rather than the one this test is
+	// about.
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-x"
+	}))
 
 	// Listed from a runtime root that has never seen the name. Nothing binds
 	// a socket under this one, so its length does not matter.
@@ -492,8 +501,10 @@ func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sessions, 1, "a session whose socket lives under another runtime root is still live")
 	require.Equal(t, "elsewhere", sessions[0].Name)
-	require.Equal(t, sessiondir.StatusStarting, sessions[0].Status,
+	require.Equal(t, sessiondir.StatusReady, sessions[0].Status,
 		"the record is the authority on a session no socket here can answer for")
+	require.Equal(t, "sid-x", sessions[0].SessionID)
+	require.Equal(t, "bash", sessions[0].Command)
 	require.Empty(t, sessions[0].SSHCommand,
 		"and no connect string may be invented for a session this environment cannot reach")
 }
