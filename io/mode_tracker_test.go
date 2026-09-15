@@ -162,8 +162,10 @@ func Test_ModeTracker_PartialIsNotEmittedAfterOverflow(t *testing.T) {
 
 // The partial is the one part of the snapshot whose size the stream chooses,
 // so its worst case is worth pinning rather than reasoning about: a CSI whose
-// parameters stop exactly on the cap is the largest one that will ever be
-// replayed, and one byte more replays nothing at all.
+// parameters stop exactly on the cap is the largest mode sequence that will
+// ever be replayed, and one byte more replays nothing at all. A string
+// sequence is bounded separately and higher; see
+// Test_ModeTracker_BoundsUnterminatedString.
 func Test_ModeTracker_PartialIsBoundedAtItsWorstCase(t *testing.T) {
 	m := NewModeTracker()
 
@@ -220,6 +222,165 @@ func Test_ModeTracker_PartialFollowsTheSequenceBeingAbandoned(t *testing.T) {
 			require.Equal(t, tt.want, string(m.Snapshot()))
 		})
 	}
+}
+
+// A string sequence -- OSC, DCS, PM, APC or SOS -- carries a payload that is
+// not terminal output: a window title, a hyperlink, an OSC 52 clipboard, a
+// terminfo reply. The tracker dropped the introducer and read the payload as
+// ordinary output, so it held no partial for a string: a trim boundary inside
+// one left the joiner the string's tail alone, and a tail alone is text its
+// terminal prints.
+func Test_ModeTracker_StringSequenceIsThePartial(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "an OSC the stream stops inside",
+			input: "\x1b]0;abc",
+			want:  "\x1b]0;abc",
+		},
+		{
+			name:  "a DCS the stream stops inside",
+			input: "\x1bP0;1|abc",
+			want:  "\x1bP0;1|abc",
+		},
+		{
+			name:  "a PM the stream stops inside",
+			input: "\x1b^abc",
+			want:  "\x1b^abc",
+		},
+		{
+			name:  "an APC the stream stops inside",
+			input: "\x1b_abc",
+			want:  "\x1b_abc",
+		},
+		{
+			name:  "an SOS the stream stops inside",
+			input: "\x1bXabc",
+			want:  "\x1bXabc",
+		},
+		{
+			name:  "a BEL ends an OSC",
+			input: "\x1b]0;abc\x07",
+			want:  "",
+		},
+		{
+			// xterm takes BEL for an OSC terminator and for nothing else, so
+			// a DCS carrying one is still open afterwards.
+			name:  "a BEL ends nothing else",
+			input: "\x1bPabc\x07def",
+			want:  "\x1bPabc\x07def",
+		},
+		{
+			name:  "an ST ends an OSC",
+			input: "\x1b]0;abc\x1b\\",
+			want:  "",
+		},
+		{
+			name:  "an ST ends a DCS",
+			input: "\x1bPabc\x1b\\",
+			want:  "",
+		},
+		{
+			// The ESC of a terminator the stream has not finished belongs to
+			// the partial like any other byte of the string: the ring's next
+			// byte is the backslash that completes it.
+			name:  "the ESC of an ST the stream stops on",
+			input: "\x1b]0;abc\x1b",
+			want:  "\x1b]0;abc\x1b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, string(m.Snapshot()))
+		})
+	}
+}
+
+// An ESC inside a string is where the string ends, on the DEC state machine
+// every terminal implements: it leaves the string, and the byte after it opens
+// a new sequence -- unless that byte is a backslash, which makes the pair the
+// ST the string was waiting for. The tracker reads it the same way, because
+// the session's own terminal did: a mode sequence that arrived like this
+// really did run there, and swallowing it as payload would leave a joiner on
+// the screen the session had left.
+func Test_ModeTracker_StringAbandonedByEsc(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "a mode sequence after an unterminated OSC",
+			input: "\x1b]0;abc\x1b[?25l",
+			want:  "\x1b[?25l",
+		},
+		{
+			name:  "a mode sequence in an OSC a BEL terminates later",
+			input: "\x1b]0;title\x1b[?1049h\x07",
+			want:  "\x1b[?1049h",
+		},
+		{
+			name:  "a mode sequence in a DCS an ST terminates later",
+			input: "\x1bPq\x1b[?2004h\x1b\\",
+			want:  "\x1b[?2004h",
+		},
+		{
+			name:  "a second string abandons the first",
+			input: "\x1b]0;abc\x1b]1;d",
+			want:  "\x1b]1;d",
+		},
+		{
+			name:  "ESC ESC inside a string",
+			input: "\x1b]0;abc\x1b\x1b[?25l",
+			want:  "\x1b[?25l",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, string(m.Snapshot()))
+		})
+	}
+}
+
+// A string whose terminator never arrives must not let the stream choose the
+// snapshot's size. Past the bound the parser keeps reading -- only the
+// terminator returns it to normal -- but what it is holding is a fragment of a
+// string, and a fragment replayed ahead of the ring prints rather than being
+// completed, the same bargain an overflowed CSI makes.
+func Test_ModeTracker_BoundsUnterminatedString(t *testing.T) {
+	m := NewModeTracker()
+
+	// Four bytes of introducer and then the bound again in payload, so the cap
+	// falls inside the run and everything after it is the stream trying to
+	// grow a partial that is already gone.
+	_, err := m.Write([]byte("\x1b]0;" + strings.Repeat("a", maxStringBytes)))
+	require.NoError(t, err)
+	require.Empty(t, m.Snapshot(), "an overflowed string is never replayed")
+	require.Zero(t, m.bufferedBytes(), "nothing of it is still held either")
+
+	// The parser is still inside that string, so its terminator is what ends
+	// it, and the sequence after that is tracked as usual.
+	_, err = m.Write([]byte("\x1b\\\x1b[?25l"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1b[?25l", string(m.Snapshot()))
+
+	// The largest string that is still replayed is one that stops exactly on
+	// the bound, which makes maxStringBytes the partial's own ceiling.
+	m = NewModeTracker()
+	_, err = m.Write([]byte("\x1b]0;" + strings.Repeat("a", maxStringBytes-len("\x1b]0;"))))
+	require.NoError(t, err)
+	require.Len(t, m.Snapshot(), maxStringBytes)
 }
 
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {

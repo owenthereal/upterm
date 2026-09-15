@@ -6,12 +6,20 @@ import (
 	"strconv"
 )
 
-// maxSequenceBytes caps how much of an in-progress escape sequence the tracker
+// maxSequenceBytes caps how much of an in-progress mode sequence the tracker
 // will hold. Real mode sequences are a handful of bytes; anything longer is
 // either not a mode sequence or is a stream that will never terminate it, and
 // neither is worth unbounded memory in a process whose entire point is running
 // unattended.
 const maxSequenceBytes = 64
+
+// maxStringBytes caps the string sequences the same way, but higher: an OSC,
+// DCS, PM, APC or SOS legitimately carries a payload a mode sequence never
+// would -- a hyperlink's URL, an OSC 52 clipboard, a terminfo reply -- and
+// cutting one short replays a string the joiner's terminal never sees the end
+// of. It is still a cap, because a string whose terminator never arrives would
+// otherwise let the stream pick the snapshot's size.
+const maxStringBytes = 4096
 
 // restorable lists the DEC private modes worth putting a reattaching terminal
 // back into, mapped to the value a terminal holds them at before anything has
@@ -88,8 +96,9 @@ type ModeTracker struct {
 	partial []byte
 
 	seq      []byte
-	overflow bool // current sequence exceeded maxSequenceBytes; discard it
+	overflow bool // current sequence ran past its cap; discard it
 	state    modeState
+	kind     stringKind // which string sequence msString is inside
 }
 
 type modeState int
@@ -99,6 +108,30 @@ const (
 	msEsc
 	msCSI
 	msCharset
+	msString    // inside an OSC, DCS, PM, APC or SOS payload
+	msStringEsc // an ESC inside one: the next byte says whether it ended
+)
+
+// stringKind is which string sequence the parser is inside. It is tracked for
+// one decision: BEL terminates an OSC and nothing else -- xterm accepts it
+// there, and for a DCS, PM, APC or SOS only ST will do.
+//
+// The 8-bit C1 introducers (0x9b for CSI, 0x9d for OSC, 0x90 for DCS and the
+// rest) are out of scope. The tracker decodes no character set, and in the
+// UTF-8 a session actually emits those bytes are continuation bytes of
+// ordinary characters far more often than they are introducers: honouring them
+// would swallow real text to catch a sequence almost nothing sends. A program
+// that does send them goes unrecorded, like anything else the tracker does not
+// recognise.
+type stringKind int
+
+const (
+	skNone stringKind = iota
+	skOSC             // ESC ]
+	skDCS             // ESC P
+	skPM              // ESC ^
+	skAPC             // ESC _
+	skSOS             // ESC X
 )
 
 func NewModeTracker() *ModeTracker {
@@ -141,6 +174,16 @@ func (m *ModeTracker) step(b byte) {
 		case '(':
 			m.state = msCharset
 			m.partial = append(m.partial, b)
+		case ']':
+			m.startString(skOSC, b)
+		case 'P':
+			m.startString(skDCS, b)
+		case '^':
+			m.startString(skPM, b)
+		case '_':
+			m.startString(skAPC, b)
+		case 'X':
+			m.startString(skSOS, b)
 		case 'c':
 			// RIS, a hard reset: the terminal is back at power-on, so
 			// everything recorded before it is no longer true of it.
@@ -201,7 +244,73 @@ func (m *ModeTracker) step(b byte) {
 		}
 		m.seq = append(m.seq, b)
 		m.partial = append(m.partial, b)
+	case msString:
+		switch {
+		case b == 0x1b:
+			// Either the ST that ends the string or the start of a sequence
+			// that abandons it; the next byte decides. Either way the ESC is
+			// part of what has been seen, so it is recorded: a trim boundary
+			// here leaves the ring holding the byte that completes it.
+			m.appendString(b)
+			m.state = msStringEsc
+		case b == 0x07 && m.kind == skOSC:
+			// BEL is a terminator here and nowhere else; see stringKind.
+			m.endString()
+		default:
+			m.appendString(b)
+		}
+	case msStringEsc:
+		if b == '\\' {
+			// ST, which ends any of them.
+			m.endString()
+			return
+		}
+		// Anything else and the string was abandoned, which is how a
+		// terminal's own parser reads it: the ESC left the string and this
+		// byte opens a new sequence. Resync on it rather than swallow
+		// everything that follows, as an ESC inside a CSI does.
+		m.state = msEsc
+		m.reset()
+		m.openPartial()
+		m.step(b)
 	}
+}
+
+// startString enters a string sequence, whose payload the tracker consumes
+// without interpreting it: those bytes are a title, a URL or a clipboard, not
+// commands, and the terminal they are bound for will not act on them either.
+// The raw bytes are the partial, so a joiner attaching mid-string is replayed
+// the string from its introducer and its terminal completes it from the ring.
+func (m *ModeTracker) startString(kind stringKind, introducer byte) {
+	m.state = msString
+	m.kind = kind
+	m.reset()
+	m.partial = append(m.partial, introducer)
+}
+
+// appendString records a byte of the string in progress, up to the bound. Past
+// it the parser keeps reading -- only the terminator ends a string, so it must
+// still be looked for -- but the partial is dropped and not reopened for this
+// sequence, the bargain an overflowed CSI already makes.
+func (m *ModeTracker) appendString(b byte) {
+	if m.overflow {
+		return
+	}
+	if len(m.partial) >= maxStringBytes {
+		m.overflow = true
+		m.closePartial()
+		return
+	}
+	m.partial = append(m.partial, b)
+}
+
+// endString leaves a string at its terminator, which is the one place the
+// payload stops being something a joiner still needs.
+func (m *ModeTracker) endString() {
+	m.state = msNormal
+	m.kind = skNone
+	m.reset()
+	m.closePartial()
 }
 
 func (m *ModeTracker) reset() {
