@@ -24,7 +24,6 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
-	"golang.org/x/term"
 )
 
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
@@ -120,16 +119,6 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 		key = cert.SignatureKey
 	}
 
-	// Prompting requires an interactive terminal. When stdin is a file that is
-	// definitively not a terminal (daemonized, redirected, or closed), the
-	// read below fails with a bare EOF that tells the user nothing about how
-	// to proceed, so fail fast with actionable guidance instead. Other
-	// io.Reader implementations are left alone: we cannot tell whether they
-	// are interactive, so the read loop below decides.
-	if f, ok := cb.stdin.(*os.File); ok && !term.IsTerminal(int(f.Fd())) {
-		return fmt.Errorf("cannot ask to confirm the %s host key of %s: stdin is not a terminal (upterm may be running daemonized or with stdin redirected); re-run with --skip-host-key-check to automatically accept new host keys, or pre-populate %s", keyType(key.Type()), hostname, cb.file)
-	}
-
 	fp := utils.FingerprintSHA256(key)
 	_, _ = fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
 	_, _ = fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
@@ -139,7 +128,10 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	for {
 		confirm, err := reader.ReadString('\n')
 		if err != nil {
-			return fmt.Errorf("could not read host-key confirmation from stdin: %w", err)
+			return fmt.Errorf("could not read host-key confirmation from stdin: %w; "+
+				"to confirm the %s host key of %s, re-run interactively, "+
+				"pre-populate %s with a verified host key, or use --skip-host-key-check to automatically accept new host keys",
+				err, keyType(key.Type()), hostname, cb.file)
 		}
 
 		confirm = strings.TrimSpace(confirm)
