@@ -409,12 +409,19 @@ func printSessionSummary(info sessionInfo) {
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
+	// One deadline for whichever branch runs. Both ask the admin socket, and
+	// a host that was stopped rather than killed accepts the connection and
+	// then never answers on it — which for the shell-prompt use this command
+	// exists for means a prompt that never returns.
+	ctx, cancel := context.WithTimeout(c.Context(), sessionQueryTimeout)
+	defer cancel()
+
 	// If output format specified, use special handling (non-interactive)
 	if flagOutput != "" {
-		return outputSession(c.Context(), flagAdminSocket, flagOutput)
+		return outputSession(ctx, flagAdminSocket, flagOutput)
 	}
 
-	detail, err := fetchSessionDetail(c.Context(), flagAdminSocket)
+	detail, err := fetchSessionDetail(ctx, flagAdminSocket)
 	if err != nil {
 		return err
 	}
