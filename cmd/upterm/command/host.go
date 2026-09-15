@@ -211,16 +211,33 @@ const maxGeneratedNameAttempts = 5
 // info` would then not find what they went looking for. A generated name
 // carries no intent at all — it is upterm's own dice roll — and losing that
 // roll is not a reason to refuse to host.
-func runWithGeneratedNameRetry(explicit string, command []string, run func(name string) error) error {
+//
+// A nil logger means the package default rather than silence.
+func runWithGeneratedNameRetry(logger *slog.Logger, explicit string, command []string, run func(name string) error) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	var err error
 	for attempt := 0; attempt < maxGeneratedNameAttempts; attempt++ {
-		err = run(resolveSessionName(explicit, command))
+		name := resolveSessionName(explicit, command)
+		err = run(name)
 		if err == nil {
 			return nil
 		}
 		if explicit != "" || !errors.Is(err, sessiondir.ErrNameInUse) {
 			return err
 		}
+		// The last collision is the one the user is told about, so it is not
+		// followed by a redraw and there is nothing here to announce.
+		if attempt+1 == maxGeneratedNameAttempts {
+			break
+		}
+		// Every redraw, because a redraw is upterm hosting under a name other
+		// than the one it drew first and nothing else on any path records
+		// that. Without it, an operator whose session is not where the name
+		// they remember says it should be has no trail at all.
+		logger.Info("session name is taken, drawing another", "name", name)
 	}
 	return err
 }
@@ -409,7 +426,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	// A fresh Host per attempt, because every field that names the session —
 	// Name and the banner the callback prints — belongs to the name this
 	// attempt drew, and because Run fills fields in on the Host it is given.
-	err = runWithGeneratedNameRetry(flagName, args, func(name string) error {
+	err = runWithGeneratedNameRetry(logger.Logger, flagName, args, func(name string) error {
 		h := &host.Host{
 			Host:              flagServer,
 			Name:              name,

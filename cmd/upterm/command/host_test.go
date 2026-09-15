@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,18 +184,77 @@ func Test_ResolveSessionName(t *testing.T) {
 	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))
 }
 
+// logRecord is one record a capturingHandler was given, flattened to what a
+// test cares about. Comparing these rather than formatted output means an
+// assertion says which record carried which name, not which substring
+// appeared somewhere in a stream.
+type logRecord struct {
+	Level slog.Level
+	Msg   string
+	Attrs map[string]string
+}
+
+// capturingHandler collects every record written to a logger built on it.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []logRecord
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := logRecord{Level: r.Level, Msg: r.Message, Attrs: map[string]string{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.Attrs[a.Key] = a.Value.String()
+		return true
+	})
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, rec)
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) captured() []logRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]logRecord(nil), h.records...)
+}
+
+// redrawLogs is what one redraw of each of names is expected to look like.
+func redrawLogs(names ...string) []logRecord {
+	var want []logRecord
+	for _, name := range names {
+		want = append(want, logRecord{
+			Level: slog.LevelInfo,
+			Msg:   "session name is taken, drawing another",
+			Attrs: map[string]string{"name": name},
+		})
+	}
+	return want
+}
+
 // Test_runWithGeneratedNameRetry covers the difference between a name upterm
 // picked and a name the user typed. A generated name that collides is a lost
 // dice roll and re-rolling is what the user wants; an explicit one that
 // collides is the answer to their question.
+//
+// Every case also pins what was logged. A redraw is the one moment upterm
+// hosts under a name other than the one it drew, and the operator who later
+// cannot find that name has the log and nothing else — so a redraw that says
+// nothing, or a refusal that claims one happened, are both wrong.
 func Test_runWithGeneratedNameRetry(t *testing.T) {
 	inUse := func(name string) error {
 		return fmt.Errorf("claiming %s: %w", name, sessiondir.ErrNameInUse)
 	}
 
 	t.Run("a generated name is retried with a fresh one", func(t *testing.T) {
+		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry("", []string{"bash"}, func(name string) error {
+		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(name string) error {
 			names = append(names, name)
 			if len(names) < 3 {
 				return inUse(name)
@@ -209,11 +270,15 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 			distinct[n] = true
 		}
 		require.Len(t, distinct, 3, "retrying the name that was taken would collide again")
+
+		require.Equal(t, redrawLogs(names[0], names[1]), logs.captured(),
+			"each name that was taken is logged once, as it is given up")
 	})
 
 	t.Run("an explicit name is never retried", func(t *testing.T) {
+		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry("mine", []string{"bash"}, func(name string) error {
+		err := runWithGeneratedNameRetry(slog.New(logs), "mine", []string{"bash"}, func(name string) error {
 			names = append(names, name)
 			return inUse(name)
 		})
@@ -221,11 +286,13 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		require.ErrorIs(t, err, sessiondir.ErrNameInUse)
 		require.Equal(t, []string{"mine"}, names,
 			"hosting under a different name would answer a question the user did not ask")
+		require.Empty(t, logs.captured(), "nothing was redrawn, so nothing is announced")
 	})
 
 	t.Run("retrying is bounded", func(t *testing.T) {
+		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry("", []string{"bash"}, func(name string) error {
+		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(name string) error {
 			names = append(names, name)
 			return fmt.Errorf("attempt %d: %w", len(names), inUse(name))
 		})
@@ -233,18 +300,46 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		require.Len(t, names, maxGeneratedNameAttempts)
 		require.ErrorIs(t, err, sessiondir.ErrNameInUse)
 		require.ErrorContains(t, err, "attempt 5", "the last failure is the one the user sees")
+
+		// One short of the attempts: the last collision is returned rather
+		// than redrawn, and logging it would claim a session was hosted
+		// somewhere when none was hosted at all.
+		require.Equal(t, redrawLogs(names[:maxGeneratedNameAttempts-1]...), logs.captured())
 	})
 
 	t.Run("any other failure is final", func(t *testing.T) {
+		logs := &capturingHandler{}
 		refused := errors.New("dial tcp: connection refused")
 		var calls int
-		err := runWithGeneratedNameRetry("", []string{"bash"}, func(string) error {
+		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(string) error {
 			calls++
 			return refused
 		})
 
 		require.ErrorIs(t, err, refused)
 		require.Equal(t, 1, calls, "a fresh name fixes a collision and nothing else")
+		require.Empty(t, logs.captured(), "a failure that is not a collision is not a redraw")
+	})
+
+	t.Run("a nil logger is the package default", func(t *testing.T) {
+		// The CLI always has a logger to pass. The guard is what keeps an
+		// embedder that has none from turning a redraw into a nil panic.
+		logs := &capturingHandler{}
+		orig := slog.Default()
+		slog.SetDefault(slog.New(logs))
+		t.Cleanup(func() { slog.SetDefault(orig) })
+
+		var names []string
+		err := runWithGeneratedNameRetry(nil, "", []string{"bash"}, func(name string) error {
+			names = append(names, name)
+			if len(names) < 2 {
+				return inUse(name)
+			}
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, redrawLogs(names[0]), logs.captured())
 	})
 }
 
