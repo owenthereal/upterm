@@ -236,6 +236,10 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	}
 
 	for _, w := range writers {
+		// The snapshot describes the terminal as of the ring's first byte,
+		// so it has to go immediately in front of the ring and nowhere else:
+		// it can end mid-sequence, where the ring's own first bytes are the
+		// rest of that sequence.
 		if snap := t.modes.Snapshot(); len(snap) > 0 {
 			if _, err := w.Write(snap); err != nil {
 				return err

@@ -132,6 +132,21 @@ func Test_ModeTracker_BoundsUnterminatedSequence(t *testing.T) {
 	require.Equal(t, "\x1b[?1049h", string(m.Snapshot()))
 }
 
+// The head of a sequence is only worth replaying while the tracker can still
+// be holding all of it. Once a sequence has overflowed, the bytes kept are a
+// fragment of one: replayed ahead of the ring they would print rather than be
+// completed, and they would put the snapshot's own bound at the mercy of the
+// stream.
+func Test_ModeTracker_PartialIsNotEmittedAfterOverflow(t *testing.T) {
+	m := NewModeTracker()
+
+	// A CSI whose parameters run well past maxSequenceBytes and never end.
+	_, err := m.Write([]byte("\x1b[" + strings.Repeat("1;", maxSequenceBytes)))
+	require.NoError(t, err)
+
+	require.Empty(t, m.Snapshot())
+}
+
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	m := NewModeTracker()
 

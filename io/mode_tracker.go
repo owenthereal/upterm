@@ -69,6 +69,13 @@ type ModeTracker struct {
 
 	charsetG0 []byte // last "ESC ( X", verbatim
 
+	// partial is the raw bytes of the sequence the parser is currently
+	// inside, ESC included. The tracker is fed the ring's evictions, so the
+	// trim boundary can fall anywhere -- including mid-sequence, leaving the
+	// ring starting with a sequence's tail and this holding its head. See
+	// Snapshot, which replays it so the two halves meet.
+	partial []byte
+
 	seq      []byte
 	overflow bool // current sequence exceeded maxSequenceBytes; discard it
 	state    modeState
@@ -105,24 +112,30 @@ func (m *ModeTracker) step(b byte) {
 		if b == 0x1b {
 			m.state = msEsc
 			m.reset()
+			m.openPartial()
 		}
 	case msEsc:
 		switch b {
 		case 0x1b:
 			// ESC ESC: restart rather than fall out of sync.
 			m.reset()
+			m.openPartial()
 		case '[':
 			m.state = msCSI
 			m.reset()
+			m.partial = append(m.partial, b)
 		case '(':
 			m.state = msCharset
+			m.partial = append(m.partial, b)
 		case 'c':
 			// RIS, a hard reset: the terminal is back at power-on, so
 			// everything recorded before it is no longer true of it.
 			m.resetToDefaults()
 			m.state = msNormal
+			m.closePartial()
 		default:
 			m.state = msNormal
+			m.closePartial()
 		}
 	case msCharset:
 		switch {
@@ -132,12 +145,15 @@ func (m *ModeTracker) step(b byte) {
 			// the snapshot ending mid-escape.
 			m.state = msEsc
 			m.reset()
+			m.openPartial()
 		case b < 0x30 || b > 0x7e:
 			// Not a designator at all; no charset was selected.
 			m.state = msNormal
+			m.closePartial()
 		default:
 			m.charsetG0 = []byte{0x1b, '(', b}
 			m.state = msNormal
+			m.closePartial()
 		}
 	case msCSI:
 		if b >= 0x40 && b <= 0x7e {
@@ -146,6 +162,7 @@ func (m *ModeTracker) step(b byte) {
 			}
 			m.state = msNormal
 			m.reset()
+			m.closePartial()
 			return
 		}
 		if b == 0x1b {
@@ -153,21 +170,42 @@ func (m *ModeTracker) step(b byte) {
 			// rather than swallow everything that follows.
 			m.state = msEsc
 			m.reset()
+			m.openPartial()
 			return
 		}
 		if len(m.seq) >= maxSequenceBytes {
 			// Stop accumulating but stay in msCSI, so the sequence's real
 			// terminator still returns the parser to normal.
 			m.overflow = true
+
+			// An overflowed sequence is never replayed. The tracker has
+			// already given up on completing it, so what it holds is a
+			// fragment that would print on the joiner's terminal, and
+			// keeping it would let the stream set the snapshot's size.
+			m.closePartial()
 			return
 		}
 		m.seq = append(m.seq, b)
+		m.partial = append(m.partial, b)
 	}
 }
 
 func (m *ModeTracker) reset() {
 	m.seq = m.seq[:0]
 	m.overflow = false
+}
+
+// openPartial starts recording a sequence at its ESC, replacing whatever the
+// previous one was: an ESC arriving mid-sequence abandons that sequence, and
+// an abandoned head is not one the ring's first bytes will complete.
+func (m *ModeTracker) openPartial() {
+	m.partial = append(m.partial[:0], 0x1b)
+}
+
+// closePartial drops the recorded sequence, which is what every way out of one
+// -- finished, abandoned or not a sequence after all -- calls for.
+func (m *ModeTracker) closePartial() {
+	m.partial = m.partial[:0]
 }
 
 // resetToDefaults forgets everything recorded, which is what a terminal does
@@ -242,12 +280,18 @@ func (m *ModeTracker) finishCSI(final byte) {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the three verbatim sequences.
+// len(restorable) plus the three verbatim sequences and one partial sequence.
 //
 // The order is the order the stream would have had to use to reach this
-// state: the normal screen's margins, then the modes -- which is where a
-// switch to the alternate screen happens -- then the alternate screen's own
-// margins, and only while it is the one showing.
+// state: the normal screen's margins, then the modes, then the switch to the
+// alternate screen, then that screen's own margins, and only while it is the
+// one showing.
+//
+// The state as of the ring's first byte includes being partway through a
+// sequence, so the partial goes last, after the charset. The ring's first
+// bytes then complete it on the joiner's terminal instead of printing as text
+// -- which is what they did when the trim boundary fell inside a sequence and
+// the snapshot said nothing about it.
 func (m *ModeTracker) Snapshot() []byte {
 	nums := make([]int, 0, len(m.decPrivate))
 	for n := range m.decPrivate {
@@ -273,5 +317,6 @@ func (m *ModeTracker) Snapshot() []byte {
 		out = append(out, m.altRegion...)
 	}
 	out = append(out, m.charsetG0...)
+	out = append(out, m.partial...)
 	return out
 }

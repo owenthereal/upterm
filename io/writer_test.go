@@ -147,6 +147,37 @@ func Test_MultiWriter_JoinerSeesSplitSequenceWhole(t *testing.T) {
 	require.Equal(t, "before\x1b[?1049hafter", late.String())
 }
 
+// The trim boundary lands wherever the ring's byte budget puts it, which is
+// as easily inside an escape sequence as between two. The ring then starts
+// with that sequence's tail while only the tracker still holds its head, and
+// a joiner handed the tail alone prints it as text on the wrong screen --
+// permanently, because nothing repeats the sequence for an attached guest.
+func Test_MultiWriter_JoinerSeesTheSequenceTheRingStartsInside(t *testing.T) {
+	w := NewMultiWriter(16)
+
+	_, err := w.Write([]byte("\x1b[?1049h"))
+	require.NoError(t, err)
+
+	// 15 more bytes push the ring 7 over, which trims it to exactly the "h"
+	// that terminates the switch to the alternate screen.
+	_, err = w.Write([]byte("0123456789abcde"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b[?1049"+"h0123456789abcde", late.String(),
+		"the snapshot must carry the head of the sequence the ring starts inside")
+
+	// Once the terminator has left the ring too, the tracker holds the
+	// finished mode instead and there is no partial left to replay.
+	_, err = w.Write([]byte("fghijklmnopqrstu"))
+	require.NoError(t, err)
+
+	later := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(later))
+	require.Equal(t, "\x1b[?1049h"+"fghijklmnopqrstu", later.String())
+}
+
 func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
 	w := NewMultiWriter(16) // far too small to still hold the mode sequences
 
