@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/termsize"
+	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -467,6 +469,59 @@ func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
+// bannerFlushTimeout bounds how long startup waits for the banner to reach a
+// stdout that is not a terminal: long enough for a reader that is merely slow
+// to get going, short enough that nobody waiting for a session to come up
+// wonders whether it has hung.
+const bannerFlushTimeout = 2 * time.Second
+
+// printBanner prints the session banner without letting whoever reads stdout
+// decide whether the session starts.
+//
+// It runs from SessionCreatedCallback, before the admin socket is bound and
+// before the command is started, so a write that blocks here blocks all of
+// that: the record stays at starting, the name stays held, and an operator's
+// pipeline ends up waiting on a process that is waiting on the pipeline. A
+// pipe nobody drains is enough to do it — the banner passes a pipe buffer with
+// a long enough command line — and a write already in the kernel is not
+// something the session's cancellation can reach.
+//
+// So off a terminal the banner goes through a sink whose Write never blocks,
+// and startup waits bannerFlushTimeout for delivery and no longer. On a
+// terminal it is printed as before: a terminal drains itself, and the
+// synchronous write keeps the banner ahead of everything the session prints
+// after it.
+//
+// The version warning host.Run prints later is deliberately left synchronous.
+// It is a few hundred bytes into a pipe that is otherwise empty by then, which
+// no pipe buffer is small enough to block.
+func printBanner(detail tui.SessionDetail) {
+	if tui.IsTTY() {
+		tui.PrintSessionDetail(detail)
+		return
+	}
+
+	sink := uio.NewAsyncWriter(os.Stdout, uio.DefaultGuestBufferSize, func(err error) {
+		slog.Debug("session banner dropped", "error", err)
+	})
+	// The error is the sink's own to report: a fresh sink can only fail here by
+	// overflowing, and overflowing calls the callback above.
+	_, _ = io.WriteString(sink, tui.FormatSessionDetail(detail))
+
+	ctx, cancel := context.WithTimeout(context.Background(), bannerFlushTimeout)
+	defer cancel()
+	if err := sink.Flush(ctx); err != nil {
+		// Left open on purpose. Close discards whatever is still pending, and
+		// the drain goroutine delivers the rest once the reader comes back,
+		// exactly as the command's own stdout sink does. At worst it parks in
+		// that write holding the banner and nothing else, and ends when the
+		// pipe drains, the reader closes it, or the process exits.
+		slog.Debug("session banner is still draining; starting the session anyway", "error", err, "timeout", bannerFlushTimeout)
+		return
+	}
+	_ = sink.Close()
+}
+
 func displaySession(ctx context.Context, session *api.GetSessionResponse, name string) error {
 	// Build session detail (includes SCP commands if SFTP is enabled)
 	detail, err := buildSessionDetail(session)
@@ -477,7 +532,7 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 
 	// With --accept, just print session info and continue (no interactive confirmation needed)
 	if flagAccept {
-		tui.PrintSessionDetail(detail)
+		printBanner(detail)
 		return nil
 	}
 

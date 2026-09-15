@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/assert"
@@ -86,6 +88,52 @@ func Test_UserDiscardedError_IsAnAbandonedSession(t *testing.T) {
 	// shareRunE's errors.As at :413 keeps finding it through a wrap too.
 	var interrupted UserInterruptedError
 	require.ErrorAs(t, fmt.Errorf("session created callback: %w", interruptedErr), &interrupted)
+}
+
+// Test_printBanner_DoesNotBlockOnAnUndrainedPipe pins the banner as something
+// startup survives. It is printed from SessionCreatedCallback — before the
+// admin socket is bound and before the command is started — so a banner
+// larger than the pipe buffer, written straight at a stdout nobody reads,
+// stopped the host there for good: a write already in the kernel is not
+// something cancellation can interrupt, the command never ran, and the record
+// stayed at starting with the name held.
+func Test_printBanner_DoesNotBlockOnAnUndrainedPipe(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Closing the write end releases the sink's drain goroutine if it is
+		// still parked in a write to it.
+		_ = w.Close()
+		_ = r.Close()
+	})
+
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	// Well past the 64 KiB a pipe buffers, so the banner cannot be delivered
+	// to a reader that never reads.
+	detail := tui.SessionDetail{Name: "banner", Command: strings.Repeat("x", 200<<10)}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		printBanner(detail)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(bannerFlushTimeout + 10*time.Second):
+		t.Fatal("printBanner blocked on a stdout nobody was reading")
+	}
+
+	// It gave up on the flush, not on the banner: what reached the pipe is the
+	// banner, from its first byte.
+	want := tui.FormatSessionDetail(detail)
+	got := make([]byte, 512)
+	n, err := io.ReadFull(r, got)
+	require.NoError(t, err)
+	require.Equal(t, want[:n], string(got[:n]))
 }
 
 func Test_ResolveSessionName(t *testing.T) {
