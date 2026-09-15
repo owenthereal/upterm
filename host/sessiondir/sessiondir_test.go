@@ -398,3 +398,58 @@ func Test_CheckSocketPath_BoundaryAtDarwinSunPathLimit(t *testing.T) {
 	err := CheckSocketPath(runtimeRootAt104, name)
 	require.ErrorIs(t, err, ErrSocketPathTooLong)
 }
+
+func Test_ListLive_ReturnsOnlyHeldNames(t *testing.T) {
+	// Two runtime roots over one state root, because that is the split the
+	// listing exists for: a host claimed from cron is live and has no
+	// directory at all under the login session's runtime root.
+	runtimeA, runtimeB, stateRoot := splitRoots(t)
+	ctx := context.Background()
+
+	a, err := claim(t, runtimeA, stateRoot, "alpha")
+	require.NoError(t, err)
+	defer func() { _ = a.Release(ctx) }()
+
+	b, err := claim(t, runtimeB, stateRoot, "bravo")
+	require.NoError(t, err)
+	defer func() { _ = b.Release(ctx) }()
+	require.NoError(t, b.Update(func(r *Record) {
+		r.Status = StatusReady
+		r.SessionID = "sid-b"
+	}))
+
+	// Ended: the record stays for `session info` to answer from, but nobody
+	// holds the name, so it is not a session that exists right now.
+	ended, err := claim(t, runtimeA, stateRoot, "ended")
+	require.NoError(t, err)
+	require.NoError(t, ended.Release(ctx))
+
+	// Killed: the same free lock, with a record that still says ready. The
+	// lock decides, not the record.
+	killed, err := claim(t, runtimeA, stateRoot, "killed")
+	require.NoError(t, err)
+	require.NoError(t, killed.Update(func(r *Record) { r.Status = StatusReady }))
+	require.NoError(t, killed.releaseKeepingDir())
+
+	// Held, with a record this process cannot parse. One bad entry must cost
+	// its own row and not the listing, the same way it does in Prune.
+	corrupt, err := claim(t, runtimeA, stateRoot, "corrupt")
+	require.NoError(t, err)
+	defer func() { _ = corrupt.Release(ctx) }()
+	require.NoError(t, os.WriteFile(corrupt.RecordPath(), []byte("{not json"), 0600))
+
+	live, err := ListLive(ctx, stateRoot)
+	require.NoError(t, err)
+
+	var names []string
+	for _, rec := range live {
+		names = append(names, rec.Name)
+	}
+	require.Equal(t, []string{"alpha", "bravo"}, names,
+		"the live set is what the results locks say, whatever runtime root each session claimed under")
+
+	require.Equal(t, StatusStarting, live[0].Status)
+	require.Equal(t, []string{"bash"}, live[0].Command)
+	require.Equal(t, StatusReady, live[1].Status, "each record comes back as its owner published it")
+	require.Equal(t, "sid-b", live[1].SessionID)
+}

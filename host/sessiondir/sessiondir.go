@@ -463,6 +463,59 @@ func Inspect(ctx context.Context, stateRoot, name string) (rec *Record, held boo
 	return rec, held, err
 }
 
+// ListLive returns the record of every session that exists right now, in name
+// order.
+//
+// The set is the names whose results lock is held, because that lock is the
+// one thing every live session has wherever it was started: a host under a
+// different XDG_RUNTIME_DIR — which Linux gives a login session and denies a
+// cron job — publishes into the same results root and leaves nothing under
+// this one. A caller that walked a runtime root instead would answer "no
+// sessions" for a session it could then look up by name.
+//
+// Held names only, and ownership comes from the lock for the reason Inspect
+// gives: a record says what its owner last published, which after a SIGKILL is
+// frequently "ready".
+//
+// One bad entry is not a failed listing, the same way it is not a failed
+// Prune: a record that cannot be read or parsed is skipped, since a listing
+// that fails entirely over one unreadable name tells the user less than one
+// that is short by a row.
+func ListLive(ctx context.Context, stateRoot string) ([]Record, error) {
+	resRoot := resultsRoot(stateRoot)
+	resReg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRegistry(resReg)
+
+	entries, err := os.ReadDir(resRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var live []Record
+	for _, e := range entries {
+		if !e.IsDir() || ValidateName(e.Name()) != nil {
+			continue
+		}
+		held, err := lockIsHeld(filepath.Join(resRoot, e.Name(), resultLockFile))
+		if err != nil || !held {
+			continue
+		}
+		rec, err := readRecordLocked(stateRoot, e.Name())
+		if err != nil {
+			continue
+		}
+		live = append(live, *rec)
+	}
+
+	return live, nil
+}
+
 // releaseKeepingDir drops both locks without removing anything, leaving
 // exactly what a crashed process leaves — a crash drops every lock the process
 // held, on both roots. It exists for tests and for the failure paths in Claim.
