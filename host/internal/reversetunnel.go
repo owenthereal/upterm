@@ -157,27 +157,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	// second Establish replaces the field, and either of them acting on the
 	// replacement would close a connection that is not the one it is nursing.
 	client := c.Client
-	// Closing the client is how both of them give up on the relay: it is the
-	// only thing that fails a request already on the wire. Nil-safe like
-	// Close, since every teardown path here has to survive a tunnel that never
-	// finished establishing.
-	//
-	// The keepalive is stopped first so its ctx ends before the client does:
-	// a ping already in flight then fails because ctx was cancelled, not
-	// because the relay went quiet, and keepAlive's own check for that keeps
-	// it from reporting a relay that was merely slow to answer
-	// cancel-streamlocal-forward as dead.
-	closeClient := func() {
-		if c.stopKeepAlive != nil {
-			c.stopKeepAlive()
-		}
-		if client != nil {
-			_ = client.Close()
-		}
-	}
-	c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
 
-	// make sure connection is alive
+	// This generation's keepalive, built before the listener that has to be
+	// able to stop it.
 	//
 	// On the tunnel's own lifetime, not the caller's. ctx belongs to the
 	// session, which outlives a tunnel that is closed before it ends, and
@@ -193,6 +175,32 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 	keepAliveCtx, stopKeepAlive := context.WithCancel(ctx)
 	c.stopKeepAlive = stopKeepAlive
+
+	// Closing the client is how both the listener and the keepalive give up on
+	// the relay: it is the only thing that fails a request already on the
+	// wire. Nil-safe on the client, since every teardown path here has to
+	// survive a tunnel that never finished establishing.
+	//
+	// The keepalive is stopped first so its ctx ends before the client does:
+	// a ping already in flight then fails because ctx was cancelled, not
+	// because the relay went quiet, and keepAlive's own check for that keeps
+	// it from reporting a relay that was merely slow to answer
+	// cancel-streamlocal-forward as dead.
+	//
+	// Both the cancel and the client are this generation's, read here rather
+	// than off the tunnel when the closure runs. Reading the field instead
+	// would let a listener left over from an earlier Establish cancel the
+	// current keepalive — killing a live tunnel's liveness check on its way to
+	// closing a connection that is no longer the one it was nursing.
+	closeClient := func() {
+		stopKeepAlive()
+		if client != nil {
+			_ = client.Close()
+		}
+	}
+	c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
+
+	// make sure connection is alive
 	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() error {
 		// TODO: ping with session ID
 		_, _, err := client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
