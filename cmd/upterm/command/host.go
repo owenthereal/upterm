@@ -166,7 +166,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
-	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when there is no terminal.")
+	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset.")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
@@ -186,6 +186,31 @@ containing client public keys.`,
 	}
 
 	return cmd
+}
+
+// defaultTerm is what the hosted command is given when nothing else says. A
+// command on a pty with TERM unset renders as if it had no cursor addressing
+// at all, so something has to be chosen; this is what every terminal upterm is
+// likely to be driven from supports.
+const defaultTerm = "xterm-256color"
+
+// resolveTerm picks the TERM the hosted command runs under: the flag, then
+// whatever this process inherited, then defaultTerm.
+//
+// Deliberately not a question about stdout. This used to fall back to
+// defaultTerm whenever stdout was not a terminal, which threw away a perfectly
+// good inherited TERM for `upterm host ... | tee log` run from a real
+// terminal — the one case where the inherited value is certainly right. The
+// command is given a pty upterm allocates either way, so what stdout happens
+// to be says nothing about what TERM it should see.
+func resolveTerm(flag, inherited string) string {
+	if flag != "" {
+		return flag
+	}
+	if inherited != "" {
+		return inherited
+	}
+	return defaultTerm
 }
 
 func resolveSessionName(explicit string, command []string) string {
@@ -415,13 +440,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	term := flagTerm
-	if term == "" && !tui.IsTTY() {
-		// With no terminal there is no TERM worth inheriting, and a command on
-		// a pty with TERM unset or "dumb" renders as if it had no cursor
-		// addressing at all.
-		term = "xterm-256color"
-	}
+	term := resolveTerm(flagTerm, os.Getenv("TERM"))
 
 	// A fresh Host per attempt, because every field that names the session —
 	// Name and the banner the callback prints — belongs to the name this

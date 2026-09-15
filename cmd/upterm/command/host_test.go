@@ -343,6 +343,45 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 	})
 }
 
+// Test_resolveTerm pins the order the hosted command's TERM is decided in.
+//
+// The middle case is the one with a bug behind it: the default used to be
+// taken whenever stdout was not a terminal, so `upterm host ... | tee log`
+// from a real terminal replaced a known-good TERM with a guess.
+func Test_resolveTerm(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		flag      string
+		inherited string
+		want      string
+	}{
+		{
+			name:      "the flag wins over everything",
+			flag:      "screen-256color",
+			inherited: "xterm",
+			want:      "screen-256color",
+		},
+		{
+			name: "the flag stands on its own",
+			flag: "screen-256color",
+			want: "screen-256color",
+		},
+		{
+			name:      "an inherited TERM beats the default",
+			inherited: "rxvt-unicode-256color",
+			want:      "rxvt-unicode-256color",
+		},
+		{
+			name: "no TERM anywhere falls back to the default",
+			want: defaultTerm,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resolveTerm(tc.flag, tc.inherited))
+		})
+	}
+}
+
 func Test_ResolveSessionName_RejectsUnsafeExplicitName(t *testing.T) {
 	// The CLI must refuse early with a readable message rather than letting
 	// Claim reject it after the process is already underway.
