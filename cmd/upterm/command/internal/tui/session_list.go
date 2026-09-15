@@ -32,8 +32,11 @@ func calculateColumns(width int) []table.Column {
 	// A status cut to "disconnec…" would be the one column a session with no
 	// other detail to show is read from.
 	const statusWidth = 12
-	// Table adds ~3 chars padding per column (borders + spacing)
-	const columnPadding = 18 // 6 columns * 3
+	// bubbles pads a cell by one on each side, so six columns cost twelve;
+	// the rest is slack for the borders and spacing around them. The
+	// eighty-column test is what keeps the number honest -- it measures the
+	// rendered table rather than trusting this arithmetic.
+	const columnPadding = 18
 
 	available := width - markerWidth - nameWidth - statusWidth - columnPadding
 	if available <= 0 {

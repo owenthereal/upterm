@@ -481,7 +481,14 @@ func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 
 	// Claimed with no admin socket bound, which is every session whose socket
 	// this environment cannot see.
-	d := claimSession(t, "elsewhere")
+	d, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+		RuntimeRoot:  utils.UptermRuntimeDir(),
+		StateRoot:    utils.UptermStateDir(),
+		Name:         "elsewhere",
+		Command:      []string{"bash"},
+		ForceCommand: []string{"tmux", "attach"},
+	})
+	require.NoError(t, err)
 	releaseAtEnd(t, d)
 
 	// Ready, with a session ID: without one the lookup stops at its first
@@ -505,6 +512,8 @@ func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 		"the record is the authority on a session no socket here can answer for")
 	require.Equal(t, "sid-x", sessions[0].SessionID)
 	require.Equal(t, "bash", sessions[0].Command)
+	require.Equal(t, "tmux attach", sessions[0].ForceCommand,
+		"a record-only row must carry everything the record holds, not a subset of it")
 	require.Empty(t, sessions[0].SSHCommand,
 		"and no connect string may be invented for a session this environment cannot reach")
 }

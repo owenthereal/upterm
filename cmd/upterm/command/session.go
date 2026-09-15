@@ -521,10 +521,11 @@ func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.Ses
 		// that distinguishes a session still starting from one running out of
 		// this environment's reach.
 		detail := tui.SessionDetail{
-			Name:      rec.Name,
-			Status:    rec.Status,
-			SessionID: rec.SessionID,
-			Command:   strings.Join(rec.Command, " "),
+			Name:         rec.Name,
+			Status:       rec.Status,
+			SessionID:    rec.SessionID,
+			Command:      strings.Join(rec.Command, " "),
+			ForceCommand: strings.Join(rec.ForceCommand, " "),
 		}
 
 		if live, ok := liveDetail(ctx, runtimeRoot, rec); ok {
