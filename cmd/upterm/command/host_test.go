@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,7 +119,10 @@ func Test_printBanner_DoesNotBlockOnAnUndrainedPipe(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		printBanner(detail)
+		// Discarded rather than defaulted: closing the pipe in the cleanup
+		// drops the sink, and that warning is expected here and would
+		// otherwise land in the middle of the test output.
+		printBanner(slog.New(slog.NewTextHandler(io.Discard, nil)), detail)
 	}()
 
 	select {

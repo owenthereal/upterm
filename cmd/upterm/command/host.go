@@ -492,17 +492,28 @@ const bannerFlushTimeout = 2 * time.Second
 // synchronous write keeps the banner ahead of everything the session prints
 // after it.
 //
-// The version warning host.Run prints later is deliberately left synchronous.
-// It is a few hundred bytes into a pipe that is otherwise empty by then, which
-// no pipe buffer is small enough to block.
-func printBanner(detail tui.SessionDetail) {
+// The version warning host.Run prints is deliberately left synchronous. It
+// runs just before this callback, so it is the first thing written to an empty
+// pipe, and a few hundred bytes is smaller than any pipe buffer.
+//
+// logger may be nil, which is the package default rather than silence: a
+// banner nobody received is the kind of thing an operator is looking for when
+// they come here.
+func printBanner(logger *slog.Logger, detail tui.SessionDetail) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	if tui.IsTTY() {
 		tui.PrintSessionDetail(detail)
 		return
 	}
 
 	sink := uio.NewAsyncWriter(os.Stdout, uio.DefaultGuestBufferSize, func(err error) {
-		slog.Debug("session banner dropped", "error", err)
+		// Warn, not debug: the banner carries the command a guest has to run
+		// to join, and a session whose banner never arrived reads, to whoever
+		// was waiting for it, as a session that never started.
+		logger.Warn("session banner dropped", "error", err)
 	})
 	// The error is the sink's own to report: a fresh sink can only fail here by
 	// overflowing, and overflowing calls the callback above.
@@ -516,7 +527,7 @@ func printBanner(detail tui.SessionDetail) {
 		// exactly as the command's own stdout sink does. At worst it parks in
 		// that write holding the banner and nothing else, and ends when the
 		// pipe drains, the reader closes it, or the process exits.
-		slog.Debug("session banner is still draining; starting the session anyway", "error", err, "timeout", bannerFlushTimeout)
+		logger.Debug("session banner is still draining; starting the session anyway", "error", err, "timeout", bannerFlushTimeout)
 		return
 	}
 	_ = sink.Close()
@@ -532,7 +543,15 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 
 	// With --accept, just print session info and continue (no interactive confirmation needed)
 	if flagAccept {
-		printBanner(detail)
+		// The logger root.go put in the context: it writes to upterm's log
+		// file, which is where an operator goes to find out what became of a
+		// startup. Nil until some caller sets one up, which printBanner reads
+		// as the package default.
+		var logger *slog.Logger
+		if l := uptermctx.Logger(ctx); l != nil {
+			logger = l.Logger
+		}
+		printBanner(logger, detail)
 		return nil
 	}
 
