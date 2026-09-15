@@ -167,13 +167,12 @@ func Prune(ctx context.Context, stateRoot string, olderThan time.Duration) error
 	return nil
 }
 
-const (
-	renameAttempts = 5
-	renameBackoff  = 2 * time.Millisecond
-)
-
 // writeJSONAtomic publishes by rename, so a reader never sees a half-written
 // record.
+//
+// replaceFile is per-platform because the rename is only atomic-in-front-of-a-
+// reader on one of them for free: see rename_unix.go and rename_windows.go,
+// and readFileShareDelete for the reader's half of the same problem.
 func writeJSONAtomic(path string, v any) error {
 	raw, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -185,17 +184,9 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 
-	// Retry the rename. On Windows a concurrent reader can block replacement
-	// outright, and a reader's window is microseconds, so a few attempts turn
-	// a lost final outcome into a slightly delayed one. See readFileShareDelete
-	// for the other half of this.
-	for attempt := 0; attempt < renameAttempts; attempt++ {
-		if err = os.Rename(tmp, path); err == nil {
-			return nil
-		}
-		time.Sleep(renameBackoff)
+	if err := replaceFile(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
-
-	_ = os.Remove(tmp)
-	return err
+	return nil
 }
