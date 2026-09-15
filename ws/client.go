@@ -76,12 +76,12 @@ var wsDefaultPorts = map[string]int{
 	"wss": 443,
 }
 
-// StripDefaultPort drops an explicit default port from u's host. The dialer
+// stripDefaultPort drops an explicit default port from u's host. The dialer
 // copies the host verbatim into the Host header, and some firewalls and
 // virtual-host matchers reject "example.com:443" where browsers and curl
 // send "example.com". The address actually dialed does not change. The port
 // is compared numerically because the dialer resolves ":0443" as 443 too.
-func StripDefaultPort(u *url.URL) {
+func stripDefaultPort(u *url.URL) {
 	def, ok := wsDefaultPorts[u.Scheme]
 	if !ok || u.Port() == "" {
 		return

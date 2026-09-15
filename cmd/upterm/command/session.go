@@ -17,7 +17,6 @@ import (
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
-	"github.com/owenthereal/upterm/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -319,8 +318,11 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		} else {
 			u.User = url.UserPassword(userSplit[0], userSplit[1])
 		}
-		ws.StripDefaultPort(u)
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s' %s@%s", u.String(), user, host+":"+port)
+		// SSH expands percent tokens before executing ProxyCommand in a shell.
+		// Quote the URL for that shell, then the command for the caller's shell.
+		proxyURL := strings.ReplaceAll(u.String(), "%", "%%")
+		proxyCommand := "upterm proxy " + quoteShellArg(proxyURL)
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand=%s %s@%s", quoteShellArg(proxyCommand), user, host+":"+port)
 	}
 
 	var clients []string
@@ -357,6 +359,10 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 	}, nil
+}
+
+func quoteShellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func clientDesc(addr, clientVer, fingerprint string) string {

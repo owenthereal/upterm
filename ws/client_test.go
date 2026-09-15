@@ -82,7 +82,7 @@ func TestStripDefaultPort(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			u, err := url.Parse(tt.url)
 			require.NoError(t, err)
-			StripDefaultPort(u)
+			stripDefaultPort(u)
 			assert.Equal(t, tt.want, u.String())
 		})
 	}
