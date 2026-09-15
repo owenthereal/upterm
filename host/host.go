@@ -255,6 +255,21 @@ type Host struct {
 // never happened.
 var ErrSessionAbandoned = errors.New("session abandoned before the command started")
 
+// ClaimTimeout bounds how long Run waits for the session registry when it
+// takes a name.
+//
+// Claim waits on two lock files, either of which can be held by a process that
+// is stopped rather than slow — a wait no amount of patience resolves. The
+// caller's context is not a bound in practice: the CLI runs Run on
+// context.Background(), so without this a stuck registry hangs `upterm host`
+// at startup forever while every read path already gives up after
+// sessionQueryTimeout. Ten seconds matches those read paths, since they wait
+// on the same locks.
+//
+// A var, not a const, so an embedder on a slower filesystem and a test that
+// wants to observe the timeout can both move it.
+var ClaimTimeout = 10 * time.Second
+
 // Run hosts one session and returns when it ends.
 //
 // It may be called again afterwards: everything Run claims, it gives back
@@ -296,13 +311,19 @@ func (c *Host) Run(ctx context.Context) error {
 			return err
 		}
 
-		dir, err := sessiondir.Claim(ctx, sessiondir.ClaimOptions{
+		// Bounded by ClaimTimeout rather than by ctx, which for the CLI never
+		// ends. Cancelled as soon as Claim returns: the claim it produces
+		// outlives this call and must not be tied to a context that is about
+		// to expire.
+		claimCtx, cancelClaim := context.WithTimeout(ctx, ClaimTimeout)
+		dir, err := sessiondir.Claim(claimCtx, sessiondir.ClaimOptions{
 			RuntimeRoot:  runtimeDir,
 			StateRoot:    utils.UptermStateDir(),
 			Name:         c.Name,
 			Command:      c.Command,
 			ForceCommand: c.ForceCommand,
 		})
+		cancelClaim()
 		if err != nil {
 			return err
 		}
