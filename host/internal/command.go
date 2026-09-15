@@ -122,6 +122,11 @@ type command struct {
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	forceForwardingInputForTesting bool
+
+	// flushLogTimeoutForTesting, when non-zero, replaces guestFlushLogTimeout.
+	// A test asserting the warning has landed when Run returns needs a bound
+	// that a loaded CI scheduler cannot miss.
+	flushLogTimeoutForTesting time.Duration
 }
 
 // setupCommand creates an exec.Cmd with the given context, name, and args.
@@ -220,6 +225,10 @@ func (c *command) Run() error {
 					// Waiting under a bound is the only form with neither
 					// failure. One goroutine per call of Run, which is once per
 					// host process.
+					logTimeout := guestFlushLogTimeout
+					if c.flushLogTimeoutForTesting > 0 {
+						logTimeout = c.flushLogTimeoutForTesting
+					}
 					logged := make(chan struct{})
 					go func() {
 						defer close(logged)
@@ -228,7 +237,7 @@ func (c *command) Run() error {
 					}()
 					select {
 					case <-logged:
-					case <-time.After(guestFlushLogTimeout):
+					case <-time.After(logTimeout):
 					}
 				}
 			}()

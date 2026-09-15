@@ -145,9 +145,14 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 	writers := uio.NewMultiWriter(5)
 	require.NoError(t, writers.Append(guest))
 
+	// The handler is slow but working, and the bound is far above its delay.
+	// With the default 100ms bound, a CI runner starved of CPU could fail to
+	// schedule the logging goroutine in time and Run returned before the line
+	// landed. A slow handler also makes a fire-and-forget regression fail every
+	// time instead of only when the goroutine happens to lose the race.
 	var logs recordingWriter
 	cmd := &command{
-		logger:  slog.New(slog.NewTextHandler(&logs, nil)),
+		logger:  slog.New(slog.NewTextHandler(&delayedWriter{delay: 200 * time.Millisecond, rec: &logs}, nil)),
 		stdin:   stdinr,
 		stdout:  stdoutw,
 		writers: writers,
@@ -156,6 +161,7 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 			pending:   [][]byte{[]byte("never delivered\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
+		flushLogTimeoutForTesting: 30 * time.Second,
 	}
 
 	require.NoError(t, cmd.Run())
