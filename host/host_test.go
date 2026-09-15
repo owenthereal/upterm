@@ -84,24 +84,95 @@ func Test_hostKeyCallback(t *testing.T) {
 	assert.Contains(t, err.Error(), "Offending ED25519 key in "+tempfile)
 }
 
-func Test_hostKeyCallbackStdinEOF(t *testing.T) {
-	knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
-	stdout := new(bytes.Buffer)
-	cb, err := NewPromptingHostKeyCallback(strings.NewReader(""), stdout, knownHostsFile)
+func Test_hostKeyCallbackStdinReadError(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
 	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, devNull.Close()) })
+	closed, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
 
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
 	require.NoError(t, err)
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
 
-	err = cb("127.0.0.1:22", addr, pk)
-	assert.ErrorIs(t, err, io.EOF)
-	assert.ErrorContains(t, err, "could not read host-key confirmation from stdin")
-	assert.Contains(t, stdout.String(), "Are you sure you want to continue connecting")
+	for _, tt := range []struct {
+		name    string
+		stdin   io.Reader
+		wantErr error
+	}{
+		{"empty reader", strings.NewReader(""), io.EOF},
+		{"null device", devNull, io.EOF},
+		{"closed file", closed, os.ErrClosed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+			stdout := new(bytes.Buffer)
+			cb, err := NewPromptingHostKeyCallback(tt.stdin, stdout, knownHostsFile)
+			require.NoError(t, err)
 
-	content, err := os.ReadFile(knownHostsFile)
+			err = cb("127.0.0.1:22", addr, pk)
+			assert.ErrorIs(t, err, tt.wantErr)
+			assert.ErrorContains(t, err, "could not read host-key confirmation from stdin")
+			assert.ErrorContains(t, err, "ED25519 host key of 127.0.0.1:22")
+			assert.ErrorContains(t, err, "interactively")
+			assert.ErrorContains(t, err, knownHostsFile)
+			assert.ErrorContains(t, err, "--skip-host-key-check")
+			assert.Contains(t, stdout.String(), "Are you sure you want to continue connecting")
+
+			content, err := os.ReadFile(knownHostsFile)
+			require.NoError(t, err)
+			assert.Empty(t, content, "an unconfirmed host key must not be trusted")
+		})
+	}
+}
+
+func Test_hostKeyCallbackRedirectedStdin(t *testing.T) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
 	require.NoError(t, err)
-	assert.Empty(t, content, "an unconfirmed host key must not be trusted")
+	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
+
+	for _, source := range []string{"pipe", "file"} {
+		for _, answer := range []string{"yes", "no"} {
+			t.Run(source+"/"+answer, func(t *testing.T) {
+				var stdin *os.File
+				if source == "pipe" {
+					reader, writer, err := os.Pipe()
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = writer.Close() })
+					stdin = reader
+					t.Cleanup(func() { assert.NoError(t, stdin.Close()) })
+					_, err = writer.WriteString(answer + "\n")
+					require.NoError(t, err)
+					require.NoError(t, writer.Close())
+				} else {
+					filename := filepath.Join(t.TempDir(), "stdin")
+					require.NoError(t, os.WriteFile(filename, []byte(answer+"\n"), 0600))
+					stdin, err = os.Open(filename)
+					require.NoError(t, err)
+					t.Cleanup(func() { assert.NoError(t, stdin.Close()) })
+				}
+
+				knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
+				cb, err := NewPromptingHostKeyCallback(stdin, io.Discard, knownHostsFile)
+				require.NoError(t, err)
+				err = cb("127.0.0.1:22", addr, pk)
+				if answer == "yes" {
+					require.NoError(t, err)
+				} else {
+					require.EqualError(t, err, "Host key verification failed")
+				}
+
+				content, err := os.ReadFile(knownHostsFile)
+				require.NoError(t, err)
+				if answer == "yes" {
+					assert.Equal(t, "127.0.0.1 "+testPublicKey+"\n", string(content))
+				} else {
+					assert.Empty(t, content, "a rejected host key must not be trusted")
+				}
+			})
+		}
+	}
 }
 
 func Test_hostKeyCallbackIPv6WithPort(t *testing.T) {

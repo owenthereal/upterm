@@ -128,7 +128,10 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	for {
 		confirm, err := reader.ReadString('\n')
 		if err != nil {
-			return fmt.Errorf("could not read host-key confirmation from stdin: %w", err)
+			return fmt.Errorf("could not read host-key confirmation from stdin: %w; "+
+				"to confirm the %s host key of %s, re-run interactively, "+
+				"pre-populate %s with a verified host key, or use --skip-host-key-check to automatically accept new host keys",
+				err, keyType(key.Type()), hostname, cb.file)
 		}
 
 		confirm = strings.TrimSpace(confirm)
