@@ -140,6 +140,43 @@ func Test_printBanner_DoesNotBlockOnAnUndrainedPipe(t *testing.T) {
 	require.Equal(t, want[:n], string(got[:n]))
 }
 
+// Test_printBanner_DeliversTheWholeBannerToAReaderThatReads is the other half
+// of the bargain: not blocking is only worth having if the banner still
+// arrives. The sink hands its bytes to a drain goroutine, so a flush that
+// returned too early — or a Close before it, which discards what is still
+// pending — would truncate the banner rather than fail anything.
+func Test_printBanner_DeliversTheWholeBannerToAReaderThatReads(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	// Read as it arrives: the banner is several drain chunks long, so a reader
+	// that only started afterwards would be the undrained-pipe case again.
+	collected := make(chan string, 1)
+	go func() {
+		var buf strings.Builder
+		_, _ = io.Copy(&buf, r)
+		collected <- buf.String()
+	}()
+
+	detail := tui.SessionDetail{Name: "banner", Command: strings.Repeat("x", 200<<10)}
+	want := tui.FormatSessionDetail(detail)
+
+	// Nil: the default logger is what a caller with no logger of its own gets,
+	// and nothing here is expected to log at all.
+	printBanner(nil, detail)
+
+	require.NoError(t, w.Close())
+	got := <-collected
+	require.NoError(t, r.Close())
+
+	require.Equal(t, len(want), len(got), "the whole banner must arrive, not just what was delivered when the flush returned")
+	require.True(t, want == got, "the banner arrived corrupted")
+}
+
 func Test_ResolveSessionName(t *testing.T) {
 	require.Equal(t, "mine", resolveSessionName("mine", []string{"bash"}))
 	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))
