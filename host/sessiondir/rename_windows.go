@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -33,10 +32,19 @@ func replaceFile(from, to string) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, windows.ERROR_INVALID_PARAMETER), errors.Is(err, windows.ERROR_NOT_SUPPORTED):
-		// What a pre-1607 Windows answers to an information class it does not
-		// know, and what a volume without POSIX rename support (FAT, exFAT)
-		// answers to the flag. Neither says the rename cannot be done at all.
+	case errors.Is(err, windows.ERROR_INVALID_PARAMETER),
+		errors.Is(err, windows.ERROR_NOT_SUPPORTED),
+		errors.Is(err, windows.ERROR_INVALID_NAME),
+		errors.Is(err, windows.ERROR_BAD_PATHNAME):
+		// The first two are a pre-1607 Windows answering an information class
+		// it does not know, and a volume without POSIX rename support (FAT,
+		// exFAT) answering the flag. The last two are the name being refused
+		// by the path normalizer, whatever the reason.
+		//
+		// None of them says the rename cannot be done, only that it cannot be
+		// done this way — and Update is the only path by which a record is
+		// published, so a refusal here has to degrade to the older call rather
+		// than take every publication on this platform down with it.
 		return renameWithRetry(from, to)
 	default:
 		return err
@@ -89,7 +97,14 @@ type fileRenameInfo struct {
 
 // renamePOSIX renames from onto to with POSIX semantics.
 func renamePOSIX(from, to string) error {
-	target, err := ntPath(to)
+	// A full Win32 path, which is the form FILE_RENAME_INFO documents and the
+	// form kernel32 expects: SetFileInformationByHandle runs the name through
+	// the DOS path normalizer on its way to the NT call below it. Spelling the
+	// name the way the object manager reads it (\??\C:\...) does not skip that
+	// step -- the normalizer classifies a single-backslash prefix as a rooted
+	// path and prepends the current drive, which produces a name nothing can
+	// resolve.
+	target, err := filepath.Abs(to)
 	if err != nil {
 		return err
 	}
@@ -129,7 +144,7 @@ func renamePOSIX(from, to string) error {
 	// FILE_RENAME_FLAG_REPLACE_IF_EXISTS (0x1) | FILE_RENAME_FLAG_POSIX_SEMANTICS
 	// (0x2); x/sys spells them with the ntifs names for the same bits.
 	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
-	// Zero because the name below is absolute; a handle here would make it
+	// Zero because the name above is a full path; a handle here would make it
 	// relative to that directory.
 	info.RootDirectory = 0
 	info.FileNameLength = uint32(nameBytes)
@@ -141,29 +156,4 @@ func renamePOSIX(from, to string) error {
 		return &os.LinkError{Op: "rename", Old: from, New: to, Err: err}
 	}
 	return nil
-}
-
-// ntPath spells a path the way the object manager reads it.
-//
-// FILE_RENAME_INFO's name is resolved below the Win32 path layer, so with no
-// RootDirectory it has to be absolute and in the NT namespace: \??\C:\dir\file
-// for a drive letter, \??\UNC\server\share\file for a UNC path. \??\ is also
-// the one prefix the Win32 normalizer passes through untouched, so this is the
-// spelling that arrives intact whichever layer ends up reading it.
-func ntPath(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
-
-	switch {
-	case strings.HasPrefix(abs, `\\?\`):
-		// The Win32 spelling of the same thing, which filepath treats as a
-		// volume name and leaves alone: swap the prefix rather than nest it.
-		return `\??\` + abs[4:], nil
-	case strings.HasPrefix(abs, `\\`):
-		return `\??\UNC\` + abs[2:], nil
-	default:
-		return `\??\` + abs, nil
-	}
 }
