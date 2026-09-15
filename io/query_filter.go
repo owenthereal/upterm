@@ -38,9 +38,9 @@ const (
 	qfStateOSCParam                       // saw OSC number
 	qfStateOSCSemi                        // saw OSC number ;
 	qfStateOSCQuery                       // saw OSC N ; ? (query for color)
-	qfStateOSCQueryEsc                    // saw ESC in OSC query (possible ST)
+	qfStateOSCQueryEsc                    // saw ESC in OSC query (ST if '\' follows, else the query ends there)
 	qfStateOSCContent                     // saw OSC N ; <non-?> (not a query, pass through)
-	qfStateOSCContentEsc                  // saw ESC in OSC content (possible ST)
+	qfStateOSCContentEsc                  // saw ESC in OSC content (ST if '\' follows, else the OSC ends there)
 )
 
 // NewTerminalQueryFilter creates a filter that removes terminal query
@@ -227,20 +227,21 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 
 	case qfStateOSCContentEsc:
-		f.seqBuf = append(f.seqBuf, b)
 		if b == '\\' { // ST (String Terminator)
+			f.seqBuf = append(f.seqBuf, b)
 			// Pass through the entire OSC sequence
 			f.flushAndReset()
 			return
 		}
-		// Not ST, continue as content (the ESC might be part of content)
-		f.state = qfStateOSCContent
-		// The content bound belongs here too: a run of ESCs bounces between
-		// these two states and would otherwise never reach the check in
-		// qfStateOSCContent, which only runs for ordinary content bytes.
-		if len(f.seqBuf) > 256 {
-			f.flushAndReset()
-		}
+		// Anything else ends the string: an ESC abandons an OSC whatever
+		// follows it, and only ESC \ ends it as ST. Treating the ESC as
+		// content let "ESC ] 0 ; t ESC [ 6 n BEL" through whole, so every
+		// joiner's terminal answered the cursor-position query inside it into
+		// the pty. The OSC before the ESC is not ours to filter, so it goes
+		// out; the ESC starts a sequence again, and this byte is the first of
+		// it.
+		f.endStringAtESC()
+		f.processByte(b)
 
 	case qfStateOSCQuery:
 		f.seqBuf = append(f.seqBuf, b)
@@ -259,15 +260,18 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 
 	case qfStateOSCQueryEsc:
-		f.seqBuf = append(f.seqBuf, b)
 		if b == '\\' { // ST (String Terminator)
+			f.seqBuf = append(f.seqBuf, b)
 			// This is a color query (OSC 10/11/12), filter it
 			f.state = qfStateNormal
 			f.seqBuf = f.seqBuf[:0]
 			return
 		}
-		// Not ST, output what we have
-		f.flushAndReset()
+		// Ended by the ESC, same as OSC content above: what we have is an
+		// unterminated query, which is passed through as it always was, and
+		// what follows the ESC is a new sequence rather than more of it.
+		f.endStringAtESC()
+		f.processByte(b)
 
 	default:
 		f.outBuf = append(f.outBuf, b)
@@ -323,6 +327,15 @@ func (f *TerminalQueryFilter) isCSIQuery(finalByte byte) bool {
 		}
 	}
 	return false
+}
+
+// endStringAtESC closes an OSC that a non-ST ESC ended. The string's own bytes
+// go to outBuf; the trailing ESC stays held as the start of whatever sequence
+// comes next, which the caller then feeds the current byte to.
+func (f *TerminalQueryFilter) endStringAtESC() {
+	f.outBuf = append(f.outBuf, f.seqBuf[:len(f.seqBuf)-1]...)
+	f.seqBuf = append(f.seqBuf[:0], 0x1b)
+	f.state = qfStateEsc
 }
 
 // flushAndReset appends buffered bytes to outBuf and resets state.

@@ -210,6 +210,48 @@ func TestTerminalQueryFilter_PreservesNonQueryOSC(t *testing.T) {
 	}
 }
 
+// An ESC inside an OSC ends the string whatever follows it; only a backslash
+// makes it the ST that ends it cleanly. The filter used to keep swallowing
+// content across the ESC, so an unterminated title followed by a cursor
+// position request reached every joiner whole -- and every joiner's terminal
+// answered the request into the shared pty, which is the one thing this filter
+// exists to prevent.
+func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []byte
+		expected []byte
+	}{
+		{
+			name:     "ESC not followed by backslash ends the OSC, and the query after it is filtered",
+			input:    []byte("\x1b]0;t\x1b[6n\x07"),
+			expected: []byte("\x1b]0;t\x07"),
+		},
+		{
+			name:     "ESC followed by backslash is still ST",
+			input:    []byte("\x1b]0;t\x1b\\"),
+			expected: []byte("\x1b]0;t\x1b\\"),
+		},
+		{
+			name:     "the same inside an OSC colour query",
+			input:    []byte("\x1b]11;?\x1b[6n\x07"),
+			expected: []byte("\x1b]11;?\x07"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			n, err := filter.Write(tt.input)
+			require.NoError(t, err)
+			require.Equal(t, len(tt.input), n)
+			require.Equal(t, tt.expected, buf.Bytes())
+		})
+	}
+}
+
 func TestTerminalQueryFilter_SplitWrites(t *testing.T) {
 	tests := []struct {
 		name     string
