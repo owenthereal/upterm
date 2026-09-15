@@ -19,6 +19,18 @@ import (
 
 const (
 	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
+
+	// listenerCloseGrace bounds how long closing the forwarded listener waits
+	// on the relay before the transport is taken out from under it.
+	//
+	// That Close sends cancel-streamlocal-forward and waits for the reply, and
+	// x/crypto answers global requests in order: a relay that accepted the
+	// session but never answered an earlier request — a keepalive, say — leaves
+	// the wait with nothing that can ever wake it. Shutdown closes this
+	// listener from a run.Group interrupt, so the wait held up the whole
+	// teardown: no final publication, no Release, and `session info` still
+	// reporting a ready session on a name nothing will give back.
+	listenerCloseGrace = 5 * time.Second
 )
 
 type ReverseTunnel struct {
@@ -33,6 +45,8 @@ type ReverseTunnel struct {
 	HostKeyCallback ssh.HostKeyCallback
 	Logger          *slog.Logger
 
+	// ln is the forwarded listener, wrapped so that closing it is bounded by
+	// listenerCloseGrace rather than by the relay's willingness to answer.
 	ln net.Listener
 
 	// stopKeepAlive ends the goroutine Establish starts. Nil until then.
@@ -44,6 +58,9 @@ type ReverseTunnel struct {
 // dial, the session request, the listen — and each leaves a different subset
 // of these set; a Close that assumed the successful one would turn a failed
 // dial into a nil dereference in the caller's teardown.
+//
+// It is bounded: closing ln goes through the wrapper, which gives the relay
+// listenerCloseGrace and then closes the client itself.
 func (c *ReverseTunnel) Close() {
 	// Stopped before the client is closed, so the ticker cannot start a ping
 	// into a connection that is going away.
@@ -58,6 +75,9 @@ func (c *ReverseTunnel) Close() {
 	}
 }
 
+// Listener returns the forwarded listener the guest server serves on, wrapped
+// so that whoever closes it — Shutdown, from an interrupt — cannot be left
+// waiting on a relay that has stopped replying.
 func (c *ReverseTunnel) Listener() net.Listener {
 	return c.ln
 }
@@ -125,10 +145,25 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}
 
-	c.ln, err = c.Listen("unix", sessResp.SessionID)
+	ln, err := c.Listen("unix", sessResp.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
 	}
+
+	// The client this listener and this keepalive belong to, read once. A
+	// second Establish replaces the field, and either of them acting on the
+	// replacement would close a connection that is not the one it is nursing.
+	client := c.Client
+	// Closing the client is how both of them give up on the relay: it is the
+	// only thing that fails a request already on the wire. Nil-safe like
+	// Close, since every teardown path here has to survive a tunnel that never
+	// finished establishing.
+	closeClient := func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}
+	c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
 
 	// make sure connection is alive
 	//
@@ -146,12 +181,21 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 	keepAliveCtx, stopKeepAlive := context.WithCancel(ctx)
 	c.stopKeepAlive = stopKeepAlive
-	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() {
+	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() error {
 		// TODO: ping with session ID
-		_, _, err := c.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
-		if err != nil {
-			baseLogger.Error("error pinging server", "error", err)
-		}
+		_, _, err := client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+		return err
+	}, func(err error) {
+		// Once, at the point of giving up. Logging every interval said the
+		// same thing about the same dead connection until the session ended,
+		// which buried whatever else the host had to say.
+		baseLogger.Error("relay stopped answering keepalives, closing the tunnel", "error", err)
+		// The guest server is parked in Accept on a tunnel that no longer
+		// carries anything. Closing the client is what makes Serve return, so
+		// OnGuestServerStopped runs and the session is published as
+		// disconnected instead of sitting at ready with nobody able to reach
+		// it.
+		closeClient()
 	})
 
 	return sessResp, nil
@@ -201,7 +245,60 @@ func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clie
 	return &resp, nil
 }
 
-func keepAlive(ctx context.Context, d time.Duration, fn func()) {
+// boundedListener is a forwarded listener whose Close cannot outlive the
+// grace. Accept and Addr are the wrapped listener's own: only Close is a
+// request-response with the relay, and only Close is at risk.
+type boundedListener struct {
+	net.Listener
+
+	grace time.Duration
+	// force fails whatever the inner Close is waiting for. Closing the SSH
+	// client is the only thing that can: the request is already on the wire,
+	// and x/crypto offers no way to abandon the wait for its reply.
+	force func()
+}
+
+func newBoundedListener(ln net.Listener, grace time.Duration, force func()) net.Listener {
+	return &boundedListener{Listener: ln, grace: grace, force: force}
+}
+
+// Close returns what the forwarded listener returned, having waited at most
+// the grace for the relay to answer before forcing the transport.
+//
+// The inner Close runs on its own goroutine because there is nothing to cancel
+// it with: it is parked either on the mutex x/crypto serialises global
+// requests with, or on the reply channel for its own. Closing the transport
+// ends both — the mux loop closes that channel on its way out, and every
+// pending request returns EOF — so the result is still collected afterwards
+// rather than guessed at.
+func (l *boundedListener) Close() error {
+	closed := make(chan error, 1)
+	go func() { closed <- l.Listener.Close() }()
+
+	timer := time.NewTimer(l.grace)
+	defer timer.Stop()
+
+	select {
+	case err := <-closed:
+		return err
+	case <-timer.C:
+		l.force()
+		return <-closed
+	}
+}
+
+// keepAlive pings the relay every d until ctx ends or the tunnel is gone.
+//
+// Each ping is bounded by d, because a ping is a global request whose reply
+// comes from the relay's mux loop: a relay that has stopped serving that loop
+// leaves SendRequest waiting on a channel nothing will write to, and an
+// unbounded wait there is both a goroutine parked for the rest of the session
+// and — since the next tick would queue behind it — a tunnel whose death
+// nothing notices.
+//
+// onDead is called at most once, and only for a tunnel that actually failed. A
+// ctx that ends is this host's own teardown and says nothing about the relay.
+func keepAlive(ctx context.Context, d time.Duration, ping func() error, onDead func(error)) {
 	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
@@ -210,8 +307,39 @@ func keepAlive(ctx context.Context, d time.Duration, fn func()) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			fn()
 		}
+
+		err := pingWithin(ctx, d, ping)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			onDead(err)
+			return
+		}
+	}
+}
+
+// pingWithin runs one ping and waits at most d for its result.
+//
+// On a timeout the goroutine is abandoned rather than waited for: it is parked
+// in exactly the place this bound exists to escape, and it ends when the
+// caller tears the transport down, which is what onDead does. Its channel is
+// buffered so that send cannot be what keeps it alive.
+func pingWithin(ctx context.Context, d time.Duration, ping func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- ping() }()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case err := <-result:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("no reply to keepalive within %s", d)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
