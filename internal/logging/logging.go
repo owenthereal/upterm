@@ -166,12 +166,12 @@ func newSentryHandler(dsn string) (slog.Handler, func() error, error) {
 		return nil, nil, err
 	}
 
-	// Intentionally left zero-valued. Option.Level and its replacement
-	// Option.EventLevel are both deprecated, and EventLevel is slated for
-	// removal in sentry-go/slog 0.48.0. The zero value already yields
-	// EventLevel = {LevelError, LevelFatal}, which is exactly what the previous
-	// Level: slog.LevelError produced via levelsFromMinimum.
-	handler := slogsentry.Option{}.NewSentryHandler(context.Background())
+	// sentry-go/slog only sends logs as of v0.48. Capture error issues
+	// separately to preserve the error tracking promised by --sentry-dsn.
+	handler := slogmulti.Fanout(
+		slogsentry.Option{}.NewSentryHandler(context.Background()),
+		&sentryIssueHandler{tags: make(map[string]string)},
+	)
 
 	cleanup := func() error {
 		ok := sentry.Flush(sentryFlushTimeout)
