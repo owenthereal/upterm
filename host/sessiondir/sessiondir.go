@@ -263,10 +263,15 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNameInUse, name)
 	}
 	// The runtime lock is ours from here until the Dir below takes ownership of
-	// it, so every failure in between has to hand it back.
+	// it, so every failure in between has to hand it back — and take the
+	// directory with it. Nothing can have claimed that directory, because the
+	// sessions registry is held across every one of those failures, so a
+	// refused claim leaves nothing behind rather than a directory that will
+	// look stale to the next reaper.
 	dropRuntimeLock := func() {
 		_ = unlock(lf)
 		_ = lf.Close()
+		_ = os.RemoveAll(sessRuntime)
 	}
 
 	// The results registry, taken second and — by the order of these defers —
@@ -297,11 +302,6 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 	if err != nil || !ok {
 		_ = rlf.Close()
 		dropRuntimeLock()
-		// Nothing can have claimed the runtime directory we just made — the
-		// sessions registry is still held — so removing it leaves a refused
-		// claim with nothing behind, rather than a directory that will look
-		// stale to the next reaper.
-		_ = os.RemoveAll(sessRuntime)
 		if err != nil {
 			return nil, err
 		}

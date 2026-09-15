@@ -209,6 +209,35 @@ func Test_Claim_RefusesANameHeldUnderAnotherRuntimeRoot(t *testing.T) {
 	require.Equal(t, a.LaunchID(), rec.LaunchID, "the holder's record must still be the holder's")
 }
 
+// Test_Claim_LeavesNothingBehindWhenTheResultsRegistryIsBusy covers the other
+// way a claim can be refused after it has made its runtime directory. The
+// results registry is reachable in production now that host.ClaimTimeout
+// bounds the wait, and a claim that gives up there used to leave sessions/
+// <name> for the next reaper to puzzle over.
+func Test_Claim_LeavesNothingBehindWhenTheResultsRegistryIsBusy(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	// Held for the whole claim, so the wait can only end in the timeout.
+	held, err := lockRegistry(context.Background(), resultsRoot(stateRoot))
+	require.NoError(t, err)
+	defer releaseRegistry(held)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err = Claim(ctx, ClaimOptions{
+		RuntimeRoot: runtimeRoot,
+		StateRoot:   stateRoot,
+		Name:        "demo",
+		Command:     []string{"bash"},
+	})
+	require.Error(t, err, "a claim that cannot take the results registry must fail")
+	require.Contains(t, err.Error(), filepath.Join(resultsRoot(stateRoot), registryLockFile))
+
+	_, statErr := os.Stat(filepath.Join(sessionsRoot(runtimeRoot), "demo"))
+	require.True(t, os.IsNotExist(statErr), "a refused claim must leave no runtime directory behind")
+}
+
 func Test_Release_FreesTheRecordSide(t *testing.T) {
 	// The other half of ownership spanning both roots: a name given back has
 	// to be claimable from anywhere, not just from the root that gave it back.
