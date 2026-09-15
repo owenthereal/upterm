@@ -195,6 +195,14 @@ type logRecord struct {
 }
 
 // capturingHandler collects every record written to a logger built on it.
+//
+// Only valid for a logger nothing has called With or WithGroup on: WithAttrs
+// and WithGroup below return the receiver and drop what they are handed, so a
+// derived logger's attributes and group prefixes would be missing from the
+// records collected here rather than merely unasserted. Accumulating them
+// means carrying a prefix and an attribute list into every record, which is
+// more machinery than the one call site needs — every logger in these tests
+// comes straight from slog.New(&capturingHandler{}).
 type capturingHandler struct {
 	mu      sync.Mutex
 	records []logRecord
@@ -321,14 +329,16 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		require.Empty(t, logs.captured(), "a failure that is not a collision is not a redraw")
 	})
 
-	t.Run("a nil logger is the package default", func(t *testing.T) {
+	t.Run("a nil logger still redraws", func(t *testing.T) {
 		// The CLI always has a logger to pass. The guard is what keeps an
-		// embedder that has none from turning a redraw into a nil panic.
-		logs := &capturingHandler{}
-		orig := slog.Default()
-		slog.SetDefault(slog.New(logs))
-		t.Cleanup(func() { slog.SetDefault(orig) })
-
+		// embedder that has none from turning a redraw into a nil panic, so
+		// what this case needs is a collision reaching the log line with no
+		// logger behind it.
+		//
+		// Where that record lands is deliberately not asserted. Capturing it
+		// would mean swapping slog's default, which is process-global and
+		// backs the standard log package too — a test that reaches that far
+		// out to check a nil check is worse than the nil check.
 		var names []string
 		err := runWithGeneratedNameRetry(nil, "", []string{"bash"}, func(name string) error {
 			names = append(names, name)
@@ -339,7 +349,8 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		require.Equal(t, redrawLogs(names[0]), logs.captured())
+		require.Len(t, names, 2,
+			"the collision was redrawn, so the log line ran with no logger to run it on")
 	})
 }
 
