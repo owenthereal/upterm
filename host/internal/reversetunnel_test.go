@@ -293,28 +293,41 @@ func Test_KeepAlive_StopsAfterAFailedPing(t *testing.T) {
 func Test_KeepAlive_DoesNotReportADeadRelayWhenStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// The interval is also pingWithin's own timeout, and a ping that times out
+	// is a dead relay -- which is what this test must not produce by accident.
+	// A whole second between the ping announcing itself and that timeout is
+	// the margin that makes the ordering below a fact rather than a race the
+	// test usually wins: with a 20ms interval, a scheduler hiccup between the
+	// two lines after started turned this green test red.
+	const interval = time.Second
+
+	// Sent from inside the ping, so the cancel below lands on a ping that is
+	// provably in flight rather than on one that may not have begun.
+	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	wantErr := errors.New("ssh: EOF")
 
-	var pings atomic.Int32
 	dead := make(chan error, 2)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		keepAlive(ctx, 20*time.Millisecond, func() error {
-			pings.Add(1)
+		keepAlive(ctx, interval, func() error {
+			started <- struct{}{}
 			<-release
 			return wantErr
 		}, func(err error) { dead <- err })
 	}()
 
-	require.Eventually(t, func() bool { return pings.Load() > 0 }, time.Second, time.Millisecond,
-		"the ping never started")
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the ping never started")
+	}
 
 	// Cancel while the ping is still in flight, the way the force close's
-	// stopKeepAlive now runs before it closes the client that would fail
-	// this same ping. Only then does the ping resolve, and it resolves with
-	// an error -- the one closing the client would produce.
+	// stopKeepAlive runs before it closes the client that would fail this
+	// same ping. Only then does the ping resolve, and it resolves with an
+	// error -- the one closing the client would produce.
 	cancel()
 	close(release)
 
