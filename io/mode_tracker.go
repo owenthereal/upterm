@@ -22,6 +22,9 @@ const maxSequenceBytes = 64
 // The defaults are what let Snapshot stay quiet about state a joiner is
 // already in: it joins with a terminal at its own defaults, so replaying them
 // back to it is bytes that say nothing.
+//
+// The three alternate-screen modes are listed here because they are worth
+// restoring, but they are not kept in decPrivate: see altScreenModes.
 var restorable = map[int]bool{
 	1:    false, // DECCKM, application cursor keys
 	7:    true,  // DECAWM, autowrap
@@ -60,6 +63,14 @@ func restorableModes() []int {
 // writeMu.
 type ModeTracker struct {
 	decPrivate map[int]bool
+
+	// A terminal has one alternate screen, not one per mode that reaches it,
+	// so it is one boolean plus the mode that last entered it. altVia only
+	// means anything while altScreen is set; it is what the snapshot replays,
+	// because a joiner told to leave by a mode it never entered through is a
+	// joiner on the wrong screen.
+	altScreen bool
+	altVia    int // 47, 1047 or 1049
 
 	// Each screen buffer has its own margins, so the two DECSTBMs are kept
 	// apart: replaying the alternate screen's to a joiner sitting on the
@@ -209,26 +220,48 @@ func (m *ModeTracker) closePartial() {
 }
 
 // resetToDefaults forgets everything recorded, which is what a terminal does
-// to itself on RIS or DECSTR.
+// to itself on RIS: it comes back at power-on, on the normal screen.
 func (m *ModeTracker) resetToDefaults() {
 	clear(m.decPrivate)
+	m.altScreen = false
+	m.altVia = 0
 	m.mainRegion = nil
 	m.altRegion = nil
 	m.charsetG0 = nil
 }
 
-// altScreenModes are the DEC private modes that put the alternate screen
-// buffer on show. Any one of them is enough.
-var altScreenModes = []int{47, 1047, 1049}
+// softResetModes are the tracked DEC private modes DECSTR returns to their
+// default. They are the ones on a terminal's soft-reset list; the rest of
+// what the tracker records -- the screen buffer, the mouse modes, focus
+// reporting, 1048 and bracketed paste -- all postdates that list and survives
+// a DECSTR on tmux and on xterm alike.
+var softResetModes = []int{1, 7, 25} // DECCKM, DECAWM, DECTCEM
 
-func (m *ModeTracker) altActive() bool {
-	for _, n := range altScreenModes {
-		if m.decPrivate[n] {
-			return true
-		}
+// softReset applies DECSTR. It is not RIS with a different spelling: it leaves
+// the screen buffer alone, which is why a full-screen program can issue one on
+// the alternate screen without dropping back to the normal one.
+func (m *ModeTracker) softReset() {
+	for _, n := range softResetModes {
+		delete(m.decPrivate, n)
 	}
-	return false
+	// The margins of the buffer that is showing, and only that one: the other
+	// buffer's are not the ones being reset.
+	if m.altActive() {
+		m.altRegion = nil
+	} else {
+		m.mainRegion = nil
+	}
+	m.charsetG0 = nil
 }
+
+// altScreenModes are the DEC private modes that put the alternate screen
+// buffer on show. They are three spellings of one piece of state on a real
+// terminal, so the tracker keeps one: "\x1b[?47h\x1b[?1049l" leaves the
+// alternate screen on tmux and on xterm, and tracking the two modes apart had
+// the snapshot replay a "?47h" the session was no longer in.
+var altScreenModes = map[int]bool{47: true, 1047: true, 1049: true}
+
+func (m *ModeTracker) altActive() bool { return m.altScreen }
 
 func (m *ModeTracker) finishCSI(final byte) {
 	params := m.seq
@@ -247,6 +280,15 @@ func (m *ModeTracker) finishCSI(final byte) {
 				continue
 			}
 			if _, ok := restorable[n]; !ok {
+				continue
+			}
+			if altScreenModes[n] {
+				m.altScreen = set
+				if set {
+					// Whichever mode entered last is the one to replay, since
+					// it is the one the session's own reset will match.
+					m.altVia = n
+				}
 				continue
 			}
 			m.decPrivate[n] = set
@@ -272,7 +314,7 @@ func (m *ModeTracker) finishCSI(final byte) {
 		// DECSTR, a soft reset. Its parameter is the intermediate '!', which
 		// is what separates it from the several other CSI ... p sequences.
 		if len(params) == 1 && params[0] == '!' {
-			m.resetToDefaults()
+			m.softReset()
 		}
 	}
 }
@@ -280,7 +322,8 @@ func (m *ModeTracker) finishCSI(final byte) {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the three verbatim sequences and one partial sequence.
+// len(restorable) plus the screen switch, the three verbatim sequences and one
+// partial sequence.
 //
 // The order is the order the stream would have had to use to reach this
 // state: the normal screen's margins, then the modes, then the switch to the
@@ -314,6 +357,11 @@ func (m *ModeTracker) Snapshot() []byte {
 		}
 	}
 	if m.altActive() {
+		// Replayed through the mode that entered, so a joiner is left in the
+		// state the session's own "l" will match.
+		out = append(out, 0x1b, '[', '?')
+		out = append(out, []byte(strconv.Itoa(m.altVia))...)
+		out = append(out, 'h')
 		out = append(out, m.altRegion...)
 	}
 	out = append(out, m.charsetG0...)

@@ -13,8 +13,10 @@ func Test_ModeTracker_DECPrivateModes(t *testing.T) {
 	_, err := m.Write([]byte("\x1b[?1049h\x1b[?2004h\x1b[?25l"))
 	require.NoError(t, err)
 
-	// Ascending numeric order, so the snapshot is deterministic.
-	require.Equal(t, "\x1b[?25l\x1b[?1049h\x1b[?2004h", string(m.Snapshot()))
+	// Ascending numeric order, so the snapshot is deterministic. The switch
+	// to the alternate screen is not one of them: it is its own state now,
+	// and it goes after them, in front of the margins that belong to it.
+	require.Equal(t, "\x1b[?25l\x1b[?2004h\x1b[?1049h", string(m.Snapshot()))
 }
 
 func Test_ModeTracker_LastWriteWins(t *testing.T) {
@@ -199,25 +201,77 @@ func Test_ModeTracker_EmitsOnlyNonDefaultState(t *testing.T) {
 	}
 }
 
-func Test_ModeTracker_ResetClearsEverything(t *testing.T) {
+// Modes 47, 1047 and 1049 are three ways of asking for one thing, and a real
+// terminal has one alternate screen: tmux and xterm both leave it on a reset
+// of any of the three, whichever one entered it. Tracked as independent modes
+// they contradict each other, and the snapshot replays a switch the session
+// had already left.
+func Test_ModeTracker_AlternateScreenIsOneState(t *testing.T) {
 	tests := []struct {
 		name  string
-		reset string
+		input string
+		want  string
 	}{
-		{name: "RIS", reset: "\x1bc"},
-		{name: "DECSTR", reset: "\x1b[!p"},
+		{
+			name:  "1049l leaves a screen 47h entered",
+			input: "\x1b[?47h\x1b[?1049l",
+			want:  "",
+		},
+		{
+			name:  "47l leaves a screen 1049h entered",
+			input: "\x1b[?1049h\x1b[?47l",
+			want:  "",
+		},
+		{
+			name:  "47h is replayed as the mode that entered",
+			input: "\x1b[?47h",
+			want:  "\x1b[?47h",
+		},
+		{
+			name:  "1047h is replayed as the mode that entered",
+			input: "\x1b[?1047h",
+			want:  "\x1b[?1047h",
+		},
+		{
+			name:  "the last mode to enter is the one replayed",
+			input: "\x1b[?1049h\x1b[?47h",
+			want:  "\x1b[?47h",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := NewModeTracker()
-			_, err := m.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[1;23r\x1b(0"))
+			_, err := m.Write([]byte(tt.input))
 			require.NoError(t, err)
-			require.NotEmpty(t, m.Snapshot(), "the state a reset clears must be there first")
-
-			_, err = m.Write([]byte(tt.reset))
-			require.NoError(t, err)
-			require.Empty(t, m.Snapshot())
+			require.Equal(t, tt.want, string(m.Snapshot()))
 		})
 	}
+}
+
+// RIS puts the terminal back at power-on, so nothing recorded before it is
+// true of it any more -- the screen buffer included.
+func Test_ModeTracker_ResetClearsEverything(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[1;23r\x1b(0"))
+	require.NoError(t, err)
+	require.NotEmpty(t, m.Snapshot(), "the state a reset clears must be there first")
+
+	_, err = m.Write([]byte("\x1bc"))
+	require.NoError(t, err)
+	require.Empty(t, m.Snapshot())
+}
+
+// DECSTR is a soft reset, and this test used to be the DECSTR half of
+// Test_ModeTracker_ResetClearsEverything, asserting it cleared as much as RIS
+// does. No terminal behaves that way: tmux and xterm both keep the screen
+// buffer, the mouse modes, focus reporting and bracketed paste across it, and
+// return only the cursor keys, autowrap and cursor visibility to their
+// defaults, along with the active buffer's margins and the charset.
+func Test_ModeTracker_SoftResetIsNotAFullReset(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?1049h\x1b[?1h\x1b[?25l\x1b[?2004h\x1b[5;10r\x1b(0\x1b[!p"))
+	require.NoError(t, err)
+
+	require.Equal(t, "\x1b[?2004h\x1b[?1049h", string(m.Snapshot()))
 }

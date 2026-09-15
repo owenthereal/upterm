@@ -190,7 +190,9 @@ func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
 	require.NoError(t, w.Append(late))
 
 	got := late.String()
-	require.True(t, strings.HasPrefix(got, "\x1b[?1049h\x1b[?2004h"),
+	// Bracketed paste first, then the alternate screen: the snapshot puts the
+	// screen switch after the DEC private modes.
+	require.True(t, strings.HasPrefix(got, "\x1b[?2004h\x1b[?1049h"),
 		"replay must open with the mode snapshot, got %q", got)
 	require.True(t, strings.HasSuffix(got, "defghij"),
 		"replay must still end with the ring's tail, got %q", got)
