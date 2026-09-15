@@ -178,6 +178,30 @@ func Test_MultiWriter_JoinerSeesTheSequenceTheRingStartsInside(t *testing.T) {
 	require.Equal(t, "\x1b[?1049h"+"fghijklmnopqrstu", later.String())
 }
 
+// The same boundary falls inside string sequences, which are the long ones: a
+// window title, a hyperlink, an OSC 52 clipboard. The ring then starts partway
+// through the payload, and a joiner handed that alone has the rest of somebody
+// else's title typed onto its screen, because the introducer that made those
+// bytes a string left with the eviction.
+func Test_MultiWriter_JoinerSeesTheStringTheRingStartsInside(t *testing.T) {
+	w := NewMultiWriter(16)
+
+	const title = "\x1b]0;title\x07" // 10 bytes
+	_, err := w.Write([]byte(title))
+	require.NoError(t, err)
+
+	// 11 more bytes push the ring 5 over, which trims it to the middle of the
+	// title's payload.
+	const after = "0123456789a"
+	_, err = w.Write([]byte(after))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b]0;t"+"itle\x07"+after, late.String(),
+		"the snapshot must carry the head of the string the ring starts inside")
+}
+
 func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
 	w := NewMultiWriter(16) // far too small to still hold the mode sequences
 
