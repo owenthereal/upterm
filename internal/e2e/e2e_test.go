@@ -221,13 +221,28 @@ func extractSSHCommand(output string) string {
 	// Remove newlines/extra spaces caused by terminal wrapping
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 
-	// Preserve the quoted WebSocket ProxyCommand and optional SSH port.
-	re := regexp.MustCompile(`SSH:\s*(ssh\s+(?:-o\s+ProxyCommand='[^']+'\s+)?\S+(?:\s+-p\s+\d+)?)`)
+	// A shell argument can concatenate quoted text and escaped apostrophes.
+	// Preserve the whole ProxyCommand, including its nested URL quoting.
+	re := regexp.MustCompile(`SSH:\s*(ssh\s+(?:-o\s+ProxyCommand=(?:'[^']*'|\\.|[^\s'\\])+\s+)?\S+(?:\s+-p\s+\d+)?)`)
 	matches := re.FindStringSubmatch(clean)
 	if len(matches) < 2 {
 		return ""
 	}
 	return strings.TrimSpace(matches[1])
+}
+
+func TestExtractSSHCommand(t *testing.T) {
+	for _, command := range []string{
+		"ssh sid@example.com -p 2222",
+		"ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com:443",
+		`ssh -o ProxyCommand='upterm proxy '\''wss://sid@example.com/ws'\''' sid@example.com:443`,
+		`ssh -o ProxyCommand='upterm proxy '\''wss://sid@example.com/team'\''\'\'''\''s/ws?q=a&b=c'\''' sid@example.com:443`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			output := "Session: sid\nSSH: " + command + "\nClients: none\n"
+			require.Equal(t, command, extractSSHCommand(output))
+		})
+	}
 }
 
 // extractScpUserHost extracts user and host separately from SSH command.

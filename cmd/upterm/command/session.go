@@ -312,7 +312,17 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 			sshCmd = fmt.Sprintf("%s -p %s", sshCmd, port)
 		}
 	} else {
-		sshCmd = fmt.Sprintf("ssh -o ProxyCommand='upterm proxy %s://%s@%s' %s@%s", scheme, user, hostPort, user, host+":"+port)
+		userSplit := strings.SplitN(user, ":", 2)
+		if len(userSplit) == 1 {
+			u.User = url.User(userSplit[0])
+		} else {
+			u.User = url.UserPassword(userSplit[0], userSplit[1])
+		}
+		// SSH expands percent tokens before executing ProxyCommand in a shell.
+		// Quote the URL for that shell, then the command for the caller's shell.
+		proxyURL := strings.ReplaceAll(u.String(), "%", "%%")
+		proxyCommand := "upterm proxy " + quoteShellArg(proxyURL)
+		sshCmd = fmt.Sprintf("ssh -o ProxyCommand=%s %s@%s", quoteShellArg(proxyCommand), user, host+":"+port)
 	}
 
 	var clients []string
@@ -349,6 +359,10 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 	}, nil
+}
+
+func quoteShellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func clientDesc(addr, clientVer, fingerprint string) string {
