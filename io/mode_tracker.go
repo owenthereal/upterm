@@ -234,10 +234,11 @@ func (m *ModeTracker) resetToDefaults() {
 }
 
 // softResetModes are the tracked DEC private modes DECSTR returns to their
-// default. They are the ones on a terminal's soft-reset list; the rest of
-// what the tracker records -- the screen buffer, the mouse modes, focus
-// reporting, 1048 and bracketed paste -- all postdates that list and survives
-// a DECSTR on tmux and on xterm alike.
+// default under the model this tracker implements: xterm's soft reset,
+// verified against xterm's ReallyReset. tmux has no handler for CSI ! p at
+// all, so it ignores DECSTR and resets nothing -- it keeps this set, and
+// everything else the tracker records -- the screen buffer, the mouse modes,
+// focus reporting, 1048 and bracketed paste included -- across it too.
 var softResetModes = []int{1, 7, 25} // DECCKM, DECAWM, DECTCEM
 
 // softReset applies DECSTR. It is not RIS with a different spelling: it leaves

@@ -337,10 +337,12 @@ func Test_ModeTracker_ResetClearsEverything(t *testing.T) {
 
 // DECSTR is a soft reset, and this test used to be the DECSTR half of
 // Test_ModeTracker_ResetClearsEverything, asserting it cleared as much as RIS
-// does. No terminal behaves that way: tmux and xterm both keep the screen
-// buffer, the mouse modes, focus reporting and bracketed paste across it, and
-// return only the cursor keys, autowrap and cursor visibility to their
-// defaults, along with the active buffer's margins and the charset.
+// does. No terminal behaves that way: the tracker models xterm's soft reset,
+// which keeps the screen buffer, the mouse modes, focus reporting and
+// bracketed paste across it, and returns only the cursor keys, autowrap and
+// cursor visibility to their defaults, along with the active buffer's margins
+// and the charset. tmux keeps even more -- it has no handler for CSI ! p and
+// ignores DECSTR outright.
 func Test_ModeTracker_SoftResetIsNotAFullReset(t *testing.T) {
 	m := NewModeTracker()
 	_, err := m.Write([]byte("\x1b[?1049h\x1b[?1h\x1b[?25l\x1b[?2004h\x1b[5;10r\x1b(0\x1b[!p"))
