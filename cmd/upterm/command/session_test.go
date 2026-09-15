@@ -402,6 +402,13 @@ func Test_infoRunE_PrintsTheSessionItValidated(t *testing.T) {
 		"the session the lookup validated is the one the answer is about")
 	require.NotContains(t, out, "sid-replacement",
 		"a session that claimed the name after the lookup is not the answer to that lookup")
+
+	// And it prints the status the record published, as the summary for a
+	// session that has ended does and as the list's detail view does. A live
+	// session is the one case that used to answer the question "how is NAME?"
+	// without saying.
+	require.Regexp(t, `Status:\s+`+sessiondir.StatusReady, out,
+		"the record's status belongs in the detail a live session prints too")
 }
 
 func Test_lookup_Disconnected(t *testing.T) {

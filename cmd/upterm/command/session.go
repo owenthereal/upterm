@@ -385,6 +385,11 @@ func infoRunE(c *cobra.Command, args []string) error {
 		}
 		if detail, err := buildSessionDetail(live); err == nil {
 			detail.Name = name
+			// The status the lookup settled on, which the socket's answer does
+			// not carry: the summary below prints one for a session that has
+			// ended, and `session list` prints one for every row, so the one
+			// case that answered "how is NAME?" without saying was this one.
+			detail.Status = info.Status
 			detail.AdminSocket = adminSocket
 			tui.PrintSessionDetail(detail)
 			return nil
