@@ -105,8 +105,11 @@ func NewModeTracker() *ModeTracker {
 	return &ModeTracker{decPrivate: map[int]bool{}}
 }
 
-// bufferedBytes reports the parser's current accumulation. It exists for tests.
-func (m *ModeTracker) bufferedBytes() int { return len(m.seq) }
+// bufferedBytes reports the parser's current accumulation: both the CSI
+// parameters it is collecting and the raw partial of the same sequence, which
+// is what a test asking whether an unterminated sequence can grow the parser
+// wants to know. It exists for tests.
+func (m *ModeTracker) bufferedBytes() int { return len(m.seq) + len(m.partial) }
 
 // Write consumes output and records mode changes. It never fails and never
 // alters the stream; callers use it as an observer, not a filter.
@@ -256,8 +259,8 @@ func (m *ModeTracker) softReset() {
 
 // altScreenModes are the DEC private modes that put the alternate screen
 // buffer on show. They are three spellings of one piece of state on a real
-// terminal, so the tracker keeps one: "\x1b[?47h\x1b[?1049l" leaves the
-// alternate screen on tmux and on xterm, and tracking the two modes apart had
+// terminal, so the tracker keeps one: "\x1b[?47h\x1b[?1049l" returns to the
+// normal screen on tmux and on xterm, and tracking the two modes apart had
 // the snapshot replay a "?47h" the session was no longer in.
 var altScreenModes = map[int]bool{47: true, 1047: true, 1049: true}
 

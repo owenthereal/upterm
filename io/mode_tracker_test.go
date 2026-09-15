@@ -122,10 +122,21 @@ func Test_ModeTracker_IgnoresUnknownModes(t *testing.T) {
 func Test_ModeTracker_BoundsUnterminatedSequence(t *testing.T) {
 	m := NewModeTracker()
 
-	// A CSI that never terminates must not grow the parser without limit.
+	// A CSI that never terminates must not grow the parser without limit. The
+	// parser holds two things now: maxSequenceBytes of CSI parameters at the
+	// most, and the raw partial of that same sequence, which inside a CSI is
+	// those parameters plus the two-byte "ESC [" introducer. 2*maxSequenceBytes+2
+	// is the ceiling for the pair.
 	_, err := m.Write([]byte("\x1b[" + strings.Repeat("1;", 100_000)))
 	require.NoError(t, err)
-	require.LessOrEqual(t, m.bufferedBytes(), maxSequenceBytes)
+	require.LessOrEqual(t, m.bufferedBytes(), 2*maxSequenceBytes+2,
+		"the parser's ceiling holds whatever the stream does")
+
+	// This input ran past that ceiling, so the overflow dropped the partial:
+	// the capped parameters are all that is left, and nothing here is still
+	// growing with the stream.
+	require.Equal(t, maxSequenceBytes, m.bufferedBytes(),
+		"an overflowed sequence keeps its capped parameters and no partial")
 
 	// And the parser must have recovered: a real sequence after the garbage
 	// still registers.
@@ -147,6 +158,68 @@ func Test_ModeTracker_PartialIsNotEmittedAfterOverflow(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Empty(t, m.Snapshot())
+}
+
+// The partial is the one part of the snapshot whose size the stream chooses,
+// so its worst case is worth pinning rather than reasoning about: a CSI whose
+// parameters stop exactly on the cap is the largest one that will ever be
+// replayed, and one byte more replays nothing at all.
+func Test_ModeTracker_PartialIsBoundedAtItsWorstCase(t *testing.T) {
+	m := NewModeTracker()
+
+	// maxSequenceBytes of parameters exactly. The cap is checked before each
+	// byte is taken, so this is the last one that still fits.
+	params := strings.Repeat("1;", maxSequenceBytes/2)
+	_, err := m.Write([]byte("\x1b[" + params))
+	require.NoError(t, err)
+
+	require.Equal(t, "\x1b["+params, string(m.Snapshot()))
+
+	// "ESC [" plus the parameters: maxSequenceBytes and its introducer, which
+	// is the ceiling Snapshot's doc comment claims.
+	require.Len(t, m.Snapshot(), maxSequenceBytes+2)
+}
+
+// Every way out of a sequence has to take the partial with it, or the joiner
+// is replayed the head of a sequence the ring never finishes and the bytes
+// print instead. The abandoning ESC is the case to watch: it both ends one
+// sequence and opens another.
+func Test_ModeTracker_PartialFollowsTheSequenceBeingAbandoned(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "a charset designation the stream stops inside",
+			input: "\x1b(",
+			want:  "\x1b(",
+		},
+		{
+			name:  "a charset designation abandoned by ESC",
+			input: "\x1b(\x1b[?10",
+			want:  "\x1b[?10",
+		},
+		{
+			name:  "a CSI abandoned by ESC",
+			input: "\x1b[?99\x1b[?10",
+			want:  "\x1b[?10",
+		},
+		{
+			name:  "ESC ESC",
+			input: "\x1b\x1b[?10",
+			want:  "\x1b[?10",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, string(m.Snapshot()))
+		})
+	}
 }
 
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
