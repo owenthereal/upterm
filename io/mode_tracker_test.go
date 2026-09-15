@@ -394,12 +394,24 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 		fmt.Fprintf(&b, "\x1b[?%dh", mode)
 	}
 	b.WriteString("\x1b[1;99999r\x1b(0")
+
+	// And then the stream stops inside a string that runs right up to its
+	// bound. The partial is the only part of the snapshot the stream sizes, so
+	// a worst case without one is a worst case of the constant half alone.
+	partial := "\x1b]0;" + strings.Repeat("a", maxStringBytes-len("\x1b]0;"))
+	b.WriteString(partial)
+
 	_, err := m.Write([]byte(b.String()))
 	require.NoError(t, err)
 
-	// Every restorable mode set at once, plus both scroll regions and the
-	// charset, must still be trivially smaller than a guest's sink.
-	require.Less(t, len(m.Snapshot()), 1024)
+	snap := string(m.Snapshot())
+	require.Contains(t, snap, partial, "the partial must be in it, or the bound below is about an empty slot")
+
+	// Every restorable mode set at once, plus both scroll regions, the charset
+	// and a string partial at its own cap, must still be trivially smaller
+	// than a guest's sink.
+	const constantBudget = 1024 // everything that is not the partial
+	require.Less(t, len(snap), constantBudget+maxStringBytes)
 }
 
 func Test_ModeTracker_EmitsOnlyNonDefaultState(t *testing.T) {

@@ -116,6 +116,12 @@ const (
 // one decision: BEL terminates an OSC and nothing else -- xterm accepts it
 // there, and for a DCS, PM, APC or SOS only ST will do.
 //
+// CAN (0x18) and SUB (0x1a) end a string on the DEC state machine too, and are
+// not honoured here, as they are not in the CSI parser either. The cost is
+// paid in the partial: a string cancelled that way stays open, so the ordinary
+// text that follows the CAN goes on being recorded as payload -- up to
+// maxStringBytes of it -- until an ESC or, in an OSC, a BEL closes it.
+//
 // The 8-bit C1 introducers (0x9b for CSI, 0x9d for OSC, 0x90 for DCS and the
 // rest) are out of scope. The tracker decodes no character set, and in the
 // UTF-8 a session actually emits those bytes are continuation bytes of
@@ -270,6 +276,7 @@ func (m *ModeTracker) step(b byte) {
 		// byte opens a new sequence. Resync on it rather than swallow
 		// everything that follows, as an ESC inside a CSI does.
 		m.state = msEsc
+		m.kind = skNone
 		m.reset()
 		m.openPartial()
 		m.step(b)
@@ -436,7 +443,10 @@ func (m *ModeTracker) finishCSI(final byte) {
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
 // len(restorable) plus the screen switch, the three verbatim sequences and one
-// partial sequence.
+// partial sequence. Only the partial is sized by the stream rather than by
+// this file, and its own bound is maxSequenceBytes for a mode sequence or
+// maxStringBytes for a string: the ceiling is a few kilobytes, not the tens of
+// bytes everything else comes to.
 //
 // The order is the order the stream would have had to use to reach this
 // state: the normal screen's margins, then the modes, then the switch to the
