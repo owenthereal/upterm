@@ -184,7 +184,9 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 				}
 			}
 
-			// set default ports for ws or wss
+			// set default ports for ws or wss: known_hosts keys the server as
+			// host:port, so the URL must carry one. ws.NewWSConn drops it again
+			// from the dial URL so the Host header stays "host", not "host:443".
 			if u.Scheme == "ws" && u.Port() == "" {
 				u.Host = u.Host + ":80"
 				flagServer = u.String()
