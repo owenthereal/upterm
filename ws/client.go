@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -70,18 +71,23 @@ func webSocketDialHeader(sessionID, encodedNodeAddr string, isClient bool) http.
 }
 
 // wsDefaultPorts maps a WebSocket scheme to the port dialed when the URL has none.
-var wsDefaultPorts = map[string]string{
-	"ws":  "80",
-	"wss": "443",
+var wsDefaultPorts = map[string]int{
+	"ws":  80,
+	"wss": 443,
 }
 
 // stripDefaultPort drops an explicit default port from u's host. The dialer
 // copies the host verbatim into the Host header, and some firewalls and
 // virtual-host matchers reject "example.com:443" where browsers and curl
-// send "example.com". The address actually dialed does not change.
+// send "example.com". The address actually dialed does not change. The port
+// is compared numerically because the dialer resolves ":0443" as 443 too.
 func stripDefaultPort(u *url.URL) {
-	port := u.Port()
-	if port != "" && port == wsDefaultPorts[u.Scheme] {
-		u.Host = strings.TrimSuffix(u.Host, ":"+port)
+	def, ok := wsDefaultPorts[u.Scheme]
+	if !ok || u.Port() == "" {
+		return
 	}
+	if n, err := strconv.Atoi(u.Port()); err != nil || n != def {
+		return
+	}
+	u.Host = strings.TrimSuffix(u.Host, ":"+u.Port())
 }

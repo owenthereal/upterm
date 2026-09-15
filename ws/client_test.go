@@ -75,6 +75,8 @@ func TestStripDefaultPort(t *testing.T) {
 		{name: "ipv6 non-default port", url: "ws://[::1]:8080", want: "ws://[::1]:8080"},
 		{name: "ipv6 no port", url: "ws://[::1]", want: "ws://[::1]"},
 		{name: "ipv6 zone default port", url: "wss://[fe80::1%25eth0]:443", want: "wss://[fe80::1%25eth0]"},
+		{name: "ws zero-padded default port", url: "ws://test.com:080", want: "ws://test.com"},
+		{name: "wss zero-padded default port", url: "wss://test.com:0443", want: "wss://test.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
