@@ -67,6 +67,7 @@ var (
 	flagReadOnly                bool
 	flagAccept                  bool
 	flagSkipHostKeyCheck        bool
+	flagProxy                   string
 	flagNoSFTP                  bool
 	flagAllowLocalTCPForwarding bool
 )
@@ -135,6 +136,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
 	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
+	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
 
@@ -214,7 +216,11 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return SilentError{Err: errors.New("no TTY available")}
 	}
 
-	var err error
+	proxyURL, err := parseProxyURL(flagProxy)
+	if err != nil {
+		return err
+	}
+
 	if len(args) == 0 {
 		shellCmd := getDefaultShell()
 		args, err = shlex.Split(shellCmd)
@@ -305,6 +311,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		HostKeyCallback:         hkcb,
 		AuthorizedKeys:          authorizedKeys,
 		KeepAliveDuration:       50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
+		ProxyURL:                proxyURL,
 		SessionCreatedCallback:  displaySessionCallback,
 		ClientJoinedCallback:    clientJoinedCallback,
 		ClientLeftCallback:      clientLeftCallback,

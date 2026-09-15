@@ -42,7 +42,7 @@ func handshakeHost(t *testing.T, rawURL string) string {
 
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
-	_, _ = NewWSConn(u, true)
+	_, _ = NewWSConn(u, true, nil)
 	_ = client.Close() // unblock the reader if the dial never wrote
 
 	return <-hostCh
@@ -54,6 +54,46 @@ func TestNewWSConnHostHeaderOmitsDefaultPort(t *testing.T) {
 
 func TestNewWSConnHostHeaderKeepsNonDefaultPort(t *testing.T) {
 	assert.Equal(t, "example.com:8080", handshakeHost(t, "ws://sid:addr@example.com:8080"))
+}
+
+// TestNewWSConnDialsThroughProxy verifies an explicit proxy wins over the
+// environment: the dial goes to the proxy and opens with a CONNECT to the server.
+func TestNewWSConnDialsThroughProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://env-proxy.example.com:8080")
+
+	client, server := net.Pipe()
+	origDial := websocket.DefaultDialer.NetDialContext
+	dialed := make(chan string, 1)
+	websocket.DefaultDialer.NetDialContext = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed <- addr
+		return client, nil
+	}
+	t.Cleanup(func() { websocket.DefaultDialer.NetDialContext = origDial })
+
+	reqCh := make(chan *http.Request, 1)
+	go func() {
+		defer func() { _ = server.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(server))
+		if err != nil {
+			reqCh <- nil
+			return
+		}
+		reqCh <- req
+	}()
+
+	u, err := url.Parse("wss://sid:addr@uptermd.example.com")
+	require.NoError(t, err)
+	proxyURL, err := url.Parse("http://user:secret@proxy.example.com:3128")
+	require.NoError(t, err)
+	_, _ = NewWSConn(u, true, proxyURL)
+	_ = client.Close()
+
+	assert.Equal(t, "proxy.example.com:3128", <-dialed)
+	req := <-reqCh
+	require.NotNil(t, req)
+	assert.Equal(t, http.MethodConnect, req.Method)
+	assert.Equal(t, "uptermd.example.com:443", req.Host)
+	assert.NotEmpty(t, req.Header.Get("Proxy-Authorization"))
 }
 
 func TestStripDefaultPort(t *testing.T) {

@@ -88,7 +88,7 @@ func TestStartSSHProxyProtocolOptional(t *testing.T) {
 		t.Run(transport, func(t *testing.T) {
 			var raw net.Conn
 			if transport == "websocket" {
-				raw, err = ws.NewWSConn(&url.URL{Scheme: "ws", Host: wsAddr, User: url.UserPassword("proxy-policy-test", "")}, false)
+				raw, err = ws.NewWSConn(&url.URL{Scheme: "ws", Host: wsAddr, User: url.UserPassword("proxy-policy-test", "")}, false, nil)
 			} else {
 				raw, err = net.DialTimeout("tcp", addr, time.Second)
 			}

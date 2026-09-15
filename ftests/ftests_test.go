@@ -735,7 +735,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		encodedNodeAddr := base64.URLEncoding.EncodeToString([]byte(session.NodeAddr))
 		u, _ = url.Parse(u.String())
 		u.User = url.UserPassword(session.SessionId, encodedNodeAddr)
-		c.sshClient, err = ws.NewSSHClient(u, config, true)
+		c.sshClient, err = ws.NewSSHClient(u, config, true, nil)
 	} else {
 		c.sshClient, err = ssh.Dial("tcp", u.Host, config)
 	}

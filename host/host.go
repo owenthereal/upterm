@@ -210,6 +210,9 @@ type Host struct {
 	ReadOnly                       bool
 	AllowLocalTCPForwarding        bool
 	ForceForwardingInputForTesting bool
+	// ProxyURL, when non-nil, routes the connection to the upterm server
+	// through an HTTP proxy.
+	ProxyURL *url.URL
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -242,6 +245,7 @@ func (c *Host) Run(ctx context.Context) error {
 		HostKeyCallback:   c.HostKeyCallback,
 		AuthorizedKeys:    aks,
 		KeepAliveDuration: c.KeepAliveDuration,
+		ProxyURL:          c.ProxyURL,
 		Logger:            logger.With("component", "reverse-tunnel"),
 	}
 	sessResp, err := rt.Establish(ctx)

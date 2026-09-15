@@ -68,7 +68,7 @@ func Test_WebSocketProxy_Host(t *testing.T) {
 	u.Scheme = "ws"
 	u.User = url.UserPassword("owen", "")
 
-	wsc, err := ws.NewWSConn(u, false)
+	wsc, err := ws.NewWSConn(u, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

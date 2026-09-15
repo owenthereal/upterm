@@ -174,6 +174,18 @@ Clients can connect to the host session via WebSocket as well:
 ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
 
+### HTTP Proxy
+
+If the host can only reach the internet through an HTTP proxy, pass it with `--proxy`. It works with `ssh://`, `ws://` and `wss://` servers, so the default server works too as long as the proxy allows `CONNECT` to port 22:
+
+```console
+upterm host --proxy http://proxy.example.com:3128 -- bash
+```
+
+Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
+
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
+
 ### Debug GitHub Actions
 
 `upterm` can be integrated with GitHub Actions to enable real-time SSH debugging, allowing you to interact directly with the runner system during workflow execution. This is achieved through [action-upterm](https://github.com/owenthereal/action-upterm), which sets up an `upterm` session within your CI pipeline.
