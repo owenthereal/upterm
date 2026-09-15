@@ -44,7 +44,14 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	// Use a command that reads from stdin and outputs it (cross-platform)
 	var shellCmd string
 	var shellArgs []string
+	// What ends a line of input, which is not the same question as what ends a
+	// line of output. A ConPTY is a console: conhost turns the bytes written
+	// into it back into key events, and only CR is the Enter that finishes a
+	// cooked read -- a bare LF arrives as Ctrl+J, and the read goes on waiting.
+	lineEnd := "\n"
 	if runtime.GOOS == "windows" {
+		lineEnd = "\r\n"
+
 		// Windows: cmd reads one line into a variable and echoes it, which is
 		// what 'head -n 1' does below -- it ends itself once it has the line,
 		// rather than waiting for stdin to end. Delayed expansion (/v:on) is
@@ -107,7 +114,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 
 	// Send input through the pipe
 	testInput := "test input from pipe"
-	_, err = stdinw.Write([]byte(testInput + "\n"))
+	_, err = stdinw.Write([]byte(testInput + lineEnd))
 	require.NoError(err, "failed to write to stdin")
 
 	// Give a moment for data to be fully written and copied through the PTY
