@@ -464,6 +464,83 @@ func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
 	require.NoError(t, err, "a live session's directory must survive a reap")
 }
 
+// Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere pins the defect a
+// runtime-root walk had: the listing enumerated the sessions directory under
+// this process's XDG_RUNTIME_DIR, so a host started under a different one —
+// which on Linux is every cron job and plenty of ssh contexts — was missing
+// from a list that `session info NAME` would happily answer for.
+func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
+	setupSessionRoots(t)
+
+	// Claimed with no admin socket bound, which is every session before it
+	// reaches ready and every session whose socket this environment cannot
+	// see.
+	releaseAtEnd(t, claimSession(t, "elsewhere"))
+
+	// Listed from a runtime root that has never seen the name. Nothing binds
+	// a socket under this one, so its length does not matter.
+	otherRuntime := t.TempDir()
+
+	sessions, err := listSessions(context.Background(), otherRuntime, utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1, "a session whose socket lives under another runtime root is still live")
+	require.Equal(t, "elsewhere", sessions[0].Name)
+	require.Equal(t, sessiondir.StatusStarting, sessions[0].Status,
+		"the record is the authority on a session no socket here can answer for")
+	require.Empty(t, sessions[0].SSHCommand,
+		"and no connect string may be invented for a session this environment cannot reach")
+}
+
+// Test_listSessions_PrefersTheLiveAnswerWhenTheSessionIDMatches covers the
+// other half of the same listing: the record is the floor, not the ceiling.
+// Where a socket under this runtime root answers for the session the record
+// describes, the row carries what only a running session knows — and where it
+// answers for a different one, none of that may reach the row, because a
+// successor's connect string printed under this session's name sends whoever
+// reads it to the wrong terminal.
+func Test_listSessions_PrefersTheLiveAnswerWhenTheSessionIDMatches(t *testing.T) {
+	t.Run("the socket answers for the recorded session", func(t *testing.T) {
+		setupSessionRoots(t)
+		buildReady(t, "ready")
+
+		sessions, err := listSessions(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+		require.NoError(t, err)
+		require.Len(t, sessions, 1)
+		require.Equal(t, "ready", sessions[0].Name)
+		require.Equal(t, sessiondir.StatusReady, sessions[0].Status)
+		require.Equal(t, "sid-1", sessions[0].SessionID)
+		require.Equal(t, "ssh://127.0.0.1:2222", sessions[0].Host)
+		require.NotEmpty(t, sessions[0].SSHCommand,
+			"a session that answered for itself can be joined, and the row says how")
+	})
+
+	t.Run("the socket answers for another session", func(t *testing.T) {
+		setupSessionRoots(t)
+
+		d := claimSession(t, "mismatched")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) {
+			r.Status = sessiondir.StatusReady
+			r.SessionID = "sid-recorded"
+		}))
+		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+			SessionId: "sid-other",
+			Host:      "ssh://127.0.0.1:2222",
+			NodeAddr:  "127.0.0.1:2222",
+			Command:   []string{"bash"},
+		})
+
+		sessions, err := listSessions(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+		require.NoError(t, err)
+		require.Len(t, sessions, 1)
+		require.Equal(t, "sid-recorded", sessions[0].SessionID,
+			"the row is about the session the record names")
+		require.Empty(t, sessions[0].Host,
+			"an answer about another session is not this session's live detail")
+		require.Empty(t, sessions[0].SSHCommand)
+	})
+}
+
 // buildAgedRecord leaves what a finished session leaves — an unheld results
 // directory with the outcome in it — and backdates the record, since its own
 // updated_at is what Prune dates an entry by. It returns the record's path.

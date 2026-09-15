@@ -42,6 +42,7 @@ type SessionDetail struct {
 	IsCurrent        bool
 	AdminSocket      string
 	Name             string
+	Status           string
 	SessionID        string
 	Command          string
 	ForceCommand     string

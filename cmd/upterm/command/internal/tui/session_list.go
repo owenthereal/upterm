@@ -28,10 +28,14 @@ func calculateColumns(width int) []table.Column {
 	// Fixed columns
 	const markerWidth = 2
 	const nameWidth = 18
+	// Wide enough for "disconnected", the longest status a session publishes.
+	// A status cut to "disconnec…" would be the one column a session with no
+	// other detail to show is read from.
+	const statusWidth = 12
 	// Table adds ~3 chars padding per column (borders + spacing)
-	const columnPadding = 15 // 5 columns * 3
+	const columnPadding = 18 // 6 columns * 3
 
-	available := width - markerWidth - nameWidth - columnPadding
+	available := width - markerWidth - nameWidth - statusWidth - columnPadding
 	if available <= 0 {
 		available = 40 // fallback minimum
 	}
@@ -44,6 +48,7 @@ func calculateColumns(width int) []table.Column {
 	return []table.Column{
 		{Title: "", Width: markerWidth},
 		{Title: "NAME", Width: nameWidth},
+		{Title: "STATUS", Width: statusWidth},
 		{Title: "SESSION ID", Width: sessionIDWidth},
 		{Title: "COMMAND", Width: commandWidth},
 		{Title: "HOST", Width: hostWidth},
@@ -64,7 +69,7 @@ func NewSessionListModel(sessions []SessionDetail) SessionListModel {
 			marker = "*"
 			cursorIdx = i
 		}
-		rows[i] = table.Row{marker, s.Name, s.SessionID, s.Command, s.Host}
+		rows[i] = table.Row{marker, s.Name, s.Status, s.SessionID, s.Command, s.Host}
 	}
 
 	t := table.New(

@@ -205,7 +205,7 @@ func tidySessions(ctx context.Context) {
 func listRunE(c *cobra.Command, args []string) error {
 	tidySessions(c.Context())
 
-	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir())
+	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir(), utils.UptermStateDir())
 	if err != nil {
 		return err
 	}
@@ -477,48 +477,98 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 	return tmpl.Execute(os.Stdout, data)
 }
 
-func listSessions(ctx context.Context, dir string) ([]tui.SessionDetail, error) {
-	var result []tui.SessionDetail
+// listSessions reports every session that exists right now, carrying whatever
+// live detail this runtime root can confirm.
+//
+// Which sessions exist comes from the records, not from the sessions directory
+// under runtimeRoot: a name is held on both roots, and only the results root is
+// the same directory for every host on the machine. Walking the runtime root
+// hid any session started under a different XDG_RUNTIME_DIR — which on Linux is
+// a cron job, a systemd unit or an ssh login, depending on how the box is set
+// up — from the one command that is supposed to show a user their sessions,
+// while `session info NAME` answered for it perfectly well.
+//
+// A socket under this runtime root refines a row; it never decides whether
+// there is one.
+func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.SessionDetail, error) {
+	// Bounded on its own rather than across the whole walk, for the reason
+	// each socket query is: the registry lock and every admin socket are
+	// separate things a stopped process can hold, and one of them must not be
+	// able to spend the budget the rest need.
+	listCtx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
+	defer cancel()
 
-	entries, err := os.ReadDir(sessiondir.SessionsRoot(dir))
+	records, err := sessiondir.ListLive(listCtx, stateRoot)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return result, nil
-		}
 		return nil, err
 	}
 
 	currentAdminSocket := currentAdminSocketFile()
-	for _, entry := range entries {
-		if !entry.IsDir() || sessiondir.ValidateName(entry.Name()) != nil {
-			continue
+	var result []tui.SessionDetail
+	for _, rec := range records {
+		// What the record knows is the whole row until a socket says more.
+		// The status especially: it is the record's to publish, and it is all
+		// that distinguishes a session still starting from one running out of
+		// this environment's reach.
+		detail := tui.SessionDetail{
+			Name:      rec.Name,
+			Status:    rec.Status,
+			SessionID: rec.SessionID,
+			Command:   strings.Join(rec.Command, " "),
 		}
 
-		adminSocket, err := sessiondir.AdminSocketPath(dir, entry.Name())
-		if err != nil {
-			continue
+		if live, ok := liveDetail(ctx, runtimeRoot, rec); ok {
+			// The record stays authoritative for what it owns: the socket
+			// answers about a session, not about a name or its status.
+			live.Name = rec.Name
+			live.Status = rec.Status
+			live.IsCurrent = live.AdminSocket == currentAdminSocket
+			detail = live
 		}
 
-		// Per socket, not once for the walk: a listing that hit the budget on
-		// its first stopped host would then report nothing at all, when what
-		// it owes the user is every session that can still answer.
-		sess, err := sessionWithTimeout(ctx, adminSocket)
-		if err != nil {
-			continue
-		}
-
-		detail, err := buildSessionDetail(sess)
-		if err != nil {
-			continue
-		}
-
-		detail.IsCurrent = adminSocket == currentAdminSocket
-		detail.AdminSocket = adminSocket
-		detail.Name = entry.Name()
 		result = append(result, detail)
 	}
 
 	return result, nil
+}
+
+// liveDetail returns what a running session can fill in that its record
+// cannot — who is connected, and how to join them.
+//
+// The answer is accepted only if its session ID is the record's, the same
+// generation check `session info` makes: between the listing and this query
+// the session can end and a successor can claim the name, and a successor's
+// connect string printed under this session's name sends whoever reads it to
+// the wrong terminal.
+func liveDetail(ctx context.Context, runtimeRoot string, rec sessiondir.Record) (tui.SessionDetail, bool) {
+	// A record with no session ID has not reached ready, so there is nothing
+	// for a socket to confirm and no generation to compare against.
+	if rec.SessionID == "" {
+		return tui.SessionDetail{}, false
+	}
+
+	adminSocket, err := sessiondir.AdminSocketPath(runtimeRoot, rec.Name)
+	if err != nil {
+		return tui.SessionDetail{}, false
+	}
+
+	// Per socket, not once for the walk: a listing that hit the budget on
+	// its first stopped host would then report nothing at all, when what
+	// it owes the user is every session that can still answer.
+	sess, err := sessionWithTimeout(ctx, adminSocket)
+	if err != nil || sess.SessionId != rec.SessionID {
+		return tui.SessionDetail{}, false
+	}
+
+	detail, err := buildSessionDetail(sess)
+	if err != nil {
+		// A host URL that will not parse is a reason to show the row the
+		// record already supports, not to drop the session from the listing.
+		return tui.SessionDetail{}, false
+	}
+
+	detail.AdminSocket = adminSocket
+	return detail, true
 }
 
 func parseURL(str string) (u *url.URL, scheme string, host string, port string, err error) {
