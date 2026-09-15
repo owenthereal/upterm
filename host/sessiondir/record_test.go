@@ -205,6 +205,47 @@ func Test_Inspect_LivenessComesFromTheLockNotTheRecord(t *testing.T) {
 	require.Nil(t, rec, "a name that never existed yields no record, not an error")
 }
 
+func Test_Inspect_DoesNotBorrowLivenessFromAnotherStateRoot(t *testing.T) {
+	// The mirror image of the test below: one runtime root, two state roots,
+	// which is what a second shell with a different XDG_STATE_HOME gives on a
+	// machine where XDG_RUNTIME_DIR is per-user and shared. The runtime lock
+	// says someone claimed this name here; only the lock beside the record
+	// says who wrote that record.
+	root := shortTempRoot(t)
+	runtimeRoot := filepath.Join(root, "run")
+	stateA := filepath.Join(root, "stateA")
+	stateB := filepath.Join(root, "stateB")
+	for _, dir := range []string{runtimeRoot, stateA, stateB} {
+		require.NoError(t, os.MkdirAll(dir, 0700))
+	}
+	ctx := context.Background()
+
+	// B reaches ready and is SIGKILLed: the record goes on saying ready, and
+	// every lock the process held is dropped, which is all a crash leaves.
+	b, err := claim(t, runtimeRoot, stateB, "demo")
+	require.NoError(t, err)
+	require.NoError(t, b.Update(func(r *Record) { r.Status = StatusReady }))
+	require.NoError(t, b.releaseKeepingDir())
+
+	// A claims the same name under the same runtime root, taking that runtime
+	// lock — and nothing of B's.
+	a, err := claim(t, runtimeRoot, stateA, "demo")
+	require.NoError(t, err)
+	defer func() { _ = a.Release(ctx) }()
+
+	rec, held, err := Inspect(ctx, runtimeRoot, stateB, "demo")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	require.Equal(t, StatusReady, rec.Status, "B's record is stale, not rewritten")
+	require.False(t, held, "an unrelated claim under this runtime root must not revive a dead session")
+
+	rec, held, err = Inspect(ctx, runtimeRoot, stateA, "demo")
+	require.NoError(t, err)
+	require.True(t, held, "the live session is held under the root it publishes into")
+	require.NotNil(t, rec)
+	require.Equal(t, StatusStarting, rec.Status)
+}
+
 func Test_Inspect_SeesAHolderUnderAnotherRuntimeRoot(t *testing.T) {
 	// A reader that shares only the state root still has to see the holder,
 	// or it reports the live session's record as nobody's and offers the name.

@@ -12,9 +12,9 @@
 // So there are two registry locks, and exactly one order between them: the
 // sessions registry (RuntimeRoot/sessions/.registry.lock) is taken before the
 // results registry (StateRoot/results/.registry.lock), and no function takes
-// the sessions registry while holding the results registry. Claim and Inspect
-// take both, in that order; Release and Reap take only the sessions registry;
-// Prune takes only the results registry. A per-name lock is only ever acquired
+// the sessions registry while holding the results registry. Claim takes both,
+// in that order; Release and Reap take only the sessions registry; Inspect and
+// Prune take only the results registry. A per-name lock is only ever acquired
 // under the registry that guards the directory it lives in, because a lock
 // inside a directory cannot protect that directory from removal.
 package sessiondir
@@ -402,28 +402,30 @@ func (d *Dir) dropLocks() error {
 
 // Inspect reads a name's record and ownership as one observation.
 //
-// All of it under both registry locks, because they are facts about one thing
+// Both under the results registry lock, because they are facts about one thing
 // and a caller that reads them separately can mix generations: read A's
-// record, then observe B's ownership. Under the locks a name is either
-// unclaimed or fully published, since Claim holds both across mkdir, lock and
-// the initial publication — so held implies rec != nil, and a caller need not
-// defend against a record that vanished between the two reads.
+// record, then observe B's ownership. Under that lock a name is either
+// unclaimed or fully published, since Claim holds the results registry across
+// the results lock and the initial publication — so held implies rec != nil,
+// and a caller need not defend against a record that vanished between the two
+// reads.
 //
-// Ownership is the disjunction of the two roots. A holder under a runtime root
-// this caller cannot see still owns the record it is publishing into, so
-// reporting the name as free would offer it to a second host and report the
-// live session's record as nobody's.
+// Ownership is the lock beside the record and nothing else. That lock is held
+// by whoever is publishing into this record, whatever runtime root they
+// claimed under, which is why a holder this caller cannot otherwise see is
+// still reported. The runtime lock cannot stand in for it and is not
+// consulted: it says only that *someone* holds this name under this runtime
+// root, and that someone may be a different session with a different state
+// root. Taking the disjunction of the two let a fresh claim under (R, stateA)
+// lend its liveness to a SIGKILLed session's record under (R, stateB), which
+// reported a dead session as ready and its name as held by it.
+//
+// runtimeRoot is therefore unused, and kept only so callers can go on naming a
+// session by the pair of roots it lives under.
 func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Record, held bool, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, false, err
 	}
-
-	sessRoot := sessionsRoot(runtimeRoot)
-	reg, err := lockRegistry(ctx, sessRoot)
-	if err != nil {
-		return nil, false, err
-	}
-	defer releaseRegistry(reg)
 
 	resRoot := resultsRoot(stateRoot)
 	resReg, err := lockRegistry(ctx, resRoot)
@@ -432,15 +434,12 @@ func Inspect(ctx context.Context, runtimeRoot, stateRoot, name string) (rec *Rec
 	}
 	defer releaseRegistry(resReg)
 
-	held, err = lockIsHeld(filepath.Join(sessRoot, name, sessionLockFile))
+	// A missing results directory, or a missing lock inside one, is nobody's:
+	// lockIsHeld reports that rather than failing, and a name with no record
+	// here is a name this state root has never seen published.
+	held, err = lockIsHeld(filepath.Join(resRoot, name, resultLockFile))
 	if err != nil {
 		return nil, false, err
-	}
-	if !held {
-		held, err = lockIsHeld(filepath.Join(resRoot, name, resultLockFile))
-		if err != nil {
-			return nil, false, err
-		}
 	}
 
 	rec, err = readRecordLocked(stateRoot, name)
