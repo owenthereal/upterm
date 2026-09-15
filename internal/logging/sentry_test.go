@@ -108,7 +108,6 @@ func sentryTestLogger(t *testing.T) (*Logger, func() []*sentry.Event) {
 	var mu sync.Mutex
 	var captured []*sentry.Event
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
 		decoder := json.NewDecoder(r.Body)
 		var header json.RawMessage
 		if err := decoder.Decode(&header); err != nil {
