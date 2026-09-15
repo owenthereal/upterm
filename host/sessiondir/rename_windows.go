@@ -139,7 +139,17 @@ func renamePOSIX(from, to string) error {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
-	buf := make([]byte, int(unsafe.Offsetof(fileRenameInfo{}.FileName))+nameBytes)
+	// The buffer carries the terminating NUL even though FileNameLength does
+	// not count it. KernelBase converts FileName to an NT path as a
+	// NUL-terminated string before it ever looks at FileNameLength, so a
+	// buffer cut exactly at the name makes whatever byte follows it part of
+	// the name: the rename then fails with "path not found", or worse
+	// succeeds under a name with garbage appended. Go zeroes allocations, so
+	// this only bit when the length landed on a size-class boundary and the
+	// next object's bytes followed -- once per few path lengths, which is how
+	// it presented in CI. Rust's std::fs::rename sizes this buffer the same
+	// way for the same reason.
+	buf := make([]byte, int(unsafe.Offsetof(fileRenameInfo{}.FileName))+nameBytes+2)
 	info := (*fileRenameInfo)(unsafe.Pointer(&buf[0]))
 	// FILE_RENAME_FLAG_REPLACE_IF_EXISTS (0x1) | FILE_RENAME_FLAG_POSIX_SEMANTICS
 	// (0x2); x/sys spells them with the ntifs names for the same bits.
@@ -148,7 +158,7 @@ func renamePOSIX(from, to string) error {
 	// relative to that directory.
 	info.RootDirectory = 0
 	info.FileNameLength = uint32(nameBytes)
-	copy(unsafe.Slice(&info.FileName[0], chars), name[:chars])
+	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
 
 	// FileRenameInfoEx is 22, the class that reads Flags rather than
 	// ReplaceIfExists; the length is the whole buffer, name included.
