@@ -58,19 +58,27 @@ func shortXDGDir(t *testing.T) string {
 	return dir
 }
 
-// skipWithoutPOSIXShell skips a case whose command is a shell script.
+// shellCommand picks this platform's spelling of a case's command.
 //
-// Two reasons, both about the command rather than the guarantee: Windows has
-// no POSIX shell to run it, and no signals for it to die from — a terminated
-// process there is reported as an ordinary exit status, so "signalled" is not
-// a distinction the platform can make. Kept in the harness so the cases
-// themselves stay as written.
-func skipWithoutPOSIXShell(t *testing.T, command []string) {
+// What these cases are about is what a host publishes, not what shell ran:
+// Windows has no POSIX shell, which is a fact about the command rather than
+// about the guarantee, so each case names the same work twice and runs
+// whichever spelling this platform can.
+//
+// A nil Windows spelling means the case has none. That is the signal case:
+// Windows reports a terminated process as an ordinary exit status, so
+// "signalled" is not a distinction the platform can make, and there is no
+// command that would make it one.
+func shellCommand(t *testing.T, posix, windows []string) []string {
 	t.Helper()
 
-	if runtime.GOOS == "windows" && len(command) > 0 && command[0] == "sh" {
-		t.Skip("the command under test is a POSIX shell script")
+	if runtime.GOOS != "windows" {
+		return posix
 	}
+	if windows == nil {
+		t.Skip("Windows reports a terminated process as an ordinary exit status, so there is no signalled outcome to publish")
+	}
+	return windows
 }
 
 // uniqueSessionName keeps concurrent tests from claiming the same name. They
@@ -126,8 +134,6 @@ func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse
 // are about.
 func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outcomeRun {
 	t.Helper()
-
-	skipWithoutPOSIXShell(t, command)
 
 	dir := shortXDGDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
@@ -319,14 +325,18 @@ func watchStatuses(stateRoot, name string, done <-chan struct{}) <-chan []string
 }
 
 func Test_Host_PublishesNonZeroExit(t *testing.T) {
-	res := runHostForOutcome(t, []string{"sh", "-c", "exit 42"})
+	res := runHostForOutcome(t, shellCommand(t,
+		[]string{"sh", "-c", "exit 42"},
+		[]string{"cmd", "/c", "exit", "42"}))
 	require.Equal(t, sessiondir.ReasonExited, res.Reason)
 	require.NotNil(t, res.ExitCode)
 	require.Equal(t, 42, *res.ExitCode)
 }
 
 func Test_Host_PublishesZeroExit(t *testing.T) {
-	res := runHostForOutcome(t, []string{"sh", "-c", "exit 0"})
+	res := runHostForOutcome(t, shellCommand(t,
+		[]string{"sh", "-c", "exit 0"},
+		[]string{"cmd", "/c", "exit", "0"}))
 	require.Equal(t, sessiondir.ReasonExited, res.Reason)
 	require.NotNil(t, res.ExitCode)
 	require.Equal(t, 0, *res.ExitCode)
@@ -338,7 +348,9 @@ func Test_Host_PublishesZeroExit(t *testing.T) {
 // behind used to make the second run publish into the first run's released
 // directory, which by then may belong to somebody else entirely.
 func Test_Host_CanRunTwice(t *testing.T) {
-	run := newOutcomeRun(t, []string{"sh", "-c", "exit 0"})
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "exit 0"},
+		[]string{"cmd", "/c", "exit", "0"}))
 
 	// One drain for both runs: the pipe stays open between them, since the
 	// second run writes to the same stdout the first one did.
@@ -379,7 +391,9 @@ func Test_Host_CanRunTwice(t *testing.T) {
 }
 
 func Test_Host_PublishesSignalTermination(t *testing.T) {
-	res := runHostForOutcome(t, []string{"sh", "-c", "kill -TERM $$"})
+	res := runHostForOutcome(t, shellCommand(t,
+		[]string{"sh", "-c", "kill -TERM $$"},
+		nil))
 	require.Equal(t, sessiondir.ReasonSignaled, res.Reason,
 		"a signalled command must not be reported as exited -1")
 	require.Nil(t, res.ExitCode)
@@ -412,7 +426,10 @@ func Test_Host_PublishesStartupAbandonedWhenTheCallbackDeclines(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := runHostForOutcome(t, []string{"sh", "-c", "exit 0"},
+			rec := runHostForOutcome(t,
+				shellCommand(t,
+					[]string{"sh", "-c", "exit 0"},
+					[]string{"cmd", "/c", "exit", "0"}),
 				withSessionCreatedCallback(func(context.Context, *api.GetSessionResponse) error {
 					return tc.err
 				}))
@@ -437,7 +454,9 @@ func Test_Host_PublishesStoppedOnCancellation(t *testing.T) {
 	// also the one case the wait status cannot answer on its own — our own
 	// teardown kills the command, so without the shutdownRequested flag this
 	// reports "signaled" on Unix and a non-zero "exited" on Windows.
-	res := runHostUntilCancelled(t, []string{"sh", "-c", "echo READY; sleep 300"}, "READY")
+	res := runHostUntilCancelled(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}), "READY")
 
 	require.Equal(t, sessiondir.ReasonStopped, res.Reason,
 		"a shutdown we initiated must not be reported as the signal it produced")
@@ -451,7 +470,9 @@ func Test_Host_PublishesStoppedOnCancellation(t *testing.T) {
 // a host that never publishes ready at all, so one of these has to show that a
 // working session does.
 func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
-	run := newOutcomeRun(t, []string{"sh", "-c", "echo READY; sleep 300"})
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
@@ -494,7 +515,9 @@ func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
 	t.Setenv(upterm.HostSessionNameEnvVar, "outer-session")
 	t.Setenv(upterm.HostAdminSocketEnvVar, "/outer/admin.sock")
 
-	run := newOutcomeRun(t, []string{"sh", "-c", "echo NAME=$" + upterm.HostSessionNameEnvVar})
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo NAME=$" + upterm.HostSessionNameEnvVar},
+		[]string{"cmd", "/c", "echo", "NAME=%" + upterm.HostSessionNameEnvVar + "%"}))
 
 	collected := make(chan string, 1)
 	go func() {
@@ -526,7 +549,9 @@ func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
 // "disconnected"; the session still ends for the reason it is eventually
 // stopped for, not for the network.
 func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
-	run := newOutcomeRun(t, []string{"sh", "-c", "echo READY; sleep 300"})
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
@@ -584,7 +609,9 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 }
 
 func Test_Host_NeverPublishesReadyWhenClaimRefusesTheSocketPath(t *testing.T) {
-	run := newOutcomeRun(t, []string{"sh", "-c", "sleep 300"})
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "sleep 300"},
+		[]string{"cmd", "/c", "ping -n 400 127.0.0.1 >nul"}))
 
 	// A runtime root deep enough that <root>/upterm/sessions/<name>/admin.sock
 	// is longer than a unix socket path may be. Claim refuses it up front, so
