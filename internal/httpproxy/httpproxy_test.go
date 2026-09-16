@@ -93,6 +93,51 @@ func TestDialRefusedOnPort22SuggestsWSS(t *testing.T) {
 	assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
 }
 
+// An unbracketed IPv6 address is not a valid authority, so a suggestion
+// carrying one could not be pasted back into --server.
+func TestDialRefusedOnPort22BracketsIPv6(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "[2001:db8::1]:22")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wss://[2001:db8::1]")
+}
+
+// Only an answer that means "not to that port" earns the advice. A 4xx about
+// the request and a 5xx from the proxy or its upstream are about something a
+// different transport cannot fix, and the hint would crowd out the status.
+func TestDialRefusedOnlyHintsAtPolicyDenials(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		wantHint bool
+	}{
+		{status: http.StatusForbidden, wantHint: true},
+		{status: http.StatusMethodNotAllowed, wantHint: true},
+		{status: http.StatusNotImplemented, wantHint: true},
+		{status: http.StatusProxyAuthRequired},
+		{status: http.StatusUnauthorized},
+		{status: http.StatusBadRequest},
+		{status: http.StatusNotFound},
+		{status: http.StatusInternalServerError},
+		{status: http.StatusBadGateway},
+		{status: http.StatusServiceUnavailable},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			proxy := httpproxytest.Start(t, tc.status)
+
+			_, err := httpproxy.Dial(t.Context(), proxy.URL, "relay.corp:22")
+
+			require.Error(t, err)
+			if tc.wantHint {
+				assert.Contains(t, err.Error(), "wss://relay.corp")
+				return
+			}
+			assert.NotContains(t, err.Error(), "wss://")
+		})
+	}
+}
+
 // The same refusal to a WebSocket port is just a refusal: 443 is what proxies
 // already allow, so pointing at wss:// would be noise.
 func TestDialRefusedOnPort443OmitsTheHint(t *testing.T) {

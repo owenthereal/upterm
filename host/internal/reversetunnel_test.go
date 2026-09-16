@@ -363,65 +363,89 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	var (
 		sshURL   = &url.URL{Scheme: "ssh", Host: "uptermd.upterm.dev:22"}
 		wssURL   = &url.URL{Scheme: "wss", Host: "uptermd.upterm.dev:443"}
-		proxyURL = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
-		// A real network failure: the hint is gated on one, so that it does
-		// not trail a host-key warning it has nothing to do with.
+		flagged  = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
+		httpEnv  = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
+		socksEnv = &url.URL{Scheme: "socks5", Host: "proxy.example.com:1080"}
+		// A real network failure. The hint is gated on one so that it cannot
+		// trail a host-key warning it has nothing to do with.
 		dialErr = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection reset by peer")}
 	)
 
-	// clearProxyEnv blanks every spelling, so a proxy in the ambient
-	// environment cannot decide the outcome of these subtests.
-	clearProxyEnv := func(t *testing.T) {
+	// stubEnv makes the environment lookup answer with proxy, and sets varName
+	// so the message has a spelling to name. A nil proxy stands for every way
+	// none applies: nothing set, NO_PROXY exempting the host, a value that does
+	// not parse.
+	stubEnv := func(t *testing.T, varName string, proxy *url.URL, lookupErr error) {
 		t.Helper()
-		for _, name := range proxyEnvVars {
-			t.Setenv(name, "")
+		for _, n := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+			t.Setenv(n, "")
 		}
+		if varName != "" {
+			t.Setenv(varName, "set-for-display-only")
+		}
+		orig := proxyFromEnvironment
+		t.Cleanup(func() { proxyFromEnvironment = orig })
+		proxyFromEnvironment = func(*http.Request) (*url.URL, error) { return proxy, lookupErr }
 	}
 
-	t.Run("direct ssh behind an environment proxy is explained", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+	t.Run("an http proxy is offered for copying", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
-		assert.Contains(t, err.Error(), "HTTPS_PROXY")
-		assert.Contains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
+		// Exported, not merely assigned: a bare assignment would not reach the
+		// process the user retries with.
+		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$HTTPS_PROXY"`)
 		assert.Contains(t, err.Error(), "--proxy")
 	})
 
-	t.Run("the lowercase spelling counts too", func(t *testing.T) {
+	t.Run("the lowercase spelling is named when it is the one set", func(t *testing.T) {
 		// Windows environment variable names are case-insensitive, so setting
-		// http_proxy also sets HTTP_PROXY and the uppercase spelling — checked
-		// first — is the one reported. Naming either is correct there; what
-		// this case pins down is the Unix behaviour, where they are two
-		// distinct variables and only one of them holds the value.
+		// https_proxy also sets HTTPS_PROXY and the uppercase spelling wins.
+		// Naming either is correct there; this pins the Unix behaviour.
 		if runtime.GOOS == "windows" {
 			t.Skip("environment variable names are case-insensitive on Windows")
 		}
-		clearProxyEnv(t)
-		t.Setenv("http_proxy", "http://proxy.example.com:3128")
+		stubEnv(t, "https_proxy", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
-		assert.Contains(t, err.Error(), `UPTERM_PROXY="$http_proxy"`)
+		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$https_proxy"`)
 	})
 
 	// socks5:// is a supported way to configure the environment proxy for the
-	// ws/wss path, but --proxy takes only http://, so telling the user to copy
-	// it across would trade this failure for a flag rejection.
-	t.Run("a socks5 proxy is not offered for copying", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "socks5://proxy.example.com:1080")
+	// ws and wss path, but --proxy takes only http://, so offering the copy
+	// would trade this failure for a flag rejection.
+	t.Run("a socks5 proxy names the other transport instead", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
-		assert.Contains(t, err.Error(), "HTTPS_PROXY")
-		assert.NotContains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
-		assert.Contains(t, err.Error(), "wss://uptermd.upterm.dev")
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+		assert.Contains(t, err.Error(), "--server wss://uptermd.upterm.dev")
 	})
 
-	t.Run("no proxy in the environment, no advice", func(t *testing.T) {
-		clearProxyEnv(t)
+	// Every way no proxy applies arrives as a nil lookup: NO_PROXY exempting
+	// this host, nothing set at all, or a value too malformed to parse. In
+	// none of them is routing through a proxy the answer.
+	t.Run("a proxy that does not apply gets no advice", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", nil, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("a lookup error gets no advice", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", httpEnv, errors.New("invalid proxy address"))
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("a proxy with no host gets no advice", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", &url.URL{Scheme: "http"}, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -429,30 +453,27 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("--proxy already supplied, no advice", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(sshURL, proxyURL, dialErr)
+		err := sshDialError(sshURL, flagged, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 	})
 
-	t.Run("wss already honours the environment, no advice", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+	t.Run("wss already reads the environment, no advice", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(wssURL, nil, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 	})
 
-	// Everything the dial wraps other than a network failure happened after the
-	// connection succeeded, where a proxy cannot be the cause. A host-key
+	// Everything the dial wraps other than a network failure happened after
+	// the connection succeeded, where a proxy cannot be the cause. A host-key
 	// mismatch is the case that matters: the advice would trail a security
 	// warning it has nothing to do with.
 	t.Run("a failure that is not the network gets no advice", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, errors.New("ssh: handshake failed: host key mismatch"))
 
@@ -460,49 +481,29 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		assert.NotContains(t, err.Error(), "wss://")
 	})
 
-	// A value that only looks like an http:// URL is no more copyable than a
-	// socks5:// one: following the advice would swap this error for a flag
-	// rejection.
-	t.Run("a malformed http proxy is not offered for copying", func(t *testing.T) {
-		for _, value := range []string{"http://proxy.example.com:bad", "http://", "http:///path"} {
-			t.Run(value, func(t *testing.T) {
-				clearProxyEnv(t)
-				t.Setenv("HTTPS_PROXY", value)
-
-				err := sshDialError(sshURL, nil, dialErr)
-
-				assert.NotContains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
-				assert.Contains(t, err.Error(), "wss://")
-			})
-		}
-	})
-
 	// A custom relay was chosen for a reason. Changing the transport is the
 	// suggestion; changing whose deployment the session runs on is not.
 	t.Run("a custom relay keeps its own host in the suggestion", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "socks5://proxy.example.com:1080")
+		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
 		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, dialErr)
 
-		assert.Contains(t, err.Error(), "wss://relay.corp")
+		assert.Contains(t, err.Error(), "--server wss://relay.corp")
 		assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
 	})
 
-	// The instruction has to survive being pasted into a shell: a bare
-	// assignment would not reach the retried process.
-	t.Run("the copy instruction exports the variable", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+	// url.URL.Hostname strips the brackets, and an unbracketed IPv6 address is
+	// not an authority the suggestion could be pasted back as.
+	t.Run("an IPv6 relay is bracketed in the suggestion", func(t *testing.T) {
+		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "[2001:db8::1]:22"}, nil, dialErr)
 
-		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$HTTPS_PROXY"`)
+		assert.Contains(t, err.Error(), "--server wss://[2001:db8::1]")
 	})
 
 	t.Run("an auth failure is still a permission denial", func(t *testing.T) {
-		clearProxyEnv(t)
-		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, errors.New(publickeyAuthError))
 

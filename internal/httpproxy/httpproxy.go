@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -115,10 +116,14 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 func refusedError(proxyAddr, addr string, resp *http.Response) error {
 	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
 
-	// A challenge is answerable, and the answer is credentials. Suggesting a
-	// different server would only move the same challenge to port 443, while
-	// crowding out the status that says what to actually do.
-	if resp.StatusCode == http.StatusProxyAuthRequired || resp.StatusCode == http.StatusUnauthorized {
+	// Only for an answer that means "not to that port". A challenge is
+	// answerable with credentials, a 4xx about the request is about the
+	// request, and a 5xx is the proxy or its upstream failing — in none of
+	// those would a different port be the fix, and the advice would crowd out
+	// the status that says what actually is.
+	switch resp.StatusCode {
+	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+	default:
 		return err
 	}
 
@@ -127,9 +132,22 @@ func refusedError(proxyAddr, addr string, resp *http.Response) error {
 	// onto a different deployment.
 	if host, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
 		return fmt.Errorf("%w; many proxies allow CONNECT only to port 443, "+
-			"so try a WebSocket server instead, e.g. --server wss://%s", err, host)
+			"so try a WebSocket server instead, e.g. --server %s", err, WebSocketServerURL(host))
 	}
 	return err
+}
+
+// WebSocketServerURL formats host as a wss:// --server value.
+//
+// Exported because the CONNECT refusal here and the dial-failure hint in
+// host/internal both suggest one, and a bare IPv6 address needs bracketing to
+// be a valid authority — "wss://2001:db8::1" is not a URL either of them could
+// have accepted back.
+func WebSocketServerURL(host string) string {
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return "wss://" + host
 }
 
 // proxyHostPort returns the address to dial for proxyURL, defaulting the port

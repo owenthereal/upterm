@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -411,8 +412,8 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	// cause and the advice would trail a security warning it has nothing to do
 	// with.
 	if proxyURL == nil && !isWSScheme(host.Scheme) && isNetworkError(err) {
-		if name, copyable := proxyEnvVar(); name != "" {
-			if copyable {
+		if envProxy, name := envProxyFor(host.Hostname()); envProxy != nil {
+			if envProxy.Scheme == "http" {
 				// Exported, not merely assigned: a shell variable would not
 				// reach the retried process, and this is read after the
 				// original command has already failed.
@@ -422,17 +423,19 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 					"the process list), or pass --proxy", dialErr, name, name)
 			}
 			// Copying it would only trade this error for "only http:// proxies
-			// are supported". The ws/wss path reaches the same proxy through
-			// gorilla, which does speak socks5.
+			// are supported", so the other transport is the one to name. It is
+			// offered as a route rather than a promise: whether this particular
+			// value serves a ws:// or wss:// dial is gorilla's business, not
+			// something to assert on its behalf.
 			//
-			// The suggested server is the one already configured, with the
-			// transport changed. Naming upterm's public relay instead would
-			// silently move the session onto someone else's deployment, which
-			// is rarely what a custom --server was chosen for.
+			// The example keeps the host already configured and changes only
+			// the scheme. Naming upterm's public relay would silently move the
+			// session onto someone else's deployment, which is rarely what a
+			// custom --server was chosen for.
 			return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
 				"environment for ssh:// servers, the same as OpenSSH, and --proxy takes "+
-				"only http:// values — to go through this one, use a WebSocket server, "+
-				"e.g. --server wss://%s, which does honour it", dialErr, name, host.Hostname())
+				"only http:// values — a ws:// or wss:// server does read the environment, "+
+				"e.g. --server %s", dialErr, name, httpproxy.WebSocketServerURL(host.Hostname()))
 		}
 	}
 
@@ -446,35 +449,51 @@ func isNetworkError(err error) bool {
 	return errors.As(err, &opErr)
 }
 
-// proxyEnvVars are the spellings net/http's ProxyFromEnvironment consults, in
-// its order of preference. Both cases are listed because the lowercase ones are
-// what most shells and curl set; on Windows they name the same variable, so
-// the uppercase spelling is simply the one reported.
-var proxyEnvVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
+// proxyFromEnvironment is how the environment is consulted. A variable because
+// the real one answers from a sync.Once populated at its first call in the
+// process, which a test cannot then influence with t.Setenv.
+var proxyFromEnvironment = http.ProxyFromEnvironment
 
-// proxyEnvVar names the first proxy variable that is set, and reports whether
-// its value is one --proxy would take.
+// envProxyFor reports the proxy the environment would use to reach hostname,
+// and the variable that supplied it.
 //
-// Advising that a value be copied without checking it sends the user from a
-// dial failure straight into a flag rejection — socks5:// is the common case,
-// since it is a supported way to configure the environment proxy for the ws
-// and wss path, but a malformed http:// URL lands the same way.
-func proxyEnvVar() (name string, copyable bool) {
-	for _, n := range proxyEnvVars {
-		if v := os.Getenv(n); v != "" {
-			return n, copyableProxyValue(v)
+// Asking the question this way rather than reading the variables directly is
+// what makes the advice safe to give. A proxy that is set but does not apply
+// comes back nil, and there are three ways that happens, each of which would
+// otherwise produce a wrong suggestion:
+//
+//   - NO_PROXY exempts this host. The user has said they do not want it
+//     proxied, so proposing that they route it through one anyway contradicts
+//     their own configuration — and the dial failure is then almost certainly
+//     something else.
+//   - The value does not parse. Copying it would swap this error for a flag
+//     rejection, and no transport would fare better.
+//   - Only the variable for the other scheme is set, which is not the one a
+//     dial to this host would consult.
+//
+// The value is inspected only for its scheme and never retained: it may carry
+// credentials.
+func envProxyFor(hostname string) (proxy *url.URL, name string) {
+	// https first: it is what a wss:// server, the busier of the two
+	// suggestions, would consult.
+	for _, scheme := range []string{"https", "http"} {
+		u, err := proxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: scheme, Host: hostname}})
+		if err != nil || u == nil || u.Hostname() == "" {
+			continue
 		}
+		return u, proxyEnvVarName(scheme)
 	}
-	return "", false
+	return nil, ""
 }
 
-// copyableProxyValue reports whether v would survive --proxy.
-//
-// It mirrors parseProxyURL, which lives in the command package and cannot be
-// reached from here. The rule is small enough that repeating it costs less
-// than a package to share it, and the two drifting apart costs only the
-// accuracy of a suggestion. Nothing of v is retained: it may carry credentials.
-func copyableProxyValue(v string) bool {
-	u, err := url.Parse(v)
-	return err == nil && u.Scheme == "http" && u.Hostname() != ""
+// proxyEnvVarName names the variable that supplied scheme's proxy, preferring
+// whichever spelling is actually set. The lowercase ones are what most shells
+// and curl write; on Windows the two name the same variable, so the uppercase
+// one is simply what gets reported.
+func proxyEnvVarName(scheme string) string {
+	upper := strings.ToUpper(scheme) + "_PROXY"
+	if os.Getenv(upper) == "" && os.Getenv(scheme+"_proxy") != "" {
+		return scheme + "_proxy"
+	}
+	return upper
 }
