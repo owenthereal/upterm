@@ -40,7 +40,7 @@ const (
 	qfStateOSCQuery                       // saw OSC N ; ? (query for color)
 	qfStateOSCQueryEsc                    // saw ESC in OSC query (ST if '\' follows, else the query ends there)
 	qfStateOSCContent                     // saw OSC N ; <non-?> (not a query, pass through)
-	qfStateOSCContentEsc                  // saw ESC in OSC content (ST if '\' follows, else the OSC ends there)
+	qfStateOSCContentEsc                  // saw ESC in OSC content, or right after the ; (ST if '\' follows, else the OSC ends there)
 )
 
 // NewTerminalQueryFilter creates a filter that removes terminal query
@@ -206,6 +206,19 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 			}
 			// Other OSC query (e.g., OSC 4;?), don't filter - treat as content
 			f.state = qfStateOSCContent
+			return
+		}
+		// An empty payload ends at its terminator like any other. Taking the
+		// byte after the ";" as content, whatever it was, meant "ESC ] 0 ; BEL"
+		// -- a shell clearing its title -- never closed, and everything the
+		// command printed next was held behind it until the next BEL or ESC,
+		// or the content bound.
+		if b == 0x07 { // BEL - end of OSC
+			f.flushAndReset()
+			return
+		}
+		if b == 0x1b { // ESC - possible ST
+			f.state = qfStateOSCContentEsc
 			return
 		}
 		// Not a query (it's setting a value), continue to end of OSC

@@ -252,6 +252,57 @@ func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
 	}
 }
 
+// "ESC ] 0 ; BEL" is how a shell clears its title, and an empty payload ends
+// at its terminator like any other. The filter took the byte after the ";" as
+// the payload's first byte whatever it was, so the BEL never closed the string
+// and whatever the command printed next was held -- up to the content bound
+// -- until another BEL or an ESC came along: a prompt that cleared its title
+// stalled every joiner until the bound filled or a later escape sequence let
+// the text through. "ESC ] 0 ; ESC \" went the same way, with the ESC as
+// content and the ST never seen as one.
+func TestTerminalQueryFilter_EmptyOSCEndsAtItsTerminator(t *testing.T) {
+	tests := []struct {
+		name     string
+		writes   [][]byte
+		expected []byte
+	}{
+		{
+			name:     "BEL ends it, and the text after it in the same write goes out with it",
+			writes:   [][]byte{[]byte("\x1b]0;\x07hello")},
+			expected: []byte("\x1b]0;\x07hello"),
+		},
+		{
+			name:     "BEL ends it, and a later write is not held behind it",
+			writes:   [][]byte{[]byte("\x1b]0;\x07"), []byte("hello")},
+			expected: []byte("\x1b]0;\x07hello"),
+		},
+		{
+			name:     "ST ends it",
+			writes:   [][]byte{[]byte("\x1b]0;\x1b\\hello")},
+			expected: []byte("\x1b]0;\x1b\\hello"),
+		},
+		{
+			name:     "a ? after the ; still passes through whole",
+			writes:   [][]byte{[]byte("\x1b]0;?\x07hello")},
+			expected: []byte("\x1b]0;?\x07hello"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			for _, w := range tt.writes {
+				n, err := filter.Write(w)
+				require.NoError(t, err)
+				require.Equal(t, len(w), n)
+			}
+			require.Equal(t, tt.expected, buf.Bytes())
+		})
+	}
+}
+
 func TestTerminalQueryFilter_SplitWrites(t *testing.T) {
 	tests := []struct {
 		name     string
