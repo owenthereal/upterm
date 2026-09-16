@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/httpproxy"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
@@ -223,10 +224,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 
 // dialSSHViaProxy connects to an ssh:// server through c.ProxyURL.
 func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientConfig) (*ssh.Client, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, proxyDialTimeout)
-	defer cancel()
-
-	conn, err := dialHTTPProxy(dialCtx, c.ProxyURL, c.Host.Host)
+	conn, err := httpproxy.Dial(ctx, c.ProxyURL, c.Host.Host)
 	if err != nil {
 		return nil, err
 	}

@@ -20,7 +20,13 @@ func TestParseProxyURL(t *testing.T) {
 	}{
 		{in: "", want: ""},
 		{in: "http://proxy.example.com:3128", want: "http://proxy.example.com:3128"},
-		{in: "http://user:pass@proxy.example.com", want: "http://user:pass@proxy.example.com"},
+		// A missing port is filled in here so that every dial path agrees.
+		// "proxy.example.com:" parses with an empty port and used to reach the
+		// dialer intact, where it resolved as port 0.
+		{in: "http://user:pass@proxy.example.com", want: "http://user:pass@proxy.example.com:80"},
+		{in: "http://proxy.example.com:", want: "http://proxy.example.com:80"},
+		{in: "http://[::1]", want: "http://[::1]:80"},
+		{in: "http://[::1]:3128", want: "http://[::1]:3128"},
 		{in: "https://proxy.example.com:3128", wantErr: "only http:// proxies are supported"},
 		{in: "socks5://proxy.example.com:1080", wantErr: "only http:// proxies are supported"},
 		{in: "proxy.example.com:3128", wantErr: "only http:// proxies are supported"},
