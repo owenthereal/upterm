@@ -25,12 +25,20 @@ var (
 
 // calculateColumns returns table columns sized for the given terminal width
 func calculateColumns(width int) []table.Column {
-	// Fixed column
+	// Fixed columns
 	const markerWidth = 2
-	// Table adds ~3 chars padding per column (borders + spacing)
-	const columnPadding = 12 // 4 columns * 3
+	const nameWidth = 18
+	// Wide enough for "disconnected", the longest status a session publishes.
+	// A status cut to "disconnec…" would be the one column a session with no
+	// other detail to show is read from.
+	const statusWidth = 12
+	// bubbles pads a cell by one on each side, so six columns cost twelve;
+	// the rest is slack for the borders and spacing around them. The
+	// eighty-column test is what keeps the number honest -- it measures the
+	// rendered table rather than trusting this arithmetic.
+	const columnPadding = 18
 
-	available := width - markerWidth - columnPadding
+	available := width - markerWidth - nameWidth - statusWidth - columnPadding
 	if available <= 0 {
 		available = 40 // fallback minimum
 	}
@@ -42,6 +50,8 @@ func calculateColumns(width int) []table.Column {
 
 	return []table.Column{
 		{Title: "", Width: markerWidth},
+		{Title: "NAME", Width: nameWidth},
+		{Title: "STATUS", Width: statusWidth},
 		{Title: "SESSION ID", Width: sessionIDWidth},
 		{Title: "COMMAND", Width: commandWidth},
 		{Title: "HOST", Width: hostWidth},
@@ -62,7 +72,7 @@ func NewSessionListModel(sessions []SessionDetail) SessionListModel {
 			marker = "*"
 			cursorIdx = i
 		}
-		rows[i] = table.Row{marker, s.SessionID, s.Command, s.Host}
+		rows[i] = table.Row{marker, s.Name, s.Status, s.SessionID, s.Command, s.Host}
 	}
 
 	t := table.New(

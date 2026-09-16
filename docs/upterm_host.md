@@ -58,12 +58,15 @@ upterm host [flags]
   -h, --help                         help for host
       --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).
       --known-hosts string           Specify a file containing known keys for remote hosts (required). (default "~/.ssh/known_hosts")
+      --name string                  Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.
       --no-sftp                      Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
   -i, --private-key strings          Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default. (default [~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}])
       --proxy string                 HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.
+      --pty-size string              Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.
   -r, --read-only                    Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
       --server string                Specify the upterm server address (required). Supported protocols: ssh, ws, wss. (default "ssh://uptermd.upterm.dev:22")
       --skip-host-key-check          Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
+      --term string                  Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when TERM is unset or dumb.
 ```
 
 ### Options inherited from parent commands

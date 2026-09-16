@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,11 +14,270 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func Test_MultiWriter_ReplayIsByteBounded(t *testing.T) {
+	w := NewMultiWriter(10)
+	for _, s := range []string{"aaaaa", "bbbbb", "ccccc"} {
+		_, err := w.Write([]byte(s))
+		require.NoError(t, err)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "bbbbbccccc", late.String())
+}
+
+func Test_MultiWriter_ReplayTrimsOversizedWrite(t *testing.T) {
+	w := NewMultiWriter(4)
+	_, err := w.Write([]byte("abcdefgh"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "efgh", late.String())
+}
+
+func Test_MultiWriter_ReplayTrimsPartialLeadingChunk(t *testing.T) {
+	w := NewMultiWriter(8)
+	for _, s := range []string{"aaaaaa", "bbbbbb"} {
+		_, err := w.Write([]byte(s))
+		require.NoError(t, err)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "aabbbbbb", late.String())
+}
+
+// The ring bounded its bytes but not its chunks, so a producer writing one
+// byte at a time filled it with one chunk per byte: megabytes of slice
+// headers, and a joining writer handed that many separate Write calls with
+// the fan-out lock held for all of them.
+func Test_MultiWriter_ReplayChunkCountIsBounded(t *testing.T) {
+	const ring = 64 << 10
+
+	w := NewMultiWriter(ring)
+	want := make([]byte, 0, ring)
+	for i := 0; i < ring; i++ {
+		b := byte('a' + i%26)
+		_, err := w.Write([]byte{b})
+		require.NoError(t, err)
+		want = append(want, b)
+	}
+
+	require.LessOrEqual(t, len(w.buffer.Data()), ring/ringChunkSize+2)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, string(want), late.String())
+}
+
+// Coalescing into the tail chunk must leave what Data already handed out
+// alone: those slices are what a joiner is being written, and a chunk that
+// grew or shifted under one would replay the wrong bytes.
+func Test_MultiWriter_ReplayTrimsACoalescedTail(t *testing.T) {
+	// Bigger than one chunk, so the ring's head is a coalesced tail by the
+	// time the trimming starts on it.
+	const ring = ringChunkSize + 1000
+
+	w := NewMultiWriter(ring)
+	var all []byte
+	write := func(n int) {
+		for i := 0; i < n; i++ {
+			b := byte('a' + len(all)%26)
+			_, err := w.Write([]byte{b})
+			require.NoError(t, err)
+			all = append(all, b)
+		}
+	}
+
+	write(100)
+	handedOut := w.buffer.Data()
+	before := make([]string, len(handedOut))
+	for i, chunk := range handedOut {
+		before[i] = string(chunk)
+	}
+
+	// Enough to coalesce into that tail, open new chunks, and then trim the
+	// front of the coalesced one.
+	write(ring)
+
+	for i, chunk := range handedOut {
+		require.Equal(t, before[i], string(chunk),
+			"chunk %d changed after it had been handed to a joiner", i)
+	}
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, string(all[len(all)-ring:]), late.String())
+}
+
+func Test_MultiWriter_ReplayStripsTerminalQueries(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+
+	live := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(live))
+
+	_, err := w.Write([]byte("before\x1b[6nafter"))
+	require.NoError(t, err)
+
+	// Live output is untouched: filtering live output is the session handler's
+	// job, per attached client, not the fan-out's.
+	require.Equal(t, "before\x1b[6nafter", live.String())
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "beforeafter", late.String())
+}
+
+// A joiner that attaches mid-sequence must see the sequence whole, not just
+// the tail the live fan-out delivers after it joins. The lead-in the filter
+// is still holding is not in the ring yet, so Append must hand it over too.
+func Test_MultiWriter_JoinerSeesSplitSequenceWhole(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+
+	_, err := w.Write([]byte("before\x1b["))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	_, err = w.Write([]byte("?1049hafter"))
+	require.NoError(t, err)
+
+	require.Equal(t, "before\x1b[?1049hafter", late.String())
+}
+
+// The trim boundary lands wherever the ring's byte budget puts it, which is
+// as easily inside an escape sequence as between two. The ring then starts
+// with that sequence's tail while only the tracker still holds its head, and
+// a joiner handed the tail alone prints it as text on the wrong screen --
+// permanently, because nothing repeats the sequence for an attached guest.
+func Test_MultiWriter_JoinerSeesTheSequenceTheRingStartsInside(t *testing.T) {
+	w := NewMultiWriter(16)
+
+	_, err := w.Write([]byte("\x1b[?1049h"))
+	require.NoError(t, err)
+
+	// 15 more bytes push the ring 7 over, which trims it to exactly the "h"
+	// that terminates the switch to the alternate screen.
+	_, err = w.Write([]byte("0123456789abcde"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b[?1049"+"h0123456789abcde", late.String(),
+		"the snapshot must carry the head of the sequence the ring starts inside")
+
+	// Once the terminator has left the ring too, the tracker holds the
+	// finished mode instead and there is no partial left to replay.
+	_, err = w.Write([]byte("fghijklmnopqrstu"))
+	require.NoError(t, err)
+
+	later := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(later))
+	require.Equal(t, "\x1b[?1049h"+"fghijklmnopqrstu", later.String())
+}
+
+// The same boundary falls inside string sequences, which are the long ones: a
+// window title, a hyperlink, an OSC 52 clipboard. The ring then starts partway
+// through the payload, and a joiner handed that alone has the rest of somebody
+// else's title typed onto its screen, because the introducer that made those
+// bytes a string left with the eviction.
+func Test_MultiWriter_JoinerSeesTheStringTheRingStartsInside(t *testing.T) {
+	w := NewMultiWriter(16)
+
+	const title = "\x1b]0;title\x07" // 10 bytes
+	_, err := w.Write([]byte(title))
+	require.NoError(t, err)
+
+	// 11 more bytes push the ring 5 over, which trims it to the middle of the
+	// title's payload.
+	const after = "0123456789a"
+	_, err = w.Write([]byte(after))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b]0;t"+"itle\x07"+after, late.String(),
+		"the snapshot must carry the head of the string the ring starts inside")
+}
+
+func Test_MultiWriter_ReplayRestoresModesAfterRollover(t *testing.T) {
+	w := NewMultiWriter(16) // far too small to still hold the mode sequences
+
+	_, err := w.Write([]byte("\x1b[?1049h\x1b[?2004h"))
+	require.NoError(t, err)
+	_, err = w.Write([]byte("0123456789abcdefghij"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	got := late.String()
+	// Bracketed paste first, then the alternate screen: the snapshot puts the
+	// screen switch after the DEC private modes.
+	require.True(t, strings.HasPrefix(got, "\x1b[?2004h\x1b[?1049h"),
+		"replay must open with the mode snapshot, got %q", got)
+	require.True(t, strings.HasSuffix(got, "defghij"),
+		"replay must still end with the ring's tail, got %q", got)
+}
+
+// The snapshot is replayed ahead of the ring, so it has to describe the
+// terminal as of the ring's first byte. Fed at the ring's entrance instead,
+// the tracker described the state after it, and a mode set inside the ring
+// window was applied twice: "qqq ESC(0 qqq" reached a joiner as
+// "ESC(0 qqq ESC(0 qqq", drawing all six characters in the graphics charset
+// instead of three.
+func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.T) {
+	w := NewMultiWriter(64)
+
+	_, err := w.Write([]byte("qqq\x1b(0qqq"))
+	require.NoError(t, err)
+
+	// Nothing has left the ring, so the ring carries the charset switch
+	// itself and the snapshot has nothing to add.
+	early := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(early))
+	require.Equal(t, "qqq\x1b(0qqq", early.String())
+
+	// Push it out of the ring: now it survives only in the snapshot, and
+	// still only once.
+	plain := strings.Repeat("z", 64)
+	_, err = w.Write([]byte(plain))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	require.Equal(t, "\x1b(0"+plain, late.String())
+}
+
+// A write larger than the ring drops everything queued and its own leading
+// bytes. Both left the ring, and the queued bytes left first: handing them to
+// the tracker the other way round makes it believe the older sequence is the
+// newer one.
+func Test_MultiWriter_OversizedWriteEvictsInStreamOrder(t *testing.T) {
+	w := NewMultiWriter(8)
+
+	_, err := w.Write([]byte("\x1b[?2004h"))
+	require.NoError(t, err)
+
+	_, err = w.Write([]byte("\x1b[?2004ltrailing"))
+	require.NoError(t, err)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+
+	// Bracketed paste ends back off, which is where a joining terminal
+	// already is, so the snapshot says nothing and the ring is all there is.
+	// Out of order it would open with a stale "\x1b[?2004h".
+	require.Equal(t, "trailing", late.String())
+}
+
 func Test_MultiWriter(t *testing.T) {
 	assert := assert.New(t)
 
 	w1 := bytes.NewBuffer(nil)
-	w := NewMultiWriter(1, w1)
+	w := NewMultiWriter(6, w1)
 
 	r := bytes.NewBufferString("hello1")
 	_, _ = io.Copy(w, r)
@@ -264,6 +524,13 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 
 		produced := make(chan string, 1)
 		stop := make(chan struct{})
+		// Closed after the first write. The joiner must not be attached
+		// before the producer has run at all: on a loaded runner (or with one
+		// P) the goroutine can otherwise be starved past the whole window,
+		// see stop already closed on its first iteration, and hand back
+		// nothing -- which failed the non-empty assertion below in CI while
+		// proving nothing about atomicity.
+		started := make(chan struct{})
 		go func() {
 			var sent []byte
 			for i := 0; ; i++ {
@@ -276,9 +543,13 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 				p := []byte{byte('a' + i%26)}
 				sent = append(sent, p...)
 				_, _ = w.Write(p)
+				if i == 0 {
+					close(started)
+				}
 			}
 		}()
 
+		<-started
 		time.Sleep(time.Duration(attempt%5) * time.Millisecond)
 		var joined bytes.Buffer
 		require.NoError(t, w.Append(&joined))
@@ -297,14 +568,16 @@ func TestMultiWriterAppendIsAtomicWithTheFanOut(t *testing.T) {
 // returned N nil entries before the N real ones and every newly attached writer
 // received N zero-length writes.
 func TestMultiWriterReplayHasNoEmptyWrites(t *testing.T) {
-	w := NewMultiWriter(3)
+	w := NewMultiWriter(6)
 	_, _ = w.Write([]byte("one"))
 	_, _ = w.Write([]byte("two"))
 
 	var rec recordingWriter
 	require.NoError(t, w.Append(&rec))
 
-	require.Equal(t, []int{3, 3}, rec.writeSizes(), "replay must not emit empty writes")
+	// Chunk boundaries are the ring's business -- small writes are coalesced
+	// -- but none of them may be empty.
+	require.NotContains(t, rec.writeSizes(), 0, "replay must not emit empty writes")
 	require.Equal(t, "onetwo", string(rec.bytes()))
 }
 
@@ -373,7 +646,7 @@ func TestMultiWriterShutdownRefusesLaterAppends(t *testing.T) {
 // guest with a queued replay nobody will deliver.
 func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
 	for attempt := range 50 {
-		w := NewMultiWriter(5)
+		w := NewMultiWriter(6)
 		_, _ = w.Write([]byte("output"))
 
 		var out recordingWriter

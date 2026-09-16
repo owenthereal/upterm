@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,17 +38,27 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	assert.False(term.IsTerminal(int(stdinr.Fd())), "stdin should not be a TTY for this test")
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Create command WITH ForceForwardingInputForTesting
 	// Use a command that reads from stdin and outputs it (cross-platform)
 	var shellCmd string
 	var shellArgs []string
+	// What ends a line of input, which is not the same question as what ends a
+	// line of output. A ConPTY is a console: conhost turns the bytes written
+	// into it back into key events, and only CR is the Enter that finishes a
+	// cooked read -- a bare LF arrives as Ctrl+J, and the read goes on waiting.
+	lineEnd := "\n"
 	if runtime.GOOS == "windows" {
-		// Windows: Use 'findstr' with regex that matches any line
-		// This reads stdin line by line and outputs matching lines
-		shellCmd = "findstr"
-		shellArgs = []string{"/r", ".*"}
+		lineEnd = "\r\n"
+
+		// Windows: cmd reads one line into a variable and echoes it, which is
+		// what 'head -n 1' does below -- it ends itself once it has the line,
+		// rather than waiting for stdin to end. Delayed expansion (/v:on) is
+		// what makes !line! read the variable when the echo runs instead of
+		// when cmd parsed the line, before the read.
+		shellCmd = "cmd"
+		shellArgs = []string{"/v:on", "/c", "set /p line=&echo !line!"}
 	} else {
 		// Unix: Use 'head' which reads exactly one line then exits
 		shellCmd = "head"
@@ -58,6 +69,9 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 		shellCmd,
 		shellArgs,
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		stdinr,
 		stdoutw,
 		ee,
@@ -100,14 +114,15 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 
 	// Send input through the pipe
 	testInput := "test input from pipe"
-	_, err = stdinw.Write([]byte(testInput + "\n"))
+	_, err = stdinw.Write([]byte(testInput + lineEnd))
 	require.NoError(err, "failed to write to stdin")
 
 	// Give a moment for data to be fully written and copied through the PTY
 	time.Sleep(50 * time.Millisecond)
 
-	// Close stdin so 'more' on Windows will exit after reading
-	// On Unix, 'head -n 1' exits immediately after reading one line
+	// Nothing waits on this: both commands end once they have their line, and
+	// a session no longer ends because its stdin did. The write end is simply
+	// finished with.
 	_ = stdinw.Close()
 
 	// The command should complete after receiving input
@@ -122,7 +137,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 		_ = stdoutw.Close()
 		select {
 		case output := <-outputCh:
-			// head -n 1 should output exactly the line we sent
+			// Either command echoes back the one line it read
 			assert.Contains(output, testInput, "should see our piped input in output, proving stdin was forwarded")
 		case <-time.After(2 * time.Second):
 			assert.Fail("stdout never reached EOF")
@@ -145,7 +160,7 @@ func TestCommand_ContextCancellation(t *testing.T) {
 	defer func() { _ = stdoutw.Close() }()
 
 	ee := &emitter.Emitter{}
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	// Use a long-running command that will only exit when interrupted
 	var shellCmd string
@@ -164,6 +179,9 @@ func TestCommand_ContextCancellation(t *testing.T) {
 		shellCmd,
 		shellArgs,
 		nil,
+		termsize.Size{},
+		false,
+		"",
 		os.Stdin,
 		stdoutw,
 		ee,
@@ -258,12 +276,13 @@ func TestCommand_DrainsOutputAfterExit(t *testing.T) {
 		logger:  discardLogger(),
 		stdin:   stdinr,
 		stdout:  stdoutw,
-		writers: uio.NewMultiWriter(5),
+		writers: uio.NewMultiWriter(uio.DefaultReplayBytes),
 		ctx:     context.Background(),
 		ptmx: &exitedPTY{
 			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
+		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	captured := make(chan string, 1)

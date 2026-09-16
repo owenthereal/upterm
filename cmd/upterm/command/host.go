@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -18,11 +19,16 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/internal/termsize"
+	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 // UserDiscardedError represents a user's intentional choice to discard the session
@@ -32,11 +38,29 @@ func (e UserDiscardedError) Error() string {
 	return "session discarded by user"
 }
 
+// Unwrap makes a discard an abandoned startup rather than a failed one.
+//
+// displaySession returns this from SessionCreatedCallback, and Host records
+// every error from there as startup_failed unless it wraps ErrSessionAbandoned.
+// Nothing failed here: the operator was shown the session and said no, and a
+// record saying otherwise sends whoever reads it looking for a fault that
+// never happened.
+func (e UserDiscardedError) Unwrap() error {
+	return host.ErrSessionAbandoned
+}
+
 // UserInterruptedError represents a user's Ctrl+C interruption
 type UserInterruptedError struct{}
 
 func (e UserInterruptedError) Error() string {
 	return "interrupted by user"
+}
+
+// Unwrap makes an interruption an abandoned startup rather than a failed
+// one, for the same reason UserDiscardedError.Unwrap does: nothing failed,
+// the operator hit Ctrl+C at the prompt instead of answering it.
+func (e UserInterruptedError) Unwrap() error {
+	return host.ErrSessionAbandoned
 }
 
 // SilentError wraps an error that has already been displayed to the user.
@@ -70,6 +94,9 @@ var (
 	flagProxy                   string
 	flagNoSFTP                  bool
 	flagAllowLocalTCPForwarding bool
+	flagPtySize                 string
+	flagTerm                    string
+	flagName                    string
 )
 
 func hostCmd() *cobra.Command {
@@ -139,6 +166,9 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
+	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
+	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
+	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -159,11 +189,123 @@ containing client public keys.`,
 	return cmd
 }
 
+// defaultTerm is what the hosted command is given when nothing else says. A
+// command on a pty with TERM unset renders as if it had no cursor addressing
+// at all, so something has to be chosen; this is what every terminal upterm is
+// likely to be driven from supports.
+const defaultTerm = "xterm-256color"
+
+// dumbTerm is the terminfo entry for a terminal that can do nothing: no cursor
+// addressing, no clearing, no scrolling regions. Inherited into a pty it is
+// worse than no answer, because a command that asks the database believes it.
+const dumbTerm = "dumb"
+
+// resolveTerm picks the TERM the hosted command runs under: the flag, then
+// whatever this process inherited, then defaultTerm.
+//
+// Deliberately not a question about stdout. This used to fall back to
+// defaultTerm whenever stdout was not a terminal, which threw away a perfectly
+// good inherited TERM for `upterm host ... | tee log` run from a real
+// terminal — the one case where the inherited value is certainly right. The
+// command is given a pty upterm allocates either way, so what stdout happens
+// to be says nothing about what TERM it should see.
+//
+// An inherited dumbTerm counts as nothing inherited. It is what a CI runner,
+// a cron job or an editor's shell pane exports, and the session upterm hosts
+// is a pty with a real terminal on the other end of it — passing "dumb"
+// through would leave a full-screen command rendering as line noise for a
+// guest whose terminal could have shown it. The flag is not filtered: a user
+// who types --term dumb is answering the question, not failing to.
+func resolveTerm(flag, inherited string) string {
+	if flag != "" {
+		return flag
+	}
+	if inherited != "" && inherited != dumbTerm {
+		return inherited
+	}
+	return defaultTerm
+}
+
+func resolveSessionName(explicit string, command []string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return sessiondir.GenerateName(command)
+}
+
+// maxGeneratedNameAttempts bounds the retry below. A generated name is a
+// command plus four random hex digits, so a collision is already unlikely and
+// two in a row is a signal that something other than luck is wrong — a name
+// being recreated as fast as it is claimed, say. Retrying forever would turn
+// that into a spin instead of an error.
+const maxGeneratedNameAttempts = 5
+
+// runWithGeneratedNameRetry hosts a session under a name, drawing a new name
+// when a generated one turns out to be taken.
+//
+// The distinction is intent. A name the user typed is the answer to their
+// question, so a collision is theirs to hear about; hosting under some other
+// name would be answering a question they did not ask, and `upterm session
+// info` would then not find what they went looking for. A generated name
+// carries no intent at all — it is upterm's own dice roll — and losing that
+// roll is not a reason to refuse to host.
+//
+// A nil logger means the package default rather than silence.
+func runWithGeneratedNameRetry(logger *slog.Logger, explicit string, command []string, run func(name string) error) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	var err error
+	for attempt := 0; attempt < maxGeneratedNameAttempts; attempt++ {
+		name := resolveSessionName(explicit, command)
+		err = run(name)
+		if err == nil {
+			return nil
+		}
+		if explicit != "" || !errors.Is(err, sessiondir.ErrNameInUse) {
+			return err
+		}
+		// The last collision is the one the user is told about, so it is not
+		// followed by a redraw and there is nothing here to announce.
+		if attempt+1 == maxGeneratedNameAttempts {
+			break
+		}
+		// Every redraw, because a redraw is upterm hosting under a name other
+		// than the one it drew first and nothing else on any path records
+		// that. Without it, an operator whose session is not where the name
+		// they remember says it should be has no trail at all.
+		logger.Info("session name is taken, drawing another", "name", name)
+	}
+	return err
+}
+
+// validateSessionNameFlag rejects an unusable --name before anything is
+// started, so the user sees one clear error rather than a failure partway
+// through startup.
+func validateSessionNameFlag(name string) error {
+	if name == "" {
+		return nil
+	}
+	if err := sessiondir.ValidateName(name); err != nil {
+		return err
+	}
+	// A legal name can still be unusable, because the admin socket path is the
+	// name plus a runtime root the user did not pick. Checked here so the
+	// limit is reported before the session starts rather than by a bind that
+	// fails once the tunnel is already up.
+	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
+}
+
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	var result error
 
 	if flagReadOnly && flagAllowLocalTCPForwarding {
 		result = multierror.Append(result, fmt.Errorf("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host"))
+	}
+
+	if err := validateSessionNameFlag(flagName); err != nil {
+		result = multierror.Append(result, err)
 	}
 
 	if flagServer == "" {
@@ -203,17 +345,36 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	return result
 }
 
+// confirmationTerminalError says whether the confirmation prompt could be
+// answered on this stdin and stdout, so that shareRunE can refuse before a
+// name is claimed or a tunnel raised.
+//
+// The prompt is a Bubble Tea program: it draws on stdout and reads the answer
+// from stdin, so both have to be terminals. Looking at stdout alone let
+// `upterm host </dev/null` through to claim its name, establish the reverse
+// tunnel and start the prompt before finding there was nothing to read the
+// answer from. With --accept there is no prompt and nothing to check.
+func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
+	if accept {
+		return nil
+	}
+	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
+		return nil
+	}
+	return errors.New("interactive confirmation requires a terminal on stdin and stdout")
+}
+
 func shareRunE(c *cobra.Command, args []string) error {
-	// Early TTY check: if interactive confirmation is needed but no TTY is available, fail fast
-	// before making any network connections. This provides clear feedback and avoids orphan sessions.
-	if !flagAccept && !tui.IsTTY() {
+	// Refuse before anything is claimed or connected: a session that reaches
+	// the prompt and cannot be answered is an orphan holding a name.
+	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
 		c.SilenceUsage = true
 		c.SilenceErrors = true
-		fmt.Fprintln(os.Stderr, "Error: interactive confirmation requires a terminal (TTY)")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "To run in non-interactive environments (CI, scripts, etc.), use --accept:")
 		fmt.Fprintln(os.Stderr, "  upterm host --accept [command]")
-		return SilentError{Err: errors.New("no TTY available")}
+		return SilentError{Err: err}
 	}
 
 	proxyURL, err := parseProxyURL(flagProxy)
@@ -303,28 +464,49 @@ func shareRunE(c *cobra.Command, args []string) error {
 		sftpPermissionChecker = &DialogPermissionChecker{}
 	}
 
-	h := &host.Host{
-		Host:                    flagServer,
-		Command:                 args,
-		ForceCommand:            forceCommand,
-		Signers:                 signers,
-		HostKeyCallback:         hkcb,
-		AuthorizedKeys:          authorizedKeys,
-		KeepAliveDuration:       50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-		ProxyURL:                proxyURL,
-		SessionCreatedCallback:  displaySessionCallback,
-		ClientJoinedCallback:    clientJoinedCallback,
-		ClientLeftCallback:      clientLeftCallback,
-		Stdin:                   os.Stdin,
-		Stdout:                  os.Stdout,
-		Logger:                  logger.Logger,
-		ReadOnly:                flagReadOnly,
-		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
-		SFTPDisabled:            flagNoSFTP,
-		SFTPPermissionChecker:   sftpPermissionChecker,
+	var ptySize termsize.Size
+	if flagPtySize != "" {
+		ptySize, err = termsize.Parse(flagPtySize)
+		if err != nil {
+			return err
+		}
 	}
 
-	err = h.Run(c.Context())
+	term := resolveTerm(flagTerm, os.Getenv("TERM"))
+
+	// A fresh Host per attempt, because every field that names the session —
+	// Name and the banner the callback prints — belongs to the name this
+	// attempt drew, and because Run fills fields in on the Host it is given.
+	err = runWithGeneratedNameRetry(logger.Logger, flagName, args, func(name string) error {
+		h := &host.Host{
+			Host:              flagServer,
+			Name:              name,
+			Command:           args,
+			ForceCommand:      forceCommand,
+			Signers:           signers,
+			HostKeyCallback:   hkcb,
+			AuthorizedKeys:    authorizedKeys,
+			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
+			ProxyURL:          proxyURL,
+			SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
+				return displaySession(ctx, s, name)
+			},
+			ClientJoinedCallback:    clientJoinedCallback,
+			ClientLeftCallback:      clientLeftCallback,
+			Stdin:                   os.Stdin,
+			Stdout:                  os.Stdout,
+			Logger:                  logger.Logger,
+			ReadOnly:                flagReadOnly,
+			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
+			PtySize:                 ptySize,
+			PinPtySize:              flagPtySize != "",
+			Term:                    term,
+			SFTPDisabled:            flagNoSFTP,
+			SFTPPermissionChecker:   sftpPermissionChecker,
+		}
+
+		return h.Run(c.Context())
+	})
 
 	// Handle user actions specially - no help menu
 	var userDiscardedErr UserDiscardedError
@@ -355,16 +537,89 @@ func notifyBody(c *api.Client) string {
 	return clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint)
 }
 
-func displaySessionCallback(ctx context.Context, session *api.GetSessionResponse) error {
+// bannerFlushTimeout bounds how long startup waits for the banner to reach a
+// stdout that is not a terminal: long enough for a reader that is merely slow
+// to get going, short enough that nobody waiting for a session to come up
+// wonders whether it has hung.
+const bannerFlushTimeout = 2 * time.Second
+
+// printBanner prints the session banner without letting whoever reads stdout
+// decide whether the session starts.
+//
+// It runs from SessionCreatedCallback, before the admin socket is bound and
+// before the command is started, so a write that blocks here blocks all of
+// that: the record stays at starting, the name stays held, and an operator's
+// pipeline ends up waiting on a process that is waiting on the pipeline. A
+// pipe nobody drains is enough to do it — the banner passes a pipe buffer with
+// a long enough command line — and a write already in the kernel is not
+// something the session's cancellation can reach.
+//
+// So off a terminal the banner goes through a sink whose Write never blocks,
+// and startup waits bannerFlushTimeout for delivery and no longer. On a
+// terminal it is printed as before: a terminal drains itself, and the
+// synchronous write keeps the banner ahead of everything the session prints
+// after it.
+//
+// The version warning host.Run prints is deliberately left synchronous. It
+// runs just before this callback, so it is the first thing written to an empty
+// pipe, and a few hundred bytes is smaller than any pipe buffer.
+//
+// logger may be nil, which is the package default rather than silence: a
+// banner nobody received is the kind of thing an operator is looking for when
+// they come here.
+func printBanner(logger *slog.Logger, detail tui.SessionDetail) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if tui.IsTTY() {
+		tui.PrintSessionDetail(detail)
+		return
+	}
+
+	sink := uio.NewAsyncWriter(os.Stdout, uio.DefaultGuestBufferSize, func(err error) {
+		// Warn, not debug: the banner carries the command a guest has to run
+		// to join, and a session whose banner never arrived reads, to whoever
+		// was waiting for it, as a session that never started.
+		logger.Warn("session banner dropped", "error", err)
+	})
+	// The error is the sink's own to report: a fresh sink can only fail here by
+	// overflowing, and overflowing calls the callback above.
+	_, _ = io.WriteString(sink, tui.FormatSessionDetail(detail))
+
+	ctx, cancel := context.WithTimeout(context.Background(), bannerFlushTimeout)
+	defer cancel()
+	if err := sink.Flush(ctx); err != nil {
+		// Left open on purpose. Close discards whatever is still pending, and
+		// the drain goroutine delivers the rest once the reader comes back,
+		// exactly as the command's own stdout sink does. At worst it parks in
+		// that write holding the banner and nothing else, and ends when the
+		// pipe drains, the reader closes it, or the process exits.
+		logger.Debug("session banner is still draining; starting the session anyway", "error", err, "timeout", bannerFlushTimeout)
+		return
+	}
+	_ = sink.Close()
+}
+
+func displaySession(ctx context.Context, session *api.GetSessionResponse, name string) error {
 	// Build session detail (includes SCP commands if SFTP is enabled)
 	detail, err := buildSessionDetail(session)
 	if err != nil {
 		return fmt.Errorf("failed to build session detail: %w", err)
 	}
+	detail.Name = name
 
 	// With --accept, just print session info and continue (no interactive confirmation needed)
 	if flagAccept {
-		tui.PrintSessionDetail(detail)
+		// The logger root.go put in the context: it writes to upterm's log
+		// file, which is where an operator goes to find out what became of a
+		// startup. Nil until some caller sets one up, which printBanner reads
+		// as the package default.
+		var logger *slog.Logger
+		if l := uptermctx.Logger(ctx); l != nil {
+			logger = l.Logger
+		}
+		printBanner(logger, detail)
 		return nil
 	}
 

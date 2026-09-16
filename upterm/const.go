@@ -5,6 +5,7 @@ const (
 	HostSSHClientVersion  = "SSH-2.0-upterm-host-client"
 	HostSSHServerVersion  = "SSH-2.0-upterm-host-server"
 	HostAdminSocketEnvVar = "UPTERM_ADMIN_SOCKET"
+	HostSessionNameEnvVar = "UPTERM_SESSION_NAME"
 
 	// client
 	ClientSSHClientVersion = "SSH-2.0-upterm-client-client"

@@ -2,6 +2,7 @@ package io
 
 import (
 	"io"
+	"slices"
 )
 
 // TerminalQueryFilter wraps an io.Writer and filters out terminal query
@@ -37,9 +38,9 @@ const (
 	qfStateOSCParam                       // saw OSC number
 	qfStateOSCSemi                        // saw OSC number ;
 	qfStateOSCQuery                       // saw OSC N ; ? (query for color)
-	qfStateOSCQueryEsc                    // saw ESC in OSC query (possible ST)
+	qfStateOSCQueryEsc                    // saw ESC in OSC query (ST if '\' follows, else the query ends there)
 	qfStateOSCContent                     // saw OSC N ; <non-?> (not a query, pass through)
-	qfStateOSCContentEsc                  // saw ESC in OSC content (possible ST)
+	qfStateOSCContentEsc                  // saw ESC in OSC content, or right after the ; (ST if '\' follows, else the OSC ends there)
 )
 
 // NewTerminalQueryFilter creates a filter that removes terminal query
@@ -74,6 +75,25 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// maxPendingBytes is the most the filter will ever be holding, and so the most
+// Pending can return. Every state that accumulates gives up at a bound of its
+// own: 32 bytes of CSI parameters, 32 of an OSC colour query, 256 of OSC
+// content, and 8 of an OSC number. The largest is the OSC content bound, plus
+// the byte that overshoots it and the ESC of a string terminator that turned
+// out not to be one; 260 covers that with room to spare.
+//
+// It matters because Pending is replayed to every joining writer ahead of the
+// ring: what the filter holds is output no reader has seen yet, and it is held
+// outside the ring's byte budget.
+const maxPendingBytes = 260
+
+// Pending returns a copy of the bytes of an escape sequence the filter is
+// still holding because it has not yet seen the sequence's end. They are
+// not in the underlying writer yet. The result never exceeds maxPendingBytes.
+func (f *TerminalQueryFilter) Pending() []byte {
+	return slices.Clone(f.seqBuf)
 }
 
 // processByte processes a single byte, appending non-filtered output to f.outBuf.
@@ -149,6 +169,13 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 
 	case qfStateOSCParam:
 		f.seqBuf = append(f.seqBuf, b)
+		// The oscCmd guard below counts value, not digits, so a run of zeros
+		// slips past it forever. An OSC number is four digits at the outside,
+		// making "ESC ] dddd ;" seven bytes, so anything past eight is not one.
+		if len(f.seqBuf) > 8 {
+			f.flushAndReset()
+			return
+		}
 		if b >= '0' && b <= '9' {
 			// Check before updating to prevent overflow (OSC commands are 1-3 digits)
 			if f.oscCmd > 99 {
@@ -181,6 +208,19 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 			f.state = qfStateOSCContent
 			return
 		}
+		// An empty payload ends at its terminator like any other. Taking the
+		// byte after the ";" as content, whatever it was, meant "ESC ] 0 ; BEL"
+		// -- a shell clearing its title -- never closed, and everything the
+		// command printed next was held behind it until the next BEL or ESC,
+		// or the content bound.
+		if b == 0x07 { // BEL - end of OSC
+			f.flushAndReset()
+			return
+		}
+		if b == 0x1b { // ESC - possible ST
+			f.state = qfStateOSCContentEsc
+			return
+		}
 		// Not a query (it's setting a value), continue to end of OSC
 		f.state = qfStateOSCContent
 
@@ -200,14 +240,21 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 
 	case qfStateOSCContentEsc:
-		f.seqBuf = append(f.seqBuf, b)
 		if b == '\\' { // ST (String Terminator)
+			f.seqBuf = append(f.seqBuf, b)
 			// Pass through the entire OSC sequence
 			f.flushAndReset()
 			return
 		}
-		// Not ST, continue as content (the ESC might be part of content)
-		f.state = qfStateOSCContent
+		// Anything else ends the string: an ESC abandons an OSC whatever
+		// follows it, and only ESC \ ends it as ST. Treating the ESC as
+		// content let "ESC ] 0 ; t ESC [ 6 n BEL" through whole, so every
+		// joiner's terminal answered the cursor-position query inside it into
+		// the pty. The OSC before the ESC is not ours to filter, so it goes
+		// out; the ESC starts a sequence again, and this byte is the first of
+		// it.
+		f.endStringAtESC()
+		f.processByte(b)
 
 	case qfStateOSCQuery:
 		f.seqBuf = append(f.seqBuf, b)
@@ -226,15 +273,18 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 
 	case qfStateOSCQueryEsc:
-		f.seqBuf = append(f.seqBuf, b)
 		if b == '\\' { // ST (String Terminator)
+			f.seqBuf = append(f.seqBuf, b)
 			// This is a color query (OSC 10/11/12), filter it
 			f.state = qfStateNormal
 			f.seqBuf = f.seqBuf[:0]
 			return
 		}
-		// Not ST, output what we have
-		f.flushAndReset()
+		// Ended by the ESC, same as OSC content above: what we have is an
+		// unterminated query, which is passed through as it always was, and
+		// what follows the ESC is a new sequence rather than more of it.
+		f.endStringAtESC()
+		f.processByte(b)
 
 	default:
 		f.outBuf = append(f.outBuf, b)
@@ -290,6 +340,15 @@ func (f *TerminalQueryFilter) isCSIQuery(finalByte byte) bool {
 		}
 	}
 	return false
+}
+
+// endStringAtESC closes an OSC that a non-ST ESC ended. The string's own bytes
+// go to outBuf; the trailing ESC stays held as the start of whatever sequence
+// comes next, which the caller then feeds the current byte to.
+func (f *TerminalQueryFilter) endStringAtESC() {
+	f.outBuf = append(f.outBuf, f.seqBuf[:len(f.seqBuf)-1]...)
+	f.seqBuf = append(f.seqBuf[:0], 0x1b)
+	f.state = qfStateEsc
 }
 
 // flushAndReset appends buffered bytes to outBuf and resets state.

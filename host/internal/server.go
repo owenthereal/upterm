@@ -20,6 +20,7 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/crypto/ssh"
 )
@@ -37,13 +38,41 @@ type Server struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	PtySize                 termsize.Size
+	PinPtySize              bool
+	Term                    string
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
 
+	// OnCommandStarted, if set, is called once the hosted command is running.
+	// Readiness is a claim about facts, and this is one of the two facts it
+	// rests on: until this fires, "ready" would mean a command that may still
+	// fail to start.
+	OnCommandStarted func()
+
+	// OnGuestServerStopped is called when the guest listener stops serving,
+	// which in practice means the reverse tunnel is gone. The session does not
+	// end: the command keeps running and keeps its pty. Reporting it is the
+	// caller's job, because internal must not know about on-disk state.
+	OnGuestServerStopped func(error)
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+
+	// cmd is the hosted command, kept so its outcome can be read after
+	// ServeWithContext returns.
+	cmd *command
+}
+
+// CommandResult returns the hosted command's outcome. Valid after
+// ServeWithContext returns.
+func (s *Server) CommandResult() CommandResult {
+	if s.cmd == nil {
+		return CommandResult{}
+	}
+	return s.cmd.Result()
 }
 
 // sessionContext derives the context guest sessions live under.
@@ -80,7 +109,7 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 }
 
 func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
-	writers := uio.NewMultiWriter(5)
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
@@ -88,6 +117,9 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Command[0],
 		s.Command[1:],
 		s.CommandEnv,
+		s.PtySize,
+		s.PinPtySize,
+		s.Term,
 		s.Stdin,
 		s.Stdout,
 		s.EventEmitter,
@@ -95,9 +127,13 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 		s.Logger,
 		s.ForceForwardingInputForTesting,
 	)
+	s.cmd = cmd
 	ptmx, err := cmd.Start(cmdCtx)
 	if err != nil {
 		return fmt.Errorf("error starting command: %w", err)
+	}
+	if s.OnCommandStarted != nil {
+		s.OnCommandStarted()
 	}
 
 	var g run.Group
@@ -186,7 +222,22 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			},
 		}
 		g.Add(func() error {
-			return server.Serve(l)
+			err := server.Serve(l)
+
+			// A tunnel that goes away takes the guests with it and nothing
+			// else. Returning here would end the run.Group — which interrupts
+			// every actor regardless of the error — and the interrupts would
+			// cancel the command: a network blip would destroy work that is
+			// still running perfectly well. Park until the session ends for a
+			// reason that is actually the session's.
+
+			// Our own Shutdown makes Serve return ErrServerClosed, which is
+			// the session ending, not the tunnel; any other error lost guests.
+			if s.OnGuestServerStopped != nil && !errors.Is(err, gssh.ErrServerClosed) {
+				s.OnGuestServerStopped(err)
+			}
+			<-sessCtx.Done()
+			return nil
 		}, func(err error) {
 			// Let the fan-out finish delivering before the sessions are
 			// released. This is the last interrupt in the group, so waiting
@@ -396,7 +447,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
-		ptmx, err = h.startForceCommand(ctx, ptyReq.Term)
+		ptmx, err = h.startForceCommand(ctx, ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
@@ -580,10 +631,14 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 // startForceCommand runs the forced command for a guest on its own pty.
 // CommandEnv wins over anything the host inherited, and the guest's own TERM
 // wins over both.
-func (h *sessionHandler) startForceCommand(ctx context.Context, term string) (PTY, error) {
+func (h *sessionHandler) startForceCommand(ctx context.Context, term string, width, height int) (PTY, error) {
 	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
 	cmd.Env = append(os.Environ(), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
-	// Pass nil for stdin since this is a remote attach - size will come from SSH client
-	return startPty(cmd, nil)
+	// The guest's own geometry, taken from its pty request. A full-screen
+	// program reads its window size before the first window-change request
+	// arrives, so opening at the default drew that first frame at 80x24 on a
+	// terminal that is nothing of the sort. A request that carries no usable
+	// size falls back inside startPty.
+	return startPty(cmd, termsize.Size{Cols: width, Rows: height}, false)
 }

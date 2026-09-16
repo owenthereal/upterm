@@ -3,6 +3,7 @@ package host
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"log/slog"
@@ -18,7 +21,9 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/internal"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -212,14 +217,73 @@ type Host struct {
 	ForceForwardingInputForTesting bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
-	ProxyURL *url.URL
+	ProxyURL   *url.URL
+	PtySize    termsize.Size
+	PinPtySize bool
+	Term       string
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
+
+	// Name is the session's local name. It determines the socket paths, so
+	// they are known before the server is ever contacted. It is unrelated to
+	// the server-assigned session ID in the connect string.
+	//
+	// Ignored when AdminSocketFile is set: supplying a socket is how a caller
+	// says it is managing the paths itself, so Run claims no name and there is
+	// nothing for this to name. SessionDir stays nil in that case, and no
+	// record is published.
+	Name string
+
+	// SessionDir is claimed by Run and readable for as long as Run is
+	// running. Run clears it on the way out: the directory is released by
+	// then, a released Dir may not be touched again, and leaving it here
+	// would be leaving a handle to a name that now belongs to whoever claimed
+	// it next. Nil when AdminSocketFile was supplied, which is how tests
+	// drive Host without taking a name.
+	SessionDir *sessiondir.Dir
 }
 
+// ErrSessionAbandoned marks a session given up before its command started, as
+// opposed to one that failed to start. A SessionCreatedCallback error that
+// wraps it is recorded as startup_abandoned rather than startup_failed.
+//
+// Declining the interactive confirmation is the case it exists for: the
+// operator was shown the session and said no, nothing went wrong, and a
+// record saying otherwise sends whoever reads it looking for a fault that
+// never happened.
+var ErrSessionAbandoned = errors.New("session abandoned before the command started")
+
+// ClaimTimeout bounds how long Run waits for the session registry when it
+// takes a name.
+//
+// Claim waits on two lock files, either of which can be held by a process that
+// is stopped rather than slow — a wait no amount of patience resolves. The
+// caller's context is not a bound in practice: the CLI runs Run on
+// context.Background(), so without this a stuck registry hangs `upterm host`
+// at startup forever while every read path already gives up after
+// sessionQueryTimeout. Ten seconds matches those read paths, since they wait
+// on the same locks.
+//
+// A var, not a const, so an embedder on a slower filesystem and a test that
+// wants to observe the timeout can both move it.
+var ClaimTimeout = 10 * time.Second
+
+// Run hosts one session and returns when it ends.
+//
+// It may be called again afterwards: everything Run claims, it gives back
+// before returning, including the two fields it fills in on the Host itself.
+// A caller that supplied AdminSocketFile keeps it across runs, since managing
+// the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) error {
+	// First, before anything here can write a byte. The version warning below
+	// and whatever a SessionCreatedCallback prints both go to Stdout well
+	// before the signal actor is assembled, and for an embedder whose reader
+	// has gone away a single one of those writes is fatal. See
+	// InstallSignalPolicy; calling it again from setupSignalHandler is free.
+	InstallSignalPolicy()
+
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)
@@ -237,6 +301,118 @@ func (c *Host) Run(ctx context.Context) error {
 		aks = append(aks, ak.PublicKeys...)
 	}
 
+	// Whether this run took the name, as opposed to being handed a socket to
+	// use. Only the run that claimed it may give it back.
+	var claimedDir bool
+
+	if c.AdminSocketFile == "" {
+		runtimeDir, err := utils.CreateUptermRuntimeDir()
+		if err != nil {
+			return err
+		}
+
+		// Bounded by ClaimTimeout rather than by ctx, which for the CLI never
+		// ends. Cancelled as soon as Claim returns: the claim it produces
+		// outlives this call and must not be tied to a context that is about
+		// to expire.
+		claimCtx, cancelClaim := context.WithTimeout(ctx, ClaimTimeout)
+		dir, err := sessiondir.Claim(claimCtx, sessiondir.ClaimOptions{
+			RuntimeRoot:  runtimeDir,
+			StateRoot:    utils.UptermStateDir(),
+			Name:         c.Name,
+			Command:      c.Command,
+			ForceCommand: c.ForceCommand,
+		})
+		cancelClaim()
+		if err != nil {
+			return err
+		}
+		c.SessionDir = dir
+		c.AdminSocketFile = dir.AdminSocket()
+		claimedDir = true
+	}
+
+	var (
+		sessionID   string
+		runReason   = sessiondir.ReasonStartupFailed
+		runExitCode *int
+		runSignal   string
+	)
+
+	// shutdownRequested records that *we* initiated the teardown — a signal or
+	// a cancelled context — as distinct from the wait status that results.
+	//
+	// This distinction is load-bearing. Cancelling a running command makes our
+	// own teardown kill it, so the wait reports a signal on Unix and an
+	// ordinary non-zero exit on Windows. Classifying off the wait status alone
+	// would report "signaled" or "exited 137" for something the operator asked
+	// for, on a platform-dependent basis.
+	var shutdownRequested atomic.Bool
+
+	if c.SessionDir != nil {
+		dir := c.SessionDir
+		// c.Logger, not the enriched logger built below: this is registered
+		// before that one exists, deliberately, so that it also covers the
+		// early returns between here and there.
+		logger := c.Logger
+		// Registered here so it runs however Run exits, including the early
+		// returns below. It closes over the variables rather than their values,
+		// which is why they are declared above rather than beside it.
+		defer func() {
+			releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancelRelease()
+
+			// Neither failure can be returned — Run's error belongs to the
+			// session, not to its bookkeeping — and neither may be silent.
+			// A record that was not published means `session info` reports the
+			// wrong outcome for this run, and a directory that was not released
+			// means the name stays taken until something reaps it. Both are
+			// invisible from outside the process without a line here.
+			//
+			// A cancellation before the command starts is still a stop. The
+			// signal actor that sets shutdownRequested is registered only
+			// after SessionCreatedCallback returns, so a caller that cancels
+			// during Establish, or while the callback is waiting, gets
+			// ctx.Err() back through returns that report startup_failed --
+			// for a session that was told to stop. Decided here, on the
+			// publish itself, so that every early return is covered.
+			// startup_abandoned still wins: an interactive decline whose
+			// embedder also cancels is still a decline. The one corner this
+			// accepts is a genuine startup failure that coincides with a
+			// cancellation, reported as stopped, which is what the caller
+			// asked for.
+			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
+				runReason = sessiondir.ReasonStopped
+			}
+			if err := dir.Update(func(r *sessiondir.Record) {
+				r.SessionID = sessionID
+				r.FinishedAt = time.Now().UTC()
+				advanceStatus(r, sessiondir.StatusEnding)
+				r.Reason = runReason
+				r.ExitCode = runExitCode
+				r.Signal = runSignal
+			}); err != nil {
+				logger.Warn("failed to publish final session record", "error", err)
+			}
+			if err := dir.Release(releaseCtx); err != nil {
+				logger.Warn("failed to release session directory", "error", err)
+			}
+
+			// Run's own bookkeeping, undone. Left in place, a second Run on
+			// this Host would skip the claim above and spend the whole session
+			// updating and finally releasing a Dir that is already released —
+			// and the name is free the instant Release returns, so those
+			// writes would land on a successor's record and that release would
+			// delete a live successor's runtime directory. The socket path is
+			// only cleared if this run was the one that derived it; a caller
+			// that supplied its own keeps it.
+			c.SessionDir = nil
+			if claimedDir {
+				c.AdminSocketFile = ""
+			}
+		}()
+	}
+
 	logger := c.Logger.With("server", u.String())
 	logger.Info("Establishing reverse tunnel")
 	rt := internal.ReverseTunnel{
@@ -248,6 +424,11 @@ func (c *Host) Run(ctx context.Context) error {
 		ProxyURL:          c.ProxyURL,
 		Logger:            logger.With("component", "reverse-tunnel"),
 	}
+	// Deferred before Establish, not after: Close is nil-safe on a partially
+	// established tunnel, and a dial that succeeds but then fails inside
+	// Establish -- at createSession or Listen -- must still close the SSH
+	// client rather than leak it.
+	defer rt.Close()
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
 		// Log the error before returning to ensure it's captured in logs
@@ -255,7 +436,6 @@ func (c *Host) Run(ctx context.Context) error {
 		logger.Error("Failed to establish reverse tunnel", "error", err)
 		return err
 	}
-	defer rt.Close()
 
 	// Check server version compatibility after establishing connection
 	serverVersion := string(rt.ServerVersion())
@@ -266,21 +446,13 @@ func (c *Host) Run(ctx context.Context) error {
 		displayVersionWarning(c.Stdout, logger, result)
 	}
 
-	if c.AdminSocketFile == "" {
-		dir, err := utils.CreateUptermRuntimeDir()
-		if err != nil {
-			return err
-		}
-
-		c.AdminSocketFile = filepath.Join(dir, AdminSocketFile(sessResp.SessionID))
-
-		defer func() {
-			_ = os.Remove(c.AdminSocketFile)
-		}()
-	}
-
 	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
+
+	// The ID, but not readiness: the session is registered and nothing more.
+	// Nothing has accepted it, the admin socket is unbound and the command
+	// does not exist yet.
+	sessionID = sessResp.SessionID
 
 	session := &api.GetSessionResponse{
 		SessionId:      sessResp.SessionID,
@@ -295,6 +467,13 @@ func (c *Host) Run(ctx context.Context) error {
 
 	if c.SessionCreatedCallback != nil {
 		if err := c.SessionCreatedCallback(ctx, session); err != nil {
+			// runReason is startup_failed at this point, which is right for a
+			// callback that broke and wrong for one that declined on the
+			// operator's behalf. Nothing failed in that case, and the record
+			// is all a later reader has to tell the two apart by.
+			if errors.Is(err, ErrSessionAbandoned) {
+				runReason = sessiondir.ReasonStartupAbandoned
+			}
 			return err
 		}
 	}
@@ -304,22 +483,47 @@ func (c *Host) Run(ctx context.Context) error {
 
 	logger = logger.With("cmd", c.Command, "force_cmd", c.ForceCommand)
 
+	// Readiness is a claim about facts, so it waits for the facts to report
+	// themselves: the admin socket bound and the command started. Registering
+	// the actors that do those things establishes neither.
+	adminReady := make(chan struct{})
+	cmdReady := make(chan struct{})
+	// sync.Once on each, since a callback that fires twice must not panic on a
+	// double close.
+	var adminOnce, cmdOnce sync.Once
+
+	// Bound here, not inside the group. A bind failure is a startup failure and
+	// has to be reported as one: inside the group it raced the command's start,
+	// and whichever actor lost the race decided the classification — the same
+	// unusable socket path was published as startup_failed on one run and
+	// signaled on the next. Returning the error here also hands the deferred
+	// writer above the reason it already assumes at this point.
+	//
+	// adminReady therefore closes before the group exists. The ready actor
+	// still waits on both channels: which of the two facts is established
+	// first is not something readiness should depend on.
+	adminServer := internal.AdminServer{
+		Session:     session,
+		ClientRepo:  clientRepo,
+		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
+	}
+	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
+		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)
+		return err
+	}
+
 	var g run.Group
 	{
 		// Handle OS signals for graceful shutdown
 		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
-		setupSignalHandler(&g, ctx)
+		setupSignalHandler(&g, ctx, &shutdownRequested)
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
-		s := internal.AdminServer{
-			Session:    session,
-			ClientRepo: clientRepo,
-		}
 		g.Add(func() error {
-			return s.Serve(ctx, c.AdminSocketFile)
+			return adminServer.Serve(ctx)
 		}, func(err error) {
-			_ = s.Shutdown(ctx)
+			_ = adminServer.Shutdown(ctx)
 			cancel()
 		})
 	}
@@ -372,14 +576,22 @@ func (c *Host) Run(ctx context.Context) error {
 			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}
+	// Hoisted out of the block below so the classification after g.Run can ask
+	// it what the command actually did.
+	var sshServer internal.Server
 	{
 		logger.Info("Starting sshd server")
 		defer logger.Info("Finishing sshd server")
 
+		commandEnv := []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)}
+		if c.SessionDir != nil {
+			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
+		}
+
 		ctx, cancel := context.WithCancel(ctx)
-		sshServer := internal.Server{
+		sshServer = internal.Server{
 			Command:                        c.Command,
-			CommandEnv:                     []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)},
+			CommandEnv:                     commandEnv,
 			ForceCommand:                   c.ForceCommand,
 			Signers:                        c.Signers,
 			AuthorizedKeys:                 aks,
@@ -391,8 +603,20 @@ func (c *Host) Run(ctx context.Context) error {
 			ReadOnly:                       c.ReadOnly,
 			AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
 			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
+			PtySize:                        c.PtySize,
+			PinPtySize:                     c.PinPtySize,
+			Term:                           c.Term,
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
+			OnCommandStarted:               func() { cmdOnce.Do(func() { close(cmdReady) }) },
+			OnGuestServerStopped: func(err error) {
+				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
+				if c.SessionDir != nil {
+					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+						advanceStatus(r, sessiondir.StatusDisconnected)
+					})
+				}
+			},
 		}
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener())
@@ -400,8 +624,63 @@ func (c *Host) Run(ctx context.Context) error {
 			cancel()
 		})
 	}
+	{
+		ready := make(chan struct{})
+		g.Add(func() error {
+			select {
+			case <-adminReady:
+			case <-ready:
+				return nil
+			}
+			select {
+			case <-cmdReady:
+			case <-ready:
+				return nil
+			}
 
-	return g.Run()
+			// Both acknowledged. Only now is every claim a reader makes off
+			// "ready" true: the session is registered, the user accepted it,
+			// the admin socket is bound, and the command is running.
+			if c.SessionDir != nil {
+				_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+					r.SessionID = sessionID
+					advanceStatus(r, sessiondir.StatusReady)
+				})
+			}
+
+			<-ready
+			return nil
+		}, func(err error) {
+			close(ready)
+		})
+	}
+
+	err = g.Run()
+
+	// The command's own outcome, and the cause that initiated teardown, are
+	// two different questions. Precedence is explicit because the wait status
+	// cannot answer the second: our own teardown kills the command, so a
+	// requested shutdown surfaces as a signal on Unix and as an ordinary
+	// non-zero exit on Windows.
+	res := sshServer.CommandResult()
+	switch {
+	case shutdownRequested.Load():
+		// We asked for this. Whatever the wait says, the reason is that it was
+		// stopped — and the exit code of a process we killed is not the
+		// command's own outcome, so it is deliberately not reported.
+		runReason = sessiondir.ReasonStopped
+	case res.Exited:
+		code := res.Code
+		runExitCode = &code
+		runReason = sessiondir.ReasonExited
+	case res.Signal != "":
+		runSignal = res.Signal
+		runReason = sessiondir.ReasonSignaled
+	default:
+		runReason = sessiondir.ReasonStartupFailed
+	}
+
+	return err
 }
 
 func keyType(t string) string {

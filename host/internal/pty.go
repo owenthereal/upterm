@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 // PTY represents a pseudo-terminal abstraction that works across platforms.
@@ -58,6 +61,17 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d", e.Code)
 }
 
+// CommandResult is a command's own outcome, as distinct from the session's
+// shutdown cause.
+type CommandResult struct {
+	// Exited is true when the command terminated under its own control.
+	Exited bool
+	// Code is its status; meaningful only when Exited.
+	Code int
+	// Signal names the signal that killed it, when it was killed.
+	Signal string
+}
+
 // exitCode reports the status a PTY's process exited with, given the error
 // from Wait. The second return is false when the process did not exit under
 // its own control: exec reports -1 for a process stopped by a signal, which is
@@ -87,4 +101,23 @@ func exitCode(err error) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// ResolvePtySize decides the geometry a session's pty opens with.
+//
+// An explicit request wins outright, because a pinned size is a promise the
+// geometry will not move. Otherwise the host's terminal is asked, which is the
+// historical behavior. With neither, the default stands: a session with no
+// terminal still needs a size, and inheriting the kernel's is how a headless
+// TUI ends up rendering into a guess.
+func ResolvePtySize(stdin *os.File, want termsize.Size) termsize.Size {
+	if want.Valid() {
+		return want
+	}
+	if stdin != nil {
+		if h, w, err := getPtysize(stdin); err == nil && w > 0 && h > 0 {
+			return termsize.Size{Cols: w, Rows: h}
+		}
+	}
+	return termsize.Default
 }

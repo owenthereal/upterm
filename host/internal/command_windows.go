@@ -9,7 +9,22 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
+	"golang.org/x/term"
 )
+
+// signalName has no answer on Windows: a process there is terminated with a
+// status rather than signalled, so the wait carries no signal to name. The
+// empty string is the honest result, not a placeholder.
+func signalName(err error) string {
+	return ""
+}
+
+// ownsTerminal reports whether f is a terminal this process may touch. Windows
+// has no process groups in this sense and no SIGTTIN, so there is nothing to
+// be in the foreground of: being a terminal is the whole of the question.
+func ownsTerminal(f *os.File) bool {
+	return f != nil && term.IsTerminal(int(f.Fd()))
+}
 
 // setupTerminalResize polls for terminal size changes on Windows
 // Windows doesn't have SIGWINCH signals like Unix, so we poll for terminal size changes

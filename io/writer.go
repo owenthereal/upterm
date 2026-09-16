@@ -9,32 +9,114 @@ import (
 	"sync"
 )
 
+// DefaultReplayBytes bounds the replay ring handed to a joining writer.
+//
+// It must stay well under DefaultGuestBufferSize: Append replays into a joining
+// writer before attaching it, so a ring at or above a guest's sink size would
+// overflow that guest with its own replay and drop it at the door.
+const DefaultReplayBytes = 256 << 10
+
+// ringChunkSize is the size a replay chunk is grown to before another is
+// started, which is what bounds the ring's chunk count as well as its bytes.
+//
+// A chunk is only closed once the next write no longer fits in it, so any two
+// adjacent closed chunks hold more than ringChunkSize bytes between them:
+// that caps the queue at 2*max/ringChunkSize + 2 chunks, the two being the
+// partially trimmed head and the still-growing tail. A stream of one-byte
+// writes, which is the case that motivated this, packs them full and reaches
+// only max/ringChunkSize + 1.
+const ringChunkSize = 4096
+
 type buffer struct {
 	mu sync.Mutex
 
 	queue [][]byte
-	size  int
+	max   int // cap in bytes
+	size  int // bytes currently held
+
+	// onEvict is handed every byte that leaves the ring, in stream order.
+	// What it feeds is state the replay can no longer reconstruct from the
+	// ring itself; see NewMultiWriter.
+	onEvict func([]byte)
 }
 
+// Append copies p into the ring and hands whatever that pushed out to
+// onEvict, in stream order, before returning.
 func (c *buffer) Append(p []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// A buffer built with a non-positive size keeps nothing; without this the
-	// trim below slices an empty queue and panics.
-	if c.size <= 0 {
+	evicted := c.push(p)
+	if c.onEvict == nil {
 		return
 	}
 
-	// remove leading elements until there is room
-	for len(c.queue) >= c.size {
-		c.queue = c.queue[1:]
+	// Called outside c.mu: what onEvict feeds is not this type's to lock, and
+	// a callback under a lock invites one. Order is still the stream's, since
+	// Append is only ever reached under the fan-out's writeMu. The slices
+	// handed over are read before this returns and not retained, so the ones
+	// that alias p are safe.
+	for _, e := range evicted {
+		c.onEvict(e)
+	}
+}
+
+// push does Append's bookkeeping and returns the evicted bytes for it to
+// deliver.
+func (c *buffer) push(p []byte) [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.max <= 0 {
+		// Nothing is kept, so everything handed over has already left.
+		return [][]byte{p}
 	}
 
-	pp := make([]byte, len(p))
-	copy(pp, p)
+	var evicted [][]byte
 
-	c.queue = append(c.queue, pp)
+	// A single write larger than the ring keeps only its tail. Everything
+	// queued is older than the prefix being dropped, so it leaves first.
+	if len(p) > c.max {
+		evicted = append(evicted, c.queue...)
+		evicted = append(evicted, p[:len(p)-c.max])
+		c.queue = c.queue[:0]
+		c.size = 0
+		p = p[len(p)-c.max:]
+	}
+
+	// Grow the tail chunk in place where p fits in it, so a producer writing a
+	// byte at a time does not get a chunk per byte. Only the spare capacity
+	// past the tail's length is written, and that is never part of a slice
+	// Data has already handed out: the ring only ever appends after what it
+	// has already returned, and only ever trims in front of it.
+	if tail := len(c.queue) - 1; len(p) < ringChunkSize && tail >= 0 &&
+		len(c.queue[tail])+len(p) <= ringChunkSize &&
+		cap(c.queue[tail])-len(c.queue[tail]) >= len(p) {
+		c.queue[tail] = append(c.queue[tail], p...)
+	} else {
+		// A write of ringChunkSize or more gets a chunk of its own; a smaller
+		// one gets room to be grown into.
+		chunk := make([]byte, len(p), max(len(p), ringChunkSize))
+		copy(chunk, p)
+		c.queue = append(c.queue, chunk)
+	}
+	c.size += len(p)
+
+	// Trim from the front, re-slicing the oldest chunk rather than dropping it
+	// when it is larger than the excess, so the ring holds exactly max bytes
+	// rather than the largest prefix of whole chunks that fits.
+	for c.size > c.max {
+		excess := c.size - c.max
+		head := c.queue[0]
+		if len(head) > excess {
+			evicted = append(evicted, head[:excess])
+			c.queue[0] = head[excess:]
+			c.size -= excess
+			break
+		}
+		evicted = append(evicted, head)
+		c.queue = c.queue[1:]
+		c.size -= len(head)
+	}
+
+	return evicted
 }
 
 func (c *buffer) Data() [][]byte {
@@ -42,16 +124,40 @@ func (c *buffer) Data() [][]byte {
 	defer c.mu.Unlock()
 
 	// Length, not capacity, was the bug: this returned len(queue) nil entries
-	// followed by the real ones, so every newly attached writer was handed that
-	// many zero-length writes before its replay.
+	// followed by the real ones.
 	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
 }
 
-func NewMultiWriter(bufferSize int, writers ...io.Writer) *MultiWriter {
+// bufferWriter adapts the replay ring to io.Writer so a filter can sit in
+// front of it.
+type bufferWriter struct{ b *buffer }
+
+func (w bufferWriter) Write(p []byte) (int, error) {
+	w.b.Append(p)
+	return len(p), nil
+}
+
+// NewMultiWriter returns a fan-out whose replay ring holds the most recent
+// replayBytes bytes of output.
+func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
+	b := &buffer{max: replayBytes}
+	modes := NewModeTracker()
+
+	// The tracker watches what leaves the ring, not what enters it. Append
+	// replays the snapshot ahead of the ring's bytes, so the state it
+	// describes has to be the state as of the ring's first byte, with the
+	// ring itself carrying everything after. Fed at the entrance it described
+	// the state after the ring, and any mode set inside the ring window was
+	// applied twice: once by the snapshot, far too early, and again by the
+	// replay.
+	b.onEvict = func(p []byte) { _, _ = modes.Write(p) }
+
 	return &MultiWriter{
 		writers: writers,
-		buffer:  &buffer{size: bufferSize},
+		buffer:  b,
+		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
+		modes:   modes,
 	}
 }
 
@@ -86,6 +192,18 @@ type MultiWriter struct {
 
 	buffer *buffer
 
+	// replay is the producer-side path into the ring. Terminal queries are
+	// stripped here rather than on the way out: a query that was live an hour
+	// ago is not live now, and answering it on replay feeds a reply to whatever
+	// the command is doing today. Stateful across writes; only touched under
+	// writeMu.
+	replay *TerminalQueryFilter
+
+	// modes records terminal state the ring loses once it scrolls out, so a
+	// joining writer can be restored to it before the replay. It is fed by
+	// the ring's evictions rather than by Write; see NewMultiWriter.
+	modes *ModeTracker
+
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
@@ -118,8 +236,29 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	}
 
 	for _, w := range writers {
+		// The snapshot describes the terminal as of the ring's first byte,
+		// so it has to go immediately in front of the ring and nowhere else:
+		// it can end mid-sequence, where the ring's own first bytes are the
+		// rest of that sequence.
+		if snap := t.modes.Snapshot(); len(snap) > 0 {
+			if _, err := w.Write(snap); err != nil {
+				return err
+			}
+		}
 		for _, d := range t.buffer.Data() {
 			if _, err := w.Write(d); err != nil {
+				return err
+			}
+		}
+
+		// A partial escape sequence the filter is still holding is live output,
+		// not history: it is not in the ring yet, so the loop above never sees
+		// it. A joiner that misses it would see only the tail once the
+		// remainder arrives live, which is garbage on its terminal. Replaying
+		// the lead-in lets the joiner's own filter (or terminal) see the
+		// sequence whole.
+		if pending := t.replay.Pending(); len(pending) > 0 {
+			if _, err := w.Write(pending); err != nil {
 				return err
 			}
 		}
@@ -203,14 +342,16 @@ func (t *MultiWriter) Remove(writers ...io.Writer) {
 // Writers that buffer are what keep this serial loop honest: each attached
 // guest is an AsyncWriter, so its Write is a copy and a signal rather than SSH
 // I/O, and a guest that cannot keep up overflows and is dropped instead of
-// pacing everyone else. The host's own stdout is attached unwrapped and so is
-// written inline here, which is the one place back-pressure belongs: the pty
-// should not run ahead of the terminal that owns it.
+// pacing everyone else. The host's own stdout is attached unwrapped only when
+// it is a terminal, which is the one place back-pressure belongs: the pty
+// should not run ahead of the screen that owns it. A non-terminal stdout is
+// wrapped, because a pipe nobody drains would otherwise block here with
+// writeMu held and wedge the whole session.
 func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
-	t.buffer.Append(p)
+	_, _ = t.replay.Write(p)
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))

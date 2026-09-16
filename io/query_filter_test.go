@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTerminalQueryFilter(t *testing.T) {
@@ -209,6 +210,99 @@ func TestTerminalQueryFilter_PreservesNonQueryOSC(t *testing.T) {
 	}
 }
 
+// An ESC inside an OSC ends the string whatever follows it; only a backslash
+// makes it the ST that ends it cleanly. The filter used to keep swallowing
+// content across the ESC, so an unterminated title followed by a cursor
+// position request reached every joiner whole -- and every joiner's terminal
+// answered the request into the shared pty, which is the one thing this filter
+// exists to prevent.
+func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []byte
+		expected []byte
+	}{
+		{
+			name:     "ESC not followed by backslash ends the OSC, and the query after it is filtered",
+			input:    []byte("\x1b]0;t\x1b[6n\x07"),
+			expected: []byte("\x1b]0;t\x07"),
+		},
+		{
+			name:     "ESC followed by backslash is still ST",
+			input:    []byte("\x1b]0;t\x1b\\"),
+			expected: []byte("\x1b]0;t\x1b\\"),
+		},
+		{
+			name:     "the same inside an OSC colour query",
+			input:    []byte("\x1b]11;?\x1b[6n\x07"),
+			expected: []byte("\x1b]11;?\x07"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			n, err := filter.Write(tt.input)
+			require.NoError(t, err)
+			require.Equal(t, len(tt.input), n)
+			require.Equal(t, tt.expected, buf.Bytes())
+		})
+	}
+}
+
+// "ESC ] 0 ; BEL" is how a shell clears its title, and an empty payload ends
+// at its terminator like any other. The filter took the byte after the ";" as
+// the payload's first byte whatever it was, so the BEL never closed the string
+// and whatever the command printed next was held -- up to the content bound
+// -- until another BEL or an ESC came along: a prompt that cleared its title
+// stalled every joiner until the bound filled or a later escape sequence let
+// the text through. "ESC ] 0 ; ESC \" went the same way, with the ESC as
+// content and the ST never seen as one.
+func TestTerminalQueryFilter_EmptyOSCEndsAtItsTerminator(t *testing.T) {
+	tests := []struct {
+		name     string
+		writes   [][]byte
+		expected []byte
+	}{
+		{
+			name:     "BEL ends it, and the text after it in the same write goes out with it",
+			writes:   [][]byte{[]byte("\x1b]0;\x07hello")},
+			expected: []byte("\x1b]0;\x07hello"),
+		},
+		{
+			name:     "BEL ends it, and a later write is not held behind it",
+			writes:   [][]byte{[]byte("\x1b]0;\x07"), []byte("hello")},
+			expected: []byte("\x1b]0;\x07hello"),
+		},
+		{
+			name:     "ST ends it",
+			writes:   [][]byte{[]byte("\x1b]0;\x1b\\hello")},
+			expected: []byte("\x1b]0;\x1b\\hello"),
+		},
+		{
+			name:     "a ? after the ; still passes through whole",
+			writes:   [][]byte{[]byte("\x1b]0;?\x07hello")},
+			expected: []byte("\x1b]0;?\x07hello"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			for _, w := range tt.writes {
+				n, err := filter.Write(w)
+				require.NoError(t, err)
+				require.Equal(t, len(w), n)
+			}
+			require.Equal(t, tt.expected, buf.Bytes())
+		})
+	}
+}
+
 func TestTerminalQueryFilter_SplitWrites(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -309,6 +403,71 @@ func TestTerminalQueryFilter_TertiaryDeviceAttributes(t *testing.T) {
 			assert.NoError(err)
 			assert.Equal(len(tt.input), n)
 			assert.Equal(tt.expected, buf.Bytes())
+		})
+	}
+}
+
+// The OSC number guard only tripped once oscCmd passed 99, and a run of zeros
+// never raises it, so "ESC ]" followed by zeros accumulated forever: the bytes
+// were held out of the replay ring and handed whole to every joining writer.
+func TestTerminalQueryFilter_OSCNumberIsBounded(t *testing.T) {
+	var buf bytes.Buffer
+	filter := NewTerminalQueryFilter(&buf)
+
+	input := append([]byte("\x1b]"), bytes.Repeat([]byte("0"), 2048)...)
+	for i, b := range input {
+		n, err := filter.Write([]byte{b})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		require.LessOrEqual(t, len(filter.Pending()), 9, "after byte %d", i)
+	}
+
+	// None of it is a query, so all of it reaches the writer.
+	require.Equal(t, string(input), buf.String())
+}
+
+// Pending is replayed to every joiner ahead of the ring, so whatever the
+// filter is holding has to stay small whatever the stream does.
+func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
+	const runLength = 2048
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "CSI parameters",
+			input: append([]byte("\x1b["), bytes.Repeat([]byte("1;"), runLength)...),
+		},
+		{
+			name:  "OSC content",
+			input: append([]byte("\x1b]0;"), bytes.Repeat([]byte("x"), runLength)...),
+		},
+		{
+			name:  "OSC content of escapes",
+			input: append([]byte("\x1b]0;"), bytes.Repeat([]byte{0x1b}, runLength)...),
+		},
+		{
+			name:  "OSC query",
+			input: append([]byte("\x1b]11;?"), bytes.Repeat([]byte("?"), runLength)...),
+		},
+		{
+			name:  "OSC number",
+			input: append([]byte("\x1b]"), bytes.Repeat([]byte("0"), runLength)...),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			filter := NewTerminalQueryFilter(&buf)
+
+			for i, b := range tt.input {
+				_, err := filter.Write([]byte{b})
+				require.NoError(t, err)
+				require.LessOrEqual(t, len(filter.Pending()), maxPendingBytes,
+					"after byte %d", i)
+			}
 		})
 	}
 }

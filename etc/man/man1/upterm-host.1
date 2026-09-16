@@ -57,6 +57,10 @@ containing client public keys.
 	Specify a file containing known keys for remote hosts (required).
 
 .PP
+\fB--name\fP=""
+	Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.
+
+.PP
 \fB--no-sftp\fP[=false]
 	Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
 
@@ -69,6 +73,10 @@ containing client public keys.
 	HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.
 
 .PP
+\fB--pty-size\fP=""
+	Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.
+
+.PP
 \fB-r\fP, \fB--read-only\fP[=false]
 	Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
 
@@ -79,6 +87,10 @@ containing client public keys.
 .PP
 \fB--skip-host-key-check\fP[=false]
 	Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
+
+.PP
+\fB--term\fP=""
+	Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when TERM is unset or dumb.
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS

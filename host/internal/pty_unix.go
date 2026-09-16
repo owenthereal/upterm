@@ -9,29 +9,26 @@ import (
 	"syscall"
 
 	ptylib "github.com/creack/pty"
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
-func startPty(c *exec.Cmd, stdin *os.File) (PTY, error) {
-	// Create PTY with kernel defaults first
-	f, err := ptylib.Start(c)
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+	if !size.Valid() {
+		size = termsize.Default
+	}
+
+	// StartWithSize, not Start-then-Setsize: a child can read its window size
+	// before a follow-up ioctl lands, and a full-screen program that does so
+	// draws its first frame at the kernel default.
+	f, err := ptylib.StartWithSize(c, &ptylib.Winsize{
+		Rows: uint16(size.Rows),
+		Cols: uint16(size.Cols),
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Set the initial size from stdin if available
-	if stdin != nil {
-		h, w, err := getPtysize(stdin)
-		if err == nil && w > 0 && h > 0 {
-			// Set the PTY size before returning
-			// Ignore error - process is already running, will use kernel defaults if this fails
-			_ = ptylib.Setsize(f, &ptylib.Winsize{
-				Rows: uint16(h),
-				Cols: uint16(w),
-			})
-		}
-	}
-
-	return wrapPty(f, c), nil
+	return wrapPty(f, c, pinned), nil
 }
 
 // Linux kernel return EIO when attempting to read from a master pseudo
@@ -49,8 +46,8 @@ func getPtysize(f *os.File) (h, w int, err error) {
 	return ptylib.Getsize(f)
 }
 
-func wrapPty(f *os.File, cmd *exec.Cmd) *pty {
-	return &pty{File: f, cmd: cmd}
+func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
+	return &pty{File: f, cmd: cmd, pinned: pinned}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -60,7 +57,8 @@ func wrapPty(f *os.File, cmd *exec.Cmd) *pty {
 // * https://travis-ci.org/owenthereal/upterm/jobs/632458125
 type pty struct {
 	*os.File
-	cmd *exec.Cmd // Process started with this PTY
+	cmd    *exec.Cmd // Process started with this PTY
+	pinned bool
 	sync.RWMutex
 }
 
@@ -68,11 +66,16 @@ func (pty *pty) Setsize(h, w int) error {
 	pty.RLock()
 	defer pty.RUnlock()
 
-	size := &ptylib.Winsize{
-		Rows: uint16(h),
-		Cols: uint16(w),
+	// --pty-size promises the geometry will not move. Every resize in the
+	// process funnels through here — the host's SIGWINCH handler and a guest's
+	// window-change request both reach it via event.go — so this is the only
+	// place the promise has to be kept. Reporting success is deliberate: a
+	// client asking to resize a pinned session has done nothing wrong.
+	if pty.pinned {
+		return nil
 	}
-	return ptylib.Setsize(pty.File, size)
+
+	return ptylib.Setsize(pty.File, &ptylib.Winsize{Rows: uint16(h), Cols: uint16(w)})
 }
 
 func (pty *pty) Read(p []byte) (n int, err error) {
