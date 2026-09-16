@@ -235,7 +235,7 @@ func (c *command) Run() error {
 			// change while the command runs: ^Z then bg, or a shell that moved
 			// on, leaves the host in the background of a terminal somebody
 			// else is now using. SIGTTOU is ignored for the reasons in
-			// host_unix.go, so nothing would stop this tcsetattr from
+			// signal_unix.go, so nothing would stop this tcsetattr from
 			// succeeding — it would write this session's stale termios over
 			// theirs, and the usual symptom is a shell that has lost its echo.
 			//

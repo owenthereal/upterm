@@ -22,20 +22,14 @@ import (
 // replaces run.SignalHandler: the flag has to be set before the group unwinds,
 // and a handler that only cancels cannot do that.
 //
-// It also changes process-wide state that outlives the session: SIGPIPE is
-// converted to EPIPE, and SIGTTIN and SIGTTOU are ignored, for the rest of the
-// process's life and are never restored. An embedder that calls Host.Run
-// in-process inherits all three, and so does everything else in the same
-// process — a library of its own that reads a background terminal would find
-// the read returning EIO instead of the caller being stopped. Nothing here can
-// scope any of it: the dispositions are per process, and restoring them at the
-// end of a session would reopen both holes for any other session still
-// running.
+// The process-wide dispositions — SIGPIPE converted, SIGTTIN and SIGTTOU
+// ignored — are InstallSignalPolicy's, which this calls; see there for why
+// they outlive the session and are never restored.
 func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *atomic.Bool) {
 	// Run has already done this by the time it gets here, and the Once makes
-	// saying so again free. It is repeated because this function, not Run, is
-	// where the host takes over process-wide signal state: a future caller
-	// that assembles its own group would otherwise inherit half the policy.
+	// saying so again free. It is repeated so that the policy is a property
+	// of setting up a host's signals rather than of Run: a future caller that
+	// assembles its own group would otherwise get none of it.
 	InstallSignalPolicy()
 
 	{
@@ -72,15 +66,4 @@ func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *at
 			close(stop)
 		})
 	}
-
-	// SIG_IGN, not a handler. A backgrounded process reading its controlling
-	// terminal is sent SIGTTIN, and the default disposition stops it — so
-	// `upterm host … &` would suspend. With a handler installed the read
-	// returns EINTR and Go retries, which spins. Ignored, it returns EIO, which
-	// the stdin actor above now survives. SIGTTOU is the same story for writes.
-	//
-	// Ignoring SIGTTOU also means a background tcsetattr would succeed, which
-	// is why command.Run checks foreground ownership before touching terminal
-	// modes at all.
-	signal.Ignore(syscall.SIGTTIN, syscall.SIGTTOU)
 }

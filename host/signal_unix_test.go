@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,4 +98,46 @@ func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 	require.Equal(t, 7, exitErr.ExitCode(),
 		"a host whose stdout reader closed must reach its own exit, not die of SIGPIPE; stderr: %s", stderr.String())
 	require.Contains(t, stderr.String(), "SURVIVED")
+}
+
+// Test_InstallSignalPolicy_IgnoresTheJobControlStops covers the other two
+// dispositions the policy owns. SIGTTIN and SIGTTOU used to be ignored at the
+// end of setupSignalHandler, which Run reaches only after the reverse tunnel
+// is up, the version warning is printed and SessionCreatedCallback has written
+// the banner. `upterm host --accept … &` from a terminal with `stty tostop`
+// set was sent SIGTTOU by the first of those writes and stopped before the
+// ignore existed; the prompting host-key callback's read of stdin was sent
+// SIGTTIN the same way. InstallSignalPolicy is Run's first act, so the ignores
+// have to be its doing and nothing else's.
+//
+// A child, for the same reason as above: the dispositions are process-wide,
+// and by the time this runs another test in the package has already called
+// setupSignalHandler, so an in-process check would pass whatever
+// InstallSignalPolicy did. The child's os/signal bookkeeping starts clear
+// whatever disposition it inherited across exec -- signal.Ignored reports
+// what this process asked for, not what the kernel holds -- so the check
+// before the call pins that, and only a signal.Ignore inside the child can
+// satisfy the checks after it.
+func Test_InstallSignalPolicy_IgnoresTheJobControlStops(t *testing.T) {
+	if os.Getenv("UPTERM_HOST_SIGNAL_POLICY_CHILD") == "1" {
+		require.False(t, signal.Ignored(syscall.SIGTTIN) || signal.Ignored(syscall.SIGTTOU),
+			"the child must start with nothing ignored on its own account")
+
+		InstallSignalPolicy()
+
+		require.True(t, signal.Ignored(syscall.SIGTTIN), "InstallSignalPolicy alone must ignore SIGTTIN")
+		require.True(t, signal.Ignored(syscall.SIGTTOU), "InstallSignalPolicy alone must ignore SIGTTOU")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), childTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=Test_InstallSignalPolicy_IgnoresTheJobControlStops")
+	cmd.Env = append(os.Environ(), "UPTERM_HOST_SIGNAL_POLICY_CHILD=1")
+
+	// The child's exit status is this one test's verdict: the filter runs
+	// nothing else there, and a require failure in the child fails its binary.
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "child output:\n%s", out)
 }
