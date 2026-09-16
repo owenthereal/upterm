@@ -140,13 +140,19 @@ Host a session from a script or CI step with nothing attached to its terminal. `
 upterm host --accept --name build-shell --pty-size 132x43 -- bash &
 ```
 
+In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Add it first, or pass `--skip-host-key-check` to accept an unknown key on the first connection:
+
+```console
+mkdir -p ~/.ssh && ssh-keyscan uptermd.upterm.dev >> ~/.ssh/known_hosts
+```
+
 Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
 
 ```console
 upterm session info build-shell -o json
 ```
 
-The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — whose connection details need `upterm session info` run in that environment, where its admin socket lives. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
+The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — reached through the admin socket path its record carries. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
 
 ### File Transfer (SFTP/SCP)
 
