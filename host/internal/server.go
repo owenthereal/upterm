@@ -108,7 +108,10 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 	release()
 }
 
-func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
+// ServeWithContext runs the session: the hosted command, the guest door on
+// guest, and — when host is not nil — the host door on host, for clients that
+// are already on this machine.
+func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
@@ -158,29 +161,35 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			cmdCancel()
 		})
 	}
+	// Both doors share this: the session ends for one reason, and the guest
+	// actor's interrupt is what decides when sessions are released.
+	sessCtx, cancel := context.WithCancel(sessionContext(ctx))
+	sh := sessionHandler{
+		forceCommand:          s.ForceCommand,
+		commandEnv:            s.CommandEnv,
+		ptmx:                  ptmx,
+		eventEmmiter:          s.EventEmitter,
+		writers:               writers,
+		keepAliveDuration:     s.KeepAliveDuration,
+		ctx:                   sessCtx,
+		logger:                s.Logger,
+		readonly:              s.ReadOnly,
+		sftpPermissionChecker: s.SFTPPermissionChecker,
+		kind:                  kindGuest,
+		cmdDone:               cmdDone,
+		commandResult:         cmd.Result,
+	}
+
+	var ss []gssh.Signer
+	for _, signer := range s.Signers {
+		ss = append(ss, signer)
+	}
+
 	{
-		sessCtx, cancel := context.WithCancel(sessionContext(ctx))
-		sh := sessionHandler{
-			forceCommand:          s.ForceCommand,
-			commandEnv:            s.CommandEnv,
-			ptmx:                  ptmx,
-			eventEmmiter:          s.EventEmitter,
-			writers:               writers,
-			keepAliveDuration:     s.KeepAliveDuration,
-			ctx:                   sessCtx,
-			logger:                s.Logger,
-			readonly:              s.ReadOnly,
-			sftpPermissionChecker: s.SFTPPermissionChecker,
-		}
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
 			EventEmmiter:   s.EventEmitter,
 			Logger:         s.Logger,
-		}
-
-		var ss []gssh.Signer
-		for _, signer := range s.Signers {
-			ss = append(ss, signer)
 		}
 
 		// Set up subsystem handlers (SFTP)
@@ -222,7 +231,7 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			},
 		}
 		g.Add(func() error {
-			err := server.Serve(l)
+			err := server.Serve(guest)
 
 			// A tunnel that goes away takes the guests with it and nothing
 			// else. Returning here would end the run.Group — which interrupts
@@ -251,6 +260,52 @@ func (s *Server) ServeWithContext(ctx context.Context, l net.Listener) error {
 			// SSH connection open after its channel closed would hang the host
 			// forever, and the deferred ReverseTunnel.Close would never run.
 			_ = server.Shutdown(sessCtx)
+		})
+	}
+	if host != nil {
+		// The same session state under the other door's policy. A local client
+		// is the host: --force-command would mean the host could never reach
+		// its own command, --read-only would lock the operator out of their own
+		// terminal, and there is no SFTP to serve to a client that already has
+		// the filesystem.
+		hostSH := sh
+		hostSH.kind = kindHost
+		hostSH.readonly = false
+		hostSH.forceCommand = nil
+		hostSH.sftpPermissionChecker = nil
+
+		hostServer := gssh.Server{
+			HostSigners:      ss,
+			Handler:          hostSH.HandleSession,
+			Version:          upterm.HostSSHServerVersion,
+			PublicKeyHandler: (&hostPublicKeyHandler{}).HandlePublicKey,
+			ChannelHandlers:  map[string]gssh.ChannelHandler{"session": rawSessionHandler},
+			ConnectionFailedCallback: func(conn net.Conn, err error) {
+				s.Logger.Error("attach connection failed", "error", err)
+			},
+		}
+		g.Add(func() error {
+			err := hostServer.Serve(host)
+			// The attach socket failing is not the session failing: the
+			// command and its guests carry on, and the operator can no longer
+			// attach locally until the session is restarted. Park.
+			if !errors.Is(err, gssh.ErrServerClosed) {
+				s.Logger.Warn("attach socket stopped serving; command continues", "error", err)
+			}
+			<-sessCtx.Done()
+			return nil
+		}, func(err error) {
+			// All this has to do is close the listener: sessions are released
+			// by sessCtx's cancellation, which the guest actor's interrupt
+			// performs, and it runs first because run.Group calls interrupts
+			// in the order the actors were added. The bound is this one's own
+			// rather than sessCtx, so that registration order — which decides
+			// whether sessCtx is already cancelled here — can never turn a
+			// Shutdown that waits on live connections into a deadlock.
+			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+			defer cancelShutdown()
+			_ = hostServer.Shutdown(shutdownCtx)
+			_ = host.Close()
 		})
 	}
 
@@ -328,6 +383,24 @@ func drainForceCommandOutput(logger *slog.Logger, output *activityReader, draine
 	}
 }
 
+// clientKind is which door a session came in by. Policy is a property of the
+// door: what --force-command, --read-only, SFTP and the query filter do to a
+// session depends on it, and HandleSession is otherwise the same code.
+type clientKind int
+
+const (
+	kindGuest clientKind = iota
+	kindHost
+)
+
+// serverConn returns the SSH connection under a session, or nil when the
+// context carries none (a test's fake session). charm stores it under
+// ContextKeyConn once the handshake has completed.
+func serverConn(sess gssh.Session) *ssh.ServerConn {
+	c, _ := sess.Context().Value(gssh.ContextKeyConn).(*ssh.ServerConn)
+	return c
+}
+
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
 	EventEmmiter   *emitter.Emitter
@@ -360,6 +433,19 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 	return false
 }
 
+// hostPublicKeyHandler admits any key on the host door. Authentication there
+// is the ability to open the socket, bound the way the admin socket is: no
+// chmod, because the 0700 session directory is the boundary — and the key
+// only names the client.
+//
+// Naming it is HandleSession's job, not this one's: a connection that
+// authenticates and never opens a session has not joined anything.
+type hostPublicKeyHandler struct{}
+
+func (h *hostPublicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
+	return true
+}
+
 type sessionHandler struct {
 	forceCommand      []string
 	commandEnv        []string
@@ -370,6 +456,14 @@ type sessionHandler struct {
 	ctx               context.Context
 	logger            *slog.Logger
 	readonly          bool
+	kind              clientKind
+
+	// cmdDone closes when the hosted command's Run has returned, and
+	// commandResult reports how it ended. A shared-pty client whose session
+	// ends because the command exited is closed with the command's status,
+	// which is what makes `upterm attach`'s exit status mean something.
+	cmdDone       <-chan struct{}
+	commandResult func() CommandResult
 
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
@@ -379,8 +473,22 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 
+	// A guest's join is announced by its authentication, where the certificate
+	// that describes it is. The host door has neither: a key that only names
+	// the client, and a connection that may open no session at all. Announced
+	// there, a local process that connects and leaves would be a client that
+	// joined and never left — a phantom in the repo that nothing removes.
+	// Announced here, it pairs with the left event deferred above.
+	if h.kind == kindHost {
+		emitHostClientJoinEvent(h.eventEmmiter, sessionID, sess.Context().ClientVersion(), sess.PublicKey())
+	}
+
 	ptyReq, winCh, isPty := sess.Pty()
-	if !isPty {
+	// A local client may be a viewer: a backgrounded host that displays the
+	// session without owning a terminal. It gets no window-change channel,
+	// which the loop below is content with. A guest still needs a pty, because
+	// a guest with no terminal has nothing to show the session on.
+	if !isPty && h.kind == kindGuest {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
 		_ = sess.Exit(1)
 		// Exit closes the channel. Without returning, the rest of the handler
@@ -443,7 +551,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// started yet.
 	guestOutput := io.Writer(sess)
 
-	if len(h.forceCommand) > 0 {
+	if h.kind == kindGuest && len(h.forceCommand) > 0 {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
@@ -503,12 +611,21 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// resumable, so dropping bytes out of the middle would leave a corrupted
 		// screen it could not detect, while a closed session it can simply
 		// rejoin. See owenthereal/upterm#524.
+		conn := serverConn(sess)
 		onDrop := func(err error) {
 			if errors.Is(err, uio.ErrOverflow) {
 				h.logger.Warn("dropping guest: too far behind to keep up with output",
 					"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
 			} else {
 				h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+			}
+			// A guest's channel is closed and uptermd's watchdog collects the
+			// rest. There is no watchdog on a unix socket, so a local client
+			// is disconnected outright: closing the connection is what ends
+			// mux.loop and releases a drain goroutine parked in the write.
+			if h.kind == kindHost && conn != nil {
+				_ = conn.Close()
+				return
 			}
 			// Closing the channel is what makes the drop real: it fails the
 			// blocked write, and it fails the stdin copy below, so run.Group
@@ -534,6 +651,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			_ = sink.Close()
 		}()
 
+		// The pty's geometry follows the local terminal as it did when the
+		// host owned it directly: announce the size the client arrived with,
+		// rather than waiting for a resize that a terminal nobody touches
+		// never sends.
+		if h.kind == kindHost && isPty {
+			terminalEventEmitter{h.eventEmmiter}.TerminalWindowChanged(sessionID, ptmx, ptyReq.Window.Width, ptyReq.Window.Height)
+		}
+
 		guestOutput = sink
 	}
 
@@ -556,8 +681,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	}
 
-	// if a readonly session has been requested, don't connect stdin
-	if h.readonly {
+	// if a readonly session has been requested, don't connect stdin. --read-only
+	// is about what guests may do; the host is not a guest of its own session.
+	if h.kind == kindGuest && h.readonly {
 		// write to client to notify them that they have connected to a read-only session
 		_, _ = io.WriteString(guestOutput, "\r\n=== Attached to read-only session ===\r\n\r\n")
 
@@ -584,11 +710,29 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 	runErr := g.Run()
 
+	commandDone := false
+	if h.cmdDone != nil {
+		select {
+		case <-h.cmdDone:
+			commandDone = true
+		default:
+		}
+	}
+
 	switch {
 	case cmdExited:
 		// A forced command ran and terminated under its own control. Its
 		// status is the session's, whichever actor unblocked run.Group first.
 		_ = sess.Exit(cmdCode)
+	case commandDone && h.commandResult != nil:
+		// The session ended because the command did. Its status is the
+		// client's; a command that was signalled rather than exited has none
+		// to give, and 1 is what this client has always been told then.
+		if res := h.commandResult(); res.Exited {
+			_ = sess.Exit(res.Code)
+		} else {
+			_ = sess.Exit(1)
+		}
 	case runErr != nil:
 		_ = sess.Exit(1)
 	default:

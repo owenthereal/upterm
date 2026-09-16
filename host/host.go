@@ -619,7 +619,7 @@ func (c *Host) Run(ctx context.Context) error {
 			},
 		}
 		g.Add(func() error {
-			return sshServer.ServeWithContext(ctx, rt.Listener())
+			return sshServer.ServeWithContext(ctx, rt.Listener(), nil)
 		}, func(err error) {
 			cancel()
 		})

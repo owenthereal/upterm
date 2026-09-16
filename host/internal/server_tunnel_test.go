@@ -98,7 +98,7 @@ func Test_Server_TunnelLossDoesNotKillCommand(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- s.ServeWithContext(ctx, ln) }()
+	go func() { done <- s.ServeWithContext(ctx, ln, nil) }()
 
 	awaitLine("READY")
 	require.NoError(t, ln.Close())
@@ -161,7 +161,7 @@ func Test_Server_CommandExitDoesNotReportTunnelLoss(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- s.ServeWithContext(ctx, ln) }()
+	go func() { done <- s.ServeWithContext(ctx, ln, nil) }()
 
 	awaitLine("READY")
 

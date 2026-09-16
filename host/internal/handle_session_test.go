@@ -39,6 +39,7 @@ func TestHandleSessionDoesNotBlockOnAStalledReadOnlyGuest(t *testing.T) {
 	}
 
 	h := &sessionHandler{
+		kind:              kindGuest,
 		readonly:          true,
 		writers:           writers,
 		eventEmmiter:      emitter.New(1),
