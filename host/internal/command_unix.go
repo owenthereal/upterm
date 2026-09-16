@@ -12,8 +12,7 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
-	"golang.org/x/sys/unix"
-	"golang.org/x/term"
+	"github.com/owenthereal/upterm/internal/tty"
 )
 
 // signalName names the signal that killed a command, given the error from
@@ -34,20 +33,8 @@ func signalName(err error) string {
 
 // ownsTerminal reports whether f is a terminal this process is in the
 // foreground of.
-//
-// Reading or reconfiguring a terminal we are not in the foreground of is what
-// SIGTTIN and SIGTTOU exist to prevent, and since we ignore both, nothing else
-// would stop us: `upterm host … &` would put the foreground shell's terminal
-// into raw mode and then race it for input.
 func ownsTerminal(f *os.File) bool {
-	if f == nil || !term.IsTerminal(int(f.Fd())) {
-		return false
-	}
-	pgrp, err := tcgetpgrp(int(f.Fd()))
-	if err != nil {
-		return false
-	}
-	return pgrp == unix.Getpgrp()
+	return tty.Owned(f)
 }
 
 // setupTerminalResize sets up terminal resize handling for Unix systems using SIGWINCH

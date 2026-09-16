@@ -9,7 +9,7 @@ import (
 
 	"github.com/oklog/run"
 	"github.com/olebedev/emitter"
-	"golang.org/x/term"
+	"github.com/owenthereal/upterm/internal/tty"
 )
 
 // signalName has no answer on Windows: a process there is terminated with a
@@ -19,11 +19,9 @@ func signalName(err error) string {
 	return ""
 }
 
-// ownsTerminal reports whether f is a terminal this process may touch. Windows
-// has no process groups in this sense and no SIGTTIN, so there is nothing to
-// be in the foreground of: being a terminal is the whole of the question.
+// ownsTerminal reports whether f is a terminal this process may touch.
 func ownsTerminal(f *os.File) bool {
-	return f != nil && term.IsTerminal(int(f.Fd()))
+	return tty.Owned(f)
 }
 
 // setupTerminalResize polls for terminal size changes on Windows
