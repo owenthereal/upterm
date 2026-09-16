@@ -28,6 +28,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 // UserDiscardedError represents a user's intentional choice to discard the session
@@ -344,17 +345,36 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	return result
 }
 
+// confirmationTerminalError says whether the confirmation prompt could be
+// answered on this stdin and stdout, so that shareRunE can refuse before a
+// name is claimed or a tunnel raised.
+//
+// The prompt is a Bubble Tea program: it draws on stdout and reads the answer
+// from stdin, so both have to be terminals. Looking at stdout alone let
+// `upterm host </dev/null` through to claim its name, establish the reverse
+// tunnel and start the prompt before finding there was nothing to read the
+// answer from. With --accept there is no prompt and nothing to check.
+func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
+	if accept {
+		return nil
+	}
+	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
+		return nil
+	}
+	return errors.New("interactive confirmation requires a terminal on stdin and stdout")
+}
+
 func shareRunE(c *cobra.Command, args []string) error {
-	// Early TTY check: if interactive confirmation is needed but no TTY is available, fail fast
-	// before making any network connections. This provides clear feedback and avoids orphan sessions.
-	if !flagAccept && !tui.IsTTY() {
+	// Refuse before anything is claimed or connected: a session that reaches
+	// the prompt and cannot be answered is an orphan holding a name.
+	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
 		c.SilenceUsage = true
 		c.SilenceErrors = true
-		fmt.Fprintln(os.Stderr, "Error: interactive confirmation requires a terminal (TTY)")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "To run in non-interactive environments (CI, scripts, etc.), use --accept:")
 		fmt.Fprintln(os.Stderr, "  upterm host --accept [command]")
-		return SilentError{Err: errors.New("no TTY available")}
+		return SilentError{Err: err}
 	}
 
 	proxyURL, err := parseProxyURL(flagProxy)
