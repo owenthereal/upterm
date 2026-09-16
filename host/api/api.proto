@@ -32,6 +32,14 @@ message Client {
   string version = 2;
   string addr = 3;
   string public_key_fingerprint = 4;
+  // Which door the client came in by. GUEST is zero so a reader built before
+  // this field existed sees every client as a guest, which is what they were.
+  Kind kind = 5;
+
+  enum Kind {
+    GUEST = 0;
+    HOST = 1;
+  }
 }
 
 message Identifier {

@@ -620,6 +620,21 @@ func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *
 		Version:              auth.ClientVersion,
 		Addr:                 auth.RemoteAddr,
 		PublicKeyFingerprint: utils.FingerprintSHA256(pk),
+		Kind:                 api.Client_GUEST,
+	}
+	eventEmmiter.Emit(upterm.EventClientJoined, c)
+}
+
+// emitHostClientJoinEvent announces a client on the host door. There is no
+// certificate to parse: the socket's permissions are the authentication and
+// the key only names the client, so the fields come from the connection.
+func emitHostClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID, version string, pk ssh.PublicKey) {
+	c := &api.Client{
+		Id:                   sessionID,
+		Version:              version,
+		Addr:                 "local",
+		PublicKeyFingerprint: utils.FingerprintSHA256(pk),
+		Kind:                 api.Client_HOST,
 	}
 	eventEmmiter.Emit(upterm.EventClientJoined, c)
 }
