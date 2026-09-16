@@ -31,8 +31,17 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
-	return newHostKeyCallback(stdin, stdout, knownHostsFilename, false)
+// NewPromptingHostKeyCallback creates a host key callback that asks before
+// accepting an unknown host key.
+//
+// Set proxied when the transport passes through an HTTP proxy. x/crypto hands
+// the callback the socket's peer, which is then the proxy rather than the
+// server, and presenting it as the server's address is misleading — OpenSSH
+// prints a placeholder in the same situation. It is display-only: knownhosts
+// matches on the hostname argument and appendHostLine stores only that, so
+// verification is unaffected either way.
+func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, proxied bool) (ssh.HostKeyCallback, error) {
+	return newHostKeyCallback(stdin, stdout, knownHostsFilename, false, proxied)
 }
 
 // NewAutoAcceptingHostKeyCallback creates a host key callback that automatically
@@ -40,11 +49,14 @@ func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFi
 // This is similar to SSH's StrictHostKeyChecking=accept-new behavior:
 // - Unknown host keys are automatically accepted and added to known_hosts
 // - Known host keys are still validated (preventing MITM attacks on subsequent connections)
+//
+// It takes no proxied flag: its message names the hostname and the key type,
+// never the peer address.
 func NewAutoAcceptingHostKeyCallback(stdout io.Writer, knownHostsFilename string) (ssh.HostKeyCallback, error) {
-	return newHostKeyCallback(nil, stdout, knownHostsFilename, true)
+	return newHostKeyCallback(nil, stdout, knownHostsFilename, true, false)
 }
 
-func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, autoAccept bool) (ssh.HostKeyCallback, error) {
+func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, autoAccept, proxied bool) (ssh.HostKeyCallback, error) {
 	if err := createFileIfNotExist(knownHostsFilename); err != nil {
 		return nil, err
 	}
@@ -60,6 +72,7 @@ func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename st
 		file:            knownHostsFilename,
 		HostKeyCallback: cb,
 		autoAccept:      autoAccept,
+		proxied:         proxied,
 	}
 
 	return hkcb.checkHostKey, nil
@@ -88,8 +101,17 @@ type hostKeyCallback struct {
 	stdout     io.Writer
 	file       string
 	autoAccept bool
+	// proxied suppresses the peer address in the prompt, because through a
+	// tunnel it belongs to the proxy rather than to the server.
+	proxied bool
 	ssh.HostKeyCallback
 }
+
+// noHostIP stands in for the server's address when the connection was
+// tunnelled. OpenSSH prints "<no hostip for proxy command>" in the same
+// situation; upterm reaches it through --proxy or the proxy environment rather
+// than a ProxyCommand.
+const noHostIP = "<no hostip for proxy>"
 
 func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
@@ -125,7 +147,11 @@ func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr
 	}
 
 	fp := utils.FingerprintSHA256(key)
-	_, _ = fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), knownhosts.Normalize(remote.String()))
+	hostIP := knownhosts.Normalize(remote.String())
+	if cb.proxied {
+		hostIP = noHostIP
+	}
+	_, _ = fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), hostIP)
 	_, _ = fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
 	_, _ = fmt.Fprintf(cb.stdout, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
 

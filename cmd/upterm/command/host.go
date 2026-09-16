@@ -450,7 +450,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if flagSkipHostKeyCheck {
 		hkcb, err = host.NewAutoAcceptingHostKeyCallback(os.Stdout, flagKnownHostsFilename)
 	} else {
-		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename)
+		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename, connectionIsProxied(flagServer, proxyURL))
 	}
 	if err != nil {
 		return err

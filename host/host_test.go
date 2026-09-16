@@ -33,7 +33,7 @@ func Test_hostKeyCallbackKnowHostsFileNotExist(t *testing.T) {
 	}
 	fp := utils.FingerprintSHA256(pk)
 
-	cb, err := NewPromptingHostKeyCallback(stdin, stdout, knownHostsFile)
+	cb, err := NewPromptingHostKeyCallback(stdin, stdout, knownHostsFile, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func Test_hostKeyCallback(t *testing.T) {
 	require.NoError(t, err)
 	fp := utils.FingerprintSHA256(pk)
 
-	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile)
+	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile, false)
 	require.NoError(t, err)
 
 	// 127.0.0.1:22 is not in known_hosts
@@ -108,7 +108,7 @@ func Test_hostKeyCallbackStdinReadError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
 			stdout := new(bytes.Buffer)
-			cb, err := NewPromptingHostKeyCallback(tt.stdin, stdout, knownHostsFile)
+			cb, err := NewPromptingHostKeyCallback(tt.stdin, stdout, knownHostsFile, false)
 			require.NoError(t, err)
 
 			err = cb("127.0.0.1:22", addr, pk)
@@ -154,7 +154,7 @@ func Test_hostKeyCallbackRedirectedStdin(t *testing.T) {
 				}
 
 				knownHostsFile := filepath.Join(t.TempDir(), "known_hosts")
-				cb, err := NewPromptingHostKeyCallback(stdin, io.Discard, knownHostsFile)
+				cb, err := NewPromptingHostKeyCallback(stdin, io.Discard, knownHostsFile, false)
 				require.NoError(t, err)
 				err = cb("127.0.0.1:22", addr, pk)
 				if answer == "yes" {
@@ -184,7 +184,7 @@ func Test_hostKeyCallbackIPv6WithPort(t *testing.T) {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
 	require.NoError(t, err)
 
-	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile)
+	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile, false)
 	require.NoError(t, err)
 
 	// Test IPv6 address with port - even though remote is IPv6,
@@ -230,7 +230,7 @@ func Test_hostKeyCallbackIPv6WithCertAuthority(t *testing.T) {
 		SignatureKey: pk,
 	}
 
-	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile)
+	cb, err := NewPromptingHostKeyCallback(stdin, stdout, tempfile, false)
 	require.NoError(t, err)
 
 	// Test IPv6 address with certificate authority
@@ -357,4 +357,48 @@ func Test_autoAcceptingHostKeyCallbackValidatesKnownKeys(t *testing.T) {
 	err = cb("127.0.0.1:22", addr, pk)
 	assert.Error(t, err, "should reject mismatched key to prevent MITM")
 	assert.Contains(t, err.Error(), "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED")
+}
+
+// Through a tunnel, x/crypto hands the callback the proxy's address. Printing
+// it as the server's is misleading — OpenSSH prints a placeholder instead —
+// and it is display-only: what gets written to known_hosts is the hostname
+// either way.
+func Test_hostKeyCallback_proxiedPromptHidesTheProxyAddress(t *testing.T) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
+	require.NoError(t, err)
+
+	// The peer here is the proxy, not uptermd.
+	proxyAddr := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 3128}
+
+	for _, tc := range []struct {
+		name        string
+		proxied     bool
+		wantShown   string
+		wantMissing string
+	}{
+		{name: "direct", proxied: false, wantShown: "10.0.0.5"},
+		{name: "proxied", proxied: true, wantShown: noHostIP, wantMissing: "10.0.0.5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+			stdin := bytes.NewBufferString("yes\n")
+			stdout := bytes.NewBuffer(nil)
+
+			cb, err := NewPromptingHostKeyCallback(stdin, stdout, knownHosts, tc.proxied)
+			require.NoError(t, err)
+			require.NoError(t, cb("uptermd.upterm.dev:22", proxyAddr, pk))
+
+			assert.Contains(t, stdout.String(), "uptermd.upterm.dev", "the server is always named")
+			assert.Contains(t, stdout.String(), tc.wantShown)
+			if tc.wantMissing != "" {
+				assert.NotContains(t, stdout.String(), tc.wantMissing)
+			}
+
+			// Either way the stored line is the hostname, never the peer.
+			stored, err := os.ReadFile(knownHosts)
+			require.NoError(t, err)
+			assert.Contains(t, string(stored), "uptermd.upterm.dev")
+			assert.NotContains(t, string(stored), "10.0.0.5")
+		})
+	}
 }
