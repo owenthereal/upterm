@@ -41,9 +41,16 @@ func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *at
 		// this actor stayed parked in the select and run.Group, which waits for
 		// every actor, hung forever.
 		//
-		// Returning through this branch must not set shutdownRequested: it
-		// fires on every ordinary teardown, which is precisely what the flag
-		// exists to distinguish from.
+		// Returning through this branch must not set shutdownRequested by
+		// itself: it fires on every ordinary teardown, which is precisely
+		// what the flag exists to distinguish from. But it is not proof that
+		// nobody asked. When the parent context is cancelled, another actor
+		// derived from it can return first, and the interrupt then closes
+		// stop while ctx.Done() is ready too; the select picks between them
+		// at random, so half the time the cancellation would be lost here
+		// and the command killed during teardown recorded as an ordinary
+		// exit. The parent context is asked once more before returning,
+		// without blocking, because it is the only thing that counts.
 		stop := make(chan struct{})
 		g.Add(func() error {
 			select {
@@ -54,6 +61,11 @@ func setupSignalHandler(g *run.Group, ctx context.Context, shutdownRequested *at
 				shutdownRequested.Store(true)
 				return ctx.Err()
 			case <-stop:
+				select {
+				case <-ctx.Done():
+					shutdownRequested.Store(true)
+				default:
+				}
 				return nil
 			}
 		}, func(err error) {
