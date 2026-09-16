@@ -98,10 +98,25 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 						HostKeyCallback:   ssh.FixedHostKey(good[0].PublicKey()),
 						KeepAliveDuration: time.Hour,
 					}
+					// Counted per subtest rather than totalled at the end: a
+					// total makes every nested -run filter fail, because the
+					// parent still expects the tunnels of the leaves the
+					// filter excluded.
+					before := proxy.tunnels.Load()
 					response, err := tunnel.Establish(t.Context())
 					if tunnel.Client != nil {
 						t.Cleanup(func() { _ = tunnel.Client.Close() })
 					}
+
+					// Proxied endpoints go through the proxy in every case,
+					// the rejected ones included: authentication happens after
+					// the tunnel is up. Direct endpoints must not touch it.
+					want := before
+					if endpoint.proxy != nil {
+						want++
+					}
+					require.EqualValues(t, want, proxy.tunnels.Load())
+
 					if !tc.allowed {
 						require.Error(t, err)
 						if len(tc.signers) == 0 {
@@ -118,7 +133,4 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 			}
 		})
 	}
-	// Every case of the two proxied endpoints went through the proxy, the
-	// rejected ones included: authentication happens after the tunnel is up.
-	require.EqualValues(t, 2*len(authCases), proxy.tunnels.Load())
 }

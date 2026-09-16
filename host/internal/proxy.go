@@ -54,7 +54,15 @@ func dialHTTPProxy(ctx context.Context, proxyURL *url.URL, addr string) (net.Con
 		_ = conn.Close()
 		return nil, fmt.Errorf("error reading CONNECT response from proxy %s: %w", proxyAddr, err)
 	}
-	_ = resp.Body.Close()
+	// resp.Body deliberately goes unclosed: it reads through br, which is
+	// attached to the live socket, so closing it drains however many bytes the
+	// response announced. RFC 9110 §9.3.6 requires a client to ignore
+	// Content-Length and Transfer-Encoding on a 2xx answer to CONNECT — those
+	// bytes are the tunnel's, and on a server-speaks-first protocol they are
+	// the SSH banner. On a refusal, draining a Content-Length the proxy never
+	// finishes sending blocks until the deadline instead of failing now.
+	// Neither net/http's dialConn nor gorilla's dialer closes it either; the
+	// non-200 branch below closes conn, which is what actually frees it.
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
 		return nil, fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
