@@ -51,6 +51,38 @@ func Test_Result_SurvivesRelease(t *testing.T) {
 	require.Equal(t, ReasonUnknown, got.Reason)
 }
 
+// Test_Record_CarriesTheAdminSocketPath pins that the record says where the
+// session's admin socket is, from the first publish on. The record is the one
+// thing a reader under another runtime root shares with the session, and the
+// path is fixed the moment the name is claimed, so there is no publish that
+// could honestly leave it out.
+func Test_Record_CarriesTheAdminSocketPath(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+
+	rec, err := ReadRecord(stateRoot, "demo")
+	require.NoError(t, err)
+	require.Equal(t, d.AdminSocket(), rec.AdminSocket,
+		"the path is known when the name is claimed and published with it")
+
+	// Forced the way Name and LaunchID are, not merely defaulted: a publisher
+	// that writes a wrong path is overruled, not just one that blanks it, so
+	// no Update can leave a reader with any path but the one the claim made.
+	// A set-when-empty implementation would pass the blank case and fail
+	// this one.
+	require.NoError(t, d.Update(func(r *Record) {
+		r.AdminSocket = "/nowhere/sessions/demo/admin.sock"
+		r.Status = StatusReady
+	}))
+	rec, err = ReadRecord(stateRoot, "demo")
+	require.NoError(t, err)
+	require.Equal(t, d.AdminSocket(), rec.AdminSocket)
+	require.Equal(t, StatusReady, rec.Status, "the rest of the update still lands")
+}
+
 func Test_Record_PublicationIsAtomicUnderAConcurrentReader(t *testing.T) {
 	// Review fix: the previous version of this test had no concurrent reader,
 	// so its name promised more than it checked. Atomicity is only observable

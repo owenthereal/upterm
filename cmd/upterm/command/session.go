@@ -72,7 +72,7 @@ func list() *cobra.Command {
 
 Which sessions exist comes from the records in: %s
 A session started under a different XDG_RUNTIME_DIR is listed from there too,
-though only a socket under this one can add its connection details.
+and reached through the admin socket path its record carries.
 
 Sockets are stored in: %s
 
@@ -233,10 +233,15 @@ func fetchSessionDetail(ctx context.Context, adminSocket string) (tui.SessionDet
 // A caller must not have to parse two formats depending on whether it happened
 // to ask while the process was still running.
 type sessionInfo struct {
-	Name             string   `json:"name"`
-	LaunchID         string   `json:"launchId,omitempty"`
-	Status           string   `json:"status"`
-	SessionID        string   `json:"sessionId,omitempty"`
+	Name      string `json:"name"`
+	LaunchID  string `json:"launchId,omitempty"`
+	Status    string `json:"status"`
+	SessionID string `json:"sessionId,omitempty"`
+	// AdminSocket is the socket the session bound when it claimed its name,
+	// published while the name is held and taken from the record: see
+	// adminSocketFor. Absent once the session has ended, since there is
+	// nothing left to dial.
+	AdminSocket      string   `json:"adminSocket,omitempty"`
 	Command          string   `json:"command,omitempty"`
 	ForceCommand     string   `json:"forceCommand,omitempty"`
 	SSHCommand       string   `json:"sshCommand,omitempty"`
@@ -288,6 +293,15 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// ready or disconnected.
 	info := infoFromRecord(rec, rec.Status)
 
+	// Where the session answers, published for the caller and used for the
+	// dial below. The record's path, not one built under this process's
+	// runtime root: see adminSocketFor.
+	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	if err != nil {
+		return sessionInfo{}, nil, err
+	}
+	info.AdminSocket = adminSocket
+
 	// A record with no session ID has not reached ready, so there is nothing
 	// for the admin socket to confirm and nothing to compare against. Skip it
 	// rather than issue a query whose generation check could not succeed.
@@ -305,11 +319,6 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// again.
 	if rec.Status != sessiondir.StatusReady {
 		return info, nil, nil
-	}
-
-	adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
-	if err != nil {
-		return sessionInfo{}, nil, err
 	}
 
 	// Live detail is a second observation, taken outside the lock, so it is
@@ -357,6 +366,29 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	return info
 }
 
+// adminSocketFor returns the admin socket a held record's session answers at.
+//
+// The record carries the path because the session claimed its name under a
+// runtime root the reader need not share: on Linux a cron job, a systemd unit
+// and an ssh login each get their own XDG_RUNTIME_DIR, and all of them publish
+// into the one state root the reader finds the record through. A path built
+// under the reader's root named a socket nothing was bound at, so every such
+// session was found and then shown as if nothing answered for it. The path
+// under runtimeRoot survives for one case: a record written before records
+// carried the field.
+//
+// The recorded path is dialled as it is. What makes that safe is what makes
+// the record worth reading at all: the results root and every directory
+// under it are created 0700, the record 0600, and only a record whose lock
+// is held is dialled — so whoever could plant a path here could already
+// plant the whole record.
+func adminSocketFor(runtimeRoot string, rec *sessiondir.Record) (string, error) {
+	if rec.AdminSocket != "" {
+		return rec.AdminSocket, nil
+	}
+	return sessiondir.AdminSocketPath(runtimeRoot, rec.Name)
+}
+
 func infoRunE(c *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing session name")
@@ -391,10 +423,6 @@ func infoRunE(c *cobra.Command, args []string) error {
 	// session that was asked about even if another one has since taken the
 	// name.
 	if live != nil {
-		adminSocket, err := sessiondir.AdminSocketPath(utils.UptermRuntimeDir(), name)
-		if err != nil {
-			return err
-		}
 		if detail, err := buildSessionDetail(live); err == nil {
 			detail.Name = name
 			// The status the lookup settled on, which the socket's answer does
@@ -402,7 +430,10 @@ func infoRunE(c *cobra.Command, args []string) error {
 			// ended, and `session list` prints one for every row, so the one
 			// case that answered "how is NAME?" without saying was this one.
 			detail.Status = info.Status
-			detail.AdminSocket = adminSocket
+			// And the path the lookup dialled, which is the record's. Built
+			// again here it would come out under this process's runtime root
+			// and disagree with the socket that just answered.
+			detail.AdminSocket = info.AdminSocket
 			tui.PrintSessionDetail(detail)
 			return nil
 		}
@@ -500,7 +531,7 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 }
 
 // listSessions reports every session that exists right now, carrying whatever
-// live detail this runtime root can confirm.
+// live detail its socket can confirm.
 //
 // Which sessions exist comes from the records, not from the sessions directory
 // under runtimeRoot: a name is held on both roots, and only the results root is
@@ -510,8 +541,8 @@ func outputSession(ctx context.Context, adminSocket, format string) error {
 // up — from the one command that is supposed to show a user their sessions,
 // while `session info NAME` answered for it perfectly well.
 //
-// A socket under this runtime root refines a row; it never decides whether
-// there is one.
+// The socket a record names refines its row; it never decides whether there
+// is one.
 func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.SessionDetail, error) {
 	// Bounded on its own rather than across the whole walk, for the reason
 	// each socket query is: the registry lock and every admin socket are
@@ -578,7 +609,7 @@ func liveDetail(ctx context.Context, runtimeRoot string, rec sessiondir.Record) 
 		return tui.SessionDetail{}, false
 	}
 
-	adminSocket, err := sessiondir.AdminSocketPath(runtimeRoot, rec.Name)
+	adminSocket, err := adminSocketFor(runtimeRoot, &rec)
 	if err != nil {
 		return tui.SessionDetail{}, false
 	}

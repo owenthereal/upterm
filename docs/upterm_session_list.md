@@ -8,7 +8,7 @@ List shared sessions.
 
 Which sessions exist comes from the records in: /home/user/.local/state/upterm/results
 A session started under a different XDG_RUNTIME_DIR is listed from there too,
-though only a socket under this one can add its connection details.
+and reached through the admin socket path its record carries.
 
 Sockets are stored in: /run/user/1000/upterm/sessions
 

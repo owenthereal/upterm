@@ -43,8 +43,15 @@ const (
 // completely wrong. A single atomic rename makes that impossible instead of
 // unlikely. LaunchID is what lets a caller confirm which run it is looking at.
 type Record struct {
-	Name         string    `json:"name"`
-	LaunchID     string    `json:"launch_id"`
+	Name     string `json:"name"`
+	LaunchID string `json:"launch_id"`
+	// AdminSocket is where the session's admin socket is bound, under the
+	// runtime root it claimed its name with. A reader under another runtime
+	// root — a login shell asking about a cron job's session — shares only
+	// the record with it, and a path rebuilt under the reader's own root
+	// names a socket nothing answers at. Forced on every publish, like Name
+	// and LaunchID, so no caller can leave it out.
+	AdminSocket  string    `json:"admin_socket,omitempty"`
 	SessionID    string    `json:"session_id,omitempty"`
 	Command      []string  `json:"command,omitempty"`
 	ForceCommand []string  `json:"force_command,omitempty"`
@@ -71,6 +78,7 @@ func (d *Dir) Update(mutate func(*Record)) error {
 	mutate(&d.record)
 	d.record.Name = d.name
 	d.record.LaunchID = d.launchID
+	d.record.AdminSocket = d.AdminSocket()
 	d.record.UpdatedAt = time.Now().UTC()
 
 	return writeJSONAtomic(d.RecordPath(), d.record)

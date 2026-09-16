@@ -342,6 +342,44 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 		"the response a caller may print is the one that was validated")
 }
 
+// Test_lookup_ReachesASocketUnderAnotherRuntimeRoot is `session info`'s half
+// of the cross-root case: the record is found through the shared state root,
+// and the socket is dialled where the record says rather than under the
+// runtime root this process happens to have. Before the record carried the
+// path, a session started from cron was found and then shown as if nothing
+// answered for it.
+func Test_lookup_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "cron")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-cron"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-cron",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+
+	// The inspector's runtime root moves; the state root, and with it the
+	// record, stays where the session published it.
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got := lookupJSON(t, "cron")
+	require.Equal(t, sessiondir.StatusReady, got["status"])
+	require.NotEmpty(t, got["sshCommand"],
+		"the socket the record names answered, so the session is joinable from here too")
+	require.Equal(t, d.AdminSocket(), got["adminSocket"],
+		"and the answer says where it was reached")
+
+	_, live, err := lookup(context.Background(), "cron")
+	require.NoError(t, err)
+	require.NotNil(t, live, "the validated response is handed back for the detail view")
+}
+
 // Test_lookup_ReadyWithSocketAnsweringForAnotherSession is the case the
 // returned response exists to make safe: the name is held and the socket
 // answers, but for a different session than the record describes. There is
@@ -507,16 +545,16 @@ func Test_reapSessions_RemovesTheDirectoryOfADeadOwner(t *testing.T) {
 	require.NoError(t, err, "a live session's directory must survive a reap")
 }
 
-// Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere pins the defect a
-// runtime-root walk had: the listing enumerated the sessions directory under
-// this process's XDG_RUNTIME_DIR, so a host started under a different one —
-// which on Linux is every cron job and plenty of ssh contexts — was missing
-// from a list that `session info NAME` would happily answer for.
-func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
+// Test_listSessions_KeepsTheRecordRowWhenNobodyAnswersAtTheRecordedPath pins
+// that a held session nobody answers for still gets a row. The record says
+// where its admin socket is, and nothing is bound there. The listing walks the
+// records, so the row exists; the dial goes to the recorded path and finds
+// nothing, so the row is the record's and no more.
+func Test_listSessions_KeepsTheRecordRowWhenNobodyAnswersAtTheRecordedPath(t *testing.T) {
 	setupSessionRoots(t)
 
-	// Claimed with no admin socket bound, which is every session whose socket
-	// this environment cannot see.
+	// Claimed with no admin socket bound: the record carries the path, and
+	// nobody is listening at it.
 	d, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
 		RuntimeRoot:  utils.UptermRuntimeDir(),
 		StateRoot:    utils.UptermStateDir(),
@@ -536,8 +574,9 @@ func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 		r.SessionID = "sid-x"
 	}))
 
-	// Listed from a runtime root that has never seen the name. Nothing binds
-	// a socket under this one, so its length does not matter.
+	// Listed from a runtime root that has never seen the name. The dial does
+	// not go under this root — it goes where the record says — so nothing
+	// about it matters, its length included.
 	otherRuntime := t.TempDir()
 
 	sessions, err := listSessions(context.Background(), otherRuntime, utils.UptermStateDir())
@@ -554,9 +593,45 @@ func Test_listSessions_ShowsALiveSessionWhoseSocketIsElsewhere(t *testing.T) {
 		"and no connect string may be invented for a session this environment cannot reach")
 }
 
+// Test_listSessions_ReachesASocketUnderAnotherRuntimeRoot is the case the
+// record's admin_socket exists for: a host claimed under one XDG_RUNTIME_DIR —
+// cron's, a systemd unit's, an ssh login's — and listed from another. The
+// socket is bound where the record says, so the row carries live detail; a
+// listing that built the path under its own runtime root found nothing there
+// and showed the session as record-only.
+func Test_listSessions_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "cron")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-cron"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-cron",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+
+	otherRuntime := t.TempDir()
+
+	sessions, err := listSessions(context.Background(), otherRuntime, utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "cron", sessions[0].Name)
+	require.Equal(t, sessiondir.StatusReady, sessions[0].Status)
+	require.Equal(t, "ssh://127.0.0.1:2222", sessions[0].Host,
+		"the socket the record names answered, whatever runtime root the listing runs under")
+	require.NotEmpty(t, sessions[0].SSHCommand)
+	require.Equal(t, d.AdminSocket(), sessions[0].AdminSocket,
+		"the row says where the session was reached, which is the recorded path")
+}
+
 // Test_listSessions_PrefersTheLiveAnswerWhenTheSessionIDMatches covers the
 // other half of the same listing: the record is the floor, not the ceiling.
-// Where a socket under this runtime root answers for the session the record
+// Where the socket the record names answers for the session the record
 // describes, the row carries what only a running session knows — and where it
 // answers for a different one, none of that may reach the row, because a
 // successor's connect string printed under this session's name sends whoever
@@ -680,17 +755,18 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 	}{
 		{
 			// No session ID yet, so there is nothing to ask the admin socket
-			// and no connect string to hand back.
+			// and no connect string to hand back. The socket's path is
+			// published all the same: the name is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason"},
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "adminSocket"},
 		},
 		{
 			// The one state whose socket answers, and the only one that can
 			// carry a connect string.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "sshCommand"},
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "sshCommand", "adminSocket"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -698,11 +774,12 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// the live detail may not, since only ready is joinable.
 			name:  "disconnected",
 			build: buildDisconnected,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId"},
+			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "adminSocket"},
 		},
 		{
 			// The only state that can carry an exit code, because it is the
-			// only one whose command reported one.
+			// only one whose command reported one — and, like every ended
+			// session, no socket path, since there is nothing left to dial.
 			name:  "exited",
 			build: buildEndedAfterExit,
 			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "exitCode"},
