@@ -27,6 +27,14 @@ var localClientDrainTimeout = 5 * time.Second
 // socket in the shape lt describes, holding raw mode and following resizes
 // for exactly as long as the attachment lasts.
 func attachLocalTerminal(ctx context.Context, socket string, lt localTerminal, escape byte, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
+	return attachLocalTerminalWith(ctx, socket, lt, escape, stdin, stdout, tty.Owned, logger)
+}
+
+// attachLocalTerminalWith is attachLocalTerminal with the foreground-ownership
+// predicate injected, for the reason withRawTerminal takes one: job control
+// cannot be staged in-process, so a test that needs raw mode to be restored
+// has no way to be the foreground of the pty pair it opened.
+func attachLocalTerminalWith(ctx context.Context, socket string, lt localTerminal, escape byte, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -49,7 +57,7 @@ func attachLocalTerminal(ctx context.Context, socket string, lt localTerminal, e
 		res attach.Result
 		err error
 	)
-	if rawErr := withRawTerminal(stdin, tty.Owned, func() error {
+	if rawErr := withRawTerminal(stdin, owned, func() error {
 		res, err = client.Run(ctx)
 		return nil
 	}); rawErr != nil {

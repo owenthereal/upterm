@@ -241,11 +241,21 @@ type sessionInfo struct {
 	// published while the name is held and taken from the record: see
 	// adminSocketFor. Absent once the session has ended, since there is
 	// nothing left to dial.
-	AdminSocket      string   `json:"adminSocket,omitempty"`
-	Command          string   `json:"command,omitempty"`
-	ForceCommand     string   `json:"forceCommand,omitempty"`
-	SSHCommand       string   `json:"sshCommand,omitempty"`
-	ClientCount      int      `json:"clientCount"`
+	AdminSocket string `json:"adminSocket,omitempty"`
+	// AttachSocket is where `upterm attach` dials to put a terminal on this
+	// session, taken from the record for the reason AdminSocket is: the
+	// session bound it under the runtime root it claimed its name with, which
+	// a reader need not share. Absent once the session has ended.
+	AttachSocket string `json:"attachSocket,omitempty"`
+	Command      string `json:"command,omitempty"`
+	ForceCommand string `json:"forceCommand,omitempty"`
+	SSHCommand   string `json:"sshCommand,omitempty"`
+	ClientCount  int    `json:"clientCount"`
+	// GuestCount is ClientCount without the session's own terminals. A script
+	// waiting for someone to join has to watch this one: the host's terminal
+	// is a client of the session, so clientCount is at least one from the
+	// moment a foreground session starts.
+	GuestCount       int      `json:"guestCount"`
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
@@ -301,6 +311,11 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		return sessionInfo{}, nil, err
 	}
 	info.AdminSocket = adminSocket
+	// And where a terminal would attach, which is the record's path for the
+	// same reason. Empty for a record written before attach sockets existed,
+	// and omitted from the JSON rather than published as a path nothing is
+	// bound at.
+	info.AttachSocket = rec.AttachSocket
 
 	// A record with no session ID has not reached ready, so there is nothing
 	// for the admin socket to confirm and nothing to compare against. Skip it
@@ -363,7 +378,22 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	info.SSHCommand = detail.SSHCommand
 	info.ConnectedClients = detail.ConnectedClients
 	info.ClientCount = len(detail.ConnectedClients)
+	info.GuestCount = countGuests(sess.ConnectedClients)
 	return info
+}
+
+// countGuests counts the clients that came in by the guest door. The response
+// is what it is counted from rather than the rendered descriptions: the kind
+// is a field, and reading it back out of a formatted line would make a
+// display change a counting change.
+func countGuests(clients []*api.Client) int {
+	var n int
+	for _, c := range clients {
+		if c.Kind != api.Client_HOST {
+			n++
+		}
+	}
+	return n
 }
 
 // adminSocketFor returns the admin socket a held record's session answers at.
@@ -703,7 +733,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 
 	var clients []string
 	for _, c := range sess.ConnectedClients {
-		clients = append(clients, clientDesc(c.Addr, c.Version, c.PublicKeyFingerprint))
+		clients = append(clients, clientDesc(c.Kind, c.Addr, c.Version, c.PublicKeyFingerprint))
 	}
 
 	// Build SFTP/SCP commands if enabled and using direct SSH
@@ -741,11 +771,25 @@ func quoteShellArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func clientDesc(addr, clientVer, fingerprint string) string {
+// clientDesc describes one connected client, starting with the door it came
+// in by. A session's own terminals are clients of it now, and a line that did
+// not say which was which would show an operator a stranger where their own
+// window is.
+func clientDesc(kind api.Client_Kind, addr, clientVer, fingerprint string) string {
 	if shouldHideClientIP() {
 		addr = "[redacted]"
 	}
-	return fmt.Sprintf("%s %s %s", addr, clientVer, fingerprint)
+	return fmt.Sprintf("%s %s %s %s", kindName(kind), addr, clientVer, fingerprint)
+}
+
+// kindName names a client's door for a person reading it. The proto's own
+// String() shouts (GUEST, HOST) and is a wire detail; these are the words the
+// README and `session info` use.
+func kindName(k api.Client_Kind) string {
+	if k == api.Client_HOST {
+		return "host"
+	}
+	return "guest"
 }
 
 func currentAdminSocketFile() string {

@@ -154,6 +154,14 @@ upterm session info build-shell -o json
 
 The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — reached through the admin socket path its record carries. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
 
+Put a terminal on a session started without one, from any shell on the same machine:
+
+```console
+upterm attach build-shell
+```
+
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and `guestCount` in the JSON is what a script should watch.
+
 ### File Transfer (SFTP/SCP)
 
 Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:

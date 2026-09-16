@@ -41,6 +41,22 @@ func TestBuildSessionDetailSSH(t *testing.T) {
 	}
 }
 
+// Test_clientDesc_NamesTheDoorEachClientCameInBy pins the prefix every client
+// description now carries. The host's own terminal is a client of the session,
+// and a listing that did not say so would show an operator a stranger where
+// their own window is.
+//
+// The address is redacted under CI, so it is the prefix that is compared
+// rather than the whole line.
+func Test_clientDesc_NamesTheDoorEachClientCameInBy(t *testing.T) {
+	guest := clientDesc(api.Client_GUEST, "1.2.3.4:5", "SSH-2.0-x", "SHA256:abc")
+	require.Equal(t, "guest", strings.Fields(guest)[0])
+	require.Contains(t, guest, "SSH-2.0-x SHA256:abc", "and still says what it always said")
+
+	host := clientDesc(api.Client_HOST, "local", "SSH-2.0-upterm-attach", "SHA256:abc")
+	require.Equal(t, "host", strings.Fields(host)[0])
+}
+
 func TestBuildSessionDetailWebSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a POSIX shell and OpenSSH")
@@ -233,6 +249,18 @@ func buildEndedAfterKill(t *testing.T, name string) {
 	require.NoError(t, d.Release(context.Background()))
 }
 
+// writeRecordRaw publishes a record file directly, for the shapes the
+// publisher would never produce: Dir.Update forces the socket paths on every
+// write, so a record from before attach sockets existed cannot be staged
+// through it.
+func writeRecordRaw(t *testing.T, path string, rec sessiondir.Record) {
+	t.Helper()
+
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0600))
+}
+
 type stubAdminServer struct {
 	api.UnimplementedAdminServiceServer
 
@@ -342,6 +370,35 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 		"the response a caller may print is the one that was validated")
 }
 
+// Test_lookup_CountsGuestsApartFromTheHostsOwnTerminal pins what a script
+// waiting for company should watch. The host's terminal is a client of its own
+// session now, so clientCount alone answers "has anyone joined?" with "yes"
+// from the moment the session starts.
+func Test_lookup_CountsGuestsApartFromTheHostsOwnTerminal(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "counted")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-counted"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-counted",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+		ConnectedClients: []*api.Client{
+			{Addr: "local", Version: "SSH-2.0-upterm-attach", Kind: api.Client_HOST},
+			{Addr: "1.2.3.4:5", Version: "SSH-2.0-x", Kind: api.Client_GUEST},
+		},
+	})
+
+	got := lookupJSON(t, "counted")
+	require.Equal(t, float64(2), got["clientCount"], "every attachment is a client")
+	require.Equal(t, float64(1), got["guestCount"], "only one of them came in by the guest door")
+}
+
 // Test_lookup_ReachesASocketUnderAnotherRuntimeRoot is `session info`'s half
 // of the cross-root case: the record is found through the shared state root,
 // and the socket is dialled where the record says rather than under the
@@ -374,6 +431,8 @@ func Test_lookup_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
 		"the socket the record names answered, so the session is joinable from here too")
 	require.Equal(t, d.AdminSocket(), got["adminSocket"],
 		"and the answer says where it was reached")
+	require.Equal(t, d.AttachSocket(), got["attachSocket"],
+		"and where a terminal from this shell would attach, which is equally not under this root")
 
 	_, live, err := lookup(context.Background(), "cron")
 	require.NoError(t, err)
@@ -695,10 +754,7 @@ func buildAgedRecord(t *testing.T, name string, age time.Duration) string {
 	var rec sessiondir.Record
 	require.NoError(t, json.Unmarshal(raw, &rec))
 	rec.UpdatedAt = time.Now().UTC().Add(-age)
-
-	raw, err = json.Marshal(rec)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, raw, 0600))
+	writeRecordRaw(t, path, rec)
 
 	return path
 }
@@ -746,7 +802,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 
 	// Present in every state, so a caller can read them without first working
 	// out which state it got.
-	mandatory := []string{"name", "launchId", "status", "clientCount"}
+	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount"}
 
 	for _, tc := range []struct {
 		name  string
@@ -759,14 +815,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// published all the same: the name is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "adminSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "adminSocket", "attachSocket"},
 		},
 		{
 			// The one state whose socket answers, and the only one that can
 			// carry a connect string.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "sshCommand", "adminSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -774,7 +830,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// the live detail may not, since only ready is joinable.
 			name:  "disconnected",
 			build: buildDisconnected,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "adminSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "sessionId", "adminSocket", "attachSocket"},
 		},
 		{
 			// The only state that can carry an exit code, because it is the
@@ -782,14 +838,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// session, no socket path, since there is nothing left to dial.
 			name:  "exited",
 			build: buildEndedAfterExit,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "exitCode"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "exitCode"},
 		},
 		{
 			// Killed before it could publish an outcome: the same shape as a
 			// clean exit, minus the code nobody recorded.
 			name:  "killed",
 			build: buildEndedAfterKill,
-			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
