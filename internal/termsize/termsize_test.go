@@ -6,6 +6,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test_Size_Valid pins the rule every fallback in the tree rests on: a
+// half-specified size is not a size, so a caller that was handed one opens at
+// the default rather than at a zero-column pty. It used to be asked of
+// host/internal's ResolvePtySize; the rule is the type's own.
+func Test_Size_Valid(t *testing.T) {
+	for _, tc := range []struct {
+		in   Size
+		want bool
+	}{
+		{in: Size{Cols: 132, Rows: 43}, want: true},
+		{in: Default, want: true},
+		{in: Size{Cols: Max, Rows: Max}, want: true},
+		// The zero value: nothing was specified at all.
+		{in: Size{}},
+		// Half-specified, either way round.
+		{in: Size{Cols: 132}},
+		{in: Size{Rows: 43}},
+		// Negative, and past what a winsize can carry.
+		{in: Size{Cols: -1, Rows: 43}},
+		{in: Size{Cols: 132, Rows: -1}},
+		{in: Size{Cols: Max + 1, Rows: 43}},
+		{in: Size{Cols: 132, Rows: Max + 1}},
+	} {
+		require.Equal(t, tc.want, tc.in.Valid(), "size %+v", tc.in)
+	}
+}
+
 func Test_Parse(t *testing.T) {
 	for _, tc := range []struct {
 		in      string

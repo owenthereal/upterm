@@ -44,17 +44,12 @@ type Server struct {
 	AuthorizedKeys          []ssh.PublicKey
 	EventEmitter            *emitter.Emitter
 	KeepAliveDuration       time.Duration
-	Stdin                   *os.File
-	Stdout                  *os.File
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
 	PtySize                 termsize.Size
 	PinPtySize              bool
 	Term                    string
-	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
-	// This is used in tests where stdin is a pipe but we still want to forward test data.
-	ForceForwardingInputForTesting bool
 
 	// AwaitInitialClient defers starting the command until the first host
 	// client's output subscription is installed, and defers serving guests
@@ -154,12 +149,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.PtySize,
 		s.PinPtySize,
 		s.Term,
-		s.Stdin,
-		s.Stdout,
 		s.EventEmitter,
 		writers,
 		s.Logger,
-		s.ForceForwardingInputForTesting,
 	)
 	s.cmd = cmd
 

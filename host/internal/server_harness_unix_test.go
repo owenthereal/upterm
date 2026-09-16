@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,15 +26,10 @@ import (
 // never answers fails the test instead of hanging it.
 const harnessTimeout = 10 * time.Second
 
-// hostHarness runs a Server with its terminal replaced by pipes and serves
-// guests over loopback. Tests that need the real SSH server and real child
-// processes, rather than a fake Session, build on it.
+// hostHarness runs a Server that serves guests over loopback and local
+// clients over a unix socket. Tests that need the real SSH server and real
+// child processes, rather than a fake Session, build on it.
 type hostHarness struct {
-	// input is the write end of the host's stdin.
-	input *os.File
-	// stdout is the read end of the host's stdout, with a read deadline.
-	stdout *os.File
-
 	addr        string
 	hostKey     ssh.PublicKey
 	guestSigner ssh.Signer
@@ -51,20 +45,12 @@ type hostHarness struct {
 	done <-chan error
 }
 
-// startHost wires srv to pipes, a loopback listener, a host-door socket and a
+// startHost wires srv to a loopback listener, a host-door socket and a
 // throwaway host key, then serves it until the test ends. The caller sets
 // Command, ForceCommand and whatever else the test is about before passing
 // srv in.
 func startHost(t *testing.T, srv *Server) *hostHarness {
 	t.Helper()
-
-	stdin, input, err := os.Pipe()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = stdin.Close(); _ = input.Close() })
-	stdout, hostOutput, err := os.Pipe()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = stdout.Close(); _ = hostOutput.Close() })
-	require.NoError(t, stdout.SetReadDeadline(time.Now().Add(harnessTimeout)))
 
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -78,7 +64,6 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 	require.NoError(t, err)
 
 	srv.Signers = []ssh.Signer{signer}
-	srv.Stdin, srv.Stdout = stdin, hostOutput
 	srv.EventEmitter = emitter.New(1)
 	srv.KeepAliveDuration = time.Hour
 	srv.Logger = discardLogger()
@@ -107,7 +92,7 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 		}
 	})
 
-	return &hostHarness{input: input, stdout: stdout, addr: ln.Addr().String(),
+	return &hostHarness{addr: ln.Addr().String(),
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
 		hostKey: signer.PublicKey(), guestSigner: guestSigner, done: done}
 }

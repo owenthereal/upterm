@@ -5,7 +5,6 @@ package internal
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -15,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/conpty"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"golang.org/x/sys/windows"
-	"golang.org/x/term"
 )
 
 // Windows API proc handles (cached to avoid repeated lazy DLL loading)
@@ -193,12 +191,6 @@ func (p *pty) Close() error {
 		p.cpty = nil
 	}
 	return err
-}
-
-// getPtysize gets the terminal size from a file descriptor on Windows
-func getPtysize(f *os.File) (h, w int, err error) {
-	w, h, err = term.GetSize(int(f.Fd()))
-	return h, w, err
 }
 
 // Windows doesn't return EIO like Linux, so this is a no-op

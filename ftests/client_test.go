@@ -448,6 +448,24 @@ func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, want
 	return sess
 }
 
+// adminClientSessionTimeout bounds one admin query. The socket is local and
+// the server answers off an in-memory repo, so anything slower than this is a
+// host that has stopped answering rather than one that is busy.
+const adminClientSessionTimeout = 10 * time.Second
+
+// adminClientSession asks the admin socket what the session looks like right
+// now. Unlike getAndVerifySession it asserts nothing, so a caller can poll it.
+func adminClientSession(socket string) (*api.GetSessionResponse, error) {
+	adminClient, err := host.AdminClient(socket)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), adminClientSessionTimeout)
+	defer cancel()
+	return adminClient.GetSession(ctx, &api.GetSessionRequest{})
+}
+
 func checkSessionPayload(t *testing.T, sess *api.GetSessionResponse, wantHostURL, wantNodeURL string) {
 	require := require.New(t)
 	require.NotEmpty(sess.SessionId, "session ID should not be empty")

@@ -33,11 +33,11 @@ const childTimeout = 30 * time.Second
 // and before the final record was published. The conversion was installed by
 // the CLI's main, which an embedder of Host.Run never runs.
 //
-// The child is therefore an embedder: it builds a Host over the process's own
-// stdout and calls Run, and Run is what has to install the policy. Calling
+// The child is therefore an embedder: it calls Run and then writes to the
+// process's own stdout, and Run is what has to install the policy. Calling
 // setupSignalHandler directly instead would assert something narrower than
-// this test's name — Run writes to Stdout before it ever assembles the signal
-// actor, so the policy has to be in force before that, and only a call
+// this test's name — Run's callbacks write before it ever assembles the
+// signal actor, so the policy has to be in force before that, and only a call
 // through Run can show it is.
 //
 // No relay: the host dials a port nothing listens on, so Run returns from
@@ -55,7 +55,6 @@ func Test_Host_ClosedStdoutReaderDoesNotKillAnEmbedder(t *testing.T) {
 			AdminSocketFile: filepath.Join(os.TempDir(), "upterm-sigpipe-child-admin.sock"),
 			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-			Stdout:          os.Stdout,
 		}
 		if err := h.Run(context.Background()); err == nil {
 			_, _ = fmt.Fprintln(os.Stderr, "the host reached a relay that should not exist")

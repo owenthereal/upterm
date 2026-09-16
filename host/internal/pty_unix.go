@@ -45,10 +45,6 @@ func ptyError(err error) error {
 	return nil
 }
 
-func getPtysize(f *os.File) (h, w int, err error) {
-	return ptylib.Getsize(f)
-}
-
 func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
 	return &pty{File: f, cmd: cmd, pinned: pinned}
 }

@@ -26,7 +26,7 @@ import (
 //
 // Ownership is injected because job control cannot be staged in-process: a
 // pty pair opened here is the controlling terminal of no session, so the
-// real ownsTerminal answers false for it either way and the transition the
+// real tty.Owned answers false for it either way and the transition the
 // rule is about never happens.
 func Test_Command_RestoresTheTerminalOnlyWhenStillOwned(t *testing.T) {
 	for _, tc := range []struct {

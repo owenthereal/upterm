@@ -40,7 +40,11 @@ func TestServerCommandEnvironment(t *testing.T) {
 				Command: command, ForceCommand: command,
 				CommandEnv: []string{"UPTERM_ADMIN_SOCKET=" + socket},
 			})
-			got, err := bufio.NewReader(h.stdout).ReadString('\x04')
+			// A viewer on the host door: the replay carries the output the
+			// command already wrote, so what the host's own client sees is
+			// what the host used to print on its stdout.
+			_, out, _ := h.connectHost(t, nil)
+			got, err := bufio.NewReader(out).ReadString('\x04')
 			require.NoError(t, err)
 			assert.Equal(t, "SOCKET=/tmp/upterm-current.sock\nTERM=host-term\nINHERITED=inherited-ok\x04", got, "host environment")
 

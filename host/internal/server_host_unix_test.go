@@ -170,3 +170,53 @@ func TestHostDoorFailureDoesNotEndTheSession(t *testing.T) {
 	_, guestOut := h.connectGuest(t)
 	readUntil(t, guestOut, "UP")
 }
+
+// A host client leaving is not the session ending. The command keeps its pty
+// and a guest keeps its output.
+func TestHostClientLeavingDoesNotEndTheSession(t *testing.T) {
+	h := startHost(t, &Server{Command: []string{"sh", "-c",
+		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; sleep 0.5; printf 'ALIVE\n'; IFS= read -r line`}})
+	hostIn, hostOut, hostSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, hostOut, "READY")
+	_, guestOut := h.connectGuest(t)
+	readUntil(t, guestOut, "READY")
+
+	_, err := io.WriteString(hostIn, "go\n")
+	require.NoError(t, err)
+	require.NoError(t, hostSess.Close())
+
+	readUntil(t, guestOut, "ALIVE")
+	select {
+	case err := <-h.done:
+		t.Fatalf("the session ended when its host client left: %v", err)
+	default:
+	}
+}
+
+// An output-only viewer that never reads is dropped, and nothing else notices.
+//
+// 6 MB, because the drop has to be the host's doing rather than the harness's:
+// 3 MB fits inside the client's SSH channel window (2 MiB) plus the secondary
+// sink's buffer (1 MiB) and never overflows, so the viewer stayed connected
+// and only the harness's own read deadline ended the wait.
+func TestUndrainedViewerDoesNotWedgeTheSession(t *testing.T) {
+	h := startHost(t, &Server{Command: []string{"sh", "-c",
+		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c 6000000; printf 'DONE\n'; IFS= read -r line`}})
+	_, viewerOut, viewerSess := h.connectHost(t, nil)
+	readUntil(t, viewerOut, "READY")
+	// The viewer reads nothing more.
+	guestIn, guestOut := h.connectGuest(t)
+	readUntil(t, guestOut, "READY")
+	_, err := io.WriteString(guestIn, "go\n")
+	require.NoError(t, err)
+	readUntil(t, guestOut, "DONE")
+
+	waited := make(chan error, 1)
+	go func() { waited <- viewerSess.Wait() }()
+	select {
+	case err := <-waited:
+		require.Error(t, err, "the undrained viewer is disconnected, not left holding the fan-out")
+	case <-time.After(harnessTimeout):
+		t.Fatal("the undrained viewer was neither dropped nor drained")
+	}
+}

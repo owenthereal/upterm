@@ -4,7 +4,6 @@ package internal
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -22,11 +21,6 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(err, "failed to create stdout pipe")
-	defer func() { _ = stdoutr.Close() }()
-	defer func() { _ = stdoutw.Close() }()
-
 	ee := &emitter.Emitter{}
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
@@ -38,12 +32,9 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 		termsize.Size{},
 		false,
 		"",
-		os.Stdin,
-		stdoutw,
 		ee,
 		writers,
 		discardLogger(),
-		false,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -74,11 +65,6 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(err, "failed to create stdout pipe")
-	defer func() { _ = stdoutr.Close() }()
-	defer func() { _ = stdoutw.Close() }()
-
 	ee := &emitter.Emitter{}
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 
@@ -90,12 +76,9 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 		termsize.Size{},
 		false,
 		"",
-		os.Stdin,
-		stdoutw,
 		ee,
 		writers,
 		discardLogger(),
-		false,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -164,14 +147,13 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 
-	// Create a pipe to capture stdout
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(err, "failed to create stdout pipe")
-	defer func() { _ = stdoutr.Close() }()
-	defer func() { _ = stdoutw.Close() }()
-
 	ee := &emitter.Emitter{}
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+
+	// The fan-out is where the command's output goes now, so that is where a
+	// test reads it: a client of the session is what a terminal is.
+	out := &recordingWriter{}
+	require.NoError(writers.Append(out))
 
 	// Run a simple command through ConPTY
 	// Use 'cmd /c echo' which is simple and reliable on Windows
@@ -182,38 +164,17 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 		termsize.Size{},
 		false,
 		"",
-		os.Stdin, // Pass stdin so startPty can attempt to get size
-		stdoutw,
 		ee,
 		writers,
 		discardLogger(),
-		false,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	// Start the command - this will create the ConPTY
-	_, err = cmd.Start(ctx, termsize.Size{})
+	_, err := cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command with ConPTY")
-
-	// Capture output in background
-	outputCh := make(chan string, 1)
-	go func() {
-		buf := make([]byte, 1024)
-		var output []byte
-		for {
-			n, err := stdoutr.Read(buf)
-			if n > 0 {
-				output = append(output, buf[:n]...)
-			}
-			if err != nil {
-				break
-			}
-		}
-		// Always send to channel to avoid deadlock
-		outputCh <- string(output)
-	}()
 
 	// Run the command
 	errCh := make(chan error, 1)
@@ -227,15 +188,10 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 		// Command should complete successfully
 		assert.NoError(err, "command should complete successfully")
 
-		// Verify we got output through ConPTY
-		_ = stdoutw.Close()
-		select {
-		case output := <-outputCh:
-			assert.Contains(output, "ConPTY test successful", "should see command output through ConPTY")
-			t.Logf("ConPTY output: %q", output)
-		case <-time.After(500 * time.Millisecond):
-			assert.Fail("timeout waiting for output")
-		}
+		// Run flushes the fan-out before returning, so the output is here.
+		output := string(out.bytes())
+		assert.Contains(output, "ConPTY test successful", "should see command output through ConPTY")
+		t.Logf("ConPTY output: %q", output)
 	case <-time.After(2500 * time.Millisecond):
 		cancel()
 		<-errCh // Wait for goroutine to finish
@@ -260,20 +216,9 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 	t.Setenv(upterm.HostSessionNameEnvVar, "outer-session")
 	t.Setenv(upterm.HostAdminSocketEnvVar, `C:\outer\admin.sock`)
 
-	// Never written to, and never a terminal, so Run does not forward it and
-	// nothing here has to feed it.
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdinr.Close() }()
-	defer func() { _ = stdinw.Close() }()
-
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	out := &recordingWriter{}
 	require.NoError(t, writers.Append(out))
-
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	require.NoError(t, err)
-	defer func() { _ = devNull.Close() }()
 
 	// cmd expands %VAR% from the environment it was started with, which is the
 	// one under test. Each piece is its own argument so that the command line
@@ -287,13 +232,13 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 			upterm.HostAdminSocketEnvVar + `=C:\inner\admin.sock`,
 		},
 		termsize.Default, false, "",
-		stdinr, devNull, emitter.New(1), writers, testLogger(t), false,
+		emitter.New(1), writers, testLogger(t),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx, termsize.Size{})
+	_, err := cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 	require.NoError(t, cmd.Run())
 

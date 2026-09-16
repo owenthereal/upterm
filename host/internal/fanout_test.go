@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -92,15 +91,6 @@ func (d *delayedWriter) Write(p []byte) (int, error) {
 // it a barrier — and asserting *immediately after Run returns*, rather than
 // eventually, is what makes this test notice if it moves back.
 func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdinr.Close() }()
-	defer func() { _ = stdinw.Close() }()
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdoutr.Close() }()
-	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
-
 	const lastLine = "written just before exit"
 
 	var guestOut recordingWriter
@@ -115,15 +105,12 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 
 	cmd := &command{
 		logger:  discardLogger(),
-		stdin:   stdinr,
-		stdout:  stdoutw,
 		writers: writers,
 		ctx:     t.Context(),
 		ptmx: &exitedPTY{
 			pending:   [][]byte{[]byte("first chunk\r\n"), []byte(lastLine + "\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
-		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())
@@ -141,15 +128,6 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 // whose last screenful never arrived looks from the outside like output the
 // command never produced.
 func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdinr.Close() }()
-	defer func() { _ = stdinw.Close() }()
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdoutr.Close() }()
-	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
-
 	// Never released, so the flush can only end at its deadline.
 	gate := make(chan struct{})
 	defer close(gate)
@@ -168,8 +146,6 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 	var logs recordingWriter
 	cmd := &command{
 		logger:  slog.New(slog.NewTextHandler(&delayedWriter{delay: 200 * time.Millisecond, rec: &logs}, nil)),
-		stdin:   stdinr,
-		stdout:  stdoutw,
 		writers: writers,
 		ctx:     t.Context(),
 		ptmx: &exitedPTY{
@@ -177,7 +153,6 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 			readDelay: 20 * time.Millisecond,
 		},
 		flushLogTimeoutForTesting: 30 * time.Second,
-		ownsTerminal:              ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())
@@ -198,15 +173,6 @@ func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
 // process anyway — with stdout redirected and stderr on a stopped terminal,
 // which is exactly the shape of session this whole change exists for.
 func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdinr.Close() }()
-	defer func() { _ = stdinw.Close() }()
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdoutr.Close() }()
-	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
-
 	// Stuck guest, so the flush fails and there is a warning to write at all.
 	guestGate := make(chan struct{})
 	defer close(guestGate)
@@ -222,15 +188,12 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 	defer close(logGate)
 	cmd := &command{
 		logger:  slog.New(slog.NewTextHandler(&gatedWriter{gate: logGate, rec: &recordingWriter{}}, nil)),
-		stdin:   stdinr,
-		stdout:  stdoutw,
 		writers: writers,
 		ctx:     t.Context(),
 		ptmx: &exitedPTY{
 			pending:   [][]byte{[]byte("never delivered\r\n")},
 			readDelay: 20 * time.Millisecond,
 		},
-		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	done := make(chan error, 1)
@@ -260,15 +223,6 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 // it. The comparison is against a synchronous writer attached to the same
 // fan-out, which by definition has everything the fan-out accepted.
 func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdinr.Close() }()
-	defer func() { _ = stdinw.Close() }()
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(t, err)
-	defer func() { _ = stdoutr.Close() }()
-	go func() { _, _ = io.Copy(io.Discard, stdoutr) }()
-
 	var accepted recordingWriter // synchronous: the reference for what got in
 	var guestOut recordingWriter
 	guest := uio.NewAsyncWriter(&delayedWriter{delay: 200 * time.Millisecond, rec: &guestOut},
@@ -285,8 +239,6 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 	}
 	cmd := &command{
 		logger:  discardLogger(),
-		stdin:   stdinr,
-		stdout:  stdoutw,
 		writers: writers,
 		ctx:     t.Context(),
 		ptmx: &exitedPTY{
@@ -302,7 +254,6 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 			// that ends the wait while the copy is still producing.
 			readDelay: 20 * time.Millisecond,
 		},
-		ownsTerminal: ownsTerminal, // not built by newCommand, so wired by hand
 	}
 
 	require.NoError(t, cmd.Run())

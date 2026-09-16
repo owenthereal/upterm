@@ -16,6 +16,7 @@ import (
 	"github.com/gen2brain/beeep"
 	"github.com/google/shlex"
 	"github.com/hashicorp/go-multierror"
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
@@ -24,6 +25,8 @@ import (
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/internal/tty"
+	"github.com/owenthereal/upterm/internal/version"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
@@ -166,7 +169,7 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
 	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
-	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
+	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
@@ -493,8 +496,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 			},
 			ClientJoinedCallback:    clientJoinedCallback,
 			ClientLeftCallback:      clientLeftCallback,
-			Stdin:                   os.Stdin,
-			Stdout:                  os.Stdout,
 			Logger:                  logger.Logger,
 			ReadOnly:                flagReadOnly,
 			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
@@ -503,9 +504,24 @@ func shareRunE(c *cobra.Command, args []string) error {
 			Term:                    term,
 			SFTPDisabled:            flagNoSFTP,
 			SFTPPermissionChecker:   sftpPermissionChecker,
+			// The local terminal attaches before the command starts, so a
+			// command that exits at once cannot beat it to the output.
+			AwaitInitialClient: true,
+			// The daemon has no terminal; this process does.
+			VersionWarningCallback: func(r *version.CompatibilityResult) {
+				host.DisplayVersionWarning(os.Stdout, logger.Logger, r)
+			},
 		}
 
-		return h.Run(c.Context())
+		return runLocalSession(c.Context(), name, os.Stderr, logger.Logger,
+			func(ctx context.Context, onAttachSocket func(string)) error {
+				h.AttachListeningCallback = onAttachSocket
+				return h.Run(ctx)
+			},
+			func(ctx context.Context, socket string) (attach.Result, error) {
+				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, term)
+				return attachLocalTerminal(ctx, socket, lt, 0, os.Stdin, os.Stdout, logger.Logger)
+			})
 	})
 
 	// Handle user actions specially - no help menu
@@ -525,12 +541,25 @@ func shareRunE(c *cobra.Command, args []string) error {
 	return err
 }
 
+// notify raises a desktop notification. A var so a test can see what the
+// callbacks below decided to send, rather than pop a real notification on
+// whoever is running the suite.
+var notify = beeep.Notify
+
 func clientJoinedCallback(c *api.Client) {
-	_ = beeep.Notify("Upterm Client Joined", notifyBody(c), icon.Upterm)
+	// The host's own terminal is a client of the session now, and notifying
+	// the operator that they have joined their own session is noise.
+	if !shouldNotifyClient(c) {
+		return
+	}
+	_ = notify("Upterm Client Joined", notifyBody(c), icon.Upterm)
 }
 
 func clientLeftCallback(c *api.Client) {
-	_ = beeep.Notify("Upterm Client Left", notifyBody(c), icon.Upterm)
+	if !shouldNotifyClient(c) {
+		return
+	}
+	_ = notify("Upterm Client Left", notifyBody(c), icon.Upterm)
 }
 
 func notifyBody(c *api.Client) string {
