@@ -185,7 +185,9 @@ func buildReady(t *testing.T, name string) {
 }
 
 // buildDisconnected: claimed, published disconnected by the tunnel-loss path,
-// no socket answering.
+// and an admin socket that still answers — the host keeps its command and its
+// admin server running until the session ends, so the socket is as talkative
+// as a ready session's.
 func buildDisconnected(t *testing.T, name string) {
 	t.Helper()
 
@@ -195,6 +197,12 @@ func buildDisconnected(t *testing.T, name string) {
 		r.Status = sessiondir.StatusDisconnected
 		r.SessionID = "sid-2"
 	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-2",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
 }
 
 // buildEndedAfterExit: what a normal shutdown leaves — the outcome published,
@@ -411,6 +419,10 @@ func Test_infoRunE_PrintsTheSessionItValidated(t *testing.T) {
 		"the record's status belongs in the detail a live session prints too")
 }
 
+// Test_lookup_Disconnected pins that a socket answering for a disconnected
+// session does not make it joinable. The socket answers about a session; only
+// ready says its answer is one anyone can act on, and a connect string for a
+// session whose tunnel is down cannot connect.
 func Test_lookup_Disconnected(t *testing.T) {
 	setupSessionRoots(t)
 	buildDisconnected(t, "disconnected")
@@ -418,6 +430,30 @@ func Test_lookup_Disconnected(t *testing.T) {
 	got := lookupJSON(t, "disconnected")
 	require.Equal(t, sessiondir.StatusDisconnected, got["status"],
 		"a held name keeps the status its owner published")
+	require.NotContains(t, got, "sshCommand",
+		"a socket that answers for a disconnected session does not make it joinable")
+
+	_, live, err := lookup(context.Background(), "disconnected")
+	require.NoError(t, err)
+	require.Nil(t, live, "nothing the socket said may be printed as this session's live detail")
+}
+
+// Test_listSessions_KeepsADisconnectedSessionRecordOnly is the listing's half
+// of the same rule: a disconnected session's socket answers, because the host
+// keeps its admin server up until the session ends, and none of that answer
+// may become a row that says how to join it.
+func Test_listSessions_KeepsADisconnectedSessionRecordOnly(t *testing.T) {
+	setupSessionRoots(t)
+	buildDisconnected(t, "disconnected")
+
+	sessions, err := listSessions(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "disconnected", sessions[0].Name)
+	require.Equal(t, sessiondir.StatusDisconnected, sessions[0].Status)
+	require.Equal(t, "sid-2", sessions[0].SessionID)
+	require.Empty(t, sessions[0].Host, "the socket's answer is not a row anyone can act on")
+	require.Empty(t, sessions[0].SSHCommand)
 }
 
 func Test_lookup_EndedAfterNormalExit(t *testing.T) {
@@ -657,8 +693,9 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId", "sshCommand"},
 		},
 		{
-			// A session ID but no socket: the ID stays, the live detail does
-			// not appear from nowhere.
+			// A session ID and a socket that answers, because the host keeps
+			// its admin server up through a tunnel loss: the ID stays, and
+			// the live detail may not, since only ready is joinable.
 			name:  "disconnected",
 			build: buildDisconnected,
 			want:  []string{"name", "launchId", "status", "clientCount", "command", "reason", "sessionId"},

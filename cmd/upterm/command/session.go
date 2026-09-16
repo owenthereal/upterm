@@ -259,11 +259,11 @@ const statusEnded = "ended"
 // with B's ownership — and, more immediately, could dereference a nil record:
 // ReadRecord returns not-found, a claim completes, IsHeld returns true.
 //
-// The response is the one this lookup validated, and is nil unless the admin
-// socket answered and its session ID matched the record. Handing it back is
-// what stops a caller that wants the full live detail from asking again: a
-// second query returns whatever holds the name at that instant, which need
-// not be the session the first one confirmed.
+// The response is the one this lookup validated, and is nil unless the record
+// says ready, the admin socket answered and its session ID matched the record.
+// Handing it back is what stops a caller that wants the full live detail from
+// asking again: a second query returns whatever holds the name at that
+// instant, which need not be the session the first one confirmed.
 func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
@@ -292,6 +292,18 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// for the admin socket to confirm and nothing to compare against. Skip it
 	// rather than issue a query whose generation check could not succeed.
 	if rec.SessionID == "" {
+		return info, nil, nil
+	}
+
+	// The socket answers about a session, and only ready says its answer is
+	// one anyone can act on. After a tunnel loss the host keeps its command
+	// and its admin server running until the session ends — stage 1 has no
+	// way back from disconnected — so a disconnected session's socket
+	// answers as readily as a live one's, with a connect string that cannot
+	// connect. The record's view is the whole answer. A later stage that
+	// reconnects needs nothing more here: a record back at ready is dialled
+	// again.
+	if rec.Status != sessiondir.StatusReady {
 		return info, nil, nil
 	}
 
@@ -555,6 +567,14 @@ func liveDetail(ctx context.Context, runtimeRoot string, rec sessiondir.Record) 
 	// A record with no session ID has not reached ready, so there is nothing
 	// for a socket to confirm and no generation to compare against.
 	if rec.SessionID == "" {
+		return tui.SessionDetail{}, false
+	}
+
+	// And a session that has one but is not ready is not joinable, whatever
+	// its socket says: the tunnel-loss path keeps the admin server up, so a
+	// disconnected session answers with a connect string nobody can use. The
+	// same gate `session info` keeps in front of its dial.
+	if rec.Status != sessiondir.StatusReady {
 		return tui.SessionDetail{}, false
 	}
 
