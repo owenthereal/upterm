@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -397,31 +398,52 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 
 	dialErr := fmt.Errorf("ssh dial error: %w", err)
 
-	// A direct ssh:// dial that failed on a machine which defines a proxy is
-	// the shape of "egress is proxy-only". upterm does not read those
-	// variables for ssh:// servers, the same as OpenSSH, so nothing in the
-	// error connects the failure to the proxy the user knows they are behind —
-	// and in an agent sandbox, whatever reads this error is what has to work
-	// out the next move.
-	if proxyURL == nil && !isWSScheme(host.Scheme) {
+	// A direct ssh:// dial that failed to reach the host on a machine which
+	// defines a proxy is the shape of "egress is proxy-only". upterm does not
+	// read those variables for ssh:// servers, the same as OpenSSH, so nothing
+	// in the error connects the failure to the proxy the user knows they are
+	// behind — and in an agent sandbox, whatever reads this error is what has
+	// to work out the next move.
+	//
+	// Gated on the failure actually being a network one. Everything else this
+	// wraps happens after the connection succeeded — a host-key mismatch, a
+	// declined prompt, an algorithm mismatch — where a proxy cannot be the
+	// cause and the advice would trail a security warning it has nothing to do
+	// with.
+	if proxyURL == nil && !isWSScheme(host.Scheme) && isNetworkError(err) {
 		if name, copyable := proxyEnvVar(); name != "" {
 			if copyable {
+				// Exported, not merely assigned: a shell variable would not
+				// reach the retried process, and this is read after the
+				// original command has already failed.
 				return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
 					"environment for ssh:// servers, the same as OpenSSH — to go through it, "+
-					"set UPTERM_PROXY=\"$%s\" so the credentials stay out of the process "+
-					"list, or pass --proxy", dialErr, name, name)
+					"run: export UPTERM_PROXY=\"$%s\" (which keeps the credentials out of "+
+					"the process list), or pass --proxy", dialErr, name, name)
 			}
 			// Copying it would only trade this error for "only http:// proxies
 			// are supported". The ws/wss path reaches the same proxy through
 			// gorilla, which does speak socks5.
+			//
+			// The suggested server is the one already configured, with the
+			// transport changed. Naming upterm's public relay instead would
+			// silently move the session onto someone else's deployment, which
+			// is rarely what a custom --server was chosen for.
 			return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
 				"environment for ssh:// servers, the same as OpenSSH, and --proxy takes "+
 				"only http:// values — to go through this one, use a WebSocket server, "+
-				"e.g. --server wss://uptermd.upterm.dev, which does honour it", dialErr, name)
+				"e.g. --server wss://%s, which does honour it", dialErr, name, host.Hostname())
 		}
 	}
 
 	return dialErr
+}
+
+// isNetworkError reports whether err is a failure to establish or hold the
+// connection, as opposed to one the SSH exchange itself produced.
+func isNetworkError(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
 }
 
 // proxyEnvVars are the spellings net/http's ProxyFromEnvironment consults, in
@@ -433,16 +455,26 @@ var proxyEnvVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_pr
 // proxyEnvVar names the first proxy variable that is set, and reports whether
 // its value is one --proxy would take.
 //
-// Only http:// is: parseProxyURL rejects every other scheme. socks5:// is a
-// supported way to configure the environment proxy for the ws/wss path, so
-// recommending that a value be copied without checking would send a socks5://
-// user from a dial failure straight into a flag rejection. The value itself
-// stays unread beyond its scheme — it may carry credentials.
+// Advising that a value be copied without checking it sends the user from a
+// dial failure straight into a flag rejection — socks5:// is the common case,
+// since it is a supported way to configure the environment proxy for the ws
+// and wss path, but a malformed http:// URL lands the same way.
 func proxyEnvVar() (name string, copyable bool) {
 	for _, n := range proxyEnvVars {
 		if v := os.Getenv(n); v != "" {
-			return n, strings.HasPrefix(v, "http://")
+			return n, copyableProxyValue(v)
 		}
 	}
 	return "", false
+}
+
+// copyableProxyValue reports whether v would survive --proxy.
+//
+// It mirrors parseProxyURL, which lives in the command package and cannot be
+// reached from here. The rule is small enough that repeating it costs less
+// than a package to share it, and the two drifting apart costs only the
+// accuracy of a suggestion. Nothing of v is retained: it may carry credentials.
+func copyableProxyValue(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && u.Scheme == "http" && u.Hostname() != ""
 }

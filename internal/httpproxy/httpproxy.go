@@ -122,9 +122,12 @@ func refusedError(proxyAddr, addr string, resp *http.Response) error {
 		return err
 	}
 
-	if _, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
+	// The suggestion keeps the host that was being dialled and changes only the
+	// transport. Naming upterm's public relay would silently move the session
+	// onto a different deployment.
+	if host, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
 		return fmt.Errorf("%w; many proxies allow CONNECT only to port 443, "+
-			"so try a WebSocket server instead, e.g. --server wss://uptermd.upterm.dev", err)
+			"so try a WebSocket server instead, e.g. --server wss://%s", err, host)
 	}
 	return err
 }

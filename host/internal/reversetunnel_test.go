@@ -364,7 +364,9 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		sshURL   = &url.URL{Scheme: "ssh", Host: "uptermd.upterm.dev:22"}
 		wssURL   = &url.URL{Scheme: "wss", Host: "uptermd.upterm.dev:443"}
 		proxyURL = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
-		dialErr  = errors.New("dial tcp: connection reset by peer")
+		// A real network failure: the hint is gated on one, so that it does
+		// not trail a host-key warning it has nothing to do with.
+		dialErr = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection reset by peer")}
 	)
 
 	// clearProxyEnv blanks every spelling, so a proxy in the ambient
@@ -442,6 +444,60 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		err := sshDialError(wssURL, nil, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+
+	// Everything the dial wraps other than a network failure happened after the
+	// connection succeeded, where a proxy cannot be the cause. A host-key
+	// mismatch is the case that matters: the advice would trail a security
+	// warning it has nothing to do with.
+	t.Run("a failure that is not the network gets no advice", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, nil, errors.New("ssh: handshake failed: host key mismatch"))
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+		assert.NotContains(t, err.Error(), "wss://")
+	})
+
+	// A value that only looks like an http:// URL is no more copyable than a
+	// socks5:// one: following the advice would swap this error for a flag
+	// rejection.
+	t.Run("a malformed http proxy is not offered for copying", func(t *testing.T) {
+		for _, value := range []string{"http://proxy.example.com:bad", "http://", "http:///path"} {
+			t.Run(value, func(t *testing.T) {
+				clearProxyEnv(t)
+				t.Setenv("HTTPS_PROXY", value)
+
+				err := sshDialError(sshURL, nil, dialErr)
+
+				assert.NotContains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
+				assert.Contains(t, err.Error(), "wss://")
+			})
+		}
+	})
+
+	// A custom relay was chosen for a reason. Changing the transport is the
+	// suggestion; changing whose deployment the session runs on is not.
+	t.Run("a custom relay keeps its own host in the suggestion", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "socks5://proxy.example.com:1080")
+
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, dialErr)
+
+		assert.Contains(t, err.Error(), "wss://relay.corp")
+		assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
+	})
+
+	// The instruction has to survive being pasted into a shell: a bare
+	// assignment would not reach the retried process.
+	t.Run("the copy instruction exports the variable", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$HTTPS_PROXY"`)
 	})
 
 	t.Run("an auth failure is still a permission denial", func(t *testing.T) {

@@ -84,10 +84,13 @@ func TestDialRefused(t *testing.T) {
 func TestDialRefusedOnPort22SuggestsWSS(t *testing.T) {
 	proxy := httpproxytest.Start(t, http.StatusForbidden)
 
-	_, err := httpproxy.Dial(t.Context(), proxy.URL, "uptermd.upterm.dev:22")
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "relay.corp:22")
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "wss://uptermd.upterm.dev")
+	// The host being dialled, not upterm's public relay: a custom --server was
+	// chosen for a reason, and only the transport is in question here.
+	assert.Contains(t, err.Error(), "wss://relay.corp")
+	assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
 }
 
 // The same refusal to a WebSocket port is just a refusal: 443 is what proxies
