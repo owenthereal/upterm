@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ws.NewWSConn and ws.NewSSHClient take a proxy URL straight from an exported
+// caller, so the port cannot be assumed to have passed through parseProxyURL.
+// A portless URL used to reach port 80 on both paths; without this it would
+// reach net.Dialer as "missing port in address".
+func TestProxyHostPort(t *testing.T) {
+	for raw, want := range map[string]string{
+		"http://proxy.example.com":             "proxy.example.com:80",
+		"http://proxy.example.com:":            "proxy.example.com:80",
+		"http://proxy.example.com:3128":        "proxy.example.com:3128",
+		"http://[::1]":                         "[::1]:80",
+		"http://[::1]:3128":                    "[::1]:3128",
+		"http://user:s3cret@proxy.example.com": "proxy.example.com:80",
+	} {
+		u, err := url.Parse(raw)
+		require.NoError(t, err)
+		got := proxyHostPort(u)
+		assert.Equal(t, want, got, raw)
+		assert.NotContains(t, got, "s3cret", "credentials must not reach the dial address")
+	}
+}
 
 // shrinkHeaderLimit lowers the response-header cap for the duration of a test,
 // so the boundary can be exercised without moving 10 MiB.

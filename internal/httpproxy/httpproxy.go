@@ -32,9 +32,6 @@ var maxResponseHeaderBytes int64 = 10 << 20
 // Dial opens a TCP tunnel to addr through the HTTP proxy at proxyURL. The
 // context's deadline bounds the dial and the CONNECT exchange, not the
 // lifetime of the returned connection.
-//
-// proxyURL.Host must already carry a port — parseProxyURL normalises it at the
-// flag boundary, so that every dial path agrees on what "http://proxy" means.
 func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -42,9 +39,7 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 		defer cancel()
 	}
 
-	// URL.Host is host:port and excludes userinfo, so proxy credentials cannot
-	// reach an error message through it.
-	proxyAddr := proxyURL.Host
+	proxyAddr := proxyHostPort(proxyURL)
 
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr)
@@ -108,6 +103,26 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 
 	_ = conn.SetDeadline(time.Time{})
 	return &bufferedConn{Conn: conn, r: br}, nil
+}
+
+// proxyHostPort returns the address to dial for proxyURL, defaulting the port
+// to 80.
+//
+// parseProxyURL already defaults it, so for --proxy this is a no-op. It is
+// repeated here because ws.NewWSConn and ws.NewSSHClient are exported and take
+// a proxy URL directly: both accepted portless ones before this dialer existed
+// — the ssh path defaulted explicitly, and gorilla's hostPortNoPort did the
+// same — and relying on the CLI boundary alone would regress them into
+// "missing port in address". The flag keeps normalising so that one canonical
+// URL is what reaches http.ProxyURL and the key fetch.
+//
+// URL.Host and URL.Hostname both exclude userinfo, so proxy credentials cannot
+// reach an error message through the result.
+func proxyHostPort(proxyURL *url.URL) string {
+	if proxyURL.Port() != "" {
+		return proxyURL.Host
+	}
+	return net.JoinHostPort(proxyURL.Hostname(), "80")
 }
 
 // bufferedConn is a net.Conn that reads through r, so bytes r already buffered
