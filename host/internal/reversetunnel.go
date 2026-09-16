@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"os/user"
 	"strings"
 	"time"
@@ -141,7 +142,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	if err != nil {
-		return nil, sshDialError(c.Host.String(), err)
+		return nil, sshDialError(c.Host, c.ProxyURL, err)
 	}
 
 	sessResp, err := c.createSession(user.Username, publicKeys, authorizedKeys)
@@ -228,9 +229,10 @@ func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientC
 	if err != nil {
 		return nil, err
 	}
+	// No Close on the error path: NewClientConn closes conn itself on each of
+	// them, and ws.NewSSHClient already relies on that.
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, c.Host.Host, config)
 	if err != nil {
-		_ = conn.Close()
 		return nil, err
 	}
 	return ssh.NewClient(ncc, chans, reqs), nil
@@ -385,13 +387,45 @@ func (e *PermissionDeniedError) Error() string {
 
 func (e *PermissionDeniedError) Unwrap() error { return e.err }
 
-func sshDialError(host string, err error) error {
+func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	if strings.Contains(err.Error(), publickeyAuthError) {
 		return &PermissionDeniedError{
-			host: host,
+			host: host.String(),
 			err:  err,
 		}
 	}
 
-	return fmt.Errorf("ssh dial error: %w", err)
+	dialErr := fmt.Errorf("ssh dial error: %w", err)
+
+	// A direct ssh:// dial that failed on a machine which defines a proxy is
+	// the shape of "egress is proxy-only". upterm does not read those
+	// variables for ssh:// servers, the same as OpenSSH, so nothing in the
+	// error connects the failure to the proxy the user knows they are behind —
+	// and in an agent sandbox, whatever reads this error is what has to work
+	// out the next move.
+	if proxyURL == nil && !isWSScheme(host.Scheme) {
+		if name := proxyEnvVar(); name != "" {
+			return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
+				"environment for ssh:// servers, the same as OpenSSH — to go through it, "+
+				"set UPTERM_PROXY=\"$%s\" so the credentials stay out of the process "+
+				"list, or pass --proxy", dialErr, name, name)
+		}
+	}
+
+	return dialErr
+}
+
+// proxyEnvVars are the spellings net/http's ProxyFromEnvironment consults, in
+// its order of preference. Both cases are listed because the lowercase ones are
+// what most shells and curl set.
+var proxyEnvVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
+
+// proxyEnvVar names the first proxy variable that is set, or "" if none is.
+func proxyEnvVar() string {
+	for _, name := range proxyEnvVars {
+		if os.Getenv(name) != "" {
+			return name
+		}
+	}
+	return ""
 }

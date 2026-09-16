@@ -75,6 +75,29 @@ func TestDialRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "uptermd.example.com:22")
 }
 
+// Squid's SSL_ports ACL allows 443 only, so the usual corporate answer for
+// port 22 is a refusal. Without the hint it reads as though the upterm server
+// were unreachable, and the way out — a wss:// server on 443 — is not obvious.
+func TestDialRefusedOnPort22SuggestsWSS(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "uptermd.upterm.dev:22")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wss://uptermd.upterm.dev")
+}
+
+// The same refusal to a WebSocket port is just a refusal: 443 is what proxies
+// already allow, so pointing at wss:// would be noise.
+func TestDialRefusedOnPort443OmitsTheHint(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "uptermd.upterm.dev:443")
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "wss://")
+}
+
 // A status line with no reason phrase is legal. gorilla splits on the space
 // and indexes [1] unconditionally, so this input panics its dialer.
 func TestDialRefusedWithNoReasonPhrase(t *testing.T) {

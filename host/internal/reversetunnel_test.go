@@ -19,6 +19,7 @@ import (
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -351,4 +352,83 @@ func Test_KeepAlive_DoesNotReportADeadRelayWhenStopped(t *testing.T) {
 	}
 
 	require.Empty(t, dead, "a ping that failed only because ctx ended must not be reported as a dead relay")
+}
+
+// A direct ssh:// dial that fails on a machine which defines a proxy is the
+// shape of "egress is proxy-only". upterm deliberately does not read those
+// variables for ssh:// servers, the same as OpenSSH, so without this the error
+// never connects the failure to the proxy the user knows they are behind.
+func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
+	var (
+		sshURL   = &url.URL{Scheme: "ssh", Host: "uptermd.upterm.dev:22"}
+		wssURL   = &url.URL{Scheme: "wss", Host: "uptermd.upterm.dev:443"}
+		proxyURL = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
+		dialErr  = errors.New("dial tcp: connection reset by peer")
+	)
+
+	// clearProxyEnv blanks every spelling, so a proxy in the ambient
+	// environment cannot decide the outcome of these subtests.
+	clearProxyEnv := func(t *testing.T) {
+		t.Helper()
+		for _, name := range proxyEnvVars {
+			t.Setenv(name, "")
+		}
+	}
+
+	t.Run("direct ssh behind an environment proxy is explained", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Contains(t, err.Error(), "HTTPS_PROXY")
+		assert.Contains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
+		assert.Contains(t, err.Error(), "--proxy")
+	})
+
+	t.Run("the lowercase spelling counts too", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("http_proxy", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Contains(t, err.Error(), `UPTERM_PROXY="$http_proxy"`)
+	})
+
+	t.Run("no proxy in the environment, no advice", func(t *testing.T) {
+		clearProxyEnv(t)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("--proxy already supplied, no advice", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, proxyURL, dialErr)
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+
+	t.Run("wss already honours the environment, no advice", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(wssURL, nil, dialErr)
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+
+	t.Run("an auth failure is still a permission denial", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+
+		err := sshDialError(sshURL, nil, errors.New(publickeyAuthError))
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
 }

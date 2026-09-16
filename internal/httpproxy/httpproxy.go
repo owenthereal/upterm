@@ -94,7 +94,7 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 	// sends a non-200 2xx, so this is conformance rather than a live fix.
 	if resp.StatusCode/100 != 2 {
 		_ = conn.Close()
-		return nil, fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
+		return nil, refusedError(proxyAddr, addr, resp.Status)
 	}
 
 	// The cap covered the response headers. Lift it before the tunnel is
@@ -103,6 +103,22 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 
 	_ = conn.SetDeadline(time.Time{})
 	return &bufferedConn{Conn: conn, r: br}, nil
+}
+
+// refusedError reports a CONNECT the proxy would not open, naming the likely
+// cause when the target is SSH's port.
+//
+// Stock Squid denies CONNECT to anything outside its SSL_ports ACL, which is
+// 443 alone, so the common corporate answer for port 22 is an immediate
+// refusal rather than a timeout — and the refusal on its own reads as though
+// the upterm server were unreachable.
+func refusedError(proxyAddr, addr, status string) error {
+	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, status)
+	if _, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
+		return fmt.Errorf("%w; many proxies allow CONNECT only to port 443, "+
+			"so try a WebSocket server instead, e.g. --server wss://uptermd.upterm.dev", err)
+	}
+	return err
 }
 
 // proxyHostPort returns the address to dial for proxyURL, defaulting the port
