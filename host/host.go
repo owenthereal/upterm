@@ -368,6 +368,22 @@ func (c *Host) Run(ctx context.Context) error {
 			// wrong outcome for this run, and a directory that was not released
 			// means the name stays taken until something reaps it. Both are
 			// invisible from outside the process without a line here.
+			//
+			// A cancellation before the command starts is still a stop. The
+			// signal actor that sets shutdownRequested is registered only
+			// after SessionCreatedCallback returns, so a caller that cancels
+			// during Establish, or while the callback is waiting, gets
+			// ctx.Err() back through returns that report startup_failed --
+			// for a session that was told to stop. Decided here, on the
+			// publish itself, so that every early return is covered.
+			// startup_abandoned still wins: an interactive decline whose
+			// embedder also cancels is still a decline. The one corner this
+			// accepts is a genuine startup failure that coincides with a
+			// cancellation, reported as stopped, which is what the caller
+			// asked for.
+			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
+				runReason = sessiondir.ReasonStopped
+			}
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()

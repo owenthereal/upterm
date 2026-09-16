@@ -465,6 +465,58 @@ func Test_Host_PublishesStoppedOnCancellation(t *testing.T) {
 	require.Empty(t, res.Signal)
 }
 
+// Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts is the
+// cancellation the signal actor cannot answer for: it is registered only
+// after SessionCreatedCallback returns, so a caller that cancels while the
+// callback is waiting -- or during Establish, before it -- gets ctx.Err()
+// back through a path where every error used to be a startup failure, and
+// the record said the session broke when it had been told to stop. The
+// callback here waits on the context the way the interactive confirmation
+// does, and the test cancels once it is known to be waiting.
+func Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts(t *testing.T) {
+	entered := make(chan struct{})
+	run := newOutcomeRun(t,
+		shellCommand(t,
+			[]string{"sh", "-c", "exit 0"},
+			[]string{"cmd", "/c", "exit", "0"}),
+		withSessionCreatedCallback(func(ctx context.Context, _ *api.GetSessionResponse) error {
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	// A cancellation that lands before the callback is entered would end
+	// the run somewhere else; waiting for the channel pins it to this path.
+	select {
+	case <-entered:
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("the callback was not entered within %s", outcomeTimeout)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
+	run.closeWriters()
+
+	rec := run.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Equal(t, sessiondir.ReasonStopped, rec.Reason,
+		"a session cancelled before its command started was told to stop; nothing failed")
+	require.Nil(t, rec.ExitCode,
+		"the command never started, so there is no exit code to report")
+	require.Empty(t, rec.Signal)
+}
+
 // Test_Host_PublishesReadyOnceBothSidesAcknowledge is the positive control for
 // the two tests below it. "Never publishes ready" is satisfied just as well by
 // a host that never publishes ready at all, so one of these has to show that a
