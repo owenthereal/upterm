@@ -2,6 +2,7 @@ package command
 
 import (
 	"errors"
+	"net"
 	"net/url"
 )
 
@@ -35,13 +36,22 @@ func parseProxyURL(s string) (*url.URL, error) {
 		}
 		return nil, errors.New("invalid --proxy: not a valid URL, e.g. http://proxy.example.com:3128")
 	}
-	// websocket.Dialer only speaks CONNECT over plain HTTP, so accepting
-	// https:// here would fail at dial time instead.
+	// upterm's CONNECT dialer talks to the proxy in the clear: it never wraps
+	// that connection in TLS, so an https:// proxy would fail at dial time.
+	// Supporting one is a separate change, not an inherited limitation.
 	if u.Scheme != "http" {
 		return nil, errors.New("invalid --proxy: only http:// proxies are supported, e.g. http://proxy.example.com:3128")
 	}
 	if u.Hostname() == "" {
 		return nil, errors.New("invalid --proxy: missing host, e.g. http://proxy.example.com:3128")
+	}
+	// Default the port once, here, so every dial path agrees on what
+	// "http://proxy.example.com" means, and mirroring what --server already
+	// does for portless ws:// and wss:// URLs. "http://proxy.example.com:" also
+	// parses, with an empty port, and previously reached the dialer intact to
+	// be resolved as port 0.
+	if u.Port() == "" {
+		u.Host = net.JoinHostPort(u.Hostname(), "80")
 	}
 	return u, nil
 }

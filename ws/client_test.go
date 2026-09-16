@@ -3,12 +3,18 @@ package ws
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,43 +63,83 @@ func TestNewWSConnHostHeaderKeepsNonDefaultPort(t *testing.T) {
 }
 
 // TestNewWSConnDialsThroughProxy verifies an explicit proxy wins over the
-// environment: the dial goes to the proxy and opens with a CONNECT to the server.
+// environment: the dial goes to the proxy and opens with a CONNECT to the
+// server, carrying the proxy's credentials.
+//
+// This drives a real listener rather than hooking websocket.DefaultDialer.
+// NewWSConn now sets NetDialContext itself, so a hook there is overwritten;
+// the old version of this test would have blocked forever waiting for a dial
+// that its own hook never saw.
 func TestNewWSConnDialsThroughProxy(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://env-proxy.example.com:8080")
 
-	client, server := net.Pipe()
-	origDial := websocket.DefaultDialer.NetDialContext
-	dialed := make(chan string, 1)
-	websocket.DefaultDialer.NetDialContext = func(_ context.Context, _, addr string) (net.Conn, error) {
-		dialed <- addr
-		return client, nil
-	}
-	t.Cleanup(func() { websocket.DefaultDialer.NetDialContext = origDial })
-
-	reqCh := make(chan *http.Request, 1)
-	go func() {
-		defer func() { _ = server.Close() }()
-		req, err := http.ReadRequest(bufio.NewReader(server))
-		if err != nil {
-			reqCh <- nil
-			return
-		}
-		reqCh <- req
-	}()
+	// Refusing keeps the test off DNS entirely: the proxy records the request
+	// and answers 407 without ever dialing uptermd.example.com.
+	proxy := httpproxytest.Start(t, http.StatusProxyAuthRequired)
+	proxyURL := *proxy.URL
+	proxyURL.User = url.UserPassword("user", "secret")
 
 	u, err := url.Parse("wss://sid:addr@uptermd.example.com")
 	require.NoError(t, err)
-	proxyURL, err := url.Parse("http://user:secret@proxy.example.com:3128")
-	require.NoError(t, err)
-	_, _ = NewWSConn(u, true, proxyURL)
-	_ = client.Close()
 
-	assert.Equal(t, "proxy.example.com:3128", <-dialed)
-	req := <-reqCh
-	require.NotNil(t, req)
-	assert.Equal(t, http.MethodConnect, req.Method)
-	assert.Equal(t, "uptermd.example.com:443", req.Host)
-	assert.NotEmpty(t, req.Header.Get("Proxy-Authorization"))
+	_, err = NewWSConn(u, true, &proxyURL)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "407")
+	assert.Equal(t, "uptermd.example.com:443", proxy.LastTarget())
+	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("user:secret")), proxy.LastAuth())
+}
+
+// A username-only proxy URL must authenticate on the ws path too. gorilla
+// sends Proxy-Authorization only when a password is set, so this is what pins
+// ws to the shared dialer rather than letting it drift back to gorilla's.
+func TestNewWSConnSendsCredentialForUsernameOnlyProxy(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusProxyAuthRequired)
+	proxyURL := *proxy.URL
+	proxyURL.User = url.User("token")
+
+	u, err := url.Parse("wss://sid:addr@uptermd.example.com")
+	require.NoError(t, err)
+
+	_, err = NewWSConn(u, true, &proxyURL)
+
+	require.Error(t, err)
+	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("token:")), proxy.LastAuth())
+}
+
+// The wss handshake still has to complete end to end once the tunnel is open.
+// Taking over NetDialContext means gorilla no longer dials, so this pins down
+// that it still wraps the tunnel in TLS with ServerName from the target rather
+// than the proxy, and then runs the upgrade over it.
+func TestNewWSConnCompletesWSSHandshakeThroughProxy(t *testing.T) {
+	var upgrader websocket.Upgrader
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}))
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	origTLS := websocket.DefaultDialer.TLSClientConfig
+	websocket.DefaultDialer.TLSClientConfig = &tls.Config{RootCAs: pool}
+	t.Cleanup(func() { websocket.DefaultDialer.TLSClientConfig = origTLS })
+
+	proxy := httpproxytest.Start(t, http.StatusOK)
+	target := strings.TrimPrefix(srv.URL, "https://")
+
+	u, err := url.Parse("wss://sid:addr@" + target)
+	require.NoError(t, err)
+
+	conn, err := NewWSConn(u, true, proxy.URL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	assert.Equal(t, target, proxy.LastTarget())
+	assert.EqualValues(t, 1, proxy.Tunnels())
 }
 
 func TestStripDefaultPort(t *testing.T) {

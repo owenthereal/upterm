@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -9,20 +8,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/config"
+	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -332,62 +329,6 @@ func Test_Fetcher_reportsEveryFailureAtOnce(t *testing.T) {
 	assert.Contains(t, err.Error(), "/bob")
 }
 
-// connectProxy is a minimal recording HTTP CONNECT proxy, enough to show that
-// a fetch was tunnelled rather than dialled directly.
-type connectProxy struct {
-	URL *url.URL
-
-	// lastTarget is the authority of the most recent CONNECT. It loads as nil
-	// when the proxy was never asked for a tunnel.
-	lastTarget atomic.Value // string
-}
-
-func startConnectProxy(t *testing.T) *connectProxy {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	p := &connectProxy{URL: &url.URL{Scheme: "http", Host: ln.Addr().String()}}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go p.serve(conn)
-		}
-	}()
-	return p
-}
-
-func (p *connectProxy) serve(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-
-	br := bufio.NewReader(conn)
-	req, err := http.ReadRequest(br)
-	if err != nil || req.Method != http.MethodConnect {
-		return
-	}
-	p.lastTarget.Store(req.Host)
-
-	target, err := net.Dial("tcp", req.Host)
-	if err != nil {
-		_ = (&http.Response{StatusCode: http.StatusBadGateway, ProtoMajor: 1, ProtoMinor: 1}).Write(conn)
-		return
-	}
-	defer func() { _ = target.Close() }()
-
-	_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-
-	go func() {
-		_, _ = io.Copy(target, br)
-		_ = target.Close()
-	}()
-	_, _ = io.Copy(conn, target)
-}
-
 // --proxy has to reach key fetches, not just the tunnel. On the network the
 // flag exists for, the proxy is the only egress and HTTPS_PROXY is
 // deliberately unset, so a direct fetch fails before the tunnel is ever
@@ -398,7 +339,7 @@ func Test_Fetcher_fetchesThroughTheProxy(t *testing.T) {
 	}))
 	defer server.Close()
 
-	proxy := startConnectProxy(t)
+	proxy := httpproxytest.Start(t, http.StatusOK)
 	transport := proxyTransport(proxy.URL)
 	transport.TLSClientConfig = &tls.Config{RootCAs: certPool(t, server)}
 
@@ -407,7 +348,7 @@ func Test_Fetcher_fetchesThroughTheProxy(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, aks, 1)
-	assert.Equal(t, strings.TrimPrefix(server.URL, "https://"), proxy.lastTarget.Load())
+	assert.Equal(t, strings.TrimPrefix(server.URL, "https://"), proxy.LastTarget())
 }
 
 func Test_Fetcher_dedup(t *testing.T) {
