@@ -104,17 +104,20 @@ func TestDialRefusedOnPort22BracketsIPv6(t *testing.T) {
 	assert.Contains(t, err.Error(), "wss://[2001:db8::1]")
 }
 
-// Only an answer that means "not to that port" earns the advice. A 4xx about
-// the request and a 5xx from the proxy or its upstream are about something a
-// different transport cannot fix, and the hint would crowd out the status.
+// Only a denial of this destination earns the advice. Everything else — a
+// method the proxy will not perform at all, a challenge answerable with
+// credentials, a malformed request, a failing upstream — is about something a
+// different port cannot fix, and the hint would crowd out the status.
 func TestDialRefusedOnlyHintsAtPolicyDenials(t *testing.T) {
 	for _, tc := range []struct {
 		status   int
 		wantHint bool
 	}{
 		{status: http.StatusForbidden, wantHint: true},
-		{status: http.StatusMethodNotAllowed, wantHint: true},
-		{status: http.StatusNotImplemented, wantHint: true},
+		// CONNECT itself being unsupported, rather than this destination being
+		// refused: a wss:// server through the same proxy still needs CONNECT.
+		{status: http.StatusMethodNotAllowed},
+		{status: http.StatusNotImplemented},
 		{status: http.StatusProxyAuthRequired},
 		{status: http.StatusUnauthorized},
 		{status: http.StatusBadRequest},

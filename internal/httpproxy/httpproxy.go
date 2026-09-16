@@ -116,14 +116,16 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 func refusedError(proxyAddr, addr string, resp *http.Response) error {
 	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
 
-	// Only for an answer that means "not to that port". A challenge is
-	// answerable with credentials, a 4xx about the request is about the
-	// request, and a 5xx is the proxy or its upstream failing — in none of
-	// those would a different port be the fix, and the advice would crowd out
-	// the status that says what actually is.
-	switch resp.StatusCode {
-	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
-	default:
+	// Only for a denial of this destination, which is what 403 is and what
+	// Squid answers when CONNECT falls outside its SSL_ports ACL.
+	//
+	// Not 405 or 501: those say CONNECT itself is unsupported, and a wss://
+	// server through the same proxy still needs CONNECT, merely to 443. Not
+	// 401 or 407, which are answerable with credentials. Not a 5xx, which is
+	// the proxy or its upstream failing. In none of those would a different
+	// port be the fix, and the advice would crowd out the status that says
+	// what is.
+	if resp.StatusCode != http.StatusForbidden {
 		return err
 	}
 

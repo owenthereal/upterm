@@ -412,7 +412,11 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	// cause and the advice would trail a security warning it has nothing to do
 	// with.
 	if proxyURL == nil && !isWSScheme(host.Scheme) && isNetworkError(err) {
-		if envProxy, name := envProxyFor(host.Hostname()); envProxy != nil {
+		// Probed with the port, not just the hostname: NO_PROXY entries may be
+		// port-specific, and the lookup fills in the scheme's default port for
+		// anything that arrives without one — so a bare hostname would be
+		// asked about :443 and sail straight past an exemption for :22.
+		if envProxy, name := envProxyFor(host.Host); envProxy != nil {
 			if envProxy.Scheme == "http" {
 				// Exported, not merely assigned: a shell variable would not
 				// reach the retried process, and this is read after the
@@ -454,8 +458,8 @@ func isNetworkError(err error) bool {
 // process, which a test cannot then influence with t.Setenv.
 var proxyFromEnvironment = http.ProxyFromEnvironment
 
-// envProxyFor reports the proxy the environment would use to reach hostname,
-// and the variable that supplied it.
+// envProxyFor reports the proxy the environment would use to reach authority,
+// which is a host:port, and the variable that supplied it.
 //
 // Asking the question this way rather than reading the variables directly is
 // what makes the advice safe to give. A proxy that is set but does not apply
@@ -473,11 +477,11 @@ var proxyFromEnvironment = http.ProxyFromEnvironment
 //
 // The value is inspected only for its scheme and never retained: it may carry
 // credentials.
-func envProxyFor(hostname string) (proxy *url.URL, name string) {
+func envProxyFor(authority string) (proxy *url.URL, name string) {
 	// https first: it is what a wss:// server, the busier of the two
 	// suggestions, would consult.
 	for _, scheme := range []string{"https", "http"} {
-		u, err := proxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: scheme, Host: hostname}})
+		u, err := proxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: scheme, Host: authority}})
 		if err != nil || u == nil || u.Hostname() == "" {
 			continue
 		}

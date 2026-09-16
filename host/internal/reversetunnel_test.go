@@ -375,7 +375,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// so the message has a spelling to name. A nil proxy stands for every way
 	// none applies: nothing set, NO_PROXY exempting the host, a value that does
 	// not parse.
-	stubEnv := func(t *testing.T, varName string, proxy *url.URL, lookupErr error) {
+	stubEnv := func(t *testing.T, varName string, proxy *url.URL, lookupErr error) *string {
 		t.Helper()
 		for _, n := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
 			t.Setenv(n, "")
@@ -385,11 +385,16 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		}
 		orig := proxyFromEnvironment
 		t.Cleanup(func() { proxyFromEnvironment = orig })
-		proxyFromEnvironment = func(*http.Request) (*url.URL, error) { return proxy, lookupErr }
+		var asked string
+		proxyFromEnvironment = func(req *http.Request) (*url.URL, error) {
+			asked = req.URL.Host
+			return proxy, lookupErr
+		}
+		return &asked
 	}
 
 	t.Run("an http proxy is offered for copying", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -406,7 +411,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("environment variable names are case-insensitive on Windows")
 		}
-		stubEnv(t, "https_proxy", httpEnv, nil)
+		_ = stubEnv(t, "https_proxy", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -417,7 +422,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// ws and wss path, but --proxy takes only http://, so offering the copy
 	// would trade this failure for a flag rejection.
 	t.Run("a socks5 proxy names the other transport instead", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -429,7 +434,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// this host, nothing set at all, or a value too malformed to parse. In
 	// none of them is routing through a proxy the answer.
 	t.Run("a proxy that does not apply gets no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", nil, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", nil, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -437,7 +442,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("a lookup error gets no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, errors.New("invalid proxy address"))
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, errors.New("invalid proxy address"))
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -445,7 +450,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("a proxy with no host gets no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", &url.URL{Scheme: "http"}, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", &url.URL{Scheme: "http"}, nil)
 
 		err := sshDialError(sshURL, nil, dialErr)
 
@@ -453,7 +458,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("--proxy already supplied, no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, flagged, dialErr)
 
@@ -461,7 +466,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("wss already reads the environment, no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(wssURL, nil, dialErr)
 
@@ -473,7 +478,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// mismatch is the case that matters: the advice would trail a security
 	// warning it has nothing to do with.
 	t.Run("a failure that is not the network gets no advice", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, errors.New("ssh: handshake failed: host key mismatch"))
 
@@ -484,7 +489,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// A custom relay was chosen for a reason. Changing the transport is the
 	// suggestion; changing whose deployment the session runs on is not.
 	t.Run("a custom relay keeps its own host in the suggestion", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
 		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, dialErr)
 
@@ -495,15 +500,26 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	// url.URL.Hostname strips the brackets, and an unbracketed IPv6 address is
 	// not an authority the suggestion could be pasted back as.
 	t.Run("an IPv6 relay is bracketed in the suggestion", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
 		err := sshDialError(&url.URL{Scheme: "ssh", Host: "[2001:db8::1]:22"}, nil, dialErr)
 
 		assert.Contains(t, err.Error(), "--server wss://[2001:db8::1]")
 	})
 
+	// NO_PROXY entries may name a port, and the lookup fills in the scheme's
+	// default for anything asked without one. Probing the bare hostname would
+	// therefore ask about :443 and sail past an exemption written for :22.
+	t.Run("the lookup is asked about the port that failed", func(t *testing.T) {
+		asked := stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		_ = sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "uptermd.upterm.dev:22", *asked)
+	})
+
 	t.Run("an auth failure is still a permission denial", func(t *testing.T) {
-		stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
 		err := sshDialError(sshURL, nil, errors.New(publickeyAuthError))
 
