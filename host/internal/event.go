@@ -4,16 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"log/slog"
 
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/upterm"
-)
-
-const (
-	errBadFileDescriptor = "bad file descriptor"
 )
 
 type terminal struct {
@@ -100,7 +95,7 @@ func (t terminalEventHandler) handleWindowChanged(evt emitter.Event, m map[io.Re
 		m[pty] = ts
 	}
 	ts[tt.ID] = tt
-	if err := resizeWindow(pty, ts); err != nil && !strings.Contains(err.Error(), errBadFileDescriptor) {
+	if err := resizeWindow(pty, ts); err != nil {
 		return fmt.Errorf("error resizing window: %w", err)
 	}
 

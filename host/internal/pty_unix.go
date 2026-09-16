@@ -74,7 +74,17 @@ func (pty *pty) Setsize(h, w int) error {
 		return nil
 	}
 
-	return ptylib.Setsize(pty.File, &ptylib.Winsize{Rows: uint16(h), Cols: uint16(w)})
+	err := pty.control(func(fd uintptr) error {
+		return unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ,
+			&unix.Winsize{Row: uint16(h), Col: uint16(w)})
+	})
+	if errors.Is(err, os.ErrClosed) {
+		// A resize that lost the race with the end of the session is nothing
+		// to anyone, and the Windows pty says nothing about one on a closed
+		// pty either (pty_windows.go's Setsize).
+		return nil
+	}
+	return err
 }
 
 // Redraw nudges the foreground process group with SIGWINCH, the signal a
@@ -84,7 +94,17 @@ func (pty *pty) Redraw() error {
 	pty.RLock()
 	defer pty.RUnlock()
 
-	pgrp, err := tty.ForegroundProcessGroup(int(pty.Fd()))
+	var pgrp int
+	err := pty.control(func(fd uintptr) (err error) {
+		pgrp, err = tty.ForegroundProcessGroup(int(fd))
+		return err
+	})
+	if errors.Is(err, os.ErrClosed) {
+		// A nudge that lost the race with the end of the session is nothing
+		// to anyone, and the Windows pty says nothing about one on a closed
+		// pty either (pty_windows.go's Redraw).
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -93,6 +113,33 @@ func (pty *pty) Redraw() error {
 		return errors.New("pty has no foreground process group")
 	}
 	return unix.Kill(-pgrp, unix.SIGWINCH)
+}
+
+// control runs f with the master's descriptor while holding a reference on
+// the file, so a Close racing it cannot destroy the file under the ioctl and
+// the number can never be one the process has reused. Fd() takes no
+// reference: it reads the number bare, and the write path — unlocked,
+// parked in the kernel while the command is not reading — is what finishes
+// the close when that write finally returns; on Linux a write whose command
+// has exited never does, and the descriptor lives until the process exits.
+// control reports a closed file as os.ErrClosed and leaves what to do about
+// it to the caller. Blocking mode is unaffected: StartWithSize already
+// applied the initial size through Fd(), which put the master in blocking
+// mode before the first write.
+func (pty *pty) control(f func(fd uintptr) error) error {
+	rc, err := pty.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ferr error
+	if err := rc.Control(func(fd uintptr) { ferr = f(fd) }); err != nil {
+		// Control's only failure here is the file being closed or closing
+		// (os/rawconn.go's checkValid, then poll.FD.RawControl's incref).
+		// The callback's own error (ferr) still comes back below, distinct
+		// from this one.
+		return os.ErrClosed
+	}
+	return ferr
 }
 
 func (pty *pty) Read(p []byte) (n int, err error) {
