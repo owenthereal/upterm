@@ -404,11 +404,20 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	// and in an agent sandbox, whatever reads this error is what has to work
 	// out the next move.
 	if proxyURL == nil && !isWSScheme(host.Scheme) {
-		if name := proxyEnvVar(); name != "" {
+		if name, copyable := proxyEnvVar(); name != "" {
+			if copyable {
+				return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
+					"environment for ssh:// servers, the same as OpenSSH — to go through it, "+
+					"set UPTERM_PROXY=\"$%s\" so the credentials stay out of the process "+
+					"list, or pass --proxy", dialErr, name, name)
+			}
+			// Copying it would only trade this error for "only http:// proxies
+			// are supported". The ws/wss path reaches the same proxy through
+			// gorilla, which does speak socks5.
 			return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
-				"environment for ssh:// servers, the same as OpenSSH — to go through it, "+
-				"set UPTERM_PROXY=\"$%s\" so the credentials stay out of the process "+
-				"list, or pass --proxy", dialErr, name, name)
+				"environment for ssh:// servers, the same as OpenSSH, and --proxy takes "+
+				"only http:// values — to go through this one, use a WebSocket server, "+
+				"e.g. --server wss://uptermd.upterm.dev, which does honour it", dialErr, name)
 		}
 	}
 
@@ -417,15 +426,23 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 
 // proxyEnvVars are the spellings net/http's ProxyFromEnvironment consults, in
 // its order of preference. Both cases are listed because the lowercase ones are
-// what most shells and curl set.
+// what most shells and curl set; on Windows they name the same variable, so
+// the uppercase spelling is simply the one reported.
 var proxyEnvVars = []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
 
-// proxyEnvVar names the first proxy variable that is set, or "" if none is.
-func proxyEnvVar() string {
-	for _, name := range proxyEnvVars {
-		if os.Getenv(name) != "" {
-			return name
+// proxyEnvVar names the first proxy variable that is set, and reports whether
+// its value is one --proxy would take.
+//
+// Only http:// is: parseProxyURL rejects every other scheme. socks5:// is a
+// supported way to configure the environment proxy for the ws/wss path, so
+// recommending that a value be copied without checking would send a socks5://
+// user from a dial failure straight into a flag rejection. The value itself
+// stays unread beyond its scheme — it may carry credentials.
+func proxyEnvVar() (name string, copyable bool) {
+	for _, n := range proxyEnvVars {
+		if v := os.Getenv(n); v != "" {
+			return n, strings.HasPrefix(v, "http://")
 		}
 	}
-	return ""
+	return "", false
 }

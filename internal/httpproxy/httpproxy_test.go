@@ -73,6 +73,9 @@ func TestDialRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "407")
 	assert.Contains(t, err.Error(), proxy.URL.Host)
 	assert.Contains(t, err.Error(), "uptermd.example.com:22")
+	// A 407 is answerable with credentials, so the port-policy advice would
+	// only crowd out the status that says what to do.
+	assert.NotContains(t, err.Error(), "wss://")
 }
 
 // Squid's SSL_ports ACL allows 443 only, so the usual corporate answer for

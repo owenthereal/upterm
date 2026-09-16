@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -387,12 +388,34 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	})
 
 	t.Run("the lowercase spelling counts too", func(t *testing.T) {
+		// Windows environment variable names are case-insensitive, so setting
+		// http_proxy also sets HTTP_PROXY and the uppercase spelling — checked
+		// first — is the one reported. Naming either is correct there; what
+		// this case pins down is the Unix behaviour, where they are two
+		// distinct variables and only one of them holds the value.
+		if runtime.GOOS == "windows" {
+			t.Skip("environment variable names are case-insensitive on Windows")
+		}
 		clearProxyEnv(t)
 		t.Setenv("http_proxy", "http://proxy.example.com:3128")
 
 		err := sshDialError(sshURL, nil, dialErr)
 
 		assert.Contains(t, err.Error(), `UPTERM_PROXY="$http_proxy"`)
+	})
+
+	// socks5:// is a supported way to configure the environment proxy for the
+	// ws/wss path, but --proxy takes only http://, so telling the user to copy
+	// it across would trade this failure for a flag rejection.
+	t.Run("a socks5 proxy is not offered for copying", func(t *testing.T) {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", "socks5://proxy.example.com:1080")
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Contains(t, err.Error(), "HTTPS_PROXY")
+		assert.NotContains(t, err.Error(), `UPTERM_PROXY="$HTTPS_PROXY"`)
+		assert.Contains(t, err.Error(), "wss://uptermd.upterm.dev")
 	})
 
 	t.Run("no proxy in the environment, no advice", func(t *testing.T) {

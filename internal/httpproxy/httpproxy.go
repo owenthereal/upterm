@@ -94,7 +94,7 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 	// sends a non-200 2xx, so this is conformance rather than a live fix.
 	if resp.StatusCode/100 != 2 {
 		_ = conn.Close()
-		return nil, refusedError(proxyAddr, addr, resp.Status)
+		return nil, refusedError(proxyAddr, addr, resp)
 	}
 
 	// The cap covered the response headers. Lift it before the tunnel is
@@ -112,8 +112,16 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 // 443 alone, so the common corporate answer for port 22 is an immediate
 // refusal rather than a timeout — and the refusal on its own reads as though
 // the upterm server were unreachable.
-func refusedError(proxyAddr, addr, status string) error {
-	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, status)
+func refusedError(proxyAddr, addr string, resp *http.Response) error {
+	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
+
+	// A challenge is answerable, and the answer is credentials. Suggesting a
+	// different server would only move the same challenge to port 443, while
+	// crowding out the status that says what to actually do.
+	if resp.StatusCode == http.StatusProxyAuthRequired || resp.StatusCode == http.StatusUnauthorized {
+		return err
+	}
+
 	if _, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
 		return fmt.Errorf("%w; many proxies allow CONNECT only to port 443, "+
 			"so try a WebSocket server instead, e.g. --server wss://uptermd.upterm.dev", err)
