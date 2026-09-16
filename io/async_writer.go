@@ -160,6 +160,29 @@ func (a *AsyncWriter) Flush(ctx context.Context) error {
 	}
 }
 
+// Err reports the error that ended delivery, if any.
+//
+// Flush cannot answer this: it reports nil for a sink that has already failed,
+// because a guest that is gone is not a shutdown error. A caller that needs to
+// know whether everything written was actually delivered — rather than merely
+// that nothing more is coming — has to ask here as well.
+func (a *AsyncWriter) Err() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.err
+}
+
+// Closed reports whether Close has been called.
+//
+// Like Err, it is the other half of what Flush does not say: Flush returns nil
+// for a closed sink too, and a caller that needs to know whether what it wrote
+// was delivered rather than discarded has to ask.
+func (a *AsyncWriter) Closed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.closed
+}
+
 // fail records a terminal error and releases everything waiting on this sink.
 // Callers must hold a.mu.
 //

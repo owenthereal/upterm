@@ -254,6 +254,7 @@ func (p *exitedPTY) Close() error {
 	return nil
 }
 func (p *exitedPTY) Setsize(int, int) error { return nil }
+func (p *exitedPTY) Redraw() error          { return nil }
 func (p *exitedPTY) Wait() error            { return nil }
 func (p *exitedPTY) Kill() error            { return nil }
 

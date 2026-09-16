@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,6 +85,12 @@ type Server struct {
 	// cmd is the hosted command, kept so its outcome can be read after
 	// ServeWithContext returns.
 	cmd *command
+
+	// hostClients elects the primary among the clients on the host door. A
+	// value rather than a pointer built in ServeWithContext: the elector's
+	// state is read from outside the serving goroutine, and a pointer written
+	// there would be a race with every such read.
+	hostClients hostClients
 }
 
 // CommandResult returns the hosted command's outcome. Valid after
@@ -364,6 +371,10 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		// The gate: the first client through this door is what the command's
 		// start is waiting for.
 		hostSH.onHostClientAttached = func() { firstOnce.Do(func() { close(firstHostClient) }) }
+		// And the elector: exactly one of the clients on this door paces the
+		// command and is sent its live terminal queries.
+		s.hostClients.logger = s.Logger
+		hostSH.hostClients = &s.hostClients
 
 		hostServer := gssh.Server{
 			HostSigners:      ss,
@@ -567,6 +578,10 @@ type sessionHandler struct {
 	// await its initial client starts the command on.
 	onHostClientAttached func()
 
+	// hostClients, set on the host door only, is the elector every client that
+	// could be primary registers with.
+	hostClients *hostClients
+
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
 }
@@ -701,57 +716,166 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	} else {
 		// output
-		// Wrap SSH session with TerminalQueryFilter to filter out terminal query
-		// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
-		// they reach the client. This prevents client terminals from responding
-		// to queries meant for the host terminal.
-		filtered := uio.NewTerminalQueryFilter(sess)
+		if h.kind == kindHost {
+			// A client on the host door gets a sink that can become the
+			// primary: synchronous and unfiltered, so the command cannot
+			// outrun the terminal and its live queries reach one. Until it is
+			// elected it is the same bounded, filtered, asynchronous sink a
+			// guest gets.
 
-		// And wrap that in a sink with its own goroutine and a bounded buffer,
-		// so this guest cannot hold up the fan-out for the host or anyone else.
-		// A guest that overflows is disconnected: a terminal stream is not
-		// resumable, so dropping bytes out of the middle would leave a corrupted
-		// screen it could not detect, while a closed session it can simply
-		// rejoin. See owenthereal/upterm#524.
-		conn := serverConn(sess)
-		onDrop := func(err error) {
-			if errors.Is(err, uio.ErrOverflow) {
-				h.logger.Warn("dropping guest: too far behind to keep up with output",
-					"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
-			} else {
-				h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+			// The connection close is the one thing that releases a write
+			// parked in SSH; the elector learns of the departure from the
+			// connection's end, like every other departure — see the actor
+			// below.
+			disconnect := func() {
+				if conn := serverConn(sess); conn != nil {
+					_ = conn.Close()
+				}
 			}
-			// A guest's channel is closed and uptermd's watchdog collects the
-			// rest. There is no watchdog on a unix socket, so a local client
-			// is disconnected outright: closing the connection is what ends
-			// mux.loop and releases a drain goroutine parked in the write.
-			if h.kind == kindHost && conn != nil {
-				_ = conn.Close()
+			sink := newHostSink(sess, disconnect, sessionID, h.logger)
+			if err := attachGuestOutput(h.writers, sink); err != nil {
+				if errors.Is(err, uio.ErrClosed) {
+					// The session is already tearing down. This client
+					// arrived a moment too late, which is not its error.
+					_ = sess.Exit(0)
+				} else {
+					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
+					_ = sess.Exit(1)
+				}
 				return
 			}
-			// Closing the channel is what makes the drop real: it fails the
-			// blocked write, and it fails the stdin copy below, so run.Group
-			// returns and the deferred client-left event fires.
-			_ = sess.Close()
-		}
+			sink.markAttached()
 
-		sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
-		if err := attachGuestOutput(h.writers, sink); err != nil {
-			if errors.Is(err, uio.ErrClosed) {
-				// The session is already tearing down. This guest arrived a
-				// moment too late, which is not its error.
-				_ = sess.Exit(0)
-			} else {
-				h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
-				_ = sess.Exit(1)
+			defer func() {
+				// Registered first, so it runs last: by the time this sink
+				// leaves the fan-out the elector below has already chosen a
+				// successor. In the window between the two there are briefly
+				// two unfiltered primaries, so a live query in it is answered
+				// twice — by a terminal that is going away and by the one
+				// taking over — and that is the whole cost.
+				h.writers.Remove(sink)
+				_ = sink.Close()
+			}()
+
+			// Only a client with a terminal on both ends — a pty here, and a
+			// declaration that it forwards that terminal's keystrokes — can
+			// answer the queries a primary is sent. A viewer, pty or not, is a
+			// filtered asynchronous sink for as long as it stays.
+			//
+			// Before the gate is signalled below, not after: the gate is what
+			// starts the command, and a client elected only afterwards would
+			// take the command's first output through the filtered async path
+			// — swallowing a query in the first frame a full-screen program
+			// draws.
+			if isPty && isInteractive(sess) && h.hostClients != nil {
+				c := &hostClient{id: sessionID, sink: sink}
+				h.hostClients.add(c)
+				defer h.hostClients.remove(c) // runs before the removal above
+
+				// Election cleanup is tied to the connection's end, not to
+				// this handler's return. The handler cannot return while its
+				// input actor is parked in ptmx.Write — the command stopped
+				// reading its pty, and a kernel write there is released by
+				// the command reading; on macOS also by the command's exit,
+				// which fails the write, but on Linux by nothing short of
+				// the daemon's exit — so the deferred removal above can be
+				// an arbitrarily long way off, and until it runs the elector
+				// holds a gone client as primary: no election runs, every
+				// later client stays a filtered secondary, and live queries
+				// reach nobody.
+				//
+				// sess.Context() is what every departure shares. charm's
+				// handleConn defers conn.Close(), which cancels it, whether
+				// the transport ended because the client hung up or because
+				// the daemon closed it; a server-side close (the watchdog's,
+				// the overflow path's) cancels it synchronously in the same
+				// call, so this actor wakes at the same instant either way.
+				//
+				// It must not end the group, though: run.Group's interrupt
+				// would cancel the input actor's context too, and
+				// contextReader.Read never starts a read on a context already
+				// cancelled — so the bytes the client sent before hanging up,
+				// still pending in the SSH channel, would be lost instead of
+				// delivered the next time the command reads. The input actor
+				// ends the group itself, from the EOF it reads once its write
+				// returns, exactly as before this actor existed; this one
+				// only frees the elector and then waits to be interrupted,
+				// like the window-change loop below.
+				//
+				// What is left behind until then is the handler goroutine
+				// itself, still parked in that pty write until the command
+				// reads — on macOS also until the command exits, which fails
+				// the write, but on Linux until nothing short of the
+				// daemon's exit — and with it everything the handler defers:
+				// writers.Remove, sink.Close and the client-left event all
+				// wait for it, so a client that left with its input parked
+				// is still listed by session info until then. That stays
+				// bounded by the session's life because upterm host exits
+				// with its session; an embedder that keeps the process
+				// alive keeps this goroutine — and, on Linux, the thread
+				// blocked in the write — running until it exits. It holds
+				// nothing the fan-out or the elector needs.
+				ctx, cancel := context.WithCancel(h.ctx)
+				g.Add(func() error {
+					select {
+					case <-sess.Context().Done():
+						h.hostClients.remove(c)
+					case <-ctx.Done():
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}, func(error) {
+					cancel()
+				})
 			}
-			return
-		}
 
-		defer func() {
-			h.writers.Remove(sink)
-			_ = sink.Close()
-		}()
+			guestOutput = sink
+		} else {
+			// Wrap SSH session with TerminalQueryFilter to filter out terminal query
+			// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
+			// they reach the client. This prevents client terminals from responding
+			// to queries meant for the host terminal.
+			filtered := uio.NewTerminalQueryFilter(sess)
+
+			// And wrap that in a sink with its own goroutine and a bounded buffer,
+			// so this guest cannot hold up the fan-out for the host or anyone else.
+			// A guest that overflows is disconnected: a terminal stream is not
+			// resumable, so dropping bytes out of the middle would leave a corrupted
+			// screen it could not detect, while a closed session it can simply
+			// rejoin. See owenthereal/upterm#524.
+			onDrop := func(err error) {
+				if errors.Is(err, uio.ErrOverflow) {
+					h.logger.Warn("dropping guest: too far behind to keep up with output",
+						"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
+				} else {
+					h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+				}
+				// Closing the channel is what makes the drop real: it fails the
+				// blocked write, and it fails the stdin copy below, so run.Group
+				// returns and the deferred client-left event fires.
+				_ = sess.Close()
+			}
+
+			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
+			if err := attachGuestOutput(h.writers, sink); err != nil {
+				if errors.Is(err, uio.ErrClosed) {
+					// The session is already tearing down. This guest arrived a
+					// moment too late, which is not its error.
+					_ = sess.Exit(0)
+				} else {
+					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
+					_ = sess.Exit(1)
+				}
+				return
+			}
+
+			defer func() {
+				h.writers.Remove(sink)
+				_ = sink.Close()
+			}()
+
+			guestOutput = sink
+		}
 
 		// Attached, in the sense the gate is defined by: the subscription is
 		// installed, so nothing the command writes from here on can be missed.
@@ -774,7 +898,16 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			terminalEventEmitter{h.eventEmmiter}.TerminalWindowChanged(sessionID, ptmx, ptyReq.Window.Width, ptyReq.Window.Height)
 		}
 
-		guestOutput = sink
+		// Everything a repaint needs is now queued: the mode snapshot, the
+		// ring, and this client's subscription. Ask the command to redraw
+		// without changing geometry. Best-effort, and the only use this
+		// branch makes of the handle, so a handler built without one — a
+		// test's — is left alone.
+		if ptmx != nil {
+			if err := ptmx.Redraw(); err != nil {
+				h.logger.Debug("redraw nudge skipped", "session-id", sessionID, "error", err)
+			}
+		}
 	}
 
 	{
@@ -864,13 +997,26 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 // normal operation the moment MultiWriter learned to quiesce.
 //
 // It takes a built sink rather than building one so the caller, and a test,
-// keeps a handle on what it must release.
-func attachGuestOutput(writers *uio.MultiWriter, sink *uio.AsyncWriter) error {
+// keeps a handle on what it must release. The sink is whatever the door built:
+// an AsyncWriter for a guest, a hostSink for a local client.
+func attachGuestOutput(writers *uio.MultiWriter, sink interface {
+	io.Writer
+	Close() error
+}) error {
 	if err := writers.Append(sink); err != nil {
 		_ = sink.Close()
 		return err
 	}
 	return nil
+}
+
+// isInteractive reports whether a host client declared that it forwards its
+// terminal's keystrokes (attach.Client sends the env request when it has
+// both a pty and a Stdin). Without the declaration a pty says only that
+// the client displays on a terminal, and a terminal nobody reads answers a
+// query into whatever shell owns it.
+func isInteractive(sess gssh.Session) bool {
+	return slices.Contains(sess.Environ(), upterm.AttachInteractiveEnvVar+"=1")
 }
 
 func emitClientJoinEvent(eventEmmiter *emitter.Emitter, sessionID string, auth *server.AuthRequest, pk ssh.PublicKey) {

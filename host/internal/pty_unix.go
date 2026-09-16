@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"sync"
@@ -10,6 +11,8 @@ import (
 
 	ptylib "github.com/creack/pty"
 	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/internal/tty"
+	"golang.org/x/sys/unix"
 )
 
 func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
@@ -76,6 +79,24 @@ func (pty *pty) Setsize(h, w int) error {
 	}
 
 	return ptylib.Setsize(pty.File, &ptylib.Winsize{Rows: uint16(h), Cols: uint16(w)})
+}
+
+// Redraw nudges the foreground process group with SIGWINCH, the signal a
+// full-screen program repaints on. Nothing about the geometry changes, so a
+// pinned session is nudged like any other.
+func (pty *pty) Redraw() error {
+	pty.RLock()
+	defer pty.RUnlock()
+
+	pgrp, err := tty.ForegroundProcessGroup(int(pty.Fd()))
+	if err != nil {
+		return err
+	}
+	if pgrp <= 0 {
+		// kill(0, …) would signal our own process group.
+		return errors.New("pty has no foreground process group")
+	}
+	return unix.Kill(-pgrp, unix.SIGWINCH)
 }
 
 func (pty *pty) Read(p []byte) (n int, err error) {

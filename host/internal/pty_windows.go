@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -56,13 +57,16 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 		return nil, fmt.Errorf("failed to create job object: %w", err)
 	}
 
-	return &pty{
+	p := &pty{
 		cpty:   cpty,
 		handle: handle,
 		pid:    pid,
 		job:    job,
 		pinned: pinned,
-	}, nil
+	}
+	p.lastH.Store(int32(size.Rows))
+	p.lastW.Store(int32(size.Cols))
+	return p, nil
 }
 
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
@@ -74,6 +78,13 @@ type pty struct {
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
 	pinned              bool
+
+	// lastH, lastW are the geometry the ConPTY was last set to. Windows has no
+	// SIGWINCH, so Redraw nudges by resizing out and back, and it needs a size
+	// to come back to. Atomic rather than guarded by the lock below, because
+	// Setsize runs under the read lock, which does not exclude another Setsize.
+	lastH, lastW atomic.Int32
+
 	sync.RWMutex
 }
 
@@ -94,6 +105,43 @@ func (p *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	if err := p.cpty.Resize(w, h); err != nil {
+		return err
+	}
+	// Recorded only once the ConPTY is actually at this size: Redraw comes
+	// back to what it finds here, and a size that failed to apply would make
+	// the nudge a resize rather than a round-trip.
+	p.lastH.Store(int32(h))
+	p.lastW.Store(int32(w))
+	return nil
+}
+
+// Redraw asks the console application to repaint. There is no SIGWINCH on
+// Windows, so the nudge is a resize round-trip: one column wider, then back to
+// the size it was. A pinned session gets no nudge at all — the promise that
+// the geometry will not move is the stronger of the two.
+//
+// The write lock, not the read lock that guards a single Resize: the two calls
+// below must land back to back, and under RLock a concurrent Setsize could run
+// between them and be overwritten by the second.
+func (p *pty) Redraw() error {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.conptyClosed || p.cpty == nil {
+		return nil // Silently ignore a nudge on a closed pty
+	}
+	if p.pinned {
+		return nil
+	}
+
+	h, w := int(p.lastH.Load()), int(p.lastW.Load())
+	if h <= 0 || w <= 0 {
+		return nil
+	}
+	if err := p.cpty.Resize(w+1, h); err != nil {
+		return err
+	}
 	return p.cpty.Resize(w, h)
 }
 

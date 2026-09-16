@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,11 +185,92 @@ type hostPty struct {
 	viewer bool
 }
 
+// gatedConn is a client connection a test can stop reading from: the client
+// that is still connected but is no longer taking bytes off the socket, which
+// is what the host sees of a terminal under SIGSTOP.
+//
+// It exists to tell a closed connection from a closed channel. Both leave the
+// same error on the session, and an in-process client whose mux is still
+// running answers a channel close at once — so a host that closed the channel
+// where it meant to close the connection would look identical, while releasing
+// nothing that is parked in SSH. With the mux stopped, only the connection
+// going away has any effect.
+type gatedConn struct {
+	net.Conn
+
+	pause, resume     chan struct{}
+	pauseOnce         sync.Once
+	resumeOnce        sync.Once
+	transportEnded    chan struct{}
+	transportEndsOnce sync.Once
+}
+
+func newGatedConn(c net.Conn) *gatedConn {
+	return &gatedConn{Conn: c,
+		pause: make(chan struct{}), resume: make(chan struct{}),
+		transportEnded: make(chan struct{})}
+}
+
+func (g *gatedConn) Read(p []byte) (int, error) {
+	select {
+	case <-g.pause:
+		<-g.resume
+	default:
+	}
+	n, err := g.Conn.Read(p)
+	if err != nil {
+		g.transportEndsOnce.Do(func() { close(g.transportEnded) })
+	}
+	return n, err
+}
+
+// pauseReads stops the client's mux dead. Nothing is read off the socket from
+// here on, so the channel window is never adjusted and the host's writes park.
+func (g *gatedConn) pauseReads() { g.pauseOnce.Do(func() { close(g.pause) }) }
+
+// resumeReads lets the mux run again, so the client can find out what became
+// of it while it was not looking.
+func (g *gatedConn) resumeReads() { g.resumeOnce.Do(func() { close(g.resume) }) }
+
+// transportClosed closes once the client's read side ends, which on this
+// socket means the host closed the connection rather than the channel on it.
+// Only observable after resumeReads: a paused mux reads nothing, including an
+// EOF.
+func (g *gatedConn) transportClosed() <-chan struct{} { return g.transportEnded }
+
+// hostDialOption tunes one host-door connection.
+type hostDialOption func(*hostDialConfig)
+
+type hostDialConfig struct{ deadline time.Duration }
+
+// withHostDeadline replaces the harness's absolute connection deadline for one
+// connection. The tests that move several MiB, and the ones that deliberately
+// stop reading for a while, need the room: with the default they could fail
+// because a loaded runner ran out of deadline rather than because anything was
+// wrong.
+func withHostDeadline(d time.Duration) hostDialOption {
+	return func(c *hostDialConfig) { c.deadline = d }
+}
+
 // dialHost completes the handshake on the host door with a throwaway key, the
 // way upterm attach does, and opens no session: a connection is not yet a
 // client.
-func (h *hostHarness) dialHost(t *testing.T) *ssh.Client {
+func (h *hostHarness) dialHost(t *testing.T, opts ...hostDialOption) *ssh.Client {
 	t.Helper()
+
+	client, _ := h.dialHostConn(t, opts...)
+	return client
+}
+
+// dialHostConn is dialHost for a test that needs the gate on the client's
+// reads as well as the client.
+func (h *hostHarness) dialHostConn(t *testing.T, opts ...hostDialOption) (*ssh.Client, *gatedConn) {
+	t.Helper()
+
+	cfg := hostDialConfig{deadline: harnessTimeout}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -198,8 +280,12 @@ func (h *hostHarness) dialHost(t *testing.T) *ssh.Client {
 	raw, err := net.DialTimeout("unix", h.attachSocket, harnessTimeout)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = raw.Close() })
-	require.NoError(t, raw.SetDeadline(time.Now().Add(harnessTimeout)))
-	conn, chans, reqs, err := ssh.NewClientConn(raw, h.attachSocket, &ssh.ClientConfig{
+	require.NoError(t, raw.SetDeadline(time.Now().Add(cfg.deadline)))
+	gated := newGatedConn(raw)
+	// Released whatever the test does, so a mux parked in the gate can never
+	// outlive the test that paused it.
+	t.Cleanup(gated.resumeReads)
+	conn, chans, reqs, err := ssh.NewClientConn(gated, h.attachSocket, &ssh.ClientConfig{
 		User: "host", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.FixedHostKey(h.hostKey),
 		ClientVersion:   upterm.AttachSSHClientVersion,
@@ -207,16 +293,26 @@ func (h *hostHarness) dialHost(t *testing.T) *ssh.Client {
 	require.NoError(t, err)
 	client := ssh.NewClient(conn, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
-	return client
+	return client, gated
 }
 
 // connectHost attaches through the host door with a throwaway key, the way
 // upterm attach does. A nil pty makes it a pipe viewer; a pty that is not a
 // viewer declares itself interactive, as attach.Client does with a Stdin.
-func (h *hostHarness) connectHost(t *testing.T, pty *hostPty) (io.WriteCloser, io.Reader, *ssh.Session) {
+func (h *hostHarness) connectHost(t *testing.T, pty *hostPty, opts ...hostDialOption) (io.WriteCloser, io.Reader, *ssh.Session) {
 	t.Helper()
 
-	sess, err := h.dialHost(t).NewSession()
+	in, out, sess, _ := h.connectHostGated(t, pty, opts...)
+	return in, out, sess
+}
+
+// connectHostGated is connectHost for a test that needs to stop the client
+// reading mid-session.
+func (h *hostHarness) connectHostGated(t *testing.T, pty *hostPty, opts ...hostDialOption) (io.WriteCloser, io.Reader, *ssh.Session, *gatedConn) {
+	t.Helper()
+
+	client, gated := h.dialHostConn(t, opts...)
+	sess, err := client.NewSession()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sess.Close() })
 	if pty != nil {
@@ -230,7 +326,7 @@ func (h *hostHarness) connectHost(t *testing.T, pty *hostPty) (io.WriteCloser, i
 	out, err := sess.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, sess.Shell())
-	return in, out, sess
+	return in, out, sess, gated
 }
 
 // readUntil reads r until marker appears, returning everything read.

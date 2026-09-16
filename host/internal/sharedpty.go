@@ -105,6 +105,22 @@ func (s *sharedPTY) Setsize(h, w int) error {
 	return ptmx.Setsize(h, w)
 }
 
+// Redraw before the pty exists is a no-op: there is no process to nudge, and
+// the client that arrived early has nothing to repaint — the command's first
+// output is still ahead of it. Never waits, unlike Write: the nudge runs on
+// the attaching client's handler, which must reach its actors.
+func (s *sharedPTY) Redraw() error {
+	select {
+	case <-s.ready:
+	default:
+		return nil
+	}
+	s.mu.Lock()
+	ptmx := s.ptmx
+	s.mu.Unlock()
+	return ptmx.Redraw()
+}
+
 func (s *sharedPTY) Close() error {
 	ptmx, err := s.wait()
 	if err != nil {

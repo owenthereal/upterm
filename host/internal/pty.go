@@ -30,6 +30,12 @@ type PTY interface {
 	// On Windows, this resizes the ConPTY buffer.
 	Setsize(h, w int) error
 
+	// Redraw asks the process on the pty to repaint without changing its
+	// geometry: a replay repaints what the ring holds, and a full-screen
+	// program redraws the rest on SIGWINCH. On Windows there is no SIGWINCH,
+	// so the nudge is a resize, and unavailable under a pinned size.
+	Redraw() error
+
 	// Wait waits for the process associated with this PTY to exit.
 	// On Unix, this delegates to exec.Cmd.Wait().
 	// On Windows, this waits on the process handle.
