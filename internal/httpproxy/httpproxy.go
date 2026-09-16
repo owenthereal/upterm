@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -94,7 +95,7 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 	// sends a non-200 2xx, so this is conformance rather than a live fix.
 	if resp.StatusCode/100 != 2 {
 		_ = conn.Close()
-		return nil, fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
+		return nil, refusedError(proxyAddr, addr, resp)
 	}
 
 	// The cap covered the response headers. Lift it before the tunnel is
@@ -103,6 +104,52 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 
 	_ = conn.SetDeadline(time.Time{})
 	return &bufferedConn{Conn: conn, r: br}, nil
+}
+
+// refusedError reports a CONNECT the proxy would not open, naming the likely
+// cause when the target is SSH's port.
+//
+// Stock Squid denies CONNECT to anything outside its SSL_ports ACL, which is
+// 443 alone, so the common corporate answer for port 22 is an immediate
+// refusal rather than a timeout — and the refusal on its own reads as though
+// the upterm server were unreachable.
+func refusedError(proxyAddr, addr string, resp *http.Response) error {
+	err := fmt.Errorf("proxy %s refused CONNECT to %s: %s", proxyAddr, addr, resp.Status)
+
+	// Only for a denial of this destination, which is what 403 is and what
+	// Squid answers when CONNECT falls outside its SSL_ports ACL.
+	//
+	// Not 405 or 501: those say CONNECT itself is unsupported, and a wss://
+	// server through the same proxy still needs CONNECT, merely to 443. Not
+	// 401 or 407, which are answerable with credentials. Not a 5xx, which is
+	// the proxy or its upstream failing. In none of those would a different
+	// port be the fix, and the advice would crowd out the status that says
+	// what is.
+	if resp.StatusCode != http.StatusForbidden {
+		return err
+	}
+
+	// The suggestion keeps the host that was being dialled and changes only the
+	// transport. Naming upterm's public relay would silently move the session
+	// onto a different deployment.
+	if host, port, splitErr := net.SplitHostPort(addr); splitErr == nil && port == "22" {
+		return fmt.Errorf("%w; many proxies allow CONNECT only to port 443, "+
+			"so try a WebSocket server instead, e.g. --server %s", err, WebSocketServerURL(host))
+	}
+	return err
+}
+
+// WebSocketServerURL formats host as a wss:// --server value.
+//
+// Exported because the CONNECT refusal here and the dial-failure hint in
+// host/internal both suggest one, and a bare IPv6 address needs bracketing to
+// be a valid authority — "wss://2001:db8::1" is not a URL either of them could
+// have accepted back.
+func WebSocketServerURL(host string) string {
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return "wss://" + host
 }
 
 // proxyHostPort returns the address to dial for proxyURL, defaulting the port

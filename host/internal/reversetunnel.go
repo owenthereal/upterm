@@ -2,10 +2,13 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
+	"os"
 	"os/user"
 	"strings"
 	"time"
@@ -141,7 +144,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	if err != nil {
-		return nil, sshDialError(c.Host.String(), err)
+		return nil, sshDialError(c.Host, c.ProxyURL, err)
 	}
 
 	sessResp, err := c.createSession(user.Username, publicKeys, authorizedKeys)
@@ -228,9 +231,10 @@ func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientC
 	if err != nil {
 		return nil, err
 	}
+	// No Close on the error path: NewClientConn closes conn itself on each of
+	// them, and ws.NewSSHClient already relies on that.
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, c.Host.Host, config)
 	if err != nil {
-		_ = conn.Close()
 		return nil, err
 	}
 	return ssh.NewClient(ncc, chans, reqs), nil
@@ -385,13 +389,115 @@ func (e *PermissionDeniedError) Error() string {
 
 func (e *PermissionDeniedError) Unwrap() error { return e.err }
 
-func sshDialError(host string, err error) error {
+func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	if strings.Contains(err.Error(), publickeyAuthError) {
 		return &PermissionDeniedError{
-			host: host,
+			host: host.String(),
 			err:  err,
 		}
 	}
 
-	return fmt.Errorf("ssh dial error: %w", err)
+	dialErr := fmt.Errorf("ssh dial error: %w", err)
+
+	// A direct ssh:// dial that failed to reach the host on a machine which
+	// defines a proxy is the shape of "egress is proxy-only". upterm does not
+	// read those variables for ssh:// servers, the same as OpenSSH, so nothing
+	// in the error connects the failure to the proxy the user knows they are
+	// behind — and in an agent sandbox, whatever reads this error is what has
+	// to work out the next move.
+	//
+	// Gated on the failure actually being a network one. Everything else this
+	// wraps happens after the connection succeeded — a host-key mismatch, a
+	// declined prompt, an algorithm mismatch — where a proxy cannot be the
+	// cause and the advice would trail a security warning it has nothing to do
+	// with.
+	if proxyURL == nil && !isWSScheme(host.Scheme) && isNetworkError(err) {
+		// Probed with the port, not just the hostname: NO_PROXY entries may be
+		// port-specific, and the lookup fills in the scheme's default port for
+		// anything that arrives without one — so a bare hostname would be
+		// asked about :443 and sail straight past an exemption for :22.
+		if envProxy, name := envProxyFor(host.Host); envProxy != nil {
+			if envProxy.Scheme == "http" {
+				// Exported, not merely assigned: a shell variable would not
+				// reach the retried process, and this is read after the
+				// original command has already failed.
+				return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
+					"environment for ssh:// servers, the same as OpenSSH — to go through it, "+
+					"run: export UPTERM_PROXY=\"$%s\" (which keeps the credentials out of "+
+					"the process list), or pass --proxy", dialErr, name, name)
+			}
+			// Copying it would only trade this error for "only http:// proxies
+			// are supported", so the other transport is the one to name. It is
+			// offered as a route rather than a promise: whether this particular
+			// value serves a ws:// or wss:// dial is gorilla's business, not
+			// something to assert on its behalf.
+			//
+			// The example keeps the host already configured and changes only
+			// the scheme. Naming upterm's public relay would silently move the
+			// session onto someone else's deployment, which is rarely what a
+			// custom --server was chosen for.
+			return fmt.Errorf("%w; %s is set, but upterm does not use the proxy "+
+				"environment for ssh:// servers, the same as OpenSSH, and --proxy takes "+
+				"only http:// values — a ws:// or wss:// server does read the environment, "+
+				"e.g. --server %s", dialErr, name, httpproxy.WebSocketServerURL(host.Hostname()))
+		}
+	}
+
+	return dialErr
+}
+
+// isNetworkError reports whether err is a failure to establish or hold the
+// connection, as opposed to one the SSH exchange itself produced.
+func isNetworkError(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
+}
+
+// proxyFromEnvironment is how the environment is consulted. A variable because
+// the real one answers from a sync.Once populated at its first call in the
+// process, which a test cannot then influence with t.Setenv.
+var proxyFromEnvironment = http.ProxyFromEnvironment
+
+// envProxyFor reports the proxy the environment would use to reach authority,
+// which is a host:port, and the variable that supplied it.
+//
+// Asking the question this way rather than reading the variables directly is
+// what makes the advice safe to give. A proxy that is set but does not apply
+// comes back nil, and there are three ways that happens, each of which would
+// otherwise produce a wrong suggestion:
+//
+//   - NO_PROXY exempts this host. The user has said they do not want it
+//     proxied, so proposing that they route it through one anyway contradicts
+//     their own configuration — and the dial failure is then almost certainly
+//     something else.
+//   - The value does not parse. Copying it would swap this error for a flag
+//     rejection, and no transport would fare better.
+//   - Only the variable for the other scheme is set, which is not the one a
+//     dial to this host would consult.
+//
+// The value is inspected only for its scheme and never retained: it may carry
+// credentials.
+func envProxyFor(authority string) (proxy *url.URL, name string) {
+	// https first: it is what a wss:// server, the busier of the two
+	// suggestions, would consult.
+	for _, scheme := range []string{"https", "http"} {
+		u, err := proxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: scheme, Host: authority}})
+		if err != nil || u == nil || u.Hostname() == "" {
+			continue
+		}
+		return u, proxyEnvVarName(scheme)
+	}
+	return nil, ""
+}
+
+// proxyEnvVarName names the variable that supplied scheme's proxy, preferring
+// whichever spelling is actually set. The lowercase ones are what most shells
+// and curl write; on Windows the two name the same variable, so the uppercase
+// one is simply what gets reported.
+func proxyEnvVarName(scheme string) string {
+	upper := strings.ToUpper(scheme) + "_PROXY"
+	if os.Getenv(upper) == "" && os.Getenv(scheme+"_proxy") != "" {
+		return scheme + "_proxy"
+	}
+	return upper
 }

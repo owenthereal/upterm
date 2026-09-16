@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -351,4 +353,178 @@ func Test_KeepAlive_DoesNotReportADeadRelayWhenStopped(t *testing.T) {
 	}
 
 	require.Empty(t, dead, "a ping that failed only because ctx ended must not be reported as a dead relay")
+}
+
+// A direct ssh:// dial that fails on a machine which defines a proxy is the
+// shape of "egress is proxy-only". upterm deliberately does not read those
+// variables for ssh:// servers, the same as OpenSSH, so without this the error
+// never connects the failure to the proxy the user knows they are behind.
+func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
+	var (
+		sshURL   = &url.URL{Scheme: "ssh", Host: "uptermd.upterm.dev:22"}
+		wssURL   = &url.URL{Scheme: "wss", Host: "uptermd.upterm.dev:443"}
+		flagged  = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
+		httpEnv  = &url.URL{Scheme: "http", Host: "proxy.example.com:3128"}
+		socksEnv = &url.URL{Scheme: "socks5", Host: "proxy.example.com:1080"}
+		// A real network failure. The hint is gated on one so that it cannot
+		// trail a host-key warning it has nothing to do with.
+		dialErr = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection reset by peer")}
+	)
+
+	// stubEnv makes the environment lookup answer with proxy, and sets varName
+	// so the message has a spelling to name. A nil proxy stands for every way
+	// none applies: nothing set, NO_PROXY exempting the host, a value that does
+	// not parse.
+	stubEnv := func(t *testing.T, varName string, proxy *url.URL, lookupErr error) *string {
+		t.Helper()
+		for _, n := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+			t.Setenv(n, "")
+		}
+		if varName != "" {
+			t.Setenv(varName, "set-for-display-only")
+		}
+		orig := proxyFromEnvironment
+		t.Cleanup(func() { proxyFromEnvironment = orig })
+		var asked string
+		proxyFromEnvironment = func(req *http.Request) (*url.URL, error) {
+			asked = req.URL.Host
+			return proxy, lookupErr
+		}
+		return &asked
+	}
+
+	t.Run("an http proxy is offered for copying", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		// Exported, not merely assigned: a bare assignment would not reach the
+		// process the user retries with.
+		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$HTTPS_PROXY"`)
+		assert.Contains(t, err.Error(), "--proxy")
+	})
+
+	t.Run("the lowercase spelling is named when it is the one set", func(t *testing.T) {
+		// Windows environment variable names are case-insensitive, so setting
+		// https_proxy also sets HTTPS_PROXY and the uppercase spelling wins.
+		// Naming either is correct there; this pins the Unix behaviour.
+		if runtime.GOOS == "windows" {
+			t.Skip("environment variable names are case-insensitive on Windows")
+		}
+		_ = stubEnv(t, "https_proxy", httpEnv, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$https_proxy"`)
+	})
+
+	// socks5:// is a supported way to configure the environment proxy for the
+	// ws and wss path, but --proxy takes only http://, so offering the copy
+	// would trade this failure for a flag rejection.
+	t.Run("a socks5 proxy names the other transport instead", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+		assert.Contains(t, err.Error(), "--server wss://uptermd.upterm.dev")
+	})
+
+	// Every way no proxy applies arrives as a nil lookup: NO_PROXY exempting
+	// this host, nothing set at all, or a value too malformed to parse. In
+	// none of them is routing through a proxy the answer.
+	t.Run("a proxy that does not apply gets no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", nil, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("a lookup error gets no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, errors.New("invalid proxy address"))
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("a proxy with no host gets no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", &url.URL{Scheme: "http"}, nil)
+
+		err := sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
+	})
+
+	t.Run("--proxy already supplied, no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		err := sshDialError(sshURL, flagged, dialErr)
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+
+	t.Run("wss already reads the environment, no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		err := sshDialError(wssURL, nil, dialErr)
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+
+	// Everything the dial wraps other than a network failure happened after
+	// the connection succeeded, where a proxy cannot be the cause. A host-key
+	// mismatch is the case that matters: the advice would trail a security
+	// warning it has nothing to do with.
+	t.Run("a failure that is not the network gets no advice", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		err := sshDialError(sshURL, nil, errors.New("ssh: handshake failed: host key mismatch"))
+
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+		assert.NotContains(t, err.Error(), "wss://")
+	})
+
+	// A custom relay was chosen for a reason. Changing the transport is the
+	// suggestion; changing whose deployment the session runs on is not.
+	t.Run("a custom relay keeps its own host in the suggestion", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, dialErr)
+
+		assert.Contains(t, err.Error(), "--server wss://relay.corp")
+		assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
+	})
+
+	// url.URL.Hostname strips the brackets, and an unbracketed IPv6 address is
+	// not an authority the suggestion could be pasted back as.
+	t.Run("an IPv6 relay is bracketed in the suggestion", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
+
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "[2001:db8::1]:22"}, nil, dialErr)
+
+		assert.Contains(t, err.Error(), "--server wss://[2001:db8::1]")
+	})
+
+	// NO_PROXY entries may name a port, and the lookup fills in the scheme's
+	// default for anything asked without one. Probing the bare hostname would
+	// therefore ask about :443 and sail past an exemption written for :22.
+	t.Run("the lookup is asked about the port that failed", func(t *testing.T) {
+		asked := stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		_ = sshDialError(sshURL, nil, dialErr)
+
+		assert.Equal(t, "uptermd.upterm.dev:22", *asked)
+	})
+
+	t.Run("an auth failure is still a permission denial", func(t *testing.T) {
+		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
+
+		err := sshDialError(sshURL, nil, errors.New(publickeyAuthError))
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
 }

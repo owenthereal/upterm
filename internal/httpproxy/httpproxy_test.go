@@ -73,6 +73,83 @@ func TestDialRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "407")
 	assert.Contains(t, err.Error(), proxy.URL.Host)
 	assert.Contains(t, err.Error(), "uptermd.example.com:22")
+	// A 407 is answerable with credentials, so the port-policy advice would
+	// only crowd out the status that says what to do.
+	assert.NotContains(t, err.Error(), "wss://")
+}
+
+// Squid's SSL_ports ACL allows 443 only, so the usual corporate answer for
+// port 22 is a refusal. Without the hint it reads as though the upterm server
+// were unreachable, and the way out — a wss:// server on 443 — is not obvious.
+func TestDialRefusedOnPort22SuggestsWSS(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "relay.corp:22")
+
+	require.Error(t, err)
+	// The host being dialled, not upterm's public relay: a custom --server was
+	// chosen for a reason, and only the transport is in question here.
+	assert.Contains(t, err.Error(), "wss://relay.corp")
+	assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
+}
+
+// An unbracketed IPv6 address is not a valid authority, so a suggestion
+// carrying one could not be pasted back into --server.
+func TestDialRefusedOnPort22BracketsIPv6(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "[2001:db8::1]:22")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wss://[2001:db8::1]")
+}
+
+// Only a denial of this destination earns the advice. Everything else — a
+// method the proxy will not perform at all, a challenge answerable with
+// credentials, a malformed request, a failing upstream — is about something a
+// different port cannot fix, and the hint would crowd out the status.
+func TestDialRefusedOnlyHintsAtPolicyDenials(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		wantHint bool
+	}{
+		{status: http.StatusForbidden, wantHint: true},
+		// CONNECT itself being unsupported, rather than this destination being
+		// refused: a wss:// server through the same proxy still needs CONNECT.
+		{status: http.StatusMethodNotAllowed},
+		{status: http.StatusNotImplemented},
+		{status: http.StatusProxyAuthRequired},
+		{status: http.StatusUnauthorized},
+		{status: http.StatusBadRequest},
+		{status: http.StatusNotFound},
+		{status: http.StatusInternalServerError},
+		{status: http.StatusBadGateway},
+		{status: http.StatusServiceUnavailable},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			proxy := httpproxytest.Start(t, tc.status)
+
+			_, err := httpproxy.Dial(t.Context(), proxy.URL, "relay.corp:22")
+
+			require.Error(t, err)
+			if tc.wantHint {
+				assert.Contains(t, err.Error(), "wss://relay.corp")
+				return
+			}
+			assert.NotContains(t, err.Error(), "wss://")
+		})
+	}
+}
+
+// The same refusal to a WebSocket port is just a refusal: 443 is what proxies
+// already allow, so pointing at wss:// would be noise.
+func TestDialRefusedOnPort443OmitsTheHint(t *testing.T) {
+	proxy := httpproxytest.Start(t, http.StatusForbidden)
+
+	_, err := httpproxy.Dial(t.Context(), proxy.URL, "uptermd.upterm.dev:443")
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "wss://")
 }
 
 // A status line with no reason phrase is legal. gorilla splits on the space
