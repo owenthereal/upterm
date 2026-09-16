@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,7 +100,38 @@ func ValidateName(name string) error {
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("%w: %q must match %s", ErrInvalidName, name, nameRe)
 	}
+	// Two of Windows' rules, applied on every platform for the reason
+	// maxSocketPath gives: a name that works on Linux and fails on Windows is
+	// a worse contract than one refused everywhere. Both would otherwise pass
+	// flag validation and fail at Mkdir, after the user was told the name was
+	// fine.
+	//
+	// On the Windows releases that still reserve a device name with any
+	// extension — Windows 10 and the Server releases before 2025 do; Windows
+	// 11 and Server 2025 relaxed it — con.log is the console, so the part
+	// before the first period is what is compared: the strictest release is
+	// the one the contract has to hold on.
+	if base, _, _ := strings.Cut(name, "."); isReservedDeviceName(base) {
+		return fmt.Errorf("%w: %q is a device name on Windows", ErrInvalidName, name)
+	}
+	// A trailing period is dropped when the path is created, so build. and
+	// build would be one directory under two names.
+	if strings.HasSuffix(name, ".") {
+		return fmt.Errorf("%w: %q ends in a period, which Windows drops", ErrInvalidName, name)
+	}
 	return nil
+}
+
+// isReservedDeviceName reports whether base, compared case-insensitively, is
+// one of the DOS device names Windows refuses as a file or directory name.
+// nameRe admits only ASCII, so ToUpper folds the letters and nothing else.
+func isReservedDeviceName(base string) bool {
+	b := strings.ToUpper(base)
+	switch b {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(b) == 4 && (strings.HasPrefix(b, "COM") || strings.HasPrefix(b, "LPT")) && b[3] >= '0' && b[3] <= '9'
 }
 
 // CheckSocketPath reports whether a name's sockets would fit in a unix socket
@@ -641,6 +673,10 @@ func releaseRegistry(f *os.File) {
 func GenerateName(command []string) string {
 	base := "session"
 	if len(command) > 0 && command[0] != "" {
+		// A basename ValidateName refuses falls back to "session" rather than
+		// to a repaired form of itself. That covers the names the regexp
+		// rejects and the ones Windows reserves alike: a command called
+		// nul.exe gets session-xxxx, and nothing here has to know why.
 		if b := filepath.Base(command[0]); ValidateName(b) == nil {
 			base = b
 		}

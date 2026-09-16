@@ -92,6 +92,22 @@ func Test_ValidateName(t *testing.T) {
 	err := ValidateName(string(long))
 	require.ErrorIs(t, err, ErrInvalidName)
 	require.ErrorContains(t, err, "longer than 64 bytes")
+
+	// Windows' device names, whatever the case or extension, and a trailing
+	// period: refused here on every platform, because a name that claims on
+	// Linux and fails at Mkdir on Windows is not a name at all.
+	for _, bad := range []string{"con", "NUL", "Com1", "lpt9", "con.log", "build."} {
+		require.ErrorIs(t, ValidateName(bad), ErrInvalidName, "name %q", bad)
+	}
+	require.ErrorContains(t, ValidateName("con.log"), "device name")
+	require.ErrorContains(t, ValidateName("build."), "ends in a period")
+
+	// And only those: a device name is exactly three or four characters
+	// before the first period, so a longer word, a shorter one, a two-digit
+	// port or a suffix past the period is an ordinary name.
+	for _, ok := range []string{"console", "com", "com10", "nul-1a2b", "build.1", "aux2"} {
+		require.NoError(t, ValidateName(ok), "name %q", ok)
+	}
 }
 
 func Test_Claim_RejectsTraversalWithoutTouchingAnything(t *testing.T) {
@@ -362,6 +378,12 @@ func Test_GenerateName(t *testing.T) {
 	// A command whose basename is not a legal name must still produce one.
 	require.NoError(t, ValidateName(GenerateName([]string{"../weird"})))
 	require.NoError(t, ValidateName(GenerateName([]string{".hidden"})))
+
+	// A basename that is a Windows device name falls back the same way, to
+	// the default rather than to some repaired form of nul.
+	reserved := GenerateName([]string{"nul.exe"})
+	require.NoError(t, ValidateName(reserved))
+	require.Regexp(t, `^session-[0-9a-f]{4}$`, reserved)
 
 	// A basename at the length limit must still leave room for the suffix —
 	// and for the runtime root the name ends up under, which is why the cut is
