@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/base64"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	chshare "github.com/jpillora/chisel/share"
+	"github.com/owenthereal/upterm/internal/httpproxy"
 	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
 )
@@ -49,8 +51,25 @@ func NewWSConn(u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, er
 	header := webSocketDialHeader(user.Username(), encodedNodeAddr, isUptermClient)
 	dialer := websocket.DefaultDialer
 	if proxyURL != nil {
+		// Open the tunnel with upterm's own dialer instead of gorilla's.
+		// gorilla throws away the reader it buffered the CONNECT response
+		// through, which is safe only because WebSocket is client-speaks-first
+		// — and the ssh:// path needs the same dialer, where it is not. Sharing
+		// one also means proxy authentication, the default port, the accepted
+		// statuses and the error text are defined once.
+		//
+		// gorilla still runs TLS for wss over the returned tunnel, with
+		// ServerName taken from the target URL rather than from the proxy, and
+		// then performs the upgrade.
+		//
+		// Only an explicit --proxy is taken over. The environment path stays
+		// with gorilla, which also understands socks5:// in HTTPS_PROXY and
+		// honours NO_PROXY; neither is something this dialer does.
 		d := *websocket.DefaultDialer
-		d.Proxy = http.ProxyURL(proxyURL)
+		d.Proxy = nil
+		d.NetDialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return httpproxy.Dial(ctx, proxyURL, addr)
+		}
 		dialer = &d
 	}
 	wsc, _, err := dialer.Dial(u.String(), header)

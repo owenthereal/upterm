@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
@@ -75,7 +76,7 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 		{name: "rejected then accepted", signers: []ssh.Signer{bad[0], good[0]}, allowed: true},
 	}
 
-	proxy := startConnectProxy(t, http.StatusOK)
+	proxy := httpproxytest.Start(t, http.StatusOK)
 	sshURL := &url.URL{Scheme: "ssh", Host: sshln.Addr().String()}
 	wsURL := &url.URL{Scheme: "ws", Host: wsln.Addr().String()}
 	for _, endpoint := range []struct {
@@ -102,7 +103,7 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 					// total makes every nested -run filter fail, because the
 					// parent still expects the tunnels of the leaves the
 					// filter excluded.
-					before := proxy.tunnels.Load()
+					before := proxy.Tunnels()
 					response, err := tunnel.Establish(t.Context())
 					if tunnel.Client != nil {
 						t.Cleanup(func() { _ = tunnel.Client.Close() })
@@ -115,7 +116,7 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 					if endpoint.proxy != nil {
 						want++
 					}
-					require.EqualValues(t, want, proxy.tunnels.Load())
+					require.EqualValues(t, want, proxy.Tunnels())
 
 					if !tc.allowed {
 						require.Error(t, err)
