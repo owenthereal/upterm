@@ -538,7 +538,7 @@ func (d wsConnDialer) DialContext(_ context.Context, id *api.Identifier) (net.Co
 	encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(id.NodeAddr))
 	u.User = url.UserPassword(id.Id, encodedNodeAddr)
 
-	return ws.NewWSConn(u, true)
+	return ws.NewWSConn(u, true, nil)
 }
 
 type sidewayConnDialer struct {

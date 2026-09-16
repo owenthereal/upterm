@@ -223,6 +223,11 @@ func exampleConfig() string {
 # Supported protocols: ssh, ws, wss
 # server: ssh://uptermd.upterm.dev:22
 
+# HTTP proxy to connect to the server through (default: none)
+# Applies to ssh, ws and wss servers. Without it, ws and wss connections
+# use HTTPS_PROXY/HTTP_PROXY. Credentials go in the URL.
+# proxy: http://user:pass@proxy.example.com:3128
+
 # Force a specific command for clients (default: none)
 # When set, clients cannot run arbitrary commands.
 # force-command: "/bin/bash -l"

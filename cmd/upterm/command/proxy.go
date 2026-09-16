@@ -26,6 +26,8 @@ func proxyCmd() *cobra.Command {
 		RunE: proxyRunE,
 	}
 
+	cmd.Flags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Without it, HTTPS_PROXY/HTTP_PROXY are used.")
+
 	return cmd
 }
 
@@ -39,7 +41,12 @@ func proxyRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	conn, err := ws.NewWSConn(u, true)
+	proxyURL, err := parseProxyURL(flagProxy)
+	if err != nil {
+		return err
+	}
+
+	conn, err := ws.NewWSConn(u, true, proxyURL)
 	if err != nil {
 		return err
 	}

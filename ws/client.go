@@ -17,8 +17,9 @@ import (
 // NewSSHClient creates a ssh client via ws.
 // The url must include username as session id and password as encoded node address.
 // isUptermClient indicates whether the client is host client or client client.
-func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool) (*ssh.Client, error) {
-	conn, err := NewWSConn(u, isUptermClient)
+// proxyURL, when non-nil, is the HTTP proxy to dial through (see NewWSConn).
+func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool, proxyURL *url.URL) (*ssh.Client, error) {
+	conn, err := NewWSConn(u, isUptermClient, proxyURL)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +37,9 @@ func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool) (*s
 // NewWSConn creates a ws net.Conn.
 // The url must include username as session id and password as encoded node address.
 // isUptermClient indicates whether the client is host client or client client.
-func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
+// proxyURL, when non-nil, is the HTTP proxy to dial through; when nil, the
+// proxy comes from the environment (HTTPS_PROXY, HTTP_PROXY, NO_PROXY).
+func NewWSConn(u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, error) {
 	u, _ = url.Parse(u.String()) // clone
 	user := u.User
 	u.User = nil // ws spec doesn't support basic auth
@@ -44,7 +47,13 @@ func NewWSConn(u *url.URL, isUptermClient bool) (net.Conn, error) {
 
 	encodedNodeAddr, _ := user.Password()
 	header := webSocketDialHeader(user.Username(), encodedNodeAddr, isUptermClient)
-	wsc, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	dialer := websocket.DefaultDialer
+	if proxyURL != nil {
+		d := *websocket.DefaultDialer
+		d.Proxy = http.ProxyURL(proxyURL)
+		dialer = &d
+	}
+	wsc, _, err := dialer.Dial(u.String(), header)
 	if err != nil {
 		return nil, err
 	}

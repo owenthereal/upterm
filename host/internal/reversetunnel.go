@@ -28,8 +28,10 @@ type ReverseTunnel struct {
 	Signers           []ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
-	HostKeyCallback   ssh.HostKeyCallback
-	Logger            *slog.Logger
+	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
+	ProxyURL        *url.URL
+	HostKeyCallback ssh.HostKeyCallback
+	Logger          *slog.Logger
 
 	ln net.Listener
 }
@@ -90,7 +92,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	if isWSScheme(c.Host.Scheme) {
 		u, _ := url.Parse(c.Host.String()) // clone
 		u.User = url.UserPassword(user.Username, "")
-		c.Client, err = ws.NewSSHClient(u, config, false)
+		c.Client, err = ws.NewSSHClient(u, config, false, c.ProxyURL)
+	} else if c.ProxyURL != nil {
+		c.Client, err = c.dialSSHViaProxy(ctx, config)
 	} else {
 		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
 	}
@@ -119,6 +123,23 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	})
 
 	return sessResp, nil
+}
+
+// dialSSHViaProxy connects to an ssh:// server through c.ProxyURL.
+func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientConfig) (*ssh.Client, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, proxyDialTimeout)
+	defer cancel()
+
+	conn, err := dialHTTPProxy(dialCtx, c.ProxyURL, c.Host.Host)
+	if err != nil {
+		return nil, err
+	}
+	ncc, chans, reqs, err := ssh.NewClientConn(conn, c.Host.Host, config)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(ncc, chans, reqs), nil
 }
 
 func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clientAuthorizedKeys [][]byte) (*server.CreateSessionResponse, error) {

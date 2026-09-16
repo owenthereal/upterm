@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -63,24 +64,36 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 	defer readyCancel()
 	require.NoError(t, utils.WaitForServer(readyCtx, sshln.Addr().String()))
 
-	for _, endpoint := range []*url.URL{
-		{Scheme: "ssh", Host: sshln.Addr().String()},
-		{Scheme: "ws", Host: wsln.Addr().String()},
+	authCases := []struct {
+		name    string
+		signers []ssh.Signer
+		allowed bool
+	}{
+		{name: "no keys"},
+		{name: "rejected key", signers: bad},
+		{name: "accepted key", signers: good, allowed: true},
+		{name: "rejected then accepted", signers: []ssh.Signer{bad[0], good[0]}, allowed: true},
+	}
+
+	proxy := startConnectProxy(t, http.StatusOK)
+	sshURL := &url.URL{Scheme: "ssh", Host: sshln.Addr().String()}
+	wsURL := &url.URL{Scheme: "ws", Host: wsln.Addr().String()}
+	for _, endpoint := range []struct {
+		name  string
+		host  *url.URL
+		proxy *url.URL
+	}{
+		{name: "ssh", host: sshURL},
+		{name: "ws", host: wsURL},
+		{name: "ssh via proxy", host: sshURL, proxy: proxy.URL},
+		{name: "ws via proxy", host: wsURL, proxy: proxy.URL},
 	} {
-		t.Run(endpoint.Scheme, func(t *testing.T) {
-			for _, tc := range []struct {
-				name    string
-				signers []ssh.Signer
-				allowed bool
-			}{
-				{name: "no keys"},
-				{name: "rejected key", signers: bad},
-				{name: "accepted key", signers: good, allowed: true},
-				{name: "rejected then accepted", signers: []ssh.Signer{bad[0], good[0]}, allowed: true},
-			} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, tc := range authCases {
 				t.Run(tc.name, func(t *testing.T) {
 					tunnel := &ReverseTunnel{
-						Host:              endpoint,
+						Host:              endpoint.host,
+						ProxyURL:          endpoint.proxy,
 						Signers:           tc.signers,
 						HostKeyCallback:   ssh.FixedHostKey(good[0].PublicKey()),
 						KeepAliveDuration: time.Hour,
@@ -105,4 +118,7 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 			}
 		})
 	}
+	// Every case of the two proxied endpoints went through the proxy, the
+	// rejected ones included: authentication happens after the tunnel is up.
+	require.EqualValues(t, 2*len(authCases), proxy.tunnels.Load())
 }

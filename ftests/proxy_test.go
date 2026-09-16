@@ -116,7 +116,7 @@ func dialGuest(t *testing.T, session *api.GetSessionResponse, clientJoinURL stri
 	if u.Scheme == "ws" || u.Scheme == "wss" {
 		encodedNodeAddr := base64.URLEncoding.EncodeToString([]byte(session.NodeAddr))
 		u.User = url.UserPassword(session.SessionId, encodedNodeAddr)
-		client, err = ws.NewSSHClient(u, config, true)
+		client, err = ws.NewSSHClient(u, config, true, nil)
 	} else {
 		client, err = ssh.Dial("tcp", u.Host, config)
 	}
