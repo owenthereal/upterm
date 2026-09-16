@@ -49,7 +49,7 @@ func TestCommand_Windows_BasicExecution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	ptmx, err := cmd.Start(ctx)
+	ptmx, err := cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command")
 
 	// Run the command
@@ -101,7 +101,7 @@ func TestCommand_Windows_JobObject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ptmx, err := cmd.Start(ctx)
+	ptmx, err := cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command")
 
 	// The pty struct should have a job handle (non-zero)
@@ -194,7 +194,7 @@ func TestCommand_Windows_ConPTY(t *testing.T) {
 	defer cancel()
 
 	// Start the command - this will create the ConPTY
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command with ConPTY")
 
 	// Capture output in background
@@ -293,7 +293,7 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 	require.NoError(t, cmd.Run())
 

@@ -739,3 +739,23 @@ func Test_Host_NeverPublishesReadyWhenCommandCannotStart(t *testing.T) {
 		"a command that never started is a startup failure, not an outcome of its own")
 	require.Nil(t, rec.ExitCode)
 }
+
+func Test_Host_PublishesStartupAbandonedWhenNoClientAttaches(t *testing.T) {
+	run := newOutcomeRun(t, shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+	run.host.AwaitInitialClient = true
+	run.host.InitialClientTimeout = 300 * time.Millisecond
+
+	drained := make(chan struct{})
+	go func() { defer close(drained); _, _ = io.Copy(io.Discard, run.stdout) }()
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	err := run.host.Run(ctx)
+	run.closeWriters()
+	<-drained
+	require.ErrorIs(t, err, host.ErrNoInitialClient)
+
+	rec := run.record(t)
+	require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Nil(t, rec.ExitCode)
+}

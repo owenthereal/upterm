@@ -222,6 +222,16 @@ type Host struct {
 	PinPtySize bool
 	Term       string
 
+	// AwaitInitialClient defers starting the command until the first host
+	// client's output subscription is installed, and defers serving guests
+	// until the command has started. Foreground use sets it: a command that
+	// exits at once — `upterm host -- false` — would otherwise race the local
+	// terminal's attach, and lose. Headless use leaves it off.
+	AwaitInitialClient bool
+	// InitialClientTimeout bounds that wait; zero means
+	// internal.DefaultInitialClientTimeout.
+	InitialClientTimeout time.Duration
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
@@ -254,6 +264,11 @@ type Host struct {
 // record saying otherwise sends whoever reads it looking for a fault that
 // never happened.
 var ErrSessionAbandoned = errors.New("session abandoned before the command started")
+
+// ErrNoInitialClient is what a host told to await its initial client returns
+// when nobody attached in time. Nothing ran, so it is recorded as
+// startup_abandoned rather than a failure.
+var ErrNoInitialClient = internal.ErrNoInitialClient
 
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
@@ -606,6 +621,8 @@ func (c *Host) Run(ctx context.Context) error {
 			PtySize:                        c.PtySize,
 			PinPtySize:                     c.PinPtySize,
 			Term:                           c.Term,
+			AwaitInitialClient:             c.AwaitInitialClient,
+			InitialClientTimeout:           c.InitialClientTimeout,
 			SFTPDisabled:                   c.SFTPDisabled,
 			SFTPPermissionChecker:          c.SFTPPermissionChecker,
 			OnCommandStarted:               func() { cmdOnce.Do(func() { close(cmdReady) }) },
@@ -669,6 +686,10 @@ func (c *Host) Run(ctx context.Context) error {
 		// stopped — and the exit code of a process we killed is not the
 		// command's own outcome, so it is deliberately not reported.
 		runReason = sessiondir.ReasonStopped
+	case errors.Is(err, internal.ErrNoInitialClient):
+		// Nobody attached, so nothing ran and nothing failed: the session
+		// was abandoned before its command started.
+		runReason = sessiondir.ReasonStartupAbandoned
 	case res.Exited:
 		code := res.Code
 		runExitCode = &code

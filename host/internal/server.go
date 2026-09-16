@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,15 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/crypto/ssh"
 )
+
+// DefaultInitialClientTimeout bounds how long a server told to await its
+// initial client waits before giving up on the session.
+const DefaultInitialClientTimeout = 10 * time.Second
+
+// ErrNoInitialClient is returned by ServeWithContext when AwaitInitialClient
+// was set and nobody attached within InitialClientTimeout. The command never
+// started; the caller records startup_abandoned.
+var ErrNoInitialClient = errors.New("no client attached before the command could start")
 
 type Server struct {
 	Command                 []string
@@ -44,6 +54,16 @@ type Server struct {
 	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
 	// This is used in tests where stdin is a pipe but we still want to forward test data.
 	ForceForwardingInputForTesting bool
+
+	// AwaitInitialClient defers starting the command until the first host
+	// client's output subscription is installed, and defers serving guests
+	// until the command has started. Foreground use sets it: a command that
+	// exits at once — `upterm host -- false` — would otherwise race the local
+	// terminal's attach, and lose. Headless use leaves it off.
+	AwaitInitialClient bool
+	// InitialClientTimeout bounds that wait; zero means
+	// DefaultInitialClientTimeout.
+	InitialClientTimeout time.Duration
 
 	// OnCommandStarted, if set, is called once the hosted command is running.
 	// Readiness is a claim about facts, and this is one of the two facts it
@@ -113,6 +133,10 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	// The pty as the doors see it: the host door serves before the command
+	// starts, so a client can reach this handle before there is a pty behind
+	// it.
+	shared := newSharedPTY()
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
@@ -131,15 +155,14 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.ForceForwardingInputForTesting,
 	)
 	s.cmd = cmd
-	ptmx, err := cmd.Start(cmdCtx)
-	if err != nil {
-		return fmt.Errorf("error starting command: %w", err)
-	}
-	if s.OnCommandStarted != nil {
-		s.OnCommandStarted()
-	}
 
 	var g run.Group
+	// The three facts the session's order rests on: a client has reached the
+	// host door and is subscribed to the output, the command is running, and
+	// its Run has returned.
+	var firstOnce sync.Once
+	firstHostClient := make(chan struct{})
+	cmdStarted := make(chan struct{})
 	cmdDone := make(chan struct{})
 	{
 		ctx, cancel := context.WithCancel(ctx)
@@ -156,6 +179,33 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	{
 		g.Add(func() error {
 			defer close(cmdDone)
+			if s.AwaitInitialClient {
+				timeout := s.InitialClientTimeout
+				if timeout <= 0 {
+					timeout = DefaultInitialClientTimeout
+				}
+				timer := time.NewTimer(timeout)
+				defer timer.Stop()
+				select {
+				case <-firstHostClient:
+				case <-timer.C:
+					shared.abandon()
+					return ErrNoInitialClient
+				case <-cmdCtx.Done():
+					shared.abandon()
+					return cmdCtx.Err()
+				}
+			}
+			ptmx, err := cmd.Start(cmdCtx, shared.initialSize())
+			if err != nil {
+				shared.abandon()
+				return fmt.Errorf("error starting command: %w", err)
+			}
+			shared.set(ptmx)
+			if s.OnCommandStarted != nil {
+				s.OnCommandStarted()
+			}
+			close(cmdStarted)
 			return cmd.Run()
 		}, func(err error) {
 			cmdCancel()
@@ -167,7 +217,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	sh := sessionHandler{
 		forceCommand:          s.ForceCommand,
 		commandEnv:            s.CommandEnv,
-		ptmx:                  ptmx,
+		ptmx:                  shared,
+		shared:                shared,
 		eventEmmiter:          s.EventEmitter,
 		writers:               writers,
 		keepAliveDuration:     s.KeepAliveDuration,
@@ -231,6 +282,31 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 		}
 		g.Add(func() error {
+			// Guests are never served a session whose command has not
+			// started. The host door is: the gate is defined by a client
+			// reaching it.
+			select {
+			case <-cmdStarted:
+			case <-sessCtx.Done():
+				return nil
+			}
+
+			// Both of those can be ready at the same instant — a command that
+			// exits as soon as it starts, `upterm host -- false`, closes
+			// cmdStarted and then ends the session — and a select that picked
+			// cmdStarted arrives here with our own interrupt already run.
+			// Serving then is not merely pointless: charm's Serve has no
+			// shutdown guard, and its trackListener resets doneChan to nil
+			// whenever the server holds no listener and no connection, which is
+			// exactly the state Shutdown leaves behind. The accept loop would
+			// park forever on a listener Shutdown no longer knows about, and
+			// g.Run would never return.
+			select {
+			case <-sessCtx.Done():
+				return nil
+			default:
+			}
+
 			err := server.Serve(guest)
 
 			// A tunnel that goes away takes the guests with it and nothing
@@ -240,9 +316,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// still running perfectly well. Park until the session ends for a
 			// reason that is actually the session's.
 
-			// Our own Shutdown makes Serve return ErrServerClosed, which is
-			// the session ending, not the tunnel; any other error lost guests.
-			if s.OnGuestServerStopped != nil && !errors.Is(err, gssh.ErrServerClosed) {
+			// Our own Shutdown makes Serve return ErrServerClosed, and our own
+			// Close makes it return a use-of-closed-network-connection error
+			// instead. Both are the session ending rather than the tunnel
+			// going away, and the second is only distinguishable by asking
+			// whether the session is still live: published as a tunnel loss it
+			// would write "disconnected" over a record that is merely ending.
+			if s.OnGuestServerStopped != nil && sessCtx.Err() == nil && !errors.Is(err, gssh.ErrServerClosed) {
 				s.OnGuestServerStopped(err)
 			}
 			<-sessCtx.Done()
@@ -260,6 +340,14 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// SSH connection open after its channel closed would hang the host
 			// forever, and the deferred ReverseTunnel.Close would never run.
 			_ = server.Shutdown(sessCtx)
+
+			// And close the listener ourselves, as the host door's interrupt
+			// does. Shutdown only closes the listeners Serve registered, so an
+			// interrupt that beats Serve to it leaves this one open — and
+			// charm's Serve resets its done channel on entry, so it would then
+			// block in Accept on a listener nothing will ever close. Closing it
+			// here makes that unreachable whichever way the race goes.
+			_ = guest.Close()
 		})
 	}
 	if host != nil {
@@ -273,6 +361,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		hostSH.readonly = false
 		hostSH.forceCommand = nil
 		hostSH.sftpPermissionChecker = nil
+		// The gate: the first client through this door is what the command's
+		// start is waiting for.
+		hostSH.onHostClientAttached = func() { firstOnce.Do(func() { close(firstHostClient) }) }
 
 		hostServer := gssh.Server{
 			HostSigners:      ss,
@@ -465,6 +556,17 @@ type sessionHandler struct {
 	cmdDone       <-chan struct{}
 	commandResult func() CommandResult
 
+	// shared is the handle ptmx starts out as, kept in its own type so a host
+	// client that arrives before the pty exists can offer it the geometry to
+	// open with. Separate from ptmx because a forced command replaces that
+	// with a pty of its own.
+	shared *sharedPTY
+
+	// onHostClientAttached, set on the host door only, reports that a local
+	// client's output subscription is installed. That is what a server told to
+	// await its initial client starts the command on.
+	onHostClientAttached func()
+
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
 }
@@ -650,6 +752,19 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			h.writers.Remove(sink)
 			_ = sink.Close()
 		}()
+
+		// Attached, in the sense the gate is defined by: the subscription is
+		// installed, so nothing the command writes from here on can be missed.
+		// The geometry is offered first, because the command's start reads it
+		// the moment the gate opens.
+		if h.kind == kindHost {
+			if isPty && h.shared != nil {
+				h.shared.offerSize(termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height})
+			}
+			if h.onHostClientAttached != nil {
+				h.onHostClientAttached()
+			}
+		}
 
 		// The pty's geometry follows the local terminal as it did when the
 		// host owned it directly: announce the size the client arrived with,

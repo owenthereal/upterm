@@ -83,7 +83,7 @@ func TestCommand_NonTTY_WithForceFlag(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command")
 
 	// Capture output in background
@@ -193,7 +193,7 @@ func TestCommand_ContextCancellation(t *testing.T) {
 	// Create a context with cancel
 	ctx, cancel := context.WithCancel(context.Background())
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command")
 
 	// Run the command in a goroutine

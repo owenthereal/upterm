@@ -184,7 +184,9 @@ func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
-func (c *command) Start(ctx context.Context) (PTY, error) {
+// Start opens the command's pty and starts it. initial is the geometry the
+// initial client arrived with, used when nothing was asked for explicitly.
+func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = setupCommand(ctx, c.name, c.args)
 	// The session's own variables go last, and that is the whole rule for all
@@ -201,8 +203,16 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
 	}
 
+	want := c.ptySize
+	if !want.Valid() {
+		// The initial client's terminal, when there is one: the local
+		// terminal used to be the host's stdin and now it is a client, and
+		// the geometry it reports is the same one.
+		want = initial
+	}
+
 	var err error
-	c.ptmx, err = startPty(c.cmd, ResolvePtySize(c.stdin, c.ptySize), c.pinPtySize)
+	c.ptmx, err = startPty(c.cmd, ResolvePtySize(c.stdin, want), c.pinPtySize)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

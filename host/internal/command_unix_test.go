@@ -79,7 +79,7 @@ func TestCommand_Unix_PTY(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(err, "failed to start command")
 
 	// Capture output in background
@@ -160,7 +160,7 @@ func Test_Command_StdinCloseDoesNotEndSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
@@ -206,7 +206,7 @@ func Test_Command_UndrainedStdoutPipeDoesNotWedgeSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
@@ -290,7 +290,7 @@ func Test_Command_SlowStdoutPipeStillGetsItsTail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
@@ -360,7 +360,7 @@ func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			_, err = cmd.Start(ctx)
+			_, err = cmd.Start(ctx, termsize.Size{})
 			require.NoError(t, err)
 			require.NoError(t, cmd.Run())
 
@@ -408,7 +408,7 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = cmd.Start(ctx)
+	_, err = cmd.Start(ctx, termsize.Size{})
 	require.NoError(t, err)
 	require.NoError(t, cmd.Run())
 
@@ -492,7 +492,7 @@ func Test_Command_RestoresTheTerminalOnlyWhenStillOwned(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			_, err = cmd.Start(ctx)
+			_, err = cmd.Start(ctx, termsize.Size{})
 			require.NoError(t, err)
 			require.NoError(t, cmd.Run())
 
