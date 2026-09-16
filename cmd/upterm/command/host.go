@@ -264,7 +264,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	}
 
 	if len(refs) > 0 {
-		userKeys, err := host.AuthorizedKeysFromUserRefs(c.Context(), refs, logger.Logger)
+		userKeys, err := host.AuthorizedKeysFromUserRefs(c.Context(), refs, proxyURL, logger.Logger)
 		if err != nil {
 			return fmt.Errorf("error reading user keys: %w", err)
 		}

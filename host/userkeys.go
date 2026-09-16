@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -113,9 +114,30 @@ type Fetcher struct {
 	Transport http.RoundTripper
 }
 
-// AuthorizedKeysFromUserRefs resolves refs using a default Fetcher.
-func AuthorizedKeysFromUserRefs(ctx context.Context, refs []UserRef, logger *slog.Logger) ([]*AuthorizedKey, error) {
-	return (&Fetcher{Logger: logger}).AuthorizedKeys(ctx, refs)
+// AuthorizedKeysFromUserRefs resolves refs using a default Fetcher. A non-nil
+// proxyURL sends every fetch through that HTTP proxy.
+func AuthorizedKeysFromUserRefs(ctx context.Context, refs []UserRef, proxyURL *url.URL, logger *slog.Logger) ([]*AuthorizedKey, error) {
+	f := &Fetcher{Logger: logger}
+	if proxyURL != nil {
+		f.Transport = proxyTransport(proxyURL)
+	}
+	return f.AuthorizedKeys(ctx, refs)
+}
+
+// proxyTransport is the base round tripper for fetches that must go through
+// --proxy. The environment proxy is not a fallback: --proxy exists for
+// networks whose only egress is that proxy, and it is recommended to be
+// supplied as UPTERM_PROXY precisely so credentials stay out of HTTPS_PROXY.
+// Without this, a key fetch would take the direct route and fail before the
+// tunnel is ever dialled.
+//
+// fetchTransport installs this as its base rather than replacing it, so the
+// https-only and credential-confinement rules still police every request and
+// every redirect hop.
+func proxyTransport(proxyURL *url.URL) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = http.ProxyURL(proxyURL)
+	return t
 }
 
 // AuthorizedKeys fetches every reference, reporting all failures together.
