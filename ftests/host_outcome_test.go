@@ -186,11 +186,20 @@ func (r *outcomeRun) awaitAttachSocket(t *testing.T) string {
 	}
 }
 
-// attachViewer attaches an output-only client and returns its output.
+// attachViewer attaches an output-only client and returns its output. The
+// keys it pins come from the session record the daemon already published,
+// the same source `upterm attach` reads them from.
 func (r *outcomeRun) attachViewer(t *testing.T, ctx context.Context, socket string) io.Reader {
 	t.Helper()
+	rec := r.record(t)
+	keys := make([]ssh.PublicKey, 0, len(rec.HostKeys))
+	for _, k := range rec.HostKeys {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
+		require.NoError(t, err)
+		keys = append(keys, key)
+	}
 	pr, pw := io.Pipe()
-	client := &attach.Client{Socket: socket, Stdout: pw, Logger: testLogger}
+	client := &attach.Client{Socket: socket, HostKeys: keys, Stdout: pw, Logger: testLogger}
 	go func() {
 		_, err := client.Run(ctx)
 		_ = pw.CloseWithError(err)

@@ -520,7 +520,14 @@ func shareRunE(c *cobra.Command, args []string) error {
 			},
 			func(ctx context.Context, socket string) (attach.Result, error) {
 				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, term)
-				return attachLocalTerminal(ctx, socket, lt, 0, os.Stdin, os.Stdout, logger.Logger)
+				// The daemon's own signers, not a re-read of the record: this
+				// is the process presenting the door, so it has the keys
+				// directly.
+				keys := make([]ssh.PublicKey, 0, len(signers))
+				for _, s := range signers {
+					keys = append(keys, s.PublicKey())
+				}
+				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger.Logger)
 			})
 	})
 

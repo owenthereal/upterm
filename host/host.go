@@ -558,6 +558,29 @@ func (c *Host) Run(ctx context.Context) error {
 			_ = adminServer.Shutdown(ctx)
 			return err
 		}
+		// Published as soon as the socket a client could dial exists, so that
+		// every record whose attach socket is dialable also carries the keys
+		// `upterm attach` needs to pin it. Guarded on len(c.Signers): tests
+		// construct hosts without any, and the field is left empty rather
+		// than published as nothing.
+		if c.SessionDir != nil && len(c.Signers) > 0 {
+			hostKeys := make([]string, 0, len(c.Signers))
+			for _, s := range c.Signers {
+				hostKeys = append(hostKeys, strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(s.PublicKey())), "\n"))
+			}
+			// Not swallowed: a record that never receives the keys names a
+			// socket `upterm attach` will refuse to dial, so a session that
+			// is otherwise fine becomes unattachable for its whole life.
+			// Not fatal either — the session itself is unaffected, and the
+			// guests it exists for are served over the tunnel — so it is
+			// said once, here, rather than ending a working session.
+			if err := c.SessionDir.Update(func(r *sessiondir.Record) {
+				r.HostKeys = hostKeys
+			}); err != nil {
+				logger.Error("Failed to publish the host keys; upterm attach will refuse this session",
+					"record", c.SessionDir.RecordPath(), "error", err)
+			}
+		}
 		if c.AttachListeningCallback != nil {
 			c.AttachListeningCallback(c.AttachSocketFile)
 		}

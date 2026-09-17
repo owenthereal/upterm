@@ -14,6 +14,7 @@ import (
 	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -107,28 +108,47 @@ func resolveAttachName(ctx context.Context, explicit string) (string, error) {
 	return "", fmt.Errorf("several sessions are running; name one: %s", strings.Join(names, ", "))
 }
 
-// attachTarget resolves a name to the socket to dial, and to the status the
-// record had when it did. Starting, ready and disconnected are all attachable
-// — the command is alive and the socket is local, whatever the tunnel is doing
-// — and a name nobody holds is not.
+// attachTarget resolves a name to the socket to dial and the keys to pin it
+// with, and to the status the record had when it did. Starting, ready and
+// disconnected are all attachable — the command is alive and the socket is
+// local, whatever the tunnel is doing — and a name nobody holds is not.
 //
 // The status comes back because it is what explains a failed dial: see
 // attachFailure.
-func attachTarget(ctx context.Context, name string) (string, string, error) {
+func attachTarget(ctx context.Context, name string) (string, []ssh.PublicKey, string, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
-		return "", "", err
+		return "", nil, "", err
 	}
 	if rec == nil {
-		return "", "", fmt.Errorf("no session named %q", name)
+		return "", nil, "", fmt.Errorf("no session named %q", name)
 	}
 	if !held {
-		return "", "", fmt.Errorf("session %q has ended (%s)", name, describeOutcome(rec))
+		return "", nil, "", fmt.Errorf("session %q has ended (%s)", name, describeOutcome(rec))
 	}
+	noAttachSupport := fmt.Errorf("session %q was started by an upterm without attach support; restart it to attach", name)
 	if rec.AttachSocket == "" {
-		return "", "", fmt.Errorf("session %q was started by an upterm without attach support; restart it to attach", name)
+		return "", nil, rec.Status, noAttachSupport
 	}
-	return rec.AttachSocket, rec.Status, nil
+	// The keys are published when the attach door starts listening, which is
+	// also when its socket becomes dialable. So a record without them is
+	// either a session still starting — where the answer is to wait, exactly
+	// as it is for the dial that would have failed a moment later — or one
+	// from an upterm that predates attach. attachFailure tells those apart by
+	// the status, which is the same thing it tells a failed dial apart by.
+	if len(rec.HostKeys) == 0 {
+		return "", nil, rec.Status, attachFailure(name, rec.Status, noAttachSupport)
+	}
+	keys := make([]ssh.PublicKey, 0, len(rec.HostKeys))
+	for _, k := range rec.HostKeys {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
+		if err != nil {
+			// Present but unreadable, which no amount of waiting fixes.
+			return "", nil, rec.Status, fmt.Errorf("session %q: its record names a host key that cannot be read; restart it to attach", name)
+		}
+		keys = append(keys, key)
+	}
+	return rec.AttachSocket, keys, rec.Status, nil
 }
 
 // attachFailure explains why an attachment could not be made.
@@ -141,6 +161,12 @@ func attachTarget(ctx context.Context, name string) (string, string, error) {
 // one. The recorded status is what tells the two apart; anything other than
 // starting is a failure the dialer describes better than this could.
 func attachFailure(name, status string, err error) error {
+	// Except for the one failure this must never reword. A key that did not
+	// match says something answered the socket that is not the session, and
+	// "try again in a moment" would send the user straight back to it.
+	if errors.Is(err, attach.ErrHostKeyMismatch) {
+		return err
+	}
 	if status == sessiondir.StatusStarting {
 		return fmt.Errorf("session %q is still starting; try again in a moment", name)
 	}
@@ -196,8 +222,9 @@ func attachRunE(c *cobra.Command, args []string) error {
 	lookupCtx, cancelLookup := context.WithTimeout(c.Context(), sessionQueryTimeout)
 	name, err := resolveAttachName(lookupCtx, firstArg(args))
 	var socket, status string
+	var keys []ssh.PublicKey
 	if err == nil {
-		socket, status, err = attachTarget(lookupCtx, name)
+		socket, keys, status, err = attachTarget(lookupCtx, name)
 	}
 	cancelLookup()
 	if err != nil {
@@ -207,7 +234,7 @@ func attachRunE(c *cobra.Command, args []string) error {
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
-	res, err := attachLocalTerminal(ctx, socket, lt, escape, os.Stdin, os.Stdout, logger.Logger)
+	res, err := attachLocalTerminal(ctx, socket, keys, lt, escape, os.Stdin, os.Stdout, logger.Logger)
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, status, err)}
 	}

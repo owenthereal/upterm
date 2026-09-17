@@ -3,6 +3,8 @@ package command
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"maps"
@@ -22,8 +24,21 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 )
+
+// testHostKeyLine returns a fresh key in authorized_keys form, for building
+// fixtures whose record needs a non-empty HostKeys without caring which key
+// it names — nothing in cmd/upterm/command dials with the private half.
+func testHostKeyLine(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(priv)
+	require.NoError(t, err)
+	return strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(signer.PublicKey())), "\n")
+}
 
 func TestBuildSessionDetailSSH(t *testing.T) {
 	for _, tt := range []struct {
@@ -176,10 +191,17 @@ func releaseAtEnd(t *testing.T, d *sessiondir.Dir) {
 	t.Cleanup(func() { _ = d.Release(context.Background()) })
 }
 
-// buildStarting: claimed, lock held, nothing published beyond the claim.
+// buildStarting: claimed, lock held, and a host key published — the point
+// past which a daemon's attach socket is up and attachTarget's callers may
+// expect one, even though nothing else beyond the claim has happened yet.
 func buildStarting(t *testing.T, name string) {
 	t.Helper()
-	releaseAtEnd(t, claimSession(t, name))
+
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.HostKeys = []string{testHostKeyLine(t)}
+	}))
 }
 
 // buildReady: claimed, published ready, and an admin socket that answers.
@@ -191,6 +213,7 @@ func buildReady(t *testing.T, name string) {
 	require.NoError(t, d.Update(func(r *sessiondir.Record) {
 		r.Status = sessiondir.StatusReady
 		r.SessionID = "sid-1"
+		r.HostKeys = []string{testHostKeyLine(t)}
 	}))
 	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
 		SessionId: "sid-1",
@@ -212,6 +235,7 @@ func buildDisconnected(t *testing.T, name string) {
 	require.NoError(t, d.Update(func(r *sessiondir.Record) {
 		r.Status = sessiondir.StatusDisconnected
 		r.SessionID = "sid-2"
+		r.HostKeys = []string{testHostKeyLine(t)}
 	}))
 	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
 		SessionId: "sid-2",

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"io"
 	"log/slog"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,9 +58,11 @@ func runAsync(t *testing.T, ctx context.Context, c *Client) <-chan Result {
 }
 
 // fakeDoor is a charm ssh server on a unix socket whose handler is the test's.
-// It accepts any public key, as the host door does.
+// It accepts any public key, as the host door does. key is its own host key,
+// in the form a Client pins.
 type fakeDoor struct {
 	socket string
+	key    ssh.PublicKey
 }
 
 func serveDoor(t *testing.T, handler func(gssh.Session)) *fakeDoor {
@@ -83,8 +87,11 @@ func serveDoor(t *testing.T, handler func(gssh.Session)) *fakeDoor {
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	})
-	return &fakeDoor{socket: socket}
+	return &fakeDoor{socket: socket, key: signer.PublicKey()}
 }
+
+// pin is the HostKeys a Client needs to attach to door.
+func (d *fakeDoor) pin() []ssh.PublicKey { return []ssh.PublicKey{d.key} }
 
 func TestClientRequestsAPtyWithTheGivenGeometryAndForwardsBothWays(t *testing.T) {
 	gotPty := make(chan gssh.Pty, 1)
@@ -106,7 +113,7 @@ func TestClientRequestsAPtyWithTheGivenGeometryAndForwardsBothWays(t *testing.T)
 	go func() { _, _ = pw.Write([]byte("hello\n")) }()
 	defer func() { _ = pw.Close() }()
 	c := &Client{
-		Socket: door.socket, Stdin: pr, Stdout: &out,
+		Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: &out,
 		Pty: &Pty{Term: "xterm-256color", Size: termsize.Size{Cols: 132, Rows: 43}},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -134,7 +141,7 @@ func TestClientWithoutPtyIsAViewer(t *testing.T) {
 		_ = s.Exit(0)
 	})
 	var out bytes.Buffer
-	c := &Client{Socket: door.socket, Stdout: &out}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: &out}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -158,7 +165,7 @@ func TestClientHoldsInputOpenWhenStdinIsNil(t *testing.T) {
 		<-release
 		_ = s.Exit(0)
 	})
-	c := &Client{Socket: door.socket, Stdout: io.Discard}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -181,7 +188,7 @@ func TestClientEscapeDetaches(t *testing.T) {
 	})
 	pr, pw := io.Pipe()
 	var out bytes.Buffer
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: &out, Escape: '~',
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: &out, Escape: '~',
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -206,7 +213,7 @@ func TestClientStdinEOFDetaches(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.Copy(io.Discard, s)
 	})
-	c := &Client{Socket: door.socket, Stdin: bytes.NewReader(nil), Stdout: io.Discard}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: bytes.NewReader(nil), Stdout: io.Discard}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -219,7 +226,7 @@ func TestClientReportsAConnectionClosedWithoutStatusAsDisconnected(t *testing.T)
 		conn := s.Context().Value(gssh.ContextKeyConn).(*ssh.ServerConn)
 		_ = conn.Close() // what the stall watchdog does
 	})
-	c := &Client{Socket: door.socket, Stdout: io.Discard}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -254,7 +261,7 @@ func TestClientForwardsWindowChanges(t *testing.T) {
 		}
 	})
 	resizes := make(chan termsize.Size, 1)
-	c := &Client{Socket: door.socket, Stdout: io.Discard,
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard,
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}, Resizes: resizes}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -284,7 +291,7 @@ func TestClientReportsARemoteExitWhileForwardingInput(t *testing.T) {
 		_ = s.Exit(5)
 	})
 	pr, _ := io.Pipe() // held open, never written: a terminal nobody types on
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard,
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard,
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -324,7 +331,7 @@ func TestClientDrainsOutputBeforeReturning(t *testing.T) {
 		_ = s.Exit(0)
 	})
 	sink := &slowSink{delay: 5 * time.Millisecond}
-	c := &Client{Socket: door.socket, Stdout: sink}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -385,7 +392,7 @@ func TestClientReturnsWhenDisconnectedEvenIfStdoutIsBlocked(t *testing.T) {
 		conn := s.Context().Value(gssh.ContextKeyConn).(*ssh.ServerConn)
 		_ = conn.Close()
 	})
-	c := &Client{Socket: door.socket, Stdout: sink}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -410,7 +417,7 @@ func TestClientTreatsAStdoutWriteFailureAsADetach(t *testing.T) {
 	})
 	pr, pw := io.Pipe()
 	require.NoError(t, pr.Close()) // the reader is gone: every write fails
-	c := &Client{Socket: door.socket, Stdout: pw}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: pw}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -429,7 +436,7 @@ func TestClientTreatsAShortWriteToStdoutAsADetach(t *testing.T) {
 		_, _ = io.WriteString(s, "output")
 		_, _ = io.Copy(io.Discard, s)
 	})
-	c := &Client{Socket: door.socket, Stdout: shortSink{}}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: shortSink{}}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	res, err := c.Run(ctx)
@@ -518,7 +525,7 @@ func TestClientInternalDetachDoesNotWaitOnABlockedTransport(t *testing.T) {
 		_, _ = io.Copy(io.Discard, s)
 	})
 	conn := newBlockableConn()
-	c := &Client{Socket: door.socket, Stdout: &failingSink{conn: conn}, dial: conn.dialThrough}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: &failingSink{conn: conn}, dial: conn.dialThrough}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -593,7 +600,7 @@ func TestClientDetachIsNotHeldByAnInputWriteOnAnExhaustedWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
 			pr, pw := io.Pipe()
-			c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard, Escape: '~'}
+			c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 			done := runAsync(t, ctx, c)
@@ -630,7 +637,7 @@ func TestClientEscapeDetachesWhileAnInputWriteIsParked(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard, Escape: '~'}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -660,7 +667,7 @@ func TestClientKeepsReadingWhileDeliveryIsParked(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard, Escape: '~'}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -781,7 +788,7 @@ func TestClientDetachDeliversTheBytesItOwes(t *testing.T) {
 	conn := &slowConn{delay: 200 * time.Millisecond}
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
-	c := &Client{Socket: d.socket, Stdin: pr, Stdout: io.Discard, Escape: '~',
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
 		dial: conn.dialThrough}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -832,7 +839,7 @@ func TestClientDropsInputBeyondTheBacklogAndStillDetaches(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard, Escape: '~',
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
 		Logger: slog.New(handler)}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -890,7 +897,7 @@ func TestClientResizeFailureWithABlockedLoggerDoesNotHoldRun(t *testing.T) {
 	})
 	conn := newBlockableConn()
 	resizes := make(chan termsize.Size, 1)
-	c := &Client{Socket: door.socket, Stdout: io.Discard,
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard,
 		Logger:  slog.New(handler),
 		Pty:     &Pty{Term: "xterm", Size: termsize.Default},
 		Resizes: resizes,
@@ -935,6 +942,14 @@ func TestClientResizeFailureWithABlockedLoggerDoesNotHoldRun(t *testing.T) {
 // and without that the wait lasts until dialTimeout. The mute-peer test below
 // covers the phase after the handshake; this one covers the phase before it.
 func TestClientHandshakeIsBoundedByCancellation(t *testing.T) {
+	// Never verified: the peer never sends a version string, so the
+	// handshake this test bounds never reaches host key checking. Only
+	// HostKeys' emptiness check, ahead of the dial, has to be satisfied.
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pinnedSigner, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+
 	socket := filepath.Join(shortTempDir(t), "mute-hs.sock")
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
@@ -958,7 +973,7 @@ func TestClientHandshakeIsBoundedByCancellation(t *testing.T) {
 		accepted <- conn
 	}()
 
-	c := &Client{Socket: socket, Stdout: io.Discard}
+	c := &Client{Socket: socket, HostKeys: []ssh.PublicKey{pinnedSigner.PublicKey()}, Stdout: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
 	start := time.Now()
@@ -993,7 +1008,7 @@ func TestClientSetupIsBoundedByCancellationAgainstAnUnresponsivePeer(t *testing.
 		select {}
 	}()
 
-	c := &Client{Socket: socket, Stdout: io.Discard}
+	c := &Client{Socket: socket, HostKeys: []ssh.PublicKey{signer.PublicKey()}, Stdout: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
 	start := time.Now()
@@ -1022,7 +1037,7 @@ func TestClientCancellationReleasesABlockedInputWrite(t *testing.T) {
 	go func() { _, _ = pw.Write(bytes.Repeat([]byte("k"), 4<<20)) }()
 	// A logger of its own: past the backlog this drops input and says so, and
 	// the default logger would put that on the test's stderr.
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard,
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard,
 		Logger: slog.New(slog.DiscardHandler)}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
@@ -1057,9 +1072,9 @@ func TestClientDeclaresInteractivityOnlyWithPtyAndStdin(t *testing.T) {
 		client      *Client
 		interactive bool
 	}{
-		{"pty and stdin", &Client{Socket: door.socket, Stdout: io.Discard, Stdin: held, Pty: &Pty{Term: "xterm", Size: termsize.Default}}, true},
-		{"pty only", &Client{Socket: door.socket, Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}, false},
-		{"stdin only", &Client{Socket: door.socket, Stdout: io.Discard, Stdin: held}, false},
+		{"pty and stdin", &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard, Stdin: held, Pty: &Pty{Term: "xterm", Size: termsize.Default}}, true},
+		{"pty only", &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}, false},
+		{"stdin only", &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard, Stdin: held}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tc.client.Run(ctx)
@@ -1072,17 +1087,114 @@ func TestClientDeclaresInteractivityOnlyWithPtyAndStdin(t *testing.T) {
 }
 
 func TestClientCannotAttachToANonexistentSocket(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	pinnedSigner, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+
+	c := &Client{Socket: filepath.Join(shortTempDir(t), "none.sock"),
+		HostKeys: []ssh.PublicKey{pinnedSigner.PublicKey()}, Stdout: io.Discard}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	_, err = c.Run(ctx)
+	require.Error(t, err)
+}
+
+// TestClientRequiresAHostKey pins that the empty-HostKeys check runs before
+// the dial: Socket names a path that does not exist, so a Run that reached
+// the dial first would fail there instead, for a different reason than the
+// one this test is about.
+func TestClientRequiresAHostKey(t *testing.T) {
 	c := &Client{Socket: filepath.Join(shortTempDir(t), "none.sock"), Stdout: io.Discard}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	_, err := c.Run(ctx)
+	require.ErrorContains(t, err, "HostKeys is required")
+}
+
+// TestClientRefusesADoorPresentingAnotherKey pins the whole point of pinning:
+// a door whose key is not among HostKeys must be refused, and refused before
+// Shell() — a client that reached the shell would have handed its terminal to
+// whatever answered the socket.
+func TestClientRefusesADoorPresentingAnotherKey(t *testing.T) {
+	reachedShell := make(chan struct{}, 1)
+	door := serveDoor(t, func(s gssh.Session) {
+		reachedShell <- struct{}{}
+		_ = s.Exit(0)
+	})
+
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	notTheDoorsSigner, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+
+	c := &Client{Socket: door.socket, HostKeys: []ssh.PublicKey{notTheDoorsSigner.PublicKey()}, Stdout: io.Discard}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	_, err = c.Run(ctx)
 	require.Error(t, err)
+
+	select {
+	case <-reachedShell:
+		t.Fatal("Run must not reach Shell() when the door's key is not among HostKeys")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestClientAttachesToADaemonWithSeveralSignersWhenAllAreParsedAndPinned is
+// the round trip: a daemon with two signers of different types marshals both
+// to authorized_keys form (what host.go publishes) and back (what attach.go
+// parses), the door presents both, and a client holding both attaches
+// successfully whichever one negotiation selects.
+func TestClientAttachesToADaemonWithSeveralSignersWhenAllAreParsedAndPinned(t *testing.T) {
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	edSigner, err := ssh.NewSignerFromKey(edKey)
+	require.NoError(t, err)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	rsaSigner, err := ssh.NewSignerFromKey(rsaKey)
+	require.NoError(t, err)
+
+	var published []string
+	for _, s := range []ssh.Signer{edSigner, rsaSigner} {
+		published = append(published, strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(s.PublicKey())), "\n"))
+	}
+	var pinned []ssh.PublicKey
+	for _, line := range published {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+		require.NoError(t, err)
+		pinned = append(pinned, key)
+	}
+
+	socket := filepath.Join(shortTempDir(t), "multi.sock")
+	ln, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	srv := &gssh.Server{
+		HostSigners:      []gssh.Signer{edSigner, rsaSigner},
+		Handler:          func(s gssh.Session) { _ = s.Exit(0) },
+		PublicKeyHandler: func(gssh.Context, gssh.PublicKey) bool { return true },
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	c := &Client{Socket: socket, HostKeys: pinned, Stdout: io.Discard}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	res, err := c.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, Result{Reason: Exited, Status: 0}, res)
 }
 
 func TestClientContextCancellationDetaches(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) { _, _ = io.Copy(io.Discard, s) })
 	pr, _ := io.Pipe() // never written, never closed
-	c := &Client{Socket: door.socket, Stdin: pr, Stdout: io.Discard}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runAsync(t, ctx, c)
 	time.Sleep(100 * time.Millisecond)

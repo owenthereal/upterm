@@ -612,7 +612,15 @@ func (c *Host) Share(url string) error {
 	// was before the local terminal became a client — and a test that wants
 	// the primary's pacing asks for a pty, which with the pipe stdin makes
 	// the client interactive and eligible.
-	client := &attach.Client{Socket: sock, Stdin: stdinr, Stdout: stdoutw, Pty: c.Pty, Logger: testLogger}
+	//
+	// The keys come from signers directly, not a session record: this
+	// fixture supplies its own AdminSocketFile, which skips the Claim that
+	// would otherwise publish one.
+	hostKeys := make([]ssh.PublicKey, 0, len(signers))
+	for _, s := range signers {
+		hostKeys = append(hostKeys, s.PublicKey())
+	}
+	client := &attach.Client{Socket: sock, HostKeys: hostKeys, Stdin: stdinr, Stdout: stdoutw, Pty: c.Pty, Logger: testLogger}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()

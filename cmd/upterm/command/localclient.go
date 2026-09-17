@@ -13,6 +13,7 @@ import (
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/utils"
+	"golang.org/x/crypto/ssh"
 )
 
 // localClientDrainTimeout bounds how long upterm host waits freely, after
@@ -25,26 +26,28 @@ var localClientDrainTimeout = 5 * time.Second
 
 // attachLocalTerminal attaches the local terminal to a session's attach
 // socket in the shape lt describes, holding raw mode and following resizes
-// for exactly as long as the attachment lasts.
-func attachLocalTerminal(ctx context.Context, socket string, lt localTerminal, escape byte, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
-	return attachLocalTerminalWith(ctx, socket, lt, escape, stdin, stdout, tty.Owned, logger)
+// for exactly as long as the attachment lasts. keys is the daemon's host
+// keys, kept beside socket since the two travel together.
+func attachLocalTerminal(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
+	return attachLocalTerminalWith(ctx, socket, keys, lt, escape, stdin, stdout, tty.Owned, logger)
 }
 
 // attachLocalTerminalWith is attachLocalTerminal with the foreground-ownership
 // predicate injected, for the reason withRawTerminal takes one: job control
 // cannot be staged in-process, so a test that needs raw mode to be restored
 // has no way to be the foreground of the pty pair it opened.
-func attachLocalTerminalWith(ctx context.Context, socket string, lt localTerminal, escape byte, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
+func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	client := &attach.Client{
-		Socket: socket,
-		Stdin:  lt.stdin,
-		Stdout: stdout,
-		Pty:    lt.pty,
-		Escape: escape,
-		Logger: logger,
+		Socket:   socket,
+		HostKeys: keys,
+		Stdin:    lt.stdin,
+		Stdout:   stdout,
+		Pty:      lt.pty,
+		Escape:   escape,
+		Logger:   logger,
 	}
 	if lt.sizeOf != nil {
 		client.Resizes = watchResize(ctx, lt.sizeOf)

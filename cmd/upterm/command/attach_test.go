@@ -3,12 +3,15 @@ package command
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestAttachTarget(t *testing.T) {
@@ -19,19 +22,24 @@ func TestAttachTarget(t *testing.T) {
 	buildEndedAfterExit(t, "ended")
 
 	for _, name := range []string{"starting", "ready", "gone"} {
-		sock, status, err := attachTarget(context.Background(), name)
+		sock, keys, status, err := attachTarget(context.Background(), name)
 		require.NoError(t, err, name)
 		rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), name)
 		require.NoError(t, err)
 		require.Equal(t, rec.AttachSocket, sock, "the record's path, not one rebuilt under this runtime root")
 		require.Equal(t, rec.Status, status, "and the status that explains a failed dial")
+		require.Len(t, keys, len(rec.HostKeys), "the record's keys, parsed")
+		for i, key := range keys {
+			require.Equal(t, rec.HostKeys[i], strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n"),
+				"key %d is the one the record names, not merely a key", i)
+		}
 	}
 
-	_, _, err := attachTarget(context.Background(), "ended")
+	_, _, _, err := attachTarget(context.Background(), "ended")
 	require.ErrorContains(t, err, "ended")
 	require.ErrorContains(t, err, "exited", "the record's reason is the explanation")
 
-	_, _, err = attachTarget(context.Background(), "never-existed")
+	_, _, _, err = attachTarget(context.Background(), "never-existed")
 	require.ErrorContains(t, err, "no session named")
 }
 
@@ -44,7 +52,7 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	// Nothing got the chance to write a reason, so "unknown" is the whole
 	// explanation and must still be given.
 	buildEndedAfterKill(t, "killed")
-	_, _, err := attachTarget(context.Background(), "killed")
+	_, _, _, err := attachTarget(context.Background(), "killed")
 	require.ErrorContains(t, err, sessiondir.ReasonUnknown,
 		"a session that ended without saying how still says that much")
 
@@ -56,7 +64,7 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	rec.Signal = "SIGTERM"
 	writeRecordRaw(t, path, rec)
 
-	_, _, err = attachTarget(context.Background(), "signaled")
+	_, _, _, err = attachTarget(context.Background(), "signaled")
 	require.ErrorContains(t, err, "signaled by SIGTERM",
 		"a signalled session names the signal, since there is no exit code to name")
 }
@@ -77,6 +85,14 @@ func TestAttachFailure(t *testing.T) {
 		require.ErrorIs(t, attachFailure("t1", status, dialErr), dialErr,
 			"%s: a session that is up describes its own failure better than this could", status)
 	}
+
+	// The one failure the starting window must not swallow: something
+	// answered the socket and it was not the session. "Try again in a
+	// moment" would send the user back to it.
+	mismatch := fmt.Errorf("attach: ssh: handshake failed: %w", attach.ErrHostKeyMismatch)
+	err = attachFailure("t1", sessiondir.StatusStarting, mismatch)
+	require.ErrorIs(t, err, attach.ErrHostKeyMismatch)
+	require.NotContains(t, err.Error(), "still starting")
 }
 
 func TestAttachTargetRefusesARecordWithoutAnAttachSocket(t *testing.T) {
@@ -88,7 +104,56 @@ func TestAttachTargetRefusesARecordWithoutAnAttachSocket(t *testing.T) {
 	rec.AttachSocket = ""
 	writeRecordRaw(t, d.RecordPath(), rec)
 
-	_, _, err := attachTarget(context.Background(), "old")
+	_, _, _, err := attachTarget(context.Background(), "old")
+	require.ErrorContains(t, err, "attach")
+}
+
+// TestAttachTargetRefusesARecordWithoutHostKeys is
+// TestAttachTargetRefusesARecordWithoutAnAttachSocket's neighbour: a record
+// that never had a key published is the same class of failure as one from
+// before attach sockets existed. Unlike AttachSocket, HostKeys is not forced
+// on Update, so an ordinary Update that says nothing about it leaves it out
+// without needing writeRecordRaw.
+func TestAttachTargetRefusesARecordWithoutHostKeys(t *testing.T) {
+	setupSessionRoots(t)
+	d := claimSession(t, "no-host-key")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+	}))
+
+	_, _, _, err := attachTarget(context.Background(), "no-host-key")
+	require.ErrorContains(t, err, "attach")
+}
+
+// A session that has not published its keys yet is still starting, not one
+// that cannot be attached to: the daemon publishes them as its attach door
+// starts listening, so a record without them names a socket that is not
+// dialable either. Telling the user to restart would throw away a session
+// that was about to be attachable.
+func TestAttachTargetTellsAStartingSessionApartFromAnOldOne(t *testing.T) {
+	setupSessionRoots(t)
+	d := claimSession(t, "still-starting")
+	releaseAtEnd(t, d)
+
+	_, _, _, err := attachTarget(context.Background(), "still-starting")
+	require.ErrorContains(t, err, "still starting")
+	require.NotContains(t, err.Error(), "restart", "waiting is the advice, not restarting")
+}
+
+// TestAttachTargetRefusesARecordWithAnUnparsableHostKey covers the other way
+// HostKeys can fail to name a usable key: present, but not one
+// ssh.ParseAuthorizedKey accepts.
+func TestAttachTargetRefusesARecordWithAnUnparsableHostKey(t *testing.T) {
+	setupSessionRoots(t)
+	d := claimSession(t, "bad-host-key")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.HostKeys = []string{"not a real key"}
+	}))
+
+	_, _, _, err := attachTarget(context.Background(), "bad-host-key")
 	require.ErrorContains(t, err, "attach")
 }
 

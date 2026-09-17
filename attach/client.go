@@ -64,6 +64,13 @@ type Client struct {
 	Escape  byte
 	Logger  *slog.Logger
 
+	// HostKeys is the daemon's public keys, from the session record: one per
+	// signer it holds, since a daemon started with several private keys may
+	// present any of them. Run refuses to attach without at least one: a
+	// client that accepted any key would hand its terminal to whatever bound
+	// the socket.
+	HostKeys []ssh.PublicKey
+
 	// dial reaches the socket; nil is a unix dial. Tests hand over a
 	// connection they can block, to stand in for a daemon that has stopped
 	// reading its socket.
@@ -107,6 +114,9 @@ type Result struct {
 func (c *Client) Run(ctx context.Context) (Result, error) {
 	if c.Stdout == nil {
 		return Result{}, errors.New("attach: Stdout is required")
+	}
+	if len(c.HostKeys) == 0 {
+		return Result{}, errors.New("attach: HostKeys is required")
 	}
 	logger := c.Logger
 	if logger == nil {
@@ -154,7 +164,7 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	conn, chans, reqs, err := ssh.NewClientConn(raw, c.Socket, &ssh.ClientConfig{
 		User:            "host",
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // the socket is the trust boundary
+		HostKeyCallback: c.checkHostKey,
 		ClientVersion:   upterm.AttachSSHClientVersion,
 	})
 	if err != nil {
@@ -354,6 +364,30 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		return Result{Reason: Disconnected}, nil
 	}
 	return *result, nil
+}
+
+// ErrHostKeyMismatch is what Run's error wraps when the door presented a key
+// that is not the daemon's. It is exported so a caller can tell this apart
+// from every other reason an attachment did not happen: those are worth
+// retrying, and this one is worth stopping for — whatever answered the socket
+// is not the session, and the terminal must not be handed to it. x/crypto
+// returns the callback's error as it is and wraps it with %w, so errors.Is
+// finds it through the handshake's own message.
+var ErrHostKeyMismatch = errors.New("host key is not the daemon's")
+
+// checkHostKey accepts key only if it matches one of HostKeys. The daemon may
+// hold several signers and presents whichever the negotiated algorithm
+// selects, so every pinned key is tried in turn; ssh.FixedHostKey does the
+// actual comparison, since it is both the right byte comparison and the sink
+// CodeQL recognises as safe.
+func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	for _, want := range c.HostKeys {
+		if ssh.FixedHostKey(want)(hostname, remote, key) == nil {
+			return nil
+		}
+	}
+	// No "attach:" prefix: Run wraps the handshake's error with one already.
+	return fmt.Errorf("%w (it presented %s)", ErrHostKeyMismatch, ssh.FingerprintSHA256(key))
 }
 
 // copyOutput copies the session's output into Stdout until the session's

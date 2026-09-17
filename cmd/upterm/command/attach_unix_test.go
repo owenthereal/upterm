@@ -28,13 +28,15 @@ import (
 )
 
 // testDoor is a charm ssh server on a unix socket whose handler is the
-// test's. It accepts any public key, as the host door does.
+// test's. It accepts any public key, as the host door does. key is its own
+// host key, in the form a Client pins.
 //
 // A copy of attach/client_test.go's fakeDoor: Go test helpers do not cross
 // packages, and what is under test here — the signal contract of `upterm
 // attach` — needs the same kind of door the attach client's own tests use.
 type testDoor struct {
 	socket string
+	key    ssh.PublicKey
 }
 
 func serveTestDoor(t *testing.T, handler func(gssh.Session)) *testDoor {
@@ -65,7 +67,7 @@ func serveTestDoor(t *testing.T, handler func(gssh.Session)) *testDoor {
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	})
-	return &testDoor{socket: socket}
+	return &testDoor{socket: socket, key: signer.PublicKey()}
 }
 
 // SIGTERM to upterm attach is a detach: the terminal comes back the way it
@@ -109,7 +111,7 @@ func TestAttachDetachesOnSIGTERMAndRestoresTheTerminal(t *testing.T) {
 	go func() {
 		// owned is injected as always-true: a pty pair is nobody's
 		// foreground, and what is under test is the signal, not ownership.
-		res, err := attachLocalTerminalWith(ctx, door.socket, lt, '~', tty, tty, func(*os.File) bool { return true }, discardLogger())
+		res, err := attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', tty, tty, func(*os.File) bool { return true }, discardLogger())
 		require.NoError(t, err)
 		done <- res
 	}()
