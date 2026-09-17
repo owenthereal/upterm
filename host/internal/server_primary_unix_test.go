@@ -435,6 +435,59 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	}, harnessTimeout, 10*time.Millisecond, "the elector still holds the client that hung up")
 }
 
+// This is TestAPrimaryThatHangsUpWithParkedInputIsReplaced's twin for the
+// size calculation rather than the elector: the only signal that A is gone
+// is the connection's end, and the pty actor's interrupt that would
+// otherwise drop A out of resizeWindow's minimum does not run until the
+// group ends -- which this scenario deliberately never lets happen on its
+// own, because A's command never reads its stdin. Without the fix A keeps
+// constraining the size to 24x80 for as long as the session lives.
+func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
+	// stty size on demand would need a read, which this command must never
+	// do; SIGWINCH is the only nudge left, and Redraw sends one on every
+	// attach. The loop re-enters sleep every 0.1s rather than blocking in one
+	// long sleep: a shell only runs a trap between foreground commands, not
+	// by interrupting one already running, so a single long sleep could defer
+	// the trap for its whole duration instead of running it promptly.
+	h := startHost(t, &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty raw -echo; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+
+	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, aOut, "READY")
+
+	// More than the 2 MiB SSH channel window, so this can only complete once
+	// A hangs up; parked because the command above never reads its stdin.
+	floodErr := make(chan error, 1)
+	go func() {
+		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
+		floodErr <- err
+	}()
+	select {
+	case <-floodErr:
+		t.Fatal("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// The client hangs up -- the raw socket, not a channel or the session.
+	require.NoError(t, aGate.Close())
+
+	select {
+	case <-floodErr:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the flood write was never released")
+	}
+
+	// A is out of the elector once its connection actor has run; the fix
+	// makes the same actor emit TerminalDetached, so waiting for this is
+	// also waiting for A to be out of resizeWindow's minimum.
+	require.Eventually(t, func() bool {
+		return h.srv.hostClients.primaryID() == ""
+	}, harnessTimeout, 10*time.Millisecond, "A was never removed from the elector")
+
+	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
+	readUntil(t, bOut, "30 100")
+}
+
 // The door accepted these bytes before the client hung up, so the session is
 // owed them even though the client that sent them has gone. The danger is a
 // handler that, on the connection's end, cancels its own input reader before

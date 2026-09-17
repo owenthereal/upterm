@@ -91,6 +91,10 @@ type exitedPTY struct {
 	pending   [][]byte
 	closed    bool
 	readDelay time.Duration
+
+	// sizeH, sizeW record the last Setsize call, so a test can assert what a
+	// caller resized this fake to.
+	sizeH, sizeW int
 }
 
 func (p *exitedPTY) Read(b []byte) (int, error) {
@@ -112,10 +116,23 @@ func (p *exitedPTY) Close() error {
 	p.closed = true
 	return nil
 }
-func (p *exitedPTY) Setsize(int, int) error { return nil }
-func (p *exitedPTY) Redraw() error          { return nil }
-func (p *exitedPTY) Wait() error            { return nil }
-func (p *exitedPTY) Kill() error            { return nil }
+func (p *exitedPTY) Setsize(h, w int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sizeH, p.sizeW = h, w
+	return nil
+}
+
+// lastSize returns the h, w of the most recent Setsize call.
+func (p *exitedPTY) lastSize() (int, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sizeH, p.sizeW
+}
+
+func (p *exitedPTY) Redraw() error { return nil }
+func (p *exitedPTY) Wait() error   { return nil }
+func (p *exitedPTY) Kill() error   { return nil }
 
 // TestCommand_DrainsOutputAfterExit verifies that output the process wrote
 // just before exiting is delivered rather than dropped when Run notices the

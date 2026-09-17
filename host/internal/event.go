@@ -121,6 +121,16 @@ func (t terminalEventHandler) handleTerminalDetached(evt emitter.Event, m map[io
 
 	if len(ts) == 0 {
 		delete(m, pty)
+		return nil
+	}
+
+	// A terminal leaving can only raise the survivors' minimum, never lower
+	// it, but nothing applies that automatically: without this, the pty
+	// stays at whatever the departed terminal constrained it to until a
+	// survivor happens to resize on its own. An empty ts is skipped above
+	// rather than passed here, which would compute 0x0 and try to set it.
+	if err := resizeWindow(pty, ts); err != nil {
+		return fmt.Errorf("error resizing window: %w", err)
 	}
 
 	return nil

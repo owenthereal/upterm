@@ -16,8 +16,11 @@ var errNoPty = errors.New("session ended before its command started")
 // It exists because the host door serves before the command starts: the
 // first host client's subscription is what the command's start waits for,
 // so that client's input and resize requests can arrive before there is a
-// pty to deliver them to. Writes wait for the pty; the first geometry offered
-// before it exists is what the pty is opened with. Everything else delegates.
+// pty to deliver them to. Writes wait for the pty; the last geometry offered
+// before it exists is what the pty is opened with -- each offer is already
+// the minimum across the terminals attached so far, computed by
+// resizeWindow, so the most recent one is the current answer. Everything
+// else delegates.
 type sharedPTY struct {
 	ready chan struct{}
 	done  chan struct{}
@@ -33,10 +36,31 @@ func newSharedPTY() *sharedPTY {
 }
 
 // set publishes the pty. Once.
+//
+// If a size was recorded while the pty did not exist, it is applied here
+// before ready closes -- the gap Setsize's fast path otherwise leaves open:
+// cmd.Start reads initialSize once, before this runs, so a size offered
+// between that read and this call would otherwise be recorded and then
+// never looked at again.
+//
+// Applied under mu, not after releasing it. Between publishing s.ptmx and
+// applying the recorded size, a concurrent Setsize would take the delegating
+// branch and set the pty to the size it was actually asked for — and then
+// this call would put the older recorded size back over it, which is the
+// very thing this handle exists to prevent. The ioctl costs microseconds;
+// correctness of the last-writer is worth holding the lock for it.
+//
+// A pinned session (--pty-size) is not a special case: its Setsize already
+// reports success without moving anything. The error is dropped because
+// there is nothing here to tell — no logger, and no caller that could act
+// on it — and the size is reasserted by the next resize either way.
 func (s *sharedPTY) set(p PTY) {
 	s.once.Do(func() {
 		s.mu.Lock()
 		s.ptmx = p
+		if s.initial.Valid() {
+			_ = p.Setsize(s.initial.Rows, s.initial.Cols)
+		}
 		s.mu.Unlock()
 		close(s.ready)
 	})
@@ -47,11 +71,11 @@ func (s *sharedPTY) abandon() {
 	s.once.Do(func() { close(s.done) })
 }
 
-// offerSize records the first valid geometry seen before the pty exists.
+// offerSize records the latest valid geometry seen before the pty exists.
 func (s *sharedPTY) offerSize(size termsize.Size) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ptmx == nil && !s.initial.Valid() && size.Valid() {
+	if s.ptmx == nil && size.Valid() {
 		s.initial = size
 	}
 }
@@ -91,15 +115,24 @@ func (s *sharedPTY) Read(p []byte) (int, error) {
 }
 
 // Setsize before the pty exists records the geometry it will open with, and
-// reports success: the resize will have happened, at open.
+// reports success: the resize will have happened, at open. Once the pty
+// exists it delegates.
+//
+// The decision -- record or delegate -- is made under mu in one step rather
+// than by consulting the ready channel and then separately locking: the
+// latter left a window between the two where a resize could land after
+// ready closed but before the lock was taken, and fall through recorded
+// nowhere. offerSize is not reused for the recording half, because reaching
+// it would mean unlocking and relocking, reopening exactly that window.
 func (s *sharedPTY) Setsize(h, w int) error {
-	select {
-	case <-s.ready:
-	default:
-		s.offerSize(termsize.Size{Cols: w, Rows: h})
+	s.mu.Lock()
+	if s.ptmx == nil {
+		if size := (termsize.Size{Cols: w, Rows: h}); size.Valid() {
+			s.initial = size
+		}
+		s.mu.Unlock()
 		return nil
 	}
-	s.mu.Lock()
 	ptmx := s.ptmx
 	s.mu.Unlock()
 	return ptmx.Setsize(h, w)

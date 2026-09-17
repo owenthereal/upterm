@@ -812,6 +812,31 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					select {
 					case <-sess.Context().Done():
 						h.hostClients.remove(c)
+
+						// The pty actor's deferred interrupt says the same
+						// thing -- that this client is gone -- but only runs
+						// once the group ends, which this actor deliberately
+						// does not do (see above), and which a write parked
+						// in ptmx.Write may not do on its own for as long as
+						// the session lives. Until then resizeWindow keeps
+						// treating a client that is provably gone as one of
+						// the terminals it takes the minimum across. Emitting
+						// here as well, next to the elector removal, frees
+						// the size calculation at the same moment. The
+						// deferred emission below still runs when the
+						// handler eventually does return;
+						// handleTerminalDetached deletes by id, so the
+						// second one is a no-op — and is also the safety
+						// net, because the emitter these go through skips a
+						// listener that is not ready rather than waiting for
+						// it, which makes either emission on its own
+						// best-effort.
+						//
+						// Only interactive clients reach here, since only
+						// they register this actor; a viewer forwards no
+						// input, so nothing parks its handler and its own
+						// deferred emission arrives on time.
+						terminalEventEmitter{h.eventEmmiter}.TerminalDetached(sessionID, ptmx)
 					case <-ctx.Done():
 					}
 					<-ctx.Done()
@@ -909,7 +934,31 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		g.Add(func() error {
 			for {
 				select {
-				case win := <-winCh:
+				case win, ok := <-winCh:
+					if !ok {
+						// charm closes this channel when the session's
+						// request loop ends, and a closed channel yields the
+						// zero Window immediately and forever. Without this
+						// the loop spins, announcing 0x0 resizes until the
+						// cancellation below happens to win the select —
+						// and one landing after the detach below re-adds a
+						// terminal nothing will ever remove, pinning the
+						// minimum resizeWindow takes to nothing for the rest
+						// of the session. Stop listening rather than
+						// returning: this actor ending would end the whole
+						// group, and the input actor's own EOF is what has
+						// to do that.
+						winCh = nil
+						continue
+					}
+					if sess.Context().Err() != nil {
+						// A resize this client sent before it went away, still
+						// buffered in charm's one-deep channel. Announcing it
+						// now would re-add a client that has already been
+						// taken out of the size calculation, and nothing
+						// would take it out again.
+						continue
+					}
 					tee.TerminalWindowChanged(sessionID, ptmx, win.Width, win.Height)
 				case <-ctx.Done():
 					return ctx.Err()

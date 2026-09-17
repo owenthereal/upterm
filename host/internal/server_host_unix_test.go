@@ -220,3 +220,38 @@ func TestUndrainedViewerDoesNotWedgeTheSession(t *testing.T) {
 		t.Fatal("the undrained viewer was neither dropped nor drained")
 	}
 }
+
+// A terminal leaving restores the size for the terminals that remain, over a
+// real door rather than through the event handler alone.
+//
+// This is the end-to-end shape its unit twin in event_test.go had to stand in
+// for, and it is here because what made it unreliable is now fixed: charm
+// closes a session's window-change channel when its request loop ends, and
+// the handler's loop read that closed channel as an endless run of 0x0
+// resizes. One landing after the departing client's own detach re-added a
+// terminal nothing would ever remove, pinning the minimum to nothing for the
+// rest of the session — the survivor read "0 0" instead of its own size,
+// seven times in fifteen runs before the fix.
+func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
+	// SIGWINCH is the nudge that makes the command speak: every attach sends
+	// one through Redraw, and so does every resize. A short sleep loop rather
+	// than one long sleep, because a shell runs a trap between foreground
+	// commands rather than interrupting one already running.
+	h := startHost(t, &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+
+	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
+	readUntil(t, aOut, "READY")
+
+	// The smaller terminal takes the session down to its own size: the pty is
+	// sized to the smallest terminal watching it.
+	_, bOut, bSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	readUntil(t, bOut, "READY")
+	readUntil(t, aOut, "24 80")
+
+	// And leaving gives it back. B's output is drained from here on, so its
+	// handler winds down instead of parking on a write nobody is reading.
+	go func() { _, _ = io.Copy(io.Discard, bOut) }()
+	require.NoError(t, bSess.Close())
+	readUntil(t, aOut, "30 100")
+}

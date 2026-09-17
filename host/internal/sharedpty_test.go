@@ -59,3 +59,39 @@ func TestSharedPTYSetPublishesOnce(t *testing.T) {
 	require.ErrorIs(t, err, errNoPty)
 	require.Nil(t, got)
 }
+
+// Setsize before the pty exists has to either record the geometry or
+// delegate to the real pty, and never both or neither: consulting the ready
+// channel and then locking separately left a window between the two where a
+// resize could land and fall through unrecorded. Recording and delegating
+// both have to happen under the same lock as the pty being published, so
+// this also covers set applying the latest recorded size to the pty it
+// hands out, and a later Setsize reaching that pty directly.
+//
+// This is also what stands in for the end-to-end version of the same claim
+// (gate opens on attach at 80x24, a resize to 100x30 lands before the
+// command starts, the pty ends up at 100x30): driving that through a real
+// SSH session races the window-change request against the marker byte meant
+// to prove it landed first, on two independent queues (charm's own
+// handleRequests loop versus this handler's own input actor) with no cross
+// synchronization -- measured at roughly 1 failure in 20 runs. That is the
+// window the brief names as possibly unreachable reliably; this unit test is
+// the fallback it names for it.
+func TestSharedPtySetsizeRecordsOrDelegatesAtomically(t *testing.T) {
+	s := newSharedPTY()
+
+	require.NoError(t, s.Setsize(24, 80))
+	require.NoError(t, s.Setsize(30, 100))
+
+	p := &exitedPTY{}
+	s.set(p)
+
+	h, w := p.lastSize()
+	require.Equal(t, 30, h)
+	require.Equal(t, 100, w)
+
+	require.NoError(t, s.Setsize(43, 132))
+	h, w = p.lastSize()
+	require.Equal(t, 43, h)
+	require.Equal(t, 132, w)
+}
