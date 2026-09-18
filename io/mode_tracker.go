@@ -439,6 +439,69 @@ func (m *ModeTracker) finishCSI(final byte) {
 	}
 }
 
+// Restore returns the bytes that put a terminal this tracker has been
+// watching back where it started. It is Snapshot's opposite: Snapshot is for
+// the terminal joining a session, this is for the terminal leaving one.
+//
+// A terminal is left in whatever modes the session put it in, and restoring
+// the termios settings says nothing about them: a full-screen program that
+// was on screen when its viewer detached leaves that viewer's shell drawing
+// on the alternate screen, with no cursor, with the mouse reporting clicks as
+// input, and confined to the rows the program had chosen for itself. None of
+// that is the shell's doing and none of it goes away on its own.
+//
+// Only what was actually changed is undone, so a session that never touched a
+// mode produces nothing at all — the same property Snapshot has, and the
+// reason this is derived from the stream rather than being a fixed list of
+// resets sent on the way out. Attributes are not tracked and so are not reset
+// here.
+//
+// The order is the order a terminal has to receive it in: leave the alternate
+// screen first, through the mode that entered it, since everything after it
+// applies to the screen the terminal is going back to.
+func (m *ModeTracker) Restore() []byte {
+	var out []byte
+
+	if m.altActive() {
+		out = append(out, 0x1b, '[', '?')
+		out = append(out, []byte(strconv.Itoa(m.altVia))...)
+		out = append(out, 'l')
+	}
+
+	// The normal screen's margins, which outlive whatever set them: a shell
+	// returned to a terminal still under a full-screen program's DECSTBM
+	// scrolls inside those rows and leaves the rest of the screen frozen.
+	// The alternate screen's are not restored because they are gone with it.
+	if len(m.mainRegion) > 0 {
+		out = append(out, 0x1b, '[', 'r')
+	}
+
+	nums := make([]int, 0, len(m.decPrivate))
+	for n := range m.decPrivate {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	for _, n := range nums {
+		if m.decPrivate[n] == restorable[n] {
+			continue
+		}
+		out = append(out, 0x1b, '[', '?')
+		out = append(out, []byte(strconv.Itoa(n))...)
+		if restorable[n] {
+			out = append(out, 'h')
+		} else {
+			out = append(out, 'l')
+		}
+	}
+
+	if len(m.charsetG0) > 0 {
+		// US ASCII into G0, which is where a terminal starts.
+		out = append(out, 0x1b, '(', 'B')
+	}
+
+	return out
+}
+
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by

@@ -260,10 +260,18 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		abandoned atomic.Bool
 		copied    = make(chan struct{})
 		copyErr   error
+		// What the session did to this terminal, watched on the way past so
+		// it can be undone on the way out. Only for a terminal: a viewer
+		// redirected into a pipe or a file is not left in any modes, and mode
+		// sequences appended to a captured log are nothing but noise.
+		modes *uio.ModeTracker
 	)
+	if c.Pty != nil {
+		modes = uio.NewModeTracker()
+	}
 	go func() {
 		defer close(copied)
-		copyErr = c.copyOutput(stdout, &abandoned)
+		copyErr = c.copyOutput(stdout, modes, &abandoned)
 	}()
 
 	var g run.Group
@@ -352,6 +360,25 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	// and Wait can return before the copy has read them.
 	select {
 	case <-copied:
+		// Everything the session sent has been written, so the terminal is in
+		// the modes the session left it in and this is the moment to take it
+		// out of them: a full-screen program still running in the session
+		// would otherwise leave this terminal's shell on the alternate
+		// screen, cursor hidden, mouse reporting on. Restoring the termios
+		// settings around this call says nothing about any of that.
+		//
+		// Here rather than in the copy goroutine because the tracker is that
+		// goroutine's until it ends, and only this path has seen it end. On
+		// the timeout below the copy may still be inside a write to a
+		// terminal that is not taking bytes, which is the one case where
+		// writing more is the wrong answer anyway.
+		if modes != nil {
+			if restore := modes.Restore(); len(restore) > 0 {
+				if _, err := c.Stdout.Write(restore); err != nil {
+					logger.Debug("could not restore the terminal's modes", "error", err)
+				}
+			}
+		}
 	case <-time.After(outputDrainTimeout):
 		abandoned.Store(true)
 		logging.WarnWithin(logger, logging.LogBound, "abandoning output still undelivered to the terminal", "timeout", outputDrainTimeout)
@@ -394,13 +421,22 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 // side ends or a write fails, checking abandoned before every write. It
 // returns the write error — a short write is one, as io.Copy has it — and
 // nil for every way the read can end.
-func (c *Client) copyOutput(r io.Reader, abandoned *atomic.Bool) error {
+//
+// modes, when it is not nil, observes everything on its way to the terminal,
+// so that the terminal can be put back afterwards. It is fed what was read
+// rather than what was written: a write that fails has still reached the
+// terminal as far as the modes in it are concerned, and the tracker is the
+// record of what this terminal was asked to do, not of what arrived.
+func (c *Client) copyOutput(r io.Reader, modes *uio.ModeTracker, abandoned *atomic.Bool) error {
 	buf := make([]byte, 32<<10)
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {
 			if abandoned.Load() {
 				return nil
+			}
+			if modes != nil {
+				_, _ = modes.Write(buf[:n])
 			}
 			nw, werr := c.Stdout.Write(buf[:n])
 			if werr != nil {

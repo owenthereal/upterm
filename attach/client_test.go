@@ -133,6 +133,53 @@ func TestClientRequestsAPtyWithTheGivenGeometryAndForwardsBothWays(t *testing.T)
 	require.Equal(t, "echo:hello\r\n", out.String())
 }
 
+// A terminal is left in whatever modes the session put it in, and the termios
+// settings this client restores around the attachment say nothing about them.
+// Detaching from a full-screen program therefore used to hand back a terminal
+// on the alternate screen, with no cursor and with the mouse reporting clicks
+// as input — the session's own doing, for the session's own purposes, still
+// in force over a shell that knows nothing about it.
+//
+// Undone from what the session actually sent, so what is asserted here is
+// exactly the reverse of what the door wrote, in the order a terminal has to
+// receive it: off the alternate screen first.
+func TestClientPutsTheTerminalBackInTheModesItCameIn(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006hfull screen")
+		_ = s.Exit(0)
+	})
+
+	var out bytes.Buffer
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: &out,
+		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	res, err := c.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, Result{Reason: Exited}, res)
+
+	require.Equal(t, "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006hfull screen"+
+		"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1006l", out.String())
+}
+
+// And nothing is appended for a viewer redirected into a pipe or a file:
+// there is no terminal in any modes, and mode sequences in a captured log are
+// noise in somebody's output.
+func TestClientWithoutPtyWritesNoModeRestore(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "\x1b[?1049h\x1b[?25lfull screen")
+		_ = s.Exit(0)
+	})
+
+	var out bytes.Buffer
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: &out}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	_, err := c.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "\x1b[?1049h\x1b[?25lfull screen", out.String())
+}
+
 func TestClientWithoutPtyIsAViewer(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _, ok := s.Pty()

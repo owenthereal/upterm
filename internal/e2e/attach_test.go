@@ -134,6 +134,58 @@ func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
 	require.NoError(t, h.waitForText(term, "STTY_SIGNAL=same", 15*time.Second))
 }
 
+// Detaching from a full-screen session hands the terminal back usable.
+//
+// A session's terminal modes are the session's, and they outlive the
+// attachment: the client restores the termios settings it changed, and those
+// say nothing about the alternate screen a program is drawing on, the cursor
+// it hid, or the mouse reporting it turned on. A terminal left on the
+// alternate screen is one whose shell has lost everything printed before the
+// attach, draws over a program's screen, and has no cursor to show for it.
+//
+// Asserted through what the user would see: capture-pane reads the screen the
+// pane is showing, so a marker printed before the attach is readable
+// afterwards only if the pane is back on the normal screen. The check before
+// the detach is what makes that mean something — without it, a session that
+// never reached the alternate screen would pass this test.
+func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-alt-%d", time.Now().UnixNano()%1_000_000)
+
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
+		h.serverURL, h.keyFile, name, h.rcFile)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+
+	term := h.splitPane(h.host)
+	marker := fmt.Sprintf("NORMAL_SCREEN_%d", time.Now().UnixNano()%1_000_000)
+	require.NoError(t, term.SendLine(h.ctx, "echo "+marker))
+	require.NoError(t, h.waitForText(term, marker, 10*time.Second))
+
+	require.NoError(t, term.SendLine(h.ctx, "upterm attach "+name))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second), "attach did not reach the session's prompt")
+
+	// A full-screen program's opening, and nothing that puts it back: the
+	// program is still running when its viewer leaves, which is the case
+	// where the terminal cannot restore itself.
+	require.NoError(t, term.SendLine(h.ctx, `printf '\033[?1049h\033[?25l\033[?1000hFULL_SCREEN\n'`))
+	require.NoError(t, h.waitForText(term, "FULL_SCREEN", 10*time.Second))
+	onAlt, err := term.Capture(h.ctx)
+	require.NoError(t, err)
+	require.NotContains(t, onAlt, marker,
+		"the session never reached the alternate screen, so what follows would prove nothing")
+
+	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, term.SendKeys(h.ctx, "~."))
+	require.NoError(t, h.waitForText(term, "detached from session "+name, 10*time.Second))
+
+	require.Eventually(t, func() bool {
+		content, err := term.Capture(h.ctx)
+		return err == nil && strings.Contains(content, marker)
+	}, 10*time.Second, 100*time.Millisecond,
+		"the terminal was handed back on the session's alternate screen, with everything before the attach out of sight")
+}
+
 // The pty is sized to the smallest terminal watching it, and gives the size
 // back when that terminal leaves. Two panes of different heights are enough:
 // the session takes the shorter one while both are attached, and returns to
