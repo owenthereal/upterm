@@ -176,7 +176,16 @@ func (g *GitHubActions) appendFile(envVar string, content func() (string, error)
 		return fmt.Errorf("writing %s (%s): %w", envVar, path, err)
 	}
 
-	return f.Close()
+	// Closed here as well as deferred, because on a buffered or networked
+	// filesystem this is where a failed write is reported, and the deferred
+	// close discards that error. Named like the others: a bare "close
+	// /home/runner/…" leaves the reader to work out which of the two files
+	// upterm was writing.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing %s (%s): %w", envVar, path, err)
+	}
+
+	return nil
 }
 
 // keyValueFile renders one entry of the GITHUB_OUTPUT format.

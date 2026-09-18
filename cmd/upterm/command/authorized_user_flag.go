@@ -8,19 +8,23 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// authUserSliceValue is a pflag.Value (and pflag.SliceValue) for the five
-// authorization-list flags: --authorized-user and the four legacy
-// *-user flags.
+// authUserSliceValue is a pflag.Value (and pflag.SliceValue) for the
+// authorization-list flags: --authorized-user, the four legacy *-user flags,
+// and `upterm ci`'s --limit-access-to-users.
 //
 // It exists because pflag's own stringSliceValue.Set parses with
 // csv.Reader.Read, which returns only the first CSV record. A newline starts
 // a second record, so "github:alice\ngithub:bob" silently becomes just
 // "github:alice" inside pflag, before any upterm code ever sees the value —
 // the dropped second entry is never fetched or authorized, and nothing
-// errors. Because these five flags feed an authorization allow-list, a
+// errors. Because these flags feed an authorization allow-list, a
 // silently shortened value has to be a parse error instead, which is exactly
 // what splitCSV already gives the environment/config path in root.go. This
 // type makes the CLI path share that same parser so all three origins agree.
+//
+// The cost is that a newline-separated list is rejected rather than accepted:
+// that is the intended trade, since the alternative on an allow-list is to
+// authorize the first name and drop the rest without a word.
 type authUserSliceValue struct {
 	name    string
 	value   *[]string
@@ -103,8 +107,8 @@ func writeAuthUserCSV(vals []string) (string, error) {
 	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
-// registerAuthUserFlag registers one of the five authorization-list flags
-// using authUserSliceValue instead of StringSliceVar.
+// registerAuthUserFlag registers one of the authorization-list flags using
+// authUserSliceValue instead of StringSliceVar.
 //
 // pflag's Flag.defaultIsZeroValue special-cases the concrete type
 // *stringSliceValue so an empty default renders as no "(default ...)" text

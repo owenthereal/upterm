@@ -114,8 +114,13 @@ a public repository that command is in a public build log.`,
 
 	cmd.Flags().BoolVar(&flagCILimitAccessToActor, "limit-access-to-actor", false,
 		"Authorize only the account that triggered the CI job, by fetching its public keys from the CI system's code host.")
-	cmd.Flags().StringSliceVar(&flagCILimitAccessToUsers, "limit-access-to-users", nil,
-		"Authorize only these GitHub users, by fetching their public keys. Repeatable, and accepts a comma- or whitespace-separated list.")
+	// registerAuthUserFlag, not StringSliceVar: pflag's own string-slice
+	// parser reads one CSV record, so a newline-separated list silently
+	// becomes its first name and the rest are never authorized. This is an
+	// allow-list, so a value it cannot parse whole has to be an error — the
+	// same reason the five --*-user flags use this parser.
+	registerAuthUserFlag(cmd.Flags(), &flagCILimitAccessToUsers, "limit-access-to-users",
+		"Authorize only these GitHub users, by fetching their public keys. Repeatable, and accepts a comma- or space-separated list.")
 	cmd.Flags().DurationVar(&flagCIWaitTimeout, "wait-timeout", ciDefaultWaitTimeout,
 		"Shut down the session if no client has connected within this long. 0 waits forever.")
 	cmd.Flags().StringVar(&flagCIContinueFile, "continue-file", "",
@@ -182,7 +187,7 @@ func ciRunE(c *cobra.Command, args []string) error {
 	// flags are registered on this command too, and a job that uses both is
 	// asking for the union.
 	flagAuthorizedUsers = append(flagAuthorizedUsers, users...)
-	ciAuthorizationRequested = flagCILimitAccessToActor || len(flagCILimitAccessToUsers) > 0
+	ciAuthorizationRequested = ciRestrictionRequested(flagCILimitAccessToActor, flagCILimitAccessToUsers, suppliedFlags)
 
 	// See the hidden --accept registration above: there is no terminal here to
 	// answer a confirmation prompt on.
@@ -246,6 +251,24 @@ func ciRunE(c *cobra.Command, args []string) error {
 	return err
 }
 
+// ciRestrictionRequested reports whether the --limit-access-to-* flags asked
+// for a restriction at all, which is a different question from whether any
+// keys came back.
+//
+// supplied, not len(users): pflag parses --limit-access-to-users "" into an
+// empty slice, so a length test alone reads an empty workflow input as "no
+// restriction asked for", and the fail-closed guard in runHostSession never
+// fires — the session then accepts anyone holding the connect string this
+// command has just published to a step output, a job summary and a run
+// annotation. suppliedFlags is the union of the command line, the environment
+// and the config file, which is the question actually being asked.
+//
+// The length test stays as well, for a restriction that reached the variable
+// without going through a flag at all.
+func ciRestrictionRequested(limitToActor bool, users []string, supplied map[string]bool) bool {
+	return limitToActor || supplied["limit-access-to-users"] || len(users) > 0
+}
+
 // ciAuthorizedUsers turns the --limit-access-to-* flags into the user
 // references runHostSession authorizes.
 //
@@ -285,11 +308,14 @@ func ciAuthorizedUsers(provider ci.Provider, limitToActor bool, users []string) 
 
 // splitUserList flattens the --limit-access-to-users values.
 //
-// pflag splits on commas, which covers `--limit-access-to-users alice,bob`.
-// The other form this has to read is a workflow input written as a YAML block
-// — one name per line, sometimes spaces — which arrives as a single element
-// with newlines in it. Splitting again on whitespace is what makes both work,
-// and an empty entry is dropped rather than turned into a lookup of "".
+// The flag's parser has already split on commas, which covers
+// `--limit-access-to-users alice,bob`. Splitting again on spaces covers
+// `--limit-access-to-users "alice bob"`, which CSV does not separate, and
+// drops an empty entry rather than turning it into a lookup of "".
+//
+// Newlines never reach here: the parser rejects them, in every origin, rather
+// than returning a truncated allow-list. A workflow input written as a YAML
+// block has to be joined with commas by whoever passes it.
 func splitUserList(values []string) []string {
 	var out []string
 	for _, v := range values {
@@ -341,6 +367,12 @@ type ciSession struct {
 
 	stopOnce sync.Once
 	reason   atomic.Pointer[string]
+
+	// startedAt is when this session began watching. A continue file older
+	// than that was left by something else and says nothing about this
+	// session; see continueFileFound.
+	startedAt time.Time
+	staleOnce sync.Once
 }
 
 // created runs once the session is up: it prints the banner every host
@@ -400,6 +432,13 @@ func (s *ciSession) clientLeft(c *api.Client) {
 // watch ends the session when nobody came, or when someone inside it asked for
 // the job to continue.
 func (s *ciSession) watch(ctx context.Context) {
+	// Truncated to the second because that is the coarsest mtime granularity
+	// a runner's filesystem might have. Rounding down can only make a stale
+	// file from this same second look fresh, which costs one early exit;
+	// rounding up would make a genuinely new file look stale, and the session
+	// would then ignore the one instruction it is watching for.
+	s.startedAt = time.Now().Truncate(time.Second)
+
 	var deadline time.Time
 	if s.waitTimeout > 0 {
 		deadline = time.Now().Add(s.waitTimeout)
@@ -430,16 +469,35 @@ func (s *ciSession) watch(ctx context.Context) {
 	}
 }
 
-// continueFileFound returns the first continue file that exists, or "".
+// continueFileFound returns the first continue file that this session should
+// act on, or "".
 //
 // A stat error other than "not there" is treated as not there: an unreadable
 // parent directory is not someone asking for the session to end, and ending it
 // on that would make a misconfigured path look like a guest's decision.
+//
+// A file older than the session is ignored. /continue and the one under the
+// checkout both outlive the session that ended on them, and a self-hosted
+// runner — or a job with two `if: failure()` steps — reuses both paths. Acting
+// on a leftover would mean publishing the annotation, the step output and the
+// summary for a session that then ends a tick later with no hint that a stale
+// file, rather than a guest, ended it. Comparing mtime rather than deleting
+// the file keeps `touch` working on a path that already exists: touching a
+// stale file makes it current, which is exactly what the guest meant.
 func (s *ciSession) continueFileFound() string {
 	for _, path := range s.continueFiles {
-		if _, err := os.Stat(path); err == nil {
-			return path
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
 		}
+		if fi.ModTime().Before(s.startedAt) {
+			s.staleOnce.Do(func() {
+				s.printf("upterm: ignoring %s: it predates this session. Touch it again to end the session.", path)
+				s.logger.Info("ignoring a continue file that predates the session", "path", path, "modified", fi.ModTime())
+			})
+			continue
+		}
+		return path
 	}
 	return ""
 }

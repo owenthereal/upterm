@@ -12,6 +12,7 @@ import (
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/ci"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -245,4 +246,153 @@ func TestCIReportFailureDoesNotEndTheSession(t *testing.T) {
 
 	require.Contains(t, out.String(), "could not report the session to Fake CI")
 	require.Equal(t, []ci.Session{{SSHCommand: "ssh TOKEN@uptermd.upterm.dev", Name: "bash-1a2b"}}, p.sessions)
+}
+
+// findFlag returns the named flag from `upterm ci`'s own flag set.
+func findFlag(t *testing.T, name string) *pflag.Flag {
+	t.Helper()
+
+	cmd := ciCmd()
+	f := cmd.Flags().Lookup(name)
+	require.NotNil(t, f, "no --%s on upterm ci", name)
+	return f
+}
+
+func TestCILimitAccessToUsersRejectsATruncatedList(t *testing.T) {
+	// pflag's own string-slice parser reads one CSV record, so this value
+	// would silently become just "alice" and bob and carol would never be
+	// authorized. On an allow-list that has to be an error.
+	f := findFlag(t, "limit-access-to-users")
+
+	err := f.Value.Set("alice\nbob\ncarol")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "separate values with commas")
+}
+
+func TestCILimitAccessToUsersAcceptsTheFormsThatSurviveWhole(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"alice,bob", []string{"alice", "bob"}},
+		{"alice", []string{"alice"}},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			f := findFlag(t, "limit-access-to-users")
+			require.NoError(t, f.Value.Set(tc.in))
+
+			sv, ok := f.Value.(pflag.SliceValue)
+			require.True(t, ok)
+			require.Equal(t, tc.want, sv.GetSlice())
+		})
+	}
+}
+
+func TestCIRestrictionRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		limitToActor bool
+		users        []string
+		supplied     map[string]bool
+		want         bool
+	}{
+		{
+			// The fail-open case this function exists for: pflag parses
+			// --limit-access-to-users "" into an empty slice, so a length test
+			// alone would read an empty workflow input as "no restriction
+			// asked for" and start a session that accepts anyone.
+			name:     "an empty value is still a restriction",
+			supplied: map[string]bool{"limit-access-to-users": true},
+			want:     true,
+		},
+		{
+			name:         "the actor flag alone",
+			limitToActor: true,
+			want:         true,
+		},
+		{
+			name:  "names alone",
+			users: []string{"alice"},
+			want:  true,
+		},
+		{
+			// --limit-access-to-actor=false is supplied without asking for
+			// anything, which is why this is not derived from suppliedFlags.
+			name:     "the actor flag explicitly turned off",
+			supplied: map[string]bool{"limit-access-to-actor": true},
+			want:     false,
+		},
+		{
+			name: "nothing asked for",
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ciRestrictionRequested(tc.limitToActor, tc.users, tc.supplied))
+		})
+	}
+}
+
+func TestCIEmptyLimitAccessToUsersIsRecordedAsSupplied(t *testing.T) {
+	// End to end through the real flag set and the real ingestion, because the
+	// fail-open bug lived in the gap between them: the flag parses to an empty
+	// slice, and only suppliedFlags still remembers it was given at all.
+	withConfig(t, "")
+
+	cmd := ciCmd()
+	require.NoError(t, cmd.Flags().Set("limit-access-to-users", ""))
+
+	supplied, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+
+	require.Empty(t, flagCILimitAccessToUsers, "pflag parses an empty value into an empty slice")
+	require.True(t, supplied["limit-access-to-users"])
+	require.True(t, ciRestrictionRequested(false, flagCILimitAccessToUsers, supplied),
+		"an empty --limit-access-to-users must still fail closed")
+}
+
+func TestCIIgnoresAContinueFileThatPredatesTheSession(t *testing.T) {
+	// A self-hosted runner, or a job with two `if: failure()` steps, reuses
+	// both continue paths. Acting on a leftover would publish the annotation,
+	// the step output and the summary for a session that ends a tick later
+	// with no hint that a stale file ended it.
+	path := filepath.Join(t.TempDir(), "continue")
+	require.NoError(t, os.WriteFile(path, nil, 0644))
+
+	stale := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, stale, stale))
+
+	s, ctx, out := newTestCISession(t, 0, []string{path})
+
+	go s.watch(ctx)
+
+	select {
+	case <-ctx.Done():
+		t.Fatalf("a leftover continue file ended the session: %s", s.stopReason())
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	require.Contains(t, out.String(), "it predates this session")
+}
+
+func TestCITouchingAStaleContinueFileEndsTheSession(t *testing.T) {
+	// Comparing mtime rather than deleting the file is what keeps `touch`
+	// working on a path that already exists: touching it makes it current,
+	// which is exactly what the guest meant.
+	path := filepath.Join(t.TempDir(), "continue")
+	require.NoError(t, os.WriteFile(path, nil, 0644))
+
+	stale := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, stale, stale))
+
+	s, ctx, _ := newTestCISession(t, 0, []string{path})
+
+	go s.watch(ctx)
+
+	// Let the watcher see it as stale first, then touch it.
+	time.Sleep(50 * time.Millisecond)
+	now := time.Now().Add(time.Second)
+	require.NoError(t, os.Chtimes(path, now, now))
+
+	require.Contains(t, waitForStop(t, ctx, s), "was created")
 }
