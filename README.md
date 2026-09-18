@@ -208,11 +208,15 @@ Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`H
 
 Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
 
-### Debug GitHub Actions
+### Debug CI Jobs
 
-`upterm` can be integrated with GitHub Actions to enable real-time SSH debugging, allowing you to interact directly with the runner system during workflow execution. This is achieved through [action-upterm](https://github.com/owenthereal/action-upterm), which sets up an `upterm` session within your CI pipeline.
+`upterm ci` hosts a session from inside a CI job and tells the CI system how to join it. It is `upterm host` with the defaults a runner needs — no interactive prompts, no terminal — plus a lifecycle suited to a job: it shuts itself down if nobody connects, and it ends when someone inside the session says the job may continue.
 
-To get started, include `action-upterm` in your GitHub Actions workflow as follows:
+```console
+upterm ci --limit-access-to-actor
+```
+
+On GitHub Actions the join command is published three ways: as the `ssh-command` step output, in the job summary, and as a notice annotation on the run.
 
 ```yaml
 name: CI
@@ -221,14 +225,36 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Setup upterm session
+    - uses: actions/checkout@v4
+    - name: Debug over SSH
+      if: failure()
       uses: owenthereal/action-upterm@v1
+      with:
+        limit-access-to-actor: true
 ```
 
-This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
+[action-upterm](https://github.com/owenthereal/action-upterm) installs `upterm` on the runner and starts the session for you, and adds detached mode, where the job carries on while the session stays open. Its inputs map onto the flags below.
 
-For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
+**Restricting who may join.** The session's connect string ends up in the build log, which on a public repository is public, so restrict the session unless you mean it to be open:
+
+| Flag | Authorizes |
+| --- | --- |
+| `--limit-access-to-actor` | The account that triggered the job |
+| `--limit-access-to-users alice,bob` | The named GitHub users |
+| `--authorized-user gitlab:alice` | Any user on any [supported code host](#access-control) |
+| `--authorized-keys FILE` | The public keys in an `authorized_keys` file |
+
+If a restriction is asked for and no keys can be resolved, the session refuses to start rather than accepting anyone.
+
+**Ending the session.** From inside the session, hand the job back by creating the continue file:
+
+```console
+touch /continue
+```
+
+Otherwise the session ends when nobody has connected within `--wait-timeout` (10 minutes by default; `0` waits forever), or when the shell exits. Once a client has connected, the wait timeout no longer applies.
+
+**What reaches the build log.** The banner, the join command and one line per client joining and leaving. The session's own terminal output is not mirrored there — a build log outlives the run and may be public — and `--log-session-output` puts it back if you want it. Client IPs are redacted in any CI environment; see `--hide-client-ip`.
 
 ## :bulb: Tips
 
