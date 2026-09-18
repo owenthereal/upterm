@@ -17,13 +17,30 @@ import (
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// A daemon that binds at once and ends after `lives`.
+// A daemon that binds at once, starts its command — a client got through the
+// door — and ends after `lives`.
 func stubDaemon(lives time.Duration) daemonFunc {
-	return func(ctx context.Context, onAttachSocket func(string)) error {
+	return func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
 		onAttachSocket("/tmp/attach.sock")
+		onCommandStarted()
 		select {
 		case <-time.After(lives):
 			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// A daemon that binds and then waits behind its gate: AwaitInitialClient with
+// nobody through the door, so the command never starts and the wait ends in
+// ErrNoInitialClient. `lives` stands in for the gate's timeout.
+func stubGatedDaemon(lives time.Duration, timedOut error) daemonFunc {
+	return func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
+		onAttachSocket("/tmp/attach.sock")
+		select {
+		case <-time.After(lives):
+			return timedOut
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -74,7 +91,9 @@ func TestRunLocalSessionCancelsThenWaitsForTheTerminalToBeRestored(t *testing.T)
 // daemon that fails before binding the socket reports that failure.
 func TestRunLocalSessionReturnsTheDaemonsError(t *testing.T) {
 	boom := errors.New("relay unreachable")
-	daemon := func(ctx context.Context, onAttachSocket func(string)) error { return boom }
+	daemon := func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
+		return boom
+	}
 	// Recorded rather than failed here: this runs on runLocalSession's own
 	// goroutine, and t.Fatal from one that is not the test's stops only that
 	// goroutine — a tripped guard would hang to the package timeout instead
@@ -100,6 +119,53 @@ func TestRunLocalSessionReportsADisconnectAndKeepsRunning(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stderr.String(), "upterm attach build-shell")
 	require.Contains(t, stderr.String(), "the session continues")
+}
+
+// A local terminal that never attached, while the command is still behind
+// the gate, ends the session then and there.
+//
+// upterm host starts its daemon with AwaitInitialClient, so the command waits
+// for the first client through the door — which is this terminal. If it never
+// gets there, nothing else is going to open that gate, and waiting out its
+// timeout is ten seconds of nothing followed by "no client attached before
+// the command could start": an error about a symptom, after a message saying
+// the session continues, which it does not. The failure is the attach's and
+// is reported as such, at once.
+func TestRunLocalSessionEndsTheSessionWhenItsTerminalNeverAttaches(t *testing.T) {
+	refused := errors.New("unable to set terminal to raw mode")
+	client := func(ctx context.Context, socket string) (attach.Result, error) {
+		return attach.Result{}, refused
+	}
+
+	var stderr bytes.Buffer
+	gate := errors.New("no client attached before the command could start")
+	start := time.Now()
+	err := runLocalSession(context.Background(), "s", &stderr, discardLogger(),
+		stubGatedDaemon(10*time.Second, gate), client)
+
+	require.ErrorIs(t, err, refused, "the error must say why the terminal could not attach")
+	require.Contains(t, err.Error(), "could not attach the local terminal to session s")
+	require.Less(t, time.Since(start), 5*time.Second, "waited out the gate instead of ending the session")
+	require.NotContains(t, stderr.String(), "the session continues",
+		"a session whose command never started does not continue")
+}
+
+// And the same failure leaves a session that is running alone: the command
+// starting means a client got through the door, which with an attach of our
+// own that failed means somebody else's. Losing our terminal is not a reason
+// to end their session, so this is the case the message is for.
+func TestRunLocalSessionKeepsARunningSessionWhenItsTerminalFails(t *testing.T) {
+	client := func(ctx context.Context, socket string) (attach.Result, error) {
+		return attach.Result{}, errors.New("refused")
+	}
+
+	var stderr bytes.Buffer
+	err := runLocalSession(context.Background(), "s", &stderr, discardLogger(),
+		stubDaemon(300*time.Millisecond), client)
+
+	require.NoError(t, err)
+	require.Contains(t, stderr.String(), "the session continues")
+	require.Contains(t, stderr.String(), "upterm attach s")
 }
 
 // blockingHandler is a slog.Handler whose Handle never returns until
@@ -132,6 +198,9 @@ func TestRunLocalSessionBoundsItsDiagnostics(t *testing.T) {
 			return attach.Result{}, errors.New("refused")
 		}
 		start := time.Now()
+		// The command started, so this is a session somebody else is using
+		// and the failure is only reported; the blocked logger on the way to
+		// reporting it is what this is about.
 		require.NoError(t, runLocalSession(context.Background(), "s", &stderr, logger, stubDaemon(50*time.Millisecond), client))
 		require.Less(t, time.Since(start), 3*time.Second)
 		require.Contains(t, stderr.String(), "could not attach")

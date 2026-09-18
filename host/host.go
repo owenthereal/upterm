@@ -233,6 +233,14 @@ type Host struct {
 	// not block: everything after it — the command, the guest door, the
 	// readiness record — waits behind it.
 	AttachListeningCallback func(attachSocket string)
+	// CommandStartedCallback is called once the hosted command is running,
+	// which with AwaitInitialClient is also the news that a client got
+	// through the door. A caller whose own attach failed asks this whether
+	// there is a session to leave alone.
+	//
+	// Called on the server's own goroutine, in front of everything the
+	// command's start releases, so it must not block.
+	CommandStartedCallback func()
 	// VersionWarningCallback is called when the server's version is
 	// incompatible with this host's. Nil logs the mismatch and nothing more:
 	// the daemon has no terminal to print to.
@@ -681,7 +689,12 @@ func (c *Host) Run(ctx context.Context) error {
 			InitialClientTimeout:    c.InitialClientTimeout,
 			SFTPDisabled:            c.SFTPDisabled,
 			SFTPPermissionChecker:   c.SFTPPermissionChecker,
-			OnCommandStarted:        func() { cmdOnce.Do(func() { close(cmdReady) }) },
+			OnCommandStarted: func() {
+				cmdOnce.Do(func() { close(cmdReady) })
+				if c.CommandStartedCallback != nil {
+					c.CommandStartedCallback()
+				}
+			},
 			OnGuestServerStopped: func(err error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 				if c.SessionDir != nil {

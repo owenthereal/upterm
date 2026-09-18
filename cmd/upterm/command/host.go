@@ -524,8 +524,9 @@ func shareRunE(c *cobra.Command, args []string) error {
 		}
 
 		return runLocalSession(c.Context(), name, os.Stderr, logger.Logger,
-			func(ctx context.Context, onAttachSocket func(string)) error {
+			func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
 				h.AttachListeningCallback = onAttachSocket
+				h.CommandStartedCallback = onCommandStarted
 				return h.Run(ctx)
 			},
 			func(ctx context.Context, socket string) (attach.Result, error) {

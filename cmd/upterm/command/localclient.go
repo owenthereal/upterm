@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/owenthereal/upterm/attach"
@@ -88,8 +89,14 @@ func localAttachFailureMessage(name, logPath string) string {
 }
 
 // daemonFunc runs the daemon until the session ends, reporting the attach
-// socket through onAttachSocket once it is bound. Host.Run in production.
-type daemonFunc func(ctx context.Context, onAttachSocket func(string)) error
+// socket through onAttachSocket once it is bound and the hosted command's
+// start through onCommandStarted. Host.Run in production.
+//
+// The second is what tells a failed attach whether there is a session to
+// leave alone: with AwaitInitialClient the command is held behind a gate
+// that the first client through the door opens, so until this fires there is
+// nothing running.
+type daemonFunc func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error
 
 // clientFunc attaches the local terminal and reports how the attachment
 // ended. attachLocalTerminal in production.
@@ -109,8 +116,17 @@ type clientFunc func(ctx context.Context, socket string) (attach.Result, error)
 func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger *slog.Logger, runDaemon daemonFunc, attachClient clientFunc) error {
 	attachSocket := make(chan string, 1)
 	runErr := make(chan error, 1)
+	// Cancelled here, not only by the caller: a local terminal that never
+	// attached leaves a daemon holding a command behind a gate nothing is
+	// going to open. See the failed case below.
+	daemonCtx, cancelDaemon := context.WithCancel(ctx)
+	defer cancelDaemon()
+	commandStarted := make(chan struct{})
+	var startedOnce sync.Once
 	go func() {
-		runErr <- runDaemon(ctx, func(s string) { attachSocket <- s })
+		runErr <- runDaemon(daemonCtx,
+			func(s string) { attachSocket <- s },
+			func() { startedOnce.Do(func() { close(commandStarted) }) })
 	}()
 
 	// No timeout of its own: the daemon either binds the socket or returns,
@@ -130,8 +146,8 @@ func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger 
 	// localAttachFailureMessage) — attachClient returned an error rather
 	// than an attach.Result.
 	type clientOutcome struct {
-		res    attach.Result
-		failed bool
+		res attach.Result
+		err error // non-nil: never attached at all
 	}
 
 	clientCtx, cancelClient := context.WithCancel(ctx)
@@ -144,15 +160,34 @@ func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger 
 			// this result from being delivered, or the wait below would
 			// never end.
 			logging.WarnWithin(logger, logging.LogBound, "could not attach the local terminal", "error", err)
-			clientDone <- clientOutcome{failed: true}
+			clientDone <- clientOutcome{err: err}
 			return
 		}
 		clientDone <- clientOutcome{res: res}
 	}()
+	// attachErr is a local terminal that never attached while the command was
+	// still behind the gate. Reported by returning it rather than by printing
+	// it, so there is one diagnostic and it is the caller's to handle.
+	var attachErr error
 	report := func(out clientOutcome) {
 		msg := localDisconnectMessage(name, utils.UptermLogFilePath(), out.res)
-		if out.failed {
-			msg = localAttachFailureMessage(name, utils.UptermLogFilePath())
+		if out.err != nil {
+			select {
+			case <-commandStarted:
+				// Another terminal got through the door first and the command
+				// is running: this is a session somebody is using, and losing
+				// our own terminal is not a reason to end it.
+				msg = localAttachFailureMessage(name, utils.UptermLogFilePath())
+			default:
+				// Nothing is attached and the command has not started. The
+				// gate only opens for a client, so waiting out its timeout
+				// buys ten seconds of nothing and then fails anyway — while
+				// telling the operator the session continues, which it does
+				// not.
+				attachErr = fmt.Errorf("could not attach the local terminal to session %s: %w", name, out.err)
+				cancelDaemon()
+				return
+			}
 		}
 		if msg != "" {
 			// stderr may be the very terminal that stopped.
@@ -185,6 +220,13 @@ func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger 
 			cancelClient()
 			report(<-clientDone)
 		}
+	}
+	if attachErr != nil {
+		// Preferred over the daemon's own error, whichever way round the two
+		// arrived: a daemon cancelled by the line above says only that it was
+		// cancelled, and one that gave up on its own says only that nobody
+		// attached. Neither says why nobody could.
+		return attachErr
 	}
 	return err
 }
