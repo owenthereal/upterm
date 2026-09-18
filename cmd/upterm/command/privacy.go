@@ -1,6 +1,8 @@
 package command
 
-import "os"
+import (
+	"github.com/owenthereal/upterm/internal/ci"
+)
 
 var (
 	flagHideClientIP bool
@@ -32,27 +34,12 @@ func shouldHideClientIP() bool {
 	return isCI()
 }
 
-// isCI detects if the current process is running in a CI/CD environment
-// by checking for common CI environment variables.
+// isCI detects if the current process is running in a CI/CD environment.
+//
+// The environment-variable list lives in internal/ci, which is also what
+// `upterm ci` detects its provider with. Two copies of it would drift, and the
+// consequence of drifting here is a client IP printed into a public build log
+// on whichever CI system only one of the copies knows about.
 func isCI() bool {
-	ciEnvVars := []string{
-		"CI",                     // Generic CI indicator (GitHub Actions, GitLab CI, etc.)
-		"GITHUB_ACTIONS",         // GitHub Actions
-		"GITLAB_CI",              // GitLab CI
-		"CIRCLECI",               // CircleCI
-		"TRAVIS",                 // Travis CI
-		"JENKINS_URL",            // Jenkins
-		"BUILDKITE",              // Buildkite
-		"TF_BUILD",               // Azure Pipelines
-		"TEAMCITY_VERSION",       // TeamCity
-		"BITBUCKET_BUILD_NUMBER", // Bitbucket Pipelines
-	}
-
-	for _, envVar := range ciEnvVars {
-		if os.Getenv(envVar) != "" {
-			return true
-		}
-	}
-
-	return false
+	return ci.IsCI()
 }

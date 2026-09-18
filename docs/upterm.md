@@ -59,6 +59,7 @@ Environment Variables:
 
 ### SEE ALSO
 
+* [upterm ci](upterm_ci.md)	 - Host a debugging session from a CI job
 * [upterm config](upterm_config.md)	 - Manage upterm configuration
 * [upterm host](upterm_host.md)	 - Host a terminal session
 * [upterm proxy](upterm_proxy.md)	 - Proxy a terminal session via WebSocket

@@ -1,0 +1,156 @@
+.nh
+.TH "UPTERM" "1" "Sep 2026" "Upterm 0.0.0+dev" "Upterm Manual"
+
+.SH NAME
+upterm-ci - Host a debugging session from a CI job
+
+
+.SH SYNOPSIS
+\fBupterm ci [flags]\fP
+
+
+.SH DESCRIPTION
+Host a terminal session on a CI runner and tell the CI system how to join it.
+
+.PP
+This is 'upterm host' with the defaults a CI job needs and a lifecycle suited to
+one. There is no terminal on a runner and nobody watching the build log as it
+scrolls, so the session:
+.IP \(bu 2
+accepts clients without an interactive prompt,
+.IP \(bu 2
+publishes the SSH command the way the CI system expects (on GitHub Actions:
+the 'ssh-command' step output, the job summary, and a notice annotation),
+.IP \(bu 2
+shuts down on its own if nobody connects within --wait-timeout, so an
+unanswered session does not hold the runner for the job's whole timeout,
+.IP \(bu 2
+keeps the session's own terminal output out of the job log, which on a
+public repository is public (--log-session-output puts it back),
+.IP \(bu 2
+ends when a 'continue' file appears, which is how someone inside the
+session hands the job back.
+
+.PP
+Once a client connects, --wait-timeout no longer applies: the session stays up
+until the shell exits, the continue file appears, or the job is cancelled.
+
+.PP
+Restrict who may join with --limit-access-to-actor and --limit-access-to-users,
+or with any of 'upterm host's own --authorized-user and --authorized-keys flags.
+Without one of those, anyone holding the session's SSH command can join, and on
+a public repository that command is in a public build log.
+
+
+.SH OPTIONS
+\fB--allow-local-tcp-forwarding\fP[=false]
+	Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.
+
+.PP
+\fB--authorized-keys\fP=""
+	Specify a authorize_keys file listing authorized public keys for connection.
+
+.PP
+\fB--authorized-user\fP=
+	Authorize users by fetching their public keys from a code-hosting service. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
+
+.PP
+\fB--continue-file\fP=""
+	End the session when this file appears. Defaults to /continue and $GITHUB_WORKSPACE/continue.
+
+.PP
+\fB-f\fP, \fB--force-command\fP=""
+	Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for ci
+
+.PP
+\fB--hide-client-ip\fP[=false]
+	Hide client IP addresses from output (auto-enabled in CI environments).
+
+.PP
+\fB--known-hosts\fP="~/.ssh/known_hosts"
+	Specify a file containing known keys for remote hosts (required).
+
+.PP
+\fB--limit-access-to-actor\fP[=false]
+	Authorize only the account that triggered the CI job, by fetching its public keys from the CI system's code host.
+
+.PP
+\fB--limit-access-to-users\fP=
+	Authorize only these GitHub users, by fetching their public keys. Repeatable, and accepts a comma- or space-separated list.
+
+.PP
+\fB--log-session-output\fP[=false]
+	Mirror the session's terminal output into the CI job log. Off by default: that log may be public and outlives the run.
+
+.PP
+\fB--name\fP=""
+	Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.
+
+.PP
+\fB--no-sftp\fP[=false]
+	Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
+
+.PP
+\fB-i\fP, \fB--private-key\fP=[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]
+	Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.
+
+.PP
+\fB--proxy\fP=""
+	HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.
+
+.PP
+\fB--pty-size\fP=""
+	Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.
+
+.PP
+\fB-r\fP, \fB--read-only\fP[=false]
+	Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.
+
+.PP
+\fB--server\fP="ssh://uptermd.upterm.dev:22"
+	Specify the upterm server address (required). Supported protocols: ssh, ws, wss.
+
+.PP
+\fB--skip-host-key-check\fP[=true]
+	Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.
+
+.PP
+\fB--term\fP=""
+	Set TERM for the hosted command. Defaults to the inherited TERM, or xterm-256color when TERM is unset or dumb.
+
+.PP
+\fB--wait-timeout\fP=10m0s
+	Shut down the session if no client has connected within this long. 0 waits forever.
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--debug\fP[=false]
+	enable debug level logging (log file: /home/user/.local/state/upterm/upterm.log).
+
+
+.SH EXAMPLE
+.EX
+  # Debug a GitHub Actions job, letting only the user who triggered it in:
+  upterm ci --limit-access-to-actor
+
+  # Let a named set of GitHub users in, and wait half an hour for one of them:
+  upterm ci --limit-access-to-users alice,bob --wait-timeout 30m
+
+  # Hand the job back from inside the session:
+  $ touch /continue
+
+  # Use your own upterm server:
+  upterm ci --server wss://YOUR_UPTERMD_SERVER --limit-access-to-actor
+.EE
+
+
+.SH SEE ALSO
+\fBupterm(1)\fP
+
+
+.SH HISTORY
+18-Sep-2026 Auto generated by spf13/cobra

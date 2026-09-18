@@ -27,6 +27,7 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -140,40 +141,54 @@ containing client public keys.`,
 		RunE:    shareRunE,
 	}
 
+	registerHostFlags(cmd.PersistentFlags())
+
+	return cmd
+}
+
+// registerHostFlags registers the flags that describe a hosted session on fs.
+//
+// Shared rather than duplicated because `upterm ci` hosts the very same
+// session as `upterm host` and differs only in who is told about it. A second
+// copy of these registrations would be a second set of defaults, and the
+// failure mode of a drifted copy is silent: a --known-hosts or an
+// --authorized-user that means something slightly different depending on which
+// command the user typed.
+func registerHostFlags(fs *pflag.FlagSet) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		slog.Error("error getting user home directory", "error", err)
 		os.Exit(1)
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
-	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.")
-	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
+	fs.StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
+	fs.StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
+	fs.StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.")
+	fs.StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
 	// Keep help and generated docs portable without changing the runtime defaults.
-	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
-	cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
+	fs.Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
+	fs.Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
 
-	cmd.PersistentFlags().StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
-	registerAuthUserFlag(cmd.PersistentFlags(), &flagCodebergUsers, "codeberg-user", "Authorize specified Codeberg users by allowing their public keys to connect.")
-	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
-	registerAuthUserFlag(cmd.PersistentFlags(), &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
-	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
-	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
-	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
-	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
-	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
-	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
-	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
-	cmd.PersistentFlags().BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
-	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
-	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
-	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
+	fs.StringVar(&flagAuthorizedKeys, "authorized-keys", "", "Specify a authorize_keys file listing authorized public keys for connection.")
+	registerAuthUserFlag(fs, &flagCodebergUsers, "codeberg-user", "Authorize specified Codeberg users by allowing their public keys to connect.")
+	registerAuthUserFlag(fs, &flagGitHubUsers, "github-user", "Authorize specified GitHub users by allowing their public keys to connect. Configure GitHub CLI environment variables as needed; see https://cli.github.com/manual/gh_help_environment for details.")
+	registerAuthUserFlag(fs, &flagGitLabUsers, "gitlab-user", "Authorize specified GitLab users by allowing their public keys to connect.")
+	registerAuthUserFlag(fs, &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
+	fs.BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
+	fs.BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
+	fs.BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	fs.BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
+	fs.StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
+	fs.BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")
+	fs.BoolVar(&flagAllowLocalTCPForwarding, "allow-local-tcp-forwarding", false, "Allow clients to use SSH local TCP forwarding (ssh -L) through the hosted session, reaching TCP destinations visible to the host.")
+	fs.StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the host terminal's size, or 80x24 when there is none.")
+	fs.StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
+	fs.StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
 	// services are supported.
-	registerAuthUserFlag(cmd.PersistentFlags(), &flagAuthorizedUsers, "authorized-user",
+	registerAuthUserFlag(fs, &flagAuthorizedUsers, "authorized-user",
 		"Authorize users by fetching their public keys from a code-hosting service. Repeatable. "+
 			"Providers: "+host.ProviderList()+". "+
 			"Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave")
@@ -183,10 +198,8 @@ containing client public keys.`,
 	// deprecation notice would appear in logs they cannot act on.
 	for _, lf := range legacyUserFlags {
 		// Only errors on an unknown flag name, all of which are registered above.
-		_ = cmd.PersistentFlags().MarkHidden(lf.flag)
+		_ = fs.MarkHidden(lf.flag)
 	}
-
-	return cmd
 }
 
 // defaultTerm is what the hosted command is given when nothing else says. A
@@ -377,6 +390,40 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return SilentError{Err: err}
 	}
 
+	return runHostSession(c, args, sessionOptions{
+		SessionCreated: displaySession,
+		ClientJoined:   clientJoinedCallback,
+		ClientLeft:     clientLeftCallback,
+	})
+}
+
+// sessionOptions is what one command wants of the session it hosts, beyond
+// the flags both commands share: where the session's own output goes, and how
+// to react to its lifecycle. `upterm host` shows that lifecycle to the
+// operator at the terminal; `upterm ci` reports it to the CI system running
+// the job. Everything else about hosting is the same for both and lives in
+// runHostSession, so that the two commands cannot drift on which keys
+// authorize a client or how a server URL is reached.
+type sessionOptions struct {
+	// Stdout is where the hosted command's output is mirrored. nil means
+	// os.Stdout, which is what a terminal session wants: the operator watches
+	// the session they are hosting. `upterm ci` points it elsewhere, because
+	// there the mirror is a build log that may be public.
+	Stdout *os.File
+
+	// SessionCreated runs once the session is up and before the hosted command
+	// starts. An error from it abandons the session — that is how the
+	// interactive confirmation declines — so a hook that only reports must
+	// swallow its own failures rather than take a joinable session down over a
+	// report it could not deliver.
+	SessionCreated func(ctx context.Context, s *api.GetSessionResponse, name string) error
+	ClientJoined   func(*api.Client)
+	ClientLeft     func(*api.Client)
+}
+
+// runHostSession hosts a session from the already-parsed host flags, under the
+// calling command's own options.
+func runHostSession(c *cobra.Command, args []string, opts sessionOptions) error {
 	proxyURL, err := parseProxyURL(flagProxy)
 	if err != nil {
 		return err
@@ -474,6 +521,11 @@ func shareRunE(c *cobra.Command, args []string) error {
 
 	term := resolveTerm(flagTerm, os.Getenv("TERM"))
 
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
 	// A fresh Host per attempt, because every field that names the session —
 	// Name and the banner the callback prints — belongs to the name this
 	// attempt drew, and because Run fills fields in on the Host it is given.
@@ -489,12 +541,12 @@ func shareRunE(c *cobra.Command, args []string) error {
 			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
 			ProxyURL:          proxyURL,
 			SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
-				return displaySession(ctx, s, name)
+				return opts.SessionCreated(ctx, s, name)
 			},
-			ClientJoinedCallback:    clientJoinedCallback,
-			ClientLeftCallback:      clientLeftCallback,
+			ClientJoinedCallback:    opts.ClientJoined,
+			ClientLeftCallback:      opts.ClientLeft,
 			Stdin:                   os.Stdin,
-			Stdout:                  os.Stdout,
+			Stdout:                  stdout,
 			Logger:                  logger.Logger,
 			ReadOnly:                flagReadOnly,
 			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
@@ -721,6 +773,13 @@ func collectUserRefs() ([]host.UserRef, error) {
 // authorizationRequested reports whether the user asked to restrict who may
 // join, from any configuration origin.
 func authorizationRequested() bool {
+	// Set by `upterm ci` from its --limit-access-to-* flags, which are bools
+	// and lists rather than a supplied/not-supplied question: see
+	// ciAuthorizationRequested.
+	if ciAuthorizationRequested {
+		return true
+	}
+
 	for _, name := range []string{"authorized-keys", "authorized-user"} {
 		if suppliedFlags[name] {
 			return true
