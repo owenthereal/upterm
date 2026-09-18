@@ -197,6 +197,11 @@ func (s *hostSink) promote(ctx context.Context) bool {
 	return true
 }
 
+// drained reports when this sink's queue next catches up, and false if it
+// never will. A candidate skipped by an election for being behind is watched
+// on this: see hostClients.watchForDrain.
+func (s *hostSink) drained() (<-chan struct{}, bool) { return s.async.Drained() }
+
 // hostClient is one attached client on the host door.
 type hostClient struct {
 	id   string
@@ -208,6 +213,11 @@ type hostClient struct {
 	// defer both run after add — but the elector does not depend on its
 	// callers' ordering to hold that invariant.
 	gone atomic.Bool
+
+	// watching is set while a goroutine is waiting for this client's queue to
+	// catch up so that it can run another election; one at a time is enough,
+	// and successive failed elections would otherwise pile them up.
+	watching atomic.Bool
 }
 
 // hostClients keeps the host door's clients in attach order and elects the
@@ -263,7 +273,9 @@ func (h *hostClients) primaryID() string {
 
 // elect promotes the earliest candidate that drains in time. A candidate that
 // leaves while being promoted is skipped; one that cannot drain stays a
-// candidate for the next election, which the next add or remove runs.
+// candidate for the next election, which the next add or remove runs — or,
+// when a sweep promotes nobody at all, which its own catching up runs. See
+// watchForDrain.
 //
 // This may run on the handler's connection actor, the goroutine that removes
 // a client whose connection ended — whether that end was the watchdog's
@@ -303,11 +315,23 @@ func (h *hostClients) electOne() string {
 		h.mu.Unlock()
 
 		retry := false
+		var behind []drainWatch
 		for _, c := range candidates {
+			// Taken before the attempt rather than after it. This is the
+			// signal the sink publishes the next time it catches up, and a
+			// sink that catches up while its promotion is timing out
+			// publishes it during the attempt: asking afterwards would be
+			// handed the one after that instead, and leave a candidate that
+			// is ready now waiting for output that may never come.
+			drained, watchable := c.sink.drained()
+
 			ctx, cancel := context.WithTimeout(context.Background(), promoteFlushTimeout)
 			ok := c.sink.promote(ctx)
 			cancel()
 			if !ok {
+				if watchable {
+					behind = append(behind, drainWatch{client: c, drained: drained})
+				}
 				continue
 			}
 			h.mu.Lock()
@@ -322,7 +346,54 @@ func (h *hostClients) electOne() string {
 			break
 		}
 		if !retry {
+			for _, w := range behind {
+				h.watchForDrain(w)
+			}
 			return ""
 		}
 	}
+}
+
+// drainWatch is a candidate an election skipped, with the signal its sink
+// publishes the next time its queue catches up.
+type drainWatch struct {
+	client  *hostClient
+	drained <-chan struct{}
+}
+
+// watchForDrain runs another election when w's queue catches up.
+//
+// A candidate that cannot drain within promoteFlushTimeout is skipped, and
+// nothing brought it back: elections run from add and remove only. So a
+// primary that leaves while every client left is more than a second behind —
+// which is what a burst of output and a stopped terminal or two look like —
+// ends with nobody promoted, and the session stays that way until the next
+// attach or detach happens to run another election. Nobody paces the command
+// meanwhile and no terminal is sent the queries a full-screen program asks,
+// which is the whole of what a primary is for.
+//
+// Waiting on the queue rather than polling it keeps the cost where the fault
+// is: a session with a primary arms nothing, and a client that never catches
+// up is woken by its own sink failing or closing, both of which publish this
+// same signal. A sink that had already finished is not watched at all — the
+// sweep above has no signal to hand over for one, and its client's removal is
+// an election in itself — while one that is merely stuck with its output
+// undelivered holds this goroutine until the session ends, alongside the
+// handler it is already holding.
+func (h *hostClients) watchForDrain(w drainWatch) {
+	c := w.client
+	if !c.watching.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		<-w.drained
+		// Cleared before the election rather than after it. The election
+		// about to run may well skip this candidate again — output that
+		// arrived while it was catching up puts it behind again — and it is
+		// that election which arms the next watcher. Clearing afterwards
+		// would make the arming a no-op against this goroutine's own flag,
+		// which is to say the first failed retry would be the last.
+		c.watching.Store(false)
+		h.elect()
+	}()
 }

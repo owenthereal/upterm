@@ -315,6 +315,90 @@ func TestHostClientsAddRefusesAGoneClient(t *testing.T) {
 	require.NotContains(t, hc.order, c, "a client removed before it was added must not be in the order")
 }
 
+// A sweep that promotes nobody is not the end of the election.
+//
+// Elections run from add and remove, so when the primary leaves while every
+// client left is further behind than promoteFlushTimeout, the sweep skips all
+// of them and the session has no primary: nothing paces the command and no
+// terminal is sent the queries a full-screen program asks. Those clients do
+// catch up — a stopped terminal is started again, a burst is delivered — and
+// the one that does runs the election that promotes it, rather than the
+// session waiting for somebody to attach or detach.
+//
+// One client, so that what is under test is the catching up rather than a
+// second candidate arriving.
+func TestHostClientsElectAgainOnceACandidateCatchesUp(t *testing.T) {
+	gate := make(chan struct{})
+	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger())}
+	_, err := behind.sink.Write([]byte("more than a second's worth"))
+	require.NoError(t, err)
+	defer func() { _ = behind.sink.Close() }()
+
+	orig := promoteFlushTimeout
+	promoteFlushTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { promoteFlushTimeout = orig })
+
+	hc := &hostClients{logger: discardLogger()}
+	hc.add(behind)
+	require.Empty(t, hc.primaryID(), "a client that cannot drain is not promoted")
+
+	// The terminal reads again, and the queue goes out.
+	close(gate)
+
+	require.Eventually(t, func() bool {
+		return hc.primaryID() == "behind"
+	}, 5*time.Second, time.Millisecond, "the candidate was never promoted once its queue had caught up")
+}
+
+// The retry is not one-shot.
+//
+// A candidate is watched by one goroutine at a time, and the election that
+// goroutine runs is also what arms the next watcher — output that arrived
+// while the candidate was catching up leaves it behind again, and the sweep
+// skips it again. So the candidate has to be watchable again before that
+// election runs, not after it: the other order makes the arming a no-op
+// against the watcher's own flag, and the first retry that fails to promote
+// anyone is then the last retry there will ever be.
+//
+// The election is held up here by taking the lock it runs under, which is
+// what makes the ordering observable rather than a race with the promotion.
+func TestAWatchedCandidateIsWatchableAgainBeforeItsElectionRuns(t *testing.T) {
+	gate := make(chan struct{})
+	behind := &hostClient{id: "behind", sink: newHostSink(&gatedWriter{gate: gate, rec: &recordingWriter{}}, nil, "behind", discardLogger())}
+	_, err := behind.sink.Write([]byte("queued"))
+	require.NoError(t, err)
+	defer func() { _ = behind.sink.Close() }()
+
+	orig := promoteFlushTimeout
+	promoteFlushTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { promoteFlushTimeout = orig })
+
+	hc := &hostClients{logger: discardLogger()}
+	hc.add(behind)
+	require.True(t, behind.watching.Load(), "a skipped candidate is watched for catching up")
+
+	// Everything up to the unlock below runs with the election blocked.
+	hc.electMu.Lock()
+	close(gate)
+
+	watchable := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if !behind.watching.Load() {
+			watchable = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	hc.electMu.Unlock()
+	require.True(t, watchable, "the candidate was still spoken for while the election it triggered had not even started")
+
+	// And the election it triggered runs to the end before the test does:
+	// it reads promoteFlushTimeout, which the cleanup here restores.
+	require.Eventually(t, func() bool {
+		return hc.primaryID() == "behind"
+	}, 5*time.Second, time.Millisecond, "the released candidate was never promoted")
+}
+
 func TestHostClientsSkipACandidateThatCannotDrain(t *testing.T) {
 	gate := make(chan struct{})
 	defer close(gate)

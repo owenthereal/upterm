@@ -160,6 +160,26 @@ func (a *AsyncWriter) Flush(ctx context.Context) error {
 	}
 }
 
+// Drained returns a channel closed the next time delivery catches up: the
+// buffer empties and the last write returns. It is Flush for a caller that
+// wants to be told rather than to wait — one holding a lock, or one with
+// nothing to do until the news arrives.
+//
+// The second return is false for a writer that has already failed or been
+// closed, and there is nothing else it could be: the signal those publish is
+// the one the writer had at the time, and the channel that replaces it is
+// never closed by anything. Answered under the lock the two of them take, so
+// a caller that is told true holds a channel that failing and closing will
+// still close.
+func (a *AsyncWriter) Drained() (<-chan struct{}, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil || a.closed {
+		return nil, false
+	}
+	return a.idle, true
+}
+
 // Err reports the error that ended delivery, if any.
 //
 // Flush cannot answer this: it reports nil for a sink that has already failed,
