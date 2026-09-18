@@ -609,9 +609,20 @@ func (c *Host) Run(ctx context.Context) error {
 			cancel()
 		})
 	}
+	// Subscribed here, before any actor runs, rather than inside the actors
+	// that read them. run.Group starts its actors as goroutines in no
+	// particular order, and by this point the attach socket is bound and its
+	// callback has already told the local terminal to connect — so the door's
+	// join event can be emitted before a subscription made inside an actor
+	// exists. The emitter delivers to whoever is listening at the time and
+	// replays nothing, so that client would be missing from the repo for the
+	// life of the session: `session info` short by one, and no callback for
+	// it. Off stays in the interrupts, which run once, after Run.
+	clientJoined := eventEmitter.On(upterm.EventClientJoined)
+	clientLeft := eventEmitter.On(upterm.EventClientLeft)
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientJoined) {
+			for evt := range clientJoined {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
@@ -634,7 +645,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientLeft) {
+			for evt := range clientLeft {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
