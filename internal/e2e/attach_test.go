@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/owenthereal/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,6 +64,168 @@ func TestAttachDetachReattach(t *testing.T) {
 	require.NoError(t, term.SendLine(h.ctx, "exit 3"))
 	require.NoError(t, h.waitForText(term, "command exited (status 3)", 10*time.Second))
 	require.NoError(t, h.waitForText(term, "STATUS=3", 10*time.Second))
+
+	// And the host says only that. A command's exit status arrives as an
+	// ordinary error from RunE, which cobra answers with the whole usage
+	// block unless it is told otherwise — thirty lines of flags after
+	// `exit 3`, as if the user had mistyped something.
+	hostOut, err := h.host.Capture(h.ctx)
+	require.NoError(t, err)
+	require.NotContains(t, hostOut, "Usage:", "a command that exited is not a usage error")
+}
+
+// A name nobody holds is a failure to attach, which is 255 — not a crash, and
+// not the 254 a session reserves for disconnecting a terminal it had.
+func TestAttachRefusesAnUnknownSession(t *testing.T) {
+	h := newTestHarness(t, 200)
+
+	require.NoError(t, h.host.SendLine(h.ctx, "upterm attach no-such-session-here; echo NOSUCH_STATUS=$?"))
+	require.NoError(t, h.waitForText(h.host, "NOSUCH_STATUS=255", 20*time.Second))
+
+	out, err := h.host.Capture(h.ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "no session named", "and it says which name it could not find")
+}
+
+// The terminal comes back the way it was found, on both of the ways a client
+// leaves that the user chooses: the escape key, and a signal. stty -g is the
+// whole of the terminal's settings, so comparing it before and after is the
+// strongest form of "my shell still works" there is.
+func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-stty-%d", time.Now().UnixNano()%1_000_000)
+
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
+		h.serverURL, h.keyFile, name, h.rcFile)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+
+	// The comparison lives in a script rather than on the command line: a
+	// pane is narrower than the line this would otherwise be, and a marker
+	// split across a wrap is one no assertion can find.
+	//
+	// It compares the modes raw mode turns off, not `stty -g`. That blob
+	// carries PENDIN too — a kernel state bit meaning "input is pending",
+	// set by the very keystrokes that start this script — so comparing it
+	// whole reports a difference that has nothing to do with whether the
+	// terminal was restored.
+	check := filepath.Join(h.tmpDir, "check-stty.sh")
+	require.NoError(t, os.WriteFile(check, []byte(
+		"modes() { stty -a | tr ' ,' '\\n\\n' | grep -E '^-?(echo|icanon|isig|iexten|icrnl|opost)$' | sort | tr '\\n' ' '; }\n"+
+			"before=$(modes)\nupterm attach \"$1\"\nafter=$(modes)\n"+
+			"if [ \"$before\" = \"$after\" ]; then echo \"$2=same\"; else echo \"$2=CHANGED [$before] [$after]\"; fi\n"), 0755))
+
+	term := h.splitPane(h.host)
+
+	// Left with the escape key.
+	require.NoError(t, term.SendLine(h.ctx, fmt.Sprintf("sh %s %s STTY_ESCAPE", check, name)))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second))
+	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, term.SendKeys(h.ctx, "~."))
+	require.NoError(t, h.waitForText(term, "STTY_ESCAPE=same", 15*time.Second))
+
+	// Left by a signal, sent from a third terminal so that the client is
+	// still the foreground of its own. The pattern names the client's own
+	// argv, which the script wrapping it does not share.
+	killer := h.splitPane(h.host)
+	require.NoError(t, term.SendLine(h.ctx, fmt.Sprintf("sh %s %s STTY_SIGNAL", check, name)))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second))
+	require.NoError(t, killer.SendLine(h.ctx, fmt.Sprintf("pkill -f 'upterm attach %s'", name)))
+	require.NoError(t, h.waitForText(term, "STTY_SIGNAL=same", 15*time.Second))
+}
+
+// The pty is sized to the smallest terminal watching it, and gives the size
+// back when that terminal leaves. Two panes of different heights are enough:
+// the session takes the shorter one while both are attached, and returns to
+// the taller one's height when the shorter detaches.
+//
+// The command reports its size on SIGWINCH rather than on demand, because
+// every attach and every resize sends one, and a command that had to be
+// typed at would not be reporting the size the test is asking about.
+func TestTheSessionFollowsTheSmallestAttachedTerminal(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-size-%d", time.Now().UnixNano()%1_000_000)
+
+	sizeCmd := filepath.Join(h.tmpDir, "size.sh")
+	require.NoError(t, os.WriteFile(sizeCmd, []byte(
+		"stty -echo -opost\ntrap 'stty size' WINCH\nprintf 'SIZE_READY\\n'\nwhile :; do sleep 0.1; done\n"), 0755))
+
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- sh %s &",
+		h.serverURL, h.keyFile, name, sizeCmd)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+	require.NoError(t, h.waitForText(h.host, "SIZE_READY", 20*time.Second))
+
+	// The first terminal, in this harness's own 200-column window. Widths
+	// rather than heights, because a split puts panes side by side: the two
+	// terminals differ in columns, and the numbers stay far enough apart to
+	// mean something.
+	wide := h.splitPane(h.host)
+	require.NoError(t, wide.SendLine(h.ctx, "upterm attach "+name))
+	var wideCols int
+	require.Eventually(t, func() bool {
+		cols, ok := lastReportedCols(t, h, wide)
+		wideCols = cols
+		return ok && cols > 60
+	}, 30*time.Second, 200*time.Millisecond, "the session never reported a width to the first terminal")
+
+	// A second terminal, in a window of its own that is narrower than
+	// anything a split of this one could produce.
+	tm, err := tmux.Default()
+	require.NoError(t, err)
+	narrowSession, err := tm.NewSession(h.ctx, &tmux.SessionOptions{
+		Name:         fmt.Sprintf("upterm-e2e-narrow-%d", time.Now().UnixNano()),
+		Width:        40,
+		Height:       24,
+		ShellCommand: "bash --norc --noprofile",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = narrowSession.Kill(h.ctx) })
+	narrowWindows, err := narrowSession.ListWindows(h.ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, narrowWindows)
+	narrowPanes, err := narrowWindows[0].ListPanes(h.ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, narrowPanes)
+	narrow := narrowPanes[0]
+
+	require.NoError(t, narrow.SendLine(h.ctx, "upterm attach "+name))
+	require.Eventually(t, func() bool {
+		cols, ok := lastReportedCols(t, h, wide)
+		return ok && cols == 40
+	}, 30*time.Second, 200*time.Millisecond,
+		"the session did not shrink to the narrowest attached terminal (40 columns); the first terminal had %d", wideCols)
+
+	// And when the narrow one leaves, the wide one gets its width back.
+	require.NoError(t, narrow.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, narrow.SendKeys(h.ctx, "~."))
+	require.Eventually(t, func() bool {
+		cols, ok := lastReportedCols(t, h, wide)
+		return ok && cols == wideCols
+	}, 30*time.Second, 200*time.Millisecond,
+		"the session did not go back to %d columns when the narrow terminal left", wideCols)
+}
+
+// sizeLine matches what `stty size` prints: rows then columns, alone on a line.
+var sizeLine = regexp.MustCompile(`(?m)^\s*(\d+)\s+(\d+)\s*$`)
+
+// lastReportedCols is the column count from the most recent size the session
+// printed into this pane.
+func lastReportedCols(t *testing.T, h *testHarness, p *tmux.Pane) (int, bool) {
+	t.Helper()
+	content, err := p.Capture(h.ctx)
+	if err != nil {
+		return 0, false
+	}
+	matches := sizeLine.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return 0, false
+	}
+	cols, err := strconv.Atoi(matches[len(matches)-1][2])
+	if err != nil {
+		return 0, false
+	}
+	return cols, true
 }
 
 // A host whose stdout is a file still puts the command's output there: the
