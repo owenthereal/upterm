@@ -100,15 +100,20 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 // dialGuest opens an SSH session to the host with an xterm PTY and starts its
 // shell, returning the guest's stdin, stdout and session. It returns its
 // errors rather than asserting them, so a test can dial from a goroutine.
-func (h *hostHarness) dialGuest(t *testing.T) (io.Writer, io.Reader, *ssh.Session, error) {
+func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io.Reader, *ssh.Session, error) {
 	t.Helper()
+
+	cfg := dialConfig{deadline: harnessTimeout}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	raw, err := net.DialTimeout("tcp", h.addr, harnessTimeout)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	t.Cleanup(func() { _ = raw.Close() })
-	if err := raw.SetDeadline(time.Now().Add(harnessTimeout)); err != nil {
+	if err := raw.SetDeadline(time.Now().Add(cfg.deadline)); err != nil {
 		return nil, nil, nil, err
 	}
 	conn, chans, reqs, err := ssh.NewClientConn(raw, h.addr, &ssh.ClientConfig{
@@ -145,19 +150,19 @@ func (h *hostHarness) dialGuest(t *testing.T) (io.Writer, io.Reader, *ssh.Sessio
 
 // connectGuest is dialGuest for the usual case, where failing to connect is a
 // failure of the test.
-func (h *hostHarness) connectGuest(t *testing.T) (io.Writer, io.Reader) {
+func (h *hostHarness) connectGuest(t *testing.T, opts ...dialOption) (io.Writer, io.Reader) {
 	t.Helper()
 
-	guestInput, guestOutput, _ := h.connectGuestSession(t)
+	guestInput, guestOutput, _ := h.connectGuestSession(t, opts...)
 	return guestInput, guestOutput
 }
 
 // connectGuestSession is connectGuest for a test that needs the guest's
 // session itself, to wait on the status it is closed with.
-func (h *hostHarness) connectGuestSession(t *testing.T) (io.Writer, io.Reader, *ssh.Session) {
+func (h *hostHarness) connectGuestSession(t *testing.T, opts ...dialOption) (io.Writer, io.Reader, *ssh.Session) {
 	t.Helper()
 
-	guestInput, guestOutput, sess, err := h.dialGuest(t)
+	guestInput, guestOutput, sess, err := h.dialGuest(t, opts...)
 	require.NoError(t, err)
 	return guestInput, guestOutput, sess
 }
@@ -223,24 +228,32 @@ func (g *gatedConn) resumeReads() { g.resumeOnce.Do(func() { close(g.resume) }) 
 // EOF.
 func (g *gatedConn) transportClosed() <-chan struct{} { return g.transportEnded }
 
-// hostDialOption tunes one host-door connection.
-type hostDialOption func(*hostDialConfig)
+// dialOption tunes one connection, on either door.
+type dialOption func(*dialConfig)
 
-type hostDialConfig struct{ deadline time.Duration }
+type dialConfig struct{ deadline time.Duration }
 
-// withHostDeadline replaces the harness's absolute connection deadline for one
+// withDialDeadline replaces the harness's absolute connection deadline for one
 // connection. The tests that move several MiB, and the ones that deliberately
 // stop reading for a while, need the room: with the default they could fail
 // because a loaded runner ran out of deadline rather than because anything was
 // wrong.
-func withHostDeadline(d time.Duration) hostDialOption {
-	return func(c *hostDialConfig) { c.deadline = d }
+//
+// Which is not hypothetical, and is why this now reaches the guest door too.
+// TestUndrainedViewerDoesNotWedgeTheSession pushes 6 MB through a guest and
+// failed in CI at 11.53 s with "stream ended before DONE: EOF" — the deadline
+// on the guest's own connection, ten seconds after it dialled, cutting the
+// stream off a little over a second short. Twelve local runs passed, and so
+// did five under a loaded machine: the deadline is absolute, so what decides
+// it is how long the whole test takes.
+func withDialDeadline(d time.Duration) dialOption {
+	return func(c *dialConfig) { c.deadline = d }
 }
 
 // dialHost completes the handshake on the host door with a throwaway key, the
 // way upterm attach does, and opens no session: a connection is not yet a
 // client.
-func (h *hostHarness) dialHost(t *testing.T, opts ...hostDialOption) *ssh.Client {
+func (h *hostHarness) dialHost(t *testing.T, opts ...dialOption) *ssh.Client {
 	t.Helper()
 
 	client, _ := h.dialHostConn(t, opts...)
@@ -249,10 +262,10 @@ func (h *hostHarness) dialHost(t *testing.T, opts ...hostDialOption) *ssh.Client
 
 // dialHostConn is dialHost for a test that needs the gate on the client's
 // reads as well as the client.
-func (h *hostHarness) dialHostConn(t *testing.T, opts ...hostDialOption) (*ssh.Client, *gatedConn) {
+func (h *hostHarness) dialHostConn(t *testing.T, opts ...dialOption) (*ssh.Client, *gatedConn) {
 	t.Helper()
 
-	cfg := hostDialConfig{deadline: harnessTimeout}
+	cfg := dialConfig{deadline: harnessTimeout}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -284,7 +297,7 @@ func (h *hostHarness) dialHostConn(t *testing.T, opts ...hostDialOption) (*ssh.C
 // connectHost attaches through the host door with a throwaway key, the way
 // upterm attach does. A nil pty makes it a pipe viewer; a pty that is not a
 // viewer declares itself interactive, as attach.Client does with a Stdin.
-func (h *hostHarness) connectHost(t *testing.T, pty *hostPty, opts ...hostDialOption) (io.WriteCloser, io.Reader, *ssh.Session) {
+func (h *hostHarness) connectHost(t *testing.T, pty *hostPty, opts ...dialOption) (io.WriteCloser, io.Reader, *ssh.Session) {
 	t.Helper()
 
 	in, out, sess, _ := h.connectHostGated(t, pty, opts...)
@@ -293,7 +306,7 @@ func (h *hostHarness) connectHost(t *testing.T, pty *hostPty, opts ...hostDialOp
 
 // connectHostGated is connectHost for a test that needs to stop the client
 // reading mid-session.
-func (h *hostHarness) connectHostGated(t *testing.T, pty *hostPty, opts ...hostDialOption) (io.WriteCloser, io.Reader, *ssh.Session, *gatedConn) {
+func (h *hostHarness) connectHostGated(t *testing.T, pty *hostPty, opts ...dialOption) (io.WriteCloser, io.Reader, *ssh.Session, *gatedConn) {
 	t.Helper()
 
 	client, gated := h.dialHostConn(t, opts...)

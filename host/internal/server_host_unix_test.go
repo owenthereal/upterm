@@ -202,10 +202,15 @@ func TestHostClientLeavingDoesNotEndTheSession(t *testing.T) {
 func TestUndrainedViewerDoesNotWedgeTheSession(t *testing.T) {
 	h := startHost(t, &Server{Command: []string{"sh", "-c",
 		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c 6000000; printf 'DONE\n'; IFS= read -r line`}})
-	_, viewerOut, viewerSess := h.connectHost(t, nil)
+	// Both connections outlive the harness's default deadline on purpose. Six
+	// megabytes takes a loaded runner longer than ten seconds, and a deadline
+	// firing here would not fail an assertion honestly: on the guest it ends
+	// the stream this test is reading, and on the viewer it produces exactly
+	// the error the test takes as proof that the host dropped it.
+	_, viewerOut, viewerSess := h.connectHost(t, nil, withDialDeadline(60*time.Second))
 	readUntil(t, viewerOut, "READY")
 	// The viewer reads nothing more.
-	guestIn, guestOut := h.connectGuest(t)
+	guestIn, guestOut := h.connectGuest(t, withDialDeadline(60*time.Second))
 	readUntil(t, guestOut, "READY")
 	_, err := io.WriteString(guestIn, "go\n")
 	require.NoError(t, err)

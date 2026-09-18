@@ -133,16 +133,20 @@ func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
 	h := startHost(t, &Server{Command: []string{"sh", "-c",
 		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c 6000000; printf 'STREAM_DONE\n'; IFS= read -r line`}})
 
-	// A healthy guest, reading continuously from the start.
-	_, gOut := h.connectGuest(t)
-	guestDone := make(chan struct{})
+	// A healthy guest, reading continuously from the start. Six megabytes
+	// outlasts the harness's default connection deadline on a loaded runner,
+	// and this one reports what it saw rather than merely that it stopped: a
+	// read that ends in an error is the guest going away, which is the
+	// failure this test is looking for and not a reason to stop looking.
+	_, gOut := h.connectGuest(t, withDialDeadline(60*time.Second))
+	guestDone := make(chan error, 1)
 	go func() {
-		defer close(guestDone)
 		buf := make([]byte, 65536)
 		var tail []byte
 		for !strings.Contains(string(tail), "STREAM_DONE") {
 			n, err := gOut.Read(buf)
 			if err != nil {
+				guestDone <- err
 				return
 			}
 			tail = append(tail, buf[:n]...)
@@ -150,12 +154,13 @@ func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
 				tail = tail[len(tail)-4096:]
 			}
 		}
+		guestDone <- nil
 	}()
 
 	// The primary: attaches, starts the stream, and then stops taking bytes
 	// off its socket altogether.
 	aIn, aOut, aSess, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, aOut, "READY")
 	_, err := io.WriteString(aIn, "go\n")
 	require.NoError(t, err)
@@ -166,11 +171,12 @@ func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
 	// is the recovery — nothing but closing the connection underneath the
 	// parked write can produce it.
 	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, bOut, "STREAM_DONE")
 
 	select {
-	case <-guestDone:
+	case err := <-guestDone:
+		require.NoError(t, err, "the guest's stream ended before the command's output did")
 	case <-time.After(harnessTimeout):
 		t.Fatal("the guest stopped flowing behind the stalled primary")
 	}
@@ -275,7 +281,7 @@ func TestSlowPrimaryPacesTheCommandAndLosesNothing(t *testing.T) {
 	}()
 
 	aIn, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, aOut, "READY")
 	_, err := io.WriteString(aIn, "go\n")
 	require.NoError(t, err)
@@ -356,7 +362,7 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	defer h.srv.EventEmitter.Off(upterm.EventClientJoined, joined)
 
 	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, aOut, "READY")
 	aID := nextClientID(t, joined)
 
@@ -372,7 +378,7 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	bID := nextClientID(t, joined)
 	require.NotEqual(t, aID, bID)
 	awaitLiveQuery(t, bOut)
@@ -569,10 +575,10 @@ func TestSecondaryHostClientOverflowClosesTheConnection(t *testing.T) {
 	h := startHost(t, &Server{Command: []string{"sh", "-c",
 		`stty -echo -opost; printf 'READY\n'; IFS= read -r line; yes | head -c 6000000; printf 'STREAM_DONE\n'; IFS= read -r line`}})
 	aIn, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, aOut, "READY")
 	_, bOut, bSess, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
-		withHostDeadline(60*time.Second))
+		withDialDeadline(60*time.Second))
 	readUntil(t, bOut, "READY")
 
 	_, err := io.WriteString(aIn, "go\n")
