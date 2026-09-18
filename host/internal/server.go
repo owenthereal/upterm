@@ -585,6 +585,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		emitHostClientJoinEvent(h.eventEmmiter, sessionID, sess.Context().ClientVersion(), sess.PublicKey())
 	}
 
+	// Whether this client is still connected, handed to the size tracking so
+	// that it can ask under its own lock. charm cancels this context from the
+	// conn.Close it defers in handleConn, whichever side hung up.
+	alive := func() bool { return sess.Context().Err() == nil }
+
 	ptyReq, winCh, isPty := sess.Pty()
 	// A local client may be a viewer: a backgrounded host that displays the
 	// session without owning a terminal. It gets no window-change channel,
@@ -895,12 +900,20 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			}
 		}
 
-		// The pty's geometry follows the local terminal as it did when the
-		// host owned it directly: announce the size the client arrived with,
-		// rather than waiting for a resize that a terminal nobody touches
-		// never sends.
-		if h.kind == kindHost && isPty {
-			h.terminals.changed(ptmx, sessionID, ptyReq.Window.Width, ptyReq.Window.Height)
+		// The pty's geometry follows the terminals watching it: record the
+		// size this one arrived with, here, before the redraw nudge below.
+		//
+		// The window-change loop would get there too — charm seeds a
+		// session's window channel with the pty request's own window
+		// (session.go:373-375), so an arriving terminal's size reaches that
+		// loop without anybody resizing anything. But that loop is an actor,
+		// started further down, and the nudge below is what makes a
+		// full-screen program repaint: a repaint at the size the session had
+		// before this terminal arrived is one the arriving terminal has to
+		// sit through. Both doors, because a guest arrives with a terminal
+		// exactly as a local client does.
+		if isPty {
+			h.terminals.changed(ptmx, sessionID, ptyReq.Window.Width, ptyReq.Window.Height, alive)
 		}
 
 		// Everything a repaint needs is now queued: the mode snapshot, the
@@ -938,15 +951,15 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 						winCh = nil
 						continue
 					}
-					if sess.Context().Err() != nil {
-						// A resize this client sent before it went away, still
-						// buffered in charm's one-deep channel. Announcing it
-						// now would re-add a client that has already been
-						// taken out of the size calculation, and nothing
-						// would take it out again.
-						continue
-					}
-					h.terminals.changed(ptmx, sessionID, win.Width, win.Height)
+					// A resize this client sent before it went away is still
+					// buffered in charm's one-deep channel, and applying it
+					// now would re-add a client that has already been taken
+					// out of the size calculation — with nothing left to take
+					// it out again. Which is why the liveness check is passed
+					// in rather than made here: changed makes it under the
+					// same lock the removal takes, so the two cannot
+					// interleave.
+					h.terminals.changed(ptmx, sessionID, win.Width, win.Height, alive)
 				case <-ctx.Done():
 					return ctx.Err()
 				}

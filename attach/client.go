@@ -358,6 +358,13 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 
 	// The tail. The channel's remaining bytes are readable after its close,
 	// and Wait can return before the copy has read them.
+	//
+	// One budget for the whole of it, the copy and the mode restore after it:
+	// both write to the same terminal, and a terminal that has stopped stops
+	// them both. Nothing here may hold Run — a stopped terminal is exactly
+	// when the caller needs it to return.
+	tail := time.NewTimer(outputDrainTimeout)
+	defer tail.Stop()
 	select {
 	case <-copied:
 		// Everything the session sent has been written, so the terminal is in
@@ -374,12 +381,10 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		// writing more is the wrong answer anyway.
 		if modes != nil {
 			if restore := modes.Restore(); len(restore) > 0 {
-				if _, err := c.Stdout.Write(restore); err != nil {
-					logger.Debug("could not restore the terminal's modes", "error", err)
-				}
+				c.writeWithin(tail.C, restore, logger)
 			}
 		}
-	case <-time.After(outputDrainTimeout):
+	case <-tail.C:
 		abandoned.Store(true)
 		logging.WarnWithin(logger, logging.LogBound, "abandoning output still undelivered to the terminal", "timeout", outputDrainTimeout)
 	}
@@ -415,6 +420,37 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 	}
 	// No "attach:" prefix: Run wraps the handshake's error with one already.
 	return fmt.Errorf("%w (it presented %s)", ErrHostKeyMismatch, ssh.FingerprintSHA256(key))
+}
+
+// writeWithin writes p to Stdout, giving up on waiting for it when deadline
+// fires. It exists for the mode restore, which is the one write Run makes
+// after the session is gone.
+//
+// The write is on a goroutine because a write to a terminal cannot be
+// interrupted: it is the descriptor's owner that would have to close it, and
+// Run does not own Stdout. So the wait is what ends, not the write — the same
+// bargain the abandoned output copy makes, and for the same reason. What is
+// left behind is one goroutine holding a handful of bytes for a terminal that
+// is not reading; if that terminal ever resumes, what lands on it is a reset
+// to the defaults, which is the least harmful thing that could arrive late.
+//
+// Its error is logged within a bound too: this is the path a stopped terminal
+// takes, and a logger writing to that same terminal is the classic way to
+// turn a bounded wait into an unbounded one.
+func (c *Client) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.Logger) {
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Stdout.Write(p)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			logging.WarnWithin(logger, logging.LogBound, "could not restore the terminal's modes", "error", err)
+		}
+	case <-deadline:
+		logging.WarnWithin(logger, logging.LogBound, "the terminal did not take its mode restore", "timeout", outputDrainTimeout)
+	}
 }
 
 // copyOutput copies the session's output into Stdout until the session's

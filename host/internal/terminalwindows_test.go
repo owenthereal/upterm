@@ -3,7 +3,9 @@ package internal
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -32,11 +34,11 @@ func TestASmallerTerminalLeavingRestoresTheSize(t *testing.T) {
 	tw := newTerminalWindows(discardLogger())
 	pty := &exitedPTY{}
 
-	tw.changed(pty, "a", 100, 30)
+	tw.changed(pty, "a", 100, 30, nil)
 	rows, cols := pty.lastSize()
 	require.Equal(t, [2]int{30, 100}, [2]int{rows, cols}, "the only terminal's size was not applied")
 
-	tw.changed(pty, "b", 80, 24)
+	tw.changed(pty, "b", 80, 24, nil)
 	rows, cols = pty.lastSize()
 	require.Equal(t, [2]int{24, 80}, [2]int{rows, cols}, "the minimum of the two terminals was not applied")
 
@@ -60,14 +62,14 @@ func TestEveryTerminalDepartureIsApplied(t *testing.T) {
 	tw := newTerminalWindows(discardLogger())
 	pty := &exitedPTY{}
 
-	tw.changed(pty, "survivor", 120, 40)
+	tw.changed(pty, "survivor", 120, 40, nil)
 
 	var wg sync.WaitGroup
 	for i := range 32 {
 		id := fmt.Sprintf("leaving-%d", i)
 		// Smaller than the survivor in both directions, so a departure that
 		// goes missing is visible in the size at the end.
-		tw.changed(pty, id, 20+i, 10+i)
+		tw.changed(pty, id, 20+i, 10+i, nil)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -78,6 +80,55 @@ func TestEveryTerminalDepartureIsApplied(t *testing.T) {
 
 	rows, cols := pty.lastSize()
 	require.Equal(t, [2]int{40, 120}, [2]int{rows, cols}, "the session did not go back to the surviving terminal's size")
+}
+
+// A resize that was already on its way when its terminal left does not bring
+// that terminal back.
+//
+// charm's window-change channel is one deep, so a client's last resize can
+// still be in it when the client hangs up, and the handler reads it after the
+// connection actor has taken that client out of the size calculation. Adding
+// it back there is permanent: the actor's removal has already run, and the
+// pty actor's runs only when the handler returns — which an input write
+// parked in ptmx.Write can defer for as long as the session lives.
+//
+// So the liveness check cannot be at the call site, where it is a decision
+// made before the lock and acted on after it. This test puts a resize in
+// exactly that position: it is inside changed, waiting for the lock, at the
+// moment its terminal goes away. A check made outside would have said "still
+// here"; the one inside sees what is true when the map is actually written.
+func TestAResizeInFlightWhenItsTerminalLeavesIsDropped(t *testing.T) {
+	tw := newTerminalWindows(discardLogger())
+	pty := &exitedPTY{}
+
+	var gone atomic.Bool
+	alive := func() bool { return !gone.Load() }
+
+	tw.changed(pty, "survivor", 120, 40, alive)
+	tw.changed(pty, "leaving", 70, 20, alive)
+	tw.detached(pty, "leaving")
+
+	// The resize is issued while its terminal is still there and blocks on
+	// the lock, which this test holds.
+	tw.mu.Lock()
+	resized := make(chan struct{})
+	go func() {
+		defer close(resized)
+		tw.changed(pty, "leaving", 70, 20, alive)
+	}()
+	// Long enough for that goroutine to be inside changed and waiting: it has
+	// nothing else to do, and the assertion below is what would catch it if
+	// it were not.
+	time.Sleep(50 * time.Millisecond)
+
+	// The terminal goes away while the resize is in flight.
+	gone.Store(true)
+	tw.mu.Unlock()
+	<-resized
+
+	rows, cols := pty.lastSize()
+	require.Equal(t, [2]int{40, 120}, [2]int{rows, cols},
+		"a terminal that had already left was put back into the minimum by its own last resize")
 }
 
 // The size of a terminal that has left is not a constraint on anything, and
@@ -92,7 +143,7 @@ func TestTheLastTerminalLeavingDoesNotResizeThePtyToNothing(t *testing.T) {
 	tw := newTerminalWindows(discardLogger())
 	pty := &exitedPTY{}
 
-	tw.changed(pty, "a", 100, 30)
+	tw.changed(pty, "a", 100, 30, nil)
 	tw.detached(pty, "a")
 	tw.detached(pty, "a")
 

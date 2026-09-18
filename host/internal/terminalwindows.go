@@ -47,16 +47,34 @@ func newTerminalWindows(logger *slog.Logger) *terminalWindows {
 	}
 }
 
-// changed records a terminal's geometry and applies the new minimum.
+// changed records a terminal's geometry and applies the new minimum, unless
+// alive says the terminal is already gone. A nil alive means unconditional.
+//
+// The liveness question is asked here, under the lock detached takes, rather
+// than at the call site — and that is the whole of why it is a parameter. A
+// resize that asked outside this lock could be overtaken between the asking
+// and the answer: the connection actor removes the terminal, and this then
+// adds it back. Nothing would remove it again, because the actor's removal
+// has already run and the pty actor's runs only when the handler returns,
+// which an input write parked in ptmx.Write can defer for as long as the
+// session lives. The departed terminal would go on setting the size of a
+// session it is not watching.
+//
+// alive is called with the lock held, so it must not reach back into this
+// type. In production it is one read of a context's error.
 //
 // A handler built without a pty — a test's — is left alone, as it is by the
 // redraw nudge on the same path.
-func (t *terminalWindows) changed(ptmx PTY, id string, w, h int) {
+func (t *terminalWindows) changed(ptmx PTY, id string, w, h int, alive func() bool) {
 	if ptmx == nil {
 		return
 	}
 
 	t.mu.Lock()
+	if alive != nil && !alive() {
+		t.mu.Unlock()
+		return
+	}
 	ts, ok := t.m[ptmx]
 	if !ok {
 		ts = make(map[string]window)

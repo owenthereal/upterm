@@ -162,6 +162,71 @@ func TestClientPutsTheTerminalBackInTheModesItCameIn(t *testing.T) {
 		"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1006l", out.String())
 }
 
+// blockingOnLastSink takes everything until the write it is told to stop on,
+// and blocks there: a terminal that stops between the session's last byte and
+// the cleanup after it, which is the moment the mode restore happens.
+type blockingOnLastSink struct {
+	stopAfter int
+
+	mu      sync.Mutex
+	writes  int
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingOnLastSink) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	b.writes++
+	n := b.writes
+	b.mu.Unlock()
+	if n > b.stopAfter {
+		b.once.Do(func() { close(b.entered) })
+		select {} // a terminal that has stopped, and nothing to resume it
+	}
+	return len(p), nil
+}
+
+// A terminal that stops taking bytes must not keep Run from returning, and
+// that now includes the write that puts its modes back: it runs after the
+// session has ended, on a descriptor Run does not own, so nothing could
+// interrupt it. Within the same bound as the drain it follows, because the
+// two are the same terminal and it is the total the caller is waiting on.
+func TestClientReturnsWhenTheTerminalStopsOnTheModeRestore(t *testing.T) {
+	orig := outputDrainTimeout
+	outputDrainTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { outputDrainTimeout = orig })
+
+	door := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "\x1b[?1049h\x1b[?25lfull screen")
+		_ = s.Exit(0)
+	})
+
+	sink := &blockingOnLastSink{stopAfter: 1, entered: make(chan struct{})}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink,
+		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	returned := make(chan Result, 1)
+	go func() {
+		res, err := c.Run(ctx)
+		require.NoError(t, err)
+		returned <- res
+	}()
+
+	select {
+	case <-sink.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("the restore write never reached the stopped terminal")
+	}
+	select {
+	case res := <-returned:
+		require.Equal(t, Result{Reason: Exited}, res, "the session's own ending is still what is reported")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run was held by a terminal that stopped on the mode restore")
+	}
+}
+
 // And nothing is appended for a viewer redirected into a pipe or a file:
 // there is no terminal in any modes, and mode sequences in a captured log are
 // noise in somebody's output.

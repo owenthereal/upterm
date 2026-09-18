@@ -260,3 +260,27 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 	require.NoError(t, bSess.Close())
 	readUntil(t, aOut, "30 100")
 }
+
+// A guest counts towards the minimum from the size it arrives with, not from
+// its first resize. The only geometry an SSH client sends is in its pty
+// request, until somebody drags a window.
+//
+// Written to check a review's claim that it did not — and it does, from two
+// places now: the registration in the handler, and charm seeding a session's
+// window channel with the pty request's own window, which the window-change
+// loop then reads. Kept because neither of those is this package's to
+// guarantee: the first is one line in a handler that has been rearranged
+// twice this month, and the second is a charm implementation detail that an
+// upgrade could take away without saying so.
+func TestAGuestsArrivingSizeConstrainsTheSession(t *testing.T) {
+	h := startHost(t, &Server{AwaitInitialClient: true,
+		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+
+	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
+	readUntil(t, aOut, "READY")
+
+	// The harness's guest asks for 80x24 and never resizes.
+	_, gOut := h.connectGuest(t)
+	readUntil(t, gOut, "READY")
+	readUntil(t, aOut, "24 80")
+}
