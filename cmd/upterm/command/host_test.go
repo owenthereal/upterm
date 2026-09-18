@@ -882,3 +882,37 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 		})
 	}
 }
+
+// A session that did not happen, or a hosted command that exited non-zero, is
+// not the user mistyping a flag. Printing the usage block after `exit 2`
+// buries the one line that says what happened under thirty lines of flags —
+// which is what `upterm host -- bash` did on every non-zero exit, since the
+// command's status comes back as an ordinary error from RunE.
+//
+// The failure here is a malformed --proxy because it is deterministic and
+// reaches nothing: no keys, no relay, no session. What is under test is where
+// SilenceUsage is set, not which error follows it.
+func Test_hostUsageIsForUsageErrorsOnly(t *testing.T) {
+	origAccept, origProxy := flagAccept, flagProxy
+	t.Cleanup(func() { flagAccept, flagProxy = origAccept, origProxy })
+
+	var out strings.Builder
+	root := Root()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"host", "--accept", "--proxy", "://not-a-url", "--", "true"})
+
+	require.Error(t, root.Execute())
+	require.NotContains(t, out.String(), "Usage:", "a failure to host is not a usage error")
+	require.NotContains(t, out.String(), "--force-command", "and the flag list has nothing to do with it")
+
+	// The other half of the contract: a flag combination that is genuinely
+	// wrong still explains itself with the usage the user needs.
+	out.Reset()
+	root = Root()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"host", "--nonexistent-flag"})
+	require.Error(t, root.Execute())
+	require.Contains(t, out.String(), "Usage:", "an unknown flag is exactly what usage is for")
+}

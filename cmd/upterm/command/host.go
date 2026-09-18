@@ -368,6 +368,16 @@ func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
+	// Set here rather than on the command, because where it is set is what
+	// divides the two kinds of failure. Cobra raises unknown flags and bad
+	// flag combinations (validateShareRequiredFlags, a PreRunE) before this
+	// line, and usage is the right answer to those. Everything below it is a
+	// session that did not happen or a command that exited — and the hosted
+	// command's own exit status is the most common of them, which printed
+	// thirty lines of flags after `exit 2` as if the user had mistyped
+	// something.
+	c.SilenceUsage = true
+
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
 	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
