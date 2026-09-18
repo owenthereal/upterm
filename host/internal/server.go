@@ -164,18 +164,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	cmdStarted := make(chan struct{})
 	cmdDone := make(chan struct{})
 	{
-		ctx, cancel := context.WithCancel(ctx)
-		teh := terminalEventHandler{
-			eventEmitter: s.EventEmitter,
-			logger:       s.Logger,
-		}
-		g.Add(func() error {
-			return teh.Handle(ctx)
-		}, func(err error) {
-			cancel()
-		})
-	}
-	{
 		g.Add(func() error {
 			defer close(cmdDone)
 			if s.AwaitInitialClient {
@@ -219,6 +207,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		ptmx:                  shared,
 		shared:                shared,
 		eventEmmiter:          s.EventEmitter,
+		terminals:             newTerminalWindows(s.Logger),
 		writers:               writers,
 		keepAliveDuration:     s.KeepAliveDuration,
 		ctx:                   sessCtx,
@@ -541,10 +530,14 @@ func (h *hostPublicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.Public
 }
 
 type sessionHandler struct {
-	forceCommand      []string
-	commandEnv        []string
-	ptmx              PTY
-	eventEmmiter      *emitter.Emitter
+	forceCommand []string
+	commandEnv   []string
+	ptmx         PTY
+	eventEmmiter *emitter.Emitter
+	// terminals is the geometry of every terminal attached to the session,
+	// shared by both doors: guests count towards the minimum as host clients
+	// do.
+	terminals         *terminalWindows
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
@@ -820,23 +813,18 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 						// in ptmx.Write may not do on its own for as long as
 						// the session lives. Until then resizeWindow keeps
 						// treating a client that is provably gone as one of
-						// the terminals it takes the minimum across. Emitting
-						// here as well, next to the elector removal, frees
-						// the size calculation at the same moment. The
-						// deferred emission below still runs when the
-						// handler eventually does return;
-						// handleTerminalDetached deletes by id, so the
-						// second one is a no-op — and is also the safety
-						// net, because the emitter these go through skips a
-						// listener that is not ready rather than waiting for
-						// it, which makes either emission on its own
-						// best-effort.
+						// the terminals it takes the minimum across. Saying
+						// it here as well, next to the elector removal, frees
+						// the size calculation at the same moment; the
+						// deferred one below still runs when the handler
+						// eventually does return, and detached deletes by id,
+						// so the second is a no-op.
 						//
 						// Only interactive clients reach here, since only
 						// they register this actor; a viewer forwards no
 						// input, so nothing parks its handler and its own
-						// deferred emission arrives on time.
-						terminalEventEmitter{h.eventEmmiter}.TerminalDetached(sessionID, ptmx)
+						// deferred detach arrives on time.
+						h.terminals.detached(ptmx, sessionID)
 					case <-ctx.Done():
 					}
 					<-ctx.Done()
@@ -912,7 +900,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// rather than waiting for a resize that a terminal nobody touches
 		// never sends.
 		if h.kind == kindHost && isPty {
-			terminalEventEmitter{h.eventEmmiter}.TerminalWindowChanged(sessionID, ptmx, ptyReq.Window.Width, ptyReq.Window.Height)
+			h.terminals.changed(ptmx, sessionID, ptyReq.Window.Width, ptyReq.Window.Height)
 		}
 
 		// Everything a repaint needs is now queued: the mode snapshot, the
@@ -930,7 +918,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	{
 		// pty
 		ctx, cancel := context.WithCancel(h.ctx)
-		tee := terminalEventEmitter{h.eventEmmiter}
 		g.Add(func() error {
 			for {
 				select {
@@ -959,13 +946,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 						// would take it out again.
 						continue
 					}
-					tee.TerminalWindowChanged(sessionID, ptmx, win.Width, win.Height)
+					h.terminals.changed(ptmx, sessionID, win.Width, win.Height)
 				case <-ctx.Done():
 					return ctx.Err()
 				}
 			}
 		}, func(err error) {
-			tee.TerminalDetached(sessionID, ptmx)
+			h.terminals.detached(ptmx, sessionID)
 			cancel()
 		})
 	}

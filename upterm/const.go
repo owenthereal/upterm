@@ -25,8 +25,6 @@ const (
 
 	SSHCertExtension = "upterm-auth-request"
 
-	EventClientJoined          = "client-joined"
-	EventClientLeft            = "client-left"
-	EventTerminalWindowChanged = "terminal-window-changed"
-	EventTerminalDetached      = "terminal-detached"
+	EventClientJoined = "client-joined"
+	EventClientLeft   = "client-left"
 )

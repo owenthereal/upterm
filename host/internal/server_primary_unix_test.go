@@ -478,8 +478,9 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 	}
 
 	// A is out of the elector once its connection actor has run; the fix
-	// makes the same actor emit TerminalDetached, so waiting for this is
-	// also waiting for A to be out of resizeWindow's minimum.
+	// has the same actor take A out of the size tracking, on the next line,
+	// so waiting for this is as good as waiting for A to be out of
+	// resizeWindow's minimum.
 	require.Eventually(t, func() bool {
 		return h.srv.hostClients.primaryID() == ""
 	}, harnessTimeout, 10*time.Millisecond, "A was never removed from the elector")
