@@ -456,6 +456,23 @@ func (m *ModeTracker) finishCSI(final byte) {
 // resets sent on the way out. Attributes are not tracked and so are not reset
 // here.
 //
+// "Where it started" means the terminal's power-on defaults, not the state
+// the caller's own terminal was in before the attachment. That state is not
+// knowable without asking the terminal for it — a DECRQM round-trip per mode,
+// before attaching, racing the user's keystrokes on the same stdin, and
+// unanswered by terminals that do not implement it. tmux, which has the same
+// problem on detach, resets to defaults too rather than asking.
+//
+// It costs less than it sounds like. At a shell prompt — which is what
+// launches a CLI — every mode in restorable is already at its default except
+// the ones the shell re-asserts on every prompt: measured here, zsh holds
+// DECCKM and bracketed paste and emits both again at the next prompt, bash
+// holds bracketed paste and does the same. So for the modes a caller actually
+// holds, a reset is undone within one keystroke, and for the rest the default
+// is what the caller had. What is left is a caller that is not a shell and
+// keeps the mouse or the alternate screen while running a child, which is not
+// how a program that shells out behaves.
+//
 // The order is the order a terminal has to receive it in: leave the alternate
 // screen first, through the mode that entered it, since everything after it
 // applies to the screen the terminal is going back to.
