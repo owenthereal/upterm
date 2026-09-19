@@ -366,6 +366,25 @@ func TestIdentitySigners_PubSelectorWithNoAgentIsAnError(t *testing.T) {
 	_, _, err := identitySigners([]string{pubFile}, "", failingPrompt(t))
 	require.ErrorContains(t, err, pubFile+": no SSH agent to look up")
 	require.ErrorContains(t, err, "SSH agent is not running")
+	require.NotContains(t, err.Error(), "to use the private key itself",
+		"nothing sits beside this .pub, so there is no private key to point at")
+}
+
+// TestIdentitySigners_PubSelectorHintsAtThePrivateKeyBeside covers the slip
+// this hint is for: `-i id.pub` when `id` is right there. The message must
+// still say exactly why the lookup failed, and then name the sibling. Both of
+// signerFor's failures are covered by one test only in the sense that they
+// share this one call site; here there is no agent at all.
+func TestIdentitySigners_PubSelectorHintsAtThePrivateKeyBeside(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "id")
+	require.NoError(t, os.WriteFile(keyFile, []byte(ed25519PriavteKey), 0600))
+	pubFile := keyFile + ".pub"
+	require.NoError(t, os.WriteFile(pubFile, []byte(ed25519PublicKey), 0600))
+
+	_, _, err := identitySigners([]string{pubFile}, "", failingPrompt(t))
+	require.ErrorContains(t, err, pubFile+": no SSH agent to look up")
+	require.ErrorContains(t, err, "a .pub file selects an agent key; name "+keyFile+" to use the private key itself")
 }
 
 func TestSigners_IdentitiesOnlyDoesNotFallBackToAGeneratedKey(t *testing.T) {

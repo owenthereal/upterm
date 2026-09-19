@@ -97,7 +97,7 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 	if pub, _, _, _, err := ssh.ParseAuthorizedKey(pb); err == nil {
 		s, err := ag.signerFor(pub)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", file, err)
+			return nil, fmt.Errorf("%s: %w%s", file, err, publicKeySelectorHint(file))
 		}
 		return s, nil
 	}
@@ -159,6 +159,28 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		return nil, err
 	}
 	return ssh.NewSignerFromKey(key)
+}
+
+// publicKeySelectorHint returns the parenthetical to append when a .pub
+// selector could not be resolved, or "" when there is nothing worth
+// suggesting. Naming the public half — `-i ~/.ssh/id_ed25519.pub` — is an
+// easy slip, and since an unresolvable entry became fatal it stops the host
+// with a message that on its own suggests nothing: a .pub selects a key the
+// *agent* holds, so both ways that lookup fails, no agent at all and an agent
+// that is simply not holding it, read as a puzzle when the private key was
+// sitting right beside it all along. The suggestion is made only when the
+// sibling with ".pub" stripped exists, so it always names a file that is
+// really there; a lone .pub, which is the deliberate use of a selector, gets
+// the bare error.
+func publicKeySelectorHint(file string) string {
+	private, ok := strings.CutSuffix(file, ".pub")
+	if !ok {
+		return ""
+	}
+	if _, err := os.Stat(private); err != nil {
+		return ""
+	}
+	return fmt.Sprintf(" (a .pub file selects an agent key; name %s to use the private key itself)", private)
 }
 
 // publicKeyBeside returns the key in <file>.pub, or nil when there is none
