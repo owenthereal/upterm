@@ -112,6 +112,11 @@ type outcomeRun struct {
 	// attachSocket carries the path the daemon bound its local door at, so a
 	// case can attach a client to the session it is watching.
 	attachSocket chan string
+
+	// Set by options before the host and relay are built.
+	signers        []ssh.Signer
+	sessionCreated func(context.Context, *api.GetSessionResponse) error
+	relayOptions   []func(*Server)
 }
 
 // outcomeOption adjusts the host a case runs, for the things that are not the
@@ -122,7 +127,21 @@ type outcomeOption func(*outcomeRun)
 // CLI asks the operator there, and it is the only hook that can refuse a
 // session after the relay has created it but before the command exists.
 func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse) error) outcomeOption {
-	return func(r *outcomeRun) { r.host.SessionCreatedCallback = cb }
+	return func(r *outcomeRun) { r.sessionCreated = cb }
+}
+
+// withSigners replaces the host's identity.
+func withSigners(signers []ssh.Signer) outcomeOption {
+	return func(r *outcomeRun) { r.signers = signers }
+}
+
+// withRelayAuthorizedKeys runs the relay with an allowlist of host identities.
+func withRelayAuthorizedKeys(path string) outcomeOption {
+	return func(r *outcomeRun) {
+		r.relayOptions = append(r.relayOptions, func(s *Server) {
+			s.authorizedKeysFiles = append(s.authorizedKeysFiles, path)
+		})
+	}
 }
 
 // newOutcomeRun builds a Host that claims a session directory for real.
@@ -137,13 +156,6 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 
-	ts, err := NewServerWithMode(ServerPrivateKeyContent, routing.ModeEmbedded)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ts.Shutdown() })
-
-	signers, err := utils.CreateSigners([][]byte{[]byte(HostPrivateKeyContent)})
-	require.NoError(t, err)
-
 	name := uniqueSessionName(t)
 
 	// Buffered for two runs: Test_Host_CanRunTwice runs the same Host twice,
@@ -151,24 +163,35 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 	attachSocket := make(chan string, 2)
 
 	run := &outcomeRun{
-		host: &host.Host{
-			Host:                    "ssh://" + ts.SSHAddr(),
-			Name:                    name,
-			Command:                 command,
-			Signers:                 signers,
-			HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
-			KeepAliveDuration:       keepAliveDuration,
-			Logger:                  testLogger,
-			AttachListeningCallback: func(s string) { attachSocket <- s },
-		},
 		name:         name,
 		stateRoot:    utils.UptermStateDir(),
-		relay:        ts,
 		attachSocket: attachSocket,
 	}
-
 	for _, opt := range opts {
 		opt(run)
+	}
+
+	ts, err := NewServerWithOptions(ServerPrivateKeyContent, routing.ModeEmbedded, run.relayOptions...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ts.Shutdown() })
+	run.relay = ts
+
+	signers := run.signers
+	if signers == nil {
+		signers, err = utils.CreateSigners([][]byte{[]byte(HostPrivateKeyContent)})
+		require.NoError(t, err)
+	}
+
+	run.host = &host.Host{
+		Host:                    "ssh://" + ts.SSHAddr(),
+		Name:                    name,
+		Command:                 command,
+		Signers:                 signers,
+		HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
+		KeepAliveDuration:       keepAliveDuration,
+		Logger:                  testLogger,
+		SessionCreatedCallback:  run.sessionCreated,
+		AttachListeningCallback: func(s string) { attachSocket <- s },
 	}
 
 	return run

@@ -279,7 +279,7 @@ type TestServer interface {
 	Shutdown() error
 }
 
-func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
+func NewServerWithOptions(hostKey string, mode routing.Mode, opts ...func(*Server)) (TestServer, error) {
 	sshln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SSH listener: %w", err)
@@ -296,6 +296,9 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 		sshln:          sshln,
 		wsln:           wsln,
 		mode:           mode,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	// Start server in background
@@ -334,6 +337,11 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 	return s, nil
 }
 
+// NewServerWithMode is NewServerWithOptions with none.
+func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
+	return NewServerWithOptions(hostKey, mode)
+}
+
 type Server struct {
 	Server *server.Server
 
@@ -342,6 +350,10 @@ type Server struct {
 	hostKeyContent string
 	mode           routing.Mode
 	logger         *slog.Logger
+
+	// authorizedKeysFiles restricts which identities may register as hosts,
+	// uptermd's --authorized-keys.
+	authorizedKeysFiles []string
 
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
@@ -406,13 +418,14 @@ func (s *Server) start() error {
 
 	s.mu.Lock()
 	s.Server = &server.Server{
-		NodeAddr:        s.SSHAddr(), // node addr is hard coded to ssh addr
-		HostSigners:     hostSigners,
-		Signers:         signers,
-		NetworkProvider: network,
-		MetricsProvider: provider.NewDiscardProvider(),
-		SessionManager:  sm,
-		Logger:          logger,
+		NodeAddr:            s.SSHAddr(), // node addr is hard coded to ssh addr
+		HostSigners:         hostSigners,
+		Signers:             signers,
+		NetworkProvider:     network,
+		MetricsProvider:     provider.NewDiscardProvider(),
+		SessionManager:      sm,
+		Logger:              logger,
+		AuthorizedKeysFiles: s.authorizedKeysFiles,
 	}
 	s.mu.Unlock()
 
