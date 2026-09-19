@@ -40,11 +40,25 @@ const (
 )
 
 // DefaultStopGrace is how long each step of the teardown waits before the
-// next: SIGHUP, then SIGTERM, then SIGKILL. Five seconds is long enough for
-// a shell to hang up its jobs and a program to flush, and short enough that
-// `session stop` against something that ignores both is a ten-second wait,
-// not a minute.
+// next, save the first: SIGHUP (bounded by hangupGrace instead), then close
+// the pty master, then SIGTERM, then SIGKILL. Five seconds is long enough
+// for a shell to hang up its jobs and a program to flush, and short enough
+// that `session stop` against something that ignores everything is a worst
+// case of about sixteen seconds -- hangupGrace plus three of these -- not a
+// minute.
 const DefaultStopGrace = 5 * time.Second
+
+// hangupGrace bounds only the first step of terminate's teardown -- how
+// long SIGHUP alone is given before the pty master closes -- and is
+// shorter than stopGrace on purpose. An idle interactive shell (nothing
+// typed into it yet, nothing running) ignores a bare SIGHUP for ten
+// seconds or more, measured against a real bash; a shell that is going to
+// act on it, forwarding it to its jobs, does so in tens of milliseconds.
+// A full stopGrace here would buy the idle case nothing and would cost
+// every freshly started, untouched session -- the common case for a
+// `--detach`ed one -- several extra seconds on every stop. A var so a test
+// can shrink it.
+var hangupGrace = time.Second
 
 // activityWriter records when it last wrote, so a drain can stop once output
 // has gone idle.
@@ -323,8 +337,18 @@ func (c *command) Run() error {
 				// The session is ending and the command is not: hang it up
 				// the way a terminal going away would, and escalate only if
 				// it stays.
-				terminate(c.ptmx, exited, c.grace())
-				c.recordResult(waitErr)
+				terminate(c.ptmx, exited, c.grace(), c.logger, c.name)
+				// terminate's own final wait is bounded -- it may return
+				// with the process still not confirmed exited, however
+				// unlikely -- so waitErr may still be being written by the
+				// goroutine above. Reading it here unconditionally would be
+				// a data race; recording is safe only once exited has
+				// actually closed, which happens-before this observes it.
+				select {
+				case <-exited:
+					c.recordResult(waitErr)
+				default:
+				}
 				return ctx.Err()
 			}
 		}, func(err error) {
@@ -341,15 +365,21 @@ func (c *command) Run() error {
 			// since ctx is already done.
 			cancel()
 
-			// Close takes the pty's write lock, which a pending writer
-			// starves new readers behind (see terminate's doc comment on
-			// why it never closes the pty itself). waitDone, closed only
-			// once this actor's own execute returns, keeps Close from
-			// running until terminate already has, so it can never queue
-			// ahead of terminate's own Signal calls. Now that cancel runs
-			// first, this wait is bounded by terminate's own grace/kill
-			// sequence on every path, not just the one where c.ctx was
-			// already done when we got here.
+			// Fired, not waited on, same as terminate's own close (see its
+			// doc comment for why a close here can never be relied on to
+			// return): run.Group calls every actor's interrupt before it
+			// waits for any execute to return, so an interrupt parked in a
+			// blocking Close would hang Run's own return exactly the way a
+			// synchronous close inside terminate would hang terminate's.
+			// waitDone still keeps this from firing until terminate's own
+			// execute has returned, but not from overlapping it: terminate's
+			// own close runs on closeAsync's own goroutine, not the actor's,
+			// and may still be in flight here. That overlap is harmless --
+			// os.File.Close is safe to call twice, and the Windows pty
+			// guards its own close the same way -- so which of the two
+			// closes actually reaches the descriptor first does not matter:
+			// whichever wins, wins, and the daemon's own process exit closes
+			// it regardless of either.
 			//
 			// That the output actor has already drained by the time this
 			// runs is a separate guarantee, and not this gate's doing:
@@ -357,44 +387,132 @@ func (c *command) Run() error {
 			// the output actor's own interrupt (above, waitIdle) always runs
 			// to completion first, whichever actor returned first.
 			<-waitDone
-			_ = c.ptmx.Close()
+			closeAsync(c.ptmx)
 		})
 	}
 
 	return g.Run()
 }
 
-// terminate ends a command that has been told to stop: SIGHUP to its
-// process group, which a job-control shell forwards to every job; SIGTERM
-// after grace; SIGKILL after another. Where signals are unsupported it
-// kills at once. It returns once the process has exited.
+// closeAsync starts closing ptmx on its own goroutine and returns without
+// waiting. See terminate's doc comment for why a close here can never be
+// relied on to return, and why it is fired anyway.
+func closeAsync(ptmx PTY) {
+	go func() { _ = ptmx.Close() }()
+}
+
+// terminate ends a command that has been told to stop, the design's own
+// sequence: SIGHUP to its process group, which a job-control shell forwards
+// to every job; if it stays past hangupGrace, close the pty master --
+// anything still holding the terminal open fails its reads and writes,
+// which collects processes that ignored the hangup, and is also what frees
+// a session leader a platform will otherwise block inside exit() while its
+// controlling terminal still holds output nobody has drained, since the
+// reader that was going to drain it stopped issuing new reads the moment
+// this session began ending; SIGTERM after another grace; SIGKILL to the
+// group, then the leader, after a third -- the design's boundary is
+// everything in the command's process group, plus everything that hangs up
+// when the pty goes, and a leader-only kill would leave its own children
+// behind exactly like the hangup and the term steps would if nothing
+// forwarded them. Where signals are unsupported it kills at once. Every
+// wait in here is bounded, including the one after the final kill --
+// terminate must return, with or without proof the process has actually
+// gone, because it runs on the actor's own execute and run.Group is
+// waiting for that to return before anything else can. A command still not
+// confirmed exited when terminate gives up is logged: Result() staying
+// zero for it is fine, but it should not also be silent.
 //
-// The pty master is deliberately not closed between the steps: Read holds
-// the pty's read lock for the length of a blocking read and Close takes the
-// write lock, so a close here would wait on a read that only the process's
-// exit ends. The interrupt closes it only after this returns, which the
-// wait actor's waitDone gate guarantees.
-func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration) {
-	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM} {
+// The close is fired on its own goroutine rather than waited on, and this
+// is load-bearing, not a style choice. Read holds the pty's read lock for
+// the length of a blocking read and Close takes the write lock, so a
+// synchronous close here would wait on a read that only the process's exit
+// ends -- the very hang this step exists to break. Bypassing that lock does
+// not fix it either: the master is opened in blocking mode with no poller
+// registration, so the Go runtime itself defers the underlying close(2)
+// behind whatever read is already in flight, independent of any lock this
+// package takes. Firing it is still worth doing: once the reader is
+// released -- the process's own exit, or the case this step exists for, a
+// leader already stuck in exit() because its slave is already closed -- the
+// close lands, and anything still holding the master open past that point
+// fails its next read or write.
+func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *slog.Logger, name string) {
+	// gone reports whether exited has already closed, without blocking:
+	// sending a signal after that would reach whatever pid the kernel has
+	// since reused, not the command, and closing or killing an already-gone
+	// process is only ever wasted work, not wrong -- so only the signals
+	// check this.
+	gone := func() bool {
 		select {
 		case <-exited:
-			// Already gone by the time this step was due: sending a signal
-			// now would reach whatever pid the kernel has since reused,
-			// not the command.
-			return
+			return true
 		default:
-		}
-		if err := ptmx.Signal(sig); err != nil {
-			break
-		}
-		timer := time.NewTimer(grace)
-		select {
-		case <-exited:
-			timer.Stop()
-			return
-		case <-timer.C:
+			return false
 		}
 	}
-	_ = ptmx.Kill()
-	<-exited
+	// wait blocks for up to d, reporting whether exited closed within it.
+	// Every step below is followed by exactly one of these.
+	wait := func(d time.Duration) bool {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-exited:
+			return true
+		case <-timer.C:
+			return false
+		}
+	}
+	// kill sends SIGKILL to the group -- the same non-blocking exited check
+	// the other signal steps make first, since a group signal has the same
+	// reused-pid risk they do -- and then kills the leader directly, the
+	// way it always has: Signal alone cannot be trusted to reach a leader
+	// that already left the group on purpose, and Kill (through
+	// os.Process) is what returns ErrProcessDone once the leader is
+	// already reaped, which a raw group signal has no way to know. Then it
+	// waits at most one more grace for either to have taken -- the one
+	// wait in this whole function that is not preceded by a signal this
+	// function chose to send for its own sake, since it is also where
+	// terminate lands when Signal itself reports the platform cannot take
+	// a step it was asked for (Windows: the group SIGKILL above is then
+	// simply a no-op, and this step is the Kill it already was). A command
+	// still running when even this gives up is logged, so an abandoned
+	// teardown leaves a trace.
+	kill := func() {
+		if !gone() {
+			_ = ptmx.Signal(syscall.SIGKILL)
+		}
+		_ = ptmx.Kill()
+		if !wait(grace) {
+			logger.Warn("command did not exit after being killed; giving up on this teardown",
+				"name", name, "bound", grace)
+		}
+	}
+
+	if gone() {
+		return
+	}
+	if err := ptmx.Signal(syscall.SIGHUP); err != nil {
+		kill()
+		return
+	}
+	if wait(hangupGrace) {
+		return
+	}
+
+	closeAsync(ptmx)
+	if wait(grace) {
+		return
+	}
+
+	if gone() {
+		return
+	}
+	if err := ptmx.Signal(syscall.SIGTERM); err != nil {
+		kill()
+		return
+	}
+	if wait(grace) {
+		return
+	}
+
+	kill()
 }
