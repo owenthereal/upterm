@@ -120,7 +120,8 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 		return nil, nil, nil, err
 	}
 	conn, chans, reqs, err := ssh.NewClientConn(raw, h.addr, &ssh.ClientConfig{
-		User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(h.guestSigner)},
+		Config: ssh.Config{RekeyThreshold: cfg.rekeyThreshold},
+		User:   "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(h.guestSigner)},
 		HostKeyCallback: ssh.FixedHostKey(h.hostKey),
 	})
 	if err != nil {
@@ -234,7 +235,18 @@ func (g *gatedConn) transportClosed() <-chan struct{} { return g.transportEnded 
 // dialOption tunes one connection, on either door.
 type dialOption func(*dialConfig)
 
-type dialConfig struct{ deadline time.Duration }
+type dialConfig struct {
+	deadline time.Duration
+	// rekeyThreshold, when non-zero, makes the client renegotiate keys after
+	// that many bytes. x/crypto clamps it to its 256-byte minimum.
+	rekeyThreshold uint64
+}
+
+// withRekeyThreshold forces key renegotiation early, so a test can watch what
+// a rekey signs with.
+func withRekeyThreshold(n uint64) dialOption {
+	return func(c *dialConfig) { c.rekeyThreshold = n }
+}
 
 // withDialDeadline replaces the harness's absolute connection deadline for one
 // connection. The tests that move several MiB, and the ones that deliberately
