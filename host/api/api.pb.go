@@ -64,7 +64,7 @@ func (x Client_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Client_Kind.Descriptor instead.
 func (Client_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{3, 0}
+	return file_api_proto_rawDescGZIP(), []int{5, 0}
 }
 
 type Identifier_Type int32
@@ -110,7 +110,7 @@ func (x Identifier_Type) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Identifier_Type.Descriptor instead.
 func (Identifier_Type) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{4, 0}
+	return file_api_proto_rawDescGZIP(), []int{6, 0}
 }
 
 type GetSessionRequest struct {
@@ -149,6 +149,80 @@ func (*GetSessionRequest) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{0}
 }
 
+// StopSessionRequest asks the session to end: the command is hung up, then
+// terminated, then killed, and the record reads stopped.
+type StopSessionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StopSessionRequest) Reset() {
+	*x = StopSessionRequest{}
+	mi := &file_api_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StopSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StopSessionRequest) ProtoMessage() {}
+
+func (x *StopSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StopSessionRequest.ProtoReflect.Descriptor instead.
+func (*StopSessionRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{1}
+}
+
+type StopSessionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StopSessionResponse) Reset() {
+	*x = StopSessionResponse{}
+	mi := &file_api_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StopSessionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StopSessionResponse) ProtoMessage() {}
+
+func (x *StopSessionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StopSessionResponse.ProtoReflect.Descriptor instead.
+func (*StopSessionResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{2}
+}
+
 type GetSessionResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	SessionId        string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -166,7 +240,7 @@ type GetSessionResponse struct {
 
 func (x *GetSessionResponse) Reset() {
 	*x = GetSessionResponse{}
-	mi := &file_api_proto_msgTypes[1]
+	mi := &file_api_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -178,7 +252,7 @@ func (x *GetSessionResponse) String() string {
 func (*GetSessionResponse) ProtoMessage() {}
 
 func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[1]
+	mi := &file_api_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -191,7 +265,7 @@ func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionResponse.ProtoReflect.Descriptor instead.
 func (*GetSessionResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{1}
+	return file_api_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetSessionResponse) GetSessionId() string {
@@ -267,7 +341,7 @@ type AuthorizedKey struct {
 
 func (x *AuthorizedKey) Reset() {
 	*x = AuthorizedKey{}
-	mi := &file_api_proto_msgTypes[2]
+	mi := &file_api_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -279,7 +353,7 @@ func (x *AuthorizedKey) String() string {
 func (*AuthorizedKey) ProtoMessage() {}
 
 func (x *AuthorizedKey) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[2]
+	mi := &file_api_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -292,7 +366,7 @@ func (x *AuthorizedKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorizedKey.ProtoReflect.Descriptor instead.
 func (*AuthorizedKey) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{2}
+	return file_api_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *AuthorizedKey) GetPublicKeyFingerprints() []string {
@@ -324,7 +398,7 @@ type Client struct {
 
 func (x *Client) Reset() {
 	*x = Client{}
-	mi := &file_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +410,7 @@ func (x *Client) String() string {
 func (*Client) ProtoMessage() {}
 
 func (x *Client) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +423,7 @@ func (x *Client) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Client.ProtoReflect.Descriptor instead.
 func (*Client) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Client) GetId() string {
@@ -398,7 +472,7 @@ type Identifier struct {
 
 func (x *Identifier) Reset() {
 	*x = Identifier{}
-	mi := &file_api_proto_msgTypes[4]
+	mi := &file_api_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -410,7 +484,7 @@ func (x *Identifier) String() string {
 func (*Identifier) ProtoMessage() {}
 
 func (x *Identifier) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[4]
+	mi := &file_api_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -423,7 +497,7 @@ func (x *Identifier) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Identifier.ProtoReflect.Descriptor instead.
 func (*Identifier) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Identifier) GetId() string {
@@ -452,7 +526,9 @@ var File_api_proto protoreflect.FileDescriptor
 const file_api_proto_rawDesc = "" +
 	"\n" +
 	"\tapi.proto\x12\x03api\"\x13\n" +
-	"\x11GetSessionRequest\"\xda\x02\n" +
+	"\x11GetSessionRequest\"\x14\n" +
+	"\x12StopSessionRequest\"\x15\n" +
+	"\x13StopSessionResponse\"\xda\x02\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -484,10 +560,11 @@ const file_api_proto_rawDesc = "" +
 	"\x04Type\x12\b\n" +
 	"\x04HOST\x10\x00\x12\n" +
 	"\n" +
-	"\x06CLIENT\x10\x012O\n" +
+	"\x06CLIENT\x10\x012\x93\x01\n" +
 	"\fAdminService\x12?\n" +
 	"\n" +
-	"GetSession\x12\x16.api.GetSessionRequest\x1a\x17.api.GetSessionResponse\"\x00B(Z&github.com/owenthereal/upterm/host/apib\x06proto3"
+	"GetSession\x12\x16.api.GetSessionRequest\x1a\x17.api.GetSessionResponse\"\x00\x12B\n" +
+	"\vStopSession\x12\x17.api.StopSessionRequest\x1a\x18.api.StopSessionResponse\"\x00B(Z&github.com/owenthereal/upterm/host/apib\x06proto3"
 
 var (
 	file_api_proto_rawDescOnce sync.Once
@@ -502,25 +579,29 @@ func file_api_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_api_proto_goTypes = []any{
-	(Client_Kind)(0),           // 0: api.Client.Kind
-	(Identifier_Type)(0),       // 1: api.Identifier.Type
-	(*GetSessionRequest)(nil),  // 2: api.GetSessionRequest
-	(*GetSessionResponse)(nil), // 3: api.GetSessionResponse
-	(*AuthorizedKey)(nil),      // 4: api.AuthorizedKey
-	(*Client)(nil),             // 5: api.Client
-	(*Identifier)(nil),         // 6: api.Identifier
+	(Client_Kind)(0),            // 0: api.Client.Kind
+	(Identifier_Type)(0),        // 1: api.Identifier.Type
+	(*GetSessionRequest)(nil),   // 2: api.GetSessionRequest
+	(*StopSessionRequest)(nil),  // 3: api.StopSessionRequest
+	(*StopSessionResponse)(nil), // 4: api.StopSessionResponse
+	(*GetSessionResponse)(nil),  // 5: api.GetSessionResponse
+	(*AuthorizedKey)(nil),       // 6: api.AuthorizedKey
+	(*Client)(nil),              // 7: api.Client
+	(*Identifier)(nil),          // 8: api.Identifier
 }
 var file_api_proto_depIdxs = []int32{
-	5, // 0: api.GetSessionResponse.connected_clients:type_name -> api.Client
-	4, // 1: api.GetSessionResponse.authorized_keys:type_name -> api.AuthorizedKey
+	7, // 0: api.GetSessionResponse.connected_clients:type_name -> api.Client
+	6, // 1: api.GetSessionResponse.authorized_keys:type_name -> api.AuthorizedKey
 	0, // 2: api.Client.kind:type_name -> api.Client.Kind
 	1, // 3: api.Identifier.type:type_name -> api.Identifier.Type
 	2, // 4: api.AdminService.GetSession:input_type -> api.GetSessionRequest
-	3, // 5: api.AdminService.GetSession:output_type -> api.GetSessionResponse
-	5, // [5:6] is the sub-list for method output_type
-	4, // [4:5] is the sub-list for method input_type
+	3, // 5: api.AdminService.StopSession:input_type -> api.StopSessionRequest
+	5, // 6: api.AdminService.GetSession:output_type -> api.GetSessionResponse
+	4, // 7: api.AdminService.StopSession:output_type -> api.StopSessionResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
 	4, // [4:4] is the sub-list for extension type_name
 	4, // [4:4] is the sub-list for extension extendee
 	0, // [0:4] is the sub-list for field type_name
@@ -537,7 +618,7 @@ func file_api_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_rawDesc), len(file_api_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

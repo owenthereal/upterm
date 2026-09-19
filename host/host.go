@@ -380,6 +380,14 @@ func (c *Host) Run(ctx context.Context) error {
 	// is free.
 	InstallSignalPolicy()
 
+	// Run's working context. A stop requested over the admin socket cancels
+	// it, and from there it is the cancellation the signal actor already
+	// handles: shutdownRequested, the teardown, a record that reads stopped.
+	// Derived once so that every actor and every ctx.Err() below sees the
+	// same context, and context.Cause still reports the caller's cause.
+	ctx, requestStop := context.WithCancel(ctx)
+	defer requestStop()
+
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)
@@ -610,6 +618,7 @@ func (c *Host) Run(ctx context.Context) error {
 		Session:     session,
 		ClientRepo:  clientRepo,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
+		OnStop:      requestStop,
 	}
 	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
 		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)

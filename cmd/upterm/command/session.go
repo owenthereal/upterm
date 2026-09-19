@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -57,6 +58,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(current())
 	cmd.AddCommand(list())
 	cmd.AddCommand(show())
+	cmd.AddCommand(stop())
 
 	return cmd
 }
@@ -110,6 +112,109 @@ Output formats:
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
+}
+
+// stopWaitTimeout bounds how long `session stop` waits for the name to be
+// released once the daemon has acknowledged. The teardown is at most two
+// graces (DefaultStopGrace each) plus the record's publication; thirty
+// seconds is that with room, and a daemon still holding the name past it
+// is one to name a pid for.
+var stopWaitTimeout = 30 * time.Second
+
+// stopPollInterval is how often the release is checked for.
+const stopPollInterval = 200 * time.Millisecond
+
+func stop() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop NAME",
+		Short: "Stop a running session",
+		Long: `Stop a running session by name.
+
+The session's command is hung up, then terminated, then killed if it stays,
+and every attached terminal is released. The session's record keeps its
+outcome: 'upterm session info NAME' reports it as stopped.
+
+A session that has already ended is reported as such and is not an error.`,
+		Example: `  # Stop the session named build-shell:
+  upterm session stop build-shell`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			return stopSession(c.Context(), args[0], os.Stdout)
+		},
+	}
+}
+
+// stopSession asks the session named to end and waits for it to have ended.
+func stopSession(ctx context.Context, name string, out io.Writer) error {
+	stateRoot := utils.UptermStateDir()
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
+	cancelLookup()
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		return fmt.Errorf("no session named %q", name)
+	}
+	if !held {
+		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
+		return err
+	}
+
+	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	if err != nil {
+		return err
+	}
+	client, err := host.AdminClient(adminSocket)
+	if err != nil {
+		return err
+	}
+	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
+	_, err = client.StopSession(rpcCtx, &api.StopSessionRequest{})
+	cancelRPC()
+	if err != nil {
+		if rec.Status == sessiondir.StatusStarting {
+			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
+		}
+		return fmt.Errorf("session %s is not answering on its admin socket (%s): %w", name, pidOf(rec), err)
+	}
+
+	// Acknowledged. The name is free once this launch has released it, or
+	// once another launch holds it, which is the same thing from here.
+	deadline := time.Now().Add(stopWaitTimeout)
+	for {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
+		cancelPoll()
+		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(stopPollInterval):
+		}
+	}
+	final, err := sessiondir.ReadRecord(stateRoot, name)
+	if err != nil || final == nil || final.LaunchID != rec.LaunchID {
+		_, err := fmt.Fprintf(out, "session %s stopped\n", name)
+		return err
+	}
+	_, err = fmt.Fprintf(out, "session %s stopped (%s)\n", name, describeOutcome(final))
+	return err
+}
+
+// pidOf names the session's process for a human, or says the record
+// predates the field.
+func pidOf(rec *sessiondir.Record) string {
+	if rec.Pid == 0 {
+		return "pid unknown"
+	}
+	return fmt.Sprintf("pid %d", rec.Pid)
 }
 
 func current() *cobra.Command {

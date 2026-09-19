@@ -893,3 +893,35 @@ func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Test_Host_StopSessionRPCEndsTheSession: the admin socket's StopSession is
+// what `upterm session stop` calls, and it ends the session the way a
+// SIGTERM to the daemon does — the record reads stopped, no exit code.
+func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}))
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	sock := run.awaitAttachSocket(t)
+	out := run.attachViewer(t, ctx, sock)
+	awaitMarker(t, out, "READY")
+
+	client, err := host.AdminClient(run.record(t).AdminSocket)
+	require.NoError(t, err)
+	_, err = client.StopSession(ctx, &api.StopSessionRequest{})
+	require.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-time.After(outcomeTimeout):
+		t.Fatal("host did not return after StopSession")
+	}
+	rec := run.record(t)
+	require.Equal(t, sessiondir.ReasonStopped, rec.Reason)
+	require.Nil(t, rec.ExitCode)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+}

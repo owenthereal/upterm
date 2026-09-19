@@ -6,9 +6,16 @@ option go_package = "github.com/owenthereal/upterm/host/api";
 
 service AdminService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {}
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse) {}
 }
 
 message GetSessionRequest {}
+
+// StopSessionRequest asks the session to end: the command is hung up, then
+// terminated, then killed, and the record reads stopped.
+message StopSessionRequest {}
+
+message StopSessionResponse {}
 
 message GetSessionResponse {
   string session_id = 1;

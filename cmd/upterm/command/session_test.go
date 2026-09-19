@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -26,6 +27,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // testHostKeyLine returns a fresh key in authorized_keys form, for building
@@ -290,6 +293,10 @@ type stubAdminServer struct {
 
 	mu    sync.Mutex
 	resps []*api.GetSessionResponse
+
+	// onStop, if set, is called on StopSession; nil answers Unimplemented, the
+	// way a daemon that predates this RPC would.
+	onStop func()
 }
 
 // GetSession answers with the next response in the sequence and repeats the
@@ -307,6 +314,14 @@ func (s *stubAdminServer) GetSession(context.Context, *api.GetSessionRequest) (*
 	return resp, nil
 }
 
+func (s *stubAdminServer) StopSession(context.Context, *api.StopSessionRequest) (*api.StopSessionResponse, error) {
+	if s.onStop == nil {
+		return nil, status.Error(codes.Unimplemented, "no stop")
+	}
+	s.onStop()
+	return &api.StopSessionResponse{}, nil
+}
+
 func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionResponse) {
 	t.Helper()
 
@@ -315,6 +330,20 @@ func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionRespons
 
 	srv := grpc.NewServer()
 	api.RegisterAdminServiceServer(srv, &stubAdminServer{resps: resps})
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(srv.Stop)
+}
+
+// serveStubAdminWithStop is serveStubAdmin for a fixture that also answers
+// StopSession.
+func serveStubAdminWithStop(t *testing.T, socket string, resp *api.GetSessionResponse, onStop func()) {
+	t.Helper()
+
+	ln, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+
+	srv := grpc.NewServer()
+	api.RegisterAdminServiceServer(srv, &stubAdminServer{resps: []*api.GetSessionResponse{resp}, onStop: onStop})
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 }
@@ -895,4 +924,85 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 				"%s was not signalled and must not say it was", tc.name)
 		})
 	}
+}
+
+func Test_stopSession(t *testing.T) {
+	t.Run("stops a ready session and reports the outcome", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "ready-1")
+		require.NoError(t, d.Update(func(r *sessiondir.Record) {
+			r.Status = sessiondir.StatusReady
+			r.SessionID = "sid-1"
+			r.HostKeys = []string{testHostKeyLine(t)}
+		}))
+		released := make(chan struct{})
+		var releasedAt time.Time
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, func() {
+			// What the daemon does: publish stopped and give the name back —
+			// delayed, so the assertion below can tell a caller that returns
+			// the instant the RPC is acknowledged from one that actually
+			// waited for the release. Reading out after <-released alone
+			// cannot: stopSession writes its message before either goroutine
+			// is scheduled again, so a version that skipped the wait would
+			// still have the right bytes in out by the time this looks.
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				_ = d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusEnding; r.Reason = sessiondir.ReasonStopped })
+				_ = d.Release(context.Background())
+				releasedAt = time.Now()
+				close(released)
+			}()
+		})
+		var out bytes.Buffer
+		require.NoError(t, stopSession(context.Background(), "ready-1", &out))
+		returnedAt := time.Now()
+		<-released
+		require.False(t, returnedAt.Before(releasedAt),
+			"stopSession must not return before the name was released")
+		require.Contains(t, out.String(), "session ready-1 stopped")
+	})
+	t.Run("a session that has ended is already done", func(t *testing.T) {
+		setupSessionRoots(t)
+		buildEndedAfterExit(t, "gone-1")
+		var out bytes.Buffer
+		require.NoError(t, stopSession(context.Background(), "gone-1", &out))
+		require.Contains(t, out.String(), "has already ended")
+	})
+	t.Run("a held name whose socket does not answer names the pid", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "mute-1")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "mute-1", &out)
+		require.ErrorContains(t, err, "not answering on its admin socket")
+		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()))
+	})
+	t.Run("a session still starting says so", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "start-1")
+		releaseAtEnd(t, d)
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "start-1", &out)
+		require.ErrorContains(t, err, "still starting")
+		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()))
+	})
+	t.Run("an unknown name", func(t *testing.T) {
+		setupSessionRoots(t)
+		var out bytes.Buffer
+		require.ErrorContains(t, stopSession(context.Background(), "nope", &out), `no session named "nope"`)
+	})
+	t.Run("a stop the daemon acknowledged but did not finish is reported, bounded", func(t *testing.T) {
+		old := stopWaitTimeout
+		stopWaitTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { stopWaitTimeout = old })
+		setupSessionRoots(t)
+		d := claimSession(t, "stuck-1")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, func() {})
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "stuck-1", &out)
+		require.ErrorContains(t, err, "still running after")
+	})
 }

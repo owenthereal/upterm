@@ -19,6 +19,11 @@ type AdminServer struct {
 	// registering the actor does not establish and binding does.
 	OnListening func()
 
+	// OnStop is called when a client asks the session to end. The daemon
+	// wires it to the cancellation a SIGTERM causes; the RPC returns at
+	// once and the teardown follows.
+	OnStop func()
+
 	srv *grpc.Server
 	ln  net.Listener
 	sync.Mutex
@@ -64,6 +69,7 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 	api.RegisterAdminServiceServer(s.srv, &adminServiceServer{
 		Session:    s.Session,
 		ClientRepo: s.ClientRepo,
+		OnStop:     s.OnStop,
 	})
 	srv := s.srv
 	s.Unlock()
@@ -91,8 +97,15 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 }
 
 type adminServiceServer struct {
+	// Embedded so that a real v1.2.0 protoc-gen-go-grpc's
+	// mustEmbedUnimplementedAdminServiceServer() requirement is satisfied
+	// without this having to stand in for every method the service ever
+	// grows; GetSession and StopSession below override its stubs.
+	api.UnimplementedAdminServiceServer
+
 	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
+	OnStop     func()
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
@@ -107,4 +120,11 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		ConnectedClients: s.ClientRepo.Clients(),
 		SftpDisabled:     s.Session.SftpDisabled,
 	}, nil
+}
+
+func (s *adminServiceServer) StopSession(ctx context.Context, in *api.StopSessionRequest) (*api.StopSessionResponse, error) {
+	if s.OnStop != nil {
+		s.OnStop()
+	}
+	return &api.StopSessionResponse{}, nil
 }
