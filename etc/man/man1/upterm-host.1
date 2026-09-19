@@ -31,7 +31,9 @@ The session runs in a process of its own. This terminal is a client of it:
 type ~. at the start of a line (or --escape-char) to leave the session
 running, reattach with 'upterm attach NAME', and end it with
 \&'upterm session stop NAME'. On Unix, ~^Z suspends this terminal instead — fg
-resumes it. With --detach nothing is attached: the session starts in the
+resumes it. A session that keeps producing output while this terminal is
+suspended may disconnect it before fg runs; 'upterm attach NAME' brings it
+back. With --detach nothing is attached: the session starts in the
 background and this command prints how to reach it.
 
 

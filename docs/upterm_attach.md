@@ -12,8 +12,10 @@ is attached to; with several, the name is required.
 
 To detach, type the escape character at the start of a line followed by a
 period: ~. by default. ~~ sends a literal ~. On Unix, ~^Z suspends this
-terminal instead — fg resumes it. Everything else is sent to the session as
-typed. A SIGTERM or SIGHUP detaches too.
+terminal instead — fg resumes it. A session that keeps producing output
+while this terminal is suspended may disconnect it before fg runs (the
+same 254 below); 'upterm attach NAME' brings it back. Everything else is
+sent to the session as typed. A SIGTERM or SIGHUP detaches too.
 
 Exit status: 0 after a detach; the command's own status once the session
 ends; 254 if the session disconnected this terminal (a stalled or overflowed
