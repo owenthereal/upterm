@@ -94,7 +94,18 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 	// A public key selects the agent key it names, as an IdentityFile that
 	// names a .pub does in OpenSSH. It is the only way to pick one identity
 	// that exists nowhere but in an agent.
-	if pub, _, _, _, err := ssh.ParseAuthorizedKey(pb); err == nil {
+	if pub, _, _, rest, err := ssh.ParseAuthorizedKey(pb); err == nil {
+		// One entry names one identity. Pointing it at a file of many —
+		// ~/.ssh/authorized_keys, say — would otherwise silently mean "the
+		// first key in it", which is a guess this has no business making.
+		// The test is whether another key *parses* out of what follows, not
+		// whether anything follows at all: a real .pub ends in a newline and
+		// may carry blank or `#` comment lines, and ParseAuthorizedKey skips
+		// exactly those before it looks for a key, so they leave a non-empty
+		// rest that yields no second key.
+		if _, _, _, _, err := ssh.ParseAuthorizedKey(rest); err == nil {
+			return nil, fmt.Errorf("%s names more than one key; name a file with a single key", file)
+		}
 		s, err := ag.signerFor(pub)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w%s", file, err, publicKeySelectorHint(file))
