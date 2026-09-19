@@ -94,14 +94,31 @@ func TestRekeySignsWithTheSessionHostKey(t *testing.T) {
 	handshakes := hostKey.signatures.Load()
 	require.GreaterOrEqual(t, handshakes, int32(1), "the handshake signed")
 
-	// Well past the threshold in both directions; cat echoes it back. In
+	// Spend the client's rekey budget over several round trips rather than in
+	// one big write. x/crypto checks the budget *before* charging the packet
+	// it is about to send: handshake.go:617-621 asks for a key exchange only
+	// once writeBytesLeft has already run out, so a single 4 KB write spends
+	// the budget and asks for nothing — the *next* packet is what asks, and
+	// in this test that packet came after the assertion. One big write left
+	// the rekey to the read side, which counts the same way
+	// (handshake.go:433-437): it fired only when the echo happened to come
+	// back split across packets, and a host that drained the pty in one go
+	// sent it as one, so nothing ever asked. That race is what made this
+	// flaky, badly so on Linux.
+	//
+	// Each round is over the 256-byte threshold in both directions, so round
+	// two finds the budget spent and its own packet asks for the rekey. In
 	// lines, because the pty is in canonical mode and drops input lines
 	// longer than its 4095-byte line buffer.
-	payload := strings.Repeat(strings.Repeat("x", 200)+"\n", 20) + "END\n"
-	_, err = io.WriteString(guestIn, payload)
-	require.NoError(t, err)
-	readUntil(t, guestOut, "END")
+	line := strings.Repeat("x", 300)
+	for _, marker := range []string{"ONE", "TWO", "THREE", "FOUR"} {
+		_, err = io.WriteString(guestIn, line+"\n"+marker+"\n")
+		require.NoError(t, err)
+		readUntil(t, guestOut, marker)
+	}
 
+	// The exchange is asked for deterministically, above; this waits only for
+	// it to finish.
 	require.Eventually(t, func() bool { return hostKey.signatures.Load() > handshakes },
 		harnessTimeout, 10*time.Millisecond, "a rekey signed with the session host key")
 
