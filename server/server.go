@@ -338,15 +338,19 @@ func (s *Server) Shutdown() error {
 
 	var err error
 
-	// Stop accepting new connections first
+	// Stop accepting new connections first. An already-closed listener is
+	// success, not failure: the serving path closes these same listeners on its
+	// way down -- sshProxy.Shutdown closes sshln by way of SSHRouting, and
+	// webSocketProxy.Shutdown closes wsln by way of http.Server -- so whichever
+	// side loses the race sees net.ErrClosed, and the listener is shut either way.
 	if s.sshln != nil {
-		if sshErr := s.sshln.Close(); sshErr != nil {
+		if sshErr := s.sshln.Close(); sshErr != nil && !errors.Is(sshErr, net.ErrClosed) {
 			err = errors.Join(err, fmt.Errorf("ssh listener close: %w", sshErr))
 		}
 	}
 
 	if s.wsln != nil {
-		if wsErr := s.wsln.Close(); wsErr != nil {
+		if wsErr := s.wsln.Close(); wsErr != nil && !errors.Is(wsErr, net.ErrClosed) {
 			err = errors.Join(err, fmt.Errorf("websocket listener close: %w", wsErr))
 		}
 	}
