@@ -29,7 +29,7 @@ func TestSignersFallback(t *testing.T) {
 		{name: "invalid key", keys: []string{invalid}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			signers, cleanup, err := Signers(tc.keys)
+			signers, cleanup, err := Signers(tc.keys, false)
 			if cleanup != nil {
 				t.Cleanup(cleanup)
 			}
@@ -53,7 +53,7 @@ func TestSignersPreservesFileKey(t *testing.T) {
 	keyFile := filepath.Join(dir, "key")
 	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(block), 0600))
 
-	signers, cleanup, err := Signers([]string{filepath.Join(dir, "missing"), keyFile})
+	signers, cleanup, err := Signers([]string{filepath.Join(dir, "missing"), keyFile}, false)
 	if cleanup != nil {
 		t.Cleanup(cleanup)
 	}
@@ -197,4 +197,94 @@ func Test_signerFromFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingPrompt is a passphrase prompt that must never be reached.
+func failingPrompt(t *testing.T) func(string) ([]byte, error) {
+	return func(file string) ([]byte, error) {
+		t.Fatalf("the passphrase prompt was called for %s", file)
+		return nil, nil
+	}
+}
+
+func TestIdentitySigners_EmptyListIsAnError(t *testing.T) {
+	_, cleanup, err := identitySigners(nil, "", failingPrompt(t))
+	require.Nil(t, cleanup)
+	require.EqualError(t, err, "private-key was supplied but names no files")
+}
+
+func TestIdentitySigners_MissingFileIsAnError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, _, err := identitySigners([]string{missing}, "", failingPrompt(t))
+	require.ErrorContains(t, err, "cannot read private key "+missing)
+}
+
+func TestIdentitySigners_UnparseableFileIsAnError(t *testing.T) {
+	junk := filepath.Join(t.TempDir(), "junk")
+	require.NoError(t, os.WriteFile(junk, []byte("not a key of any kind"), 0600))
+	_, _, err := identitySigners([]string{junk}, "", failingPrompt(t))
+	require.ErrorContains(t, err, "cannot parse private key "+junk)
+}
+
+func TestIdentitySigners_UnencryptedFileNeedsNoAgent(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	block, err := ssh.MarshalPrivateKey(privateKey, "")
+	require.NoError(t, err)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(block), 0600))
+
+	// No agent socket at all: an unencrypted file must not want one.
+	signers, cleanup, err := identitySigners([]string{keyFile}, "", failingPrompt(t))
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.Len(t, signers, 1)
+	want, err := ssh.NewPublicKey(publicKey)
+	require.NoError(t, err)
+	require.Equal(t, want.Marshal(), signers[0].PublicKey().Marshal())
+}
+
+func TestIdentitySigners_EncryptedFileWithNoAgentPrompts(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(keyFile, []byte(ed25519PriavteKey), 0600))
+
+	t.Run("right passphrase", func(t *testing.T) {
+		prompts := 0
+		signers, cleanup, err := identitySigners([]string{keyFile}, "", func(string) ([]byte, error) {
+			prompts++
+			return []byte("1234"), nil
+		})
+		require.NoError(t, err)
+		t.Cleanup(cleanup)
+		require.Len(t, signers, 1)
+		require.Equal(t, 1, prompts)
+		want, _, _, _, err := ssh.ParseAuthorizedKey([]byte(ed25519PublicKey))
+		require.NoError(t, err)
+		require.Equal(t, want.Marshal(), signers[0].PublicKey().Marshal())
+	})
+
+	t.Run("wrong passphrase three times is an error, not a generated key", func(t *testing.T) {
+		prompts := 0
+		_, _, err := identitySigners([]string{keyFile}, "", func(string) ([]byte, error) {
+			prompts++
+			return []byte("wrong"), nil
+		})
+		require.ErrorContains(t, err, "error decrypting private key "+keyFile)
+		require.Equal(t, 3, prompts)
+	})
+}
+
+func TestIdentitySigners_PubSelectorWithNoAgentIsAnError(t *testing.T) {
+	pubFile := filepath.Join(t.TempDir(), "id.pub")
+	require.NoError(t, os.WriteFile(pubFile, []byte(ed25519PublicKey), 0600))
+	_, _, err := identitySigners([]string{pubFile}, "", failingPrompt(t))
+	require.ErrorContains(t, err, pubFile+": no SSH agent to look up")
+	require.ErrorContains(t, err, "SSH agent is not running")
+}
+
+func TestSigners_IdentitiesOnlyDoesNotFallBackToAGeneratedKey(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, _, err := Signers([]string{missing}, true)
+	require.ErrorContains(t, err, "cannot read private key "+missing)
 }

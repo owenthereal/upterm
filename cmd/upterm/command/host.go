@@ -451,7 +451,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
 	}
 
-	signers, cleanup, err := host.Signers(flagPrivateKeys)
+	signers, cleanup, err := host.Signers(flagPrivateKeys, identitiesOnlyRequested())
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
@@ -787,6 +787,13 @@ func authorizationRequested() bool {
 		}
 	}
 	return false
+}
+
+// identitiesOnlyRequested reports whether the user named their identities,
+// from any configuration origin. A named list is the whole set: see
+// host.Signers.
+func identitiesOnlyRequested() bool {
+	return suppliedFlags["private-key"]
 }
 
 func countKeys(aks []*host.AuthorizedKey) int {

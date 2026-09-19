@@ -623,6 +623,20 @@ func Test_authorizationRequested(t *testing.T) {
 	assert.False(t, authorizationRequested())
 }
 
+func Test_identitiesOnlyRequested(t *testing.T) {
+	orig := suppliedFlags
+	t.Cleanup(func() { suppliedFlags = orig })
+
+	suppliedFlags = map[string]bool{}
+	assert.False(t, identitiesOnlyRequested())
+
+	suppliedFlags = map[string]bool{"private-key": true}
+	assert.True(t, identitiesOnlyRequested())
+
+	suppliedFlags = map[string]bool{"authorized-keys": true}
+	assert.False(t, identitiesOnlyRequested())
+}
+
 // Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that shareRunE does not
 // re-wrap an error AuthorizedKeysFromFile has already described.
 func Test_hostCmd_authorizedKeysErrorNamesTheFileOnce(t *testing.T) {
