@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,40 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 			assert.ErrorContains(t, err, cc.wantErrSubstr)
 		})
 	}
+}
+
+// Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins
+// the three combinations that cannot work: a background session nobody can
+// confirm, an output format for a foreground run that has none, and a format
+// this does not speak.
+func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *testing.T) {
+	origServer, origDetach, origAccept, origOutput := flagServer, flagDetach, flagAccept, flagHostOutput
+	t.Cleanup(func() {
+		flagServer, flagDetach, flagAccept, flagHostOutput = origServer, origDetach, origAccept, origOutput
+	})
+
+	// Built once, before any case sets a flag: registering a flag writes its
+	// default into the variable behind it, so constructing the command per
+	// call would undo the case it was meant to exercise. It is also where
+	// --server's default comes from, which keeps that check quiet.
+	cmd := hostCmd()
+	reset := func() { flagDetach, flagAccept, flagHostOutput = false, false, "" }
+
+	reset()
+	flagDetach = true
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--detach requires --accept")
+
+	reset()
+	flagHostOutput = "json"
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--output requires --detach")
+
+	reset()
+	flagDetach, flagAccept, flagHostOutput = true, true, "yaml"
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "must be 'json'")
+
+	reset()
+	flagDetach, flagAccept, flagHostOutput = true, true, "json"
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
 }
 
 // Test_UserDiscardedError_IsAnAbandonedSession pins how declining or
@@ -623,19 +658,75 @@ func Test_authorizationRequested(t *testing.T) {
 	assert.False(t, authorizationRequested())
 }
 
-// Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that shareRunE does not
-// re-wrap an error AuthorizedKeysFromFile has already described.
+// runHostInProcess runs `upterm host <argv...>` with the daemon in a
+// goroutine of this process instead of a child of it, and returns what the
+// command returned.
+//
+// The exchange is the real one — a real bootstrap.Child on the far end of a
+// pipe, reporting through the same messages — but the daemon is not started
+// by spawnDaemon, which re-executes this process's own argv. Under `go test`
+// that argv is the test runner's, so a test that reached spawnDaemon would
+// start a second copy of the test binary and run the whole suite inside it,
+// once per spawn.
+//
+// The daemon's hostOptions come from the arguments after `--`, which is what
+// cobra hands shareRunE and therefore what the real daemon parses out of the
+// argv it inherits.
+func runHostInProcess(t *testing.T, argv ...string) error {
+	t.Helper()
+
+	orig := hostSpawn
+	t.Cleanup(func() { hostSpawn = orig })
+
+	// Registered before the connections' own cleanup and therefore run after
+	// it: the close is what ends the daemon, and the daemon reads the flag
+	// variables the next test is about to write.
+	var daemons sync.WaitGroup
+	t.Cleanup(daemons.Wait)
+
+	var command []string
+	for i, a := range argv {
+		if a == "--" {
+			command = argv[i+1:]
+			break
+		}
+	}
+
+	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
+		opts, err := parseHostOptions(command)
+		if err != nil {
+			return nil, nil, err
+		}
+		a, b := net.Pipe()
+		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+		daemons.Add(1)
+		go func() {
+			defer daemons.Done()
+			_ = runDaemonProcess(context.Background(), discardLogger(), opts, a, so.name,
+				func(ctx context.Context, h *host.Host) error { return h.Run(ctx) })
+		}()
+		return b, nil, nil
+	}
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs(argv)
+	return root.Execute()
+}
+
+// Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps
+// an error AuthorizedKeysFromFile has already described. The daemon is what
+// resolves the keys and so what produces the error; the parent adds only its
+// own "session NAME could not start:" prefix, which is what the assertions
+// below check — the file is named once, and never with the doubled "error
+// reading authorized keys: error reading authorized keys".
 func Test_hostCmd_authorizedKeysErrorNamesTheFileOnce(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	missing := filepath.Join(dir, "nope")
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs([]string{"host", "--accept", "--authorized-keys", missing, "--", "true"})
-
-	err := root.Execute()
+	err := runHostInProcess(t, "host", "--accept", "--authorized-keys", missing, "--", "true")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "error reading authorized keys file "+missing)
 	assert.NotContains(t, err.Error(), "error reading authorized keys: error reading authorized keys")
@@ -782,13 +873,7 @@ func Test_hostCmd_refusesEmptyAuthorization(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			root := Root()
-			root.SetOut(io.Discard)
-			root.SetErr(io.Discard)
-			root.SetArgs(c.args)
-
-			err := root.Execute()
-			assert.ErrorContains(t, err, c.wantErrSubstr)
+			assert.ErrorContains(t, runHostInProcess(t, c.args...), c.wantErrSubstr)
 		})
 	}
 }
@@ -806,12 +891,8 @@ func Test_hostCmd_guardRefusesWhenRequestedButEmpty(t *testing.T) {
 	t.Run("empty flag value", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--authorized-user", "", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t,
+			runHostInProcess(t, "host", "--accept", "--authorized-user", "", "--", "true"), wantErr)
 	})
 
 	t.Run("empty config list", func(t *testing.T) {
@@ -823,24 +904,14 @@ func Test_hostCmd_guardRefusesWhenRequestedButEmpty(t *testing.T) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(confDir, "config.yaml"), []byte("authorized-user: []\n"), 0o600))
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t, runHostInProcess(t, "host", "--accept", "--", "true"), wantErr)
 	})
 
 	t.Run("empty environment variable", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 		t.Setenv("UPTERM_AUTHORIZED_USER", "")
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t, runHostInProcess(t, "host", "--accept", "--", "true"), wantErr)
 	})
 }
 
@@ -868,17 +939,13 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-			root := Root()
-			root.SetOut(io.Discard)
-			root.SetErr(io.Discard)
 			// An empty value, including for --authorized-keys: pflag records
-			// Changed, shareRunE reads no file and parses no reference, so the
-			// guard is the only thing standing between this and a session that
-			// accepts anyone. (An empty authorized_keys *file* fails earlier,
-			// inside AuthorizedKeysFromFile — covered above.)
-			root.SetArgs([]string{"host", "--accept", "--server", unreachable, "--" + name, "", "--", "true"})
-
-			assert.ErrorContains(t, root.Execute(), wantErr)
+			// Changed, the daemon reads no file and parses no reference, so
+			// the guard is the only thing standing between this and a session
+			// that accepts anyone. (An empty authorized_keys *file* fails
+			// earlier, inside AuthorizedKeysFromFile — covered above.)
+			assert.ErrorContains(t, runHostInProcess(t,
+				"host", "--accept", "--server", unreachable, "--"+name, "", "--", "true"), wantErr)
 		})
 	}
 }

@@ -100,12 +100,12 @@ var (
 	flagPtySize                 string
 	flagTerm                    string
 	flagName                    string
-	// flagDetach, flagHostOutput and flagHostEscapeChar are declared here so
-	// the daemon branch and runInProcessHost can parse them; Task 5
-	// registers the flags that set them. flagHostEscapeChar defaults to "~"
-	// so parseEscapeChar accepts it before the flag exists.
-	flagDetach         bool
-	flagHostOutput     string
+	flagDetach                  bool
+	flagHostOutput              string
+	// flagHostEscapeChar carries its flag's default here as well as in the
+	// registration below, so parseEscapeChar has a value to accept when the
+	// var is read without hostCmd having run — which is every unit test that
+	// calls parseHostOptions.
 	flagHostEscapeChar = "~"
 )
 
@@ -122,7 +122,13 @@ Upterm server uses private keys in this order:
   3. Auto-generated ephemeral key (if no keys found)
 
 To authorize client connections, use --authorized-keys to specify an authorized_keys file
-containing client public keys.`,
+containing client public keys.
+
+The session runs in a process of its own. This terminal is a client of it:
+type ~. at the start of a line (or --escape-char) to leave the session
+running, reattach with 'upterm attach NAME', and end it with
+'upterm session stop NAME'. With --detach nothing is attached: the session
+starts in the background and this command prints how to reach it.`,
 		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   upterm host
 
@@ -145,7 +151,13 @@ containing client public keys.`,
   upterm host --allow-local-tcp-forwarding
 
   # Use a different Uptermd server, hosting a session via WebSocket:
-  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND`,
+  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
+
+  # Start a session in the background and print how to reach it:
+  upterm host --detach --accept --github-user alice
+
+  # The same, as JSON for a script:
+  upterm host --detach --accept --github-user alice -o json`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
@@ -179,6 +191,9 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
+	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
+	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
+	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -316,6 +331,16 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 
 	if err := validateSessionNameFlag(flagName); err != nil {
 		result = multierror.Append(result, err)
+	}
+
+	if flagDetach && !flagAccept {
+		result = multierror.Append(result, fmt.Errorf("--detach requires --accept: a session nobody is watching cannot be confirmed interactively"))
+	}
+	if flagHostOutput != "" && !flagDetach {
+		result = multierror.Append(result, fmt.Errorf("--output requires --detach"))
+	}
+	if flagHostOutput != "" && flagHostOutput != "json" {
+		result = multierror.Append(result, fmt.Errorf("invalid output format %q: must be 'json'", flagHostOutput))
 	}
 
 	if flagServer == "" {
@@ -500,7 +525,80 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runInProcessHost(c, logger.Logger, opts)
+	if !spawnSupported {
+		if flagDetach {
+			return errors.New("--detach is not supported on this platform yet")
+		}
+		return runInProcessHost(c, logger.Logger, opts)
+	}
+	return runHostParent(c, logger.Logger, opts)
+}
+
+// hostSpawn is how runHostParent starts the daemon.
+//
+// A var because spawnDaemon re-executes this process with this process's own
+// argv, which is upterm's argv in the binary and the test runner's under `go
+// test`: a test that drives `upterm host` through Root().Execute() and
+// reached spawnDaemon would start a second copy of the test binary, running
+// the whole suite again, once per spawn. So the tests that drive the command
+// in-process point this at a daemon in a goroutine of their own process, and
+// exercise the same exchange over a pipe.
+var hostSpawn spawnFunc = spawnDaemon
+
+// runHostParent is upterm host on a platform that spawns: the daemon is a
+// child, this process is its operator's terminal.
+func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
+	display := displaySession
+	if flagDetach && flagHostOutput == "json" {
+		// stdout is the JSON; the banner would be noise in it.
+		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
+	}
+	var attachClient clientFunc
+	if !flagDetach {
+		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
+			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
+		}
+	}
+	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
+		s := &spawnedSession{
+			name:         name,
+			detach:       flagDetach,
+			jsonOut:      flagHostOutput == "json",
+			logPath:      utils.UptermLogFilePath(),
+			stdin:        os.Stdin,
+			stdout:       os.Stdout,
+			stderr:       os.Stderr,
+			readSecret:   terminalSecretReader(os.Stdin, os.Stderr),
+			spawn:        hostSpawn,
+			display:      display,
+			attachClient: attachClient,
+			logger:       logger,
+		}
+		return s.run(c.Context())
+	})
+
+	err = mapUserAction(c, err)
+	var ec ExitCodeError
+	if errors.As(err, &ec) && ec.Err == nil {
+		// The line that explains it was printed already; the status is for
+		// a script.
+		c.SilenceErrors = true
+	}
+	return err
+}
+
+// terminalSecretReader reads a passphrase from stdin without echo, or is
+// nil when stdin is not a terminal — a secret cannot be read from a pipe
+// without echoing it somewhere.
+func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
+	if !term.IsTerminal(int(stdin.Fd())) {
+		return nil
+	}
+	return func(string) ([]byte, error) {
+		defer func() { _, _ = fmt.Fprintln(stderr) }()
+		return term.ReadPassword(int(stdin.Fd()))
+	}
 }
 
 // runInProcessHost runs the daemon in this process and attaches this

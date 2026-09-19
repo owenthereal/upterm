@@ -247,6 +247,12 @@ type sessionInfo struct {
 	// session bound it under the runtime root it claimed its name with, which
 	// a reader need not share. Absent once the session has ended.
 	AttachSocket string `json:"attachSocket,omitempty"`
+	// LogPath is where the session's process logs, from the record: the
+	// daemon publishes it, since the reader's state root need not be its.
+	LogPath string `json:"logPath,omitempty"`
+	// Pid is the process that claimed the name, from the record. What
+	// `session stop` names when the socket does not answer.
+	Pid          int    `json:"pid,omitempty"`
 	Command      string `json:"command,omitempty"`
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
@@ -357,6 +363,8 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		SessionID:    rec.SessionID,
 		Command:      strings.Join(rec.Command, " "),
 		ForceCommand: strings.Join(rec.ForceCommand, " "),
+		LogPath:      rec.LogPath,
+		Pid:          rec.Pid,
 		Reason:       rec.Reason,
 		ExitCode:     rec.ExitCode,
 		Signal:       rec.Signal,

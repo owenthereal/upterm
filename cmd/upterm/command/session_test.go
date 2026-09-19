@@ -825,8 +825,11 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 	setupSessionRoots(t)
 
 	// Present in every state, so a caller can read them without first working
-	// out which state it got.
-	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount"}
+	// out which state it got. pid is among them because Claim records it and
+	// nothing ever clears it — it is what `kill` names when a session's socket
+	// has stopped answering. logPath is not: only a daemon publishes one, and
+	// these fixtures are claims without a daemon behind them.
+	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount", "pid"}
 
 	for _, tc := range []struct {
 		name  string
@@ -839,14 +842,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// published all the same: the name is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "adminSocket", "attachSocket"},
 		},
 		{
 			// The one state whose socket answers, and the only one that can
 			// carry a connect string.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -854,7 +857,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// the live detail may not, since only ready is joinable.
 			name:  "disconnected",
 			build: buildDisconnected,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "sessionId", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "adminSocket", "attachSocket"},
 		},
 		{
 			// The only state that can carry an exit code, because it is the
@@ -862,14 +865,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// session, no socket path, since there is nothing left to dial.
 			name:  "exited",
 			build: buildEndedAfterExit,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason", "exitCode"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "exitCode"},
 		},
 		{
 			// Killed before it could publish an outcome: the same shape as a
 			// clean exit, minus the code nobody recorded.
 			name:  "killed",
 			build: buildEndedAfterKill,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "command", "reason"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
