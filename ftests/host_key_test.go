@@ -142,16 +142,18 @@ func Test_Host_AllowlistedRelayChecksTheIdentityNotTheSessionKey(t *testing.T) {
 		defer cancel()
 		err = run.host.Run(ctx)
 		require.Error(t, err)
-		// Not PermissionDeniedError: publickeyAuthError in
-		// host/internal/reversetunnel.go matches only "attempted methods
-		// [none]", the no-key-offered shape, so a key that is offered and
-		// refused — which is what an --authorized-keys allowlist produces —
-		// falls through to the generic dial error. Pre-existing, untouched by
-		// this branch, and left for a change of its own.
-		require.ErrorContains(t, err, "unable to authenticate")
-		// [none publickey]: the host did offer its identity and the relay
-		// refused it. Without this, a host that offered nothing — or one that
-		// never reached the relay — would satisfy the assertion above.
-		require.ErrorContains(t, err, "[none publickey]")
+		// An allowlist that does not name this identity is the commonest way a
+		// host is turned away, and until #562 it was the one the code did not
+		// recognise: the match covered only the no-key-offered shape, so this
+		// fell through to a raw "ssh dial error: ssh: handshake failed, ...
+		// attempted methods [none publickey]" — the string the issue quotes.
+		//
+		// Asserted on the text rather than on PermissionDeniedError, which
+		// host/internal is not allowed to export this far. The whole sentence
+		// is what makes it equivalent: only that type produces it, and it says
+		// the identity was offered and refused rather than never offered,
+		// which a host that failed to reach the relay would also satisfy.
+		require.ErrorContains(t, err, "Permission denied (publickey); the 1 identity offered was refused.")
+		require.NotContains(t, err.Error(), "ssh dial error", "a denial is classified, not wrapped as a generic dial failure")
 	})
 }

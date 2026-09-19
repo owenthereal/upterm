@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -73,9 +74,13 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 		name    string
 		signers []ssh.Signer
 		allowed bool
+		// denial is what a refused tunnel says happened. Both shapes come
+		// from a real x/crypto handshake here rather than from a string this
+		// test wrote, which is what makes them evidence.
+		denial string
 	}{
-		{name: "no keys"},
-		{name: "rejected key", signers: bad},
+		{name: "no keys", denial: "Permission denied (publickey); no identity was offered."},
+		{name: "rejected key", signers: bad, denial: "Permission denied (publickey); the 1 identity offered was refused."},
 		{name: "accepted key", signers: good, allowed: true},
 		{name: "rejected then accepted", signers: []ssh.Signer{bad[0], good[0]}, allowed: true},
 	}
@@ -125,10 +130,14 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 
 					if !tc.allowed {
 						require.Error(t, err)
-						if len(tc.signers) == 0 {
-							var denied *PermissionDeniedError
-							require.ErrorAs(t, err, &denied)
-						}
+						// Both refusals are permission denials. Only the
+						// no-key one used to be recognised as such, and the
+						// key-offered-and-refused one — what an allowlisting
+						// relay produces — surfaced as a raw handshake error
+						// (#562).
+						var denied *PermissionDeniedError
+						require.ErrorAs(t, err, &denied)
+						require.ErrorContains(t, err, tc.denial)
 						return
 					}
 					require.NoError(t, err)
@@ -475,7 +484,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("an http proxy is offered for copying", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		// Exported, not merely assigned: a bare assignment would not reach the
 		// process the user retries with.
@@ -492,7 +501,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 		}
 		_ = stubEnv(t, "https_proxy", httpEnv, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.Contains(t, err.Error(), `export UPTERM_PROXY="$https_proxy"`)
 	})
@@ -503,7 +512,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a socks5 proxy names the other transport instead", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 		assert.Contains(t, err.Error(), "--server wss://uptermd.upterm.dev")
@@ -515,7 +524,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a proxy that does not apply gets no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", nil, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
 	})
@@ -523,7 +532,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a lookup error gets no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, errors.New("invalid proxy address"))
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
 	})
@@ -531,7 +540,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a proxy with no host gets no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", &url.URL{Scheme: "http"}, nil)
 
-		err := sshDialError(sshURL, nil, dialErr)
+		err := sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.Equal(t, "ssh dial error: "+dialErr.Error(), err.Error())
 	})
@@ -539,7 +548,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("--proxy already supplied, no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(sshURL, flagged, dialErr)
+		err := sshDialError(sshURL, flagged, 1, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 	})
@@ -547,7 +556,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("wss already reads the environment, no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(wssURL, nil, dialErr)
+		err := sshDialError(wssURL, nil, 1, dialErr)
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 	})
@@ -559,7 +568,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a failure that is not the network gets no advice", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(sshURL, nil, errors.New("ssh: handshake failed: host key mismatch"))
+		err := sshDialError(sshURL, nil, 1, errors.New("ssh: handshake failed: host key mismatch"))
 
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
 		assert.NotContains(t, err.Error(), "wss://")
@@ -570,7 +579,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("a custom relay keeps its own host in the suggestion", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
-		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, dialErr)
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "relay.corp:22"}, nil, 1, dialErr)
 
 		assert.Contains(t, err.Error(), "--server wss://relay.corp")
 		assert.NotContains(t, err.Error(), "uptermd.upterm.dev")
@@ -581,7 +590,7 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("an IPv6 relay is bracketed in the suggestion", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", socksEnv, nil)
 
-		err := sshDialError(&url.URL{Scheme: "ssh", Host: "[2001:db8::1]:22"}, nil, dialErr)
+		err := sshDialError(&url.URL{Scheme: "ssh", Host: "[2001:db8::1]:22"}, nil, 1, dialErr)
 
 		assert.Contains(t, err.Error(), "--server wss://[2001:db8::1]")
 	})
@@ -592,18 +601,116 @@ func TestSSHDialErrorPointsAtTheProxyFlag(t *testing.T) {
 	t.Run("the lookup is asked about the port that failed", func(t *testing.T) {
 		asked := stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		_ = sshDialError(sshURL, nil, dialErr)
+		_ = sshDialError(sshURL, nil, 1, dialErr)
 
 		assert.Equal(t, "uptermd.upterm.dev:22", *asked)
 	})
 
+	// The proxy hint is for a dial that never reached the relay. An
+	// authentication failure reached it and was turned away, so the advice
+	// would be beside the point; the denial takes the error instead.
 	t.Run("an auth failure is still a permission denial", func(t *testing.T) {
 		_ = stubEnv(t, "HTTPS_PROXY", httpEnv, nil)
 
-		err := sshDialError(sshURL, nil, errors.New(publickeyAuthError))
+		err := sshDialError(sshURL, nil, 1, authFailure("[none publickey]"))
 
 		var denied *PermissionDeniedError
 		require.ErrorAs(t, err, &denied)
 		assert.NotContains(t, err.Error(), "UPTERM_PROXY")
+	})
+}
+
+// authFailure is x/crypto's out-of-methods error as ssh.Dial delivers it, with
+// methods the %v of the ordered list of names it tried.
+func authFailure(methods string) error {
+	return fmt.Errorf("ssh: handshake failed: ssh: unable to authenticate, attempted methods %s, no supported methods remain", methods)
+}
+
+// A refused host is told which of the two refusals it got, because they are
+// different problems: nothing was offered, or what was offered was not
+// accepted. Until #562 only the first was recognised at all — the second, what
+// a relay running with --authorized-keys produces, reached the user as the raw
+// handshake error the issue quotes.
+func TestSSHDialErrorNamesWhichDenialHappened(t *testing.T) {
+	relay := &url.URL{Scheme: "ssh", Host: "relay.corp:22"}
+
+	t.Run("no identity was offered", func(t *testing.T) {
+		err := sshDialError(relay, nil, 0, authFailure("[none]"))
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); no identity was offered.", err.Error())
+	})
+
+	t.Run("one identity was offered and refused", func(t *testing.T) {
+		err := sshDialError(relay, nil, 1, authFailure("[none publickey]"))
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); the 1 identity offered was refused.", err.Error())
+	})
+
+	// The count comes from the caller because x/crypto's list is of methods,
+	// not of keys: ssh.PublicKeys is a single "publickey" entry whether it
+	// carries one signer or three, so the same error text backs both.
+	t.Run("several identities were offered and refused", func(t *testing.T) {
+		err := sshDialError(relay, nil, 3, authFailure("[none publickey]"))
+
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); the 3 identities offered were refused.", err.Error())
+	})
+
+	// Holding keys is not offering them. A server that does not allow
+	// publickey leaves the method out of the list, and the list is what is
+	// believed — saying an identity was refused when none went out would send
+	// the user looking at the wrong key.
+	t.Run("keys held but never offered", func(t *testing.T) {
+		err := sshDialError(relay, nil, 2, authFailure("[none]"))
+
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); no identity was offered.", err.Error())
+	})
+
+	// The match is on the head of x/crypto's sentence rather than on either
+	// list it is known to produce today, so a list this code has never seen is
+	// still classified as the denial it is.
+	t.Run("an unfamiliar method list is still a denial", func(t *testing.T) {
+		err := sshDialError(relay, nil, 1, authFailure("[none keyboard-interactive]"))
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); no identity was offered.", err.Error())
+	})
+
+	// The list ends at its bracket. Everything after it is the rest of
+	// x/crypto's sentence, or whatever wrapped the error, and a method name
+	// found there was not a method that was tried.
+	t.Run("a method named after the list is not a key offered", func(t *testing.T) {
+		err := sshDialError(relay, nil, 1, fmt.Errorf("%w: publickey", authFailure("[none]")))
+
+		assert.Equal(t, "ssh://relay.corp:22: Permission denied (publickey); no identity was offered.", err.Error())
+	})
+
+	// The handshake's own words are what a bug report needs, and replacing
+	// them with a summary would lose them.
+	t.Run("the x/crypto error stays reachable", func(t *testing.T) {
+		cause := authFailure("[none publickey]")
+
+		err := sshDialError(relay, nil, 1, cause)
+
+		var denied *PermissionDeniedError
+		require.ErrorAs(t, err, &denied)
+		require.Equal(t, cause, denied.Unwrap())
+		assert.ErrorIs(t, err, cause)
+	})
+
+	// Only authentication is a denial. Everything else the dial can fail with
+	// keeps the wrap it had, and the proxy advice that goes with it.
+	t.Run("a failure that is not authentication is not a denial", func(t *testing.T) {
+		cause := errors.New("ssh: handshake failed: knownhosts: key mismatch")
+
+		err := sshDialError(relay, nil, 1, cause)
+
+		var denied *PermissionDeniedError
+		require.NotErrorAs(t, err, &denied)
+		assert.Equal(t, "ssh dial error: "+cause.Error(), err.Error())
 	})
 }
