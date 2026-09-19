@@ -83,6 +83,41 @@ func Test_Command_RestoresTheTerminalOnlyWhenStillOwned(t *testing.T) {
 	}
 }
 
+// TestRawTerminalSavesOnlyTheFirstEnter pins the invariant rawTerminal's own
+// doc comment states: the state saved on the first enter is the one
+// restored, always, even across a suspend's give-it-back-and-take-it-again.
+// A naive `r.orig = st` on every enter is invisible whenever every restore
+// succeeds, so the middle restore here is deliberately made a no-op — not
+// ours, because the process is "backgrounded" at that instant — the same
+// shape ~^Z then bg leaves suspendLocalTerminal in. If enter re-saved raw as
+// orig, the terminal would still be raw once ownership returns and the final
+// restore runs.
+func TestRawTerminalSavesOnlyTheFirstEnter(t *testing.T) {
+	ptmx, tty, err := ptylib.Open()
+	require.NoError(t, err)
+	defer func() { _ = ptmx.Close() }()
+	defer func() { _ = tty.Close() }()
+
+	fd := int(tty.Fd())
+	original, err := term.GetState(fd)
+	require.NoError(t, err)
+
+	foreground := false // the suspend's restore lands while backgrounded
+	r := &rawTerminal{f: tty, owned: func(*os.File) bool { return foreground }}
+
+	require.NoError(t, r.enter())
+	r.restore()                   // not ours: a no-op, terminal stays raw
+	require.NoError(t, r.enter()) // must not adopt raw as the state to return to
+
+	foreground = true
+	r.restore()
+
+	got, err := term.GetState(fd)
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(original, got),
+		"the second enter must not have overwritten orig with the raw state it found")
+}
+
 func TestClassifyTerminalOnAPty(t *testing.T) {
 	ptmx, tty, err := ptylib.Open()
 	require.NoError(t, err)

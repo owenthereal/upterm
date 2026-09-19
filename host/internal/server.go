@@ -946,6 +946,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// parks its whole request loop, and with it Pty, Signals and Exit.
 		// The bound is this buffer once ctx is done — our own client sends
 		// one WINCH per resume, and the session is ending by then.
+		//
+		// Past that bound — any signal request arriving after this actor has
+		// returned, which any group unwind causes, not only shutdown — there
+		// is nothing left to drain sigs, and charm's next one parks its whole
+		// request loop with the session lock held; HandleSession's own
+		// closing sess.Exit takes that same lock and would never return
+		// either. Host-door only, and the host door is a unix socket, so this
+		// is the local user's own foot: no guest can reach it.
 		sigs := make(chan gssh.Signal, 8)
 		sess.Signals(sigs)
 		ctx, cancel := context.WithCancel(h.ctx)

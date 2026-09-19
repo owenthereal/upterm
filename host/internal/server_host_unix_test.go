@@ -416,6 +416,16 @@ func TestHostDoor_WinchSignalNudgesThePty(t *testing.T) {
 	}
 	require.Equal(t, 2, ptmx.redrawCount(), "a WINCH signal request must nudge the pty")
 
+	// A second signal, proving the actor drains continuously rather than
+	// reading one and returning: a one-shot reader would leave this at 2
+	// forever, since nothing would be left to receive it.
+	sess.signal(gssh.Signal("WINCH"))
+	deadline = time.Now().Add(harnessTimeout)
+	for ptmx.redrawCount() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, 3, ptmx.redrawCount(), "the actor must keep draining signals, not read one and stop")
+
 	close(sess.release)
 	select {
 	case <-done:
@@ -444,10 +454,9 @@ func TestGuestDoor_WinchSignalIsIgnored(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); h.HandleSession(sess) }()
 
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// What is under test is an absence -- sess.registered never closes -- so
+	// there is nothing to poll for; a flat wait is what that looks like.
+	time.Sleep(300 * time.Millisecond)
 	require.Equal(t, 1, ptmx.redrawCount(), "the arrival nudge, and nothing past it")
 	select {
 	case <-sess.registered:
