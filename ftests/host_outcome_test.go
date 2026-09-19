@@ -766,6 +766,114 @@ func Test_Host_PublishesStartupAbandonedWhenNoClientAttaches(t *testing.T) {
 	require.Nil(t, rec.ExitCode)
 }
 
+// withSessionClaimedCallback stands in for the daemon's first report to the
+// process that started it.
+func withSessionClaimedCallback(cb func(*sessiondir.Dir)) outcomeOption {
+	return func(r *outcomeRun) { r.host.SessionClaimedCallback = cb }
+}
+
+// Test_Host_ReportsTheClaimBeforeItDials: the claim callback fires with the
+// name this run took, while the record still says starting, and before the
+// session-created callback — a parent that learns the name from it can name
+// the session in every prompt that follows.
+func Test_Host_ReportsTheClaimBeforeItDials(t *testing.T) {
+	var order []string
+	var claimed *sessiondir.Dir
+	run := newOutcomeRun(t,
+		shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+		withSessionClaimedCallback(func(d *sessiondir.Dir) {
+			claimed = d
+			order = append(order, "claimed:"+d.Record().Status)
+		}),
+		withSessionCreatedCallback(func(context.Context, *api.GetSessionResponse) error {
+			order = append(order, "created")
+			return nil
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	require.NoError(t, run.host.Run(ctx))
+
+	require.Equal(t, []string{"claimed:" + sessiondir.StatusStarting, "created"}, order)
+	require.Equal(t, run.name, claimed.Name())
+	require.Equal(t, os.Getpid(), claimed.Record().Pid)
+}
+
+// Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway is the cause the
+// deferred writer and the post-run switch both have to read: a cancellation
+// whose cause is ErrSessionAbandoned means the process that started this
+// session went away before the command did, and nothing failed. Two paths,
+// because Run has two: before the run.Group exists (the callback is waiting)
+// and inside it (the initial-client gate is waiting).
+func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
+	t.Run("while the session-created callback waits", func(t *testing.T) {
+		entered := make(chan struct{})
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+			withSessionCreatedCallback(func(ctx context.Context, _ *api.GetSessionResponse) error {
+				close(entered)
+				<-ctx.Done()
+				return ctx.Err()
+			}))
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		select {
+		case <-entered:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("the callback was not entered")
+		}
+		cancel(host.ErrSessionAbandoned)
+		select {
+		case <-done:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("host did not return after cancellation")
+		}
+		rec := run.record(t)
+		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
+			"the parent went away before the command started: abandoned, not stopped")
+		require.Nil(t, rec.ExitCode)
+	})
+
+	t.Run("while the initial-client gate waits", func(t *testing.T) {
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+		run.host.AwaitInitialClient = true
+		run.host.InitialClientTimeout = outcomeTimeout
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		run.awaitAttachSocket(t) // the gate is open for business; nobody walks through it
+		cancel(host.ErrSessionAbandoned)
+		select {
+		case <-done:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("host did not return after cancellation")
+		}
+		rec := run.record(t)
+		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
+			"cancelled with the abandonment cause inside the group, before the command started")
+		require.Nil(t, rec.ExitCode)
+	})
+
+	t.Run("a plain cancellation is still a stop", func(t *testing.T) {
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+		run.host.AwaitInitialClient = true
+		run.host.InitialClientTimeout = outcomeTimeout
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		run.awaitAttachSocket(t)
+		cancel()
+		<-done
+		require.Equal(t, sessiondir.ReasonStopped, run.record(t).Reason)
+	})
+}
+
 func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 	run := newOutcomeRun(t, shellCommand(t,
 		[]string{"sh", "-c", "echo ATTACHED; sleep 30"},

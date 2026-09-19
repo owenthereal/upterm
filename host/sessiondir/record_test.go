@@ -399,6 +399,24 @@ func backdate(t *testing.T, stateRoot, name string, age time.Duration) {
 	require.NoError(t, writeJSONAtomic(filepath.Join(resultsRoot(stateRoot), name, recordFile), rec))
 }
 
+func TestClaimRecordsTheClaimersPid(t *testing.T) {
+	root := shortTempRoot(t)
+	d, err := Claim(context.Background(), ClaimOptions{RuntimeRoot: root, StateRoot: root, Name: "pid-1", Command: []string{"sh"}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Release(context.Background()) })
+
+	rec, err := ReadRecord(root, "pid-1")
+	require.NoError(t, err)
+	require.Equal(t, os.Getpid(), rec.Pid, "the claimer is the owner, and the record must say which process that is")
+
+	// Survives every later Update, which forces the identity fields.
+	require.NoError(t, d.Update(func(r *Record) { r.LogPath = "/var/log/upterm.log" }))
+	rec, err = ReadRecord(root, "pid-1")
+	require.NoError(t, err)
+	require.Equal(t, os.Getpid(), rec.Pid)
+	require.Equal(t, "/var/log/upterm.log", rec.LogPath)
+}
+
 func Test_Prune_RemovesOnlyOldFreeRecords(t *testing.T) {
 	runtimeRoot, stateRoot := roots(t)
 	ctx := context.Background()

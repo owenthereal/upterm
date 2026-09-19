@@ -267,6 +267,14 @@ type Host struct {
 	// Called on the server's own goroutine, in front of everything the
 	// command's start releases, so it must not block.
 	CommandStartedCallback func()
+	// SessionClaimedCallback is called once the session's name is claimed,
+	// with the directory that holds it, before the tunnel is dialled: the
+	// first thing a caller can know about a session is its name and its
+	// paths, and a caller that relays prompts wants them before any prompt.
+	// Not called when AdminSocketFile was supplied, since nothing is claimed.
+	//
+	// Called on Run's own goroutine; it must not block.
+	SessionClaimedCallback func(*sessiondir.Dir)
 	// VersionWarningCallback is called when the server's version is
 	// incompatible with this host's. Nil logs the mismatch and nothing more:
 	// the daemon has no terminal to print to.
@@ -319,6 +327,24 @@ var ErrSessionAbandoned = errors.New("session abandoned before the command start
 // when nobody attached in time. Nothing ran, so it is recorded as
 // startup_abandoned rather than a failure.
 var ErrNoInitialClient = internal.ErrNoInitialClient
+
+// abandonedBy reports whether ctx was cancelled because the process that
+// started the session went away: a cancellation whose cause is
+// ErrSessionAbandoned. Nothing failed and nothing was asked to stop; the
+// record must say so.
+func abandonedBy(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrSessionAbandoned)
+}
+
+// closed reports whether a done-style channel has been closed, without waiting.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
 
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
@@ -390,6 +416,10 @@ func (c *Host) Run(ctx context.Context) error {
 		c.AdminSocketFile = dir.AdminSocket()
 		c.AttachSocketFile = dir.AttachSocket()
 		claimedDir = true
+
+		if c.SessionClaimedCallback != nil {
+			c.SessionClaimedCallback(dir)
+		}
 	}
 
 	var (
@@ -443,6 +473,9 @@ func (c *Host) Run(ctx context.Context) error {
 			// asked for.
 			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
 				runReason = sessiondir.ReasonStopped
+				if abandonedBy(ctx) {
+					runReason = sessiondir.ReasonStartupAbandoned
+				}
 			}
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
@@ -790,8 +823,14 @@ func (c *Host) Run(ctx context.Context) error {
 	case shutdownRequested.Load():
 		// We asked for this. Whatever the wait says, the reason is that it was
 		// stopped — and the exit code of a process we killed is not the
-		// command's own outcome, so it is deliberately not reported.
+		// command's own outcome, so it is deliberately not reported. Unless
+		// the asking was the parent going away before the command started,
+		// which is an abandonment: the daemon is the only one who can tell,
+		// because it is the only one who knows whether the command started.
 		runReason = sessiondir.ReasonStopped
+		if abandonedBy(ctx) && !closed(cmdReady) {
+			runReason = sessiondir.ReasonStartupAbandoned
+		}
 	case errors.Is(err, internal.ErrNoInitialClient):
 		// Nobody attached, so nothing ran and nothing failed: the session
 		// was abandoned before its command started.
