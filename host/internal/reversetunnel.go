@@ -22,6 +22,20 @@ import (
 )
 
 const (
+	// publickeyAuthError matches only the no-key-offered rejection, "ssh:
+	// unable to authenticate, attempted methods [none]". A key that is
+	// offered and refused — which is what a self-hosted relay's --authorized-
+	// keys allowlist produces — arrives as "[none publickey]" instead, so it
+	// does not match, sshDialError never turns it into a
+	// PermissionDeniedError, and it surfaces to the user as a raw handshake
+	// error rather than "Permission denied (publickey)".
+	//
+	// Widening the match to also cover the offered-and-refused shape is
+	// deferred: it would change the error text every rejected-key `upterm
+	// host` start prints, which deserves its own commit and tests.
+	//
+	// The gap is pinned by the "an unlisted identity is refused" subtest in
+	// ftests/host_key_test.go.
 	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
 
 	// listenerCloseGrace bounds how long closing the forwarded listener waits
@@ -43,8 +57,12 @@ const (
 type ReverseTunnel struct {
 	*ssh.Client
 
-	Host              *url.URL
-	Signers           []ssh.Signer
+	Host    *url.URL
+	Signers []ssh.Signer
+	// HostKey is the key the embedded sshd presents. Its public half is what
+	// the relay is told to expect on every guest's upstream hop; Signers
+	// authenticate this tunnel and are used for nothing else.
+	HostKey           ssh.Signer
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
 	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
@@ -90,6 +108,10 @@ func (c *ReverseTunnel) Listener() net.Listener {
 }
 
 func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionResponse, error) {
+	if c.HostKey == nil {
+		return nil, errors.New("reverse tunnel: HostKey is required")
+	}
+
 	user, err := user.Current()
 	if err != nil {
 		return nil, err
@@ -102,16 +124,17 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 
 	var (
 		auths          []ssh.AuthMethod
-		publicKeys     [][]byte
 		authorizedKeys [][]byte
 	)
 	if len(c.Signers) > 0 {
 		// SSH only tries the first auth method of each type, so group all keys.
 		auths = append(auths, ssh.PublicKeys(c.Signers...))
 	}
-	for _, signer := range c.Signers {
-		publicKeys = append(publicKeys, ssh.MarshalAuthorizedKey(signer.PublicKey()))
-	}
+	// The relay checks the embedded sshd's key against this list on every
+	// guest's upstream hop (server/sshproxy.go, hostKeyCb). The identities
+	// are deliberately absent: the relay learns them from the handshake, and
+	// nothing may treat this list as who the host is.
+	hostPublicKeys := [][]byte{ssh.MarshalAuthorizedKey(c.HostKey.PublicKey())}
 	for _, ak := range c.AuthorizedKeys {
 		authorizedKeys = append(authorizedKeys, ssh.MarshalAuthorizedKey(ak))
 	}
@@ -147,7 +170,7 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		return nil, sshDialError(c.Host, c.ProxyURL, err)
 	}
 
-	sessResp, err := c.createSession(user.Username, publicKeys, authorizedKeys)
+	sessResp, err := c.createSession(user.Username, hostPublicKeys, authorizedKeys)
 	if err != nil {
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}

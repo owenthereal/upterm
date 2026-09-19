@@ -3,6 +3,9 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -589,5 +592,60 @@ func TestStockSSHShutdownBeforeServe(t *testing.T) {
 		require.ErrorIs(t, err, ErrListnerClosed)
 	case <-time.After(time.Second):
 		t.Fatal("shutdown before Serve must prevent Accept")
+	}
+}
+
+// TestStockSSHGuestHostKeyMismatch pins the branch a guest's upstream hop is
+// checked on: the session's registered HostPublicKeys. The host-connection
+// cases in TestStockSSHUpstreamFailure identify as an upterm host, so
+// hostSession is nil there and the relay checks its own HostSigners instead;
+// this is the branch the session host key depends on. The session is created
+// on the proxy's own NodeAddr, which is what makes hostSession resolve it
+// rather than treat the hop as a sideways one to another relay node.
+func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
+	// A session key of its own. stockTestProxy installs TestPrivateKeyContent
+	// as the relay's HostSigners, so registering that key would let a check
+	// that wrongly consulted the relay's keys pass both cases below. With a
+	// fresh key, accepting it and rejecting the relay's own key is exactly
+	// the boundary under test.
+	_, sessionPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sessionKey, err := ssh.NewSignerFromKey(sessionPriv)
+	require.NoError(t, err)
+	block, err := ssh.MarshalPrivateKey(sessionPriv, "")
+	require.NoError(t, err)
+	sessionKeyPEM := string(pem.EncodeToMemory(block))
+
+	for _, tc := range []struct {
+		name, presented string
+		joins           bool
+	}{
+		{name: "presents the session key", presented: sessionKeyPEM, joins: true},
+		{name: "presents the relay's own key", presented: TestPrivateKeyContent},
+		{name: "presents an unrelated key", presented: HostPrivateKeyContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, _ := stockTestUpstream(t, false, tc.presented)
+			proxy, addr, _, signer := stockTestProxy(t, time.Second, &stockTestDialer{addr: upstream})
+			user, err := proxy.SessionManager.CreateSession(NewSession("session", proxy.NodeAddr, "host",
+				[][]byte{ssh.MarshalAuthorizedKey(sessionKey.PublicKey())}, nil))
+			require.NoError(t, err)
+
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			_, err = client.NewSession()
+			if tc.joins {
+				// The stock upstream rejects every channel with its own
+				// reason; reaching it is the success, since the handshake it
+				// sits behind is what a mismatch would have failed.
+				require.ErrorContains(t, err, "upstream channel reason")
+				return
+			}
+			var rejection *ssh.OpenChannelError
+			require.ErrorAs(t, err, &rejection)
+			require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
+		})
 	}
 }

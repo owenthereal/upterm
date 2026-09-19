@@ -353,6 +353,87 @@ func Test_bindFlagsToEnv_recordsExplicitCLIFlags(t *testing.T) {
 	assert.True(t, supplied["authorized-user"])
 }
 
+// newSliceDefaultCmd is newTestCmd with non-empty defaults on private-key and
+// server, which is what the real host command has: the ~/.ssh/id_* files that
+// exist, and the public relay.
+func newSliceDefaultCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "host", RunE: func(*cobra.Command, []string) error { return nil }}
+	cmd.Flags().StringSlice("authorized-user", nil, "")
+	cmd.Flags().StringSlice("private-key", []string{"/default/id_ed25519"}, "")
+	cmd.Flags().String("server", "ssh://default", "")
+	cmd.Flags().String("force-command", "", "")
+	cmd.Flags().Bool("debug", false, "")
+	return cmd
+}
+
+func Test_bindFlagsToEnv_emptyEnvVarAloneEmptiesASliceFlag(t *testing.T) {
+	withConfig(t, "")
+	t.Setenv("UPTERM_PRIVATE_KEY", "")
+
+	cmd := newSliceDefaultCmd()
+	supplied, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	assert.True(t, supplied["private-key"])
+
+	// The variable named an empty list; the default is not what it said.
+	keys, err := cmd.Flags().GetStringSlice("private-key")
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}
+
+func Test_bindFlagsToEnv_emptyEnvVarKeepsAConfigValue(t *testing.T) {
+	withConfig(t, "private-key: [/from/config]\nauthorized-user: [github:alice]\n")
+	t.Setenv("UPTERM_PRIVATE_KEY", "")
+	t.Setenv("UPTERM_AUTHORIZED_USER", "")
+
+	cmd := newSliceDefaultCmd()
+	supplied, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	assert.True(t, supplied["private-key"])
+	assert.True(t, supplied["authorized-user"])
+
+	keys, err := cmd.Flags().GetStringSlice("private-key")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/from/config"}, keys, "config outranks an empty variable, as it does today")
+	users, err := cmd.Flags().GetStringSlice("authorized-user")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"github:alice"}, users)
+}
+
+func Test_bindFlagsToEnv_emptyEnvVarKeepsACLIValue(t *testing.T) {
+	withConfig(t, "")
+	t.Setenv("UPTERM_PRIVATE_KEY", "")
+	t.Setenv("UPTERM_AUTHORIZED_USER", "")
+
+	cmd := newSliceDefaultCmd()
+	require.NoError(t, cmd.Flags().Set("private-key", "/from/cli"))
+	require.NoError(t, cmd.Flags().Set("authorized-user", "github:bob"))
+	supplied, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	assert.True(t, supplied["private-key"])
+
+	keys, err := cmd.Flags().GetStringSlice("private-key")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/from/cli"}, keys)
+	users, err := cmd.Flags().GetStringSlice("authorized-user")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"github:bob"}, users)
+}
+
+func Test_bindFlagsToEnv_emptyEnvVarLeavesScalarsAlone(t *testing.T) {
+	withConfig(t, "")
+	t.Setenv("UPTERM_SERVER", "")
+
+	cmd := newSliceDefaultCmd()
+	supplied, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	assert.True(t, supplied["server"])
+
+	server, err := cmd.Flags().GetString("server")
+	require.NoError(t, err)
+	assert.Equal(t, "ssh://default", server, "there is no empty value a scalar sensibly takes here")
+}
+
 func Test_isConfigCommand(t *testing.T) {
 	root := &cobra.Command{Use: "upterm"}
 	cfg := &cobra.Command{Use: "config"}

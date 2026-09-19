@@ -64,11 +64,12 @@ type Client struct {
 	Escape  byte
 	Logger  *slog.Logger
 
-	// HostKeys is the daemon's public keys, from the session record: one per
-	// signer it holds, since a daemon started with several private keys may
-	// present any of them. Run refuses to attach without at least one: a
-	// client that accepted any key would hand its terminal to whatever bound
-	// the socket.
+	// HostKeys is the daemon's public keys, from the session record: a record
+	// from a current daemon carries exactly one entry, the session host key
+	// it generated for that run; a record written by an older daemon may
+	// carry several, which is why this is a slice. Run refuses to attach
+	// without at least one: a client that accepted any key would hand its
+	// terminal to whatever bound the socket.
 	HostKeys []ssh.PublicKey
 
 	// dial reaches the socket; nil is a unix dial. Tests hand over a
@@ -407,11 +408,11 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 // finds it through the handshake's own message.
 var ErrHostKeyMismatch = errors.New("host key is not the daemon's")
 
-// checkHostKey accepts key only if it matches one of HostKeys. The daemon may
-// hold several signers and presents whichever the negotiated algorithm
-// selects, so every pinned key is tried in turn; ssh.FixedHostKey does the
-// actual comparison, since it is both the right byte comparison and the sink
-// CodeQL recognises as safe.
+// checkHostKey accepts key only if it matches one of HostKeys. A current
+// daemon presents one key, the session host key it generated for this run; a
+// record from an older daemon may pin several, so every pinned key is tried
+// in turn; ssh.FixedHostKey does the actual comparison, since it is both the
+// right byte comparison and the sink CodeQL recognises as safe.
 func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	for _, want := range c.HostKeys {
 		if ssh.FixedHostKey(want)(hostname, remote, key) == nil {
