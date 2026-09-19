@@ -34,9 +34,11 @@ func (e *errDescryptingPrivateKey) Error() string {
 //
 // With identitiesOnly, privateKeys is the whole set and must be non-empty:
 // each entry must resolve to a signer, a public key file selects the agent
-// key it names, and the agent is otherwise used only to sign an encrypted
-// key it already holds. Without it, the agent's keys are preferred when it
-// has any, then the files that load, then a generated key.
+// key it names, and the agent is otherwise used only to sign a key it
+// already holds that the file itself cannot supply — encrypted, or
+// otherwise unparseable with a `.pub` sibling. Without it, the agent's
+// keys are preferred when it has any, then the files that load, then a
+// generated key.
 func Signers(privateKeys []string, identitiesOnly bool) ([]ssh.Signer, func(), error) {
 	if identitiesOnly {
 		return identitySigners(privateKeys, os.Getenv("SSH_AUTH_SOCK"), promptForPassphrase)
@@ -107,7 +109,23 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		return ssh.NewSignerFromKey(key)
 	}
 	var missing *ssh.PassphraseMissingError
-	if !errors.As(err, &missing) && !strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys) {
+	encrypted := errors.As(err, &missing) || strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys)
+	if !encrypted {
+		// Not encrypted, but still not a signer: x/crypto's OpenSSH key-type
+		// switch has no case for sk-ssh-ed25519@openssh.com or
+		// sk-ecdsa-sha2-nistp256@openssh.com, so a FIDO/security-key private
+		// file — a key-handle stub, not a private key — lands here with
+		// "ssh: unhandled key type". That file names an identity it cannot
+		// itself sign with; if the agent holds it, resolve through the
+		// agent by its public half, the same way an encrypted key's .pub
+		// sibling already does.
+		if pub := publicKeyBeside(file); pub != nil {
+			s, agentErr := ag.signerFor(pub)
+			if agentErr == nil {
+				return s, nil
+			}
+			return nil, fmt.Errorf("cannot parse private key %s: %w (and the agent could not supply it either: %w)", file, err, agentErr)
+		}
 		return nil, fmt.Errorf("cannot parse private key %s: %w", file, err)
 	}
 

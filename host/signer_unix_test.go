@@ -242,6 +242,60 @@ func TestIdentitySigners_LegacyPEMUsesThePubBeside(t *testing.T) {
 	})
 }
 
+// TestIdentitySigners_SecurityKeyStubResolvesThroughAgent is the regression
+// this fix closes: `upterm host -i ~/.ssh/id_ed25519_sk` failed with
+// "unhandled key type" because x/crypto cannot turn a FIDO/security-key
+// private file into a signer at all. The fake agent cannot hold a genuine sk
+// key either — x/crypto's agent keyring only accepts standard private key
+// types, and a real sk key needs actual hardware behind it — so it holds an
+// ordinary ed25519 key, and the .pub sibling names that key rather than a
+// real, matching sk-ssh-ed25519 public key. What is under test is that an
+// unparseable *private* file is resolved through the agent by its public
+// half, exactly like an encrypted key already is; the stub's own embedded
+// public key blob plays no further role once ssh.ParseRawPrivateKey has
+// rejected it.
+func TestIdentitySigners_SecurityKeyStubResolvesThroughAgent(t *testing.T) {
+	agentPub, agentPriv := newEd25519(t)
+	ta := startTestAgent(t, agentPriv)
+
+	stubPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	keyFile := writeTestFile(t, dir, "id_ed25519_sk", skEd25519PrivateStub(t, stubPub))
+	writeTestFile(t, dir, "id_ed25519_sk.pub", ssh.MarshalAuthorizedKey(agentPub))
+
+	signers, cleanup, err := identitySigners([]string{keyFile}, ta.socket, failingPrompt(t))
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.Len(t, signers, 1)
+	require.Equal(t, agentPub.Marshal(), signers[0].PublicKey().Marshal())
+
+	_, err = signers[0].Sign(rand.Reader, []byte("m"))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, ta.signatures.Load(), "signed through the agent")
+}
+
+// TestIdentitySigners_SecurityKeyStubNotHeldByAgentIsAnError covers the sk
+// stub whose .pub sibling names a key the agent does not hold: the error
+// must name both facts, that the file itself could not be parsed and that
+// the agent could not supply it either.
+func TestIdentitySigners_SecurityKeyStubNotHeldByAgentIsAnError(t *testing.T) {
+	_, unrelatedPriv := newEd25519(t)
+	ta := startTestAgent(t, unrelatedPriv)
+
+	stubPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	notHeldPub, _ := newEd25519(t)
+	dir := t.TempDir()
+	keyFile := writeTestFile(t, dir, "id_ed25519_sk", skEd25519PrivateStub(t, stubPub))
+	writeTestFile(t, dir, "id_ed25519_sk.pub", ssh.MarshalAuthorizedKey(notHeldPub))
+
+	_, _, err = identitySigners([]string{keyFile}, ta.socket, failingPrompt(t))
+	require.ErrorContains(t, err, "cannot parse private key "+keyFile)
+	require.ErrorContains(t, err, "unhandled key type")
+	require.ErrorContains(t, err, "the SSH agent does not hold")
+}
+
 func TestIdentitySigners_PubSelectsAnAgentKey(t *testing.T) {
 	pub, priv := newEd25519(t)
 	ta := startTestAgent(t, priv)

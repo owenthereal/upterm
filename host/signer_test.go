@@ -226,6 +226,101 @@ func TestIdentitySigners_UnparseableFileIsAnError(t *testing.T) {
 	require.ErrorContains(t, err, "cannot parse private key "+junk)
 }
 
+// skPrivateKeyAuthMagic and the wire structs below mirror x/crypto's
+// openssh-key-v1 container (golang.org/x/crypto/ssh/keys.go, v0.57.0) well
+// enough to build a private-key file whose inner key type is
+// sk-ssh-ed25519@openssh.com: a FIDO/security-key handle, not a signable
+// private key. `ssh-keygen -t ed25519-sk` writes exactly this container
+// shape. x/crypto's parseOpenSSHPrivateKey type-switches on RSA, Ed25519 and
+// ECDSA only, so this key type falls to its default case and returns "ssh:
+// unhandled key type" — the failure this fix is about.
+const skPrivateKeyAuthMagic = "openssh-key-v1\x00"
+
+type skOpenSSHContainer struct {
+	CipherName   string
+	KdfName      string
+	KdfOpts      string
+	NumKeys      uint32
+	PubKey       []byte
+	PrivKeyBlock []byte
+}
+
+type skOpenSSHPrivateBlock struct {
+	Check1  uint32
+	Check2  uint32
+	Keytype string
+	Rest    []byte `ssh:"rest"`
+}
+
+type skEd25519PublicKeyWire struct {
+	Name        string
+	KeyBytes    []byte
+	Application string
+}
+
+// skEd25519PublicKeyBlob returns the wire-format public key blob for a
+// FIDO/security-key ed25519 identity: the shape ssh-keygen -t ed25519-sk
+// writes to <file>.pub, and what x/crypto's own parseSKEd25519 expects.
+func skEd25519PublicKeyBlob(pub ed25519.PublicKey) []byte {
+	return ssh.Marshal(skEd25519PublicKeyWire{
+		Name:        "sk-ssh-ed25519@openssh.com",
+		KeyBytes:    []byte(pub),
+		Application: "ssh:",
+	})
+}
+
+// skEd25519PrivateStub builds a genuine openssh-key-v1 private-key file
+// whose inner key type is sk-ssh-ed25519@openssh.com — a FIDO/security-key
+// stub. pub only needs to be 32 bytes; nothing reads it as a real key,
+// because x/crypto rejects the key type before it would get that far.
+func skEd25519PrivateStub(t *testing.T, pub ed25519.PublicKey) []byte {
+	t.Helper()
+
+	privBlock := ssh.Marshal(skOpenSSHPrivateBlock{
+		Check1:  0x2a2a2a2a,
+		Check2:  0x2a2a2a2a,
+		Keytype: "sk-ssh-ed25519@openssh.com",
+	})
+	container := ssh.Marshal(skOpenSSHContainer{
+		CipherName:   "none",
+		KdfName:      "none",
+		KdfOpts:      "",
+		NumKeys:      1,
+		PubKey:       skEd25519PublicKeyBlob(pub),
+		PrivKeyBlock: privBlock,
+	})
+	full := append([]byte(skPrivateKeyAuthMagic), container...)
+	return pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: full})
+}
+
+// TestSkEd25519PrivateStub_IsUnhandledKeyType pins the premise the sk-stub
+// tests in this package depend on: the synthetic private key really does
+// reach x/crypto's "ssh: unhandled key type" branch, the same one a real
+// `ssh-keygen -t ed25519-sk` private file hits.
+func TestSkEd25519PrivateStub_IsUnhandledKeyType(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_, err = ssh.ParseRawPrivateKey(skEd25519PrivateStub(t, pub))
+	require.EqualError(t, err, "ssh: unhandled key type")
+}
+
+// TestIdentitySigners_SecurityKeyStubWithNoPubSiblingKeepsUnchangedError
+// covers the "no .pub sibling" half of the sk-stub fix: with nothing to
+// recover the public half from, the file stays unresolvable and the error
+// is the same "cannot parse private key" TestIdentitySigners_UnparseableFileIsAnError
+// asserts for ordinary junk.
+func TestIdentitySigners_SecurityKeyStubWithNoPubSiblingKeepsUnchangedError(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "id_ed25519_sk")
+	require.NoError(t, os.WriteFile(keyFile, skEd25519PrivateStub(t, pub), 0600))
+
+	_, _, err = identitySigners([]string{keyFile}, "", failingPrompt(t))
+	require.ErrorContains(t, err, "cannot parse private key "+keyFile)
+	require.ErrorContains(t, err, "unhandled key type")
+}
+
 func TestIdentitySigners_UnencryptedFileNeedsNoAgent(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
