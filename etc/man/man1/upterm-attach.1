@@ -19,8 +19,9 @@ is attached to; with several, the name is required.
 
 .PP
 To detach, type the escape character at the start of a line followed by a
-period: ~. by default. ~~ sends a literal ~. Everything else is sent to the
-session as typed. A SIGTERM or SIGHUP detaches too.
+period: ~. by default. ~~ sends a literal ~. On Unix, ~^Z suspends this
+terminal instead — fg resumes it. Everything else is sent to the session as
+typed. A SIGTERM or SIGHUP detaches too.
 
 .PP
 Exit status: 0 after a detach; the command's own status once the session
@@ -31,7 +32,7 @@ could not attach.
 
 .SH OPTIONS
 \fB--escape-char\fP="~"
-	Escape character for detaching (ESC-CHAR followed by . at the start of a line), or 'none' to disable.
+	Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]

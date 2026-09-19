@@ -938,6 +938,34 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	}
 
+	if h.kind == kindHost && isPty {
+		// A WINCH signal request is a repaint nudge from a client that has
+		// just come back from a stop. Buffered and drained continuously,
+		// because charm delivers a signal request with the session lock held
+		// (charm.land/ssh session.go, "signal"): a channel nobody reads
+		// parks its whole request loop, and with it Pty, Signals and Exit.
+		// The bound is this buffer once ctx is done — our own client sends
+		// one WINCH per resume, and the session is ending by then.
+		sigs := make(chan gssh.Signal, 8)
+		sess.Signals(sigs)
+		ctx, cancel := context.WithCancel(h.ctx)
+		g.Add(func() error {
+			for {
+				select {
+				case sig := <-sigs:
+					if sig != gssh.Signal("WINCH") || ptmx == nil {
+						continue
+					}
+					if err := ptmx.Redraw(); err != nil {
+						h.logger.Debug("redraw nudge skipped", "session-id", sessionID, "error", err)
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}, func(err error) { cancel() })
+	}
+
 	{
 		// pty
 		ctx, cancel := context.WithCancel(h.ctx)

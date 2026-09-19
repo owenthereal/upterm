@@ -72,6 +72,16 @@ type Client struct {
 	// terminal to whatever bound the socket.
 	HostKeys []ssh.PublicKey
 
+	// Suspend stops the process this client runs in and returns the
+	// terminal's size once it is running again — for a local terminal:
+	// restore the terminal, SIGTSTP, re-enter raw mode, measure. Nil
+	// disables the ~^Z sequence, and the bytes reach the session instead.
+	//
+	// It is the embedder's because what "suspend" means is the terminal's
+	// business, not the protocol's: this package never touches termios and
+	// never signals its own process.
+	Suspend func() termsize.Size
+
 	// dial reaches the socket; nil is a unix dial. Tests hand over a
 	// connection they can block, to stand in for a daemon that has stopped
 	// reading its socket.
@@ -313,7 +323,7 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	}
 	if c.Stdin != nil {
 		g.Add(func() error {
-			if c.forwardInput(ctx, stdin, logger) {
+			if c.forwardInput(ctx, sess, stdin, logger) {
 				record(Result{Reason: Detached})
 			}
 			return nil
@@ -423,6 +433,29 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 	return fmt.Errorf("%w (it presented %s)", ErrHostKeyMismatch, ssh.FingerprintSHA256(key))
 }
 
+// suspend stops the process and puts the session back in step with the
+// terminal that comes back. Two requests, both best-effort: the size, because
+// the terminal may have been resized while this process was stopped, and a
+// WINCH, because a full-screen program repaints on it and the scrollback this
+// client stopped reading is already behind it.
+//
+// Both are bounded for the reason every other request on this path is: they
+// fail when the connection has gone, which is when the group is unwinding,
+// and a handler blocked on a stopped terminal would park the unwind here.
+func (c *Client) suspend(sess *ssh.Session, logger *slog.Logger) {
+	size := c.Suspend()
+	if c.Pty != nil && size.Valid() {
+		if err := sess.WindowChange(size.Rows, size.Cols); err != nil {
+			logging.LogWithin(logger, slog.LevelDebug, logging.LogBound, "window change not delivered after resume", "error", err)
+		}
+	}
+	// x/crypto has no SIGWINCH constant — RFC 4254 does not list it — and
+	// ssh.Signal is a string, so the request is spelled out.
+	if err := sess.Signal(ssh.Signal("WINCH")); err != nil {
+		logging.LogWithin(logger, slog.LevelDebug, logging.LogBound, "redraw nudge not delivered after resume", "error", err)
+	}
+}
+
 // writeWithin writes p to Stdout, giving up on waiting for it when deadline
 // fires. It exists for the mode restore, which is the one write Run makes
 // after the session is gone.
@@ -509,8 +542,8 @@ func (c *Client) copyOutput(r io.Reader, modes *uio.ModeTracker, abandoned *atom
 // would park it here, before the caller has recorded the detach and before
 // anything has cancelled: the attachment is ending either way, and the
 // connection close that follows cancellation says so.
-func (c *Client) forwardInput(ctx context.Context, stdin io.Writer, logger *slog.Logger) (detached bool) {
-	filter := NewEscapeFilter(c.Escape)
+func (c *Client) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, logger *slog.Logger) (detached bool) {
+	filter := NewEscapeFilter(c.Escape, c.Suspend != nil)
 	buf := make([]byte, 4096)
 	r := uio.NewContextReader(ctx, c.Stdin)
 
@@ -534,8 +567,8 @@ func (c *Client) forwardInput(ctx context.Context, stdin io.Writer, logger *slog
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			out, detach := filter.Feed(buf[:n])
-			if detach {
+			out, action := filter.Feed(buf[:n])
+			if action == EscapeDetach {
 				// The bytes before the escape are the session's — the Enter
 				// that preceded ~. — but a detach that has been detected
 				// must reach the cancellation machinery whether or not the
@@ -558,6 +591,9 @@ func (c *Client) forwardInput(ctx context.Context, stdin io.Writer, logger *slog
 				dropped = true
 				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
 					"backlog-bytes", inputBacklogLimit)
+			}
+			if action == EscapeSuspend {
+				c.suspend(sess, logger)
 			}
 		}
 		if err != nil {

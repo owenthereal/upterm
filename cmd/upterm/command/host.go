@@ -133,8 +133,9 @@ containing client public keys.
 The session runs in a process of its own. This terminal is a client of it:
 type ~. at the start of a line (or --escape-char) to leave the session
 running, reattach with 'upterm attach NAME', and end it with
-'upterm session stop NAME'. With --detach nothing is attached: the session
-starts in the background and this command prints how to reach it.`,
+'upterm session stop NAME'. On Unix, ~^Z suspends this terminal instead — fg
+resumes it. With --detach nothing is attached: the session starts in the
+background and this command prints how to reach it.`,
 		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   upterm host
 
@@ -199,7 +200,7 @@ starts in the background and this command prints how to reach it.`,
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
-	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.")
+	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which

@@ -3,12 +3,19 @@
 package internal
 
 import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
+	gssh "charm.land/ssh"
+	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/host/api"
+	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -283,4 +290,175 @@ func TestAGuestsArrivingSizeConstrainsTheSession(t *testing.T) {
 	_, gOut := h.connectGuest(t)
 	readUntil(t, gOut, "READY")
 	readUntil(t, aOut, "24 80")
+}
+
+// fakeSignalSession is the whole of gssh.Session HandleSession's WINCH path
+// touches, on either door: Close, Context, Exit, Pty, PublicKey, Environ,
+// SendRequest, Signals, and the Read and Write of the embedded channel. Read
+// blocks until release is closed, so the handler's actors stay up long enough
+// for a test to drive them; the rest is nil, as fakeGuestSession's comment
+// (handle_session_test.go) explains for its own smaller set.
+type fakeSignalSession struct {
+	gssh.Session
+
+	ctx     fakeHostContext
+	winCh   chan gssh.Window
+	out     io.Writer
+	key     gssh.PublicKey
+	release chan struct{}
+
+	mu         sync.Mutex
+	sigCh      chan<- gssh.Signal
+	registered chan struct{}
+}
+
+func newFakeSignalSession(sessionID string, key gssh.PublicKey) *fakeSignalSession {
+	return &fakeSignalSession{
+		ctx:        fakeHostContext{sessionID: sessionID},
+		winCh:      make(chan gssh.Window),
+		out:        io.Discard,
+		key:        key,
+		release:    make(chan struct{}),
+		registered: make(chan struct{}),
+	}
+}
+
+func (f *fakeSignalSession) Read([]byte) (int, error) { <-f.release; return 0, io.EOF }
+func (f *fakeSignalSession) Write(p []byte) (int, error) {
+	return f.out.Write(p)
+}
+func (f *fakeSignalSession) Close() error          { return nil }
+func (f *fakeSignalSession) Exit(int) error        { return nil }
+func (f *fakeSignalSession) Context() gssh.Context { return f.ctx }
+func (f *fakeSignalSession) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
+	return gssh.Pty{Term: "xterm"}, f.winCh, true
+}
+func (f *fakeSignalSession) Environ() []string         { return nil }
+func (f *fakeSignalSession) PublicKey() gssh.PublicKey { return f.key }
+func (f *fakeSignalSession) SendRequest(string, bool, []byte) (bool, error) {
+	return true, nil
+}
+
+// Signals is what the host door's WINCH actor registers with. Registering
+// closes registered, so a test can wait for the actor to be listening before
+// it delivers anything.
+func (f *fakeSignalSession) Signals(c chan<- gssh.Signal) {
+	f.mu.Lock()
+	f.sigCh = c
+	f.mu.Unlock()
+	close(f.registered)
+}
+
+// signal delivers sig as the client's signal request would. Only valid after
+// registered has closed.
+func (f *fakeSignalSession) signal(sig gssh.Signal) {
+	f.mu.Lock()
+	c := f.sigCh
+	f.mu.Unlock()
+	c <- sig
+}
+
+// fakeHostContext supplies what HandleSession's host-door path asks of a
+// session's context beyond the session ID fakeGuestContext (handle_session_
+// test.go) already covers: Err, for the liveness check terminalWindows.changed
+// makes, and ClientVersion, for the host client-joined event.
+type fakeHostContext struct {
+	gssh.Context
+	sessionID string
+}
+
+func (c fakeHostContext) Value(key any) any {
+	if key == gssh.ContextKeySessionID {
+		return c.sessionID
+	}
+	return nil
+}
+func (c fakeHostContext) Err() error            { return nil }
+func (c fakeHostContext) ClientVersion() string { return "test" }
+
+// A WINCH signal request on the host door is a redraw nudge and nothing
+// else: no geometry changes, so a pinned session is nudged like any other.
+func TestHostDoor_WinchSignalNudgesThePty(t *testing.T) {
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(edKey)
+	require.NoError(t, err)
+
+	ptmx := &exitedPTY{}
+	sess := newFakeSignalSession(t.Name(), signer.PublicKey())
+
+	h := &sessionHandler{
+		kind:              kindHost,
+		ptmx:              ptmx,
+		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		keepAliveDuration: time.Hour,
+		ctx:               context.Background(),
+		logger:            discardLogger(),
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); h.HandleSession(sess) }()
+
+	select {
+	case <-sess.registered:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the host door never registered a signal channel")
+	}
+	require.Equal(t, 1, ptmx.redrawCount(), "the arrival nudge")
+
+	sess.signal(gssh.Signal("WINCH"))
+
+	deadline := time.Now().Add(harnessTimeout)
+	for ptmx.redrawCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, 2, ptmx.redrawCount(), "a WINCH signal request must nudge the pty")
+
+	close(sess.release)
+	select {
+	case <-done:
+	case <-time.After(harnessTimeout):
+		t.Fatal("HandleSession did not return")
+	}
+}
+
+// A guest cannot make the host's command repaint. The door registers no
+// signal channel at all, so charm buffers and drops it.
+func TestGuestDoor_WinchSignalIsIgnored(t *testing.T) {
+	ptmx := &exitedPTY{}
+	sess := newFakeSignalSession(t.Name(), nil)
+
+	h := &sessionHandler{
+		kind:              kindGuest,
+		ptmx:              ptmx,
+		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		keepAliveDuration: time.Hour,
+		ctx:               context.Background(),
+		logger:            discardLogger(),
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); h.HandleSession(sess) }()
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.Equal(t, 1, ptmx.redrawCount(), "the arrival nudge, and nothing past it")
+	select {
+	case <-sess.registered:
+		t.Fatal("a guest session must never register a signal channel")
+	default:
+	}
+
+	close(sess.release)
+	select {
+	case <-done:
+	case <-time.After(harnessTimeout):
+		t.Fatal("HandleSession did not return")
+	}
 }

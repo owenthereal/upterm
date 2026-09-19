@@ -12,6 +12,7 @@ import (
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -57,17 +58,25 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	if !lt.rawMode {
 		return client.Run(ctx)
 	}
-	var (
-		res attach.Result
-		err error
-	)
-	if rawErr := withRawTerminal(stdin, owned, func() error {
-		res, err = client.Run(ctx)
-		return nil
-	}); rawErr != nil {
-		return attach.Result{}, fmt.Errorf("unable to set terminal to raw mode: %w", rawErr)
+	raw := &rawTerminal{f: stdin, owned: owned}
+	if err := raw.enter(); err != nil {
+		return attach.Result{}, fmt.Errorf("unable to set terminal to raw mode: %w", err)
 	}
-	return res, err
+	defer raw.restore()
+	if suspendSupported {
+		// Give the terminal back before stopping and take it again after:
+		// a shell prompt printed while this process still held raw mode has
+		// no echo. The size is measured after the resume, because the
+		// terminal may have been resized while we were stopped.
+		client.Suspend = func() termsize.Size {
+			raw.restore()
+			_ = stopSelf()
+			_ = raw.enter()
+			size, _ := tty.Size(stdout)
+			return size
+		}
+	}
+	return client.Run(ctx)
 }
 
 // localDisconnectMessage is what upterm host prints when the daemon

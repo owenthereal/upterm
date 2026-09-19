@@ -20,8 +20,9 @@ containing client public keys.
 The session runs in a process of its own. This terminal is a client of it:
 type ~. at the start of a line (or --escape-char) to leave the session
 running, reattach with 'upterm attach NAME', and end it with
-'upterm session stop NAME'. With --detach nothing is attached: the session
-starts in the background and this command prints how to reach it.
+'upterm session stop NAME'. On Unix, ~^Z suspends this terminal instead — fg
+resumes it. With --detach nothing is attached: the session starts in the
+background and this command prints how to reach it.
 
 ```
 upterm host [flags]
@@ -69,7 +70,7 @@ upterm host [flags]
       --authorized-keys string       Specify a authorize_keys file listing authorized public keys for connection.
       --authorized-user strings      Authorize users by fetching their public keys from a code-hosting service. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
       --detach                       Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
-      --escape-char string           Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own. (default "~")
+      --escape-char string           Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own. (default "~")
   -f, --force-command string         Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
   -h, --help                         help for host
       --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).

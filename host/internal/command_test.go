@@ -103,6 +103,10 @@ type exitedPTY struct {
 	// sizeH, sizeW record the last Setsize call, so a test can assert what a
 	// caller resized this fake to.
 	sizeH, sizeW int
+
+	// redraws counts Redraw calls, so a test can assert how many nudges a
+	// door sent without needing a real process to receive SIGWINCH.
+	redraws int
 }
 
 func (p *exitedPTY) Read(b []byte) (int, error) {
@@ -138,7 +142,20 @@ func (p *exitedPTY) lastSize() (int, int) {
 	return p.sizeH, p.sizeW
 }
 
-func (p *exitedPTY) Redraw() error               { return nil }
+func (p *exitedPTY) Redraw() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.redraws++
+	return nil
+}
+
+// redrawCount returns how many times Redraw has been called.
+func (p *exitedPTY) redrawCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.redraws
+}
+
 func (p *exitedPTY) Wait() error                 { return nil }
 func (p *exitedPTY) Kill() error                 { return nil }
 func (p *exitedPTY) Signal(syscall.Signal) error { return nil }
