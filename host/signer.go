@@ -73,13 +73,24 @@ func identitySigners(files []string, agentSocket string, prompt func(file string
 
 	ag := &lazyAgent{socket: agentSocket}
 	var signers []ssh.Signer
+	seen := make(map[string]bool, len(files))
 	for _, file := range files {
 		s, err := identitySigner(file, ag, prompt)
 		if err != nil {
 			ag.close()
 			return nil, nil, err
 		}
-		signers = append(signers, s)
+		// Naming one key twice is still one identity, as it is for OpenSSH.
+		// Offering it twice costs a second public-key probe during auth, and
+		// counts twice against the server's tolerance for tries. The key is
+		// what is deduplicated, not the filename, so `-i key -i key.pub`
+		// collapses too once the agent has resolved the selector. Every entry
+		// is still resolved first: a duplicate that cannot be resolved is as
+		// fatal as any other, it is only the offering that is skipped.
+		if id := string(s.PublicKey().Marshal()); !seen[id] {
+			seen[id] = true
+			signers = append(signers, s)
+		}
 	}
 	return signers, ag.close, nil
 }

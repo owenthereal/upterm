@@ -330,6 +330,52 @@ func TestIdentitySigners_UnencryptedFileNeedsNoAgent(t *testing.T) {
 	require.Equal(t, want.Marshal(), signers[0].PublicKey().Marshal())
 }
 
+// TestIdentitySigners_DuplicateEntriesAreOfferedOnce covers naming one key
+// more than once, which OpenSSH collapses too: two entries, one identity.
+// Offered twice it would be probed twice during auth, and counted twice
+// against the server's limit on tries. Distinct keys are left alone, in the
+// order they were named.
+func TestIdentitySigners_DuplicateEntriesAreOfferedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeKey := func(name string) (string, ssh.PublicKey) {
+		t.Helper()
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		block, err := ssh.MarshalPrivateKey(privateKey, "")
+		require.NoError(t, err)
+		file := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(file, pem.EncodeToMemory(block), 0600))
+		sshPub, err := ssh.NewPublicKey(publicKey)
+		require.NoError(t, err)
+		return file, sshPub
+	}
+	keyFile, keyPub := writeKey("key")
+	otherFile, otherPub := writeKey("other")
+
+	t.Run("the same file twice", func(t *testing.T) {
+		signers, cleanup, err := identitySigners([]string{keyFile, keyFile}, "", failingPrompt(t))
+		require.NoError(t, err)
+		t.Cleanup(cleanup)
+		require.Len(t, signers, 1)
+		require.Equal(t, keyPub.Marshal(), signers[0].PublicKey().Marshal())
+	})
+
+	t.Run("distinct keys keep their places", func(t *testing.T) {
+		signers, cleanup, err := identitySigners([]string{keyFile, otherFile, keyFile}, "", failingPrompt(t))
+		require.NoError(t, err)
+		t.Cleanup(cleanup)
+		require.Len(t, signers, 2)
+		require.Equal(t, keyPub.Marshal(), signers[0].PublicKey().Marshal())
+		require.Equal(t, otherPub.Marshal(), signers[1].PublicKey().Marshal())
+	})
+
+	t.Run("a duplicate still has to resolve", func(t *testing.T) {
+		missing := filepath.Join(dir, "missing")
+		_, _, err := identitySigners([]string{keyFile, keyFile, missing}, "", failingPrompt(t))
+		require.ErrorContains(t, err, "cannot read private key "+missing)
+	})
+}
+
 func TestIdentitySigners_EncryptedFileWithNoAgentPrompts(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "key")
 	require.NoError(t, os.WriteFile(keyFile, []byte(ed25519PriavteKey), 0600))
