@@ -28,37 +28,58 @@ func (e *errDescryptingPrivateKey) Error() string {
 	return fmt.Sprintf("error decrypting private key %s", e.file)
 }
 
-// Signers return signers based on the following conditions:
-// If SSH agent is running and has keys, it returns signers from SSH agent, otherwise return signers from private keys;
-// If neither works, it generates a signer on the fly.
+// SignerOptions configures SignersWith.
+type SignerOptions struct {
+	PrivateKeys []string
+	// Passphrase is asked for an encrypted key's passphrase. Nil prompts on
+	// this process's terminal, which a daemon does not have.
+	Passphrase func(file string) ([]byte, error)
+	// OnSkip is told about a key file that was skipped and why. Nil is
+	// silent, as SignersFromFiles always was.
+	OnSkip func(file string, err error)
+}
+
+// Signers returns signers from the agent, then the files, then a key made
+// on the spot, prompting for passphrases on this process's terminal.
 func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
-	var (
-		signers []ssh.Signer
-		cleanup func()
-		err     error
-	)
+	return SignersWith(SignerOptions{PrivateKeys: privateKeys})
+}
 
-	signers, cleanup, err = signersFromSSHAgent(os.Getenv("SSH_AUTH_SOCK"))
+// SignersWith is Signers with the passphrase prompt and the skip report
+// injected.
+func SignersWith(opts SignerOptions) ([]ssh.Signer, func(), error) {
+	signers, cleanup, err := signersFromSSHAgent(os.Getenv("SSH_AUTH_SOCK"))
 	if len(signers) == 0 || err != nil {
-		signers, err = SignersFromFiles(privateKeys)
+		signers, err = SignersFromFilesWith(opts.PrivateKeys, opts.Passphrase, opts.OnSkip)
 	}
-
 	if len(signers) == 0 || err != nil {
 		signers, err = utils.CreateSigners(nil)
 	}
-
 	return signers, cleanup, err
 }
 
 func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
+	return SignersFromFilesWith(privateKeys, nil, nil)
+}
+
+// SignersFromFilesWith reads every key it can and skips the rest. A key that
+// cannot be read never fails the set: the default key list is every file in
+// ~/.ssh that exists, and one unreadable file must not stop a session.
+func SignersFromFilesWith(privateKeys []string, passphrase func(string) ([]byte, error), onSkip func(string, error)) ([]ssh.Signer, error) {
+	if passphrase == nil {
+		passphrase = promptForPassphrase
+	}
 	var signers []ssh.Signer
 	for _, file := range privateKeys {
-		s, err := signerFromFile(file, promptForPassphrase)
-		if err == nil {
-			signers = append(signers, s)
+		s, err := signerFromFile(file, passphrase)
+		if err != nil {
+			if onSkip != nil {
+				onSkip(file, err)
+			}
+			continue
 		}
+		signers = append(signers, s)
 	}
-
 	return signers, nil
 }
 
