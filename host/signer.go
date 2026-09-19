@@ -132,3 +132,15 @@ func promptForPassphrase(file string) ([]byte, error) {
 
 	return term.ReadPassword(int(syscall.Stdin))
 }
+
+// NewHostKey generates the key the embedded sshd presents on both its doors
+// and the key the relay is told to expect from this host. It is a session's
+// key, not the operator's: fresh per run, never read from disk, never offered
+// to the relay as an identity.
+func NewHostKey() (ssh.Signer, error) {
+	signers, err := utils.CreateSigners(nil)
+	if err != nil {
+		return nil, err
+	}
+	return signers[0], nil
+}

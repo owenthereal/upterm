@@ -63,7 +63,10 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 	guestSigner, err := cert.SignCert(signer)
 	require.NoError(t, err)
 
-	srv.Signers = []ssh.Signer{signer}
+	// A test that wants to watch the door's key sets HostKey itself.
+	if srv.HostKey == nil {
+		srv.HostKey = signer
+	}
 	srv.EventEmitter = emitter.New(1)
 	srv.KeepAliveDuration = time.Hour
 	srv.Logger = discardLogger()
@@ -94,7 +97,7 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 
 	return &hostHarness{addr: ln.Addr().String(),
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
-		hostKey: signer.PublicKey(), guestSigner: guestSigner, done: done}
+		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done}
 }
 
 // dialGuest opens an SSH session to the host with an xterm PTY and starts its

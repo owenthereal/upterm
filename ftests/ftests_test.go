@@ -545,6 +545,11 @@ func (c *Host) Share(url string) error {
 		return err
 	}
 
+	hostKey, err := host.NewHostKey()
+	if err != nil {
+		return err
+	}
+
 	// permit client public key
 	var authorizedKeys []*host.AuthorizedKey
 	if c.PermittedClientPublicKey != "" {
@@ -572,6 +577,7 @@ func (c *Host) Share(url string) error {
 		Command:                 c.Command,
 		ForceCommand:            c.ForceCommand,
 		Signers:                 signers,
+		HostKey:                 hostKey,
 		AuthorizedKeys:          authorizedKeys,
 		AdminSocketFile:         c.AdminSocketFile,
 		SessionCreatedCallback:  c.SessionCreatedCallback,
@@ -613,13 +619,10 @@ func (c *Host) Share(url string) error {
 	// the primary's pacing asks for a pty, which with the pipe stdin makes
 	// the client interactive and eligible.
 	//
-	// The keys come from signers directly, not a session record: this
+	// The key comes from the fixture directly, not a session record: this
 	// fixture supplies its own AdminSocketFile, which skips the Claim that
 	// would otherwise publish one.
-	hostKeys := make([]ssh.PublicKey, 0, len(signers))
-	for _, s := range signers {
-		hostKeys = append(hostKeys, s.PublicKey())
-	}
+	hostKeys := []ssh.PublicKey{hostKey.PublicKey()}
 	client := &attach.Client{Socket: sock, HostKeys: hostKeys, Stdin: stdinr, Stdout: stdoutw, Pty: c.Pty, Logger: testLogger}
 	c.wg.Add(1)
 	go func() {

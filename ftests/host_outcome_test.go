@@ -377,6 +377,11 @@ func Test_Host_CanRunTwice(t *testing.T) {
 
 	require.NotEqual(t, first.LaunchID, second.LaunchID,
 		"the second run must claim the name for itself rather than inherit the first run's claim")
+	// Per run means per run: a Host run twice generates a key each time.
+	require.Len(t, first.HostKeys, 1)
+	require.Len(t, second.HostKeys, 1)
+	require.NotEqual(t, first.HostKeys[0], second.HostKeys[0],
+		"the second run must present a key of its own, not the first run's")
 	for i, rec := range []*sessiondir.Record{first, second} {
 		require.Equal(t, sessiondir.StatusEnding, rec.Status, "run %d", i+1)
 		require.Equal(t, sessiondir.ReasonExited, rec.Reason, "run %d", i+1)

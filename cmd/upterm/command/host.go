@@ -459,6 +459,14 @@ func shareRunE(c *cobra.Command, args []string) error {
 		defer cleanup()
 	}
 
+	// Generated here rather than left to Run: this process attaches its own
+	// terminal to the door the daemon presents, and needs the public half to
+	// pin it.
+	hostKey, err := host.NewHostKey()
+	if err != nil {
+		return fmt.Errorf("error generating host key: %w", err)
+	}
+
 	var hkcb ssh.HostKeyCallback
 	if flagSkipHostKeyCheck {
 		hkcb, err = host.NewAutoAcceptingHostKeyCallback(os.Stdout, flagKnownHostsFilename)
@@ -497,6 +505,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 			Command:           args,
 			ForceCommand:      forceCommand,
 			Signers:           signers,
+			HostKey:           hostKey,
 			HostKeyCallback:   hkcb,
 			AuthorizedKeys:    authorizedKeys,
 			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
@@ -531,13 +540,10 @@ func shareRunE(c *cobra.Command, args []string) error {
 			},
 			func(ctx context.Context, socket string) (attach.Result, error) {
 				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, term)
-				// The daemon's own signers, not a re-read of the record: this
-				// is the process presenting the door, so it has the keys
+				// The daemon's own host key, not a re-read of the record: this
+				// is the process presenting the door, so it has the key
 				// directly.
-				keys := make([]ssh.PublicKey, 0, len(signers))
-				for _, s := range signers {
-					keys = append(keys, s.PublicKey())
-				}
+				keys := []ssh.PublicKey{hostKey.PublicKey()}
 				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger.Logger)
 			})
 	})
