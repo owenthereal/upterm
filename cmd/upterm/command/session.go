@@ -21,6 +21,8 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -115,10 +117,11 @@ Output formats:
 }
 
 // stopWaitTimeout bounds how long `session stop` waits for the name to be
-// released once the daemon has acknowledged. The teardown is at most two
-// graces (DefaultStopGrace each) plus the record's publication; thirty
-// seconds is that with room, and a daemon still holding the name past it
-// is one to name a pid for.
+// released once the daemon has acknowledged. The teardown's worst case is
+// about sixteen seconds -- hangupGrace plus three DefaultStopGraces, as
+// DefaultStopGrace's own comment says -- plus the record's publication;
+// thirty seconds is that with room, and a daemon still holding the name
+// past it is one to name a pid for.
 var stopWaitTimeout = 30 * time.Second
 
 // stopPollInterval is how often the release is checked for.
@@ -176,6 +179,13 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	if err != nil {
 		if rec.Status == sessiondir.StatusStarting {
 			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
+		}
+		// A socket that answers, with the one code that means the method
+		// does not exist there: the session is held by an upterm from
+		// before `session stop`. Nothing this command can send will end it,
+		// so name the pid and let the operator do it.
+		if status.Code(err) == codes.Unimplemented {
+			return fmt.Errorf("session %s was started by an upterm that predates 'session stop' and cannot be stopped this way; end it yourself (%s)", name, pidOf(rec))
 		}
 		return fmt.Errorf("session %s is not answering on its admin socket (%s): %w", name, pidOf(rec), err)
 	}

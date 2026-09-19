@@ -110,7 +110,10 @@ func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
 	} {
 		require.Contains(t, log, want)
 	}
-	require.Contains(t, log, "REPORT unix_sockets=1",
+	// Anchored at the end of the line, not a substring: "unix_sockets=10"
+	// contains "unix_sockets=1", and ten leaked descriptors is exactly what
+	// this is meant to catch.
+	require.Regexp(t, `(?m)REPORT unix_sockets=1$`, log,
 		"the one is net.FileConn's close-on-exec dup of the child's own end; a second would be the child's inherited copy of that same end")
 }
 

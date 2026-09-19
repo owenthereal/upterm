@@ -978,6 +978,22 @@ func Test_stopSession(t *testing.T) {
 		require.ErrorContains(t, err, "not answering on its admin socket")
 		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()))
 	})
+	t.Run("a daemon that predates the RPC says so rather than blaming its socket", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "old-1")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		// serveStubAdmin leaves onStop nil, so StopSession answers
+		// Unimplemented — what a daemon from before this branch does.
+		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"})
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "old-1", &out)
+		require.ErrorContains(t, err, "predates 'session stop'")
+		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()),
+			"the operator has to be able to end it themselves")
+		require.NotContains(t, err.Error(), "not answering on its admin socket",
+			"the socket answered; it is the method that is missing")
+	})
 	t.Run("a session still starting says so", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := claimSession(t, "start-1")

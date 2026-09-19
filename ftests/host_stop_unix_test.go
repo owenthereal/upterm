@@ -81,9 +81,16 @@ func processGone(pid int) bool {
 // stop: an interactive shell with one foreground and one background job. A
 // shell with job control puts each job in its own process group, so a
 // signal to the shell's group reaches the shell and nothing it launched —
-// except that bash, on SIGHUP, resends it to every job before exiting. Both
-// jobs must be gone, and the hangup alone must have done it: the grace is
-// set long, so a fall-through to SIGTERM would take longer than the bound.
+// except that bash, on SIGHUP, resends it to every job before exiting. So
+// only the shell can end these jobs, and that both are gone is the
+// assertion that matters.
+//
+// The elapsed bound below adds the second half: that the shell did it
+// without the teardown having to escalate. With StopGrace at ten seconds,
+// SIGHUP and the pty master's close (one hangupGrace later) both land well
+// inside the bound and SIGTERM does not, so what the bound pins is that one
+// of those first two steps was enough — not, as an earlier version of this
+// comment claimed, that the hangup alone was.
 func Test_Host_StopHangsUpTheShellsJobs(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -121,6 +128,6 @@ func Test_Host_StopHangsUpTheShellsJobs(t *testing.T) {
 	require.Eventually(t, func() bool { return processGone(bg) && processGone(fg) },
 		5*time.Second, 50*time.Millisecond, "the shell's jobs outlived the session (bg %d fg %d)", bg, fg)
 	require.Less(t, time.Since(started), run.host.StopGrace,
-		"the hangup alone must end an interactive shell; a fall-through to SIGTERM takes a whole grace")
+		"the hangup or the master's close must end an interactive shell; a fall-through to SIGTERM takes a whole grace")
 	require.Equal(t, sessiondir.ReasonStopped, run.record(t).Reason)
 }

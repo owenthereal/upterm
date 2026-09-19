@@ -97,12 +97,6 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 }
 
 type adminServiceServer struct {
-	// Embedded so that a real v1.2.0 protoc-gen-go-grpc's
-	// mustEmbedUnimplementedAdminServiceServer() requirement is satisfied
-	// without this having to stand in for every method the service ever
-	// grows; GetSession and StopSession below override its stubs.
-	api.UnimplementedAdminServiceServer
-
 	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
 	OnStop     func()

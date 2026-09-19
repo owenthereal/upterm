@@ -224,7 +224,12 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		if out.res.Status == 0 {
 			return nil
 		}
-		return ExitCodeError{Code: out.res.Status, Err: fmt.Errorf("exit status %d", out.res.Status)}
+		// The same account `upterm attach` gives, for the same reason: the
+		// line is the whole story and the status below is for a script, so
+		// the error carries no message of its own and host.go silences
+		// cobra's.
+		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+commandExitedMessage(s.name, out.res.Status)+"\r\n")
+		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:
 		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+localDisconnectMessage(s.name, s.logPath, out.res)+"\r\n")
 		return ExitCodeError{Code: exitDisconnected}
@@ -291,6 +296,12 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 		AttachSocket: claimed.AttachSocket,
 		LogPath:      claimed.LogPath,
 		Pid:          int(claimed.Pid),
+		// What the record says at this moment, and what `session info -o
+		// json` would answer if asked a moment later: the claim writes
+		// ReasonUnknown and nothing has replaced it, since the session has
+		// only just started. Set explicitly so the two shapes match —
+		// reason is a key `session info` always publishes.
+		Reason: sessiondir.ReasonUnknown,
 	}
 	if sess != nil {
 		if detail, err := buildSessionDetail(sess); err == nil {

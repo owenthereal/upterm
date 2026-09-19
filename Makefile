@@ -18,10 +18,29 @@ docs:
 	rm -rf etc && mkdir -p etc/man/man1 && mkdir -p etc/completion
 	XDG_STATE_HOME=/home/user/.local/state XDG_CONFIG_HOME=/home/user/.config XDG_RUNTIME_DIR=/run/user/1000 go run cmd/gendoc/main.go
 
+# protoc-gen-go tracks google.golang.org/protobuf in go.mod: the generator and
+# the runtime it generates against are one version. protoc itself is not
+# go-installable, so install libprotoc 36.1 (brew install protobuf) and put it
+# on PATH; a different protoc only changes the version comment in the headers.
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.2.0
+
+.PHONY: proto_tools
+proto_tools:
+	mkdir -p $(BIN_DIR)
+	GOBIN=$(BIN_DIR) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN=$(BIN_DIR) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+# require_unimplemented_servers=false keeps api.AdminServiceServer satisfiable
+# from outside this module: the mandatory shape adds an unexported marker
+# method that no out-of-tree implementer can write.
 .PHONY: proto
-proto:
-	docker run -v $(CURDIR)/server:/defs namely/protoc-all -f server.proto -l go --go-source-relative -o .
-	docker run -v $(CURDIR)/host/api:/defs namely/protoc-all -f api.proto -l go --go-source-relative -o .
+proto: proto_tools
+	protoc -I server --go_out=server --go_opt=paths=source_relative server/server.proto
+	protoc -I host/api --go_out=host/api --go_opt=paths=source_relative \
+		--go-grpc_out=host/api --go-grpc_opt=paths=source_relative \
+		--go-grpc_opt=require_unimplemented_servers=false \
+		host/api/api.proto host/api/startup.proto
 
 .PHONY: build
 build:

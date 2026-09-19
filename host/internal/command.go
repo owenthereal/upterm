@@ -191,9 +191,13 @@ func (c *command) Result() CommandResult {
 	return c.result
 }
 
-// setupCommand creates an exec.Cmd with the given context, name, and args.
-// No special platform-specific handling is needed - signal handling is done
-// at the application level in host/host_*.go files.
+// setupCommand builds the *forced* command — the one a guest gets on its own
+// pty, started by startForceCommand. Only that path uses it; the session's
+// own command is built inline by Start, which explains why the two differ:
+// this one keeps CommandContext, because a forced command's teardown is the
+// guest's channel closing and an outright kill is the right end for it,
+// while the session's command needs the graded hangup/terminate/kill that
+// CommandContext would pre-empt.
 func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }

@@ -200,8 +200,6 @@ func (c *Child) Started(sessionID string) error {
 	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID}}})
 }
 
-func (c *Child) HasStarted() bool { return c.started.Load() }
-
 // Failed reports that the session did not start. Nothing is sent after
 // Started: the parent has gone by then, and a session that started and then
 // ended is an outcome the record carries, not a startup failure.

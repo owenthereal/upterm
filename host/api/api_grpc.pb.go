@@ -53,15 +53,14 @@ func (c *adminServiceClient) StopSession(ctx context.Context, in *StopSessionReq
 }
 
 // AdminServiceServer is the server API for AdminService service.
-// All implementations must embed UnimplementedAdminServiceServer
+// All implementations should embed UnimplementedAdminServiceServer
 // for forward compatibility
 type AdminServiceServer interface {
 	GetSession(context.Context, *GetSessionRequest) (*GetSessionResponse, error)
 	StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error)
-	mustEmbedUnimplementedAdminServiceServer()
 }
 
-// UnimplementedAdminServiceServer must be embedded to have forward compatible implementations.
+// UnimplementedAdminServiceServer should be embedded to have forward compatible implementations.
 type UnimplementedAdminServiceServer struct {
 }
 
@@ -71,7 +70,6 @@ func (UnimplementedAdminServiceServer) GetSession(context.Context, *GetSessionRe
 func (UnimplementedAdminServiceServer) StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopSession not implemented")
 }
-func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 
 // UnsafeAdminServiceServer may be embedded to opt out of forward compatibility for this service.
 // Use of this interface is not recommended, as added methods to AdminServiceServer will

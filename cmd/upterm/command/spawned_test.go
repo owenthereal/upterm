@@ -117,6 +117,8 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.Equal(t, "/var/log/upterm.log", info.LogPath)
 	require.Equal(t, 4242, info.Pid)
 	require.Equal(t, "ssh u@127.0.0.1 -p 2222", info.SSHCommand)
+	require.Equal(t, sessiondir.ReasonUnknown, info.Reason,
+		"reason is a key `session info -o json` always publishes; this shape has to match it")
 	require.Empty(t, stderr.String())
 
 	// The parent left after started; the daemon's watcher stays quiet.
@@ -169,11 +171,15 @@ func TestSpawnedSessionForegroundExitStatuses(t *testing.T) {
 		{"exited 0", attach.Result{Reason: attach.Exited, Status: 0}, func(t *testing.T, err error, _ string) {
 			require.NoError(t, err)
 		}},
-		{"exited 7", attach.Result{Reason: attach.Exited, Status: 7}, func(t *testing.T, err error, _ string) {
+		{"exited 7", attach.Result{Reason: attach.Exited, Status: 7}, func(t *testing.T, err error, stderr string) {
 			var ec ExitCodeError
 			require.ErrorAs(t, err, &ec)
 			require.Equal(t, 7, ec.Code)
-			require.EqualError(t, err, "exit status 7")
+			// The sentence is the account, exactly as `upterm attach`
+			// gives it; the nil Err is what makes host.go silence cobra
+			// so nothing else is printed after it.
+			require.Contains(t, stderr, "upterm: session s ended: command exited (status 7)")
+			require.NoError(t, ec.Err)
 		}},
 		{"disconnected", attach.Result{Reason: attach.Disconnected}, func(t *testing.T, err error, stderr string) {
 			var ec ExitCodeError
