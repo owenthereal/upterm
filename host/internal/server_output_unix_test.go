@@ -20,20 +20,23 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 
 	for _, mode := range []string{"shared replay", "shared live", "forced command"} {
 		t.Run(mode, func(t *testing.T) {
-			srv := &Server{Command: command, ForceForwardingInputForTesting: true}
+			srv := &Server{Command: command}
 			if mode == "forced command" {
 				srv.ForceCommand = command
 			}
 			h := startHost(t, srv)
 
 			ready := make([]byte, len("READY"))
-			_, err := io.ReadFull(h.stdout, ready)
+			// The local terminal is a client of the host door now, so the
+			// host's own view of the session is one of these.
+			in, out, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+			_, err := io.ReadFull(out, ready)
 			require.NoError(t, err)
 			require.Equal(t, "READY", string(ready))
 			if mode == "shared replay" {
-				_, err = io.WriteString(h.input, "\n")
+				_, err = io.WriteString(in, "\n")
 				require.NoError(t, err)
-				got, err := bufio.NewReader(h.stdout).ReadString('\x04')
+				got, err := bufio.NewReader(out).ReadString('\x04')
 				require.NoError(t, err)
 				require.Equal(t, output, got)
 			}

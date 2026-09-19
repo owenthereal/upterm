@@ -4,7 +4,6 @@ package ftests
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -58,12 +57,6 @@ func Test_Host_StartupClaimIsBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	done := make(chan error, 1)
 	go func() { done <- run.host.Run(ctx) }()
 
@@ -74,8 +67,6 @@ func Test_Host_StartupClaimIsBounded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run waited on the registry lock instead of its own deadline")
 	}
-	run.closeWriters()
-	<-drained
 
 	// The claim never completed, so this run owns nothing and may have said
 	// nothing: a record here would be an outcome published for a name the run

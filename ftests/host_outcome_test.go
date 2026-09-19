@@ -1,6 +1,7 @@
 package ftests
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,9 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
@@ -106,14 +109,9 @@ type outcomeRun struct {
 	// testing the instruction rather than the failure.
 	relay TestServer
 
-	// stdout is the read end of the host's stdout. The host's sink for a
-	// non-terminal stdout is asynchronous and bounded, so a test that does not
-	// read it loses output rather than blocking the host.
-	stdout *os.File
-
-	// closeWriters releases the pipe ends the host wrote to, so a reader of
-	// stdout sees EOF. Called once Run has returned.
-	closeWriters func()
+	// attachSocket carries the path the daemon bound its local door at, so a
+	// case can attach a client to the session it is watching.
+	attachSocket chan string
 }
 
 // outcomeOption adjusts the host a case runs, for the things that are not the
@@ -146,38 +144,27 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 	signers, err := utils.CreateSigners([][]byte{[]byte(HostPrivateKeyContent)})
 	require.NoError(t, err)
 
-	// Never written to: ownsTerminal reports false for a pipe, so the host
-	// does not forward stdin and nothing here has to feed it.
-	stdinr, stdinw, err := os.Pipe()
-	require.NoError(t, err)
-
-	stdoutr, stdoutw, err := os.Pipe()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = stdoutr.Close() })
-
 	name := uniqueSessionName(t)
+
+	// Buffered for two runs: Test_Host_CanRunTwice runs the same Host twice,
+	// and a callback nobody is receiving must not block the second startup.
+	attachSocket := make(chan string, 2)
 
 	run := &outcomeRun{
 		host: &host.Host{
-			Host:              "ssh://" + ts.SSHAddr(),
-			Name:              name,
-			Command:           command,
-			Signers:           signers,
-			HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
-			KeepAliveDuration: keepAliveDuration,
-			Logger:            testLogger,
-			Stdin:             stdinr,
-			Stdout:            stdoutw,
+			Host:                    "ssh://" + ts.SSHAddr(),
+			Name:                    name,
+			Command:                 command,
+			Signers:                 signers,
+			HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
+			KeepAliveDuration:       keepAliveDuration,
+			Logger:                  testLogger,
+			AttachListeningCallback: func(s string) { attachSocket <- s },
 		},
-		name:      name,
-		stateRoot: utils.UptermStateDir(),
-		relay:     ts,
-		stdout:    stdoutr,
-		closeWriters: func() {
-			_ = stdoutw.Close()
-			_ = stdinw.Close()
-			_ = stdinr.Close()
-		},
+		name:         name,
+		stateRoot:    utils.UptermStateDir(),
+		relay:        ts,
+		attachSocket: attachSocket,
 	}
 
 	for _, opt := range opts {
@@ -185,6 +172,39 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 	}
 
 	return run
+}
+
+// awaitAttachSocket returns the path the daemon bound its attach door at.
+func (r *outcomeRun) awaitAttachSocket(t *testing.T) string {
+	t.Helper()
+	select {
+	case s := <-r.attachSocket:
+		return s
+	case <-time.After(outcomeTimeout):
+		t.Fatal("the daemon never bound its attach socket")
+		return ""
+	}
+}
+
+// attachViewer attaches an output-only client and returns its output. The
+// keys it pins come from the session record the daemon already published,
+// the same source `upterm attach` reads them from.
+func (r *outcomeRun) attachViewer(t *testing.T, ctx context.Context, socket string) io.Reader {
+	t.Helper()
+	rec := r.record(t)
+	keys := make([]ssh.PublicKey, 0, len(rec.HostKeys))
+	for _, k := range rec.HostKeys {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
+		require.NoError(t, err)
+		keys = append(keys, key)
+	}
+	pr, pw := io.Pipe()
+	client := &attach.Client{Socket: socket, HostKeys: keys, Stdout: pw, Logger: testLogger}
+	go func() {
+		_, err := client.Run(ctx)
+		_ = pw.CloseWithError(err)
+	}()
+	return pr
 }
 
 // record reads what the run published. It works after Release, which is the
@@ -206,25 +226,20 @@ func runHostForOutcome(t *testing.T, command []string, opts ...outcomeOption) *s
 
 	run := newOutcomeRun(t, command, opts...)
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
+	// Nothing to drain: the daemon has no stdout of its own, and no client is
+	// attached, so the fan-out's only consumer is its replay ring.
 	err := run.host.Run(ctx)
-	run.closeWriters()
-	<-drained
 	t.Logf("host run returned: %v", err)
 
 	return run.record(t)
 }
 
-// runHostUntilCancelled starts a host, waits for marker on its stdout, then
-// cancels the context it was given and waits for Run to return.
+// runHostUntilCancelled starts a host, attaches a viewer, waits for marker on
+// what it receives, then cancels the context the host was given and waits for
+// Run to return.
 func runHostUntilCancelled(t *testing.T, command []string, marker string) *sessiondir.Record {
 	t.Helper()
 
@@ -239,7 +254,7 @@ func runHostUntilCancelled(t *testing.T, command []string, marker string) *sessi
 	// The marker proves the command is running and its output has reached us,
 	// so the cancellation below is a shutdown of a working session rather than
 	// a race with its startup.
-	awaitMarker(t, run.stdout, marker)
+	awaitMarker(t, run.attachViewer(t, ctx, run.awaitAttachSocket(t)), marker)
 	cancel()
 
 	select {
@@ -248,7 +263,6 @@ func runHostUntilCancelled(t *testing.T, command []string, marker string) *sessi
 	case <-time.After(outcomeTimeout):
 		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
 	}
-	run.closeWriters()
 
 	return run.record(t)
 }
@@ -352,14 +366,6 @@ func Test_Host_CanRunTwice(t *testing.T) {
 		[]string{"sh", "-c", "exit 0"},
 		[]string{"cmd", "/c", "exit", "0"}))
 
-	// One drain for both runs: the pipe stays open between them, since the
-	// second run writes to the same stdout the first one did.
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
@@ -368,9 +374,6 @@ func Test_Host_CanRunTwice(t *testing.T) {
 
 	t.Logf("second host run returned: %v", run.host.Run(ctx))
 	second := run.record(t)
-
-	run.closeWriters()
-	<-drained
 
 	require.NotEqual(t, first.LaunchID, second.LaunchID,
 		"the second run must claim the name for itself rather than inherit the first run's claim")
@@ -506,7 +509,6 @@ func Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts(t *testing.T)
 	case <-time.After(outcomeTimeout):
 		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
 	}
-	run.closeWriters()
 
 	rec := run.record(t)
 	require.Equal(t, sessiondir.StatusEnding, rec.Status)
@@ -532,7 +534,7 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- run.host.Run(ctx) }()
 
-	awaitMarker(t, run.stdout, "READY")
+	awaitMarker(t, run.attachViewer(t, ctx, run.awaitAttachSocket(t)), "READY")
 
 	// Waits rather than samples: the marker proves the command started, and
 	// the admin socket may bind a moment either side of that. The session
@@ -550,7 +552,6 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	case <-time.After(outcomeTimeout):
 		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
 	}
-	run.closeWriters()
 
 	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
 }
@@ -570,28 +571,25 @@ func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
 	run := newOutcomeRun(t, shellCommand(t,
 		[]string{"sh", "-c", "echo NAME=$" + upterm.HostSessionNameEnvVar},
 		[]string{"cmd", "/c", "echo", "NAME=%" + upterm.HostSessionNameEnvVar + "%"}))
-
-	collected := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(run.stdout)
-		collected <- string(b)
-	}()
+	// The command prints once and exits, so the client has to be attached
+	// before it starts: that is what a viewer of an immediate-exit command
+	// needs, and what upterm host asks for.
+	run.host.AwaitInitialClient = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
-	err := run.host.Run(ctx)
-	// The host's stdout sink is flushed as Run returns, so closing the write
-	// ends here is what turns the read above into an EOF rather than a hang.
-	run.closeWriters()
-	t.Logf("host run returned: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	out := run.attachViewer(t, ctx, run.awaitAttachSocket(t))
+	awaitMarker(t, out, "NAME="+run.name)
 
 	select {
-	case out := <-collected:
-		require.Contains(t, out, "NAME="+run.name,
-			"the command must be able to find out which session it is running in")
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
 	case <-time.After(outcomeTimeout):
-		t.Fatalf("host stdout did not reach EOF within %s", outcomeTimeout)
+		t.Fatalf("host did not return within %s", outcomeTimeout)
 	}
 }
 
@@ -601,21 +599,42 @@ func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
 // "disconnected"; the session still ends for the reason it is eventually
 // stopped for, not for the network.
 func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
+	// A marker a second, so that "still running" can be shown by what the
+	// command produces rather than only by what the record says. ping prints
+	// one reply per second, which is the same shape on the platform with no
+	// shell loop.
+	tick := "TICK"
+	if runtime.GOOS == "windows" {
+		tick = "Reply from"
+	}
 	run := newOutcomeRun(t, shellCommand(t,
-		[]string{"sh", "-c", "echo READY; sleep 300"},
-		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}))
+		[]string{"sh", "-c", "echo READY; while :; do sleep 1; echo TICK; done"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1"}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	done := make(chan error, 1)
 	go func() { done <- run.host.Run(ctx) }()
+
+	// A viewer attached before the loss, counting the markers it receives.
+	// Design item 6: the command and the local client both survive a tunnel
+	// that goes away.
+	//
+	// The socket is awaited here rather than inside the goroutine below:
+	// awaitAttachSocket calls t.Fatal, which from a goroutine that is not the
+	// test's stops only that goroutine, so a daemon that never bound would
+	// hang to the package timeout instead of failing.
+	out := run.attachViewer(t, ctx, run.awaitAttachSocket(t))
+	var ticks atomic.Int64
+	go func() {
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			if strings.Contains(sc.Text(), tick) {
+				ticks.Add(1)
+			}
+		}
+	}()
 
 	require.Eventually(t, func() bool {
 		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
@@ -630,6 +649,13 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 		return err == nil && rec != nil && rec.Status == sessiondir.StatusDisconnected
 	}, 20*time.Second, outcomePollInterval,
 		"a host that lost its tunnel must publish disconnected, and must not have exited")
+
+	// Two more markers, not one: a single one could have been in flight when
+	// the relay went away, and what is being shown is output produced after
+	// it did.
+	before := ticks.Load()
+	require.Eventually(t, func() bool { return ticks.Load() > before+1 }, 20*time.Second, 50*time.Millisecond,
+		"the command kept running, and the local client kept receiving it, after the tunnel was lost")
 
 	// And it stays disconnected while the session runs on. Nothing may talk
 	// the record back into "ready" once the tunnel that ready describes is
@@ -650,8 +676,6 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 	case <-time.After(outcomeTimeout):
 		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
 	}
-	run.closeWriters()
-	<-drained
 
 	rec := run.record(t)
 	require.Equal(t, sessiondir.StatusEnding, rec.Status)
@@ -677,19 +701,11 @@ func Test_Host_NeverPublishesReadyWhenClaimRefusesTheSocketPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	done := make(chan struct{})
 	statuses := watchStatuses(run.stateRoot, run.name, done)
 
 	err := run.host.Run(ctx)
 	close(done)
-	run.closeWriters()
-	<-drained
 	t.Logf("host run returned: %v", err)
 	require.ErrorIs(t, err, sessiondir.ErrSocketPathTooLong,
 		"a name whose admin socket cannot be bound must be refused, not attempted")
@@ -713,19 +729,11 @@ func Test_Host_NeverPublishesReadyWhenCommandCannotStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		_, _ = io.Copy(io.Discard, run.stdout)
-	}()
-
 	done := make(chan struct{})
 	statuses := watchStatuses(run.stateRoot, run.name, done)
 
 	err := run.host.Run(ctx)
 	close(done)
-	run.closeWriters()
-	<-drained
 	t.Logf("host run returned: %v", err)
 	require.Error(t, err, "a host whose command cannot start must not report success")
 
@@ -738,4 +746,42 @@ func Test_Host_NeverPublishesReadyWhenCommandCannotStart(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonStartupFailed, rec.Reason,
 		"a command that never started is a startup failure, not an outcome of its own")
 	require.Nil(t, rec.ExitCode)
+}
+
+func Test_Host_PublishesStartupAbandonedWhenNoClientAttaches(t *testing.T) {
+	run := newOutcomeRun(t, shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+	run.host.AwaitInitialClient = true
+	run.host.InitialClientTimeout = 300 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	// Nothing attaches, so there is nothing to drain: the daemon gives up on
+	// its own and the record is the whole of what it left behind.
+	err := run.host.Run(ctx)
+	require.ErrorIs(t, err, host.ErrNoInitialClient)
+
+	rec := run.record(t)
+	require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Nil(t, rec.ExitCode)
+}
+
+func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo ATTACHED; sleep 30"},
+		[]string{"cmd", "/c", "echo ATTACHED & ping -n 30 127.0.0.1 > NUL"}))
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	sock := run.awaitAttachSocket(t)
+	rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
+	require.NoError(t, err)
+	require.Equal(t, sock, rec.AttachSocket, "the record names the socket the daemon bound")
+
+	out := run.attachViewer(t, ctx, sock)
+	awaitMarker(t, out, "ATTACHED")
+	cancel()
+	<-done
 }

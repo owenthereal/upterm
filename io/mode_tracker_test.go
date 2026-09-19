@@ -523,3 +523,48 @@ func Test_ModeTracker_SoftResetIsNotAFullReset(t *testing.T) {
 
 	require.Equal(t, "\x1b[?2004h\x1b[?1049h", string(m.Snapshot()))
 }
+
+// Restore is Snapshot's opposite: for the terminal that is leaving rather
+// than the one joining. A full-screen program still on screen when a viewer
+// detaches leaves that viewer's shell on the alternate screen, cursor hidden,
+// mouse reporting clicks as input, inside the margins the program chose — and
+// restoring the termios settings around the attachment says nothing about any
+// of it.
+func Test_ModeTracker_RestoreUndoesWhatTheSessionSet(t *testing.T) {
+	m := NewModeTracker()
+	// A full-screen program's opening: margins on the normal screen, then the
+	// alternate screen, the cursor hidden, the mouse and bracketed paste on,
+	// and its own margins on the screen it switched to.
+	_, err := m.Write([]byte("\x1b[2;20r\x1b[?1049h\x1b[?25l\x1b[?1000;1006h\x1b[?2004h\x1b[5;15r"))
+	require.NoError(t, err)
+
+	// Leaving the alternate screen comes first, so everything after it lands
+	// on the screen the terminal is going back to. That screen's margins are
+	// released; the alternate screen's are not, because they went with it.
+	require.Equal(t,
+		"\x1b[?1049l"+"\x1b[r"+"\x1b[?25h\x1b[?1000l\x1b[?1006l\x1b[?2004l",
+		string(m.Restore()))
+}
+
+func Test_ModeTracker_RestoreLeavesThroughTheModeThatEntered(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?47h"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1b[?47l", string(m.Restore()),
+		"a terminal told to leave by a mode it never entered through is a terminal left on the wrong screen")
+}
+
+// The property that makes this safe to send on every detach: a session that
+// changed nothing produces nothing, so no terminal is reset on the strength
+// of a guess about what might have been done to it.
+func Test_ModeTracker_RestoreIsEmptyForAnUntouchedTerminal(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("just output, and \x1b[31mcolour\x1b[m, and \x1b[6n a query"))
+	require.NoError(t, err)
+	require.Empty(t, m.Restore())
+
+	// Including modes the session set and put back itself.
+	_, err = m.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[?25h\x1b[?1049l"))
+	require.NoError(t, err)
+	require.Empty(t, m.Restore())
+}

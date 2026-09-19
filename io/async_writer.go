@@ -160,6 +160,49 @@ func (a *AsyncWriter) Flush(ctx context.Context) error {
 	}
 }
 
+// Drained returns a channel closed the next time delivery catches up: the
+// buffer empties and the last write returns. It is Flush for a caller that
+// wants to be told rather than to wait — one holding a lock, or one with
+// nothing to do until the news arrives.
+//
+// The second return is false for a writer that has already failed or been
+// closed, and there is nothing else it could be: the signal those publish is
+// the one the writer had at the time, and the channel that replaces it is
+// never closed by anything. Answered under the lock the two of them take, so
+// a caller that is told true holds a channel that failing and closing will
+// still close.
+func (a *AsyncWriter) Drained() (<-chan struct{}, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.err != nil || a.closed {
+		return nil, false
+	}
+	return a.idle, true
+}
+
+// Err reports the error that ended delivery, if any.
+//
+// Flush cannot answer this: it reports nil for a sink that has already failed,
+// because a guest that is gone is not a shutdown error. A caller that needs to
+// know whether everything written was actually delivered — rather than merely
+// that nothing more is coming — has to ask here as well.
+func (a *AsyncWriter) Err() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.err
+}
+
+// Closed reports whether Close has been called.
+//
+// Like Err, it is the other half of what Flush does not say: Flush returns nil
+// for a closed sink too, and a caller that needs to know whether what it wrote
+// was delivered rather than discarded has to ask.
+func (a *AsyncWriter) Closed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.closed
+}
+
 // fail records a terminal error and releases everything waiting on this sink.
 // Callers must hold a.mu.
 //

@@ -215,6 +215,22 @@ func (d *Dir) AttachSocket() string { return filepath.Join(d.runtime, attachSock
 func (d *Dir) RecordPath() string   { return filepath.Join(d.state, recordFile) }
 func (d *Dir) LogPath() string      { return filepath.Join(d.state, logFileName) }
 
+// makeSessionDir creates a session's runtime directory and secures it before
+// anything else can be created inside it. The mode given to Mkdir is the
+// whole boundary on a POSIX filesystem, but sets nothing on Windows — see
+// secureSessionDir — so a directory that fails to secure is removed rather
+// than left behind looking claimed but unprotected.
+func makeSessionDir(path string) error {
+	if err := os.Mkdir(path, 0700); err != nil {
+		return err
+	}
+	if err := secureSessionDir(path); err != nil {
+		_ = os.RemoveAll(path)
+		return err
+	}
+	return nil
+}
+
 // Claim takes ownership of a name and publishes its initial state and outcome.
 //
 // Everything here happens inside one critical section held on a registry lock
@@ -260,7 +276,7 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 
 	sessRuntime := filepath.Join(sessRoot, name)
 
-	if err := os.Mkdir(sessRuntime, 0700); err != nil {
+	if err := makeSessionDir(sessRuntime); err != nil {
 		if !os.IsExist(err) {
 			return nil, err
 		}
@@ -277,7 +293,7 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		if err := os.RemoveAll(sessRuntime); err != nil {
 			return nil, err
 		}
-		if err := os.Mkdir(sessRuntime, 0700); err != nil {
+		if err := makeSessionDir(sessRuntime); err != nil {
 			return nil, err
 		}
 	}

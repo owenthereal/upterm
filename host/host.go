@@ -224,29 +224,63 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.P
 }
 
 type Host struct {
-	Host                           string
-	KeepAliveDuration              time.Duration
-	Command                        []string
-	ForceCommand                   []string
-	Signers                        []ssh.Signer
-	HostKeyCallback                ssh.HostKeyCallback
-	AuthorizedKeys                 []*AuthorizedKey
-	AdminSocketFile                string
-	SessionCreatedCallback         func(context.Context, *api.GetSessionResponse) error
-	ClientJoinedCallback           func(*api.Client)
-	ClientLeftCallback             func(*api.Client)
-	Logger                         *slog.Logger
-	Stdin                          *os.File
-	Stdout                         *os.File
-	ReadOnly                       bool
-	AllowLocalTCPForwarding        bool
-	ForceForwardingInputForTesting bool
+	Host                    string
+	KeepAliveDuration       time.Duration
+	Command                 []string
+	ForceCommand            []string
+	Signers                 []ssh.Signer
+	HostKeyCallback         ssh.HostKeyCallback
+	AuthorizedKeys          []*AuthorizedKey
+	AdminSocketFile         string
+	SessionCreatedCallback  func(context.Context, *api.GetSessionResponse) error
+	ClientJoinedCallback    func(*api.Client)
+	ClientLeftCallback      func(*api.Client)
+	Logger                  *slog.Logger
+	ReadOnly                bool
+	AllowLocalTCPForwarding bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
 	ProxyURL   *url.URL
 	PtySize    termsize.Size
 	PinPtySize bool
 	Term       string
+
+	// AttachSocketFile is where the local attach door is bound. Like
+	// AdminSocketFile, supplying it means the caller manages the path and
+	// no name is claimed; left empty with AdminSocketFile set, no attach
+	// door is served, which is how an embedder that will never attach a
+	// terminal says so. Claimed with the name otherwise.
+	AttachSocketFile string
+	// AttachListeningCallback is called once the attach socket is bound,
+	// before the command starts, with the path a client should dial. With
+	// AwaitInitialClient set, this is the moment to attach.
+	//
+	// Called on Run's own goroutine, before the run.Group exists, so it must
+	// not block: everything after it — the command, the guest door, the
+	// readiness record — waits behind it.
+	AttachListeningCallback func(attachSocket string)
+	// CommandStartedCallback is called once the hosted command is running,
+	// which with AwaitInitialClient is also the news that a client got
+	// through the door. A caller whose own attach failed asks this whether
+	// there is a session to leave alone.
+	//
+	// Called on the server's own goroutine, in front of everything the
+	// command's start releases, so it must not block.
+	CommandStartedCallback func()
+	// VersionWarningCallback is called when the server's version is
+	// incompatible with this host's. Nil logs the mismatch and nothing more:
+	// the daemon has no terminal to print to.
+	VersionWarningCallback func(*version.CompatibilityResult)
+
+	// AwaitInitialClient defers starting the command until the first host
+	// client's output subscription is installed, and defers serving guests
+	// until the command has started. Foreground use sets it: a command that
+	// exits at once — `upterm host -- false` — would otherwise race the local
+	// terminal's attach, and lose. Headless use leaves it off.
+	AwaitInitialClient bool
+	// InitialClientTimeout bounds that wait; zero means
+	// internal.DefaultInitialClientTimeout.
+	InitialClientTimeout time.Duration
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -281,6 +315,11 @@ type Host struct {
 // never happened.
 var ErrSessionAbandoned = errors.New("session abandoned before the command started")
 
+// ErrNoInitialClient is what a host told to await its initial client returns
+// when nobody attached in time. Nothing ran, so it is recorded as
+// startup_abandoned rather than a failure.
+var ErrNoInitialClient = internal.ErrNoInitialClient
+
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
 //
@@ -303,23 +342,17 @@ var ClaimTimeout = 10 * time.Second
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) error {
-	// First, before anything here can write a byte. The version warning below
-	// and whatever a SessionCreatedCallback prints both go to Stdout well
-	// before the signal actor is assembled, and for an embedder whose reader
-	// has gone away a single one of those writes is fatal. See
-	// InstallSignalPolicy; calling it again from setupSignalHandler is free.
+	// First, before anything here can write a byte. Whatever a
+	// SessionCreatedCallback prints, and whatever a VersionWarningCallback
+	// prints, goes out well before the signal actor is assembled, and for an
+	// embedder whose reader has gone away a single one of those writes is
+	// fatal. See InstallSignalPolicy; calling it again from setupSignalHandler
+	// is free.
 	InstallSignalPolicy()
 
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)
-	}
-
-	if c.Stdin == nil {
-		c.Stdin = os.Stdin
-	}
-	if c.Stdout == nil {
-		c.Stdout = os.Stdout
 	}
 
 	var aks []ssh.PublicKey
@@ -355,6 +388,7 @@ func (c *Host) Run(ctx context.Context) error {
 		}
 		c.SessionDir = dir
 		c.AdminSocketFile = dir.AdminSocket()
+		c.AttachSocketFile = dir.AttachSocket()
 		claimedDir = true
 	}
 
@@ -435,6 +469,7 @@ func (c *Host) Run(ctx context.Context) error {
 			c.SessionDir = nil
 			if claimedDir {
 				c.AdminSocketFile = ""
+				c.AttachSocketFile = ""
 			}
 		}()
 	}
@@ -467,9 +502,15 @@ func (c *Host) Run(ctx context.Context) error {
 	serverVersion := string(rt.ServerVersion())
 	logger.Debug("detected server version", "server_version", serverVersion)
 
-	// Check for version compatibility
+	// Check for version compatibility. The log is where it always goes: a
+	// daemon has no terminal of its own, and whoever does — the CLI — says so
+	// with a callback.
 	if result := version.CheckCompatibility(serverVersion); !result.Compatible {
-		displayVersionWarning(c.Stdout, logger, result)
+		logger.Warn("server version mismatch", "message", result.Message,
+			"host_version", result.HostVersion, "server_version", result.ServerVersion)
+		if c.VersionWarningCallback != nil {
+			c.VersionWarningCallback(result)
+		}
 	}
 
 	logger = logger.With("session", sessResp.SessionID)
@@ -538,6 +579,47 @@ func (c *Host) Run(ctx context.Context) error {
 		return err
 	}
 
+	// The local terminal's door, bound the way the admin socket is: no chmod,
+	// because the 0700 session directory is the boundary. Here rather than
+	// inside the group for the same reason the admin bind is — a bind failure
+	// is a startup failure and must be reported as one, not raced against the
+	// command's start.
+	var attachLn net.Listener
+	if c.AttachSocketFile != "" {
+		attachLn, err = net.Listen("unix", c.AttachSocketFile)
+		if err != nil {
+			logger.Error("Failed to bind the attach socket", "socket", c.AttachSocketFile, "error", err)
+			_ = adminServer.Shutdown(ctx)
+			return err
+		}
+		// Published as soon as the socket a client could dial exists, so that
+		// every record whose attach socket is dialable also carries the keys
+		// `upterm attach` needs to pin it. Guarded on len(c.Signers): tests
+		// construct hosts without any, and the field is left empty rather
+		// than published as nothing.
+		if c.SessionDir != nil && len(c.Signers) > 0 {
+			hostKeys := make([]string, 0, len(c.Signers))
+			for _, s := range c.Signers {
+				hostKeys = append(hostKeys, strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(s.PublicKey())), "\n"))
+			}
+			// Not swallowed: a record that never receives the keys names a
+			// socket `upterm attach` will refuse to dial, so a session that
+			// is otherwise fine becomes unattachable for its whole life.
+			// Not fatal either — the session itself is unaffected, and the
+			// guests it exists for are served over the tunnel — so it is
+			// said once, here, rather than ending a working session.
+			if err := c.SessionDir.Update(func(r *sessiondir.Record) {
+				r.HostKeys = hostKeys
+			}); err != nil {
+				logger.Error("Failed to publish the host keys; upterm attach will refuse this session",
+					"record", c.SessionDir.RecordPath(), "error", err)
+			}
+		}
+		if c.AttachListeningCallback != nil {
+			c.AttachListeningCallback(c.AttachSocketFile)
+		}
+	}
+
 	var g run.Group
 	{
 		// Handle OS signals for graceful shutdown
@@ -553,9 +635,20 @@ func (c *Host) Run(ctx context.Context) error {
 			cancel()
 		})
 	}
+	// Subscribed here, before any actor runs, rather than inside the actors
+	// that read them. run.Group starts its actors as goroutines in no
+	// particular order, and by this point the attach socket is bound and its
+	// callback has already told the local terminal to connect — so the door's
+	// join event can be emitted before a subscription made inside an actor
+	// exists. The emitter delivers to whoever is listening at the time and
+	// replays nothing, so that client would be missing from the repo for the
+	// life of the session: `session info` short by one, and no callback for
+	// it. Off stays in the interrupts, which run once, after Run.
+	clientJoined := eventEmitter.On(upterm.EventClientJoined)
+	clientLeft := eventEmitter.On(upterm.EventClientLeft)
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientJoined) {
+			for evt := range clientJoined {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
@@ -578,7 +671,7 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 	{
 		g.Add(func() error {
-			for evt := range eventEmitter.On(upterm.EventClientLeft) {
+			for evt := range clientLeft {
 				args := evt.Args
 				if len(args) == 0 {
 					continue
@@ -616,25 +709,29 @@ func (c *Host) Run(ctx context.Context) error {
 
 		ctx, cancel := context.WithCancel(ctx)
 		sshServer = internal.Server{
-			Command:                        c.Command,
-			CommandEnv:                     commandEnv,
-			ForceCommand:                   c.ForceCommand,
-			Signers:                        c.Signers,
-			AuthorizedKeys:                 aks,
-			EventEmitter:                   eventEmitter,
-			KeepAliveDuration:              c.KeepAliveDuration,
-			Stdin:                          c.Stdin,
-			Stdout:                         c.Stdout,
-			Logger:                         logger.With("component", "server"),
-			ReadOnly:                       c.ReadOnly,
-			AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
-			ForceForwardingInputForTesting: c.ForceForwardingInputForTesting,
-			PtySize:                        c.PtySize,
-			PinPtySize:                     c.PinPtySize,
-			Term:                           c.Term,
-			SFTPDisabled:                   c.SFTPDisabled,
-			SFTPPermissionChecker:          c.SFTPPermissionChecker,
-			OnCommandStarted:               func() { cmdOnce.Do(func() { close(cmdReady) }) },
+			Command:                 c.Command,
+			CommandEnv:              commandEnv,
+			ForceCommand:            c.ForceCommand,
+			Signers:                 c.Signers,
+			AuthorizedKeys:          aks,
+			EventEmitter:            eventEmitter,
+			KeepAliveDuration:       c.KeepAliveDuration,
+			Logger:                  logger.With("component", "server"),
+			ReadOnly:                c.ReadOnly,
+			AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
+			PtySize:                 c.PtySize,
+			PinPtySize:              c.PinPtySize,
+			Term:                    c.Term,
+			AwaitInitialClient:      c.AwaitInitialClient,
+			InitialClientTimeout:    c.InitialClientTimeout,
+			SFTPDisabled:            c.SFTPDisabled,
+			SFTPPermissionChecker:   c.SFTPPermissionChecker,
+			OnCommandStarted: func() {
+				cmdOnce.Do(func() { close(cmdReady) })
+				if c.CommandStartedCallback != nil {
+					c.CommandStartedCallback()
+				}
+			},
 			OnGuestServerStopped: func(err error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 				if c.SessionDir != nil {
@@ -645,7 +742,7 @@ func (c *Host) Run(ctx context.Context) error {
 			},
 		}
 		g.Add(func() error {
-			return sshServer.ServeWithContext(ctx, rt.Listener())
+			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
 		}, func(err error) {
 			cancel()
 		})
@@ -695,6 +792,10 @@ func (c *Host) Run(ctx context.Context) error {
 		// stopped — and the exit code of a process we killed is not the
 		// command's own outcome, so it is deliberately not reported.
 		runReason = sessiondir.ReasonStopped
+	case errors.Is(err, internal.ErrNoInitialClient):
+		// Nobody attached, so nothing ran and nothing failed: the session
+		// was abandoned before its command started.
+		runReason = sessiondir.ReasonStartupAbandoned
 	case res.Exited:
 		code := res.Code
 		runExitCode = &code
@@ -751,8 +852,10 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 	return apiAks
 }
 
-// displayVersionWarning prints a formatted version mismatch warning to the given writer
-func displayVersionWarning(out io.Writer, logger *slog.Logger, result *version.CompatibilityResult) {
+// DisplayVersionWarning prints a formatted version mismatch warning to the
+// given writer. Run no longer prints it — a daemon has no terminal — so this
+// is for a caller that does, from VersionWarningCallback.
+func DisplayVersionWarning(out io.Writer, logger *slog.Logger, result *version.CompatibilityResult) {
 	messages := []struct {
 		text     string
 		debugMsg string

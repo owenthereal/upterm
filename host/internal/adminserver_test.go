@@ -81,3 +81,19 @@ func Test_AdminServer_ListenSignalsBeforeServe(t *testing.T) {
 
 	require.NoError(t, s.Shutdown(context.Background()))
 }
+
+func TestGetSessionReportsEachClientsKind(t *testing.T) {
+	repo := NewClientRepo()
+	require.NoError(t, repo.Add(&api.Client{Id: "g", Kind: api.Client_GUEST}))
+	require.NoError(t, repo.Add(&api.Client{Id: "h", Kind: api.Client_HOST}))
+
+	s := &adminServiceServer{Session: &api.GetSessionResponse{}, ClientRepo: repo}
+	resp, err := s.GetSession(context.Background(), &api.GetSessionRequest{})
+	require.NoError(t, err)
+
+	kinds := map[string]api.Client_Kind{}
+	for _, c := range resp.ConnectedClients {
+		kinds[c.Id] = c.Kind
+	}
+	require.Equal(t, map[string]api.Client_Kind{"g": api.Client_GUEST, "h": api.Client_HOST}, kinds)
+}

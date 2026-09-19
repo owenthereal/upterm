@@ -15,7 +15,6 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
-	"golang.org/x/term"
 )
 
 const (
@@ -86,27 +85,20 @@ func newCommand(
 	ptySize termsize.Size,
 	pinPtySize bool,
 	term string,
-	stdin *os.File,
-	stdout *os.File,
 	eventEmitter *emitter.Emitter,
 	writers *uio.MultiWriter,
 	logger *slog.Logger,
-	forceForwardingInputForTesting bool,
 ) *command {
 	return &command{
-		name:                           name,
-		args:                           args,
-		env:                            env,
-		ptySize:                        ptySize,
-		pinPtySize:                     pinPtySize,
-		term:                           term,
-		stdin:                          stdin,
-		stdout:                         stdout,
-		eventEmitter:                   eventEmitter,
-		writers:                        writers,
-		logger:                         logger,
-		forceForwardingInputForTesting: forceForwardingInputForTesting,
-		ownsTerminal:                   ownsTerminal,
+		name:         name,
+		args:         args,
+		env:          env,
+		ptySize:      ptySize,
+		pinPtySize:   pinPtySize,
+		term:         term,
+		eventEmitter: eventEmitter,
+		writers:      writers,
+		logger:       logger,
 	}
 }
 
@@ -122,20 +114,10 @@ type command struct {
 	cmd  *exec.Cmd
 	ptmx PTY
 
-	stdin  *os.File
-	stdout *os.File
-
 	writers *uio.MultiWriter
 
 	eventEmitter *emitter.Emitter
 	logger       *slog.Logger
-
-	// ownsTerminal is the package function of the same name, held in a field
-	// so a test can take the terminal away mid-run. Losing the foreground is a
-	// job-control event — ^Z then bg — that no in-process pty can be made to
-	// produce, and the rule it is asked about is only interesting when the
-	// answer changes between the start of Run and its end.
-	ownsTerminal func(*os.File) bool
 
 	ctx context.Context
 
@@ -146,10 +128,6 @@ type command struct {
 	// hard way; see HandleSession.
 	resultMu sync.Mutex
 	result   CommandResult
-
-	// ForceForwardingInputForTesting forces stdin forwarding even when stdin is not a TTY.
-	// This is used in tests where stdin is a pipe but we still want to forward test data.
-	forceForwardingInputForTesting bool
 
 	// flushLogTimeoutForTesting, when non-zero, replaces guestFlushLogTimeout.
 	// A test asserting the warning has landed when Run returns needs a bound
@@ -184,7 +162,9 @@ func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
-func (c *command) Start(ctx context.Context) (PTY, error) {
+// Start opens the command's pty and starts it. initial is the geometry the
+// initial client arrived with, used when nothing was asked for explicitly.
+func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error) {
 	c.ctx = ctx
 	c.cmd = setupCommand(ctx, c.name, c.args)
 	// The session's own variables go last, and that is the whole rule for all
@@ -201,8 +181,18 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
 	}
 
+	want := c.ptySize
+	if !want.Valid() {
+		// The initial client's terminal, when there is one: the local
+		// terminal used to be the host's stdin and now it is a client, and
+		// the geometry it reports is the same one.
+		want = initial
+	}
+
 	var err error
-	c.ptmx, err = startPty(c.cmd, ResolvePtySize(c.stdin, c.ptySize), c.pinPtySize)
+	// startPty falls back to termsize.Default for a size that is not one, so
+	// a session nobody offered a geometry still opens at something usable.
+	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}
@@ -210,120 +200,13 @@ func (c *command) Start(ctx context.Context) (PTY, error) {
 	return c.ptmx, nil
 }
 
-// logInputEnded records that input forwarding stopped. It is not an error for
-// the session, only the end of one of its inputs.
-func (c *command) logInputEnded(err error) {
-	if c.logger == nil {
-		return
-	}
-	c.logger.Debug("stdin forwarding ended; session continues", "error", err)
-}
-
 func (c *command) Run() error {
-	// Not "is stdin a terminal" but "is stdin a terminal we are entitled to
-	// touch". Backgrounded, these are someone else's terminal's settings.
-	owns := c.ownsTerminal(c.stdin)
-
-	if owns {
-		// Set stdin in raw mode.
-		oldState, err := term.MakeRaw(int(c.stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("unable to set terminal to raw mode: %w", err)
-		}
-		defer func() {
-			// Asked again rather than remembered, because the answer can
-			// change while the command runs: ^Z then bg, or a shell that moved
-			// on, leaves the host in the background of a terminal somebody
-			// else is now using. SIGTTOU is ignored for the reasons in
-			// signal_unix.go, so nothing would stop this tcsetattr from
-			// succeeding — it would write this session's stale termios over
-			// theirs, and the usual symptom is a shell that has lost its echo.
-			//
-			// The settings belong to whoever is in the foreground now. If we
-			// are ever foregrounded again, the shell's job control puts ours
-			// back as part of resuming us.
-			if !c.ownsTerminal(c.stdin) {
-				return
-			}
-			_ = term.Restore(int(c.stdin.Fd()), oldState)
-		}()
-	}
-
 	var g run.Group
-	if owns {
-		// Setup terminal resize handling (platform-specific)
-		c.setupTerminalResize(&g, c.stdin, c.ptmx, c.eventEmitter)
-	}
-
-	// Forward stdin only from a terminal we own, or when forced for testing.
-	// A pipe or a redirect is nobody's terminal and may never see EOF, and a
-	// terminal we are not in the foreground of is not ours to read.
-	if owns || c.forceForwardingInputForTesting {
-		// input - forward stdin to PTY
-		ctx, cancel := context.WithCancel(c.ctx)
-		g.Add(func() error {
-			// The copy ending is not the session ending. stdin can die on its
-			// own — a backgrounded process, a closed terminal, plain EOF —
-			// while the command is perfectly healthy.
-			//
-			// Returning here would end the session either way: run.Group
-			// interrupts every actor as soon as any one of them returns, and it
-			// never looks at the error. Returning nil would be exactly as fatal
-			// as returning the error. So park until the session is cancelled,
-			// which the interrupt below does.
-			_, err := io.Copy(c.ptmx, uio.NewContextReader(ctx, c.stdin))
-			if err != nil {
-				c.logInputEnded(err)
-			}
-			<-ctx.Done()
-			return nil
-		}, func(err error) {
-			cancel()
-		})
-	}
 	{
-		// output
-		//
-		// A stdout that is a terminal stays synchronous: the pty should not run
-		// ahead of the screen that owns it, and a human watching wants complete
-		// output more than they want the command to finish sooner.
-		//
-		// A stdout that is not a terminal is a pipe, a file or a log. A pipe
-		// nobody drains blocks forever, and MultiWriter.Write holds writeMu
-		// across the fan-out, so that block stops every other writer and every
-		// new attach: the session wedges. Bounding it makes the worst case "the
-		// log loses output", which is what a log is for.
-		//
-		// c.stdout belongs to whoever constructed the Host. Nothing here closes
-		// it, dups it, or changes its flags — and so nothing here can release a
-		// drain goroutine already blocked writing to it. See the note below.
-		hostOut := io.Writer(c.stdout)
-		var hostSink *uio.AsyncWriter
-		if !term.IsTerminal(int(c.stdout.Fd())) {
-			// Capture the logger, not c. A closure over the command retains
-			// the command, its pty and the whole fan-out for as long as the
-			// parked writer lives, which makes the "bounded" claim below false
-			// by a wide margin.
-			logger := c.logger
-			hostSink = uio.NewAsyncWriter(c.stdout, uio.DefaultGuestBufferSize, func(err error) {
-				logger.Warn("host stdout dropped; session continues", "error", err)
-			})
-			hostOut = hostSink
-		}
-
-		// The bound, since the comment above promises one. A pipe nobody
-		// drains parks this sink's drain goroutine in that write until the
-		// process exits: Close cannot release it, and both ways to force the
-		// write to return were rejected — a deadline, which Fd() has already
-		// disabled, and a dup, which would set O_NONBLOCK on the caller's own
-		// pipe. At most one such goroutine per Run. It retains the sink, its
-		// in-flight chunk and the logger the drop callback closes over,
-		// blocks nothing else, and ends when the pipe drains, the reader
-		// closes it, or the process exits.
-
-		if err := c.writers.Append(hostOut); err != nil {
-			return err
-		}
+		// output: the pty into the fan-out. Every consumer — the local
+		// terminal included — is a client of the fan-out now, so there is
+		// nothing here to attach or pace: the primary client's synchronous
+		// writer is what keeps the pty from running ahead of a terminal.
 		ctx, cancel := context.WithCancel(c.ctx)
 		output := &activityWriter{Writer: c.writers}
 		done := make(chan struct{})
@@ -333,8 +216,8 @@ func (c *command) Run() error {
 			// is the only point where a flush is a barrier rather than a guess.
 			// Putting it in the interrupt instead would race the producer, and
 			// waiting there for the copy would not even be bounded — cancelling
-			// the reader cannot release a copy blocked in the synchronous write
-			// to c.stdout, and run.Group calls interrupts one after another, so
+			// the reader cannot release a copy blocked in a synchronous write
+			// to a client, and run.Group calls interrupts one after another, so
 			// that wait would hold up the pty close behind it.
 			defer func() {
 				flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(c.ctx), guestFlushTimeout)
@@ -376,16 +259,6 @@ func (c *command) Run() error {
 					case <-logged:
 					case <-time.After(logTimeout):
 					}
-				}
-
-				// Shutdown only flushes writers that are still attached, and
-				// AsyncWriter.Close discards whatever is pending. So the order is
-				// flush, then remove, then close. An earlier draft removed and
-				// closed in the interrupt, which both skipped the flush and threw
-				// away a slow stdout's tail.
-				c.writers.Remove(hostOut)
-				if hostSink != nil {
-					_ = hostSink.Close()
 				}
 			}()
 			defer close(done)

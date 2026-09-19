@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/logging"
@@ -122,6 +124,7 @@ var ConnectionTestCases = []FtestCase{
 	testClientLocalPortForward,
 	testClientSlowGuestDropped,
 	testHostExitsWhileGuestHoldsConnection,
+	testHostKindAndGuestKindInConnectedClients,
 }
 
 // CallbackTestCases contains all callback/event-related test functions
@@ -373,7 +376,9 @@ func (s *Server) start() error {
 		"ssh", s.SSHAddr(),
 		"ws", s.WSAddr(),
 	)
+	s.mu.Lock()
 	s.logger = logger
+	s.mu.Unlock()
 
 	// Create session manager based on the mode
 	var sm *server.SessionManager
@@ -434,12 +439,20 @@ func (s *Server) NodeAddr() string {
 func (s *Server) Shutdown() error {
 	var err error
 	s.shutdownOnce.Do(func() {
-		if s.logger != nil {
-			s.logger.Info("shutting down test server")
+		// Under the same lock NodeAddr takes, and for the same reason: start
+		// runs on its own goroutine and fills both of these in, so a shutdown
+		// that reaches them first — a test that ends without ever having
+		// reached the relay — reads them as they are being written.
+		s.mu.RLock()
+		logger, srv := s.logger, s.Server
+		s.mu.RUnlock()
+
+		if logger != nil {
+			logger.Info("shutting down test server")
 		}
 
-		if s.Server != nil {
-			err = s.Server.Shutdown()
+		if srv != nil {
+			err = srv.Shutdown()
 		}
 	})
 	return err
@@ -459,12 +472,22 @@ type Host struct {
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
-	inputCh                  chan string
-	outputCh                 chan string
-	done                     chan struct{}
-	ctx                      context.Context
-	cancel                   func()
-	wg                       sync.WaitGroup
+
+	// AttachSocketFile is where the fixture's own client attaches. Optional:
+	// derived beside AdminSocketFile when empty.
+	AttachSocketFile string
+	// Pty, when set, makes the fixture's client a client with a terminal —
+	// interactive, since it forwards the fixture's pipe stdin, and so
+	// eligible to be the session's primary. Nil leaves it a pipe viewer,
+	// which is what stage 1's pipe stdout was.
+	Pty *attach.Pty
+
+	inputCh  chan string
+	outputCh chan string
+	done     chan struct{}
+	ctx      context.Context
+	cancel   func()
+	wg       sync.WaitGroup
 }
 
 // Done closes when Host.Run has returned. Host.Close only cancels and then
@@ -538,40 +561,75 @@ func (c *Host) Share(url string) error {
 
 	logger := testLogger
 
+	attachReady := make(chan string, 1)
+	attachSocket := c.AttachSocketFile
+	if attachSocket == "" {
+		attachSocket = filepath.Join(filepath.Dir(c.AdminSocketFile), "a.sock")
+	}
+
 	c.Host = &host.Host{
-		Host:                           url,
-		Command:                        c.Command,
-		ForceCommand:                   c.ForceCommand,
-		Signers:                        signers,
-		AuthorizedKeys:                 authorizedKeys,
-		AdminSocketFile:                c.AdminSocketFile,
-		SessionCreatedCallback:         c.SessionCreatedCallback,
-		ClientJoinedCallback:           c.ClientJoinedCallback,
-		ClientLeftCallback:             c.ClientLeftCallback,
-		KeepAliveDuration:              keepAliveDuration,
-		Logger:                         logger,
-		HostKeyCallback:                ssh.InsecureIgnoreHostKey(),
-		Stdin:                          stdinr,
-		Stdout:                         stdoutw,
-		AllowLocalTCPForwarding:        c.AllowLocalTCPForwarding,
-		ReadOnly:                       c.ReadOnly,
-		SFTPDisabled:                   c.SFTPDisabled,
-		ForceForwardingInputForTesting: true,
+		Host:                    url,
+		Command:                 c.Command,
+		ForceCommand:            c.ForceCommand,
+		Signers:                 signers,
+		AuthorizedKeys:          authorizedKeys,
+		AdminSocketFile:         c.AdminSocketFile,
+		SessionCreatedCallback:  c.SessionCreatedCallback,
+		ClientJoinedCallback:    c.ClientJoinedCallback,
+		ClientLeftCallback:      c.ClientLeftCallback,
+		KeepAliveDuration:       keepAliveDuration,
+		Logger:                  logger,
+		HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
+		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
+		ReadOnly:                c.ReadOnly,
+		SFTPDisabled:            c.SFTPDisabled,
+		AttachSocketFile:        attachSocket,
+		AwaitInitialClient:      true,
+		AttachListeningCallback: func(s string) { attachReady <- s },
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		err := c.Run(c.ctx)
-		// Nothing writes to stdout once Run has returned. Close the pipe so
-		// the output goroutine sees EOF instead of waiting for stray shell
-		// output that may never come.
-		_ = stdoutw.Close()
-		_ = stdinr.Close()
 		close(c.done)
 		if err != nil {
 			testLogger.Error("error running host", "error", err)
 			errCh <- err
 		}
+	}()
+
+	var sock string
+	select {
+	case sock = <-attachReady:
+	case err := <-errCh:
+		return err
+	case <-time.After(unixSocketWaitTimeout):
+		return fmt.Errorf("timeout waiting for the attach socket")
+	}
+
+	// The fixture's terminal: the same client upterm attach is, on pipes. No
+	// pty by default, so it is an asynchronous viewer — what a pipe stdout
+	// was before the local terminal became a client — and a test that wants
+	// the primary's pacing asks for a pty, which with the pipe stdin makes
+	// the client interactive and eligible.
+	//
+	// The keys come from signers directly, not a session record: this
+	// fixture supplies its own AdminSocketFile, which skips the Claim that
+	// would otherwise publish one.
+	hostKeys := make([]ssh.PublicKey, 0, len(signers))
+	for _, s := range signers {
+		hostKeys = append(hostKeys, s.PublicKey())
+	}
+	client := &attach.Client{Socket: sock, HostKeys: hostKeys, Stdin: stdinr, Stdout: stdoutw, Pty: c.Pty, Logger: testLogger}
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		res, err := client.Run(c.ctx)
+		testLogger.Debug("fixture client finished", "result", res, "error", err)
+		// Nothing writes to stdout once the client has returned. Close the
+		// pipe so the output goroutine sees EOF.
+		_ = stdoutw.Close()
+		_ = stdinr.Close()
 	}()
 
 	if err := waitForUnixSocket(c.AdminSocketFile, errCh); err != nil {

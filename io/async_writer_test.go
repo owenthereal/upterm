@@ -158,6 +158,31 @@ func TestAsyncWriterOverflowDropsOnce(t *testing.T) {
 	}
 }
 
+// Flush reports nil for a sink that has already failed, so a caller that needs
+// to know whether what it wrote was delivered has to ask Err as well.
+func TestAsyncWriterErrReportsTheTerminalError(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+
+	a := NewAsyncWriter(gate, 16, nil)
+	defer func() { _ = a.Close() }()
+	require.NoError(t, a.Err(), "a healthy sink has no error")
+
+	_, err := a.Write([]byte("12345678"))
+	require.NoError(t, err)
+	<-gate.entered
+	require.NoError(t, a.Err(), "in flight is not failed")
+
+	_, err = a.Write([]byte("past the cap and then some"))
+	require.ErrorIs(t, err, ErrOverflow)
+	require.ErrorIs(t, a.Err(), ErrOverflow)
+
+	// And Flush still says nothing is coming, which is the whole point.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, a.Flush(ctx))
+}
+
 // onDrop runs on the pty copy's behalf, so it must never be able to hold it up.
 func TestAsyncWriterSlowDropCallbackDoesNotBlockWrite(t *testing.T) {
 	gate := newGateWriter()
@@ -233,8 +258,10 @@ func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
 func TestAsyncWriterCloseStopsAnIdleDrain(t *testing.T) {
 	var rec recordingWriter
 	a := NewAsyncWriter(&rec, DefaultGuestBufferSize, nil)
+	require.False(t, a.Closed())
 
 	require.NoError(t, a.Close())
+	require.True(t, a.Closed(), "and it says so, since Flush will not")
 	require.Eventually(t, a.stopped, 2*time.Second, time.Millisecond,
 		"an idle drain must exit on Close")
 }
@@ -562,4 +589,77 @@ func TestAsyncWriterFlushAfterCloseReturnsImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, a.Flush(ctx))
+}
+
+// Drained is the news that Flush waits for, and it has to arrive whether
+// delivery caught up or gave up: the host's elector watches a client that was
+// too far behind to be promoted, and a client that is never coming back has to
+// wake it too, or the wait is a goroutine held to the end of the session.
+func TestAsyncWriterDrainedReportsCatchingUp(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("queued"))
+	require.NoError(t, err)
+	<-gate.entered
+
+	drained, ok := a.Drained()
+	require.True(t, ok, "a live writer reports a signal to wait on")
+	select {
+	case <-drained:
+		t.Fatal("reported drained while a write was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate.release)
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never reported drained after delivery completed")
+	}
+}
+
+func TestAsyncWriterDrainedWakesOnClose(t *testing.T) {
+	gate := newGateWriter()
+	defer close(gate.release)
+
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	_, err := a.Write([]byte("never delivered"))
+	require.NoError(t, err)
+	<-gate.entered
+
+	drained, ok := a.Drained()
+	require.True(t, ok)
+	require.NoError(t, a.Close())
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a closed writer left a waiter with nothing to wake it")
+	}
+
+	// And afterwards there is no signal left to hand out: the channel the
+	// close published is spent, and the one that replaced it is closed by
+	// nothing.
+	_, ok = a.Drained()
+	require.False(t, ok, "a closed writer must not hand out a signal that never fires")
+}
+
+func TestAsyncWriterDrainedWakesOnFailure(t *testing.T) {
+	a := NewAsyncWriter(&failingWriter{}, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	drained, ok := a.Drained()
+	require.True(t, ok)
+
+	_, err := a.Write([]byte("undeliverable"))
+	require.NoError(t, err, "the failure is the delivery's, not the caller's")
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed writer left a waiter with nothing to wake it")
+	}
+
+	_, ok = a.Drained()
+	require.False(t, ok, "a failed writer must not hand out a signal that never fires")
 }

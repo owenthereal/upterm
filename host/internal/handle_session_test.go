@@ -39,9 +39,11 @@ func TestHandleSessionDoesNotBlockOnAStalledReadOnlyGuest(t *testing.T) {
 	}
 
 	h := &sessionHandler{
+		kind:              kindGuest,
 		readonly:          true,
 		writers:           writers,
 		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
 		keepAliveDuration: time.Hour, // long enough never to fire
 		ctx:               t.Context(),
 		logger:            discardLogger(),

@@ -8,7 +8,9 @@ const (
 	HostSessionNameEnvVar = "UPTERM_SESSION_NAME"
 
 	// client
-	ClientSSHClientVersion = "SSH-2.0-upterm-client-client"
+	ClientSSHClientVersion  = "SSH-2.0-upterm-client-client"
+	AttachSSHClientVersion  = "SSH-2.0-upterm-attach"
+	AttachInteractiveEnvVar = "UPTERM_ATTACH_INTERACTIVE"
 
 	// server
 	ServerSSHServerVersion         = "SSH-2.0-uptermd"
@@ -23,8 +25,6 @@ const (
 
 	SSHCertExtension = "upterm-auth-request"
 
-	EventClientJoined          = "client-joined"
-	EventClientLeft            = "client-left"
-	EventTerminalWindowChanged = "terminal-window-changed"
-	EventTerminalDetached      = "terminal-detached"
+	EventClientJoined = "client-joined"
+	EventClientLeft   = "client-left"
 )

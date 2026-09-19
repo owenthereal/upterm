@@ -51,7 +51,21 @@ type Record struct {
 	// the record with it, and a path rebuilt under the reader's own root
 	// names a socket nothing answers at. Forced on every publish, like Name
 	// and LaunchID, so no caller can leave it out.
-	AdminSocket  string    `json:"admin_socket,omitempty"`
+	AdminSocket string `json:"admin_socket,omitempty"`
+	// AttachSocket is where the session's local terminal door is bound, beside
+	// the admin socket and under the same runtime root, for the same reason
+	// AdminSocket is recorded: `upterm attach` from a shell under a different
+	// XDG_RUNTIME_DIR must dial the socket that exists, not one rebuilt under
+	// its own root. Forced on every publish.
+	AttachSocket string `json:"attach_socket,omitempty"`
+	// HostKeys is the public half of every key the attach door may present,
+	// in authorized_keys form, one entry per signer. `upterm attach` pins
+	// them: the socket's permissions are what keep another process from
+	// binding that path, and this is what catches one that managed to,
+	// whichever of the daemon's several signers it ends up presenting.
+	// Unlike AdminSocket and AttachSocket it is not forced on every publish —
+	// Dir has no key of its own — so the daemon supplies it once it has one.
+	HostKeys     []string  `json:"host_keys,omitempty"`
 	SessionID    string    `json:"session_id,omitempty"`
 	Command      []string  `json:"command,omitempty"`
 	ForceCommand []string  `json:"force_command,omitempty"`
@@ -79,6 +93,7 @@ func (d *Dir) Update(mutate func(*Record)) error {
 	d.record.Name = d.name
 	d.record.LaunchID = d.launchID
 	d.record.AdminSocket = d.AdminSocket()
+	d.record.AttachSocket = d.AttachSocket()
 	d.record.UpdatedAt = time.Now().UTC()
 
 	return writeJSONAtomic(d.RecordPath(), d.record)

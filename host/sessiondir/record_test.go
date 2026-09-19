@@ -83,6 +83,55 @@ func Test_Record_CarriesTheAdminSocketPath(t *testing.T) {
 	require.Equal(t, StatusReady, rec.Status, "the rest of the update still lands")
 }
 
+// Test_Record_AttachSocketIsForcedOnEveryPublish pins that AttachSocket is
+// republished on every Update the way AdminSocket is: a publisher that writes
+// a wrong path is overruled, not just one that blanks it.
+func Test_Record_AttachSocketIsForcedOnEveryPublish(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "attach-sock")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Release(context.Background()) })
+
+	require.NoError(t, d.Update(func(r *Record) { r.AttachSocket = "/nowhere/attach.sock" }))
+
+	rec, err := ReadRecord(stateRoot, "attach-sock")
+	require.NoError(t, err)
+	require.Equal(t, d.AttachSocket(), rec.AttachSocket,
+		"a publisher must not be able to leave the attach socket out or wrong")
+	require.Equal(t, filepath.Join(filepath.Dir(rec.AdminSocket), "attach.sock"), rec.AttachSocket)
+}
+
+// Test_Record_HostKeysRoundTrip pins that HostKeys, unlike AdminSocket and
+// AttachSocket, is not forced on every publish: Dir has no key of its own, so
+// a record that never had one published stays empty, and one the daemon set
+// survives an update that says nothing about it.
+func Test_Record_HostKeysRoundTrip(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+
+	d, err := claim(t, runtimeRoot, stateRoot, "host-keys")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Release(context.Background()) })
+
+	rec, err := ReadRecord(stateRoot, "host-keys")
+	require.NoError(t, err)
+	require.Empty(t, rec.HostKeys, "nothing has published a key yet")
+
+	keys := []string{"ssh-ed25519 AAAA one", "ssh-rsa AAAA two"}
+	require.NoError(t, d.Update(func(r *Record) { r.HostKeys = keys }))
+
+	rec, err = ReadRecord(stateRoot, "host-keys")
+	require.NoError(t, err)
+	require.Equal(t, keys, rec.HostKeys)
+
+	// An update that does not mention HostKeys leaves it as it was, the way
+	// Update's read-modify-write leaves every field an earlier update set.
+	require.NoError(t, d.Update(func(r *Record) { r.Status = StatusReady }))
+	rec, err = ReadRecord(stateRoot, "host-keys")
+	require.NoError(t, err)
+	require.Equal(t, keys, rec.HostKeys, "an unrelated update must not drop the published keys")
+}
+
 func Test_Record_PublicationIsAtomicUnderAConcurrentReader(t *testing.T) {
 	// Review fix: the previous version of this test had no concurrent reader,
 	// so its name promised more than it checked. Atomicity is only observable

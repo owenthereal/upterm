@@ -360,6 +360,35 @@ __upterm_handle_word()
     __upterm_handle_word
 }
 
+_upterm_attach()
+{
+    last_command="upterm_attach"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--escape-char=")
+    two_word_flags+=("--escape-char")
+    local_nonpersistent_flags+=("--escape-char")
+    local_nonpersistent_flags+=("--escape-char=")
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_config_edit()
 {
     last_command="upterm_config_edit"
@@ -806,6 +835,7 @@ _upterm_root_command()
     command_aliases=()
 
     commands=()
+    commands+=("attach")
     commands+=("config")
     commands+=("help")
     commands+=("host")

@@ -79,10 +79,20 @@ func testClientCallbacks(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
 		ReadOnly:                 readOnly,
+		// The fixture's own terminal comes in by the host door and is
+		// announced like any other client. This test is about the guest's
+		// events, so the host's are filtered here rather than counted: the
+		// assertions below are "exactly one guest joined, exactly one left".
 		ClientJoinedCallback: func(c *api.Client) {
+			if c.Kind == api.Client_HOST {
+				return
+			}
 			jch <- c
 		},
 		ClientLeftCallback: func(c *api.Client) {
+			if c.Kind == api.Client_HOST {
+				return
+			}
 			lch <- c
 		},
 	}
