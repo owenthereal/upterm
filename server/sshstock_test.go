@@ -645,7 +645,7 @@ func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
 			}
 			var rejection *ssh.OpenChannelError
 			require.ErrorAs(t, err, &rejection)
-			require.Contains(t, rejection.Message, "host key mismatch")
+			require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
 		})
 	}
 }

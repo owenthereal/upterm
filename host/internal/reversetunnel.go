@@ -22,6 +22,20 @@ import (
 )
 
 const (
+	// publickeyAuthError matches only the no-key-offered rejection, "ssh:
+	// unable to authenticate, attempted methods [none]". A key that is
+	// offered and refused — which is what a self-hosted relay's --authorized-
+	// keys allowlist produces — arrives as "[none publickey]" instead, so it
+	// does not match, sshDialError never turns it into a
+	// PermissionDeniedError, and it surfaces to the user as a raw handshake
+	// error rather than "Permission denied (publickey)".
+	//
+	// Widening the match to also cover the offered-and-refused shape is
+	// deferred: it would change the error text every rejected-key `upterm
+	// host` start prints, which deserves its own commit and tests.
+	//
+	// The gap is pinned by the "an unlisted identity is refused" subtest in
+	// ftests/host_key_test.go.
 	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
 
 	// listenerCloseGrace bounds how long closing the forwarded listener waits

@@ -232,6 +232,13 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 			// variable says. Resolve it to the empty list it names. Scalars
 			// keep their default: there is no empty value a bool or a string
 			// flag could sensibly take here.
+			//
+			// Six pflag.SliceValue flags reach here: private-key and the five
+			// authUserSliceValue flags — authorized-user and the four legacy
+			// *-user flags. The rule is a no-op wherever the default is already
+			// empty, which today is every one of them but private-key; a future
+			// slice flag with a non-empty default would inherit this behaviour
+			// silently.
 			if envSupplied(flag.Name) {
 				if sv, ok := flag.Value.(pflag.SliceValue); ok {
 					if err := sv.Replace(nil); err != nil {
