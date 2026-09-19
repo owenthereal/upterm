@@ -109,10 +109,12 @@ func hostCmd() *cobra.Command {
 		Long: `Host a terminal session via a reverse SSH tunnel to the Upterm server.
 
 The session links the host and client IO to a command's IO. Authentication with the
-Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
-  2. SSH Agent keys
-  3. Auto-generated ephemeral key (if no keys found)
+Upterm server uses, in this order:
+  1. SSH agent keys, when an agent is running and holds any
+  2. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
+  3. Auto-generated ephemeral key, when neither is available
+
+Supplying --private-key makes the named list the whole set instead; see its help.
 
 To authorize client connections, use --authorized-keys to specify an authorized_keys file
 containing client public keys.`,
