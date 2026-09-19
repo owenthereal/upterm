@@ -296,6 +296,86 @@ func TestIdentitySigners_SecurityKeyStubNotHeldByAgentIsAnError(t *testing.T) {
 	require.ErrorContains(t, err, "the SSH agent does not hold")
 }
 
+// skEd25519PrivateStubEmbedding builds the same sk-stub container as
+// skEd25519PrivateStub (host/signer_test.go), except the caller supplies the
+// container's embedded PubKey blob directly instead of it being computed
+// from a public key via skEd25519PublicKeyBlob. It exists for the two tests
+// below: a genuine sk key's container embeds an sk-wire blob
+// (skEd25519PublicKeyBlob's shape), but x/crypto's agent.NewKeyring() cannot
+// hold a real sk key — only standard private key types — so these tests
+// stand in an ordinary ed25519 key for what the agent holds, and need the
+// embedded PubKey to be that ordinary key's plain ssh-ed25519 blob for the
+// two to match. The private block's key type stays
+// sk-ssh-ed25519@openssh.com regardless, so the file still reaches
+// x/crypto's "ssh: unhandled key type" failure the way a real FIDO stub
+// would.
+func skEd25519PrivateStubEmbedding(t *testing.T, pubKeyBlob []byte) []byte {
+	t.Helper()
+
+	privBlock := ssh.Marshal(skOpenSSHPrivateBlock{
+		Check1:  0x2a2a2a2a,
+		Check2:  0x2a2a2a2a,
+		Keytype: "sk-ssh-ed25519@openssh.com",
+	})
+	container := ssh.Marshal(skOpenSSHContainer{
+		CipherName:   "none",
+		KdfName:      "none",
+		KdfOpts:      "",
+		NumKeys:      1,
+		PubKey:       pubKeyBlob,
+		PrivKeyBlock: privBlock,
+	})
+	full := append([]byte(skPrivateKeyAuthMagic), container...)
+	return pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: full})
+}
+
+// TestIdentitySigners_SecurityKeyStubWithNoPubSiblingResolvesThroughAgent is
+// the gap this fix closes: an sk stub with no .pub sibling used to be
+// unresolvable even when the agent held the matching key, because nothing
+// recovered a public key to look the agent up with. Now the public key
+// embedded in the openssh-key-v1 container itself is tried, exactly as the
+// .pub sibling already was. See skEd25519PrivateStubEmbedding for why the
+// fixture substitutes an ordinary ed25519 key for what would be a real sk
+// key on real hardware.
+func TestIdentitySigners_SecurityKeyStubWithNoPubSiblingResolvesThroughAgent(t *testing.T) {
+	agentPub, agentPriv := newEd25519(t)
+	ta := startTestAgent(t, agentPriv)
+
+	dir := t.TempDir()
+	keyFile := writeTestFile(t, dir, "id_ed25519_sk", skEd25519PrivateStubEmbedding(t, agentPub.Marshal()))
+	// Deliberately no id_ed25519_sk.pub beside it.
+
+	signers, cleanup, err := identitySigners([]string{keyFile}, ta.socket, failingPrompt(t))
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.Len(t, signers, 1)
+	require.Equal(t, agentPub.Marshal(), signers[0].PublicKey().Marshal())
+
+	_, err = signers[0].Sign(rand.Reader, []byte("m"))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, ta.signatures.Load(), "signed through the agent")
+}
+
+// TestIdentitySigners_SecurityKeyStubWithNoPubSiblingNotHeldByAgentIsAnError
+// is the other half of the gap: with no .pub sibling and the agent not
+// holding the embedded key either, resolution still fails, and the error
+// must say so — the same two facts
+// TestIdentitySigners_SecurityKeyStubNotHeldByAgentIsAnError asserts for the
+// .pub-sibling case.
+func TestIdentitySigners_SecurityKeyStubWithNoPubSiblingNotHeldByAgentIsAnError(t *testing.T) {
+	_, unrelatedPriv := newEd25519(t)
+	ta := startTestAgent(t, unrelatedPriv)
+
+	notHeldPub, _ := newEd25519(t)
+	dir := t.TempDir()
+	keyFile := writeTestFile(t, dir, "id_ed25519_sk", skEd25519PrivateStubEmbedding(t, notHeldPub.Marshal()))
+
+	_, _, err := identitySigners([]string{keyFile}, ta.socket, failingPrompt(t))
+	require.ErrorContains(t, err, "cannot parse private key "+keyFile)
+	require.ErrorContains(t, err, "unhandled key type")
+	require.ErrorContains(t, err, "the SSH agent does not hold")
+}
+
 func TestIdentitySigners_PubSelectsAnAgentKey(t *testing.T) {
 	pub, priv := newEd25519(t)
 	ta := startTestAgent(t, priv)

@@ -304,22 +304,13 @@ func TestSkEd25519PrivateStub_IsUnhandledKeyType(t *testing.T) {
 	require.EqualError(t, err, "ssh: unhandled key type")
 }
 
-// TestIdentitySigners_SecurityKeyStubWithNoPubSiblingKeepsUnchangedError
-// covers the "no .pub sibling" half of the sk-stub fix: with nothing to
-// recover the public half from, the file stays unresolvable and the error
-// is the same "cannot parse private key" TestIdentitySigners_UnparseableFileIsAnError
-// asserts for ordinary junk.
-func TestIdentitySigners_SecurityKeyStubWithNoPubSiblingKeepsUnchangedError(t *testing.T) {
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "id_ed25519_sk")
-	require.NoError(t, os.WriteFile(keyFile, skEd25519PrivateStub(t, pub), 0600))
-
-	_, _, err = identitySigners([]string{keyFile}, "", failingPrompt(t))
-	require.ErrorContains(t, err, "cannot parse private key "+keyFile)
-	require.ErrorContains(t, err, "unhandled key type")
-}
+// The "no .pub sibling" sk-stub case used to stop here with the file
+// unresolvable, same as ordinary junk. It no longer does: the public key
+// embedded in the openssh-key-v1 container itself is now recovered and
+// tried against the agent, so the case needs an agent and lives with the
+// other agent-backed tests in signer_unix_test.go, as
+// TestIdentitySigners_SecurityKeyStubWithNoPubSiblingResolvesThroughAgent
+// and TestIdentitySigners_SecurityKeyStubWithNoPubSiblingNotHeldByAgentIsAnError.
 
 func TestIdentitySigners_UnencryptedFileNeedsNoAgent(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)

@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -116,10 +117,16 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		// sk-ecdsa-sha2-nistp256@openssh.com, so a FIDO/security-key private
 		// file — a key-handle stub, not a private key — lands here with
 		// "ssh: unhandled key type". That file names an identity it cannot
-		// itself sign with; if the agent holds it, resolve through the
-		// agent by its public half, the same way an encrypted key's .pub
-		// sibling already does.
-		if pub := publicKeyBeside(file); pub != nil {
+		// itself sign with; if the agent holds it, resolve through the agent
+		// by its public half. The .pub sibling is tried first, matching
+		// OpenSSH's own fallback order; failing that, the openssh-key-v1
+		// container carries its public key in the clear ahead of the private
+		// section, so it can be recovered. See embeddedPublicKey for details.
+		pub := publicKeyBeside(file)
+		if pub == nil {
+			pub = embeddedPublicKey(pb)
+		}
+		if pub != nil {
 			s, agentErr := ag.signerFor(pub)
 			if agentErr == nil {
 				return s, nil
@@ -163,6 +170,66 @@ func publicKeyBeside(file string) ssh.PublicKey {
 		return nil
 	}
 	pub, _, _, _, err := ssh.ParseAuthorizedKey(b)
+	if err != nil {
+		return nil
+	}
+	return pub
+}
+
+// openSSHPrivateKeyMagic is the fixed prefix of an openssh-key-v1 container,
+// checked the same way golang.org/x/crypto/ssh's parseOpenSSHPrivateKey does
+// before it Unmarshals the rest.
+const openSSHPrivateKeyMagic = "openssh-key-v1\x00"
+
+// openSSHPrivateKeyContainer mirrors the wire layout x/crypto's unexported
+// openSSHEncryptedPrivateKey decodes an openssh-key-v1 file into
+// (golang.org/x/crypto/ssh/keys.go, v0.57.0): CipherName, KdfName and
+// KdfOpts describe how PrivKeyBlock is (or is not) encrypted, but PubKey
+// sits ahead of all of that, in the clear, whether or not the file is
+// encrypted. x/crypto's struct is unexported; ssh.Unmarshal only needs the
+// field order and tags to match, which this does.
+type openSSHPrivateKeyContainer struct {
+	CipherName   string
+	KdfName      string
+	KdfOpts      string
+	NumKeys      uint32
+	PubKey       []byte
+	PrivKeyBlock []byte
+	Rest         []byte `ssh:"rest"`
+}
+
+// embeddedPublicKey recovers the public key an openssh-key-v1 container
+// carries in the clear, ahead of its (possibly encrypted) private section,
+// for a file whose inner key type x/crypto's parseOpenSSHPrivateKey does not
+// recognise at all — a FIDO/security-key stub, for one. x/crypto surfaces
+// that same embedded key on its own for an *encrypted* file, via
+// PassphraseMissingError.PublicKey; it has no such path for an unencrypted
+// file of an unrecognised type, which reaches its keytype switch's default
+// case and returns a bare "ssh: unhandled key type", the public key it had
+// already parsed simply discarded. This helper repeats that bit of parsing.
+// It returns nil, not an error, when pb is not such a container, names more
+// than one key, or its public key blob does not itself parse — absence here
+// is exactly as ordinary as a missing .pub sibling.
+func embeddedPublicKey(pb []byte) ssh.PublicKey {
+	block, _ := pem.Decode(pb)
+	if block == nil || block.Type != "OPENSSH PRIVATE KEY" {
+		return nil
+	}
+	if !bytes.HasPrefix(block.Bytes, []byte(openSSHPrivateKeyMagic)) {
+		return nil
+	}
+
+	var w openSSHPrivateKeyContainer
+	if err := ssh.Unmarshal(block.Bytes[len(openSSHPrivateKeyMagic):], &w); err != nil {
+		return nil
+	}
+	if w.NumKeys != 1 {
+		// x/crypto itself only supports single-key files, and so does
+		// OpenSSH; anything else is not a shape worth guessing at.
+		return nil
+	}
+
+	pub, err := ssh.ParsePublicKey(w.PubKey)
 	if err != nil {
 		return nil
 	}
