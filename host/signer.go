@@ -366,7 +366,7 @@ func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
 func signersFromSSHAgent(socket string) ([]ssh.Signer, func(), error) {
 	cleanup := func() {}
 	if socket == "" {
-		return nil, cleanup, fmt.Errorf("SSH Agent is not running")
+		return nil, cleanup, fmt.Errorf("SSH agent is not running")
 	}
 
 	conn, err := net.Dial("unix", socket)
