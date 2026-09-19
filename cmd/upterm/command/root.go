@@ -222,6 +222,29 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 		if !v.IsSet(flag.Name) {
 			if inConfig {
 				bindErr = fmt.Errorf("%s: config key has no value; give it one or remove it", flag.Name)
+				return
+			}
+			// Set-but-empty in the environment, with nothing else supplying a
+			// value: neither the CLI (Changed returned above) nor the config
+			// file (viper would report the key set). viper cannot see an empty
+			// variable, so the flag would keep its default — for a slice flag
+			// that may be a real list, which is not what an explicitly empty
+			// variable says. Resolve it to the empty list it names. Scalars
+			// keep their default: there is no empty value a bool or a string
+			// flag could sensibly take here.
+			//
+			// Six pflag.SliceValue flags reach here: private-key and the five
+			// authUserSliceValue flags — authorized-user and the four legacy
+			// *-user flags. The rule is a no-op wherever the default is already
+			// empty, which today is every one of them but private-key; a future
+			// slice flag with a non-empty default would inherit this behaviour
+			// silently.
+			if envSupplied(flag.Name) {
+				if sv, ok := flag.Value.(pflag.SliceValue); ok {
+					if err := sv.Replace(nil); err != nil {
+						bindErr = bindSetError(flag.Name, "", envVarName(flag.Name), err)
+					}
+				}
 			}
 			return
 		}

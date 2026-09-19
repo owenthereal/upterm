@@ -100,6 +100,7 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 						Host:              endpoint.host,
 						ProxyURL:          endpoint.proxy,
 						Signers:           tc.signers,
+						HostKey:           good[0],
 						HostKeyCallback:   ssh.FixedHostKey(good[0].PublicKey()),
 						KeepAliveDuration: time.Hour,
 					}
@@ -138,6 +139,84 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReverseTunnelRegistersTheHostKeyNotTheIdentity pins what the relay is
+// told to expect on a guest's upstream hop: the session host key, and never
+// the identity the tunnel authenticated with. Nothing may read HostPublicKeys
+// as who the host is.
+func TestReverseTunnelRegistersTheHostKeyNotTheIdentity(t *testing.T) {
+	identity, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+
+	sshln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sshln.Close() })
+	wsln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = wsln.Close() })
+	network := &server.MemoryProvider{}
+	require.NoError(t, network.SetOpts(nil))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sessions, err := server.NewSessionManager(routing.ModeEmbedded, server.WithSessionManagerLogger(logger))
+	require.NoError(t, err)
+	srv := &server.Server{
+		NodeAddr:        sshln.Addr().String(),
+		HostSigners:     identity,
+		Signers:         identity,
+		NetworkProvider: network,
+		MetricsProvider: provider.NewDiscardProvider(),
+		SessionManager:  sessions,
+		Logger:          logger,
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- srv.ServeWithContext(ctx, sshln, wsln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer readyCancel()
+	require.NoError(t, utils.WaitForServer(readyCtx, sshln.Addr().String()))
+
+	tunnel := &ReverseTunnel{
+		Host:              &url.URL{Scheme: "ssh", Host: sshln.Addr().String()},
+		Signers:           identity,
+		HostKey:           hostKey[0],
+		HostKeyCallback:   ssh.FixedHostKey(identity[0].PublicKey()),
+		KeepAliveDuration: time.Hour,
+	}
+	response, err := tunnel.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(tunnel.Close)
+
+	sess, err := sessions.GetSession(response.SessionID)
+	require.NoError(t, err)
+	require.Len(t, sess.HostPublicKeys, 1)
+	require.Equal(t, hostKey[0].PublicKey().Marshal(), sess.HostPublicKeys[0].Marshal(), "the session key is registered")
+	require.NotEqual(t, identity[0].PublicKey().Marshal(), sess.HostPublicKeys[0].Marshal(), "the identity is not")
+}
+
+// TestReverseTunnelRequiresAHostKey: a tunnel with nothing to register must
+// say so before it dials, since a session with no registered key could never
+// admit a guest.
+func TestReverseTunnelRequiresAHostKey(t *testing.T) {
+	identity, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := &ReverseTunnel{
+		Host:            &url.URL{Scheme: "ssh", Host: "127.0.0.1:1"},
+		Signers:         identity,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+	_, err = tunnel.Establish(t.Context())
+	require.ErrorContains(t, err, "HostKey is required")
 }
 
 // blockingListener stands in for the SSH forwarded listener, whose Close sends

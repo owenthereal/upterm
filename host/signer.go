@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/owenthereal/upterm/utils"
@@ -28,10 +29,21 @@ func (e *errDescryptingPrivateKey) Error() string {
 	return fmt.Sprintf("error decrypting private key %s", e.file)
 }
 
-// Signers return signers based on the following conditions:
-// If SSH agent is running and has keys, it returns signers from SSH agent, otherwise return signers from private keys;
-// If neither works, it generates a signer on the fly.
-func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
+// Signers returns the identities upterm host offers to the server, and a
+// cleanup that releases the agent connection they may sign through.
+//
+// With identitiesOnly, privateKeys is the whole set and must be non-empty:
+// each entry must resolve to a signer, a public key file selects the agent
+// key it names, and the agent is otherwise used only to sign a key it
+// already holds that the file itself cannot supply — encrypted, or
+// otherwise unparseable with a `.pub` sibling. Without it, the agent's
+// keys are preferred when it has any, then the files that load, then a
+// generated key.
+func Signers(privateKeys []string, identitiesOnly bool) ([]ssh.Signer, func(), error) {
+	if identitiesOnly {
+		return identitySigners(privateKeys, os.Getenv("SSH_AUTH_SOCK"), promptForPassphrase)
+	}
+
 	var (
 		signers []ssh.Signer
 		cleanup func()
@@ -48,6 +60,184 @@ func Signers(privateKeys []string) ([]ssh.Signer, func(), error) {
 	}
 
 	return signers, cleanup, err
+}
+
+// identitySigners resolves an explicit identity list, OpenSSH's
+// IdentitiesOnly: every entry must produce a signer, and nothing the agent
+// holds is offered unless an entry names it.
+func identitySigners(files []string, agentSocket string, prompt func(file string) ([]byte, error)) ([]ssh.Signer, func(), error) {
+	if len(files) == 0 {
+		return nil, nil, errors.New("private-key was supplied but names no files")
+	}
+
+	ag := &lazyAgent{socket: agentSocket}
+	var signers []ssh.Signer
+	for _, file := range files {
+		s, err := identitySigner(file, ag, prompt)
+		if err != nil {
+			ag.close()
+			return nil, nil, err
+		}
+		signers = append(signers, s)
+	}
+	return signers, ag.close, nil
+}
+
+// identitySigner resolves one entry of an explicit identity list.
+func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte, error)) (ssh.Signer, error) {
+	pb, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read private key %s: %w", file, err)
+	}
+
+	// A public key selects the agent key it names, as an IdentityFile that
+	// names a .pub does in OpenSSH. It is the only way to pick one identity
+	// that exists nowhere but in an agent.
+	if pub, _, _, _, err := ssh.ParseAuthorizedKey(pb); err == nil {
+		s, err := ag.signerFor(pub)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
+		}
+		return s, nil
+	}
+
+	key, err := ssh.ParseRawPrivateKey(pb)
+	if err == nil {
+		// Directly usable, so the agent is not contacted even if it holds
+		// the same key: no round trip, and no confirmation prompt for a key
+		// that is right here.
+		return ssh.NewSignerFromKey(key)
+	}
+	var missing *ssh.PassphraseMissingError
+	encrypted := errors.As(err, &missing) || strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys)
+	if !encrypted {
+		// Not encrypted, but still not a signer: x/crypto's OpenSSH key-type
+		// switch has no case for sk-ssh-ed25519@openssh.com or
+		// sk-ecdsa-sha2-nistp256@openssh.com, so a FIDO/security-key private
+		// file — a key-handle stub, not a private key — lands here with
+		// "ssh: unhandled key type". That file names an identity it cannot
+		// itself sign with; if the agent holds it, resolve through the
+		// agent by its public half, the same way an encrypted key's .pub
+		// sibling already does.
+		if pub := publicKeyBeside(file); pub != nil {
+			s, agentErr := ag.signerFor(pub)
+			if agentErr == nil {
+				return s, nil
+			}
+			return nil, fmt.Errorf("cannot parse private key %s: %w (and the agent could not supply it either: %w)", file, err, agentErr)
+		}
+		return nil, fmt.Errorf("cannot parse private key %s: %w", file, err)
+	}
+
+	// Encrypted. If the agent holds it, sign there rather than asking for
+	// the passphrase, which is what keeps an unlocked agent key silent.
+	// OpenSSH-format files carry their public half and x/crypto surfaces
+	// it; a legacy PEM file does not, so its .pub sibling stands in, as it
+	// does for OpenSSH. Neither being available just means the prompt.
+	var pub ssh.PublicKey
+	if missing != nil {
+		pub = missing.PublicKey
+	}
+	if pub == nil {
+		pub = publicKeyBeside(file)
+	}
+	if pub != nil {
+		if s, err := ag.signerFor(pub); err == nil {
+			return s, nil
+		}
+	}
+
+	key, err = decryptPrivateKey(file, pb, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return ssh.NewSignerFromKey(key)
+}
+
+// publicKeyBeside returns the key in <file>.pub, or nil when there is none
+// that parses. Absence is ordinary — the passphrase prompt is the fallback —
+// so it is not an error.
+func publicKeyBeside(file string) ssh.PublicKey {
+	b, err := os.ReadFile(file + ".pub")
+	if err != nil {
+		return nil
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(b)
+	if err != nil {
+		return nil
+	}
+	return pub
+}
+
+// lazyAgent dials the agent the first time an entry needs it, so a list of
+// unencrypted files never opens the socket, and shares one connection across
+// the entries that do.
+type lazyAgent struct {
+	socket string
+	once   sync.Once
+	conn   net.Conn
+	client agent.ExtendedAgent
+	err    error
+}
+
+func (a *lazyAgent) dial() {
+	if a.socket == "" {
+		a.err = errors.New("SSH agent is not running")
+		return
+	}
+	conn, err := net.Dial("unix", a.socket)
+	if err != nil {
+		a.err = err
+		return
+	}
+	a.conn = conn
+	a.client = agent.NewClient(conn)
+}
+
+// signerFor returns the agent's signer for pub, or an error naming the key
+// when no agent holds it. An exact match wins. Failing that, a raw key also
+// selects a certificate entry carrying that key, as OpenSSH's IdentityFile
+// does, while a selector that is itself a certificate matches only that
+// certificate. The agent's listing does return every key it holds; only the
+// one asked for is ever returned to a caller.
+func (a *lazyAgent) signerFor(pub ssh.PublicKey) (ssh.Signer, error) {
+	a.once.Do(a.dial)
+	fingerprint := utils.FingerprintSHA256(pub)
+	if a.err != nil {
+		return nil, fmt.Errorf("no SSH agent to look up %s in: %w", fingerprint, a.err)
+	}
+	signers, err := a.client.Signers()
+	if err != nil {
+		return nil, fmt.Errorf("listing SSH agent keys: %w", err)
+	}
+	want := pub.Marshal()
+	for _, s := range signers {
+		if bytes.Equal(s.PublicKey().Marshal(), want) {
+			return s, nil
+		}
+	}
+	if _, isCert := pub.(*ssh.Certificate); !isCert {
+		for _, s := range signers {
+			// An agent signer's PublicKey is an *agent.Key — a blob with a
+			// type name, never a parsed certificate — so a type assertion on
+			// it would never match. Parse the blob to see what it is; the
+			// agent-backed signer itself is what is returned.
+			parsed, err := ssh.ParsePublicKey(s.PublicKey().Marshal())
+			if err != nil {
+				continue
+			}
+			if cert, ok := parsed.(*ssh.Certificate); ok && bytes.Equal(cert.Key.Marshal(), want) {
+				return s, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("the SSH agent does not hold %s", fingerprint)
+}
+
+func (a *lazyAgent) close() {
+	if a.conn != nil {
+		_ = a.conn.Close()
+	}
 }
 
 func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
@@ -105,9 +295,13 @@ func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) (
 		return nil, err
 	}
 
-	// simulate ssh client to retry 3 times
+	return decryptPrivateKey(file, pb, promptForPassphrase)
+}
+
+// decryptPrivateKey asks prompt for the passphrase, three times as ssh does.
+func decryptPrivateKey(file string, pb []byte, prompt func(file string) ([]byte, error)) (interface{}, error) {
 	for i := 0; i < 3; i++ {
-		pass, err := promptForPassphrase(file)
+		pass, err := prompt(file)
 		if err != nil {
 			return nil, err
 		}
@@ -131,4 +325,16 @@ func promptForPassphrase(file string) ([]byte, error) {
 	fmt.Printf("Enter passphrase for key '%s': ", file)
 
 	return term.ReadPassword(int(syscall.Stdin))
+}
+
+// NewHostKey generates the key the embedded sshd presents on both its doors
+// and the key the relay is told to expect from this host. It is a session's
+// key, not the operator's: fresh per run, never read from disk, never offered
+// to the relay as an identity.
+func NewHostKey() (ssh.Signer, error) {
+	signers, err := utils.CreateSigners(nil)
+	if err != nil {
+		return nil, err
+	}
+	return signers[0], nil
 }

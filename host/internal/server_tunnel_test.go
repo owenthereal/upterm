@@ -130,7 +130,7 @@ func Test_Server_TunnelLossDoesNotKillCommand(t *testing.T) {
 		// READY is an observed event, not a sleep: the tunnel must be closed
 		// while the command is provably running.
 		Command:           []string{"sh", "-c", "echo READY; sleep 2; echo SURVIVED"},
-		Signers:           testSigners(t),
+		HostKey:           testSigners(t)[0],
 		EventEmitter:      emitter.New(1),
 		KeepAliveDuration: time.Minute,
 		Logger:            testLogger(t),
@@ -191,7 +191,7 @@ func Test_Server_CommandExitDoesNotReportTunnelLoss(t *testing.T) {
 		// No sleep and no close: nothing touches the listener, so the only
 		// thing that ends this session is the command exiting.
 		Command:            []string{"sh", "-c", "echo READY; exit 0"},
-		Signers:            testSigners(t),
+		HostKey:            testSigners(t)[0],
 		EventEmitter:       emitter.New(1),
 		KeepAliveDuration:  time.Minute,
 		Logger:             testLogger(t),

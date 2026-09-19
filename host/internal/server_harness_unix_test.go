@@ -63,7 +63,10 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 	guestSigner, err := cert.SignCert(signer)
 	require.NoError(t, err)
 
-	srv.Signers = []ssh.Signer{signer}
+	// A test that wants to watch the door's key sets HostKey itself.
+	if srv.HostKey == nil {
+		srv.HostKey = signer
+	}
 	srv.EventEmitter = emitter.New(1)
 	srv.KeepAliveDuration = time.Hour
 	srv.Logger = discardLogger()
@@ -94,7 +97,7 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 
 	return &hostHarness{addr: ln.Addr().String(),
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
-		hostKey: signer.PublicKey(), guestSigner: guestSigner, done: done}
+		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done}
 }
 
 // dialGuest opens an SSH session to the host with an xterm PTY and starts its
@@ -117,7 +120,8 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 		return nil, nil, nil, err
 	}
 	conn, chans, reqs, err := ssh.NewClientConn(raw, h.addr, &ssh.ClientConfig{
-		User: "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(h.guestSigner)},
+		Config: ssh.Config{RekeyThreshold: cfg.rekeyThreshold},
+		User:   "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(h.guestSigner)},
 		HostKeyCallback: ssh.FixedHostKey(h.hostKey),
 	})
 	if err != nil {
@@ -231,7 +235,18 @@ func (g *gatedConn) transportClosed() <-chan struct{} { return g.transportEnded 
 // dialOption tunes one connection, on either door.
 type dialOption func(*dialConfig)
 
-type dialConfig struct{ deadline time.Duration }
+type dialConfig struct {
+	deadline time.Duration
+	// rekeyThreshold, when non-zero, makes the client renegotiate keys after
+	// that many bytes. x/crypto clamps it to its 256-byte minimum.
+	rekeyThreshold uint64
+}
+
+// withRekeyThreshold forces key renegotiation early, so a test can watch what
+// a rekey signs with.
+func withRekeyThreshold(n uint64) dialOption {
+	return func(c *dialConfig) { c.rekeyThreshold = n }
+}
 
 // withDialDeadline replaces the harness's absolute connection deadline for one
 // connection. The tests that move several MiB, and the ones that deliberately
