@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/oklog/run"
@@ -37,6 +38,13 @@ const (
 	// line, waiting outright hangs the host.
 	guestFlushLogTimeout = 100 * time.Millisecond
 )
+
+// DefaultStopGrace is how long each step of the teardown waits before the
+// next: SIGHUP, then SIGTERM, then SIGKILL. Five seconds is long enough for
+// a shell to hang up its jobs and a program to flush, and short enough that
+// `session stop` against something that ignores both is a ten-second wait,
+// not a minute.
+const DefaultStopGrace = 5 * time.Second
 
 // activityWriter records when it last wrote, so a drain can stop once output
 // has gone idle.
@@ -133,6 +141,20 @@ type command struct {
 	// A test asserting the warning has landed when Run returns needs a bound
 	// that a loaded CI scheduler cannot miss.
 	flushLogTimeoutForTesting time.Duration
+
+	// stopGrace bounds each step of terminate's teardown; zero means
+	// DefaultStopGrace. Set by the caller after construction, not a
+	// newCommand parameter.
+	stopGrace time.Duration
+}
+
+// grace is how long terminate waits at each step: the field if set, else
+// DefaultStopGrace.
+func (c *command) grace() time.Duration {
+	if c.stopGrace > 0 {
+		return c.stopGrace
+	}
+	return DefaultStopGrace
 }
 
 func (c *command) recordResult(err error) {
@@ -166,7 +188,12 @@ func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
 // initial client arrived with, used when nothing was asked for explicitly.
 func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error) {
 	c.ctx = ctx
-	c.cmd = setupCommand(ctx, c.name, c.args)
+	// exec.Command, not CommandContext: Go's own cancellation kills the
+	// process outright the instant the context ends, ahead of the hangup
+	// the wait actor below sends first. The forced command keeps
+	// CommandContext (see startForceCommand): its teardown is the guest's
+	// channel closing, and a kill is the right end for it.
+	c.cmd = exec.Command(c.name, c.args...)
 	// The session's own variables go last, and that is the whole rule for all
 	// three of them. exec.Cmd keeps the last duplicate key, so appending is
 	// what makes UPTERM_SESSION_NAME, UPTERM_ADMIN_SOCKET and TERM describe
@@ -277,27 +304,97 @@ func (c *command) Run() error {
 	}
 	{
 		ctx, cancel := context.WithCancel(c.ctx)
+		waitDone := make(chan struct{})
 		g.Add(func() error {
-			done := make(chan error, 1)
+			defer close(waitDone)
+
+			exited := make(chan struct{})
+			var waitErr error
 			go func() {
-				done <- c.ptmx.Wait()
+				waitErr = c.ptmx.Wait()
+				close(exited)
 			}()
 
 			select {
-			case err := <-done:
-				c.recordResult(err)
-				return err
+			case <-exited:
+				c.recordResult(waitErr)
+				return waitErr
 			case <-ctx.Done():
-				// Context cancelled, kill the process and wait for it to exit
-				_ = c.ptmx.Kill()
-				c.recordResult(<-done) // Wait for the process to actually exit
+				// The session is ending and the command is not: hang it up
+				// the way a terminal going away would, and escalate only if
+				// it stays.
+				terminate(c.ptmx, exited, c.grace())
+				c.recordResult(waitErr)
 				return ctx.Err()
 			}
 		}, func(err error) {
-			_ = c.ptmx.Close()
+			// cancel first: this actor's own execute is parked in the select
+			// above on this same ctx, and run.Group's contract is that
+			// execute returns once interrupt is invoked. When the output
+			// actor returns first with c.ctx still live -- a command that
+			// closes its pty slave but keeps running, so the master read
+			// ends on its own while nothing has asked the session to stop --
+			// nothing else would ever cancel this ctx, and waiting on
+			// waitDone before that happened would block forever. Cancelling
+			// first unblocks the select via ctx.Done, which sends terminate
+			// on its way; in the cancellation flow this cancel is a no-op,
+			// since ctx is already done.
 			cancel()
+
+			// Close takes the pty's write lock, which a pending writer
+			// starves new readers behind (see terminate's doc comment on
+			// why it never closes the pty itself). waitDone, closed only
+			// once this actor's own execute returns, keeps Close from
+			// running until terminate already has, so it can never queue
+			// ahead of terminate's own Signal calls. Now that cancel runs
+			// first, this wait is bounded by terminate's own grace/kill
+			// sequence on every path, not just the one where c.ctx was
+			// already done when we got here.
+			//
+			// That the output actor has already drained by the time this
+			// runs is a separate guarantee, and not this gate's doing:
+			// run.Group calls interrupts in the order actors were added, so
+			// the output actor's own interrupt (above, waitIdle) always runs
+			// to completion first, whichever actor returned first.
+			<-waitDone
+			_ = c.ptmx.Close()
 		})
 	}
 
 	return g.Run()
+}
+
+// terminate ends a command that has been told to stop: SIGHUP to its
+// process group, which a job-control shell forwards to every job; SIGTERM
+// after grace; SIGKILL after another. Where signals are unsupported it
+// kills at once. It returns once the process has exited.
+//
+// The pty master is deliberately not closed between the steps: Read holds
+// the pty's read lock for the length of a blocking read and Close takes the
+// write lock, so a close here would wait on a read that only the process's
+// exit ends. The interrupt closes it only after this returns, which the
+// wait actor's waitDone gate guarantees.
+func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration) {
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM} {
+		select {
+		case <-exited:
+			// Already gone by the time this step was due: sending a signal
+			// now would reach whatever pid the kernel has since reused,
+			// not the command.
+			return
+		default:
+		}
+		if err := ptmx.Signal(sig); err != nil {
+			break
+		}
+		timer := time.NewTimer(grace)
+		select {
+		case <-exited:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+	_ = ptmx.Kill()
+	<-exited
 }

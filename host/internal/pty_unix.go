@@ -179,3 +179,16 @@ func (pty *pty) Kill() error {
 	}
 	return cmd.Process.Kill()
 }
+
+// Signal sends sig to the command's process group. The command is a session
+// leader — creack/pty starts it with Setsid — so its group is its pid, and
+// this reaches every process that has not left the group on purpose.
+func (pty *pty) Signal(sig syscall.Signal) error {
+	pty.RLock()
+	cmd := pty.cmd
+	pty.RUnlock()
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	return unix.Kill(-cmd.Process.Pid, sig)
+}

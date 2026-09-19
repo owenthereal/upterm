@@ -290,6 +290,10 @@ type Host struct {
 	// internal.DefaultInitialClientTimeout.
 	InitialClientTimeout time.Duration
 
+	// StopGrace bounds each step of the command's teardown; zero means
+	// internal.DefaultStopGrace.
+	StopGrace time.Duration
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
@@ -757,6 +761,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Term:                    c.Term,
 			AwaitInitialClient:      c.AwaitInitialClient,
 			InitialClientTimeout:    c.InitialClientTimeout,
+			StopGrace:               c.StopGrace,
 			SFTPDisabled:            c.SFTPDisabled,
 			SFTPPermissionChecker:   c.SFTPPermissionChecker,
 			OnCommandStarted: func() {

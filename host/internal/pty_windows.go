@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -270,6 +271,10 @@ func (p *pty) Kill() error {
 
 	return nil
 }
+
+// Signal is unsupported: ConPTY has no process groups to signal. The caller
+// goes straight to Kill.
+func (p *pty) Signal(syscall.Signal) error { return errors.ErrUnsupported }
 
 // Windows job object structures and constants
 const (

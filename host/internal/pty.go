@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"syscall"
 )
 
 // PTY represents a pseudo-terminal abstraction that works across platforms.
@@ -42,6 +43,11 @@ type PTY interface {
 	// On Unix, this delegates to exec.Cmd.Process.Kill().
 	// On Windows, this calls TerminateProcess on the handle.
 	Kill() error
+
+	// Signal sends sig to the command's process group, so that a shell's
+	// hangup reaches its jobs. Unsupported on Windows, which returns
+	// errors.ErrUnsupported and lets the caller go straight to Kill.
+	Signal(sig syscall.Signal) error
 }
 
 // ExitError reports that a PTY's process exited with a non-zero status.

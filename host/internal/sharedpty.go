@@ -3,6 +3,7 @@ package internal
 import (
 	"errors"
 	"sync"
+	"syscall"
 
 	"github.com/owenthereal/upterm/internal/termsize"
 )
@@ -176,4 +177,16 @@ func (s *sharedPTY) Kill() error {
 		return err
 	}
 	return ptmx.Kill()
+}
+
+// Signal delegates once the pty exists. Nothing in this session calls it
+// before then — the command's own teardown holds the pty cmd.Start returned,
+// not this handle — but the handle stands in for PTY everywhere a guest
+// session sees the command, so it must answer to the whole interface.
+func (s *sharedPTY) Signal(sig syscall.Signal) error {
+	ptmx, err := s.wait()
+	if err != nil {
+		return err
+	}
+	return ptmx.Signal(sig)
 }
