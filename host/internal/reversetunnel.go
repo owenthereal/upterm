@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,21 +23,33 @@ import (
 )
 
 const (
-	// publickeyAuthError matches only the no-key-offered rejection, "ssh:
-	// unable to authenticate, attempted methods [none]". A key that is
-	// offered and refused — which is what a self-hosted relay's --authorized-
-	// keys allowlist produces — arrives as "[none publickey]" instead, so it
-	// does not match, sshDialError never turns it into a
-	// PermissionDeniedError, and it surfaces to the user as a raw handshake
-	// error rather than "Permission denied (publickey)".
+	// authFailurePrefix heads the one error x/crypto produces when it runs out
+	// of authentication methods:
 	//
-	// Widening the match to also cover the offered-and-refused shape is
-	// deferred: it would change the error text every rejected-key `upterm
-	// host` start prints, which deserves its own commit and tests.
+	//	ssh: unable to authenticate, attempted methods %v, no supported methods remain
 	//
-	// The gap is pinned by the "an unlisted identity is refused" subtest in
-	// ftests/host_key_test.go.
-	publickeyAuthError = "ssh: unable to authenticate, attempted methods [none]"
+	// (v0.57.0, ssh/client_auth.go:154), where %v is the ordered list of RFC
+	// 4252 method names that were tried: "[none]" when the unauthenticated
+	// probe was all that got attempted, "[none publickey]" once a key was
+	// offered and refused.
+	//
+	// The head is matched, not either whole sentence. Matching the "[none]"
+	// one in full is what this used to do, and it meant the commoner failure
+	// by far — a key offered to a relay whose --authorized-keys does not list
+	// it — matched nothing, never became a PermissionDeniedError, and reached
+	// the user as a raw "ssh dial error: ssh: handshake failed: ..." (#562).
+	// A prefix keeps any list x/crypto may grow classified as the permission
+	// denial it is; the list is then read for which of the two things to say
+	// happened, and a list too unfamiliar to read falls back to the claim that
+	// holds either way — that no identity was offered.
+	authFailurePrefix = "ssh: unable to authenticate, attempted methods "
+
+	// publicKeyMethod is what x/crypto records for ssh.PublicKeys, and its
+	// presence in that list is the only evidence that an identity actually
+	// reached the relay. Holding keys is not offering them: a server that does
+	// not allow publickey leaves the list at "[none]" however many the host
+	// had, so the signer count alone cannot tell the two apart.
+	publicKeyMethod = "publickey"
 
 	// listenerCloseGrace bounds how long closing the forwarded listener waits
 	// on the relay before the transport is taken out from under it.
@@ -167,7 +180,10 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	if err != nil {
-		return nil, sshDialError(c.Host, c.ProxyURL, err)
+		// The signers, not the auths built from them: auths holds one
+		// publickey method however many keys went into it, and it is the keys
+		// a refusal has to be reported in terms of.
+		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
 	}
 
 	sessResp, err := c.createSession(user.Username, hostPublicKeys, authorizedKeys)
@@ -401,23 +417,60 @@ func isWSScheme(scheme string) bool {
 	return scheme == "ws" || scheme == "wss"
 }
 
+// PermissionDeniedError is a relay that would not authenticate this host.
+//
+// It says which of the two ways that happened, because they are different
+// problems: a host that offered nothing has no identity for the relay to have
+// rejected, while a host whose keys were all refused has keys this relay does
+// not accept. x/crypto's own error stays reachable through Unwrap for anything
+// that wants the handshake's words instead.
 type PermissionDeniedError struct {
 	host string
-	err  error
+	// identities is how many keys were offered and refused; 0 means none was
+	// offered at all. It comes from the caller rather than from err, which
+	// lists methods and not keys — ssh.PublicKeys is a single "publickey"
+	// entry however many signers it carries. That makes it the count the dial
+	// went in with rather than the count that reached the wire: x/crypto skips
+	// a signer with no signature algorithm in common with the server, and one
+	// skipped that way is counted here as offered. Nothing closer is available
+	// to count, and the answer — this relay will not take these keys — is the
+	// same either way.
+	identities int
+	err        error
 }
 
 func (e *PermissionDeniedError) Error() string {
-	return fmt.Sprintf("%s: Permission denied (publickey).", e.host)
+	// No advice on what to do next. Which key would be accepted is the relay
+	// operator's to answer, and a guess at it printed on every refused start
+	// would be wrong more often than not.
+	var detail string
+	switch {
+	case e.identities == 1:
+		detail = "the 1 identity offered was refused"
+	case e.identities > 1:
+		detail = fmt.Sprintf("the %d identities offered were refused", e.identities)
+	default:
+		detail = "no identity was offered"
+	}
+	return fmt.Sprintf("%s: Permission denied (publickey); %s.", e.host, detail)
 }
 
 func (e *PermissionDeniedError) Unwrap() error { return e.err }
 
-func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
-	if strings.Contains(err.Error(), publickeyAuthError) {
-		return &PermissionDeniedError{
+// sshDialError turns a failed dial into what the host prints, where identities
+// is how many keys the dial had to offer.
+func sshDialError(host *url.URL, proxyURL *url.URL, identities int, err error) error {
+	if strings.Contains(err.Error(), authFailurePrefix) {
+		denied := &PermissionDeniedError{
 			host: host.String(),
 			err:  err,
 		}
+		// Only when a key actually went out: the count is the caller's, but
+		// whether anything was offered is the handshake's to say.
+		if attemptedPublicKey(err.Error()) {
+			denied.identities = identities
+		}
+		return denied
 	}
 
 	dialErr := fmt.Errorf("ssh dial error: %w", err)
@@ -467,6 +520,25 @@ func sshDialError(host *url.URL, proxyURL *url.URL, err error) error {
 	}
 
 	return dialErr
+}
+
+// attemptedPublicKey reports whether x/crypto's list of attempted methods says
+// a key was put in front of the server.
+//
+// The list is the %v of a []string, so it is read only as far as the closing
+// bracket: past it lie the rest of x/crypto's sentence and whatever wrapped
+// the error, and a method name found there was not a method that was tried.
+// A list that does not parse — a shape this does not know — reads as no key
+// offered, which is the claim that stays true either way.
+func attemptedPublicKey(msg string) bool {
+	_, list, ok := strings.Cut(msg, authFailurePrefix)
+	if !ok {
+		return false
+	}
+	if end := strings.IndexByte(list, ']'); end >= 0 {
+		list = list[:end]
+	}
+	return slices.Contains(strings.Fields(strings.TrimPrefix(list, "[")), publicKeyMethod)
 }
 
 // isNetworkError reports whether err is a failure to establish or hold the
