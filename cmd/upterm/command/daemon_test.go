@@ -114,16 +114,21 @@ func fakeRun(t *testing.T, sessionID string, result error) func(context.Context,
 			h.CommandStartedCallback()
 		}
 		time.Sleep(readyPublishGap)
+		// The status is read back out of the record rather than assumed, as
+		// the readiness actor reads it back out of the mutation it ran: what
+		// the callback carries is what a reader would find.
+		published := ""
 		err = dir.Update(func(r *sessiondir.Record) {
 			r.SessionID = sessionID
 			r.Status = sessiondir.StatusReady
+			published = r.Status
 		})
 		assert.NoError(t, err)
 		if err != nil {
 			return err
 		}
 		if h.SessionReadyCallback != nil {
-			h.SessionReadyCallback()
+			h.SessionReadyCallback(published)
 		}
 		select {
 		case <-ctx.Done():
@@ -182,6 +187,8 @@ func TestRunDaemonProcessSpeaksTheExchange(t *testing.T) {
 	require.NoError(t, <-done)
 	require.NotNil(t, out.Started)
 	require.Equal(t, "sid-1", out.Started.SessionId)
+	require.Equal(t, atStarted.Status, out.Started.Status,
+		"the parent is told the status the record carries, which is what it prints")
 	require.NotNil(t, claimed)
 	require.Equal(t, "daemon-1", claimed.Name)
 	require.NotEmpty(t, claimed.LaunchId)

@@ -89,7 +89,7 @@ func TestExchangeInOrder(t *testing.T) {
 				return err
 			}
 			child.Disarm()
-			return child.Started("sid")
+			return child.Started("sid", "ready")
 		}()
 	}()
 
@@ -108,6 +108,8 @@ func TestExchangeInOrder(t *testing.T) {
 	require.NoError(t, <-childErr)
 	require.NotNil(t, out.Started)
 	require.Equal(t, "sid", out.Started.SessionId)
+	require.Equal(t, "ready", out.Started.Status,
+		"the status the child published travels to the parent, which prints it")
 	require.Equal(t, []string{"claimed:n", "created:sid", "listening:/tmp/a.sock"}, events)
 	require.Equal(t, []string{"ssh-ed25519 AAAA"}, gotHostKeys, "the attach client (Task 5) pins exactly these host keys")
 
@@ -272,7 +274,7 @@ func TestFailedAfterStartedIsNotSent(t *testing.T) {
 			got <- m
 		}
 	}()
-	require.NoError(t, child.Started("sid"))
+	require.NoError(t, child.Started("sid", "ready"))
 	m := <-got
 	require.NotNil(t, m.GetStarted())
 	child.Failed("late", false, false)

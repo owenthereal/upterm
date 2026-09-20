@@ -77,9 +77,15 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 }
 
 func (d *scriptedDaemon) start() {
+	d.startWith(sessiondir.StatusReady)
+}
+
+// startWith is start for a case about the status the daemon publishes: the
+// record's status travels in Started and the parent prints what it is given.
+func (d *scriptedDaemon) startWith(status string) {
 	child := d.await()
 	child.Disarm()
-	_ = child.Started("sid-1")
+	_ = child.Started("sid-1", status)
 }
 
 func newSession(t *testing.T, spawn spawnFunc, client clientFunc, stdout, stderr *bytes.Buffer) *spawnedSession {
@@ -110,7 +116,8 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &info))
 	require.Equal(t, "s", info.Name)
 	require.Equal(t, "launch-1", info.LaunchID)
-	require.Equal(t, sessiondir.StatusReady, info.Status)
+	require.Equal(t, sessiondir.StatusReady, info.Status,
+		"the status the daemon published, which for a healthy session is ready")
 	require.Equal(t, "sid-1", info.SessionID)
 	require.Equal(t, "/run/a.sock", info.AdminSocket)
 	require.Equal(t, "/run/t.sock", info.AttachSocket)
@@ -127,6 +134,48 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 		t.Fatal("a parent that exits after started must not be read as abandonment")
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestSpawnedSessionDetachPrintsTheStatusItWasGiven: the JSON's status is the
+// daemon's report, not this process's assumption. The record is written by the
+// daemon and can say something other than ready by the time readiness is
+// published -- a tunnel lost in that moment leaves "disconnected" standing,
+// since a status never moves backwards -- and `upterm session info` would then
+// answer disconnected for the launch this JSON describes.
+func TestSpawnedSessionDetachPrintsTheStatusItWasGiven(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach, s.jsonOut = true, true
+	dec := d.startup(t, "s")
+	go func() { <-dec; d.startWith(sessiondir.StatusDisconnected) }()
+
+	require.NoError(t, s.run(context.Background()))
+
+	var info sessionInfo
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &info))
+	require.Equal(t, sessiondir.StatusDisconnected, info.Status,
+		"the parent prints the status the record carried, not ready by assumption")
+	require.Equal(t, "sid-1", info.SessionID, "the session is up; only its tunnel is not")
+}
+
+// TestSpawnedSessionDetachRefusesAStatuslessReport: no daemon that speaks this
+// exchange sends an empty status, and the exchange is unreleased, so one is a
+// bug in this binary rather than an older daemon to accommodate. Refused
+// rather than printed, because `"status": ""` is a value no script can branch
+// on -- the same hole as printing a status nobody vouched for.
+func TestSpawnedSessionDetachRefusesAStatuslessReport(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach, s.jsonOut = true, true
+	dec := d.startup(t, "s")
+	go func() { <-dec; d.startWith("") }()
+
+	err := s.run(context.Background())
+	require.ErrorContains(t, err, "reported no status")
+	require.ErrorContains(t, err, "/var/log/upterm.log", "the log is where the reason will be")
+	require.Empty(t, stdout.String(), "nothing may be printed for a report that cannot be trusted")
 }
 
 func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {

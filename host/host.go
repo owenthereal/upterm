@@ -275,23 +275,32 @@ type Host struct {
 	// Called on the server's own goroutine, in front of everything the
 	// command's start releases, so it must not block.
 	CommandStartedCallback func()
-	// SessionReadyCallback is called once the session's record says ready:
-	// the admin socket is bound, the command is running, and the record a
-	// reader would consult already carries that status and the session ID.
-	// A caller that tells anyone else the session is up says it here, not
-	// from CommandStartedCallback — the command starting is one of the two
-	// facts readiness is made of, and the record is written after both. A
-	// script that runs `upterm session info` the instant it is told "ready"
-	// would otherwise be told "starting" by the record.
+	// SessionReadyCallback is called once the session's record has been
+	// published: the admin socket is bound, the command is running, and the
+	// record a reader would consult already carries the session ID and the
+	// status handed to this callback. A caller that tells anyone else the
+	// session is up says it here, not from CommandStartedCallback — the
+	// command starting is one of the two facts readiness is made of, and the
+	// record is written after both. A script that runs `upterm session info`
+	// the instant it is told "ready" would otherwise be told "starting" by
+	// the record.
+	//
+	// The status is what the record ended on, which is not always ready:
+	// advanceStatus refuses to move a status backwards, so a tunnel lost
+	// between the command starting and this write leaves "disconnected"
+	// standing and the ready write is a no-op. The caller is told what the
+	// record says rather than what this actor asked for, because the two
+	// agreeing is the whole point of the callback.
 	//
 	// Not called when the record could not be published: the run fails
-	// instead, so that nobody is told ready for a record that does not say
-	// so. With no session directory — an embedder that supplied its own
-	// admin socket — there is no record and the two facts alone are it.
+	// instead, so that nobody is told about a record that was never written.
+	// With no session directory — an embedder that supplied its own admin
+	// socket — there is no record, the two facts alone are it, and the
+	// status is ready.
 	//
 	// Called once, on the readiness actor's own goroutine, after the write;
 	// it must not block.
-	SessionReadyCallback func()
+	SessionReadyCallback func(status string)
 	// SessionClaimedCallback is called once the session's name is claimed,
 	// with the directory that holds it, before the tunnel is dialled: the
 	// first thing a caller can know about a session is its name and its
@@ -641,6 +650,15 @@ func (c *Host) Run(ctx context.Context) error {
 	// double close.
 	var adminOnce, cmdOnce sync.Once
 
+	// The launch this run is, for the stop RPC to be bound to: the name and
+	// the socket are the session's and are handed on to whoever claims the
+	// name next, so they cannot say which run a caller meant. Empty when no
+	// name was claimed, which the server reads as a session no stop can name.
+	var launchID string
+	if c.SessionDir != nil {
+		launchID = c.SessionDir.LaunchID()
+	}
+
 	// Bound here, not inside the group. A bind failure is a startup failure and
 	// has to be reported as one: inside the group it raced the command's start,
 	// and whichever actor lost the race decided the classification — the same
@@ -651,15 +669,6 @@ func (c *Host) Run(ctx context.Context) error {
 	// adminReady therefore closes before the group exists. The ready actor
 	// still waits on both channels: which of the two facts is established
 	// first is not something readiness should depend on.
-
-	// The launch this run is, for the stop RPC to be bound to: the name and
-	// the socket are the session's and are handed on to whoever claims the
-	// name next, so they cannot say which run a caller meant. Empty when no
-	// name was claimed, which the server reads as a session no stop can name.
-	var launchID string
-	if c.SessionDir != nil {
-		launchID = c.SessionDir.LaunchID()
-	}
 	adminServer := internal.AdminServer{
 		Session:     session,
 		ClientRepo:  clientRepo,
@@ -853,10 +862,22 @@ func (c *Host) Run(ctx context.Context) error {
 			// Both acknowledged. Only now is every claim a reader makes off
 			// "ready" true: the session is registered, the user accepted it,
 			// the admin socket is bound, and the command is running.
+			//
+			// publishedStatus is what the record ends up saying, which is
+			// not always what is asked for here: advanceStatus will not move
+			// a status backwards, so a tunnel lost in the moment between the
+			// command starting and this write leaves "disconnected" standing
+			// and makes the ready write a no-op. Reported as it is, because
+			// a callback that announced "ready" for a record saying
+			// otherwise would be the disagreement this callback exists to
+			// rule out. Captured inside the closure, which Update runs
+			// synchronously under its own lock, once.
+			publishedStatus := sessiondir.StatusReady
 			if c.SessionDir != nil {
 				if err := c.SessionDir.Update(func(r *sessiondir.Record) {
 					r.SessionID = sessionID
 					advanceStatus(r, sessiondir.StatusReady)
+					publishedStatus = r.Status
 				}); err != nil {
 					// Fatal to the run, where every other record write here
 					// is not, because this one is the word readiness is made
@@ -872,7 +893,7 @@ func (c *Host) Run(ctx context.Context) error {
 				}
 			}
 			if c.SessionReadyCallback != nil {
-				c.SessionReadyCallback()
+				c.SessionReadyCallback(publishedStatus)
 			}
 
 			<-ready

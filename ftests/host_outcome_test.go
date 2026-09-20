@@ -119,7 +119,7 @@ type outcomeRun struct {
 	signers        []ssh.Signer
 	sessionCreated func(context.Context, *api.GetSessionResponse) error
 	sessionClaimed func(*sessiondir.Dir)
-	sessionReady   func(*outcomeRun)
+	sessionReady   func(*outcomeRun, string)
 	relayOptions   []func(*Server)
 }
 
@@ -136,8 +136,9 @@ func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse
 
 // withSessionReadyCallback stands in for whoever is told the session is up —
 // the daemon telling its parent. It is handed the run so that it can read
-// what a reader taking that word would read.
-func withSessionReadyCallback(cb func(*outcomeRun)) outcomeOption {
+// what a reader taking that word would read, and the status the host
+// published.
+func withSessionReadyCallback(cb func(*outcomeRun, string)) outcomeOption {
 	return func(r *outcomeRun) { r.sessionReady = cb }
 }
 
@@ -196,9 +197,9 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 	// Wrapped here rather than stored on the Host directly, so that the case
 	// gets the run it is watching without having to close over a variable it
 	// has not been assigned yet.
-	var sessionReady func()
+	var sessionReady func(string)
 	if run.sessionReady != nil {
-		sessionReady = func() { run.sessionReady(run) }
+		sessionReady = func(status string) { run.sessionReady(run, status) }
 	}
 
 	run.host = &host.Host{
@@ -620,19 +621,12 @@ func Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady(t *testing.T) {
 	// Buffered, because the callback runs on the readiness actor's goroutine
 	// and must not block: a send that waited for the test to receive would
 	// hold up the actor that Run's teardown waits on.
-	fired := make(chan *sessiondir.Record, 1)
+	fired := make(chan readyReport, 1)
 
 	run := newOutcomeRun(t, shellCommand(t,
 		[]string{"sh", "-c", "echo READY; sleep 300"},
 		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
-		withSessionReadyCallback(func(r *outcomeRun) {
-			rec, err := sessiondir.ReadRecord(r.stateRoot, r.name)
-			if err != nil {
-				fired <- nil
-				return
-			}
-			fired <- rec
-		}))
+		withSessionReadyCallback(reportReady(fired)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
 	defer cancel()
@@ -641,14 +635,97 @@ func Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady(t *testing.T) {
 	go func() { done <- run.host.Run(ctx) }()
 
 	select {
-	case rec := <-fired:
-		require.NotNil(t, rec, "the record a reader would consult was not readable when the callback fired")
-		require.Equal(t, sessiondir.StatusReady, rec.Status,
+	case got := <-fired:
+		require.NotNil(t, got.rec, "the record a reader would consult was not readable when the callback fired")
+		require.Equal(t, sessiondir.StatusReady, got.rec.Status,
 			"the callback is the word that the session is up; the record already has to say so")
-		require.NotEmpty(t, rec.SessionID,
+		require.NotEmpty(t, got.rec.SessionID,
 			"published by the same write, and what a reader connects with")
+		require.Equal(t, got.rec.Status, got.status,
+			"and the status the callback carries is the one the record ended on")
 	case <-time.After(outcomeTimeout):
 		t.Fatal("the session never reported itself ready")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
+}
+
+// readyReport is what the readiness callback saw: the status it was handed,
+// and the record as a reader would have found it at that instant.
+type readyReport struct {
+	status string
+	rec    *sessiondir.Record
+}
+
+// reportReady is a readiness callback that sends both to ch. Non-blocking, as
+// the callback must be: ch has to be buffered.
+func reportReady(ch chan<- readyReport) func(*outcomeRun, string) {
+	return func(r *outcomeRun, status string) {
+		rec, err := sessiondir.ReadRecord(r.stateRoot, r.name)
+		if err != nil {
+			ch <- readyReport{status: status}
+			return
+		}
+		ch <- readyReport{status: status, rec: rec}
+	}
+}
+
+// Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn is the other half of
+// the guarantee above: not "the record says ready" but "the record says what
+// the callback says".
+//
+// A status never moves backwards (advanceStatus), and disconnected ranks above
+// ready. So a tunnel lost between the command starting and the readiness write
+// — the guest server stops serving, the command carries on, and the record is
+// published as disconnected — makes the ready write a no-op that still returns
+// nil. A callback that announced "ready" there would have the parent print
+// "status": "ready" and exit 0 while `upterm session info` answered
+// disconnected for the same launch, which is the disagreement this callback
+// exists to rule out.
+//
+// The race is made deterministic rather than provoked: the disconnected write
+// happens from the claim callback, on Run's own goroutine before the group
+// exists, so the readiness actor cannot run before it. What is under test is
+// what the actor does with a record it cannot move, not how the record got
+// that way.
+func Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn(t *testing.T) {
+	fired := make(chan readyReport, 1)
+
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
+		withSessionClaimedCallback(func(d *sessiondir.Dir) {
+			// What OnGuestServerStopped publishes, and all that matters
+			// here: a status the ready write cannot move.
+			require.NoError(t, d.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusDisconnected
+			}))
+		}),
+		withSessionReadyCallback(reportReady(fired)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	select {
+	case got := <-fired:
+		require.NotNil(t, got.rec)
+		require.Equal(t, sessiondir.StatusDisconnected, got.rec.Status,
+			"the ready write cannot move a status backwards, so the record still says disconnected")
+		require.Equal(t, sessiondir.StatusDisconnected, got.status,
+			"and the callback carries what the record says, not what the actor asked for")
+		require.NotEmpty(t, got.rec.SessionID,
+			"the session ID is published by that write either way")
+	case <-time.After(outcomeTimeout):
+		t.Fatal("the readiness actor never reported")
 	}
 
 	cancel()
@@ -1026,6 +1103,7 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: "some-other-launch"})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err),
 		"a stop that names another launch is not this session's to accept")
+
 	// Ready, and still ready: the status only ever moves forwards, so a
 	// session that had accepted that stop could not reach ready again.
 	require.Eventually(t, func() bool {

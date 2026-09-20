@@ -195,9 +195,12 @@ func (c *Child) Listening(socket string, hostKeys []string) error {
 func (c *Child) Disarm() { c.armed.Store(false) }
 
 // Started is gate 3. Disarm first.
-func (c *Child) Started(sessionID string) error {
+//
+// status is what the session's record says at this moment, which the parent
+// reports rather than assuming: see the Started message in startup.proto.
+func (c *Child) Started(sessionID, status string) error {
 	c.started.Store(true)
-	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID}}})
+	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID, Status: status}}})
 }
 
 // Failed reports that the session did not start. Nothing is sent after

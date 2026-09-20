@@ -587,10 +587,17 @@ func (x *Listening) GetHostKeys() []string {
 	return nil
 }
 
-// Started is gate 3: the command is running. The parent may exit.
+// Started is gate 3: the command is running and the session's record has
+// been published. The parent may exit.
 type Started struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// status is what the record said at the moment readiness was published --
+	// ready, or disconnected if the tunnel was lost between the command
+	// starting and that write, which leaves the earlier status standing. The
+	// parent reports this rather than assuming ready, so that what it prints
+	// and what `upterm session info` answers cannot disagree.
+	Status        string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -628,6 +635,13 @@ func (*Started) Descriptor() ([]byte, []int) {
 func (x *Started) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
+	}
+	return ""
+}
+
+func (x *Started) GetStatus() string {
+	if x != nil {
+		return x.Status
 	}
 	return ""
 }
@@ -913,10 +927,11 @@ const file_startup_proto_rawDesc = "" +
 	"\asession\x18\x01 \x01(\v2\x17.api.GetSessionResponseR\asession\"M\n" +
 	"\tListening\x12#\n" +
 	"\rattach_socket\x18\x01 \x01(\tR\fattachSocket\x12\x1b\n" +
-	"\thost_keys\x18\x02 \x03(\tR\bhostKeys\"(\n" +
+	"\thost_keys\x18\x02 \x03(\tR\bhostKeys\"@\n" +
 	"\aStarted\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\\\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\"\\\n" +
 	"\x06Failed\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\vname_in_use\x18\x02 \x01(\bR\tnameInUse\x12\x1c\n" +

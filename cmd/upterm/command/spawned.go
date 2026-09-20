@@ -287,10 +287,23 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 		_, err := fmt.Fprintf(s.stdout, "Session %s is running in the background. Attach with 'upterm attach %s'; stop it with 'upterm session stop %s'.\n", s.name, s.name, s.name)
 		return err
 	}
+	// Refused rather than printed empty, and refused here rather than beside
+	// the claim above: the line this function prints without -o json names no
+	// status, so nothing there can be wrong, while a `"status": ""` hands a
+	// script a value it cannot branch on and no daemon that speaks this
+	// exchange sends one. The exchange is unreleased, so this is a bug in
+	// this binary rather than an older daemon to accommodate.
+	if st.Status == "" {
+		return fmt.Errorf("session %s started but the daemon reported no status for it (see %s)", s.name, s.logPath)
+	}
 	info := sessionInfo{
-		Name:         claimed.Name,
-		LaunchID:     claimed.LaunchId,
-		Status:       sessiondir.StatusReady,
+		Name:     claimed.Name,
+		LaunchID: claimed.LaunchId,
+		// What the record said when the daemon published it, not an
+		// assumption made here: a tunnel lost in the moment before that
+		// write leaves "disconnected" standing, and a session info run a
+		// second later would answer that.
+		Status:       st.Status,
 		SessionID:    st.SessionId,
 		AdminSocket:  claimed.AdminSocket,
 		AttachSocket: claimed.AttachSocket,

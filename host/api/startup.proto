@@ -60,8 +60,17 @@ message Listening {
   repeated string host_keys = 2;
 }
 
-// Started is gate 3: the command is running. The parent may exit.
-message Started { string session_id = 1; }
+// Started is gate 3: the command is running and the session's record has
+// been published. The parent may exit.
+message Started {
+  string session_id = 1;
+  // status is what the record said at the moment readiness was published --
+  // ready, or disconnected if the tunnel was lost between the command
+  // starting and that write, which leaves the earlier status standing. The
+  // parent reports this rather than assuming ready, so that what it prints
+  // and what `upterm session info` answers cannot disagree.
+  string status = 2;
+}
 
 // Failed: the session did not start. name_in_use asks the parent to draw
 // another name; abandoned means the parent's own answer ended it.
