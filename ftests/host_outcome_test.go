@@ -748,6 +748,58 @@ func Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn(t *testing.T) {
 	}
 }
 
+// Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce is the wiring for a
+// session that is over almost before it began: the callback fires, the
+// session is published, and the command's own outcome is still what the
+// record ends on. It is what tells a spawned daemon's parent "started", and
+// --detach's contract is that it exits 0 once the command is running; a
+// command that started and exited did run.
+//
+// It is *not* the proof that the readiness actor prefers the facts to the
+// teardown, and it should not be read as one. OnCommandStarted fires before
+// cmd.Run (host/internal/server.go:205-209), so closing cmdReady makes the
+// readiness actor runnable while ready is still open, and it has the whole
+// of the command's life and teardown to get through its selects: with the
+// preference removed, this case still passed 60 consecutive runs here. The
+// coin needs that goroutine starved across all of it, which is a loaded
+// machine's business. readinessEstablished's own tests stage the state
+// directly and decide the rule.
+//
+// Read without blocking, because Run has returned: run.Group waits for every
+// actor it started, the readiness actor among them, so the callback has
+// either happened by now or never will.
+func Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce(t *testing.T) {
+	fired := make(chan readyReport, 1)
+
+	run := newOutcomeRun(t,
+		shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+		withSessionReadyCallback(reportReady(fired)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	err := run.host.Run(ctx)
+	t.Logf("host run returned: %v", err)
+
+	select {
+	case got := <-fired:
+		require.NotEmpty(t, got.status,
+			"the session was published, so the callback carries the status it was published with")
+		require.NotNil(t, got.rec, "and the record it was published to was readable")
+	default:
+		t.Fatal("a command that started and exited was never reported as started")
+	}
+
+	// The outcome is still the command's own, which this must not have
+	// disturbed: the readiness write lands before the final one, and a status
+	// never moves backwards.
+	rec := run.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Equal(t, sessiondir.ReasonExited, rec.Reason)
+	require.NotNil(t, rec.ExitCode)
+	require.Equal(t, 0, *rec.ExitCode)
+}
+
 // Test_Host_GivesTheCommandTheSessionName covers wiring rather than an
 // outcome: the host puts the claimed name in the command's environment so that
 // a script inside the session can name itself to `upterm session info`. A typo

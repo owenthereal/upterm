@@ -374,6 +374,51 @@ func abandonedBy(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), ErrSessionAbandoned)
 }
 
+// readinessEstablished waits for the two facts readiness is made of — the
+// admin socket bound and the command started — and reports whether both were
+// established. A teardown that beats them to it is a "no"; a teardown that
+// merely coincides with them is not.
+//
+// That distinction is the whole of this function. Go picks between two ready
+// cases at random, and both are ready whenever a command starts and ends
+// before this actor is scheduled again — `upterm host --detach -- true` is
+// the whole of that window. Left to the coin, half of those runs published
+// the record and told the parent "started", and half returned here, so the
+// parent saw the channel close instead and reported "the session daemon
+// exited before reporting whether it started" — for a session whose command
+// had run to completion. --detach's contract is that it exits 0 once the
+// command is running, and a command that started and exited did run; what
+// became of it is the record's to say, and the status carried in Started is
+// what the parent prints. A script cannot branch on a coin, so an
+// established fact wins and the scheduler decides nothing.
+//
+// The non-blocking re-check on each teardown branch is what makes that so
+// rather than merely likely: whichever case the select picks, a fact that is
+// established is still established. setupSignalHandler asks its context the
+// same question on the same branch for the same reason.
+//
+// A fact that is genuinely not established is still a "no", and that is why
+// this waits on the pair rather than assuming them: a command that could not
+// start never closes cmdReady — exec reports that failure to Start, so
+// OnCommandStarted is never reached — and nothing is published for it.
+func readinessEstablished(adminReady, cmdReady, ready <-chan struct{}) bool {
+	select {
+	case <-adminReady:
+	case <-ready:
+		if !closed(adminReady) {
+			return false
+		}
+	}
+	select {
+	case <-cmdReady:
+	case <-ready:
+		if !closed(cmdReady) {
+			return false
+		}
+	}
+	return true
+}
+
 // closed reports whether a done-style channel has been closed, without waiting.
 func closed(ch <-chan struct{}) bool {
 	select {
@@ -848,14 +893,7 @@ func (c *Host) Run(ctx context.Context) error {
 	{
 		ready := make(chan struct{})
 		g.Add(func() error {
-			select {
-			case <-adminReady:
-			case <-ready:
-				return nil
-			}
-			select {
-			case <-cmdReady:
-			case <-ready:
+			if !readinessEstablished(adminReady, cmdReady, ready) {
 				return nil
 			}
 

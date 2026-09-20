@@ -119,6 +119,49 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 	require.NoError(t, h.waitForText(client, "Connection to", 20*time.Second), "the guest's ssh ends with the session")
 }
 
+// A detached session whose command exits at once is still a session that
+// started, and --detach's contract is that it exits 0 once the command is
+// running. The parent has to be told "started", never "the session daemon
+// exited before reporting whether it started" — the answer the daemon's
+// readiness report used to be able to lose its race to.
+//
+// The JSON says what the record said when readiness was published: ready,
+// since the ending write happens after run.Group has waited for the
+// readiness actor. A script that needs to know whether the session is still
+// there asks `session info`; this is about what --detach itself reports.
+//
+// The status is asserted as non-empty rather than as "ready" because the
+// value is the record's to choose — a tunnel lost in that instant would
+// legitimately make it disconnected — and an empty one is the bug this
+// pins: the parent refuses a report without a status.
+func TestDetachedHostWithACommandThatExitsAtOnceStillReportsStarted(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-bgx-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+
+	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --skip-host-key-check --server %s --private-key %s --name %s -o json -- sh -c 'exit 0'; echo DETACH_STATUS=$?",
+		h.serverURL, h.keyFile, name)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "DETACH_STATUS=0", 30*time.Second),
+		"a session whose command ran is not a session that failed to start")
+
+	out, err := h.host.Capture(h.ctx)
+	require.NoError(t, err)
+	require.NotContains(t, out, "exited before reporting whether it started")
+
+	start, end := strings.Index(out, "{"), strings.LastIndex(out, "}")
+	require.True(t, start >= 0 && end > start, "no JSON in:\n%s", out)
+	var info struct {
+		Name      string `json:"name"`
+		Status    string `json:"status"`
+		SessionID string `json:"sessionId"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out[start:end+1]), &info), "not JSON: %s", out[start:end+1])
+	require.Equal(t, name, info.Name)
+	require.NotEmpty(t, info.SessionID)
+	require.NotEmpty(t, info.Status, "the status is the record's, and a report without one is refused")
+}
+
 // upterm host exits with its command's status, every time, and prints no
 // usage block for it.
 func TestHostExitsWithTheCommandsStatus(t *testing.T) {
