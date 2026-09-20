@@ -72,6 +72,15 @@ func Test_checkHelloNonce_RefusesAnythingButItsOwnNonce(t *testing.T) {
 		require.ErrorContains(t, err, "not the session daemon this one started",
 			"a message with no hello in it has no nonce, whatever else it carries")
 	})
+	t.Run("some other message, against an empty nonce", func(t *testing.T) {
+		// The case the type check is for. GetNonce() answers "" for every
+		// arm of the oneof but hello, and ConstantTimeCompare of two empty
+		// slices returns 1 — so with only the nonce compared, this refusal
+		// would rest on spawnDaemon happening to pass 32 hex characters.
+		printMsg := &api.Startup{Msg: &api.Startup_Print{Print: &api.Print{Text: "hi"}}}
+		err := checkHelloNonce(newWire(t, printMsg), "")
+		require.ErrorContains(t, err, "not the session daemon this one started")
+	})
 	t.Run("nothing at all", func(t *testing.T) {
 		err := checkHelloNonce(newWire(t), "ours")
 		require.ErrorContains(t, err, "bootstrap hello")

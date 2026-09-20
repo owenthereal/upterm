@@ -59,6 +59,12 @@ func TestSpawnHelperProcess(t *testing.T) {
 	// contract and so is required only where the transport guarantees it.
 	report("parent_gone", strconv.FormatBool(err != nil))
 	report("eof", strconv.FormatBool(errors.Is(err, io.EOF)))
+	// The sentinel, and it has to stay the last line written here. The parent
+	// polls the log until it sees this and then requires every other report
+	// out of the snapshot it took — so a report emitted after the sentinel can
+	// be required in the instant before it exists. Polling for parent_gone,
+	// which is no longer last, made eof exactly that kind of flake.
+	report("done", "true")
 }
 
 func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
@@ -81,10 +87,13 @@ func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
 	require.Equal(t, "ping", m.GetPrint().GetText(), "the child answers on the channel it was given")
 
 	require.NoError(t, conn.Close())
+	// Waited on rather than any earlier report, because everything below is
+	// required out of one snapshot of the log: the poll has to be for the last
+	// line the child writes or a later one can be required before it lands.
 	require.Eventually(t, func() bool {
 		b, _ := os.ReadFile(logPath)
-		return strings.Contains(string(b), "REPORT parent_gone=")
-	}, 10*time.Second, 50*time.Millisecond, "the child never noticed the parent close: it holds a copy of the parent's end")
+		return strings.Contains(string(b), "REPORT done=true")
+	}, 10*time.Second, 50*time.Millisecond, "the child never finished reporting; the usual reason is that it never noticed the parent close, because it holds a copy of the parent's end")
 
 	b, err := os.ReadFile(logPath)
 	require.NoError(t, err)
@@ -123,6 +132,12 @@ func TestBootstrapConnIsNilOutsideADaemon(t *testing.T) {
 // This is what keeps the literals honest: whichever platform runs, the
 // variable this build actually hands a daemon is one the guard knows.
 func TestTestMainGuardKnowsThisPlatformsHandoff(t *testing.T) {
+	// Both cleared first, this platform's set last. startedAsDaemon is an OR,
+	// so a run that inherited the other transport's variable — a hand-run of
+	// this binary with a Windows-shaped environment, say — would satisfy it
+	// without this test having proved anything about the one below.
+	t.Setenv("UPTERM_DAEMON_FD", "")
+	t.Setenv("UPTERM_DAEMON_SOCKET", "")
 	t.Setenv(daemonHandoffEnv, "set")
 	require.True(t, startedAsDaemon(),
 		"TestMain's guard does not know %s: a test that reached the real spawn would re-run this whole suite in a child, once per spawn", daemonHandoffEnv)

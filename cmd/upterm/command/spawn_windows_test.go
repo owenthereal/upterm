@@ -46,12 +46,14 @@ func requirePlatformReports(t *testing.T, log string) {
 	// half requires, is the contract.
 	require.Regexp(t, `(?m)REPORT eof=(true|false)$`, log)
 
-	// The door closes behind the child. spawnDaemon removes the launch
-	// directory as soon as it has a connection, and this is the half of that
-	// only Windows can be wrong about: deleting a path a socket was bound to
-	// is a sharing violation there if any handle on it is still open, and
-	// RemoveAll's error is deliberately dropped — so a directory that
-	// outlived the spawn would leave the socket openable and say nothing.
+	// The door closes behind the child: spawnDaemon removes the launch
+	// directory as soon as it has a connection. Nothing in the standard
+	// library suggests this should fail — UnixListener.close unlinks before
+	// it closes the fd, RemoveAll runs after that has returned, and the
+	// accepted connection holds no handle on the path — but RemoveAll's error
+	// is deliberately dropped, so a removal that stopped working would leave
+	// one openable boot.sock per invocation and say nothing. This is the
+	// assertion that would notice.
 	m := regexp.MustCompile(`(?m)^REPORT handoff=(.+)$`).FindStringSubmatch(log)
 	require.Len(t, m, 2, "the child did not report the socket it was told to dial")
 	require.NoDirExists(t, filepath.Dir(m[1]),

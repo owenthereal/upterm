@@ -55,9 +55,6 @@ func reportPlatformFindings(report func(k, v string), conn net.Conn) {
 func requirePlatformReports(t *testing.T, log string) {
 	t.Helper()
 	for _, want := range []string{
-		// ExtraFiles[0], and nothing about that is negotiable: the child
-		// looks the descriptor up by the number this hands it.
-		"REPORT handoff=3",
 		"REPORT session_leader=true",
 		"REPORT stdin_devnull=true",
 		"REPORT cloexec=true",
@@ -67,9 +64,11 @@ func requirePlatformReports(t *testing.T, log string) {
 	} {
 		require.Contains(t, log, want)
 	}
-	// Anchored at the end of the line, not a substring: "unix_sockets=10"
-	// contains "unix_sockets=1", and ten leaked descriptors is exactly what
-	// this is meant to catch.
+	// Both anchored at the end of the line rather than taken as substrings,
+	// for the same reason: "unix_sockets=10" contains "unix_sockets=1", and
+	// ten leaked descriptors is exactly what that one is meant to catch.
 	require.Regexp(t, `(?m)REPORT unix_sockets=1$`, log,
 		"the one is net.FileConn's close-on-exec dup of the child's own end; a second would be the child's inherited copy of that same end")
+	require.Regexp(t, `(?m)REPORT handoff=3$`, log,
+		"ExtraFiles[0], and nothing about that is negotiable: the child looks the descriptor up by the number spawnDaemon hands it")
 }

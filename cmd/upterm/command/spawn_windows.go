@@ -40,11 +40,12 @@ const (
 // of its own. Where it cannot, upterm host runs the daemon in-process.
 const spawnSupported = true
 
-// bootstrapAcceptTimeout bounds the wait for the child to call back. It
-// covers a process creation and a dial, nothing more: everything the daemon
-// does that can be slow — resolving keys, dialling the relay — happens after
-// it has connected, and is bounded by the exchange rather than by this.
-const bootstrapAcceptTimeout = 10 * time.Second
+// bootstrapTimeout bounds both halves of the callback: the wait for a
+// connection, and the wait for the hello on it. Neither covers more than a
+// process creation, a dial and twenty bytes — everything the daemon does that
+// can be slow, resolving keys and dialling the relay, happens after the hello
+// and is bounded by the exchange's own gates rather than by this.
+const bootstrapTimeout = 10 * time.Second
 
 // spawnOptions describes the child. executable, args and env default to
 // this process's own.
@@ -73,9 +74,14 @@ type spawnOptions struct {
 // listener closes, and the directory is gone before this returns — the door
 // exists for as long as it takes one child to walk through it.
 //
-// The property the rest of stage 3 reads is unchanged: the child sees EOF the
-// moment the parent's end is gone, whichever way it went, because a connected
-// AF_UNIX socket is closed when the process holding it exits.
+// The property the rest of stage 3 reads is unchanged: the child's next read
+// fails the moment the parent's end is gone, whichever way it went. Go opens
+// sockets here with WSA_FLAG_NO_HANDLE_INHERIT and os/exec passes only the
+// three standard handles, so the child provably holds no copy of the parent's
+// end — the Windows analogue of the close-on-exec flag the Unix side sets.
+// Whether that read fails as EOF or as a reset is Winsock's to choose;
+// bootstrap.Child treats either as the parent leaving, which is why the
+// Windows test asserts the failure and not its shape.
 func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	if opts.name == "" || opts.logPath == "" {
 		return nil, nil, errors.New("spawnDaemon: a name and a log path are required")
@@ -108,6 +114,13 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	}
 	// Removed on every path out, including the one that succeeds: the
 	// connection outlives the path it was made through.
+	//
+	// The error is dropped because there is nothing here to report it
+	// through — spawnDaemon has no logger, and a session that started is not
+	// worth failing over a temp directory. What would go unnoticed is a
+	// removal that fails every time, leaving one boot.sock per invocation
+	// under %TMP%; spawn_windows_test.go asserts the directory is gone, so
+	// that would be caught in CI rather than in the field.
 	removeDir := func() { _ = os.RemoveAll(dir) }
 	if err := sessiondir.SecureDir(dir); err != nil {
 		removeDir()
@@ -189,7 +202,7 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	// command with no parent to answer its prompts.
 	kill := func() { _ = cmd.Process.Kill() }
 
-	if err := ln.SetDeadline(time.Now().Add(bootstrapAcceptTimeout)); err != nil {
+	if err := ln.SetDeadline(time.Now().Add(bootstrapTimeout)); err != nil {
 		kill()
 		return nil, nil, fmt.Errorf("bootstrap channel: %w", err)
 	}
@@ -200,13 +213,21 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	}
 	// Nothing else is coming through this door, and the child is already
 	// connected: the path can go now, and a second caller finds nothing.
+	// Before the nonce is checked, deliberately, so that a connection that
+	// fails it cannot leave the door open behind it.
+	//
+	// One accept and no more means a process that wins the connect race
+	// fails this spawn rather than being let in. Only another process of
+	// this user can try — that is what the DACL is for — and one of those
+	// can do worse things than deny a session, so the loud failure is the
+	// trade taken here rather than looping until the deadline.
 	closeListener()
 	removeDir()
 
 	// A hello the child never sends would otherwise park this forever; the
 	// deadline is dropped again before the connection is handed on, because
 	// from here the exchange has its own gates.
-	if err := conn.SetReadDeadline(time.Now().Add(bootstrapAcceptTimeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(bootstrapTimeout)); err != nil {
 		_ = conn.Close()
 		kill()
 		return nil, nil, fmt.Errorf("bootstrap hello: %w", err)
