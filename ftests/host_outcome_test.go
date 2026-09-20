@@ -116,6 +116,7 @@ type outcomeRun struct {
 	// Set by options before the host and relay are built.
 	signers        []ssh.Signer
 	sessionCreated func(context.Context, *api.GetSessionResponse) error
+	sessionClaimed func(*sessiondir.Dir)
 	relayOptions   []func(*Server)
 }
 
@@ -191,6 +192,7 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 		KeepAliveDuration:       keepAliveDuration,
 		Logger:                  testLogger,
 		SessionCreatedCallback:  run.sessionCreated,
+		SessionClaimedCallback:  run.sessionClaimed,
 		AttachListeningCallback: func(s string) { attachSocket <- s },
 	}
 
@@ -797,7 +799,7 @@ func Test_Host_PublishesStartupAbandonedWhenNoClientAttaches(t *testing.T) {
 // withSessionClaimedCallback stands in for the daemon's first report to the
 // process that started it.
 func withSessionClaimedCallback(cb func(*sessiondir.Dir)) outcomeOption {
-	return func(r *outcomeRun) { r.host.SessionClaimedCallback = cb }
+	return func(r *outcomeRun) { r.sessionClaimed = cb }
 }
 
 // Test_Host_ReportsTheClaimBeforeItDials: the claim callback fires with the
