@@ -103,7 +103,14 @@ func (p *SSHRouting) serveStock(ln net.Listener) error {
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			// Shutdown cancels before it closes, so the context check is the
+			// normal way this loop learns it is stopping. The ErrClosed check
+			// covers the rest: a listener closed without going through Shutdown,
+			// by the caller that owned it before Serve did. Accept reports
+			// ErrClosed only for a listener this process has closed, so it is
+			// never a network failure, and letting it fall through would log an
+			// error and charge the error counter for an orderly close.
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return ErrListnerClosed
 			}
 			// A recoverable accept error must not take the whole listener down:

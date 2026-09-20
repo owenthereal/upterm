@@ -306,10 +306,13 @@ func TestUpstreamFailureReasonAllowlist(t *testing.T) {
 	require.Equal(t, errUpstreamUnavailable, upstreamFailureReason(nil))
 }
 
-// flakyListener fails Accept a fixed number of times before reporting itself
-// closed, so a test can tell a retry apart from a bail-out.
+// flakyListener fails Accept a fixed number of times before settling on
+// terminal, so a test can tell a retry apart from a bail-out. terminal decides
+// which way the loop leaves: a closed listener is a shutdown, anything else is
+// a real accept failure.
 type flakyListener struct {
 	failures []error
+	terminal error
 	calls    atomic.Int32
 }
 
@@ -317,7 +320,7 @@ func (l *flakyListener) Accept() (net.Conn, error) {
 	if n := int(l.calls.Add(1)); n <= len(l.failures) {
 		return nil, l.failures[n-1]
 	}
-	return nil, net.ErrClosed
+	return nil, l.terminal
 }
 
 func (l *flakyListener) Close() error   { return nil }
@@ -330,13 +333,47 @@ func TestStockSSHAcceptRetriesResourceExhaustion(t *testing.T) {
 	accept := func(errno syscall.Errno) error {
 		return &net.OpError{Op: "accept", Net: "tcp", Err: os.NewSyscallError("accept4", errno)}
 	}
-	ln := &flakyListener{failures: []error{accept(syscall.EMFILE), accept(syscall.ENFILE), accept(syscall.ENOBUFS)}}
-	mp, _ := newTestMetrics(t)
-	p := &SSHRouting{MetricsProvider: mp}
+	recoverable := []error{accept(syscall.EMFILE), accept(syscall.ENFILE), accept(syscall.ENOBUFS)}
 
-	require.ErrorIs(t, p.Serve(ln), net.ErrClosed)
-	require.Equal(t, int32(len(ln.failures)+1), ln.calls.Load(),
-		"every recoverable accept failure should be retried, not returned")
+	// The two ways out of the accept loop, told apart by what Serve returns and
+	// by whether the failure is charged. A closed listener is a shutdown: it
+	// leaves by the same door as the loop's other closes and costs nothing. Any
+	// other unrecoverable error is a real failure and still surfaces raw and
+	// counted -- without this case nothing reaches that branch at all.
+	for _, tt := range []struct {
+		name      string
+		terminal  error
+		wantErr   error
+		wantCount float64
+	}{
+		{
+			name:      "a closed listener is a shutdown",
+			terminal:  net.ErrClosed,
+			wantErr:   ErrListnerClosed,
+			wantCount: 0,
+		},
+		{
+			name:      "an unrecoverable accept error is a failure",
+			terminal:  accept(syscall.EINVAL),
+			wantErr:   syscall.EINVAL,
+			wantCount: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ln := &flakyListener{failures: recoverable, terminal: tt.terminal}
+			mp, reg := newTestMetrics(t)
+			p := &SSHRouting{MetricsProvider: mp}
+
+			require.ErrorIs(t, p.Serve(ln), tt.wantErr)
+			require.Equal(t, int32(len(ln.failures)+1), ln.calls.Load(),
+				"every recoverable accept failure should be retried, not returned")
+
+			// A counter never added to is not exported at all, which reads the
+			// same as zero here: the shutdown was not charged as a failure.
+			got, _ := gatherValue(t, reg, "test_server_routing_errors_count", nil)
+			require.Equal(t, tt.wantCount, got, "routing_errors_count")
+		})
+	}
 }
 
 // Only the host gets the narrow scope. Swapping these two constants leaves

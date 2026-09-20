@@ -30,11 +30,15 @@ type sshProxy struct {
 
 	routing *SSHRouting
 	mux     sync.Mutex
+	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
+	stopped bool
 }
 
 func (r *sshProxy) Shutdown() error {
 	r.mux.Lock()
 	defer r.mux.Unlock()
+
+	r.stopped = true
 
 	if r.routing != nil {
 		return r.routing.Shutdown()
@@ -46,10 +50,19 @@ func (r *sshProxy) Shutdown() error {
 func (r *sshProxy) Serve(ln net.Listener) error {
 	authorizedKeys, err := loadAuthorizedKeys(r.AuthorizedKeysFiles)
 	if err != nil {
+		// Serve owns ln once it is handed over, and Shutdown can only close what
+		// routing has recorded -- which has not happened yet. Returning without
+		// releasing it here leaves the port bound for the life of the process.
+		_ = ln.Close()
 		return err
 	}
 
 	r.mux.Lock()
+	if r.stopped {
+		r.mux.Unlock()
+		_ = ln.Close()
+		return ErrListnerClosed
+	}
 	r.routing = &SSHRouting{
 		HostSigners:      r.HostSigners,
 		HandshakeTimeout: r.HandshakeTimeout,

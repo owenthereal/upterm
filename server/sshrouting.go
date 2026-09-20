@@ -98,6 +98,9 @@ func newSSHRoutingInstruments(p provider.Provider) *routingInstruments {
 
 func (p *SSHRouting) Serve(ln net.Listener) error {
 	if err := validateHandshakeTimeout(p.HandshakeTimeout); err != nil {
+		// serveStock is what records ln for Shutdown to close. Failing ahead of
+		// it means nothing else will ever release the listener.
+		_ = ln.Close()
 		return err
 	}
 	return p.serveStock(ln)
@@ -105,11 +108,15 @@ func (p *SSHRouting) Serve(ln net.Listener) error {
 
 func (p *SSHRouting) Shutdown() error {
 	p.mux.Lock()
-	lnerr := p.closeListenersLocked()
+	// Cancel before closing, so the accept loop wakes to a cancelled context
+	// rather than to a bare ErrClosed out of Accept and recognises its own
+	// shutdown. Closing first left it unable to tell a shutdown from a listener
+	// that had failed under it.
 	p.closeDoneChanLocked()
 	if p.cancel != nil {
 		p.cancel()
 	}
+	lnerr := p.closeListenersLocked()
 	p.mux.Unlock()
 
 	p.joinWorkers()
@@ -163,6 +170,8 @@ func (p *SSHRouting) closeListenersLocked() error {
 	if p.listener == nil {
 		return nil
 	}
+	// Nothing else closes this listener: Server.Shutdown leaves it to whoever
+	// serves it, so a close error here is a real one.
 	return p.listener.Close()
 }
 
