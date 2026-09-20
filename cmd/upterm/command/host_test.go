@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -676,11 +677,54 @@ func Test_identitiesOnlyRequested(t *testing.T) {
 	assert.False(t, identitiesOnlyRequested())
 }
 
+// captureStderr collects what fn writes to os.Stderr.
+//
+// The in-process host's operator-facing notices go to a file, not to an
+// injected writer, so swapping the file is the only way a test can see them.
+// Shaped like captureStdout in session_test.go, including the concurrent
+// drain: a warning larger than a pipe buffer would otherwise deadlock the
+// test rather than fail it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	collected := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		collected <- buf.String()
+	}()
+
+	// Registered before fn runs, because a require failure inside it calls
+	// Goexit: the close below would be skipped and the copier would sit on a
+	// pipe whose write end nobody ever closes. Closing twice is harmless.
+	defer func() { _ = w.Close() }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out := <-collected
+	require.NoError(t, r.Close())
+	return out
+}
+
 // Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped pins that the
 // in-process host names a key it could not load, the way the daemon does.
 // The two paths are the same session on different platforms, and a skip that
 // is announced on one and silent on the other leaves the operator of the
 // other wondering why their identity was not offered.
+//
+// Both halves are asserted, because the daemon does both: the log record an
+// operator finds afterwards, and the line they see at the time. A warning
+// that reached only the log would be parity with the daemon's logger and not
+// with what the daemon's parent prints, which is the half that answers the
+// question while it is being asked.
 //
 // The session itself cannot start — the server is a port nothing listens on
 // — which is deliberate: the warning is emitted while the signers are being
@@ -721,8 +765,10 @@ func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
 	logs := &capturingHandler{}
 	c := &cobra.Command{}
 	c.SetContext(context.Background())
-	// The dial is what this returns on, and it is expected to fail.
-	_ = runInProcessHost(c, slog.New(logs), hostOptions{command: []string{"true"}, term: "xterm"})
+	stderr := captureStderr(t, func() {
+		// The dial is what this returns on, and it is expected to fail.
+		_ = runInProcessHost(c, slog.New(logs), hostOptions{command: []string{"true"}, term: "xterm"})
+	})
 
 	var found bool
 	for _, rec := range logs.captured() {
@@ -733,6 +779,12 @@ func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "the in-process host must name the key it skipped, as the daemon does: %+v", logs.captured())
+
+	// The half the operator actually reads. The prefix and shape are the
+	// daemon's own, so the same session says the same thing however it was
+	// started.
+	assert.Contains(t, stderr, "warning: skipping private key "+keyFile+":",
+		"the skip has to reach the operator, not only upterm.log: %q", stderr)
 }
 
 // Test_guardedSpawn_RefusesInsideATestBinary pins hostSpawn's default: the

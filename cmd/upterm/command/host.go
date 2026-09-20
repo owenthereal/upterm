@@ -639,11 +639,22 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 	// not of the platforms that host in-process. No Passphrase, which is the
 	// difference that remains and is right: this process has the terminal,
 	// and SignersWith prompts on it when Passphrase is nil.
+	//
+	// Both halves, because the daemon's OnSkip is both halves. logger is the
+	// file logger root.go builds, so a warning that stops there is in
+	// upterm.log and nowhere the operator is looking; the daemon's second
+	// half, child.Print, is relayed to the parent's stderr, which is where
+	// the operator actually reads it. The line is the daemon's, character for
+	// character. Written synchronously, like the daemon's own relay and like
+	// the version warning above: one short line into an empty stream is
+	// smaller than any pipe buffer, which is the argument printBanner makes
+	// for leaving that warning synchronous too.
 	signers, cleanup, err := host.SignersWith(host.SignerOptions{
 		PrivateKeys:    flagPrivateKeys,
 		IdentitiesOnly: identitiesOnlyRequested(),
 		OnSkip: func(file string, err error) {
 			logger.Warn("skipping private key", "file", file, "error", err)
+			fmt.Fprintf(os.Stderr, "warning: skipping private key %s: %v\n", file, err)
 		},
 	})
 	if err != nil {
