@@ -35,6 +35,17 @@ import (
 // wedged run.Group into a failure with a stack instead of a dead suite.
 const outcomeTimeout = 60 * time.Second
 
+// refusedStopGrace is how long a session that refused a stop is watched for
+// signs of stopping anyway.
+//
+// A stop this daemon accepts cancels Run's context from inside the RPC
+// handler, so the teardown is already under way when the call returns:
+// letting a mismatched stop through and timing it measured 2 ms from the
+// refusal to Run returning, with the admin socket already unlinked before
+// the next RPC could dial it. Two seconds is that with a thousandfold
+// margin, and only this one case ever waits it out.
+const refusedStopGrace = 2 * time.Second
+
 // outcomePollInterval is how often the never-ready tests sample the record.
 // Fast enough that a "ready" published and immediately overwritten would still
 // be caught, which is the whole point of sampling rather than reading once.
@@ -1104,13 +1115,25 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	require.Equal(t, codes.FailedPrecondition, status.Code(err),
 		"a stop that names another launch is not this session's to accept")
 
-	// Ready, and still ready: the status only ever moves forwards, so a
-	// session that had accepted that stop could not reach ready again.
-	require.Eventually(t, func() bool {
-		cur, err := sessiondir.ReadRecord(run.stateRoot, run.name)
-		return err == nil && cur != nil && cur.Status == sessiondir.StatusReady
-	}, outcomeTimeout, outcomePollInterval,
-		"the session the refused stop did not name is still running")
+	// And the refusal changed nothing. Not "the record still says ready",
+	// which an accepted stop would leave standing for the whole of its
+	// teardown and which therefore shows nothing: the session has to be
+	// shown still holding its name, still answering, and still running.
+	// Waiting for the last is the point — OnStop is the cancellation itself,
+	// so an accepted stop starts the teardown before the RPC has even
+	// returned, and refusedStopGrace is many times what that teardown takes.
+	cur, held, err := sessiondir.Inspect(ctx, run.stateRoot, run.name)
+	require.NoError(t, err)
+	require.True(t, held, "a refused stop must not release the name")
+	require.Equal(t, rec.LaunchID, cur.LaunchID, "and the launch still holding it is the one that refused")
+	live, err := client.GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err, "the daemon that refused the stop is still serving its admin socket")
+	require.NotEmpty(t, live.SessionId)
+	select {
+	case err := <-done:
+		t.Fatalf("the refused stop ended the session it did not name: %v", err)
+	case <-time.After(refusedStopGrace):
+	}
 
 	// The launch the record names, which is what `upterm session stop` sends.
 	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: rec.LaunchID})

@@ -298,10 +298,10 @@ type stubAdminServer struct {
 	// way a daemon that predates this RPC would.
 	onStop func()
 
-	// stopLaunchID, if set, is the launch this fixture will answer for: a
-	// request naming any other is refused the way the daemon refuses it.
-	// Empty accepts whatever it is sent, which is what the cases that are
-	// not about the binding want.
+	// stopLaunchID is the launch this fixture answers for: a request naming
+	// any other is refused the way the daemon refuses it. There is no
+	// "accept anything" setting, deliberately — a fixture laxer than the
+	// daemon would let a case pass on a request the daemon would refuse.
 	stopLaunchID string
 
 	// stoppedLaunchID records what the last StopSession was asked to stop,
@@ -332,7 +332,7 @@ func (s *stubAdminServer) StopSession(_ context.Context, in *api.StopSessionRequ
 	s.stoppedLaunchID = in.GetLaunchId()
 	expect := s.stopLaunchID
 	s.mu.Unlock()
-	if expect != "" && in.GetLaunchId() != expect {
+	if in.GetLaunchId() != expect {
 		return nil, status.Errorf(codes.FailedPrecondition, "this socket holds launch %s; the request named %q", expect, in.GetLaunchId())
 	}
 	s.onStop()
@@ -352,10 +352,9 @@ func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionRespons
 }
 
 // serveStubAdminWithStop is serveStubAdmin for a fixture that also answers
-// StopSession. launchID is the launch it will answer for, refusing any other
-// the way the daemon does; empty answers for whatever it is sent, for the
-// cases that are not about which launch was named. The stub is returned so a
-// case can read what the request carried.
+// StopSession. launchID is the launch it answers for, refusing any other the
+// way the daemon does. The stub is returned so a case can read what the
+// request carried.
 func serveStubAdminWithStop(t *testing.T, socket string, resp *api.GetSessionResponse, launchID string, onStop func()) *stubAdminServer {
 	t.Helper()
 
