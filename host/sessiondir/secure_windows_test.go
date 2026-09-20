@@ -124,7 +124,7 @@ func Test_Claim_LabelsTheRuntimeDirectoryAtItsOwnIntegrityLevelOnWindows(t *test
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = d.Release(context.Background()) })
 
-	want := currentProcessIntegrityRID(t)
+	want := currentProcessIntegritySID(t)
 
 	sd, err := windows.GetNamedSecurityInfo(d.runtime, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION)
 	require.NoError(t, err)
@@ -144,11 +144,14 @@ func Test_Claim_LabelsTheRuntimeDirectoryAtItsOwnIntegrityLevelOnWindows(t *test
 			continue
 		}
 
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		require.NotZero(t, sid.SubAuthorityCount(), "label SID %s carries no level: %s", sid, sd)
-		got := sid.SubAuthority(uint32(sid.SubAuthorityCount()) - 1)
-		require.Equal(t, want, got,
-			"labelled %s, not at this process's own level S-1-16-%d: a label above this process's level would have been refused, one below it lets a lower-integrity process in: %s", sid, want, sd)
+		// Compared as strings, not through SubAuthority: that accessor
+		// returns a pointer into this Go-allocated descriptor and faults
+		// under -race, which is what the first Windows CI run found. The
+		// string is the whole SID, so this asserts the level and the
+		// authority it belongs to at once.
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		require.Equal(t, want, sid,
+			"labelled %s, not at this process's own level %s: a label above this process's level would have been refused, one below it lets a lower-integrity process in: %s", sid, want, sd)
 
 		require.Equal(t, windows.ACCESS_MASK(noReadUp|noWriteUp|noExecuteUp), ace.Mask,
 			"the mandatory policy is %#x, not deny read-up, write-up and execute-up: %s", ace.Mask, sd)
@@ -176,11 +179,44 @@ func Test_tokenIntegrityRID_RefusesAnUnreadableToken(t *testing.T) {
 	require.Zero(t, rid, "a level was returned alongside the error, and a caller could label with it")
 }
 
-// currentProcessIntegrityRID reads this process's own integrity level through
+// The level a directory is labelled with is only ever as good as the parse
+// that produced it, so anything that is not a mandatory label SID has to come
+// back as "no level" rather than as a number. Windows writes these with
+// ConvertSidToStringSid, which is why the match is exact and case-sensitive:
+// a string in any other shape did not come from where it should have.
+func Test_integrityRIDFromSID(t *testing.T) {
+	for _, c := range []struct {
+		sid  string
+		rid  uint32
+		want bool
+	}{
+		{sid: "S-1-16-4096", rid: 0x1000, want: true},
+		{sid: "S-1-16-8192", rid: 0x2000, want: true},
+		{sid: "S-1-16-12288", rid: 0x3000, want: true},
+		{sid: "S-1-16-16384", rid: 0x4000, want: true},
+		{sid: "S-1-5-21-1004336348-1177238915-682003330-512"}, // a group, not a level
+		{sid: "S-1-16-12288-1"},                               // an integrity SID has one sub-authority
+		{sid: "S-1-16-"},                                      // truncated
+		{sid: "S-1-16-4294967296"},                            // past the field
+		{sid: "S-1-16-0x3000"},                                // not how Windows writes it
+		{sid: "s-1-16-12288"},                                 // nor this
+		{sid: ""},                                             // what String() returns when it fails
+	} {
+		t.Run(c.sid, func(t *testing.T) {
+			rid, ok := integrityRIDFromSID(c.sid)
+			require.Equal(t, c.want, ok)
+			require.Equal(t, c.rid, rid, "a level was returned for a SID that carries none")
+		})
+	}
+}
+
+// currentProcessIntegritySID reads this process's own integrity SID through
 // the pseudo token, which is a different handle and a different retry shape
-// from what secureSessionDir uses. The expectation the label is measured
-// against must not come from the code that wrote the label.
-func currentProcessIntegrityRID(t *testing.T) uint32 {
+// from what secureSessionDir uses, and returns the whole SID rather than a
+// parsed level so that nothing the code under test does is reused here. The
+// expectation the label is measured against must not come from the code that
+// wrote the label.
+func currentProcessIntegritySID(t *testing.T) string {
 	t.Helper()
 
 	token := windows.GetCurrentProcessToken() // a pseudo handle; nothing to close
@@ -195,7 +231,8 @@ func currentProcessIntegrityRID(t *testing.T) uint32 {
 
 	sid := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0])).Label.Sid
 	require.NotNil(t, sid, "this process's token carries no integrity SID")
-	require.True(t, strings.HasPrefix(sid.String(), "S-1-16-"),
-		"%s is not an integrity SID, so its last sub-authority is not an integrity level", sid)
-	return sid.SubAuthority(uint32(sid.SubAuthorityCount()) - 1)
+	text := sid.String()
+	require.True(t, strings.HasPrefix(text, "S-1-16-"),
+		"%q is not an integrity SID, so it is not a level this test can hold the label to", text)
+	return text
 }

@@ -5,6 +5,8 @@ package sessiondir
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -90,8 +92,8 @@ func secureSessionDir(path string) error {
 }
 
 // tokenIntegrityRID returns the RID of a token's integrity level — 0x1000
-// low, 0x2000 medium, 0x3000 high, 0x4000 system — which is the last
-// sub-authority of the SID in its TOKEN_MANDATORY_LABEL.
+// low, 0x2000 medium, 0x3000 high, 0x4000 system — which is the level carried
+// by the SID in its TOKEN_MANDATORY_LABEL.
 //
 // A token whose level cannot be read is an error, not a reason to fall back:
 // the caller creates the session directory and removes it again when securing
@@ -123,9 +125,39 @@ func tokenIntegrityRID(token windows.Token) (uint32, error) {
 	if sid == nil || !sid.IsValid() {
 		return 0, errors.New("read token integrity level: no integrity SID on the token")
 	}
-	count := sid.SubAuthorityCount()
-	if count == 0 {
-		return 0, fmt.Errorf("read token integrity level: %s has no sub-authority to take the level from", sid)
+
+	// The level comes out of the SID's string form, not out of
+	// SubAuthority/SubAuthorityCount. Those call Win32 accessors that hand
+	// back a raw address inside the buffer above, which x/sys converts
+	// straight to a Go pointer (x/sys@v0.48.0 zsyscall_windows.go:950-961).
+	// The buffer is Go memory, so -race's checkptr sees a pointer conjured
+	// from a uintptr into an allocation it never came from and kills the
+	// process — every Claim, not just a test. ConvertSidToStringSid returns
+	// Windows-allocated memory instead, which checkptr does not police.
+	text := sid.String()
+	rid, ok := integrityRIDFromSID(text)
+	if !ok {
+		return 0, fmt.Errorf("read token integrity level: %q is not a mandatory label SID", text)
 	}
-	return sid.SubAuthority(uint32(count) - 1), nil
+	return rid, nil
+}
+
+// integrityRIDFromSID takes the level out of a mandatory label SID, whose
+// string form is S-1-16-<rid> and nothing else.
+//
+// Anything else fails closed, for the same reason an unreadable token does: a
+// user SID, a truncated one, a level too big for the field, or the empty
+// string a failed String() returns is not a level, and labelling with a
+// number guessed from one of those is how an elevated session ends up
+// reachable from the unelevated half of a split token.
+func integrityRIDFromSID(sid string) (uint32, bool) {
+	rid, ok := strings.CutPrefix(sid, "S-1-16-")
+	if !ok {
+		return 0, false
+	}
+	level, err := strconv.ParseUint(rid, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(level), true
 }
