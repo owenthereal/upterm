@@ -21,6 +21,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -673,6 +674,65 @@ func Test_identitiesOnlyRequested(t *testing.T) {
 
 	suppliedFlags = map[string]bool{"authorized-keys": true}
 	assert.False(t, identitiesOnlyRequested())
+}
+
+// Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped pins that the
+// in-process host names a key it could not load, the way the daemon does.
+// The two paths are the same session on different platforms, and a skip that
+// is announced on one and silent on the other leaves the operator of the
+// other wondering why their identity was not offered.
+//
+// The session itself cannot start — the server is a port nothing listens on
+// — which is deliberate: the warning is emitted while the signers are being
+// resolved, long before anything is dialled, so the failure that follows
+// costs a connection refused and no session.
+func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
+	setupSessionRoots(t)
+	dir := t.TempDir()
+
+	// Exists, so the default key list would carry it, and unparseable, so it
+	// is skipped rather than refused: that is the case OnSkip is for.
+	keyFile := filepath.Join(dir, "id_ed25519")
+	require.NoError(t, os.WriteFile(keyFile, []byte("not a private key\n"), 0600))
+
+	// No agent, so the file list is what is read at all; and no
+	// --private-key, so the list is the default set and a file that fails to
+	// load is skipped instead of failing the set.
+	t.Setenv("SSH_AUTH_SOCK", "")
+	origSupplied := suppliedFlags
+	suppliedFlags = map[string]bool{}
+	t.Cleanup(func() { suppliedFlags = origSupplied })
+
+	restoreString := func(p *string, v string) {
+		orig := *p
+		*p = v
+		t.Cleanup(func() { *p = orig })
+	}
+	restoreString(&flagServer, "ssh://127.0.0.1:1")
+	restoreString(&flagKnownHostsFilename, filepath.Join(dir, "known_hosts"))
+	restoreString(&flagName, "")
+	origKeys := flagPrivateKeys
+	flagPrivateKeys = []string{keyFile}
+	t.Cleanup(func() { flagPrivateKeys = origKeys })
+	origSkip := flagSkipHostKeyCheck
+	flagSkipHostKeyCheck = true
+	t.Cleanup(func() { flagSkipHostKeyCheck = origSkip })
+
+	logs := &capturingHandler{}
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+	// The dial is what this returns on, and it is expected to fail.
+	_ = runInProcessHost(c, slog.New(logs), hostOptions{command: []string{"true"}, term: "xterm"})
+
+	var found bool
+	for _, rec := range logs.captured() {
+		if rec.Msg == "skipping private key" && rec.Attrs["file"] == keyFile {
+			assert.Equal(t, slog.LevelWarn, rec.Level, "a skipped identity is a warning, as it is in the daemon")
+			assert.NotEmpty(t, rec.Attrs["error"], "the warning has to say why it was skipped")
+			found = true
+		}
+	}
+	assert.True(t, found, "the in-process host must name the key it skipped, as the daemon does: %+v", logs.captured())
 }
 
 // Test_guardedSpawn_RefusesInsideATestBinary pins hostSpawn's default: the

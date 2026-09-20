@@ -638,7 +638,19 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 		return err
 	}
 
-	signers, cleanup, err := host.Signers(flagPrivateKeys, identitiesOnlyRequested())
+	// SignersWith rather than Signers, for OnSkip alone: the daemon reports
+	// which identity it is not using and this path was still silent about it,
+	// so "the skip now says which key" was true of a spawned session only and
+	// not of the platforms that host in-process. No Passphrase, which is the
+	// difference that remains and is right: this process has the terminal,
+	// and SignersWith prompts on it when Passphrase is nil.
+	signers, cleanup, err := host.SignersWith(host.SignerOptions{
+		PrivateKeys:    flagPrivateKeys,
+		IdentitiesOnly: identitiesOnlyRequested(),
+		OnSkip: func(file string, err error) {
+			logger.Warn("skipping private key", "file", file, "error", err)
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
