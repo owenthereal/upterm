@@ -2,6 +2,9 @@ package command
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -658,6 +661,20 @@ func Test_authorizationRequested(t *testing.T) {
 	assert.False(t, authorizationRequested())
 }
 
+func Test_identitiesOnlyRequested(t *testing.T) {
+	orig := suppliedFlags
+	t.Cleanup(func() { suppliedFlags = orig })
+
+	suppliedFlags = map[string]bool{}
+	assert.False(t, identitiesOnlyRequested())
+
+	suppliedFlags = map[string]bool{"private-key": true}
+	assert.True(t, identitiesOnlyRequested())
+
+	suppliedFlags = map[string]bool{"authorized-keys": true}
+	assert.False(t, identitiesOnlyRequested())
+}
+
 // runHostInProcess runs `upterm host <argv...>` with the daemon in a
 // goroutine of this process instead of a child of it, and returns what the
 // command returned.
@@ -982,4 +999,103 @@ func Test_hostUsageIsForUsageErrorsOnly(t *testing.T) {
 	root.SetArgs([]string{"host", "--nonexistent-flag"})
 	require.Error(t, root.Execute())
 	require.Contains(t, out.String(), "Usage:", "an unknown flag is exactly what usage is for")
+}
+
+// runHostCmd executes `upterm host --accept <args> -- true` in a controlled
+// environment: a fresh HOME holding one plain default identity, no agent,
+// short XDG roots, and a relay nobody answers on. Every case that gets past
+// identity resolution then fails on the dial, which is how a case that should
+// have stopped earlier shows up: with a different error. Callers set the
+// config file themselves, with withConfig, so it is not touched here.
+func runHostCmd(t *testing.T, args ...string) error {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("SSH_AUTH_SOCK", "")
+	xdg, err := os.MkdirTemp("", "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(xdg) })
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
+	t.Setenv("XDG_STATE_HOME", xdg)
+
+	// A default identity, so that "the default list" is a real, loadable
+	// list and an empty variable that failed to clear it would be visible.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".ssh"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), pem.EncodeToMemory(block), 0o600))
+
+	// Through the in-process seam, never root.Execute() directly: on Unix
+	// upterm host spawns its daemon by re-executing os.Args, and in a test
+	// binary that argv is the test runner's — the child would run this whole
+	// suite again, once per spawn. TestMain trips any test that reaches the
+	// real spawn; this is the path it points at. The daemon is what resolves
+	// identities, so its error arrives under the parent's "session NAME could
+	// not start:" prefix, which ErrorContains looks through.
+	return runHostInProcess(t, append([]string{"host", "--accept", "--server", "ssh://127.0.0.1:1"}, append(args, "--", "true")...)...)
+}
+
+func Test_hostCmd_privateKeyIsIdentitiesOnlyFromEveryOrigin(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("flag", func(t *testing.T) {
+		withConfig(t, "")
+		err := runHostCmd(t, "--private-key", missing)
+		require.ErrorContains(t, err, "cannot read private key "+missing)
+	})
+
+	t.Run("config", func(t *testing.T) {
+		withConfig(t, "private-key: ["+missing+"]\n")
+		err := runHostCmd(t)
+		require.ErrorContains(t, err, "cannot read private key "+missing)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		withConfig(t, "")
+		t.Setenv("UPTERM_PRIVATE_KEY", missing)
+		err := runHostCmd(t)
+		require.ErrorContains(t, err, "cannot read private key "+missing)
+	})
+}
+
+func Test_hostCmd_emptyPrivateKeyListIsAnErrorFromEveryOrigin(t *testing.T) {
+	const want = "private-key was supplied but names no files"
+
+	t.Run("flag", func(t *testing.T) {
+		withConfig(t, "")
+		require.ErrorContains(t, runHostCmd(t, "--private-key="), want)
+	})
+
+	t.Run("config", func(t *testing.T) {
+		withConfig(t, "private-key: []\n")
+		require.ErrorContains(t, runHostCmd(t), want)
+	})
+
+	t.Run("env alone", func(t *testing.T) {
+		withConfig(t, "")
+		t.Setenv("UPTERM_PRIVATE_KEY", "")
+		require.ErrorContains(t, runHostCmd(t), want)
+	})
+}
+
+func Test_hostCmd_emptyPrivateKeyEnvPreservesAnExplicitValue(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	// Reaching "cannot read <missing>" proves two things at once: the
+	// explicit value survived the empty variable, and identities-only
+	// applied to it.
+	t.Run("config survives", func(t *testing.T) {
+		withConfig(t, "private-key: ["+missing+"]\n")
+		t.Setenv("UPTERM_PRIVATE_KEY", "")
+		require.ErrorContains(t, runHostCmd(t), "cannot read private key "+missing)
+	})
+
+	t.Run("CLI survives", func(t *testing.T) {
+		withConfig(t, "")
+		t.Setenv("UPTERM_PRIVATE_KEY", "")
+		require.ErrorContains(t, runHostCmd(t, "--private-key", missing), "cannot read private key "+missing)
+	})
 }

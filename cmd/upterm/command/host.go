@@ -116,10 +116,12 @@ func hostCmd() *cobra.Command {
 		Long: `Host a terminal session via a reverse SSH tunnel to the Upterm server.
 
 The session links the host and client IO to a command's IO. Authentication with the
-Upterm server uses private keys in this order:
-  1. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
-  2. SSH Agent keys
-  3. Auto-generated ephemeral key (if no keys found)
+Upterm server uses, in this order:
+  1. SSH agent keys, when an agent is running and holds any
+  2. Private key files: ~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}
+  3. Auto-generated ephemeral key, when neither is available
+
+Supplying --private-key makes the named list the whole set instead; see its help.
 
 To authorize client connections, use --authorized-keys to specify an authorized_keys file
 containing client public keys.
@@ -170,7 +172,7 @@ starts in the background and this command prints how to reach it.`,
 
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Specify private key files for public key authentication with the upterm server (required). Only existing files are included by default.")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
 	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
 	// Keep help and generated docs portable without changing the runtime defaults.
 	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
@@ -610,12 +612,20 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 		return err
 	}
 
-	signers, cleanup, err := host.Signers(flagPrivateKeys)
+	signers, cleanup, err := host.Signers(flagPrivateKeys, identitiesOnlyRequested())
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
 	if cleanup != nil {
 		defer cleanup()
+	}
+
+	// Generated here rather than left to Run: this process attaches its own
+	// terminal to the door the daemon presents, and needs the public half to
+	// pin it.
+	hostKey, err := host.NewHostKey()
+	if err != nil {
+		return fmt.Errorf("error generating host key: %w", err)
 	}
 
 	var hkcb ssh.HostKeyCallback
@@ -646,6 +656,7 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 			Command:           opts.command,
 			ForceCommand:      opts.forceCommand,
 			Signers:           signers,
+			HostKey:           hostKey,
 			HostKeyCallback:   hkcb,
 			AuthorizedKeys:    authorizedKeys,
 			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
@@ -680,13 +691,10 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 			},
 			func(ctx context.Context, socket string) (attach.Result, error) {
 				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
-				// The daemon's own signers, not a re-read of the record: this
-				// is the process presenting the door, so it has the keys
+				// The daemon's own host key, not a re-read of the record: this
+				// is the process presenting the door, so it has the key
 				// directly.
-				keys := make([]ssh.PublicKey, 0, len(signers))
-				for _, s := range signers {
-					keys = append(keys, s.PublicKey())
-				}
+				keys := []ssh.PublicKey{hostKey.PublicKey()}
 				// Not opts.escape: this process is the daemon, so a ~. here
 				// would detach the only terminal a foreground process has.
 				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger)
@@ -942,6 +950,13 @@ func authorizationRequested() bool {
 		}
 	}
 	return false
+}
+
+// identitiesOnlyRequested reports whether the user named their identities,
+// from any configuration origin. A named list is the whole set: see
+// host.Signers.
+func identitiesOnlyRequested() bool {
+	return suppliedFlags["private-key"]
 }
 
 func countKeys(aks []*host.AuthorizedKey) int {

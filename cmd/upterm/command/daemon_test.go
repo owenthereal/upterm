@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // daemonTestRoots points the session directories at a socket-safe temp root,
@@ -118,9 +120,18 @@ func TestRunDaemonProcessSpeaksTheExchange(t *testing.T) {
 
 	var claimed *api.Claimed
 	var listening *api.Listening
+	var doorKey ssh.PublicKey
+	run := fakeRun(t, "sid-1", nil)
 	done := make(chan error, 1)
 	go func() {
-		done <- runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, "daemon-1", fakeRun(t, "sid-1", nil))
+		done <- runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, "daemon-1",
+			func(ctx context.Context, h *host.Host) error {
+				// What the embedded sshd will present on the attach door.
+				if h.HostKey != nil {
+					doorKey = h.HostKey.PublicKey()
+				}
+				return run(ctx, h)
+			})
 	}()
 	out, err := parent.Run(context.Background(), bootstrap.Handlers{
 		Claimed:   func(c *api.Claimed) { claimed = c },
@@ -137,7 +148,15 @@ func TestRunDaemonProcessSpeaksTheExchange(t *testing.T) {
 	require.Equal(t, utils.UptermLogFilePath(), claimed.LogPath)
 	require.NotNil(t, listening)
 	require.Equal(t, claimed.AttachSocket, listening.AttachSocket)
-	require.NotEmpty(t, listening.HostKeys, "the parent pins these")
+	// Not merely non-empty: the parent pins whatever this names, and the
+	// door presents the session host key — never the --private-key signers,
+	// which authenticate the tunnel and nothing else. Reporting the signers
+	// leaves the parent unable to attach to its own session.
+	require.NotNil(t, doorKey, "the daemon must set the host key it reports")
+	require.Equal(t,
+		[]string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(doorKey)), "\n")},
+		listening.HostKeys,
+		"the parent pins the door's session host key")
 
 	rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "daemon-1")
 	require.NoError(t, err)

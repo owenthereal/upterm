@@ -224,11 +224,19 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.P
 }
 
 type Host struct {
-	Host                    string
-	KeepAliveDuration       time.Duration
-	Command                 []string
-	ForceCommand            []string
-	Signers                 []ssh.Signer
+	Host              string
+	KeepAliveDuration time.Duration
+	Command           []string
+	ForceCommand      []string
+	Signers           []ssh.Signer
+	// HostKey is the key the embedded sshd presents on both its doors and
+	// the key the relay is told to expect from this host. A session's key,
+	// not the operator's: Signers authenticate the tunnel and are used for
+	// nothing else. Left nil, Run generates one for that run and does not
+	// keep it, so a Host run twice presents two keys; a caller that needs
+	// the public half before Run — the CLI, to pin its own attach — sets it
+	// and it is used as given.
+	HostKey                 ssh.Signer
 	HostKeyCallback         ssh.HostKeyCallback
 	AuthorizedKeys          []*AuthorizedKey
 	AdminSocketFile         string
@@ -393,6 +401,17 @@ func (c *Host) Run(ctx context.Context) error {
 		return fmt.Errorf("error parsing host url: %s", err)
 	}
 
+	// This run's key. Never written back: a Host is reusable, and a key
+	// that survived into a second run would make "per run" false.
+	hostKey := c.HostKey
+	if hostKey == nil {
+		key, err := NewHostKey()
+		if err != nil {
+			return fmt.Errorf("error generating host key: %w", err)
+		}
+		hostKey = key
+	}
+
 	var aks []ssh.PublicKey
 	for _, ak := range c.AuthorizedKeys {
 		aks = append(aks, ak.PublicKeys...)
@@ -524,6 +543,7 @@ func (c *Host) Run(ctx context.Context) error {
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
+		HostKey:           hostKey,
 		HostKeyCallback:   c.HostKeyCallback,
 		AuthorizedKeys:    aks,
 		KeepAliveDuration: c.KeepAliveDuration,
@@ -639,15 +659,10 @@ func (c *Host) Run(ctx context.Context) error {
 			return err
 		}
 		// Published as soon as the socket a client could dial exists, so that
-		// every record whose attach socket is dialable also carries the keys
-		// `upterm attach` needs to pin it. Guarded on len(c.Signers): tests
-		// construct hosts without any, and the field is left empty rather
-		// than published as nothing.
-		if c.SessionDir != nil && len(c.Signers) > 0 {
-			hostKeys := make([]string, 0, len(c.Signers))
-			for _, s := range c.Signers {
-				hostKeys = append(hostKeys, strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(s.PublicKey())), "\n"))
-			}
+		// every record whose attach socket is dialable also carries the key
+		// `upterm attach` needs to pin it.
+		if c.SessionDir != nil {
+			hostKeys := []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())), "\n")}
 			// Not swallowed: a record that never receives the keys names a
 			// socket `upterm attach` will refuse to dial, so a session that
 			// is otherwise fine becomes unattachable for its whole life.
@@ -758,7 +773,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Command:                 c.Command,
 			CommandEnv:              commandEnv,
 			ForceCommand:            c.ForceCommand,
-			Signers:                 c.Signers,
+			HostKey:                 hostKey,
 			AuthorizedKeys:          aks,
 			EventEmitter:            eventEmitter,
 			KeepAliveDuration:       c.KeepAliveDuration,

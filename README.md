@@ -123,6 +123,31 @@ For a GitHub Enterprise Server instance that requires a login, authenticate
 first with `gh auth login --hostname ghe.example.com`; only credentials stored
 for that host are used.
 
+### SSH agents and hardware keys
+
+`upterm host` authenticates to the server with your SSH identity once, when
+the tunnel is established, the same as `ssh` would. Everything after that —
+guest joins, `upterm attach`, key renegotiation — uses a key generated for
+the session, so an agent that confirms each signature (gpg-agent with a
+smartcard, 1Password, a FIDO key) asks once, at start.
+
+To keep such an agent out of it entirely, name a plain key. A supplied
+`--private-key` is the whole set, like OpenSSH's `IdentitiesOnly`:
+
+```console
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/upterm
+upterm host --private-key ~/.ssh/upterm
+```
+
+To use one particular agent identity, name its public key:
+
+```console
+upterm host --private-key ~/.ssh/id_ed25519_sk.pub
+```
+
+Guests still authenticate with a key of their own. A session with no
+`--authorized-keys` or `--authorized-user` accepts any key, but not none.
+
 ### Force command
 
 Host a session initiating `tmux new -t pair-programming`, while ensuring clients join with `tmux attach -t pair-programming`.

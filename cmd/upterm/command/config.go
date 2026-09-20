@@ -246,10 +246,13 @@ func exampleConfig() string {
 #   - github:alice
 #   - gitea:carol@git.example.com
 
-# Paths to private key files (default: generates ephemeral key)
+# Identity files (default: SSH agent keys, then ~/.ssh/id_* files, then a
+# generated key). Setting this makes the list the whole set, like OpenSSH's
+# IdentitiesOnly: each file must load, a .pub selects that key in the agent,
+# and other agent keys are not offered.
 # private-key:
 #   - /path/to/private/key1
-#   - /path/to/private/key2
+#   - /path/to/id_ed25519_sk.pub
 
 # Read-only mode (default: false)
 # When enabled, clients can view but not interact with the session.

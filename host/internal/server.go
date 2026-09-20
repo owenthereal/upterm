@@ -37,10 +37,14 @@ const DefaultInitialClientTimeout = 10 * time.Second
 var ErrNoInitialClient = errors.New("no client attached before the command could start")
 
 type Server struct {
-	Command                 []string
-	CommandEnv              []string
-	ForceCommand            []string
-	Signers                 []ssh.Signer
+	Command      []string
+	CommandEnv   []string
+	ForceCommand []string
+	// HostKey is the key both doors present. A session's key, not the
+	// operator's identity: a key exchange signs with whatever is here, on
+	// every join, attach and rekey, and an identity held by a confirming
+	// agent would be asked each time.
+	HostKey                 ssh.Signer
 	AuthorizedKeys          []ssh.PublicKey
 	EventEmitter            *emitter.Emitter
 	KeepAliveDuration       time.Duration
@@ -138,6 +142,10 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
 func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener) error {
+	if s.HostKey == nil {
+		return errors.New("host server: HostKey is required")
+	}
+
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
 	// The pty as the doors see it: the host door serves before the command
 	// starts, so a client can reach this handle before there is a pty behind
@@ -224,10 +232,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		commandResult:         cmd.Result,
 	}
 
-	var ss []gssh.Signer
-	for _, signer := range s.Signers {
-		ss = append(ss, signer)
-	}
+	ss := []gssh.Signer{s.HostKey}
 
 	{
 		ph := publicKeyHandler{

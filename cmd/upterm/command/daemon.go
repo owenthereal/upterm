@@ -57,6 +57,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 
 	signers, cleanup, err := host.SignersWith(host.SignerOptions{
 		PrivateKeys: flagPrivateKeys,
+		// Read here, not inherited: the daemon is a re-exec of this argv, so
+		// it parses the same flags from the same origins and must read
+		// --private-key the same way the foreground does.
+		IdentitiesOnly: identitiesOnlyRequested(),
 		Passphrase: func(file string) ([]byte, error) {
 			return child.ReadSecret(fmt.Sprintf("Enter passphrase for key '%s': ", file))
 		},
@@ -94,10 +98,18 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		sftpPermissionChecker = &AutoAllowPermissionChecker{}
 	}
 
-	hostKeys := make([]string, 0, len(signers))
-	for _, s := range signers {
-		hostKeys = append(hostKeys, strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(s.PublicKey())), "\n"))
+	// Generated here rather than left to Run, for the same reason the
+	// in-process path generates it: the parent pins the door's keys from
+	// what Listening reports, and it must be this run's session host key —
+	// what the embedded sshd actually presents — not the --private-key
+	// signers, which authenticate the tunnel and nothing else.
+	hostKey, err := host.NewHostKey()
+	if err != nil {
+		return nil, fmt.Errorf("error generating host key: %w", err)
 	}
+	// One key, but the wire field stays plural: it is `repeated string
+	// host_keys` in startup.proto, and an older parent reads the list.
+	hostKeys := []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())), "\n")}
 
 	var sessionID string
 	return &host.Host{
@@ -106,6 +118,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Command:           opts.command,
 		ForceCommand:      opts.forceCommand,
 		Signers:           signers,
+		HostKey:           hostKey,
 		HostKeyCallback:   hkcb,
 		AuthorizedKeys:    authorizedKeys,
 		KeepAliveDuration: 50 * time.Second,

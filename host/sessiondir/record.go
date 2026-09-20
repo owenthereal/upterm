@@ -58,11 +58,12 @@ type Record struct {
 	// XDG_RUNTIME_DIR must dial the socket that exists, not one rebuilt under
 	// its own root. Forced on every publish.
 	AttachSocket string `json:"attach_socket,omitempty"`
-	// HostKeys is the public half of every key the attach door may present,
-	// in authorized_keys form, one entry per signer. `upterm attach` pins
-	// them: the socket's permissions are what keep another process from
-	// binding that path, and this is what catches one that managed to,
-	// whichever of the daemon's several signers it ends up presenting.
+	// HostKeys is the public half of the key the attach door presents, in
+	// authorized_keys form. One entry: the session host key the daemon
+	// generated for this run. `upterm attach` pins it: the socket's
+	// permissions are what keep another process from binding that path, and
+	// this is what catches one that managed to. A slice because the record's
+	// shape predates the single key and older attach clients read it.
 	// Unlike AdminSocket and AttachSocket it is not forced on every publish —
 	// Dir has no key of its own — so the daemon supplies it once it has one.
 	HostKeys     []string  `json:"host_keys,omitempty"`
