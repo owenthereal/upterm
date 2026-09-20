@@ -10,6 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	// Imported by non-test code on purpose: testing.Testing() is the
+	// designed way to ask whether this binary is a test binary, and since
+	// Go 1.13 importing the package registers no flags.
+	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -545,7 +549,29 @@ func shareRunE(c *cobra.Command, args []string) error {
 // the whole suite again, once per spawn. So the tests that drive the command
 // in-process point this at a daemon in a goroutine of their own process, and
 // exercise the same exchange over a pipe.
-var hostSpawn spawnFunc = spawnDaemon
+//
+// Its default is guardedSpawn rather than spawnDaemon itself, so that the
+// refusal is production code that covers every test package rather than one
+// package's TestMain.
+var hostSpawn spawnFunc = guardedSpawn
+
+// guardedSpawn is spawnDaemon with the fork bomb taken out of reach.
+//
+// The daemon is this executable re-executed with os.Args, and in a test
+// binary that argv is the test runner's: a test that reached the real spawn
+// would run the whole suite in a child, which reaches the spawn again, once
+// per test that does, until the machine stops. That has happened, twice.
+// Tests drive `upterm host` through runHostInProcess, which swaps this for an
+// in-process daemon on the far end of a pipe; the one test that needs the
+// real transport calls spawnDaemon directly. Every other reach for the spawn
+// from a test binary is a mistake, and is refused here rather than in any one
+// package's TestMain, which cannot protect a package that does not have one.
+func guardedSpawn(so spawnOptions) (net.Conn, *os.Process, error) {
+	if testing.Testing() {
+		return nil, nil, errors.New("refusing to spawn the daemon from a test binary: drive upterm host through runHostInProcess")
+	}
+	return spawnDaemon(so)
+}
 
 // runHostParent is upterm host on a platform that spawns: the daemon is a
 // child, this process is its operator's terminal.

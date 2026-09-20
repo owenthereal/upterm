@@ -675,6 +675,38 @@ func Test_identitiesOnlyRequested(t *testing.T) {
 	assert.False(t, identitiesOnlyRequested())
 }
 
+// Test_guardedSpawn_RefusesInsideATestBinary pins hostSpawn's default: the
+// refusal is production code, so a test in any package that reaches the real
+// spawn gets an error rather than a copy of its own test binary running the
+// whole suite, once per spawn.
+//
+// The options name an executable that does not exist, and that is
+// deliberate: the guard never looks at them, but it means that a build with
+// the guard removed — the mutation that proves this test — fails in
+// exec.Start with ENOENT instead of re-executing this test binary. The
+// child-side guard in TestMain is the second net under that proof.
+func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
+	dir := t.TempDir()
+
+	conn, proc, err := guardedSpawn(spawnOptions{
+		executable: filepath.Join(dir, "no-such-upterm"),
+		args:       []string{"host", "--", "true"},
+		env:        []string{},
+		name:       "guarded-1",
+		logPath:    filepath.Join(dir, "upterm.log"),
+	})
+	require.ErrorContains(t, err, "refusing to spawn the daemon from a test binary")
+	assert.Contains(t, err.Error(), "runHostInProcess", "the refusal has to name the seam that replaces it")
+	assert.Nil(t, conn, "nothing was connected")
+	assert.Nil(t, proc, "nothing was started")
+
+	// Reached before spawnDaemon, not after it failed: spawnDaemon opens the
+	// log path it is given before it forks, so an untouched log is proof the
+	// call returned above it.
+	_, statErr := os.Stat(filepath.Join(dir, "upterm.log"))
+	assert.True(t, os.IsNotExist(statErr), "the guard returns before spawnDaemon opens the log")
+}
+
 // runHostInProcess runs `upterm host <argv...>` with the daemon in a
 // goroutine of this process instead of a child of it, and returns what the
 // command returned.
