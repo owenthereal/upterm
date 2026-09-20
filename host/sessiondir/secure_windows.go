@@ -104,21 +104,33 @@ func secureSessionDir(path string) error {
 // cannot silently leave the socket open to the unelevated half of a split
 // token.
 func tokenIntegrityRID(token windows.Token) (uint32, error) {
-	// The buffer holds a TOKEN_MANDATORY_LABEL followed by its SID; 64 bytes
-	// covers the one-sub-authority integrity SIDs, and the loop resizes if
-	// Windows ever wants more. It only repeats while the requested size grows
-	// past what was offered, so it cannot spin.
-	buf := make([]byte, 64)
+	// The buffer holds a TOKEN_MANDATORY_LABEL followed by its SID. 64 bytes
+	// is comfortably more than a one-sub-authority integrity SID needs, and
+	// the loop resizes if Windows ever wants more; it only repeats while the
+	// size asked for grows past what was offered, so it cannot spin.
+	//
+	// It is []uint64 and not the obvious []byte because of the cast below.
+	// checkptr throws "misaligned pointer conversion" for a conversion to any
+	// pointer-bearing type — TOKEN_MANDATORY_LABEL holds a *SID — whose
+	// address is not aligned to that type (runtime/checkptr.go:19-21). A
+	// constant-size []byte that does not escape is a stack array of alignment
+	// one, so &buf[0] would satisfy that only by the luck of the frame
+	// layout: the identical line in this package's test ran out of luck on
+	// Windows CI while this one happened to pass. An element type of uint64
+	// is aligned to at least a pointer on every platform Go builds for, so
+	// the cast is correct by construction, on the stack or on the heap.
+	buf := make([]uint64, 8)
 	var n uint32
 	for {
-		err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buf[0], uint32(len(buf)), &n)
+		err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel,
+			(*byte)(unsafe.Pointer(&buf[0])), uint32(len(buf)*8), &n)
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || int(n) <= len(buf) {
+		if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || int(n) <= len(buf)*8 {
 			return 0, fmt.Errorf("read token integrity level: %w", err)
 		}
-		buf = make([]byte, n)
+		buf = make([]uint64, (int(n)+7)/8)
 	}
 
 	sid := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0])).Label.Sid

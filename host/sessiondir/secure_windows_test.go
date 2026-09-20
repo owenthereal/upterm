@@ -220,12 +220,21 @@ func currentProcessIntegritySID(t *testing.T) string {
 	t.Helper()
 
 	token := windows.GetCurrentProcessToken() // a pseudo handle; nothing to close
-	buf := make([]byte, 64)
+
+	// []uint64 rather than []byte, for the alignment the cast below needs: it
+	// converts to a type holding a *SID, and checkptr fatals on a conversion
+	// to a pointer-bearing type at an address that is not aligned to it. A
+	// constant-size []byte that does not escape is a stack array of alignment
+	// one, and this is the line that killed the first Windows CI run to reach
+	// it. Do not simplify it back.
+	buf := make([]uint64, 8)
 	var n uint32
-	err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buf[0], uint32(len(buf)), &n)
+	err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel,
+		(*byte)(unsafe.Pointer(&buf[0])), uint32(len(buf)*8), &n)
 	if errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
-		buf = make([]byte, n)
-		err = windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buf[0], uint32(len(buf)), &n)
+		buf = make([]uint64, (int(n)+7)/8)
+		err = windows.GetTokenInformation(token, windows.TokenIntegrityLevel,
+			(*byte)(unsafe.Pointer(&buf[0])), uint32(len(buf)*8), &n)
 	}
 	require.NoError(t, err, "reading this process's integrity level")
 
