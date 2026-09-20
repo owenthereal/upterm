@@ -188,6 +188,12 @@ type signalPTY struct {
 	endOn       syscall.Signal
 	exited      chan struct{}
 	unsupported bool
+	// signalErr, when set, is what Signal returns for signalErrOn, having
+	// recorded the attempt: a send that failed for its own reasons, as
+	// distinct from unsupported above, which is the platform saying it
+	// cannot signal at all and never records anything.
+	signalErr   error
+	signalErrOn syscall.Signal
 }
 
 func newSignalPTY(endOn syscall.Signal) *signalPTY {
@@ -202,6 +208,10 @@ func (p *signalPTY) Signal(sig syscall.Signal) error {
 	defer p.mu.Unlock()
 	p.signals = append(p.signals, sig)
 	p.sequence = append(p.sequence, sig.String())
+	if p.signalErr != nil && sig == p.signalErrOn {
+		// A signal that failed ends nothing, whatever endOn says.
+		return p.signalErr
+	}
 	if sig == p.endOn {
 		close(p.exited)
 	}
@@ -295,6 +305,27 @@ func TestTerminateKillsAtOnceWhereSignalsAreUnsupported(t *testing.T) {
 	require.Empty(t, p.signals)
 	require.True(t, p.killed)
 	require.Less(t, time.Since(start), 500*time.Millisecond, "no grace is spent on a step the platform cannot take")
+}
+
+// TestTerminateKeepsEscalatingWhenASignalFailsForItsOwnReasons pins the
+// other half of that: only errors.ErrUnsupported -- the platform reporting
+// it cannot signal -- skips to the kill. A send that failed for its own
+// reasons, an ESRCH from a group that has just vanished being the likely
+// one, says nothing about whether the next step can work, and jumping to
+// SIGKILL on it skipped the hangup a job-control shell needs to collect its
+// jobs and the close that frees a leader stuck in exit().
+func TestTerminateKeepsEscalatingWhenASignalFailsForItsOwnReasons(t *testing.T) {
+	withHangupGrace(t, 20*time.Millisecond)
+
+	p := newSignalPTY(0)
+	p.signalErr = syscall.ESRCH
+	p.signalErrOn = syscall.SIGHUP
+	terminate(p, p.exited, 20*time.Millisecond, discardLogger(), "test")
+	require.Equal(t,
+		[]string{syscall.SIGHUP.String(), "close", syscall.SIGTERM.String(), syscall.SIGKILL.String()},
+		p.sequence,
+		"a failed hangup is still followed by the close and the term, in order, not by an immediate kill")
+	require.True(t, p.killed, "the escalation still ends in a kill when nothing else took")
 }
 
 // TestCommandRunEndsWhenOutputEndsWithoutCancellation pins that Run cannot

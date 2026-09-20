@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -490,11 +491,37 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 				"name", name, "bound", grace)
 		}
 	}
+	// signal sends sig and reports whether the escalation should skip every
+	// remaining graceful step and kill now. Only one error means that: the
+	// platform saying it cannot signal at all (errors.ErrUnsupported, which
+	// is what the Windows PTY returns), because there is then no point
+	// spending a grace on a step it will never take. Any other error is a
+	// failure of this one send -- an ESRCH from a group that has just
+	// vanished, a transient refusal -- and the escalation carries on as if
+	// the signal had been sent: the wait that follows every step is what
+	// decides whether it took, and a process that is already gone reaches
+	// the next gone() check anyway. Jumping to SIGKILL on those was skipping
+	// the hangup a job-control shell needs to collect its jobs, and the
+	// close that frees a leader stuck in exit(), over an error that says
+	// nothing about either.
+	signal := func(sig syscall.Signal) (unsupported bool) {
+		err := ptmx.Signal(sig)
+		switch {
+		case err == nil:
+			return false
+		case errors.Is(err, errors.ErrUnsupported):
+			return true
+		default:
+			logger.Debug("a teardown signal was not delivered; continuing the escalation",
+				"name", name, "signal", sig.String(), "error", err)
+			return false
+		}
+	}
 
 	if gone() {
 		return
 	}
-	if err := ptmx.Signal(syscall.SIGHUP); err != nil {
+	if signal(syscall.SIGHUP) {
 		kill()
 		return
 	}
@@ -510,7 +537,7 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 	if gone() {
 		return
 	}
-	if err := ptmx.Signal(syscall.SIGTERM); err != nil {
+	if signal(syscall.SIGTERM) {
 		kill()
 		return
 	}
