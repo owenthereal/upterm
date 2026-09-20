@@ -202,7 +202,7 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
-	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.")
+	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -530,9 +530,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 	if !spawnSupported {
-		if flagDetach {
-			return errors.New("--detach is not supported on this platform yet")
-		}
 		return runInProcessHost(c, logger.Logger, opts)
 	}
 	return runHostParent(c, logger.Logger, opts)

@@ -12,6 +12,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// SecureDir gives a directory outside this package the same DACL Claim gives
+// the session's own, for the same reason: a socket bound inside it is only as
+// private as the directory holding it.
+//
+// `upterm host` needs it for the directory it spawns the daemon through,
+// which is an os.MkdirTemp under %TMP% rather than a session directory. There
+// is no Unix half because os.MkdirTemp already creates 0700 there, which is
+// the whole boundary on a POSIX filesystem.
+func SecureDir(path string) error { return secureSessionDir(path) }
+
 // secureSessionDir gives the directory a DACL of its own: protected, so it
 // inherits nothing from its parent, and granting full control to the current
 // user and nobody else; then a mandatory label at this process's own
