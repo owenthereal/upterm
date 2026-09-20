@@ -651,9 +651,19 @@ func (c *Host) Run(ctx context.Context) error {
 	// adminReady therefore closes before the group exists. The ready actor
 	// still waits on both channels: which of the two facts is established
 	// first is not something readiness should depend on.
+
+	// The launch this run is, for the stop RPC to be bound to: the name and
+	// the socket are the session's and are handed on to whoever claims the
+	// name next, so they cannot say which run a caller meant. Empty when no
+	// name was claimed, which the server reads as a session no stop can name.
+	var launchID string
+	if c.SessionDir != nil {
+		launchID = c.SessionDir.LaunchID()
+	}
 	adminServer := internal.AdminServer{
 		Session:     session,
 		ClientRepo:  clientRepo,
+		LaunchID:    launchID,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
 		OnStop:      requestStop,
 	}

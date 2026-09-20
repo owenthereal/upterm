@@ -174,7 +174,12 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		return err
 	}
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
-	_, err = client.StopSession(rpcCtx, &api.StopSessionRequest{})
+	// The launch that was inspected, not just the name: the socket path
+	// belongs to the name, and a session that ended between the read above
+	// and this call hands both to whoever claimed the name next. The daemon
+	// refuses a launch that is not its own, which is what keeps this from
+	// stopping a session the operator never looked at.
+	_, err = client.StopSession(rpcCtx, &api.StopSessionRequest{LaunchId: rec.LaunchID})
 	cancelRPC()
 	if err != nil {
 		// A socket that answers, with the one code that means the method
@@ -189,6 +194,16 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		// missing method.
 		if status.Code(err) == codes.Unimplemented {
 			return fmt.Errorf("session %s was started by an upterm that predates 'session stop' and cannot be stopped this way; end it yourself (%s)", name, pidOf(rec))
+		}
+		// The daemon's way of saying the socket is no longer the launch that
+		// was read: the session ended and another one claimed the name
+		// between the two. Refused rather than stopped, because the run this
+		// command was told to end is already over and the one holding the
+		// name now is somebody else's. Checked here, before the status
+		// below, for the reason Unimplemented is: it is an answer, and a
+		// guess from the record cannot improve on one.
+		if status.Code(err) == codes.FailedPrecondition {
+			return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
 		}
 		if rec.Status == sessiondir.StatusStarting {
 			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))

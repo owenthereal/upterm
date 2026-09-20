@@ -9,6 +9,8 @@ import (
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // shortTempDir returns a directory a unix socket can actually be bound in.
@@ -80,6 +82,80 @@ func Test_AdminServer_ListenSignalsBeforeServe(t *testing.T) {
 	}
 
 	require.NoError(t, s.Shutdown(context.Background()))
+}
+
+// Test_AdminServer_StopSessionOnlyEndsTheLaunchItNames pins what a stop is
+// bound to. The name and the socket path outlive the run that holds them --
+// a session ends, gives the name back, and the next `upterm host` binds the
+// same path -- so a client that read a record, then dialled, can reach a
+// different session than the one it inspected. Only the launch ID
+// distinguishes them, so it is what the request carries and what is checked
+// before anything is stopped.
+func Test_AdminServer_StopSessionOnlyEndsTheLaunchItNames(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		held     string
+		asked    string
+		wantStop bool
+		wantSays []string
+	}{
+		{
+			name:     "the launch the caller read",
+			held:     "launch-1",
+			asked:    "launch-1",
+			wantStop: true,
+		},
+		{
+			// What a session that ended and was replaced between the record
+			// read and this call looks like from here.
+			name:     "another launch",
+			held:     "launch-1",
+			asked:    "launch-2",
+			wantSays: []string{"launch-1", "launch-2"},
+		},
+		{
+			// No caller that omits it exists -- the RPC is unreleased -- so
+			// an empty value is a request that names no launch, not an old
+			// client to be accommodated.
+			name:     "no launch named",
+			held:     "launch-1",
+			asked:    "",
+			wantSays: []string{"launch-1"},
+		},
+		{
+			// A caller that supplied its own admin socket claimed no name,
+			// so there is no launch a request could name.
+			name:     "a session with no launch of its own",
+			held:     "",
+			asked:    "launch-1",
+			wantSays: []string{"no launch", "launch-1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stopped := 0
+			s := &adminServiceServer{
+				Session:    &api.GetSessionResponse{},
+				ClientRepo: NewClientRepo(),
+				LaunchID:   tc.held,
+				OnStop:     func() { stopped++ },
+			}
+
+			_, err := s.StopSession(context.Background(), &api.StopSessionRequest{LaunchId: tc.asked})
+
+			if tc.wantStop {
+				require.NoError(t, err)
+				require.Equal(t, 1, stopped, "the launch the request named is the one that was stopped")
+				return
+			}
+			require.Equal(t, codes.FailedPrecondition, status.Code(err),
+				"a stop this session cannot answer for is a precondition failure, not a transport one")
+			require.Zero(t, stopped, "nothing may be stopped for a request that does not name this launch")
+			for _, says := range tc.wantSays {
+				require.Contains(t, err.Error(), says,
+					"the refusal has to name what was held and what was asked for")
+			}
+		})
+	}
 }
 
 func TestGetSessionReportsEachClientsKind(t *testing.T) {

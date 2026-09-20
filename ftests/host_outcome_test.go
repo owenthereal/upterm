@@ -25,6 +25,8 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // outcomeTimeout bounds one host run. It is a hang detector, not a
@@ -998,7 +1000,9 @@ func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 
 // Test_Host_StopSessionRPCEndsTheSession: the admin socket's StopSession is
 // what `upterm session stop` calls, and it ends the session the way a
-// SIGTERM to the daemon does — the record reads stopped, no exit code.
+// SIGTERM to the daemon does — the record reads stopped, no exit code. It
+// ends the launch the request names and no other: the socket path belongs to
+// the name, and the name is handed on.
 func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	run := newOutcomeRun(t, shellCommand(t,
 		[]string{"sh", "-c", "echo READY; sleep 300"},
@@ -1012,9 +1016,26 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	out := run.attachViewer(t, ctx, sock)
 	awaitMarker(t, out, "READY")
 
-	client, err := host.AdminClient(run.record(t).AdminSocket)
+	rec := run.record(t)
+	client, err := host.AdminClient(rec.AdminSocket)
 	require.NoError(t, err)
-	_, err = client.StopSession(ctx, &api.StopSessionRequest{})
+
+	// A request for any other launch is refused, and the session lives: that
+	// is what keeps a replacement from being stopped in place of the session
+	// a caller inspected. Asked first, while there is still a socket to ask.
+	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: "some-other-launch"})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err),
+		"a stop that names another launch is not this session's to accept")
+	// Ready, and still ready: the status only ever moves forwards, so a
+	// session that had accepted that stop could not reach ready again.
+	require.Eventually(t, func() bool {
+		cur, err := sessiondir.ReadRecord(run.stateRoot, run.name)
+		return err == nil && cur != nil && cur.Status == sessiondir.StatusReady
+	}, outcomeTimeout, outcomePollInterval,
+		"the session the refused stop did not name is still running")
+
+	// The launch the record names, which is what `upterm session stop` sends.
+	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: rec.LaunchID})
 	require.NoError(t, err)
 
 	select {
@@ -1022,8 +1043,8 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	case <-time.After(outcomeTimeout):
 		t.Fatal("host did not return after StopSession")
 	}
-	rec := run.record(t)
-	require.Equal(t, sessiondir.ReasonStopped, rec.Reason)
-	require.Nil(t, rec.ExitCode)
-	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	final := run.record(t)
+	require.Equal(t, sessiondir.ReasonStopped, final.Reason)
+	require.Nil(t, final.ExitCode)
+	require.Equal(t, sessiondir.StatusEnding, final.Status)
 }

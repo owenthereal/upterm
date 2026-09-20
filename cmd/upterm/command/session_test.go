@@ -297,6 +297,16 @@ type stubAdminServer struct {
 	// onStop, if set, is called on StopSession; nil answers Unimplemented, the
 	// way a daemon that predates this RPC would.
 	onStop func()
+
+	// stopLaunchID, if set, is the launch this fixture will answer for: a
+	// request naming any other is refused the way the daemon refuses it.
+	// Empty accepts whatever it is sent, which is what the cases that are
+	// not about the binding want.
+	stopLaunchID string
+
+	// stoppedLaunchID records what the last StopSession was asked to stop,
+	// which is the only place the request's own content is observable.
+	stoppedLaunchID string
 }
 
 // GetSession answers with the next response in the sequence and repeats the
@@ -314,9 +324,16 @@ func (s *stubAdminServer) GetSession(context.Context, *api.GetSessionRequest) (*
 	return resp, nil
 }
 
-func (s *stubAdminServer) StopSession(context.Context, *api.StopSessionRequest) (*api.StopSessionResponse, error) {
+func (s *stubAdminServer) StopSession(_ context.Context, in *api.StopSessionRequest) (*api.StopSessionResponse, error) {
 	if s.onStop == nil {
 		return nil, status.Error(codes.Unimplemented, "no stop")
+	}
+	s.mu.Lock()
+	s.stoppedLaunchID = in.GetLaunchId()
+	expect := s.stopLaunchID
+	s.mu.Unlock()
+	if expect != "" && in.GetLaunchId() != expect {
+		return nil, status.Errorf(codes.FailedPrecondition, "this socket holds launch %s; the request named %q", expect, in.GetLaunchId())
 	}
 	s.onStop()
 	return &api.StopSessionResponse{}, nil
@@ -335,17 +352,29 @@ func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionRespons
 }
 
 // serveStubAdminWithStop is serveStubAdmin for a fixture that also answers
-// StopSession.
-func serveStubAdminWithStop(t *testing.T, socket string, resp *api.GetSessionResponse, onStop func()) {
+// StopSession. launchID is the launch it will answer for, refusing any other
+// the way the daemon does; empty answers for whatever it is sent, for the
+// cases that are not about which launch was named. The stub is returned so a
+// case can read what the request carried.
+func serveStubAdminWithStop(t *testing.T, socket string, resp *api.GetSessionResponse, launchID string, onStop func()) *stubAdminServer {
 	t.Helper()
 
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 
+	stub := &stubAdminServer{resps: []*api.GetSessionResponse{resp}, stopLaunchID: launchID, onStop: onStop}
 	srv := grpc.NewServer()
-	api.RegisterAdminServiceServer(srv, &stubAdminServer{resps: []*api.GetSessionResponse{resp}, onStop: onStop})
+	api.RegisterAdminServiceServer(srv, stub)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
+	return stub
+}
+
+// lastStoppedLaunchID is what the stub was last asked to stop.
+func (s *stubAdminServer) lastStoppedLaunchID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stoppedLaunchID
 }
 
 // captureStdout collects what fn prints. `session info` answers on stdout, so
@@ -937,7 +966,11 @@ func Test_stopSession(t *testing.T) {
 		}))
 		released := make(chan struct{})
 		var releasedAt time.Time
-		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, func() {
+		// The fixture answers for this launch and no other, as the daemon
+		// does: a stop that did not carry the launch the record named would
+		// be refused here and this case would fail rather than pass on a
+		// request that could have reached anybody's session.
+		stub := serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {
 			// What the daemon does: publish stopped and give the name back —
 			// delayed, so the assertion below can tell a caller that returns
 			// the instant the RPC is acknowledged from one that actually
@@ -960,6 +993,30 @@ func Test_stopSession(t *testing.T) {
 		require.False(t, returnedAt.Before(releasedAt),
 			"stopSession must not return before the name was released")
 		require.Contains(t, out.String(), "session ready-1 stopped")
+		require.Equal(t, d.LaunchID(), stub.lastStoppedLaunchID(),
+			"the request names the launch the record named, not just the session")
+	})
+	t.Run("a session replaced since it was read is not stopped in its successor's place", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "raced-1")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) {
+			r.Status = sessiondir.StatusReady
+			r.SessionID = "sid-1"
+		}))
+		// The socket answers for a launch that is not the one the record
+		// names -- which is what a session that ended and was replaced
+		// between the read and the dial leaves behind, since the successor
+		// binds the same path.
+		var stopped int
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", Host: "ssh://127.0.0.1:2222"}, "some-other-launch", func() { stopped++ })
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "raced-1", &out)
+		require.ErrorContains(t, err, "has been replaced since it was read")
+		require.ErrorContains(t, err, "upterm session info raced-1",
+			"the operator is told how to find out what is there now")
+		require.Zero(t, stopped, "the successor must not be stopped in its place")
+		require.Empty(t, out.String(), "nothing was stopped, so nothing is reported as stopped")
 	})
 	t.Run("a session that has ended is already done", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -1035,7 +1092,7 @@ func Test_stopSession(t *testing.T) {
 		d := claimSession(t, "stuck-1")
 		releaseAtEnd(t, d)
 		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
-		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, func() {})
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {})
 		var out bytes.Buffer
 		err := stopSession(context.Background(), "stuck-1", &out)
 		require.ErrorContains(t, err, "still running after")
