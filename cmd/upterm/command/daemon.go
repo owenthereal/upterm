@@ -200,7 +200,12 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		AttachListeningCallback: func(socket string) {
 			_ = child.Listening(socket, hostKeys)
 		},
-		CommandStartedCallback: func() {
+		// Not CommandStartedCallback, which fires a record write earlier:
+		// the parent exits the instant it reads started and prints
+		// "status": "ready", so a script that then asks `upterm session
+		// info` must not be answered "starting" by the record. Ready is
+		// what this says, and the record already says it here.
+		SessionReadyCallback: func() {
 			// Disarm before saying so: a parent that exits the instant it
 			// reads started must not be read as leaving.
 			child.Disarm()

@@ -275,6 +275,23 @@ type Host struct {
 	// Called on the server's own goroutine, in front of everything the
 	// command's start releases, so it must not block.
 	CommandStartedCallback func()
+	// SessionReadyCallback is called once the session's record says ready:
+	// the admin socket is bound, the command is running, and the record a
+	// reader would consult already carries that status and the session ID.
+	// A caller that tells anyone else the session is up says it here, not
+	// from CommandStartedCallback — the command starting is one of the two
+	// facts readiness is made of, and the record is written after both. A
+	// script that runs `upterm session info` the instant it is told "ready"
+	// would otherwise be told "starting" by the record.
+	//
+	// Not called when the record could not be published: the run fails
+	// instead, so that nobody is told ready for a record that does not say
+	// so. With no session directory — an embedder that supplied its own
+	// admin socket — there is no record and the two facts alone are it.
+	//
+	// Called once, on the readiness actor's own goroutine, after the write;
+	// it must not block.
+	SessionReadyCallback func()
 	// SessionClaimedCallback is called once the session's name is claimed,
 	// with the directory that holds it, before the tunnel is dialled: the
 	// first thing a caller can know about a session is its name and its
@@ -827,10 +844,25 @@ func (c *Host) Run(ctx context.Context) error {
 			// "ready" true: the session is registered, the user accepted it,
 			// the admin socket is bound, and the command is running.
 			if c.SessionDir != nil {
-				_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+				if err := c.SessionDir.Update(func(r *sessiondir.Record) {
 					r.SessionID = sessionID
 					advanceStatus(r, sessiondir.StatusReady)
-				})
+				}); err != nil {
+					// Fatal to the run, where every other record write here
+					// is not, because this one is the word readiness is made
+					// of: the callback below tells a parent the session is
+					// up, and a parent told that goes on to read this record
+					// -- `session info`, `session stop`, `attach`. A session
+					// whose readiness cannot be published is one no reader
+					// can manage, so it fails now, through the reporting the
+					// caller already has, rather than running on unreachable.
+					logger.Error("Failed to publish the session as ready",
+						"record", c.SessionDir.RecordPath(), "error", err)
+					return fmt.Errorf("failed to publish the session as ready: %w", err)
+				}
+			}
+			if c.SessionReadyCallback != nil {
+				c.SessionReadyCallback()
 			}
 
 			<-ready

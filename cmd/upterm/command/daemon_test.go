@@ -60,9 +60,23 @@ func daemonTestRoots(t *testing.T) {
 	t.Cleanup(func() { suppliedFlags = origSupplied })
 }
 
+// readyPublishGap is how long fakeRun leaves between the command starting
+// and the record saying ready.
+//
+// The real Host has that gap for real: the command's start is one of the two
+// facts readiness is made of, and the readiness actor writes the record only
+// once it has both. Modelled here rather than left to chance so that
+// TestRunDaemonProcessSpeaksTheExchange pins the order of the two rather
+// than which goroutine happened to run first — a daemon that told its parent
+// "started" from CommandStartedCallback would still be caught by the record
+// read, and be caught every time.
+const readyPublishGap = 100 * time.Millisecond
+
 // fakeRun stands in for Host.Run: it drives the callbacks the exchange is
 // wired to, in the order Run calls them, against a directory it claims for
-// real so SessionClaimedCallback has something to report.
+// real so SessionClaimedCallback has something to report — including the
+// ready record, which the readiness actor writes before it calls back and
+// which is therefore part of the order.
 //
 // It runs on runDaemonProcess's own goroutine, not the test's, so a failed
 // require here would call t.FailNow off the test goroutine and hang the
@@ -98,6 +112,18 @@ func fakeRun(t *testing.T, sessionID string, result error) func(context.Context,
 		}
 		if h.CommandStartedCallback != nil {
 			h.CommandStartedCallback()
+		}
+		time.Sleep(readyPublishGap)
+		err = dir.Update(func(r *sessiondir.Record) {
+			r.SessionID = sessionID
+			r.Status = sessiondir.StatusReady
+		})
+		assert.NoError(t, err)
+		if err != nil {
+			return err
+		}
+		if h.SessionReadyCallback != nil {
+			h.SessionReadyCallback()
 		}
 		select {
 		case <-ctx.Done():
@@ -138,6 +164,21 @@ func TestRunDaemonProcessSpeaksTheExchange(t *testing.T) {
 		Listening: func(l *api.Listening) { listening = l },
 	})
 	require.NoError(t, err)
+
+	// Read here, before the daemon is waited for, because this is the record
+	// as it stood at the moment the parent was told the session had started
+	// -- which is the moment `upterm host --detach -o json` prints "status":
+	// "ready" and exits, and the moment the script it printed to runs
+	// `upterm session info`. Told started off the command alone, the daemon
+	// would be answering for a record that still said starting.
+	atStarted, err := sessiondir.ReadRecord(utils.UptermStateDir(), "daemon-1")
+	require.NoError(t, err)
+	require.NotNil(t, atStarted)
+	require.Equal(t, sessiondir.StatusReady, atStarted.Status,
+		"the parent is told started only once the record it will be read against says ready")
+	require.Equal(t, "sid-1", atStarted.SessionID,
+		"and carries the session ID, which is published by the same write")
+
 	require.NoError(t, <-done)
 	require.NotNil(t, out.Started)
 	require.Equal(t, "sid-1", out.Started.SessionId)
@@ -299,7 +340,7 @@ func TestRunDaemonProcessAbandonsWhenTheParentLeavesEarly(t *testing.T) {
 // TestRunDaemonProcessIgnoresTheParentLeavingAfterStart pins that Disarm
 // beats the parent's departure. It closes the parent's end the instant
 // parent.Run reports Started — with no wait for the daemon's own
-// CommandStartedCallback to have returned, since a real parent process has
+// SessionReadyCallback to have returned, since a real parent process has
 // no way to wait for that either — so a Disarm that ran after Started
 // (rather than before) would race this close and show up here, at least
 // intermittently.

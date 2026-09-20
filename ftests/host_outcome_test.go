@@ -117,6 +117,7 @@ type outcomeRun struct {
 	signers        []ssh.Signer
 	sessionCreated func(context.Context, *api.GetSessionResponse) error
 	sessionClaimed func(*sessiondir.Dir)
+	sessionReady   func(*outcomeRun)
 	relayOptions   []func(*Server)
 }
 
@@ -129,6 +130,13 @@ type outcomeOption func(*outcomeRun)
 // session after the relay has created it but before the command exists.
 func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse) error) outcomeOption {
 	return func(r *outcomeRun) { r.sessionCreated = cb }
+}
+
+// withSessionReadyCallback stands in for whoever is told the session is up —
+// the daemon telling its parent. It is handed the run so that it can read
+// what a reader taking that word would read.
+func withSessionReadyCallback(cb func(*outcomeRun)) outcomeOption {
+	return func(r *outcomeRun) { r.sessionReady = cb }
 }
 
 // withSigners replaces the host's identity.
@@ -183,6 +191,14 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 		require.NoError(t, err)
 	}
 
+	// Wrapped here rather than stored on the Host directly, so that the case
+	// gets the run it is watching without having to close over a variable it
+	// has not been assigned yet.
+	var sessionReady func()
+	if run.sessionReady != nil {
+		sessionReady = func() { run.sessionReady(run) }
+	}
+
 	run.host = &host.Host{
 		Host:                    "ssh://" + ts.SSHAddr(),
 		Name:                    name,
@@ -193,6 +209,7 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 		Logger:                  testLogger,
 		SessionCreatedCallback:  run.sessionCreated,
 		SessionClaimedCallback:  run.sessionClaimed,
+		SessionReadyCallback:    sessionReady,
 		AttachListeningCallback: func(s string) { attachSocket <- s },
 	}
 
@@ -584,6 +601,61 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	}
 
 	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
+}
+
+// Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady pins the order the
+// callback exists for. Whoever is told the session is up goes on to read the
+// record — `upterm session info`, `session stop`, `attach` all do — and the
+// two happen back to back: `upterm host --detach -o json` prints "status":
+// "ready" and exits, and the next line of the script asks. A caller told off
+// the command's start alone would be told ready and then read "starting",
+// because the record is written by this actor and not by the command's.
+//
+// The record is read from disk inside the callback, which is the reader's
+// view and not the writer's: a Dir that had staged the status in memory but
+// not published it would pass an assertion made against the Dir.
+func Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady(t *testing.T) {
+	// Buffered, because the callback runs on the readiness actor's goroutine
+	// and must not block: a send that waited for the test to receive would
+	// hold up the actor that Run's teardown waits on.
+	fired := make(chan *sessiondir.Record, 1)
+
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
+		withSessionReadyCallback(func(r *outcomeRun) {
+			rec, err := sessiondir.ReadRecord(r.stateRoot, r.name)
+			if err != nil {
+				fired <- nil
+				return
+			}
+			fired <- rec
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	select {
+	case rec := <-fired:
+		require.NotNil(t, rec, "the record a reader would consult was not readable when the callback fired")
+		require.Equal(t, sessiondir.StatusReady, rec.Status,
+			"the callback is the word that the session is up; the record already has to say so")
+		require.NotEmpty(t, rec.SessionID,
+			"published by the same write, and what a reader connects with")
+	case <-time.After(outcomeTimeout):
+		t.Fatal("the session never reported itself ready")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
 }
 
 // Test_Host_GivesTheCommandTheSessionName covers wiring rather than an
