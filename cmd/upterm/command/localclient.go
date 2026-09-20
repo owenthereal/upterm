@@ -63,7 +63,7 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 		return attach.Result{}, fmt.Errorf("unable to set terminal to raw mode: %w", err)
 	}
 	defer raw.restore()
-	if suspendSupported {
+	if suspendSupported && suspendAvailable() {
 		client.Suspend = func() termsize.Size { return suspendLocalTerminal(raw, stdout, stopSelf) }
 	}
 	return client.Run(ctx)
