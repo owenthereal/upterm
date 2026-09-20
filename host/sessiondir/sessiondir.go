@@ -374,6 +374,7 @@ func Claim(ctx context.Context, opts ClaimOptions) (*Dir, error) {
 		r.StartedAt = d.startedAt
 		r.Status = StatusStarting
 		r.Reason = ReasonUnknown
+		r.Pid = os.Getpid()
 	}); err != nil {
 		_ = d.releaseKeepingDir()
 		return nil, err

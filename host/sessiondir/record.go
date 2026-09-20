@@ -80,6 +80,14 @@ type Record struct {
 	Reason     string    `json:"reason"`
 	ExitCode   *int      `json:"exit_code,omitempty"`
 	Signal     string    `json:"signal,omitempty"`
+	// Pid is the process that claimed the name. Set by Claim and never by a
+	// caller: the claimer is the owner by definition, and a reader who finds
+	// the name held but its socket silent needs a process to name.
+	Pid int `json:"pid,omitempty"`
+	// LogPath is where the session's process writes its log, published by
+	// the process that knows, for the reason AdminSocket is: the reader's
+	// state root need not be the daemon's.
+	LogPath string `json:"log_path,omitempty"`
 }
 
 // Update mutates the record and republishes it atomically.

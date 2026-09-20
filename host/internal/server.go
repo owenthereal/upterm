@@ -65,6 +65,10 @@ type Server struct {
 	// DefaultInitialClientTimeout.
 	InitialClientTimeout time.Duration
 
+	// StopGrace bounds each step of the command's teardown; zero means
+	// DefaultStopGrace.
+	StopGrace time.Duration
+
 	// OnCommandStarted, if set, is called once the hosted command is running.
 	// Readiness is a claim about facts, and this is one of the two facts it
 	// rests on: until this fires, "ready" would mean a command that may still
@@ -161,6 +165,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		writers,
 		s.Logger,
 	)
+	cmd.stopGrace = s.StopGrace
 	s.cmd = cmd
 
 	var g run.Group

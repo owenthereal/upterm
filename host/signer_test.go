@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,6 +198,37 @@ func Test_signerFromFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSignersWithRelaysThePassphrase: an encrypted key file is read with the
+// passphrase the injected prompt returns, and a prompt that cannot answer
+// skips the key and says so — the CLI's daemon has no terminal of its own.
+func TestSignersWithRelaysThePassphrase(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "", []byte("open-sesame"))
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "id_ed25519")
+	require.NoError(t, os.WriteFile(file, pem.EncodeToMemory(block), 0600))
+
+	t.Run("answered", func(t *testing.T) {
+		var asked string
+		signers, err := SignersFromFilesWith([]string{file}, func(f string) ([]byte, error) { asked = f; return []byte("open-sesame"), nil }, nil)
+		require.NoError(t, err)
+		require.Len(t, signers, 1)
+		require.Equal(t, file, asked)
+	})
+	t.Run("unanswered", func(t *testing.T) {
+		var skipped string
+		var reason error
+		signers, err := SignersFromFilesWith([]string{file},
+			func(string) ([]byte, error) { return nil, errors.New("no terminal") },
+			func(f string, err error) { skipped, reason = f, err })
+		require.NoError(t, err)
+		require.Empty(t, signers, "a key whose passphrase cannot be read is skipped, as it always was")
+		require.Equal(t, file, skipped)
+		require.ErrorContains(t, reason, "no terminal")
+	})
 }
 
 // failingPrompt is a passphrase prompt that must never be reached.

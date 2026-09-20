@@ -26,6 +26,13 @@ Supplying --private-key makes the named list the whole set instead; see its help
 To authorize client connections, use --authorized-keys to specify an authorized_keys file
 containing client public keys.
 
+.PP
+The session runs in a process of its own. This terminal is a client of it:
+type ~. at the start of a line (or --escape-char) to leave the session
+running, reattach with 'upterm attach NAME', and end it with
+\&'upterm session stop NAME'. With --detach nothing is attached: the session
+starts in the background and this command prints how to reach it.
+
 
 .SH OPTIONS
 \fB--accept\fP[=false]
@@ -42,6 +49,14 @@ containing client public keys.
 .PP
 \fB--authorized-user\fP=
 	Authorize users by fetching their public keys from a code-hosting service. Repeatable. Providers: github, gitlab, codeberg, srht (host optional), gitea, forgejo (host required). Examples: github:alice, github:bob@ghe.example.com, gitea:carol@git.example.com, https://git.example.com/dave
+
+.PP
+\fB--detach\fP[=false]
+	Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.
+
+.PP
+\fB--escape-char\fP="~"
+	Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.
 
 .PP
 \fB-f\fP, \fB--force-command\fP=""
@@ -66,6 +81,10 @@ containing client public keys.
 .PP
 \fB--no-sftp\fP[=false]
 	Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.
+
+.PP
+\fB-o\fP, \fB--output\fP=""
+	With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').
 
 .PP
 \fB-i\fP, \fB--private-key\fP=[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]
@@ -126,6 +145,12 @@ containing client public keys.
 
   # Use a different Uptermd server, hosting a session via WebSocket:
   upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
+
+  # Start a session in the background and print how to reach it:
+  upterm host --detach --accept --github-user alice
+
+  # The same, as JSON for a script:
+  upterm host --detach --accept --github-user alice -o json
 .EE
 
 

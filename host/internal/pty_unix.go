@@ -46,7 +46,16 @@ func ptyError(err error) error {
 }
 
 func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
-	return &pty{File: f, cmd: cmd, pinned: pinned}
+	// Snapshotted once, here, rather than read from cmd through the RWMutex
+	// below every time Signal or Kill needs them: see Signal's and Kill's
+	// own comments for why.
+	var pid int
+	var process *os.Process
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+		process = cmd.Process
+	}
+	return &pty{File: f, cmd: cmd, pinned: pinned, pid: pid, process: process}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -58,6 +67,11 @@ type pty struct {
 	*os.File
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
+	// pid and process are cmd.Process.Pid and cmd.Process, fixed at
+	// construction (see wrapPty) and never touched again. Signal and Kill
+	// read them without the RWMutex below; nothing else does.
+	pid     int
+	process *os.Process
 	sync.RWMutex
 }
 
@@ -168,14 +182,39 @@ func (pty *pty) Wait() error {
 	return cmd.Wait()
 }
 
-// Kill terminates the process
+// Kill terminates the process.
+//
+// Deliberately not behind the RWMutex above, for the same reason as Signal:
+// process is fixed at construction and never changes, so reading it needs
+// no lock -- and taking one would let a pending close's write lock starve
+// the kill step exactly the way it used to starve Signal. terminate's own
+// close now runs on its own goroutine and can still be pending, its write
+// lock queued, when the escalation reaches Kill; a kill step that blocked
+// on that would mean SIGKILL is never sent, the give-up warning never
+// logs, and terminate never returns.
 func (pty *pty) Kill() error {
-	pty.RLock()
-	cmd := pty.cmd
-	pty.RUnlock()
-
-	if cmd == nil || cmd.Process == nil {
+	if pty.process == nil {
 		return nil // No process to kill
 	}
-	return cmd.Process.Kill()
+	return pty.process.Kill()
+}
+
+// Signal sends sig to the command's process group. The command is a session
+// leader — creack/pty starts it with Setsid — so its group is its pid, and
+// this reaches every process that has not left the group on purpose.
+//
+// Deliberately not behind the RWMutex above: pid is fixed at construction
+// (wrapPty) and never changes, so nothing here needs the lock to read it
+// safely -- and taking it anyway would let a write lock queued by Close
+// starve every signal behind it. That starvation is exactly what used to
+// make terminate's own hangup impossible to send: Close (the write lock)
+// queued ahead of Signal (a read lock) whenever it ran concurrently, and
+// Go's sync.RWMutex blocks new readers behind a pending writer. terminate
+// now closes the pty master itself, mid-escalation, so a signal must never
+// depend on that close having finished first.
+func (pty *pty) Signal(sig syscall.Signal) error {
+	if pty.pid == 0 {
+		return nil
+	}
+	return unix.Kill(-pty.pid, sig)
 }

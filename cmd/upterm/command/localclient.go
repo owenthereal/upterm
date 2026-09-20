@@ -98,9 +98,13 @@ func localAttachFailureMessage(name, logPath string) string {
 // nothing running.
 type daemonFunc func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error
 
-// clientFunc attaches the local terminal and reports how the attachment
-// ended. attachLocalTerminal in production.
-type clientFunc func(ctx context.Context, socket string) (attach.Result, error)
+// inProcessClientFunc attaches the local terminal and reports how the
+// attachment ended. attachLocalTerminal in production.
+//
+// It takes no host keys because the process that runs this daemon holds its
+// signers directly; the spawning parent's clientFunc, which learns them from
+// the exchange, does.
+type inProcessClientFunc func(ctx context.Context, socket string) (attach.Result, error)
 
 // runLocalSession runs the daemon and attaches the local terminal to it
 // before the command starts. Foreground and headless are one code path:
@@ -113,7 +117,7 @@ type clientFunc func(ctx context.Context, socket string) (attach.Result, error)
 // would be cut off by process exit. So the client is waited for before this
 // returns: freely for localClientDrainTimeout, and after cancelling it
 // beyond that, but always until it has returned.
-func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger *slog.Logger, runDaemon daemonFunc, attachClient clientFunc) error {
+func runLocalSession(ctx context.Context, name string, stderr io.Writer, logger *slog.Logger, runDaemon daemonFunc, attachClient inProcessClientFunc) error {
 	attachSocket := make(chan string, 1)
 	runErr := make(chan error, 1)
 	// Cancelled here, not only by the caller: a local terminal that never

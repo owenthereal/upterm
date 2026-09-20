@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -68,6 +71,40 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 			assert.ErrorContains(t, err, cc.wantErrSubstr)
 		})
 	}
+}
+
+// Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins
+// the three combinations that cannot work: a background session nobody can
+// confirm, an output format for a foreground run that has none, and a format
+// this does not speak.
+func Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach(t *testing.T) {
+	origServer, origDetach, origAccept, origOutput := flagServer, flagDetach, flagAccept, flagHostOutput
+	t.Cleanup(func() {
+		flagServer, flagDetach, flagAccept, flagHostOutput = origServer, origDetach, origAccept, origOutput
+	})
+
+	// Built once, before any case sets a flag: registering a flag writes its
+	// default into the variable behind it, so constructing the command per
+	// call would undo the case it was meant to exercise. It is also where
+	// --server's default comes from, which keeps that check quiet.
+	cmd := hostCmd()
+	reset := func() { flagDetach, flagAccept, flagHostOutput = false, false, "" }
+
+	reset()
+	flagDetach = true
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--detach requires --accept")
+
+	reset()
+	flagHostOutput = "json"
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "--output requires --detach")
+
+	reset()
+	flagDetach, flagAccept, flagHostOutput = true, true, "yaml"
+	require.ErrorContains(t, validateShareRequiredFlags(cmd, nil), "must be 'json'")
+
+	reset()
+	flagDetach, flagAccept, flagHostOutput = true, true, "json"
+	require.NoError(t, validateShareRequiredFlags(cmd, nil))
 }
 
 // Test_UserDiscardedError_IsAnAbandonedSession pins how declining or
@@ -640,19 +677,223 @@ func Test_identitiesOnlyRequested(t *testing.T) {
 	assert.False(t, identitiesOnlyRequested())
 }
 
-// Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that shareRunE does not
-// re-wrap an error AuthorizedKeysFromFile has already described.
+// captureStderr collects what fn writes to os.Stderr.
+//
+// The in-process host's operator-facing notices go to a file, not to an
+// injected writer, so swapping the file is the only way a test can see them.
+// Shaped like captureStdout in session_test.go, including the concurrent
+// drain: a warning larger than a pipe buffer would otherwise deadlock the
+// test rather than fail it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	collected := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		collected <- buf.String()
+	}()
+
+	// Registered before fn runs, because a require failure inside it calls
+	// Goexit: the close below would be skipped and the copier would sit on a
+	// pipe whose write end nobody ever closes. Closing twice is harmless.
+	defer func() { _ = w.Close() }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out := <-collected
+	require.NoError(t, r.Close())
+	return out
+}
+
+// Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped pins that the
+// in-process host names a key it could not load, the way the daemon does.
+// The two paths are the same session on different platforms, and a skip that
+// is announced on one and silent on the other leaves the operator of the
+// other wondering why their identity was not offered.
+//
+// Both halves are asserted, because the daemon does both: the log record an
+// operator finds afterwards, and the line they see at the time. A warning
+// that reached only the log would be parity with the daemon's logger and not
+// with what the daemon's parent prints, which is the half that answers the
+// question while it is being asked.
+//
+// The session itself cannot start — the server is a port nothing listens on
+// — which is deliberate: the warning is emitted while the signers are being
+// resolved, long before anything is dialled, so the failure that follows
+// costs a connection refused and no session.
+func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
+	setupSessionRoots(t)
+	dir := t.TempDir()
+
+	// Exists, so the default key list would carry it, and unparseable, so it
+	// is skipped rather than refused: that is the case OnSkip is for.
+	keyFile := filepath.Join(dir, "id_ed25519")
+	require.NoError(t, os.WriteFile(keyFile, []byte("not a private key\n"), 0600))
+
+	// No agent, so the file list is what is read at all; and no
+	// --private-key, so the list is the default set and a file that fails to
+	// load is skipped instead of failing the set.
+	t.Setenv("SSH_AUTH_SOCK", "")
+	origSupplied := suppliedFlags
+	suppliedFlags = map[string]bool{}
+	t.Cleanup(func() { suppliedFlags = origSupplied })
+
+	restoreString := func(p *string, v string) {
+		orig := *p
+		*p = v
+		t.Cleanup(func() { *p = orig })
+	}
+	restoreString(&flagServer, "ssh://127.0.0.1:1")
+	restoreString(&flagKnownHostsFilename, filepath.Join(dir, "known_hosts"))
+	restoreString(&flagName, "")
+	// The one other global on this path that can decide the outcome:
+	// resolveAuthorizedKeys runs before the signers, so a file left behind by
+	// another test would fail this one above the line it is about. The rest
+	// of what runInProcessHost reads (flagAccept, flagReadOnly, flagPtySize,
+	// flagNoSFTP …) only furnishes the Host, which never gets to dial.
+	restoreString(&flagAuthorizedKeys, "")
+	origKeys := flagPrivateKeys
+	flagPrivateKeys = []string{keyFile}
+	t.Cleanup(func() { flagPrivateKeys = origKeys })
+	origSkip := flagSkipHostKeyCheck
+	flagSkipHostKeyCheck = true
+	t.Cleanup(func() { flagSkipHostKeyCheck = origSkip })
+
+	logs := &capturingHandler{}
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+	stderr := captureStderr(t, func() {
+		// The dial is what this returns on, and it is expected to fail.
+		_ = runInProcessHost(c, slog.New(logs), hostOptions{command: []string{"true"}, term: "xterm"})
+	})
+
+	var found bool
+	for _, rec := range logs.captured() {
+		if rec.Msg == "skipping private key" && rec.Attrs["file"] == keyFile {
+			assert.Equal(t, slog.LevelWarn, rec.Level, "a skipped identity is a warning, as it is in the daemon")
+			assert.NotEmpty(t, rec.Attrs["error"], "the warning has to say why it was skipped")
+			found = true
+		}
+	}
+	assert.True(t, found, "the in-process host must name the key it skipped, as the daemon does: %+v", logs.captured())
+
+	// The half the operator actually reads. The prefix and shape are the
+	// daemon's own, so the same session says the same thing however it was
+	// started.
+	assert.Contains(t, stderr, "warning: skipping private key "+keyFile+":",
+		"the skip has to reach the operator, not only upterm.log: %q", stderr)
+}
+
+// Test_guardedSpawn_RefusesInsideATestBinary pins hostSpawn's default: the
+// refusal is production code, so a test in any package that reaches the real
+// spawn gets an error rather than a copy of its own test binary running the
+// whole suite, once per spawn.
+//
+// The options name an executable that does not exist, and that is
+// deliberate: the guard never looks at them, but it means that a build with
+// the guard removed — the mutation that proves this test — fails in
+// exec.Start with ENOENT instead of re-executing this test binary. The
+// child-side guard in TestMain is the second net under that proof.
+func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
+	dir := t.TempDir()
+
+	conn, proc, err := guardedSpawn(spawnOptions{
+		executable: filepath.Join(dir, "no-such-upterm"),
+		args:       []string{"host", "--", "true"},
+		env:        []string{},
+		name:       "guarded-1",
+		logPath:    filepath.Join(dir, "upterm.log"),
+	})
+	require.ErrorContains(t, err, "refusing to spawn the daemon from a test binary")
+	assert.Contains(t, err.Error(), "runHostInProcess", "the refusal has to name the seam that replaces it")
+	assert.Nil(t, conn, "nothing was connected")
+	assert.Nil(t, proc, "nothing was started")
+
+	// Reached before spawnDaemon, not after it failed: spawnDaemon opens the
+	// log path it is given before it forks, so an untouched log is proof the
+	// call returned above it.
+	_, statErr := os.Stat(filepath.Join(dir, "upterm.log"))
+	assert.True(t, os.IsNotExist(statErr), "the guard returns before spawnDaemon opens the log")
+}
+
+// runHostInProcess runs `upterm host <argv...>` with the daemon in a
+// goroutine of this process instead of a child of it, and returns what the
+// command returned.
+//
+// The exchange is the real one — a real bootstrap.Child on the far end of a
+// pipe, reporting through the same messages — but the daemon is not started
+// by spawnDaemon, which re-executes this process's own argv. Under `go test`
+// that argv is the test runner's, so a test that reached spawnDaemon would
+// start a second copy of the test binary and run the whole suite inside it,
+// once per spawn.
+//
+// The daemon's hostOptions come from the arguments after `--`, which is what
+// cobra hands shareRunE and therefore what the real daemon parses out of the
+// argv it inherits.
+func runHostInProcess(t *testing.T, argv ...string) error {
+	t.Helper()
+
+	orig := hostSpawn
+	t.Cleanup(func() { hostSpawn = orig })
+
+	// Registered before the connections' own cleanup and therefore run after
+	// it: the close is what ends the daemon, and the daemon reads the flag
+	// variables the next test is about to write.
+	var daemons sync.WaitGroup
+	t.Cleanup(daemons.Wait)
+
+	var command []string
+	for i, a := range argv {
+		if a == "--" {
+			command = argv[i+1:]
+			break
+		}
+	}
+
+	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
+		opts, err := parseHostOptions(command)
+		if err != nil {
+			return nil, nil, err
+		}
+		a, b := net.Pipe()
+		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+		daemons.Add(1)
+		go func() {
+			defer daemons.Done()
+			_ = runDaemonProcess(context.Background(), discardLogger(), opts, a, so.name,
+				func(ctx context.Context, h *host.Host) error { return h.Run(ctx) })
+		}()
+		return b, nil, nil
+	}
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs(argv)
+	return root.Execute()
+}
+
+// Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps
+// an error AuthorizedKeysFromFile has already described. The daemon is what
+// resolves the keys and so what produces the error; the parent adds only its
+// own "session NAME could not start:" prefix, which is what the assertions
+// below check — the file is named once, and never with the doubled "error
+// reading authorized keys: error reading authorized keys".
 func Test_hostCmd_authorizedKeysErrorNamesTheFileOnce(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	missing := filepath.Join(dir, "nope")
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs([]string{"host", "--accept", "--authorized-keys", missing, "--", "true"})
-
-	err := root.Execute()
+	err := runHostInProcess(t, "host", "--accept", "--authorized-keys", missing, "--", "true")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "error reading authorized keys file "+missing)
 	assert.NotContains(t, err.Error(), "error reading authorized keys: error reading authorized keys")
@@ -799,13 +1040,7 @@ func Test_hostCmd_refusesEmptyAuthorization(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			root := Root()
-			root.SetOut(io.Discard)
-			root.SetErr(io.Discard)
-			root.SetArgs(c.args)
-
-			err := root.Execute()
-			assert.ErrorContains(t, err, c.wantErrSubstr)
+			assert.ErrorContains(t, runHostInProcess(t, c.args...), c.wantErrSubstr)
 		})
 	}
 }
@@ -823,12 +1058,8 @@ func Test_hostCmd_guardRefusesWhenRequestedButEmpty(t *testing.T) {
 	t.Run("empty flag value", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--authorized-user", "", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t,
+			runHostInProcess(t, "host", "--accept", "--authorized-user", "", "--", "true"), wantErr)
 	})
 
 	t.Run("empty config list", func(t *testing.T) {
@@ -840,24 +1071,14 @@ func Test_hostCmd_guardRefusesWhenRequestedButEmpty(t *testing.T) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(confDir, "config.yaml"), []byte("authorized-user: []\n"), 0o600))
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t, runHostInProcess(t, "host", "--accept", "--", "true"), wantErr)
 	})
 
 	t.Run("empty environment variable", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 		t.Setenv("UPTERM_AUTHORIZED_USER", "")
 
-		root := Root()
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		root.SetArgs([]string{"host", "--accept", "--", "true"})
-
-		assert.ErrorContains(t, root.Execute(), wantErr)
+		assert.ErrorContains(t, runHostInProcess(t, "host", "--accept", "--", "true"), wantErr)
 	})
 }
 
@@ -885,17 +1106,13 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-			root := Root()
-			root.SetOut(io.Discard)
-			root.SetErr(io.Discard)
 			// An empty value, including for --authorized-keys: pflag records
-			// Changed, shareRunE reads no file and parses no reference, so the
-			// guard is the only thing standing between this and a session that
-			// accepts anyone. (An empty authorized_keys *file* fails earlier,
-			// inside AuthorizedKeysFromFile — covered above.)
-			root.SetArgs([]string{"host", "--accept", "--server", unreachable, "--" + name, "", "--", "true"})
-
-			assert.ErrorContains(t, root.Execute(), wantErr)
+			// Changed, the daemon reads no file and parses no reference, so
+			// the guard is the only thing standing between this and a session
+			// that accepts anyone. (An empty authorized_keys *file* fails
+			// earlier, inside AuthorizedKeysFromFile — covered above.)
+			assert.ErrorContains(t, runHostInProcess(t,
+				"host", "--accept", "--server", unreachable, "--"+name, "", "--", "true"), wantErr)
 		})
 	}
 }
@@ -961,11 +1178,14 @@ func runHostCmd(t *testing.T, args ...string) error {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".ssh"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), pem.EncodeToMemory(block), 0o600))
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs(append([]string{"host", "--accept", "--server", "ssh://127.0.0.1:1"}, append(args, "--", "true")...))
-	return root.Execute()
+	// Through the in-process seam, never root.Execute() directly: on Unix
+	// upterm host spawns its daemon by re-executing os.Args, and in a test
+	// binary that argv is the test runner's — the child would run this whole
+	// suite again, once per spawn. TestMain trips any test that reaches the
+	// real spawn; this is the path it points at. The daemon is what resolves
+	// identities, so its error arrives under the parent's "session NAME could
+	// not start:" prefix, which ErrorContains looks through.
+	return runHostInProcess(t, append([]string{"host", "--accept", "--server", "ssh://127.0.0.1:1"}, append(args, "--", "true")...)...)
 }
 
 func Test_hostCmd_privateKeyIsIdentitiesOnlyFromEveryOrigin(t *testing.T) {

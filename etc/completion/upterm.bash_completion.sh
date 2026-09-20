@@ -557,6 +557,9 @@ _upterm_host()
     two_word_flags+=("--authorized-keys")
     flags+=("--authorized-user=")
     two_word_flags+=("--authorized-user")
+    flags+=("--detach")
+    flags+=("--escape-char=")
+    two_word_flags+=("--escape-char")
     flags+=("--force-command=")
     two_word_flags+=("--force-command")
     two_word_flags+=("-f")
@@ -570,6 +573,9 @@ _upterm_host()
     flags+=("--name=")
     two_word_flags+=("--name")
     flags+=("--no-sftp")
+    flags+=("--output=")
+    two_word_flags+=("--output")
+    two_word_flags+=("-o")
     flags+=("--private-key=")
     two_word_flags+=("--private-key")
     two_word_flags+=("-i")
@@ -735,6 +741,31 @@ _upterm_session_list()
     noun_aliases=()
 }
 
+_upterm_session_stop()
+{
+    last_command="upterm_session_stop"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_session()
 {
     last_command="upterm_session"
@@ -760,6 +791,7 @@ _upterm_session()
         command_aliases+=("ls")
         aliashash["ls"]="list"
     fi
+    commands+=("stop")
 
     flags=()
     two_word_flags=()

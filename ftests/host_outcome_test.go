@@ -25,6 +25,8 @@ import (
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // outcomeTimeout bounds one host run. It is a hang detector, not a
@@ -32,6 +34,17 @@ import (
 // milliseconds, so the budget costs nothing when the run behaves and turns a
 // wedged run.Group into a failure with a stack instead of a dead suite.
 const outcomeTimeout = 60 * time.Second
+
+// refusedStopGrace is how long a session that refused a stop is watched for
+// signs of stopping anyway.
+//
+// A stop this daemon accepts cancels Run's context from inside the RPC
+// handler, so the teardown is already under way when the call returns:
+// letting a mismatched stop through and timing it measured 2 ms from the
+// refusal to Run returning, with the admin socket already unlinked before
+// the next RPC could dial it. Two seconds is that with a thousandfold
+// margin, and only this one case ever waits it out.
+const refusedStopGrace = 2 * time.Second
 
 // outcomePollInterval is how often the never-ready tests sample the record.
 // Fast enough that a "ready" published and immediately overwritten would still
@@ -116,6 +129,8 @@ type outcomeRun struct {
 	// Set by options before the host and relay are built.
 	signers        []ssh.Signer
 	sessionCreated func(context.Context, *api.GetSessionResponse) error
+	sessionClaimed func(*sessiondir.Dir)
+	sessionReady   func(*outcomeRun, string)
 	relayOptions   []func(*Server)
 }
 
@@ -128,6 +143,14 @@ type outcomeOption func(*outcomeRun)
 // session after the relay has created it but before the command exists.
 func withSessionCreatedCallback(cb func(context.Context, *api.GetSessionResponse) error) outcomeOption {
 	return func(r *outcomeRun) { r.sessionCreated = cb }
+}
+
+// withSessionReadyCallback stands in for whoever is told the session is up —
+// the daemon telling its parent. It is handed the run so that it can read
+// what a reader taking that word would read, and the status the host
+// published.
+func withSessionReadyCallback(cb func(*outcomeRun, string)) outcomeOption {
+	return func(r *outcomeRun) { r.sessionReady = cb }
 }
 
 // withSigners replaces the host's identity.
@@ -182,6 +205,14 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 		require.NoError(t, err)
 	}
 
+	// Wrapped here rather than stored on the Host directly, so that the case
+	// gets the run it is watching without having to close over a variable it
+	// has not been assigned yet.
+	var sessionReady func(string)
+	if run.sessionReady != nil {
+		sessionReady = func(status string) { run.sessionReady(run, status) }
+	}
+
 	run.host = &host.Host{
 		Host:                    "ssh://" + ts.SSHAddr(),
 		Name:                    name,
@@ -191,6 +222,8 @@ func newOutcomeRun(t *testing.T, command []string, opts ...outcomeOption) *outco
 		KeepAliveDuration:       keepAliveDuration,
 		Logger:                  testLogger,
 		SessionCreatedCallback:  run.sessionCreated,
+		SessionClaimedCallback:  run.sessionClaimed,
+		SessionReadyCallback:    sessionReady,
 		AttachListeningCallback: func(s string) { attachSocket <- s },
 	}
 
@@ -584,6 +617,189 @@ func Test_Host_PublishesReadyOnceBothSidesAcknowledge(t *testing.T) {
 	require.Equal(t, sessiondir.StatusEnding, run.record(t).Status)
 }
 
+// Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady pins the order the
+// callback exists for. Whoever is told the session is up goes on to read the
+// record — `upterm session info`, `session stop`, `attach` all do — and the
+// two happen back to back: `upterm host --detach -o json` prints "status":
+// "ready" and exits, and the next line of the script asks. A caller told off
+// the command's start alone would be told ready and then read "starting",
+// because the record is written by this actor and not by the command's.
+//
+// The record is read from disk inside the callback, which is the reader's
+// view and not the writer's: a Dir that had staged the status in memory but
+// not published it would pass an assertion made against the Dir.
+func Test_Host_ReadyCallbackFiresAfterTheRecordSaysReady(t *testing.T) {
+	// Buffered, because the callback runs on the readiness actor's goroutine
+	// and must not block: a send that waited for the test to receive would
+	// hold up the actor that Run's teardown waits on.
+	fired := make(chan readyReport, 1)
+
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
+		withSessionReadyCallback(reportReady(fired)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	select {
+	case got := <-fired:
+		require.NotNil(t, got.rec, "the record a reader would consult was not readable when the callback fired")
+		require.Equal(t, sessiondir.StatusReady, got.rec.Status,
+			"the callback is the word that the session is up; the record already has to say so")
+		require.NotEmpty(t, got.rec.SessionID,
+			"published by the same write, and what a reader connects with")
+		require.Equal(t, got.rec.Status, got.status,
+			"and the status the callback carries is the one the record ended on")
+	case <-time.After(outcomeTimeout):
+		t.Fatal("the session never reported itself ready")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
+}
+
+// readyReport is what the readiness callback saw: the status it was handed,
+// and the record as a reader would have found it at that instant.
+type readyReport struct {
+	status string
+	rec    *sessiondir.Record
+}
+
+// reportReady is a readiness callback that sends both to ch. Non-blocking, as
+// the callback must be: ch has to be buffered.
+func reportReady(ch chan<- readyReport) func(*outcomeRun, string) {
+	return func(r *outcomeRun, status string) {
+		rec, err := sessiondir.ReadRecord(r.stateRoot, r.name)
+		if err != nil {
+			ch <- readyReport{status: status}
+			return
+		}
+		ch <- readyReport{status: status, rec: rec}
+	}
+}
+
+// Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn is the other half of
+// the guarantee above: not "the record says ready" but "the record says what
+// the callback says".
+//
+// A status never moves backwards (advanceStatus), and disconnected ranks above
+// ready. So a tunnel lost between the command starting and the readiness write
+// — the guest server stops serving, the command carries on, and the record is
+// published as disconnected — makes the ready write a no-op that still returns
+// nil. A callback that announced "ready" there would have the parent print
+// "status": "ready" and exit 0 while `upterm session info` answered
+// disconnected for the same launch, which is the disagreement this callback
+// exists to rule out.
+//
+// The race is made deterministic rather than provoked: the disconnected write
+// happens from the claim callback, on Run's own goroutine before the group
+// exists, so the readiness actor cannot run before it. What is under test is
+// what the actor does with a record it cannot move, not how the record got
+// that way.
+func Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn(t *testing.T) {
+	fired := make(chan readyReport, 1)
+
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
+		withSessionClaimedCallback(func(d *sessiondir.Dir) {
+			// What OnGuestServerStopped publishes, and all that matters
+			// here: a status the ready write cannot move.
+			require.NoError(t, d.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusDisconnected
+			}))
+		}),
+		withSessionReadyCallback(reportReady(fired)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	select {
+	case got := <-fired:
+		require.NotNil(t, got.rec)
+		require.Equal(t, sessiondir.StatusDisconnected, got.rec.Status,
+			"the ready write cannot move a status backwards, so the record still says disconnected")
+		require.Equal(t, sessiondir.StatusDisconnected, got.status,
+			"and the callback carries what the record says, not what the actor asked for")
+		require.NotEmpty(t, got.rec.SessionID,
+			"the session ID is published by that write either way")
+	case <-time.After(outcomeTimeout):
+		t.Fatal("the readiness actor never reported")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Logf("host run returned: %v", err)
+	case <-time.After(outcomeTimeout):
+		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
+	}
+}
+
+// Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce is the wiring for a
+// session that is over almost before it began: the callback fires, the
+// session is published, and the command's own outcome is still what the
+// record ends on. It is what tells a spawned daemon's parent "started", and
+// --detach's contract is that it exits 0 once the command is running; a
+// command that started and exited did run.
+//
+// It is *not* the proof that the readiness actor prefers the facts to the
+// teardown, and it should not be read as one. OnCommandStarted fires before
+// cmd.Run (host/internal/server.go:205-209), so closing cmdReady makes the
+// readiness actor runnable while ready is still open, and it has the whole
+// of the command's life and teardown to get through its selects: with the
+// preference removed, this case still passed 60 consecutive runs here. The
+// coin needs that goroutine starved across all of it, which is a loaded
+// machine's business. readinessEstablished's own tests stage the state
+// directly and decide the rule.
+//
+// Read without blocking, because Run has returned: run.Group waits for every
+// actor it started, the readiness actor among them, so the callback has
+// either happened by now or never will.
+func Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce(t *testing.T) {
+	fired := make(chan readyReport, 1)
+
+	run := newOutcomeRun(t,
+		shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+		withSessionReadyCallback(reportReady(fired)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+
+	err := run.host.Run(ctx)
+	t.Logf("host run returned: %v", err)
+
+	select {
+	case got := <-fired:
+		require.NotEmpty(t, got.status,
+			"the session was published, so the callback carries the status it was published with")
+		require.NotNil(t, got.rec, "and the record it was published to was readable")
+	default:
+		t.Fatal("a command that started and exited was never reported as started")
+	}
+
+	// The outcome is still the command's own, which this must not have
+	// disturbed: the readiness write lands before the final one, and a status
+	// never moves backwards.
+	rec := run.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status)
+	require.Equal(t, sessiondir.ReasonExited, rec.Reason)
+	require.NotNil(t, rec.ExitCode)
+	require.Equal(t, 0, *rec.ExitCode)
+}
+
 // Test_Host_GivesTheCommandTheSessionName covers wiring rather than an
 // outcome: the host puts the claimed name in the command's environment so that
 // a script inside the session can name itself to `upterm session info`. A typo
@@ -794,6 +1010,114 @@ func Test_Host_PublishesStartupAbandonedWhenNoClientAttaches(t *testing.T) {
 	require.Nil(t, rec.ExitCode)
 }
 
+// withSessionClaimedCallback stands in for the daemon's first report to the
+// process that started it.
+func withSessionClaimedCallback(cb func(*sessiondir.Dir)) outcomeOption {
+	return func(r *outcomeRun) { r.sessionClaimed = cb }
+}
+
+// Test_Host_ReportsTheClaimBeforeItDials: the claim callback fires with the
+// name this run took, while the record still says starting, and before the
+// session-created callback — a parent that learns the name from it can name
+// the session in every prompt that follows.
+func Test_Host_ReportsTheClaimBeforeItDials(t *testing.T) {
+	var order []string
+	var claimed *sessiondir.Dir
+	run := newOutcomeRun(t,
+		shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+		withSessionClaimedCallback(func(d *sessiondir.Dir) {
+			claimed = d
+			order = append(order, "claimed:"+d.Record().Status)
+		}),
+		withSessionCreatedCallback(func(context.Context, *api.GetSessionResponse) error {
+			order = append(order, "created")
+			return nil
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	require.NoError(t, run.host.Run(ctx))
+
+	require.Equal(t, []string{"claimed:" + sessiondir.StatusStarting, "created"}, order)
+	require.Equal(t, run.name, claimed.Name())
+	require.Equal(t, os.Getpid(), claimed.Record().Pid)
+}
+
+// Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway is the cause the
+// deferred writer and the post-run switch both have to read: a cancellation
+// whose cause is ErrSessionAbandoned means the process that started this
+// session went away before the command did, and nothing failed. Two paths,
+// because Run has two: before the run.Group exists (the callback is waiting)
+// and inside it (the initial-client gate is waiting).
+func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
+	t.Run("while the session-created callback waits", func(t *testing.T) {
+		entered := make(chan struct{})
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}),
+			withSessionCreatedCallback(func(ctx context.Context, _ *api.GetSessionResponse) error {
+				close(entered)
+				<-ctx.Done()
+				return ctx.Err()
+			}))
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		select {
+		case <-entered:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("the callback was not entered")
+		}
+		cancel(host.ErrSessionAbandoned)
+		select {
+		case <-done:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("host did not return after cancellation")
+		}
+		rec := run.record(t)
+		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
+			"the parent went away before the command started: abandoned, not stopped")
+		require.Nil(t, rec.ExitCode)
+	})
+
+	t.Run("while the initial-client gate waits", func(t *testing.T) {
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+		run.host.AwaitInitialClient = true
+		run.host.InitialClientTimeout = outcomeTimeout
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		run.awaitAttachSocket(t) // the gate is open for business; nobody walks through it
+		cancel(host.ErrSessionAbandoned)
+		select {
+		case <-done:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("host did not return after cancellation")
+		}
+		rec := run.record(t)
+		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
+			"cancelled with the abandonment cause inside the group, before the command started")
+		require.Nil(t, rec.ExitCode)
+	})
+
+	t.Run("a plain cancellation is still a stop", func(t *testing.T) {
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+		run.host.AwaitInitialClient = true
+		run.host.InitialClientTimeout = outcomeTimeout
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		run.awaitAttachSocket(t)
+		cancel()
+		<-done
+		require.Equal(t, sessiondir.ReasonStopped, run.record(t).Reason)
+	})
+}
+
 func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 	run := newOutcomeRun(t, shellCommand(t,
 		[]string{"sh", "-c", "echo ATTACHED; sleep 30"},
@@ -812,4 +1136,68 @@ func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 	awaitMarker(t, out, "ATTACHED")
 	cancel()
 	<-done
+}
+
+// Test_Host_StopSessionRPCEndsTheSession: the admin socket's StopSession is
+// what `upterm session stop` calls, and it ends the session the way a
+// SIGTERM to the daemon does — the record reads stopped, no exit code. It
+// ends the launch the request names and no other: the socket path belongs to
+// the name, and the name is handed on.
+func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
+	run := newOutcomeRun(t, shellCommand(t,
+		[]string{"sh", "-c", "echo READY; sleep 300"},
+		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}))
+	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run.host.Run(ctx) }()
+
+	sock := run.awaitAttachSocket(t)
+	out := run.attachViewer(t, ctx, sock)
+	awaitMarker(t, out, "READY")
+
+	rec := run.record(t)
+	client, err := host.AdminClient(rec.AdminSocket)
+	require.NoError(t, err)
+
+	// A request for any other launch is refused, and the session lives: that
+	// is what keeps a replacement from being stopped in place of the session
+	// a caller inspected. Asked first, while there is still a socket to ask.
+	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: "some-other-launch"})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err),
+		"a stop that names another launch is not this session's to accept")
+
+	// And the refusal changed nothing. Not "the record still says ready",
+	// which an accepted stop would leave standing for the whole of its
+	// teardown and which therefore shows nothing: the session has to be
+	// shown still holding its name, still answering, and still running.
+	// Waiting for the last is the point — OnStop is the cancellation itself,
+	// so an accepted stop starts the teardown before the RPC has even
+	// returned, and refusedStopGrace is many times what that teardown takes.
+	cur, held, err := sessiondir.Inspect(ctx, run.stateRoot, run.name)
+	require.NoError(t, err)
+	require.True(t, held, "a refused stop must not release the name")
+	require.Equal(t, rec.LaunchID, cur.LaunchID, "and the launch still holding it is the one that refused")
+	live, err := client.GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err, "the daemon that refused the stop is still serving its admin socket")
+	require.NotEmpty(t, live.SessionId)
+	select {
+	case err := <-done:
+		t.Fatalf("the refused stop ended the session it did not name: %v", err)
+	case <-time.After(refusedStopGrace):
+	}
+
+	// The launch the record names, which is what `upterm session stop` sends.
+	_, err = client.StopSession(ctx, &api.StopSessionRequest{LaunchId: rec.LaunchID})
+	require.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-time.After(outcomeTimeout):
+		t.Fatal("host did not return after StopSession")
+	}
+	final := run.record(t)
+	require.Equal(t, sessiondir.ReasonStopped, final.Reason)
+	require.Nil(t, final.ExitCode)
+	require.Equal(t, sessiondir.StatusEnding, final.Status)
 }

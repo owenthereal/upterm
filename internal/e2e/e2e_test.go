@@ -58,6 +58,11 @@ type testHarness struct {
 	clientKeyFile string
 	rcFile        string
 	tmpDir        string
+	// name is the session name startHost gives the session it starts, and
+	// the one this harness stops on the way out. A test that builds its own
+	// host command line names its own session and registers it with
+	// stopOnCleanup instead.
+	name string
 }
 
 // newTestHarness creates a new test harness with tmux session and host pane.
@@ -103,6 +108,18 @@ func newTestHarness(t *testing.T, width int) *testHarness {
 	rcFile := filepath.Join(tmpDir, "bashrc")
 	require.NoError(t, os.WriteFile(rcFile, fmt.Appendf(nil, "PS1='%s '\n", uptermPrompt), 0644))
 
+	// The name this harness's session runs under. sessiondir.ValidateName is
+	// the arbiter — letters, digits, '-', '_' and '.', first character not a
+	// period — and the name also becomes a directory and two socket paths
+	// under the runtime root, which must fit in 103 bytes: on macOS that
+	// leaves about 35 characters, so the test's name is truncated rather
+	// than carried whole.
+	base := strings.ToLower(strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()))
+	if len(base) > 20 {
+		base = base[:20]
+	}
+	name := fmt.Sprintf("e2e-%s-%d", base, time.Now().UnixNano()%1_000_000)
+
 	h := &testHarness{
 		t:             t,
 		ctx:           ctx,
@@ -113,7 +130,9 @@ func newTestHarness(t *testing.T, width int) *testHarness {
 		clientKeyFile: clientKeyFile,
 		rcFile:        rcFile,
 		tmpDir:        tmpDir,
+		name:          name,
 	}
+	h.stopOnCleanup(name)
 
 	t.Cleanup(func() {
 		_ = session.Kill(ctx)
@@ -122,12 +141,27 @@ func newTestHarness(t *testing.T, width int) *testHarness {
 	return h
 }
 
+// stopOnCleanup ends a session this test started, by name, when the test
+// is done. A session runs in a process of its own now: killing the tmux
+// session that started it reaches nothing, and a suite that leaked one
+// daemon per test would leave a machine full of them.
+func (h *testHarness) stopOnCleanup(name string) {
+	h.t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "upterm", "session", "stop", name).CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "no session named") && !strings.Contains(string(out), "already ended") {
+			h.t.Logf("cleanup: upterm session stop %s: %v: %s", name, err, out)
+		}
+	})
+}
+
 // startHost starts upterm host with the given extra flags and returns the SSH command.
 func (h *testHarness) startHost(extraFlags string) string {
 	h.t.Helper()
 
-	hostCmd := fmt.Sprintf("upterm host --server %s --private-key %s --skip-host-key-check %s -- bash --rcfile %s --noprofile",
-		h.serverURL, h.keyFile, extraFlags, h.rcFile)
+	hostCmd := fmt.Sprintf("upterm host --server %s --private-key %s --skip-host-key-check --name %s %s -- bash --rcfile %s --noprofile",
+		h.serverURL, h.keyFile, h.name, extraFlags, h.rcFile)
 	require.NoError(h.t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(h.t, h.waitForText(h.host, "SSH:", 30*time.Second), "host failed to establish session")
 
@@ -382,9 +416,13 @@ func TestBackgroundedHost(t *testing.T) {
 	h := newTestHarness(t, 200)
 
 	// startHost only knows how to launch in the foreground, and the trailing
-	// `&` is the entire point here, so send the line directly.
-	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s -- bash --rcfile %s --noprofile &",
-		h.serverURL, h.keyFile, h.rcFile)
+	// `&` is the entire point here, so send the line directly — with a name
+	// of its own, so the session can be stopped when the test is over.
+	name := fmt.Sprintf("e2e-bghost-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
+		h.serverURL, h.keyFile, name, h.rcFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second),
 		"backgrounded host failed to establish a session")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -57,6 +60,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(current())
 	cmd.AddCommand(list())
 	cmd.AddCommand(show())
+	cmd.AddCommand(stop())
 
 	return cmd
 }
@@ -110,6 +114,138 @@ Output formats:
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
+}
+
+// stopWaitTimeout bounds how long `session stop` waits for the name to be
+// released once the daemon has acknowledged. The teardown's worst case is
+// about sixteen seconds -- hangupGrace plus three DefaultStopGraces, as
+// DefaultStopGrace's own comment says -- plus the record's publication;
+// thirty seconds is that with room, and a daemon still holding the name
+// past it is one to name a pid for.
+var stopWaitTimeout = 30 * time.Second
+
+// stopPollInterval is how often the release is checked for.
+const stopPollInterval = 200 * time.Millisecond
+
+func stop() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop NAME",
+		Short: "Stop a running session",
+		Long: `Stop a running session by name.
+
+The session's command is hung up, then terminated, then killed if it stays,
+and every attached terminal is released. The session's record keeps its
+outcome: 'upterm session info NAME' reports it as stopped.
+
+A session that has already ended is reported as such and is not an error.`,
+		Example: `  # Stop the session named build-shell:
+  upterm session stop build-shell`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			return stopSession(c.Context(), args[0], os.Stdout)
+		},
+	}
+}
+
+// stopSession asks the session named to end and waits for it to have ended.
+func stopSession(ctx context.Context, name string, out io.Writer) error {
+	stateRoot := utils.UptermStateDir()
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
+	cancelLookup()
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		return fmt.Errorf("no session named %q", name)
+	}
+	if !held {
+		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
+		return err
+	}
+
+	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	if err != nil {
+		return err
+	}
+	client, err := host.AdminClient(adminSocket)
+	if err != nil {
+		return err
+	}
+	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
+	// The launch that was inspected, not just the name: the socket path
+	// belongs to the name, and a session that ended between the read above
+	// and this call hands both to whoever claimed the name next. The daemon
+	// refuses a launch that is not its own, which is what keeps this from
+	// stopping a session the operator never looked at.
+	_, err = client.StopSession(rpcCtx, &api.StopSessionRequest{LaunchId: rec.LaunchID})
+	cancelRPC()
+	if err != nil {
+		// A socket that answers, with the one code that means the method
+		// does not exist there: the session is held by an upterm from
+		// before `session stop`. Nothing this command can send will end it,
+		// so name the pid and let the operator do it.
+		//
+		// Checked ahead of the status, because the two overlap: a daemon
+		// that predates this RPC and is still starting answers Unimplemented
+		// with a starting record, and "try again in a moment" is advice that
+		// can never come good for it. Every later attempt reaches the same
+		// missing method.
+		if status.Code(err) == codes.Unimplemented {
+			return fmt.Errorf("session %s was started by an upterm that predates 'session stop' and cannot be stopped this way; end it yourself (%s)", name, pidOf(rec))
+		}
+		// The daemon's way of saying the socket is no longer the launch that
+		// was read: the session ended and another one claimed the name
+		// between the two. Refused rather than stopped, because the run this
+		// command was told to end is already over and the one holding the
+		// name now is somebody else's. Checked here, before the status
+		// below, for the reason Unimplemented is: it is an answer, and a
+		// guess from the record cannot improve on one.
+		if status.Code(err) == codes.FailedPrecondition {
+			return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
+		}
+		if rec.Status == sessiondir.StatusStarting {
+			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
+		}
+		return fmt.Errorf("session %s is not answering on its admin socket (%s): %w", name, pidOf(rec), err)
+	}
+
+	// Acknowledged. The name is free once this launch has released it, or
+	// once another launch holds it, which is the same thing from here.
+	deadline := time.Now().Add(stopWaitTimeout)
+	for {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
+		cancelPoll()
+		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(stopPollInterval):
+		}
+	}
+	final, err := sessiondir.ReadRecord(stateRoot, name)
+	if err != nil || final == nil || final.LaunchID != rec.LaunchID {
+		_, err := fmt.Fprintf(out, "session %s stopped\n", name)
+		return err
+	}
+	_, err = fmt.Fprintf(out, "session %s stopped (%s)\n", name, describeOutcome(final))
+	return err
+}
+
+// pidOf names the session's process for a human, or says the record
+// predates the field.
+func pidOf(rec *sessiondir.Record) string {
+	if rec.Pid == 0 {
+		return "pid unknown"
+	}
+	return fmt.Sprintf("pid %d", rec.Pid)
 }
 
 func current() *cobra.Command {
@@ -247,6 +383,12 @@ type sessionInfo struct {
 	// session bound it under the runtime root it claimed its name with, which
 	// a reader need not share. Absent once the session has ended.
 	AttachSocket string `json:"attachSocket,omitempty"`
+	// LogPath is where the session's process logs, from the record: the
+	// daemon publishes it, since the reader's state root need not be its.
+	LogPath string `json:"logPath,omitempty"`
+	// Pid is the process that claimed the name, from the record. What
+	// `session stop` names when the socket does not answer.
+	Pid          int    `json:"pid,omitempty"`
 	Command      string `json:"command,omitempty"`
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
@@ -357,6 +499,8 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		SessionID:    rec.SessionID,
 		Command:      strings.Join(rec.Command, " "),
 		ForceCommand: strings.Join(rec.ForceCommand, " "),
+		LogPath:      rec.LogPath,
+		Pid:          rec.Pid,
 		Reason:       rec.Reason,
 		ExitCode:     rec.ExitCode,
 		Signal:       rec.Signal,

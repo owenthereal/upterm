@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "github.com/owenthereal/upterm/host/api";
+
+import "api.proto";
+
+// Startup is one message of the exchange between `upterm host` and the
+// daemon it spawned, carried over the socket the daemon inherits. The child
+// sends print, read, claimed, session_created, listening, started, failed
+// and hello; the parent sends line, read_failed and accept. Only read and
+// session_created expect a reply.
+message Startup {
+  oneof msg {
+    Print print = 1;
+    Read read = 2;
+    Claimed claimed = 3;
+    SessionCreated session_created = 4;
+    Listening listening = 5;
+    Started started = 6;
+    Failed failed = 7;
+    Hello hello = 8;
+    Line line = 9;
+    ReadFailed read_failed = 10;
+    Accept accept = 11;
+  }
+}
+
+// Print is text for the parent's stderr: a prompt's preamble, a warning.
+message Print { string text = 1; }
+
+// Read asks the parent for one line from its terminal. secret means the
+// line must not echo and needs a terminal; the parent answers line or
+// read_failed.
+message Read {
+  string prompt = 1;
+  bool secret = 2;
+}
+
+// Claimed is the daemon's first report: the name it holds and the paths that
+// belong to it. Sent before the tunnel is dialled.
+message Claimed {
+  string name = 1;
+  string launch_id = 2;
+  string admin_socket = 3;
+  string attach_socket = 4;
+  string log_path = 5;
+  int32 pid = 6;
+}
+
+// SessionCreated is gate 1: the tunnel is up and the session is registered.
+// The parent shows it and answers accept.
+message SessionCreated { GetSessionResponse session = 1; }
+
+// Listening: the attach door is bound and these are its host keys, in
+// authorized_keys form. A foreground parent attaches now.
+message Listening {
+  string attach_socket = 1;
+  repeated string host_keys = 2;
+}
+
+// Started is gate 3: the command is running and the session's record has
+// been published. The parent may exit.
+message Started {
+  string session_id = 1;
+  // status is what the record said at the moment readiness was published --
+  // ready, or disconnected if the tunnel was lost between the command
+  // starting and that write, which leaves the earlier status standing. The
+  // parent reports this rather than assuming ready, so that what it prints
+  // and what `upterm session info` answers cannot disagree.
+  string status = 2;
+}
+
+// Failed: the session did not start. name_in_use asks the parent to draw
+// another name; abandoned means the parent's own answer ended it.
+message Failed {
+  string error = 1;
+  bool name_in_use = 2;
+  bool abandoned = 3;
+}
+
+// Hello carries the nonce a transport that cannot inherit a descriptor uses
+// to prove the connection came from the child it spawned.
+message Hello { string nonce = 1; }
+
+// Line answers a read.
+message Line { string text = 1; }
+
+// ReadFailed answers a read the parent could not satisfy.
+message ReadFailed { string reason = 1; }
+
+// Accept answers session_created.
+message Accept {
+  enum Decision {
+    ACCEPTED = 0;
+    DECLINED = 1;
+    INTERRUPTED = 2;
+  }
+  Decision decision = 1;
+}

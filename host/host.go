@@ -275,6 +275,40 @@ type Host struct {
 	// Called on the server's own goroutine, in front of everything the
 	// command's start releases, so it must not block.
 	CommandStartedCallback func()
+	// SessionReadyCallback is called once the session's record has been
+	// published: the admin socket is bound, the command is running, and the
+	// record a reader would consult already carries the session ID and the
+	// status handed to this callback. A caller that tells anyone else the
+	// session is up says it here, not from CommandStartedCallback — the
+	// command starting is one of the two facts readiness is made of, and the
+	// record is written after both. A script that runs `upterm session info`
+	// the instant it is told "ready" would otherwise be told "starting" by
+	// the record.
+	//
+	// The status is what the record ended on, which is not always ready:
+	// advanceStatus refuses to move a status backwards, so a tunnel lost
+	// between the command starting and this write leaves "disconnected"
+	// standing and the ready write is a no-op. The caller is told what the
+	// record says rather than what this actor asked for, because the two
+	// agreeing is the whole point of the callback.
+	//
+	// Not called when the record could not be published: the run fails
+	// instead, so that nobody is told about a record that was never written.
+	// With no session directory — an embedder that supplied its own admin
+	// socket — there is no record, the two facts alone are it, and the
+	// status is ready.
+	//
+	// Called once, on the readiness actor's own goroutine, after the write;
+	// it must not block.
+	SessionReadyCallback func(status string)
+	// SessionClaimedCallback is called once the session's name is claimed,
+	// with the directory that holds it, before the tunnel is dialled: the
+	// first thing a caller can know about a session is its name and its
+	// paths, and a caller that relays prompts wants them before any prompt.
+	// Not called when AdminSocketFile was supplied, since nothing is claimed.
+	//
+	// Called on Run's own goroutine; it must not block.
+	SessionClaimedCallback func(*sessiondir.Dir)
 	// VersionWarningCallback is called when the server's version is
 	// incompatible with this host's. Nil logs the mismatch and nothing more:
 	// the daemon has no terminal to print to.
@@ -289,6 +323,10 @@ type Host struct {
 	// InitialClientTimeout bounds that wait; zero means
 	// internal.DefaultInitialClientTimeout.
 	InitialClientTimeout time.Duration
+
+	// StopGrace bounds each step of the command's teardown; zero means
+	// internal.DefaultStopGrace.
+	StopGrace time.Duration
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -328,6 +366,69 @@ var ErrSessionAbandoned = errors.New("session abandoned before the command start
 // startup_abandoned rather than a failure.
 var ErrNoInitialClient = internal.ErrNoInitialClient
 
+// abandonedBy reports whether ctx was cancelled because the process that
+// started the session went away: a cancellation whose cause is
+// ErrSessionAbandoned. Nothing failed and nothing was asked to stop; the
+// record must say so.
+func abandonedBy(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrSessionAbandoned)
+}
+
+// readinessEstablished waits for the two facts readiness is made of — the
+// admin socket bound and the command started — and reports whether both were
+// established. A teardown that beats them to it is a "no"; a teardown that
+// merely coincides with them is not.
+//
+// That distinction is the whole of this function. Go picks between two ready
+// cases at random, and both are ready whenever a command starts and ends
+// before this actor is scheduled again — `upterm host --detach -- true` is
+// the whole of that window. Left to the coin, half of those runs published
+// the record and told the parent "started", and half returned here, so the
+// parent saw the channel close instead and reported "the session daemon
+// exited before reporting whether it started" — for a session whose command
+// had run to completion. --detach's contract is that it exits 0 once the
+// command is running, and a command that started and exited did run; what
+// became of it is the record's to say, and the status carried in Started is
+// what the parent prints. A script cannot branch on a coin, so an
+// established fact wins and the scheduler decides nothing.
+//
+// The non-blocking re-check on each teardown branch is what makes that so
+// rather than merely likely: whichever case the select picks, a fact that is
+// established is still established. setupSignalHandler asks its context the
+// same question on the same branch for the same reason.
+//
+// A fact that is genuinely not established is still a "no", and that is why
+// this waits on the pair rather than assuming them: a command that could not
+// start never closes cmdReady — exec reports that failure to Start, so
+// OnCommandStarted is never reached — and nothing is published for it.
+func readinessEstablished(adminReady, cmdReady, ready <-chan struct{}) bool {
+	select {
+	case <-adminReady:
+	case <-ready:
+		if !closed(adminReady) {
+			return false
+		}
+	}
+	select {
+	case <-cmdReady:
+	case <-ready:
+		if !closed(cmdReady) {
+			return false
+		}
+	}
+	return true
+}
+
+// closed reports whether a done-style channel has been closed, without waiting.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
 //
@@ -357,6 +458,14 @@ func (c *Host) Run(ctx context.Context) error {
 	// fatal. See InstallSignalPolicy; calling it again from setupSignalHandler
 	// is free.
 	InstallSignalPolicy()
+
+	// Run's working context. A stop requested over the admin socket cancels
+	// it, and from there it is the cancellation the signal actor already
+	// handles: shutdownRequested, the teardown, a record that reads stopped.
+	// Derived once so that every actor and every ctx.Err() below sees the
+	// same context, and context.Cause still reports the caller's cause.
+	ctx, requestStop := context.WithCancel(ctx)
+	defer requestStop()
 
 	u, err := url.Parse(c.Host)
 	if err != nil {
@@ -409,6 +518,10 @@ func (c *Host) Run(ctx context.Context) error {
 		c.AdminSocketFile = dir.AdminSocket()
 		c.AttachSocketFile = dir.AttachSocket()
 		claimedDir = true
+
+		if c.SessionClaimedCallback != nil {
+			c.SessionClaimedCallback(dir)
+		}
 	}
 
 	var (
@@ -462,6 +575,9 @@ func (c *Host) Run(ctx context.Context) error {
 			// asked for.
 			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
 				runReason = sessiondir.ReasonStopped
+				if abandonedBy(ctx) {
+					runReason = sessiondir.ReasonStartupAbandoned
+				}
 			}
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
@@ -579,6 +695,15 @@ func (c *Host) Run(ctx context.Context) error {
 	// double close.
 	var adminOnce, cmdOnce sync.Once
 
+	// The launch this run is, for the stop RPC to be bound to: the name and
+	// the socket are the session's and are handed on to whoever claims the
+	// name next, so they cannot say which run a caller meant. Empty when no
+	// name was claimed, which the server reads as a session no stop can name.
+	var launchID string
+	if c.SessionDir != nil {
+		launchID = c.SessionDir.LaunchID()
+	}
+
 	// Bound here, not inside the group. A bind failure is a startup failure and
 	// has to be reported as one: inside the group it raced the command's start,
 	// and whichever actor lost the race decided the classification — the same
@@ -592,7 +717,9 @@ func (c *Host) Run(ctx context.Context) error {
 	adminServer := internal.AdminServer{
 		Session:     session,
 		ClientRepo:  clientRepo,
+		LaunchID:    launchID,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
+		OnStop:      requestStop,
 	}
 	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
 		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)
@@ -739,6 +866,7 @@ func (c *Host) Run(ctx context.Context) error {
 			Term:                    c.Term,
 			AwaitInitialClient:      c.AwaitInitialClient,
 			InitialClientTimeout:    c.InitialClientTimeout,
+			StopGrace:               c.StopGrace,
 			SFTPDisabled:            c.SFTPDisabled,
 			SFTPPermissionChecker:   c.SFTPPermissionChecker,
 			OnCommandStarted: func() {
@@ -765,25 +893,45 @@ func (c *Host) Run(ctx context.Context) error {
 	{
 		ready := make(chan struct{})
 		g.Add(func() error {
-			select {
-			case <-adminReady:
-			case <-ready:
-				return nil
-			}
-			select {
-			case <-cmdReady:
-			case <-ready:
+			if !readinessEstablished(adminReady, cmdReady, ready) {
 				return nil
 			}
 
 			// Both acknowledged. Only now is every claim a reader makes off
 			// "ready" true: the session is registered, the user accepted it,
 			// the admin socket is bound, and the command is running.
+			//
+			// publishedStatus is what the record ends up saying, which is
+			// not always what is asked for here: advanceStatus will not move
+			// a status backwards, so a tunnel lost in the moment between the
+			// command starting and this write leaves "disconnected" standing
+			// and makes the ready write a no-op. Reported as it is, because
+			// a callback that announced "ready" for a record saying
+			// otherwise would be the disagreement this callback exists to
+			// rule out. Captured inside the closure, which Update runs
+			// synchronously under its own lock, once.
+			publishedStatus := sessiondir.StatusReady
 			if c.SessionDir != nil {
-				_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+				if err := c.SessionDir.Update(func(r *sessiondir.Record) {
 					r.SessionID = sessionID
 					advanceStatus(r, sessiondir.StatusReady)
-				})
+					publishedStatus = r.Status
+				}); err != nil {
+					// Fatal to the run, where every other record write here
+					// is not, because this one is the word readiness is made
+					// of: the callback below tells a parent the session is
+					// up, and a parent told that goes on to read this record
+					// -- `session info`, `session stop`, `attach`. A session
+					// whose readiness cannot be published is one no reader
+					// can manage, so it fails now, through the reporting the
+					// caller already has, rather than running on unreachable.
+					logger.Error("Failed to publish the session as ready",
+						"record", c.SessionDir.RecordPath(), "error", err)
+					return fmt.Errorf("failed to publish the session as ready: %w", err)
+				}
+			}
+			if c.SessionReadyCallback != nil {
+				c.SessionReadyCallback(publishedStatus)
 			}
 
 			<-ready
@@ -805,8 +953,14 @@ func (c *Host) Run(ctx context.Context) error {
 	case shutdownRequested.Load():
 		// We asked for this. Whatever the wait says, the reason is that it was
 		// stopped — and the exit code of a process we killed is not the
-		// command's own outcome, so it is deliberately not reported.
+		// command's own outcome, so it is deliberately not reported. Unless
+		// the asking was the parent going away before the command started,
+		// which is an abandonment: the daemon is the only one who can tell,
+		// because it is the only one who knows whether the command started.
 		runReason = sessiondir.ReasonStopped
+		if abandonedBy(ctx) && !closed(cmdReady) {
+			runReason = sessiondir.ReasonStartupAbandoned
+		}
 	case errors.Is(err, internal.ErrNoInitialClient):
 		// Nobody attached, so nothing ran and nothing failed: the session
 		// was abandoned before its command started.

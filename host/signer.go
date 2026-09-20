@@ -30,6 +30,21 @@ func (e *errDescryptingPrivateKey) Error() string {
 	return fmt.Sprintf("error decrypting private key %s", e.file)
 }
 
+// SignerOptions configures SignersWith.
+type SignerOptions struct {
+	PrivateKeys []string
+	// IdentitiesOnly makes PrivateKeys the whole identity set, as OpenSSH's
+	// IdentitiesOnly does: every entry must resolve to a signer, and no
+	// other key the agent holds is offered.
+	IdentitiesOnly bool
+	// Passphrase is asked for an encrypted key's passphrase. Nil prompts on
+	// this process's terminal, which a daemon does not have.
+	Passphrase func(file string) ([]byte, error)
+	// OnSkip is told about a key file that was skipped and why. Nil is
+	// silent, as SignersFromFiles always was.
+	OnSkip func(file string, err error)
+}
+
 // Signers returns the identities upterm host offers to the server, and a
 // cleanup that releases the agent connection they may sign through.
 //
@@ -40,26 +55,34 @@ func (e *errDescryptingPrivateKey) Error() string {
 // otherwise unparseable with a `.pub` sibling. Without it, the agent's
 // keys are preferred when it has any, then the files that load, then a
 // generated key.
+//
+// Passphrases are prompted for on this process's terminal; a process that
+// has none calls SignersWith instead.
 func Signers(privateKeys []string, identitiesOnly bool) ([]ssh.Signer, func(), error) {
-	if identitiesOnly {
-		return identitySigners(privateKeys, os.Getenv("SSH_AUTH_SOCK"), promptForPassphrase)
+	return SignersWith(SignerOptions{PrivateKeys: privateKeys, IdentitiesOnly: identitiesOnly})
+}
+
+// SignersWith is Signers with the passphrase prompt and the skip report
+// injected. The prompt reaches both paths — identitySigners takes one too —
+// so a daemon, which has no terminal to prompt on, resolves an encrypted key
+// the same way whether or not the identity list is the whole set.
+func SignersWith(opts SignerOptions) ([]ssh.Signer, func(), error) {
+	passphrase := opts.Passphrase
+	if passphrase == nil {
+		passphrase = promptForPassphrase
 	}
 
-	var (
-		signers []ssh.Signer
-		cleanup func()
-		err     error
-	)
+	if opts.IdentitiesOnly {
+		return identitySigners(opts.PrivateKeys, os.Getenv("SSH_AUTH_SOCK"), passphrase)
+	}
 
-	signers, cleanup, err = signersFromSSHAgent(os.Getenv("SSH_AUTH_SOCK"))
+	signers, cleanup, err := signersFromSSHAgent(os.Getenv("SSH_AUTH_SOCK"))
 	if len(signers) == 0 || err != nil {
-		signers, err = SignersFromFiles(privateKeys)
+		signers, err = SignersFromFilesWith(opts.PrivateKeys, passphrase, opts.OnSkip)
 	}
-
 	if len(signers) == 0 || err != nil {
 		signers, err = utils.CreateSigners(nil)
 	}
-
 	return signers, cleanup, err
 }
 
@@ -352,14 +375,27 @@ func (a *lazyAgent) close() {
 }
 
 func SignersFromFiles(privateKeys []string) ([]ssh.Signer, error) {
+	return SignersFromFilesWith(privateKeys, nil, nil)
+}
+
+// SignersFromFilesWith reads every key it can and skips the rest. A key that
+// cannot be read never fails the set: the default key list is every file in
+// ~/.ssh that exists, and one unreadable file must not stop a session.
+func SignersFromFilesWith(privateKeys []string, passphrase func(string) ([]byte, error), onSkip func(string, error)) ([]ssh.Signer, error) {
+	if passphrase == nil {
+		passphrase = promptForPassphrase
+	}
 	var signers []ssh.Signer
 	for _, file := range privateKeys {
-		s, err := signerFromFile(file, promptForPassphrase)
-		if err == nil {
-			signers = append(signers, s)
+		s, err := signerFromFile(file, passphrase)
+		if err != nil {
+			if onSkip != nil {
+				onSkip(file, err)
+			}
+			continue
 		}
+		signers = append(signers, s)
 	}
-
 	return signers, nil
 }
 

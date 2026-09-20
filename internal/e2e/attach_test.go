@@ -19,6 +19,7 @@ import (
 func TestAttachDetachReattach(t *testing.T) {
 	h := newTestHarness(t, 200)
 	name := fmt.Sprintf("e2e-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
 
 	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
 		h.serverURL, h.keyFile, name, h.rcFile)
@@ -94,6 +95,7 @@ func TestAttachRefusesAnUnknownSession(t *testing.T) {
 func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
 	h := newTestHarness(t, 200)
 	name := fmt.Sprintf("e2e-stty-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
 
 	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
 		h.serverURL, h.keyFile, name, h.rcFile)
@@ -151,6 +153,7 @@ func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
 func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 	h := newTestHarness(t, 200)
 	name := fmt.Sprintf("e2e-alt-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
 
 	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
 		h.serverURL, h.keyFile, name, h.rcFile)
@@ -197,6 +200,7 @@ func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 func TestTheSessionFollowsTheSmallestAttachedTerminal(t *testing.T) {
 	h := newTestHarness(t, 200)
 	name := fmt.Sprintf("e2e-size-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
 
 	sizeCmd := filepath.Join(h.tmpDir, "size.sh")
 	require.NoError(t, os.WriteFile(sizeCmd, []byte(
@@ -286,8 +290,14 @@ func TestRedirectedHostOutputReachesTheFile(t *testing.T) {
 	h := newTestHarness(t, 200)
 	out := filepath.Join(h.tmpDir, "out.txt")
 	marker := fmt.Sprintf("PIPE_%d", time.Now().UnixNano())
-	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s -- sh -c 'echo \"PIP\"\"%s\"' > %s 2>&1; echo HOST_EXIT=$?",
-		h.serverURL, h.keyFile, strings.TrimPrefix(marker, "PIP"), out)
+	// The hosted command exits on its own, so this session ends without
+	// being told to; registering it anyway is what keeps the rule simple —
+	// every session this suite starts is named and stopped, and stopping one
+	// that is already over is not an error.
+	name := fmt.Sprintf("e2e-pipe-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- sh -c 'echo \"PIP\"\"%s\"' > %s 2>&1; echo HOST_EXIT=$?",
+		h.serverURL, h.keyFile, name, strings.TrimPrefix(marker, "PIP"), out)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "HOST_EXIT=0", 30*time.Second))
 

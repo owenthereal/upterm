@@ -10,6 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	// Imported by non-test code on purpose: testing.Testing() is the
+	// designed way to ask whether this binary is a test binary, and since
+	// Go 1.13 importing the package registers no flags.
+	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -100,6 +104,13 @@ var (
 	flagPtySize                 string
 	flagTerm                    string
 	flagName                    string
+	flagDetach                  bool
+	flagHostOutput              string
+	// flagHostEscapeChar carries its flag's default here as well as in the
+	// registration below, so parseEscapeChar has a value to accept when the
+	// var is read without hostCmd having run — which is every unit test that
+	// calls parseHostOptions.
+	flagHostEscapeChar = "~"
 )
 
 func hostCmd() *cobra.Command {
@@ -117,7 +128,13 @@ Upterm server uses, in this order:
 Supplying --private-key makes the named list the whole set instead; see its help.
 
 To authorize client connections, use --authorized-keys to specify an authorized_keys file
-containing client public keys.`,
+containing client public keys.
+
+The session runs in a process of its own. This terminal is a client of it:
+type ~. at the start of a line (or --escape-char) to leave the session
+running, reattach with 'upterm attach NAME', and end it with
+'upterm session stop NAME'. With --detach nothing is attached: the session
+starts in the background and this command prints how to reach it.`,
 		Example: `  # Host a terminal session running $SHELL, attaching client's IO to the host's:
   upterm host
 
@@ -140,7 +157,13 @@ containing client public keys.`,
   upterm host --allow-local-tcp-forwarding
 
   # Use a different Uptermd server, hosting a session via WebSocket:
-  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND`,
+  upterm host --server wss://YOUR_UPTERMD_SERVER -- YOUR_COMMAND
+
+  # Start a session in the background and print how to reach it:
+  upterm host --detach --accept --github-user alice
+
+  # The same, as JSON for a script:
+  upterm host --detach --accept --github-user alice -o json`,
 		PreRunE: validateShareRequiredFlags,
 		RunE:    shareRunE,
 	}
@@ -174,6 +197,9 @@ containing client public keys.`,
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
+	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
+	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
+	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -313,6 +339,16 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
+	if flagDetach && !flagAccept {
+		result = multierror.Append(result, fmt.Errorf("--detach requires --accept: a session nobody is watching cannot be confirmed interactively"))
+	}
+	if flagHostOutput != "" && !flagDetach {
+		result = multierror.Append(result, fmt.Errorf("--output requires --detach"))
+	}
+	if flagHostOutput != "" && flagHostOutput != "json" {
+		result = multierror.Append(result, fmt.Errorf("invalid output format %q: must be 'json'", flagHostOutput))
+	}
+
 	if flagServer == "" {
 		result = multierror.Append(result, fmt.Errorf("missing flag --server"))
 	} else {
@@ -369,6 +405,85 @@ func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
 	return errors.New("interactive confirmation requires a terminal on stdin and stdout")
 }
 
+// hostOptions is everything shareRunE derives from flags and arguments
+// without touching the network: both the process that starts a session and
+// the daemon it spawns compute it, from the same argv, and get the same
+// answer.
+type hostOptions struct {
+	command      []string
+	forceCommand []string
+	proxyURL     *url.URL
+	refs         []host.UserRef
+	ptySize      termsize.Size
+	term         string
+	escape       byte
+}
+
+func parseHostOptions(args []string) (hostOptions, error) {
+	var opts hostOptions
+	var err error
+	if opts.proxyURL, err = parseProxyURL(flagProxy); err != nil {
+		return opts, err
+	}
+	opts.command = args
+	if len(opts.command) == 0 {
+		if opts.command, err = shlex.Split(getDefaultShell()); err != nil {
+			return opts, err
+		}
+		if len(opts.command) == 0 {
+			return opts, fmt.Errorf("no command is specified")
+		}
+	}
+	if flagForceCommand != "" {
+		if opts.forceCommand, err = shlex.Split(flagForceCommand); err != nil {
+			return opts, fmt.Errorf("error parsing command %s: %w", flagForceCommand, err)
+		}
+	}
+	if opts.refs, err = collectUserRefs(); err != nil {
+		return opts, err
+	}
+	if flagPtySize != "" {
+		if opts.ptySize, err = termsize.Parse(flagPtySize); err != nil {
+			return opts, err
+		}
+	}
+	opts.term = resolveTerm(flagTerm, os.Getenv("TERM"))
+	if opts.escape, err = parseEscapeChar(flagHostEscapeChar); err != nil {
+		return opts, err
+	}
+	return opts, nil
+}
+
+// resolveAuthorizedKeys reads the authorized keys file and fetches every
+// referenced user's keys, and refuses to start unrestricted when a
+// restriction was asked for.
+func resolveAuthorizedKeys(ctx context.Context, opts hostOptions, logger *slog.Logger) ([]*host.AuthorizedKey, error) {
+	var authorizedKeys []*host.AuthorizedKey
+	if flagAuthorizedKeys != "" {
+		// Not wrapped: AuthorizedKeysFromFile already names both the action and
+		// the file, so a wrap here reads "error reading authorized keys: error
+		// reading authorized keys file /typo: ...".
+		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
+		if err != nil {
+			return nil, err
+		}
+		authorizedKeys = append(authorizedKeys, aks)
+	}
+	if len(opts.refs) > 0 {
+		userKeys, err := host.AuthorizedKeysFromUserRefs(ctx, opts.refs, opts.proxyURL, logger)
+		if err != nil {
+			return nil, fmt.Errorf("error reading user keys: %w", err)
+		}
+		authorizedKeys = append(authorizedKeys, userKeys...)
+	}
+	// An empty authorized-key set means "allow anyone with the session token"
+	// downstream. If the user asked for a restriction, never fall back to that.
+	if authorizationRequested() && countKeys(authorizedKeys) == 0 {
+		return nil, fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
+	}
+	return authorizedKeys, nil
+}
+
 func shareRunE(c *cobra.Command, args []string) error {
 	// Set here rather than on the command, because where it is set is what
 	// divides the two kinds of failure. Cobra raises unknown flags and bad
@@ -379,6 +494,21 @@ func shareRunE(c *cobra.Command, args []string) error {
 	// thirty lines of flags after `exit 2` as if the user had mistyped
 	// something.
 	c.SilenceUsage = true
+
+	logger := uptermctx.Logger(c.Context())
+	if logger == nil {
+		return fmt.Errorf("logger not available")
+	}
+
+	// The daemon, if that is what this process is. Decided before anything
+	// touches stdin or stdout: a daemon has neither.
+	conn, daemonName, err := bootstrapConn()
+	if err != nil {
+		return err
+	}
+	if conn != nil {
+		return mapUserAction(c, runDaemon(c.Context(), logger.Logger, args, conn, daemonName))
+	}
 
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
@@ -392,68 +522,141 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return SilentError{Err: err}
 	}
 
-	proxyURL, err := parseProxyURL(flagProxy)
+	opts, err := parseHostOptions(args)
+	if err != nil {
+		return err
+	}
+	if !spawnSupported {
+		if flagDetach {
+			return errors.New("--detach is not supported on this platform yet")
+		}
+		return runInProcessHost(c, logger.Logger, opts)
+	}
+	return runHostParent(c, logger.Logger, opts)
+}
+
+// hostSpawn is how runHostParent starts the daemon.
+//
+// A var because spawnDaemon re-executes this process with this process's own
+// argv, which is upterm's argv in the binary and the test runner's under `go
+// test`: a test that drives `upterm host` through Root().Execute() and
+// reached spawnDaemon would start a second copy of the test binary, running
+// the whole suite again, once per spawn. So the tests that drive the command
+// in-process point this at a daemon in a goroutine of their own process, and
+// exercise the same exchange over a pipe.
+//
+// Its default is guardedSpawn rather than spawnDaemon itself, so that the
+// refusal is production code that covers every test package rather than one
+// package's TestMain.
+var hostSpawn spawnFunc = guardedSpawn
+
+// guardedSpawn is spawnDaemon with the fork bomb taken out of reach.
+//
+// The daemon is this executable re-executed with os.Args, and in a test
+// binary that argv is the test runner's: a test that reached the real spawn
+// would run the whole suite in a child, which reaches the spawn again, once
+// per test that does, until the machine stops. That has happened, twice.
+// Tests drive `upterm host` through runHostInProcess, which swaps this for an
+// in-process daemon on the far end of a pipe; the one test that needs the
+// real transport calls spawnDaemon directly. Every other reach for the spawn
+// from a test binary is a mistake, and is refused here rather than in any one
+// package's TestMain, which cannot protect a package that does not have one.
+func guardedSpawn(so spawnOptions) (net.Conn, *os.Process, error) {
+	if testing.Testing() {
+		return nil, nil, errors.New("refusing to spawn the daemon from a test binary: drive upterm host through runHostInProcess")
+	}
+	return spawnDaemon(so)
+}
+
+// runHostParent is upterm host on a platform that spawns: the daemon is a
+// child, this process is its operator's terminal.
+func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
+	display := displaySession
+	if flagDetach && flagHostOutput == "json" {
+		// stdout is the JSON; the banner would be noise in it.
+		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
+	}
+	var attachClient clientFunc
+	if !flagDetach {
+		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
+			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
+		}
+	}
+	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
+		s := &spawnedSession{
+			name:         name,
+			detach:       flagDetach,
+			jsonOut:      flagHostOutput == "json",
+			logPath:      utils.UptermLogFilePath(),
+			stdin:        os.Stdin,
+			stdout:       os.Stdout,
+			stderr:       os.Stderr,
+			readSecret:   terminalSecretReader(os.Stdin, os.Stderr),
+			spawn:        hostSpawn,
+			display:      display,
+			attachClient: attachClient,
+			logger:       logger,
+		}
+		return s.run(c.Context())
+	})
+
+	err = mapUserAction(c, err)
+	var ec ExitCodeError
+	if errors.As(err, &ec) && ec.Err == nil {
+		// The line that explains it was printed already; the status is for
+		// a script.
+		c.SilenceErrors = true
+	}
+	return err
+}
+
+// terminalSecretReader reads a passphrase from stdin without echo, or is
+// nil when stdin is not a terminal — a secret cannot be read from a pipe
+// without echoing it somewhere.
+func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
+	if !term.IsTerminal(int(stdin.Fd())) {
+		return nil
+	}
+	return func(string) ([]byte, error) {
+		defer func() { _, _ = fmt.Fprintln(stderr) }()
+		return term.ReadPassword(int(stdin.Fd()))
+	}
+}
+
+// runInProcessHost runs the daemon in this process and attaches this
+// process's terminal to it. It is what upterm host was in stage 2, and what
+// it still is where spawning is not supported.
+func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
+	authorizedKeys, err := resolveAuthorizedKeys(c.Context(), opts, logger)
 	if err != nil {
 		return err
 	}
 
-	if len(args) == 0 {
-		shellCmd := getDefaultShell()
-		args, err = shlex.Split(shellCmd)
-		if err != nil {
-			return err
-		}
-
-		if len(args) == 0 {
-			return fmt.Errorf("no command is specified")
-		}
-	}
-
-	var forceCommand []string
-	if flagForceCommand != "" {
-		forceCommand, err = shlex.Split(flagForceCommand)
-		if err != nil {
-			return fmt.Errorf("error parsing command %s: %w", flagForceCommand, err)
-		}
-	}
-
-	logger := uptermctx.Logger(c.Context())
-	if logger == nil {
-		return fmt.Errorf("logger not available")
-	}
-
-	refs, err := collectUserRefs()
-	if err != nil {
-		return err
-	}
-
-	var authorizedKeys []*host.AuthorizedKey
-	if flagAuthorizedKeys != "" {
-		// Not wrapped: AuthorizedKeysFromFile already names both the action and
-		// the file, so a wrap here reads "error reading authorized keys: error
-		// reading authorized keys file /typo: ...".
-		aks, err := host.AuthorizedKeysFromFile(flagAuthorizedKeys)
-		if err != nil {
-			return err
-		}
-		authorizedKeys = append(authorizedKeys, aks)
-	}
-
-	if len(refs) > 0 {
-		userKeys, err := host.AuthorizedKeysFromUserRefs(c.Context(), refs, proxyURL, logger.Logger)
-		if err != nil {
-			return fmt.Errorf("error reading user keys: %w", err)
-		}
-		authorizedKeys = append(authorizedKeys, userKeys...)
-	}
-
-	// An empty authorized-key set means "allow anyone with the session token"
-	// downstream. If the user asked for a restriction, never fall back to that.
-	if authorizationRequested() && countKeys(authorizedKeys) == 0 {
-		return fmt.Errorf("authorization was requested but no public keys were resolved; refusing to start a session that would accept any client")
-	}
-
-	signers, cleanup, err := host.Signers(flagPrivateKeys, identitiesOnlyRequested())
+	// SignersWith rather than Signers, for OnSkip alone: the daemon reports
+	// which identity it is not using and this path was still silent about it,
+	// so "the skip now says which key" was true of a spawned session only and
+	// not of the platforms that host in-process. No Passphrase, which is the
+	// difference that remains and is right: this process has the terminal,
+	// and SignersWith prompts on it when Passphrase is nil.
+	//
+	// Both halves, because the daemon's OnSkip is both halves. logger is the
+	// file logger root.go builds, so a warning that stops there is in
+	// upterm.log and nowhere the operator is looking; the daemon's second
+	// half, child.Print, is relayed to the parent's stderr, which is where
+	// the operator actually reads it. The line is the daemon's, character for
+	// character. Written synchronously, like the daemon's own relay and like
+	// the version warning above: one short line into an empty stream is
+	// smaller than any pipe buffer, which is the argument printBanner makes
+	// for leaving that warning synchronous too.
+	signers, cleanup, err := host.SignersWith(host.SignerOptions{
+		PrivateKeys:    flagPrivateKeys,
+		IdentitiesOnly: identitiesOnlyRequested(),
+		OnSkip: func(file string, err error) {
+			logger.Warn("skipping private key", "file", file, "error", err)
+			fmt.Fprintf(os.Stderr, "warning: skipping private key %s: %v\n", file, err)
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("error reading private keys: %w", err)
 	}
@@ -473,7 +676,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if flagSkipHostKeyCheck {
 		hkcb, err = host.NewAutoAcceptingHostKeyCallback(os.Stdout, flagKnownHostsFilename)
 	} else {
-		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename, connectionIsProxied(flagServer, proxyURL))
+		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename, connectionIsProxied(flagServer, opts.proxyURL))
 	}
 	if err != nil {
 		return err
@@ -487,42 +690,32 @@ func shareRunE(c *cobra.Command, args []string) error {
 		sftpPermissionChecker = &DialogPermissionChecker{}
 	}
 
-	var ptySize termsize.Size
-	if flagPtySize != "" {
-		ptySize, err = termsize.Parse(flagPtySize)
-		if err != nil {
-			return err
-		}
-	}
-
-	term := resolveTerm(flagTerm, os.Getenv("TERM"))
-
 	// A fresh Host per attempt, because every field that names the session —
 	// Name and the banner the callback prints — belongs to the name this
 	// attempt drew, and because Run fills fields in on the Host it is given.
-	err = runWithGeneratedNameRetry(logger.Logger, flagName, args, func(name string) error {
+	err = runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
 		h := &host.Host{
 			Host:              flagServer,
 			Name:              name,
-			Command:           args,
-			ForceCommand:      forceCommand,
+			Command:           opts.command,
+			ForceCommand:      opts.forceCommand,
 			Signers:           signers,
 			HostKey:           hostKey,
 			HostKeyCallback:   hkcb,
 			AuthorizedKeys:    authorizedKeys,
 			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-			ProxyURL:          proxyURL,
+			ProxyURL:          opts.proxyURL,
 			SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
 				return displaySession(ctx, s, name)
 			},
 			ClientJoinedCallback:    clientJoinedCallback,
 			ClientLeftCallback:      clientLeftCallback,
-			Logger:                  logger.Logger,
+			Logger:                  logger,
 			ReadOnly:                flagReadOnly,
 			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
-			PtySize:                 ptySize,
+			PtySize:                 opts.ptySize,
 			PinPtySize:              flagPtySize != "",
-			Term:                    term,
+			Term:                    opts.term,
 			SFTPDisabled:            flagNoSFTP,
 			SFTPPermissionChecker:   sftpPermissionChecker,
 			// The local terminal attaches before the command starts, so a
@@ -530,27 +723,39 @@ func shareRunE(c *cobra.Command, args []string) error {
 			AwaitInitialClient: true,
 			// The daemon has no terminal; this process does.
 			VersionWarningCallback: func(r *version.CompatibilityResult) {
-				host.DisplayVersionWarning(os.Stdout, logger.Logger, r)
+				host.DisplayVersionWarning(os.Stdout, logger, r)
 			},
 		}
 
-		return runLocalSession(c.Context(), name, os.Stderr, logger.Logger,
+		return runLocalSession(c.Context(), name, os.Stderr, logger,
 			func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
 				h.AttachListeningCallback = onAttachSocket
 				h.CommandStartedCallback = onCommandStarted
 				return h.Run(ctx)
 			},
 			func(ctx context.Context, socket string) (attach.Result, error) {
-				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, term)
+				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
 				// The daemon's own host key, not a re-read of the record: this
 				// is the process presenting the door, so it has the key
 				// directly.
 				keys := []ssh.PublicKey{hostKey.PublicKey()}
-				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger.Logger)
+				// Not opts.escape: this process is the daemon, so a ~. here
+				// would detach the only terminal a foreground process has.
+				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger)
 			})
 	})
 
-	// Handle user actions specially - no help menu
+	return mapUserAction(c, err)
+}
+
+// mapUserAction turns a UserDiscardedError or UserInterruptedError from a
+// run attempt into the exit shareRunE reports, on either path: a decline is
+// a clean exit (nothing printed, status 0), and an interruption silences
+// both usage and error display before being returned — a session the
+// operator declined or interrupted at the prompt is not a fault, and must
+// not read as one in the daemon's log or the foreground's stderr. Anything
+// else is returned unchanged.
+func mapUserAction(c *cobra.Command, err error) error {
 	var userDiscardedErr UserDiscardedError
 	if errors.As(err, &userDiscardedErr) {
 		return nil // Clean exit for user discard (exit code 0)
