@@ -994,6 +994,20 @@ func Test_stopSession(t *testing.T) {
 		require.NotContains(t, err.Error(), "not answering on its admin socket",
 			"the socket answered; it is the method that is missing")
 	})
+	t.Run("a daemon that predates the RPC says so even while it is still starting", func(t *testing.T) {
+		setupSessionRoots(t)
+		// Claimed and left at StatusStarting, which is what a daemon that has
+		// not published ready yet looks like — and the two conditions overlap:
+		// an upterm from before `session stop` can be in exactly this state.
+		d := claimSession(t, "old-start-1")
+		releaseAtEnd(t, d)
+		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"})
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "old-start-1", &out)
+		require.ErrorContains(t, err, "predates 'session stop'")
+		require.NotContains(t, err.Error(), "try again in a moment",
+			"retrying can never reach a method that does not exist there")
+	})
 	t.Run("a session still starting says so", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := claimSession(t, "start-1")

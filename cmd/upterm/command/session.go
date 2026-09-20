@@ -177,15 +177,21 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	_, err = client.StopSession(rpcCtx, &api.StopSessionRequest{})
 	cancelRPC()
 	if err != nil {
-		if rec.Status == sessiondir.StatusStarting {
-			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
-		}
 		// A socket that answers, with the one code that means the method
 		// does not exist there: the session is held by an upterm from
 		// before `session stop`. Nothing this command can send will end it,
 		// so name the pid and let the operator do it.
+		//
+		// Checked ahead of the status, because the two overlap: a daemon
+		// that predates this RPC and is still starting answers Unimplemented
+		// with a starting record, and "try again in a moment" is advice that
+		// can never come good for it. Every later attempt reaches the same
+		// missing method.
 		if status.Code(err) == codes.Unimplemented {
 			return fmt.Errorf("session %s was started by an upterm that predates 'session stop' and cannot be stopped this way; end it yourself (%s)", name, pidOf(rec))
+		}
+		if rec.Status == sessiondir.StatusStarting {
+			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
 		}
 		return fmt.Errorf("session %s is not answering on its admin socket (%s): %w", name, pidOf(rec), err)
 	}
