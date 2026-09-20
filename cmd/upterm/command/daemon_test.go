@@ -179,6 +179,49 @@ func TestRunDaemonProcessReportsANameInUse(t *testing.T) {
 	require.True(t, out.Failed.NameInUse)
 }
 
+// TestRunDaemonReportsAnArgumentItCannotParse pins the one failure that used
+// to be silent. A daemon whose own argv does not parse never reached
+// runDaemonProcess, so nothing was ever sent, and the parent saw its end of
+// the channel close and reported the daemon as gone rather than the reason.
+// Unreachable in practice -- the parent parsed the same argv before it
+// spawned anything -- but a failure shape that only holds while a caller
+// stays correct is not a shape.
+func TestRunDaemonReportsAnArgumentItCannotParse(t *testing.T) {
+	daemonTestRoots(t)
+
+	// Two characters where parseEscapeChar wants one, which is the cheapest
+	// way to make parseHostOptions fail without touching the arguments the
+	// session would run.
+	orig := flagHostEscapeChar
+	flagHostEscapeChar = "xy"
+	t.Cleanup(func() { flagHostEscapeChar = orig })
+
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	parent := bootstrap.NewParent(b, nil, io.Discard, nil)
+	done := make(chan error, 1)
+	go func() {
+		err := runDaemon(context.Background(), discardLogger(), []string{"sh"}, a, "bad-args")
+		// A real daemon's process exits here, and that is what closes its end
+		// of the channel. net.Pipe has to be told, and it matters: without
+		// it, a daemon that sent nothing leaves the parent waiting on a
+		// message that will never come, so the regression this test guards
+		// would hang the package instead of failing it.
+		_ = a.Close()
+		done <- err
+	}()
+	out, err := parent.Run(context.Background(), bootstrap.Handlers{})
+	require.NoError(t, err, "the parent read the reason, not the end of the connection")
+
+	daemonErr := <-done
+	require.ErrorContains(t, daemonErr, "--escape-char")
+	require.NotNil(t, out.Failed, "the parent has to be told why, not left to read EOF as the daemon going away")
+	require.Equal(t, daemonErr.Error(), out.Failed.Error,
+		"the message the parent prints is the daemon's own reason, unaltered")
+	require.False(t, out.Failed.NameInUse)
+	require.False(t, out.Failed.Abandoned)
+}
+
 func TestRunDaemonProcessMapsTheDecision(t *testing.T) {
 	for _, tc := range []struct {
 		dec   api.Accept_Decision

@@ -19,6 +19,36 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// runDaemon is shareRunE when this process is the daemon: the argv it was
+// re-executed with, parsed here, and then the session.
+//
+// The parse lives here rather than in the caller so that its failure is
+// reported the way every later one is. A daemon that returned a parse error
+// without saying anything left its parent watching the connection close,
+// which the parent reports as the daemon having gone away -- true, and
+// useless. It is unreachable in practice, since the parent parsed the same
+// argv before it spawned anything, but the shape of a failure should not
+// depend on that: the one message a daemon owes its parent is the reason.
+func runDaemon(ctx context.Context, logger *slog.Logger, args []string, conn net.Conn, name string) error {
+	opts, err := parseHostOptions(args)
+	if err != nil {
+		reportDaemonFailure(conn, err)
+		return err
+	}
+	return runDaemonProcess(ctx, logger, opts, conn, name,
+		func(ctx context.Context, h *host.Host) error { return h.Run(ctx) })
+}
+
+// reportDaemonFailure tells the parent why this daemon is not starting, for
+// a failure that happens before runDaemonProcess has taken the connection
+// over. The Child is unarmed -- there is no session to abandon -- and closed
+// as soon as the message is on the wire.
+func reportDaemonFailure(conn net.Conn, err error) {
+	child := bootstrap.NewChild(conn, nil)
+	defer func() { _ = child.Close() }()
+	child.Failed(err.Error(), false, false)
+}
+
 // runDaemonProcess is upterm host as the daemon: everything the foreground
 // did in-process, with the operator's terminal on the far end of conn.
 //

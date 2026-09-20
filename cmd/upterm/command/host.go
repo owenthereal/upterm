@@ -507,12 +507,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 	if conn != nil {
-		opts, err := parseHostOptions(args)
-		if err != nil {
-			return err
-		}
-		return mapUserAction(c, runDaemonProcess(c.Context(), logger.Logger, opts, conn, daemonName,
-			func(ctx context.Context, h *host.Host) error { return h.Run(ctx) }))
+		return mapUserAction(c, runDaemon(c.Context(), logger.Logger, args, conn, daemonName))
 	}
 
 	// Refuse before anything is claimed or connected: a session that reaches
