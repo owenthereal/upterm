@@ -195,6 +195,14 @@ func TestRunDaemonReportsAnArgumentItCannotParse(t *testing.T) {
 	orig := flagHostEscapeChar
 	flagHostEscapeChar = "xy"
 	t.Cleanup(func() { flagHostEscapeChar = orig })
+	// parseHostOptions reads this one first, so a bad URL left behind by
+	// another test would fail the daemon on an error this case is not about.
+	// The assertion below names --escape-char and would catch it, but loudly
+	// failing for the wrong reason is still a worse test than not being able
+	// to.
+	origProxy := flagProxy
+	flagProxy = ""
+	t.Cleanup(func() { flagProxy = origProxy })
 
 	a, b := net.Pipe()
 	defer func() { _ = a.Close() }()

@@ -755,6 +755,12 @@ func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
 	restoreString(&flagServer, "ssh://127.0.0.1:1")
 	restoreString(&flagKnownHostsFilename, filepath.Join(dir, "known_hosts"))
 	restoreString(&flagName, "")
+	// The one other global on this path that can decide the outcome:
+	// resolveAuthorizedKeys runs before the signers, so a file left behind by
+	// another test would fail this one above the line it is about. The rest
+	// of what runInProcessHost reads (flagAccept, flagReadOnly, flagPtySize,
+	// flagNoSFTP …) only furnishes the Host, which never gets to dial.
+	restoreString(&flagAuthorizedKeys, "")
 	origKeys := flagPrivateKeys
 	flagPrivateKeys = []string{keyFile}
 	t.Cleanup(func() { flagPrivateKeys = origKeys })

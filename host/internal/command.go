@@ -504,6 +504,14 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 	// the hangup a job-control shell needs to collect its jobs, and the
 	// close that frees a leader stuck in exit(), over an error that says
 	// nothing about either.
+	//
+	// The cost of carrying on is wall clock on an error path: a failed
+	// hangup used to reach the kill in one grace and now walks the whole
+	// escalation, hangupGrace plus three graces, the same worst case as a
+	// command that ignores everything (see DefaultStopGrace). That stays
+	// under `session stop`'s own wait, and the usual reason a send fails is
+	// a group that has already gone -- whose exited is closed, so every wait
+	// after it returns at once.
 	signal := func(sig syscall.Signal) (unsupported bool) {
 		err := ptmx.Signal(sig)
 		switch {
@@ -521,7 +529,7 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 	if gone() {
 		return
 	}
-	if signal(syscall.SIGHUP) {
+	if unsupported := signal(syscall.SIGHUP); unsupported {
 		kill()
 		return
 	}
@@ -537,7 +545,7 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 	if gone() {
 		return
 	}
-	if signal(syscall.SIGTERM) {
+	if unsupported := signal(syscall.SIGTERM); unsupported {
 		kill()
 		return
 	}

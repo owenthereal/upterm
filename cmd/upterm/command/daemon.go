@@ -41,8 +41,13 @@ func runDaemon(ctx context.Context, logger *slog.Logger, args []string, conn net
 
 // reportDaemonFailure tells the parent why this daemon is not starting, for
 // a failure that happens before runDaemonProcess has taken the connection
-// over. The Child is unarmed -- there is no session to abandon -- and closed
-// as soon as the message is on the wire.
+// over, and closes as soon as the message is on the wire.
+//
+// The Child is armed, as every Child is, but with no onParentGone to call:
+// there is no session here to abandon, and the parent leaving first only
+// means nobody is left to read the reason. Anyone who later passes a
+// callback here should know that the arming is real and it is the nil
+// callback that makes the departure a no-op.
 func reportDaemonFailure(conn net.Conn, err error) {
 	child := bootstrap.NewChild(conn, nil)
 	defer func() { _ = child.Close() }()

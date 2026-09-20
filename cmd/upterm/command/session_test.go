@@ -1001,6 +1001,11 @@ func Test_stopSession(t *testing.T) {
 		// an upterm from before `session stop` can be in exactly this state.
 		d := claimSession(t, "old-start-1")
 		releaseAtEnd(t, d)
+		// Asserted, not assumed: the overlap is the whole case, and a Claim
+		// that published some other status would quietly turn this into a
+		// duplicate of the sibling above while still passing.
+		require.Equal(t, sessiondir.StatusStarting, d.Record().Status,
+			"the case is a predating daemon that is also still starting")
 		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"})
 		var out bytes.Buffer
 		err := stopSession(context.Background(), "old-start-1", &out)
