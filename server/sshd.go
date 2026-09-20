@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -37,6 +38,35 @@ type sshd struct {
 	server   *ssh.Server
 	sessions *localSessions
 	mux      sync.Mutex
+	// stopped records a Shutdown that arrived before Serve. run.Group fires
+	// its interrupts once, when the first actor returns, so an actor still
+	// starting up misses its shutdown entirely and would then serve forever
+	// with nobody left to stop it.
+	stopped bool
+	// ln is the listener Serve was handed, recorded under mux so Shutdown can
+	// close it whatever the library is doing. ssh.Server only starts tracking a
+	// listener inside its own Serve, and it clears its done channel when it
+	// takes the first one -- so a Shutdown landing between this struct being
+	// populated and that tracking finds nothing to close, closes a done channel
+	// that is then discarded, and leaves Accept blocked forever. Owning the
+	// listener here closes that window: the flag decides what Serve reports,
+	// and this decides that it stops at all.
+	ln *closeOnceListener
+}
+
+// closeOnceListener makes Close idempotent, reporting the first result to every
+// later caller. sshd closes the listener itself and ssh.Server closes it again
+// from its own bookkeeping; without this the second close reports ErrClosed,
+// and ssh.Server hands that back as a failed shutdown.
+type closeOnceListener struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *closeOnceListener) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
 }
 
 // localSessions tracks sessions created by this process. It drives
@@ -131,6 +161,19 @@ func (s *sshd) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	s.stopped = true
+
+	// Close first, before handing the shutdown to ssh.Server. It only stops
+	// what it has already tracked, and it begins waiting on its listener wait
+	// group after tracking -- so a listener tracked between its close pass and
+	// that wait is never closed by it, and the wait then runs to its deadline
+	// while Accept sits on an open listener. Closing here ends Accept whatever
+	// the library has seen yet, and the close is idempotent, so the library's
+	// own close pass reports success rather than ErrClosed.
+	if s.ln != nil {
+		_ = s.ln.Close()
+	}
+
 	if s.server != nil {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
 		defer cancel()
@@ -154,8 +197,17 @@ func (s *sshd) Serve(ln net.Listener) error {
 		sessions,
 		s.Logger.With("com", "stream-local-handler"),
 	)
+	once := &closeOnceListener{Listener: ln}
 	s.mux.Lock()
+	if s.stopped {
+		s.mux.Unlock()
+		// Shutdown already ran and found no server to stop, so nothing else
+		// will close ln or end this call.
+		_ = once.Close()
+		return ErrListnerClosed
+	}
 	s.sessions = sessions
+	s.ln = once
 	s.server = &ssh.Server{
 		HostSigners: signers,
 		Handler: func(s ssh.Session) {
@@ -193,9 +245,23 @@ func (s *sshd) Serve(ln net.Listener) error {
 			upterm.ServerCreateSessionRequestType: s.createSessionHandler,
 		},
 	}
+	srv := s.server
 	s.mux.Unlock()
 
-	return s.server.Serve(ln)
+	err := srv.Serve(once)
+
+	// ssh.Server reports its own sentinel when it sees the shutdown itself. In
+	// the window where Shutdown closed the listener before the library tracked
+	// it, the library misses that and hands back the raw closed-listener error
+	// instead -- the same stop, named differently by an accident of timing.
+	s.mux.Lock()
+	stopped := s.stopped
+	s.mux.Unlock()
+	if stopped && errors.Is(err, net.ErrClosed) {
+		return ssh.ErrServerClosed
+	}
+
+	return err
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {

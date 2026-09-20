@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"log/slog"
 
+	gliderssh "charm.land/ssh"
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/host/api"
@@ -324,40 +326,63 @@ type Server struct {
 	SessionManager      *SessionManager
 	Logger              *slog.Logger
 
-	sshln net.Listener
-	wsln  net.Listener
-
 	mux    sync.Mutex
 	ctx    context.Context
 	cancel func()
+	// served closes when ServeWithContext returns, which is the moment every
+	// component has run its own shutdown and released its listener. Shutdown
+	// waits on it so that callers keep the guarantee they had when Shutdown
+	// closed the listeners itself: once it returns, nothing is still bound.
+	served chan struct{}
 }
 
+// errShutdownIncomplete reports that serving did not finish inside the
+// shutdown deadline, so a listener may still be bound.
+var errShutdownIncomplete = errors.New("serving did not stop within the shutdown deadline")
+
+// serveStopDeadline bounds how long Shutdown waits for serving to stop.
+//
+// run.Group runs its interrupts one after another, so the components' own
+// budgets add up: routing joins its workers for up to routingShutdownDeadline,
+// then the websocket server and sshd each drain for up to
+// serverShutDownDeadline. That sum is the floor, not the target -- a saturated
+// shutdown that spends all of it is still healthy, and scheduling, timer
+// granularity and the race detector all push it over. Budgeting exactly the sum
+// would answer such a shutdown with a false errShutdownIncomplete and an Error
+// log, which is the noise this deadline exists alongside. Hence the extra
+// serverShutDownDeadline of slack.
+//
+// A variable so tests can shorten it; nothing outside tests assigns to it.
+var serveStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadline
+
+// Shutdown cancels serving and waits for it to finish. It deliberately does not
+// close sshln or wsln: each is owned by the component serving it, which closes
+// it from its own run.Group interrupt as the context unwinds. Closing them here
+// as well made every listener close twice with no ordering between the two, and
+// the loser of that race reported "use of closed network connection" from
+// whichever side it landed on.
 func (s *Server) Shutdown() error {
 	s.mux.Lock()
-	defer s.mux.Unlock()
+	cancel, served := s.cancel, s.served
+	s.mux.Unlock()
 
 	var err error
 
-	// Stop accepting new connections first. An already-closed listener is
-	// success, not failure: the serving path closes these same listeners on its
-	// way down -- sshProxy.Shutdown closes sshln by way of SSHRouting, and
-	// webSocketProxy.Shutdown closes wsln by way of http.Server -- so whichever
-	// side loses the race sees net.ErrClosed, and the listener is shut either way.
-	if s.sshln != nil {
-		if sshErr := s.sshln.Close(); sshErr != nil && !errors.Is(sshErr, net.ErrClosed) {
-			err = errors.Join(err, fmt.Errorf("ssh listener close: %w", sshErr))
-		}
+	if cancel != nil {
+		cancel()
 	}
 
-	if s.wsln != nil {
-		if wsErr := s.wsln.Close(); wsErr != nil && !errors.Is(wsErr, net.ErrClosed) {
-			err = errors.Join(err, fmt.Errorf("websocket listener close: %w", wsErr))
+	// A Server that never served has nothing to wait for. Waiting on a nil
+	// channel would block until the deadline and report a false timeout.
+	if served != nil {
+		timer := time.NewTimer(serveStopDeadline)
+		defer timer.Stop()
+		select {
+		case <-served:
+		case <-timer.C:
+			s.Logger.Error("timed out waiting for serving to stop", "deadline", serveStopDeadline)
+			err = errors.Join(err, errShutdownIncomplete)
 		}
-	}
-
-	// Cancel context to signal graceful shutdown
-	if s.cancel != nil {
-		s.cancel()
 	}
 
 	// Clean up sessions created by this node
@@ -377,9 +402,13 @@ func (s *Server) Shutdown() error {
 
 func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
 	s.mux.Lock()
-	s.sshln, s.wsln = sshln, wsln
 	s.ctx, s.cancel = context.WithCancel(ctx)
+	// Shutdown may already be waiting on a previous run's channel, so give it a
+	// fresh one rather than reusing whatever is there.
+	s.served = make(chan struct{})
+	served := s.served
 	s.mux.Unlock()
+	defer close(served)
 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
@@ -460,6 +489,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 	{
 		ln, err := sshdDialListener.Listen()
 		if err != nil {
+			// run.Group actors do not start until Run, so nothing has taken
+			// sshln or wsln over yet and they are still this call's to release.
+			closeListeners(s.Logger, sshln, wsln)
 			return err
 		}
 
@@ -480,7 +512,41 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		})
 	}
 
-	return g.Run()
+	// A shutdown someone asked for is not a failure. Each component reports the
+	// stop in its own vocabulary -- routing its ErrListnerClosed, http.Server
+	// its ErrServerClosed, the context watcher a cancellation -- and run.Group
+	// hands back whichever happened to return first, so without this the same
+	// clean shutdown surfaced a different error run to run and every caller,
+	// the ftests harness included, logged it.
+	if err := g.Run(); !isRequestedStop(err) {
+		return err
+	}
+
+	return nil
+}
+
+// closeListeners releases listeners that no component has taken over, for the
+// paths that give up before serving starts. Each listener otherwise has exactly
+// one owner, so this is only ever reached when there is no owner at all.
+func closeListeners(logger *slog.Logger, lns ...net.Listener) {
+	for _, ln := range lns {
+		if ln == nil {
+			continue
+		}
+		if err := ln.Close(); err != nil {
+			logger.Error("error releasing listener after a failed start", "error", err)
+		}
+	}
+}
+
+// isRequestedStop reports whether err is how a component says it stopped
+// because it was told to, rather than because something went wrong.
+func isRequestedStop(err error) bool {
+	return err == nil ||
+		errors.Is(err, ErrListnerClosed) ||
+		errors.Is(err, http.ErrServerClosed) ||
+		errors.Is(err, gliderssh.ErrServerClosed) ||
+		errors.Is(err, context.Canceled)
 }
 
 // connDialer reaches the node or socket an identifier resolves to. DialContext

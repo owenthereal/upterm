@@ -26,6 +26,8 @@ type webSocketProxy struct {
 
 	srv *http.Server
 	mux sync.Mutex
+	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
+	stopped bool
 }
 
 func webHandler(h http.Handler) http.Handler {
@@ -53,6 +55,11 @@ func webHandler(h http.Handler) http.Handler {
 
 func (s *webSocketProxy) Serve(ln net.Listener) error {
 	s.mux.Lock()
+	if s.stopped {
+		s.mux.Unlock()
+		_ = ln.Close()
+		return http.ErrServerClosed
+	}
 	s.srv = &http.Server{
 		Handler: webHandler(&wsHandler{
 			ConnDialer:     s.ConnDialer,
@@ -69,10 +76,14 @@ func (s *webSocketProxy) Shutdown() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	s.stopped = true
+
 	if s.srv != nil {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
 		defer cancel()
 
+		// http.Server owns wsln outright -- Server.Shutdown no longer closes it --
+		// so Shutdown closes it exactly once and a close error here is a real one.
 		return s.srv.Shutdown(ctx)
 	}
 
