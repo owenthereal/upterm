@@ -3,39 +3,31 @@
 package command
 
 import (
-	"errors"
-	"fmt"
-	"io"
+	"net"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
-	"time"
 
-	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
-	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
-// TestSpawnHelperProcess is the child of TestSpawnDaemonHandsTheChildItsChannel:
-// the test binary re-executed with UPTERM_SPAWN_HELPER=1. It reports what it
-// finds on its stdout, which the parent pointed at the log file, and exits.
-func TestSpawnHelperProcess(t *testing.T) {
-	if os.Getenv("UPTERM_SPAWN_HELPER") != "1" {
-		return
-	}
-	defer os.Exit(0)
-	report := func(k, v string) { fmt.Printf("REPORT %s=%s\n", k, v) }
+// daemonHandoffEnv is the variable whose presence makes this process the
+// daemon on this platform: here, the descriptor the socketpair was handed
+// over on.
+const daemonHandoffEnv = daemonFDEnv
 
-	conn, name, err := bootstrapConn()
-	if err != nil || conn == nil {
-		report("bootstrap", fmt.Sprintf("err=%v nil=%v", err, conn == nil))
-		return
-	}
-	report("name", name)
+// daemonEnvCleared reports whether bootstrapConn removed every variable this
+// transport hands a daemon, so the hosted command cannot inherit any of them.
+func daemonEnvCleared() bool {
+	return os.Getenv(daemonFDEnv) == "" && os.Getenv(daemonNameEnv) == ""
+}
+
+// reportPlatformFindings adds what only a Unix child can answer: that it is a
+// session of its own, that its stdin is /dev/null, that the channel it holds
+// is marked close-on-exec, and that it holds exactly one AF_UNIX stream.
+func reportPlatformFindings(report func(k, v string), conn net.Conn) {
 	var unixSockets int
 	for fd := 3; fd < 256; fd++ {
 		typ, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
@@ -49,7 +41,6 @@ func TestSpawnHelperProcess(t *testing.T) {
 		}
 	}
 	report("unix_sockets", strconv.Itoa(unixSockets))
-	report("env_unset", strconv.FormatBool(os.Getenv(daemonFDEnv) == "" && os.Getenv(daemonNameEnv) == ""))
 	sid, _ := unix.Getsid(0)
 	report("session_leader", strconv.FormatBool(sid == os.Getpid()))
 	stdinInfo, _ := os.Stdin.Stat()
@@ -59,76 +50,25 @@ func TestSpawnHelperProcess(t *testing.T) {
 	rc, _ := conn.(syscall.Conn).SyscallConn()
 	_ = rc.Control(func(fd uintptr) { flags, _ = unix.FcntlInt(fd, unix.F_GETFD, 0) })
 	report("cloexec", strconv.FormatBool(flags&unix.FD_CLOEXEC != 0))
-	fmt.Fprintln(os.Stderr, "STDERR_MARKER")
-
-	// Echo one message, then wait for the parent's EOF: the only proof that
-	// this process holds no copy of the parent's end.
-	c := bootstrap.NewConn(conn)
-	if m, err := c.Recv(); err == nil {
-		_ = c.Send(m)
-	}
-	_, err = c.Recv()
-	report("eof", strconv.FormatBool(errors.Is(err, io.EOF)))
 }
 
-func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "upterm.log")
-	conn, proc, err := spawnDaemon(spawnOptions{
-		executable: os.Args[0],
-		args:       []string{"-test.run=^TestSpawnHelperProcess$"},
-		env:        append(os.Environ(), "UPTERM_SPAWN_HELPER=1"),
-		name:       "helper-1",
-		logPath:    logPath,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, proc)
-	defer func() { _ = conn.Close() }()
-
-	c := bootstrap.NewConn(conn)
-	require.NoError(t, c.Send(&api.Startup{Msg: &api.Startup_Print{Print: &api.Print{Text: "ping"}}}))
-	m, err := c.Recv()
-	require.NoError(t, err)
-	require.Equal(t, "ping", m.GetPrint().GetText(), "the child answers on the inherited channel")
-
-	require.NoError(t, conn.Close())
-	require.Eventually(t, func() bool {
-		b, _ := os.ReadFile(logPath)
-		return strings.Contains(string(b), "REPORT eof=")
-	}, 10*time.Second, 50*time.Millisecond, "the child never saw EOF after the parent closed: it holds a copy of the parent's end")
-
-	b, err := os.ReadFile(logPath)
-	require.NoError(t, err)
-	log := string(b)
+func requirePlatformReports(t *testing.T, log string) {
+	t.Helper()
 	for _, want := range []string{
-		"REPORT name=helper-1",
-		"REPORT env_unset=true",
 		"REPORT session_leader=true",
 		"REPORT stdin_devnull=true",
 		"REPORT cloexec=true",
+		// A socketpair whose peer is closed is EOF, not a reset, so the
+		// stricter shape is required here rather than only parent_gone.
 		"REPORT eof=true",
-		"STDERR_MARKER",
 	} {
 		require.Contains(t, log, want)
 	}
-	// Anchored at the end of the line, not a substring: "unix_sockets=10"
-	// contains "unix_sockets=1", and ten leaked descriptors is exactly what
-	// this is meant to catch.
+	// Both anchored at the end of the line rather than taken as substrings,
+	// for the same reason: "unix_sockets=10" contains "unix_sockets=1", and
+	// ten leaked descriptors is exactly what that one is meant to catch.
 	require.Regexp(t, `(?m)REPORT unix_sockets=1$`, log,
 		"the one is net.FileConn's close-on-exec dup of the child's own end; a second would be the child's inherited copy of that same end")
-}
-
-func TestSpawnDaemonRequiresANameAndALog(t *testing.T) {
-	_, _, err := spawnDaemon(spawnOptions{logPath: "/tmp/x"})
-	require.Error(t, err)
-	_, _, err = spawnDaemon(spawnOptions{name: "x"})
-	require.Error(t, err)
-}
-
-func TestBootstrapConnIsNilOutsideADaemon(t *testing.T) {
-	t.Setenv(daemonFDEnv, "")
-	_ = os.Unsetenv(daemonFDEnv)
-	conn, name, err := bootstrapConn()
-	require.NoError(t, err)
-	require.Nil(t, conn)
-	require.Empty(t, name)
+	require.Regexp(t, `(?m)REPORT handoff=3$`, log,
+		"ExtraFiles[0], and nothing about that is negotiable: the child looks the descriptor up by the number spawnDaemon hands it")
 }

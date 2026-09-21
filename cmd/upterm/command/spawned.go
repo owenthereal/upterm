@@ -58,6 +58,9 @@ type clientOutcome struct {
 func (s *spawnedSession) run(ctx context.Context) error {
 	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath})
 	if err != nil {
+		if _, statErr := os.Stat(s.logPath); statErr == nil {
+			return fmt.Errorf("could not start the session daemon: %w (see %s)", err, s.logPath)
+		}
 		return fmt.Errorf("could not start the session daemon: %w", err)
 	}
 	parent := bootstrap.NewParent(conn, s.stdin, s.stderr, s.readSecret)

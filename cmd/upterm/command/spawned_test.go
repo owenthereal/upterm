@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,6 +101,42 @@ func newSession(t *testing.T, spawn spawnFunc, client clientFunc, stdout, stderr
 		attachClient: client,
 		logger:       discardLogger(),
 	}
+}
+
+// TestSpawnedSessionNamesTheLogWhenTheSpawnFails pins that a failure to spawn
+// the daemon names the log only when the spawn got far enough to have opened
+// one. spawn_unix.go and spawn_windows.go each os.OpenFile the log
+// themselves, so a failure before that point (nonce, bootstrap directory,
+// listener) has no log to point at, and naming one that is not there would
+// mislead.
+func TestSpawnedSessionNamesTheLogWhenTheSpawnFails(t *testing.T) {
+	t.Run("log exists", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "upterm.log")
+		require.NoError(t, os.WriteFile(logPath, nil, 0o600))
+		spawn := func(spawnOptions) (net.Conn, *os.Process, error) {
+			return nil, nil, errors.New("boom")
+		}
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.logPath = logPath
+
+		err := s.run(context.Background())
+		require.ErrorContains(t, err, "boom")
+		require.ErrorContains(t, err, "(see "+logPath+")")
+	})
+	t.Run("no log yet", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "upterm.log") // never created
+		spawn := func(spawnOptions) (net.Conn, *os.Process, error) {
+			return nil, nil, errors.New("boom")
+		}
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.logPath = logPath
+
+		err := s.run(context.Background())
+		require.ErrorContains(t, err, "boom")
+		require.NotContains(t, err.Error(), "(see")
+	})
 }
 
 func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
