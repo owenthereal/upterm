@@ -12,18 +12,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSuspendAvailableFollowsTheInheritedDisposition pins the guard that
-// keeps stopSelf from waiting forever: a process that inherited SIGTSTP
-// ignored — a child of a non-interactive shell — cannot stop itself, so the
-// ~^Z hook must not be installed at all.
-func TestSuspendAvailableFollowsTheInheritedDisposition(t *testing.T) {
-	// Not parallel: the disposition is process-wide.
-	t.Cleanup(func() { signal.Reset(syscall.SIGTSTP) })
+// TestSuspendAvailableWithholdsTheHookWhenSIGTSTPIsIgnored pins the guard's
+// wiring: the hook is offered exactly when the probe says SIGTSTP is not
+// ignored. It swaps the probe rather than the process's real disposition,
+// because signal.Ignore is one-way — signal.Reset does not restore a handler
+// sigignore has already cleared — so ignoring for real would leave SIGTSTP
+// SIG_IGN for every test that runs after this one in the binary.
+//
+// The disposition this guard cannot see, an inherited SIG_IGN, is not
+// testable here at all: signal.Ignored never reports it (see
+// suspendAvailable). That case is covered downstream, by the bound
+// TestStopSelfReturnsWhenTheStopNeverLands pins.
+func TestSuspendAvailableWithholdsTheHookWhenSIGTSTPIsIgnored(t *testing.T) {
+	// Not parallel: the probe is a package var.
+	prev := tstpIgnored
+	t.Cleanup(func() { tstpIgnored = prev })
 
-	signal.Reset(syscall.SIGTSTP)
-	require.True(t, suspendAvailable(), "the default disposition stops the process, so the hook is offered")
+	tstpIgnored = func() bool { return false }
+	require.True(t, suspendAvailable(), "a SIGTSTP that is not ignored stops the process, so the hook is offered")
 
-	signal.Ignore(syscall.SIGTSTP)
+	tstpIgnored = func() bool { return true }
 	require.False(t, suspendAvailable(), "an ignored SIGTSTP cannot stop the process, so the hook is withheld")
 }
 

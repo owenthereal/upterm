@@ -18,13 +18,23 @@ const suspendSupported = true
 // test can shorten it.
 var suspendContWait = 2 * time.Second
 
-// suspendAvailable reports whether this process can actually be stopped. A
-// child of a non-interactive shell inherits SIGTSTP ignored, and raising an
-// ignored SIGTSTP is a no-op — which, with a stop that waits to be
-// continued, would be a wait that never ends. Decided once, when the hook is
-// installed: with no hook, ~^Z is not offered and both bytes reach the
+// tstpIgnored reports whether SIGTSTP is ignored through os/signal.
+// Injectable so the guard's wiring can be tested without changing the
+// process's real disposition, which os/signal cannot undo.
+var tstpIgnored = func() bool { return signal.Ignored(syscall.SIGTSTP) }
+
+// suspendAvailable reports whether the ~^Z hook should be offered. It
+// withholds it when *this* process has ignored SIGTSTP through os/signal,
+// which is the whole of what signal.Ignored can tell us here: Go's
+// runtime.initsig skips every signal whose table entry carries _SigDefault —
+// SIGTSTP is one — so sigInitIgnored never runs for it and
+// signal.Ignored(SIGTSTP) stays false whatever disposition was inherited. An
+// inherited SIG_IGN, the child-of-a-non-interactive-shell case, is therefore
+// invisible to this guard; that one, like an orphaned process group, is
+// caught downstream by stopSelf's bounded wait. Decided once, when the hook
+// is installed: with no hook, ~^Z is not offered and both bytes reach the
 // session, exactly as on a platform without job control.
-func suspendAvailable() bool { return !signal.Ignored(syscall.SIGTSTP) }
+func suspendAvailable() bool { return !tstpIgnored() }
 
 // stopSelf stops this process and returns once it has been continued — or
 // once suspendContWait has gone by without the stop ever landing.
