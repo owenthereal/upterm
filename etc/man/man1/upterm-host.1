@@ -30,8 +30,11 @@ containing client public keys.
 The session runs in a process of its own. This terminal is a client of it:
 type ~. at the start of a line (or --escape-char) to leave the session
 running, reattach with 'upterm attach NAME', and end it with
-\&'upterm session stop NAME'. With --detach nothing is attached: the session
-starts in the background and this command prints how to reach it.
+\&'upterm session stop NAME'. On Unix, ~^Z suspends this terminal instead — fg
+resumes it. A session that keeps producing output while this terminal is
+suspended may disconnect it before fg runs; 'upterm attach NAME' brings it
+back. With --detach nothing is attached: the session starts in the
+background and this command prints how to reach it.
 
 
 .SH OPTIONS
@@ -56,7 +59,7 @@ starts in the background and this command prints how to reach it.
 
 .PP
 \fB--escape-char\fP="~"
-	Escape character for detaching this terminal from the session (ESC-CHAR followed by . at the start of a line), or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.
+	Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable. No effect where the session runs in this process (Windows, until spawning lands there): the only terminal there is the session's own.
 
 .PP
 \fB-f\fP, \fB--force-command\fP=""

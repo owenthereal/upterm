@@ -12,6 +12,7 @@ import (
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -57,17 +58,48 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	if !lt.rawMode {
 		return client.Run(ctx)
 	}
-	var (
-		res attach.Result
-		err error
-	)
-	if rawErr := withRawTerminal(stdin, owned, func() error {
-		res, err = client.Run(ctx)
-		return nil
-	}); rawErr != nil {
-		return attach.Result{}, fmt.Errorf("unable to set terminal to raw mode: %w", rawErr)
+	raw := &rawTerminal{f: stdin, owned: owned}
+	if err := raw.enter(); err != nil {
+		return attach.Result{}, fmt.Errorf("unable to set terminal to raw mode: %w", err)
 	}
-	return res, err
+	defer raw.restore()
+	if suspendSupported && suspendAvailable() {
+		client.Suspend = func() termsize.Size { return suspendLocalTerminal(raw, stdout, stopSelf) }
+	}
+	return client.Run(ctx)
+}
+
+// suspendLocalTerminal is the ~^Z hook's body, lifted out of the closure that
+// builds it so both halves of it can be pinned by a test: give the terminal
+// back before stopping and take it again after, so a shell prompt printed
+// while this process still held raw mode is not left without echo. The size
+// is measured after the resume, because the terminal may have been resized
+// while we were stopped.
+//
+// Re-entering is conditional on raw.owned, unlike the give-it-back half —
+// deliberately asymmetric, and not pushed into rawTerminal.enter itself,
+// whose contract elsewhere is to fail loudly when raw mode is unavailable
+// rather than silently no-op. ^Z then bg leaves this process resuming in the
+// background: the shell sent SIGCONT without handing the terminal back, and
+// SIGTTOU is ignored (host.InstallSignalPolicy), so the re-entering
+// tcsetattr would otherwise succeed against a terminal that is no longer
+// this process's to touch — writing raw termios over the foreground shell's,
+// exactly the hazard withRawTerminal's own comment describes for its
+// deferred restore. Left cooked in that case; the EIO the input goroutine
+// gets on its next read of a background terminal is what detaches it.
+//
+// stop is stopSelf in production; a test injects one that does not actually
+// stop the process, so the terminal's state at the instant it runs — and
+// after this returns — can both be observed without staging real job
+// control.
+func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func() error) termsize.Size {
+	raw.restore()
+	_ = stop()
+	if raw.owned(raw.f) {
+		_ = raw.enter()
+	}
+	size, _ := tty.Size(stdout)
+	return size
 }
 
 // localDisconnectMessage is what upterm host prints when the daemon

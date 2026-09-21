@@ -189,6 +189,83 @@ func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 		"the terminal was handed back on the session's alternate screen, with everything before the attach out of sight")
 }
 
+// TestAttachSuspendsAndResumes drives ~^Z through a real terminal, because
+// nothing smaller can: job control needs a shell that owns the pty, and
+// in-process tests cannot be the foreground of a pty pair they opened.
+//
+// This client is the session's primary (a pty and Stdin, declared
+// interactive), and a primary's sink writes synchronously — see
+// host/internal/hostclient.go's hostSink doc. A session producing output
+// continuously would fill that client's SSH channel window while it is
+// stopped and, past primaryStallTimeout, be disconnected by the daemon's own
+// watchdog before fg ever runs — a real interaction with suspend, not a bug
+// in it, and out of scope for this change. This test's session is an idle
+// shell, which is why it does not see that: nothing is written while the
+// client is stopped, so the watchdog never arms. A guest, by contrast, would
+// be unaffected either way — its sink is asynchronous and droppable.
+func TestAttachSuspendsAndResumes(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-suspend-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+
+	hostCmd := fmt.Sprintf("upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile &",
+		h.serverURL, h.keyFile, name, h.rcFile)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+
+	term := h.splitPane(h.host)
+	// No trailing "; echo STATUS=$?" here, unlike the plain detach tests: bash
+	// treats a job stopping mid-list as that command completing with status
+	// 128+SIGTSTP and runs straight on to what follows the semicolon, so a
+	// combined line would print a stop status long before fg ever runs. The
+	// eventual detach's own status is read separately, after fg returns.
+	require.NoError(t, term.SendLine(h.ctx, "upterm attach "+name))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second), "attach did not reach the session's prompt")
+
+	// ~^Z at the start of a line suspends: the escape byte, then the literal
+	// control byte raw mode would otherwise hand straight to the session.
+	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, term.SendKeys(h.ctx, "~"))
+	require.NoError(t, term.SendKeys(h.ctx, "C-z"))
+	require.NoError(t, h.waitForText(term, "Stopped", 15*time.Second), "the attach process did not stop")
+
+	// The pane is cleared, and the clear confirmed, before fg: the pane is
+	// showing the outer shell while the job is stopped, and uptermPrompt has
+	// already been on it since line 212. Without the clear, waiting for it
+	// again below would match on its first poll no matter what fg did, the
+	// same trap TestAttachDetachReattach guards against for its own replay
+	// assertion.
+	require.NoError(t, term.SendLine(h.ctx, "clear"))
+	require.Eventually(t, func() bool {
+		content, err := term.Capture(h.ctx)
+		return err == nil && !strings.Contains(content, uptermPrompt)
+	}, 10*time.Second, 50*time.Millisecond, "the screen was not cleared, so the assertion below would prove nothing")
+
+	// fg hands the terminal back to the attach client, which re-enters raw
+	// mode and resumes forwarding.
+	require.NoError(t, term.SendLine(h.ctx, "fg"))
+
+	// A shell prompt repaints on Enter; the WINCH nudge this resume sends is
+	// what repaints a full-screen program, which this plain shell is not.
+	// This can now only pass if the session is actually forwarding again:
+	// the screen was cleared above, so uptermPrompt reappearing is the
+	// resumed client's own doing, not text already sitting on the pane.
+	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 15*time.Second), "the session's prompt did not reappear after fg")
+
+	marker := fmt.Sprintf("RESUMED_%d", time.Now().UnixNano())
+	require.NoError(t, term.SendLine(h.ctx, fmt.Sprintf(`echo "RES""%s"`, strings.TrimPrefix(marker, "RES"))))
+	require.NoError(t, h.waitForText(term, marker, 10*time.Second), "input typed after resume did not reach the session")
+
+	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
+	require.NoError(t, term.SendKeys(h.ctx, "~."))
+	require.NoError(t, h.waitForText(term, "detached from session "+name, 10*time.Second))
+
+	// fg's own exit status is the resumed attach's, once it returns.
+	require.NoError(t, term.SendLine(h.ctx, "echo FG_STATUS=$?"))
+	require.NoError(t, h.waitForText(term, "FG_STATUS=0", 10*time.Second), "a detach must exit 0")
+}
+
 // The pty is sized to the smallest terminal watching it, and gives the size
 // back when that terminal leaves. Two panes of different heights are enough:
 // the session takes the shorter one while both are attached, and returns to

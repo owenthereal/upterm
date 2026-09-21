@@ -185,7 +185,7 @@ Put a terminal on a session started without one, from any shell on the same mach
 upterm attach build-shell
 ```
 
-Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and `guestCount` in the JSON is what a script should watch.
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and `guestCount` in the JSON is what a script should watch.
 
 ### File Transfer (SFTP/SCP)
 

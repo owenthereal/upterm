@@ -59,15 +59,42 @@ func classifyTerminal(stdin, stdout *os.File, owned func(*os.File) bool, termNam
 // is ever foregrounded again, the shell's job control puts the settings back
 // as part of resuming it.
 func withRawTerminal(f *os.File, owned func(*os.File) bool, fn func() error) error {
-	oldState, err := term.MakeRaw(int(f.Fd()))
+	raw := &rawTerminal{f: f, owned: owned}
+	if err := raw.enter(); err != nil {
+		return err
+	}
+	defer raw.restore()
+	return fn()
+}
+
+// rawTerminal holds f in raw mode across enters and restores, for an
+// attachment that has to give the terminal back in the middle — ~^Z.
+//
+// The state saved on the FIRST enter is the one restored, always: a restore
+// that finds this process in the background does nothing (see
+// withRawTerminal's comment for why), and re-entering after one of those
+// would otherwise save raw mode as the state to return to and leave the
+// terminal raw at the end.
+type rawTerminal struct {
+	f     *os.File
+	owned func(*os.File) bool
+	orig  *term.State
+}
+
+func (r *rawTerminal) enter() error {
+	st, err := term.MakeRaw(int(r.f.Fd()))
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if !owned(f) {
-			return
-		}
-		_ = term.Restore(int(f.Fd()), oldState)
-	}()
-	return fn()
+	if r.orig == nil {
+		r.orig = st
+	}
+	return nil
+}
+
+func (r *rawTerminal) restore() {
+	if r.orig == nil || !r.owned(r.f) {
+		return
+	}
+	_ = term.Restore(int(r.f.Fd()), r.orig)
 }

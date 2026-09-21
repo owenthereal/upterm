@@ -321,6 +321,156 @@ func TestClientEscapeDetaches(t *testing.T) {
 	}
 }
 
+// winSize is a captured WindowChange, for asserting what the client resized
+// the session to after a resume.
+type winSize struct{ Rows, Cols int }
+
+// signalRecordingDoor records every window-change and signal request its
+// session receives, once its pty has been read, so a test can assert what a
+// resume delivered. ptyRead barriers the same way TestClientForwardsWindowChanges'
+// does: charm has nothing synchronising a window-change against Pty(), so a
+// send before the door has called it would be lost.
+type signalRecordingDoor struct {
+	ptyRead chan struct{}
+
+	mu    sync.Mutex
+	sizes []winSize
+	sigs  []string
+}
+
+func newSignalRecordingDoor() *signalRecordingDoor {
+	return &signalRecordingDoor{ptyRead: make(chan struct{})}
+}
+
+func (d *signalRecordingDoor) handle(s gssh.Session) {
+	_, winCh, ok := s.Pty()
+	if !ok {
+		return
+	}
+	sigCh := make(chan gssh.Signal, 8)
+	s.Signals(sigCh)
+	close(d.ptyRead)
+	for {
+		select {
+		case w, ok := <-winCh:
+			if !ok {
+				return
+			}
+			if w.Width == 80 && w.Height == 24 {
+				continue // the pty-req's own window, which charm delivers first
+			}
+			d.mu.Lock()
+			d.sizes = append(d.sizes, winSize{Rows: w.Height, Cols: w.Width})
+			d.mu.Unlock()
+		case sig := <-sigCh:
+			d.mu.Lock()
+			d.sigs = append(d.sigs, string(sig))
+			d.mu.Unlock()
+		}
+	}
+}
+
+func (d *signalRecordingDoor) windowChanges() []winSize {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]winSize(nil), d.sizes...)
+}
+
+func (d *signalRecordingDoor) signals() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.sigs...)
+}
+
+// The hook stands in for the terminal: it records that it was called and
+// reports the size the terminal has on resume, which is how a resize that
+// happened while the process was stopped reaches the session.
+func TestClient_SuspendSequenceCallsTheHookThenResizesAndNudges(t *testing.T) {
+	var calls atomic.Int32
+	door := newSignalRecordingDoor()
+	d := serveDoor(t, door.handle)
+
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
+		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
+	c.Suspend = func() termsize.Size {
+		calls.Add(1)
+		return termsize.Size{Rows: 24, Cols: 100}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAsync(t, ctx, c)
+
+	select {
+	case <-door.ptyRead:
+	case <-time.After(testTimeout):
+		t.Fatal("the door never read the pty")
+	}
+
+	_, err := pw.Write([]byte("\r~\x1a"))
+	require.NoError(t, err)
+
+	deadline := time.Now().Add(testTimeout)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, int32(1), calls.Load())
+
+	for len(door.windowChanges()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, []winSize{{Rows: 24, Cols: 100}}, door.windowChanges())
+
+	for len(door.signals()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, []string{"WINCH"}, door.signals())
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// Suspend nil: the two bytes reach the session, so a platform without job
+// control shows ^Z to the command rather than swallowing it.
+func TestClient_SuspendSequenceIsPassedThroughWithoutAHook(t *testing.T) {
+	door := newRecordingDoor()
+	d := serveDoor(t, door.handle)
+
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAsync(t, ctx, c)
+
+	select {
+	case <-door.started:
+	case <-time.After(testTimeout):
+		t.Fatal("the shell never started")
+	}
+
+	_, err := pw.Write([]byte("\r~\x1a"))
+	require.NoError(t, err)
+
+	deadline := time.Now().Add(testTimeout)
+	for door.taken() != "\r~\x1a" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Equal(t, "\r~\x1a", door.taken(), "with no Suspend hook both escape bytes are the session's")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
 func TestClientStdinEOFDetaches(t *testing.T) {
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.Copy(io.Discard, s)

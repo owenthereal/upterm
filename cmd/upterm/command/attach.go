@@ -56,8 +56,11 @@ terminals can attach to it over time. With no NAME, the one running session
 is attached to; with several, the name is required.
 
 To detach, type the escape character at the start of a line followed by a
-period: ~. by default. ~~ sends a literal ~. Everything else is sent to the
-session as typed. A SIGTERM or SIGHUP detaches too.
+period: ~. by default. ~~ sends a literal ~. On Unix, ~^Z suspends this
+terminal instead — fg resumes it. A session that keeps producing output
+while this terminal is suspended may disconnect it before fg runs (the
+same 254 below); 'upterm attach NAME' brings it back. Everything else is
+sent to the session as typed. A SIGTERM or SIGHUP detaches too.
 
 Exit status: 0 after a detach; the command's own status once the session
 ends; 254 if the session disconnected this terminal (a stalled or overflowed
@@ -71,7 +74,7 @@ could not attach.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: attachRunE,
 	}
-	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line), or 'none' to disable.")
+	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
 	return cmd
 }
 
