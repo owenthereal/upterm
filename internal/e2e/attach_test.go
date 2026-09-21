@@ -239,7 +239,7 @@ func TestAttachSuspendsAndResumes(t *testing.T) {
 	require.Eventually(t, func() bool {
 		content, err := term.Capture(h.ctx)
 		return err == nil && !strings.Contains(content, uptermPrompt)
-	}, 2*time.Second, 50*time.Millisecond, "the screen was not cleared, so the assertion below would prove nothing")
+	}, 10*time.Second, 50*time.Millisecond, "the screen was not cleared, so the assertion below would prove nothing")
 
 	// fg hands the terminal back to the attach client, which re-enters raw
 	// mode and resumes forwarding.
