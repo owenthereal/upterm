@@ -3,10 +3,13 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/owenthereal/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -117,6 +120,108 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 	require.NoError(t, h.host.SendLine(h.ctx, "clear; upterm session stop "+name+"; echo STOP_STATUS=$?"))
 	require.NoError(t, h.waitForText(h.host, "STOP_STATUS=0", 40*time.Second))
 	require.NoError(t, h.waitForText(client, "Connection to", 20*time.Second), "the guest's ssh ends with the session")
+}
+
+// A stop reaches every terminal attached to the session, not only the one
+// that started it. Both the host's own terminal and an `upterm attach` see
+// it exactly as they would see the command exiting on its own: the door
+// gives a command that was signalled rather than exited sess.Exit(1)
+// (host/internal/server.go's commandDone branch — a stop sends SIGHUP to
+// the command's process group, so bash dies by signal, not by exiting), and
+// each terminal prints commandExitedMessage — the same sentence `upterm
+// attach` prints for a command exit — before it goes. Both restore the
+// terminal modes they found on the way out: the host's own through
+// localclient.go, `upterm attach` through withRawTerminal in
+// cmd/upterm/command/terminal.go. Every other stop test in this file stops
+// a session with nothing attached; this is the one with two terminals on
+// it when the stop lands.
+func TestSessionStopReleasesAttachedTerminals(t *testing.T) {
+	h := newTestHarness(t, 200)
+	name := fmt.Sprintf("e2e-stopat-%d", time.Now().UnixNano()%1_000_000)
+	h.stopOnCleanup(name)
+
+	// The comparison lives in a script, as in
+	// TestAttachLeavesTheTerminalAsItFoundIt: a pane is narrower than the
+	// line this would otherwise be, and a marker split across a wrap is one
+	// no assertion can find. modes() is that test's function verbatim — it
+	// compares the modes raw mode turns off, not `stty -g`, because that
+	// blob carries PENDIN too, a kernel state bit meaning "input is
+	// pending" that the very keystrokes starting this script set, so
+	// comparing it whole would report a difference that has nothing to do
+	// with whether the terminal was restored.
+	//
+	// The script takes a label and then the command to run, so one script
+	// serves both terminals. Its markers — HOST_STATUS=, HOST_TTY=,
+	// ATTACH_STATUS=, ATTACH_TTY= — never appear in the typed command line,
+	// which carries only the bare label: a wait for one of them can only
+	// match the script's own output, never the terminal's echo of the
+	// keystrokes that started it.
+	script := filepath.Join(h.tmpDir, "stop-modes.sh")
+	require.NoError(t, os.WriteFile(script, []byte(
+		"modes() { stty -a | tr ' ,' '\\n\\n' | grep -E '^-?(echo|icanon|isig|iexten|icrnl|opost)$' | sort | tr '\\n' ' '; }\n"+
+			"label=$1; shift\n"+
+			"before=$(modes)\n"+
+			"\"$@\"\n"+
+			"status=$?\n"+
+			"after=$(modes)\n"+
+			"echo \"${label}_STATUS=$status\"\n"+
+			"if [ \"$before\" = \"$after\" ]; then echo \"${label}_TTY=same\"; else echo \"${label}_TTY=CHANGED [$before] [$after]\"; fi\n"),
+		0755))
+
+	hostCmd := fmt.Sprintf("sh %s HOST upterm host --accept --skip-host-key-check --server %s --private-key %s --name %s -- bash --rcfile %s --noprofile",
+		script, h.serverURL, h.keyFile, name, h.rcFile)
+	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
+	require.NoError(t, h.waitForText(h.host, uptermPrompt, 30*time.Second), "the host's own terminal is attached to the session")
+
+	// A second terminal attaches the same way.
+	term := h.splitPane(h.host)
+	require.NoError(t, term.SendLine(h.ctx, fmt.Sprintf("sh %s ATTACH upterm attach %s", script, name)))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second))
+
+	// Liveness before the stop, so what follows means something: two
+	// terminals, one running session.
+	live := fmt.Sprintf("LIVE_%d", time.Now().UnixNano())
+	require.NoError(t, h.host.SendLine(h.ctx, fmt.Sprintf(`echo "LIV""%s"`, strings.TrimPrefix(live, "LIV"))))
+	require.NoError(t, h.waitForText(h.host, live, 10*time.Second))
+	require.NoError(t, h.waitForText(term, live, 10*time.Second))
+
+	// The stop, from a third terminal. Split off vertically (top/bottom)
+	// rather than through h.splitPane's horizontal (side-by-side) split:
+	// h.host has already given up half its width to term, and a second
+	// side-by-side split would leave it too narrow to print the 66-column
+	// sentence below without an in-pane line wrap that breaks the
+	// wait's substring match — a tmux layout artifact, not anything the
+	// session gets wrong. A vertical split costs h.host height instead of
+	// width, which none of its assertions need.
+	ctl, err := h.host.SplitWindow(h.ctx, &tmux.SplitWindowOptions{
+		SplitDirection: tmux.PaneSplitDirectionVertical,
+		ShellCommand:   "bash --norc --noprofile",
+	})
+	require.NoError(t, err)
+	require.NoError(t, ctl.SendLine(h.ctx, "upterm session stop "+name+"; echo STOP_STATUS=$?"))
+	require.NoError(t, h.waitForText(ctl, "STOP_STATUS=0", 40*time.Second))
+
+	// Both attached terminals see the stop as a command exit: the sentence,
+	// the signalled-command status, and their terminal back the way they
+	// found it. A failed restore shows up in the wait's error as
+	// "…_TTY=CHANGED [before] [after]", which is the diagnostic wanted.
+	require.NoError(t, h.waitForText(h.host, "ended: command exited (status 1)", 20*time.Second))
+	require.NoError(t, h.waitForText(h.host, "HOST_STATUS=1", 15*time.Second))
+	require.NoError(t, h.waitForText(h.host, "HOST_TTY=same", 15*time.Second))
+	require.NoError(t, h.waitForText(term, "ended: command exited (status 1)", 20*time.Second))
+	require.NoError(t, h.waitForText(term, "ATTACH_STATUS=1", 15*time.Second))
+	require.NoError(t, h.waitForText(term, "ATTACH_TTY=same", 15*time.Second))
+
+	// And the record agrees. ctl is only a fraction of the window's height
+	// after the vertical split above, and the indented JSON runs to more
+	// lines than that: the two lines the assertion needs are filtered out
+	// of it before they reach the pane, so the visible screen is enough.
+	require.NoError(t, ctl.SendLine(h.ctx, "clear; upterm session info "+name+` -o json | grep -E '"(status|reason)"'; echo "INFO""_DONE"`))
+	require.NoError(t, h.waitForText(ctl, "INFO_DONE", 20*time.Second))
+	out, err := ctl.Capture(h.ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, `"status": "ended"`)
+	require.Contains(t, out, `"reason": "stopped"`)
 }
 
 // A detached session whose command exits at once is still a session that
