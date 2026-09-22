@@ -242,7 +242,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	{
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
-			EventEmmiter:   s.EventEmitter,
 			Logger:         s.Logger,
 		}
 
@@ -501,8 +500,20 @@ func serverConn(sess gssh.Session) *ssh.ServerConn {
 
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
-	EventEmmiter   *emitter.Emitter
 	Logger         *slog.Logger
+}
+
+type authenticatedGuestKey struct{}
+
+type authenticatedGuest struct {
+	auth *server.AuthRequest
+	key  ssh.PublicKey
+}
+
+var guestEventSequence atomic.Uint64
+
+func guestEventID(transportID string) string {
+	return fmt.Sprintf("%s/%d", transportID, guestEventSequence.Add(1))
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
@@ -516,13 +527,13 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 	// TODO: sshproxy already rejects unauthorized keys
 	// Does host still need to check them?
 	if len(h.AuthorizedKeys) == 0 {
-		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+		ctx.SetValue(authenticatedGuestKey{}, authenticatedGuest{auth, pk})
 		return true
 	}
 
 	for _, k := range h.AuthorizedKeys {
 		if utils.KeysEqual(k, pk) {
-			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+			ctx.SetValue(authenticatedGuestKey{}, authenticatedGuest{auth, pk})
 			return true
 		}
 	}
@@ -590,16 +601,9 @@ type sessionHandler struct {
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
-	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
-
-	// A guest's join is announced by its authentication, where the certificate
-	// that describes it is. The host door has neither: a key that only names
-	// the client, and a connection that may open no session at all. Announced
-	// there, a local process that connects and leaves would be a client that
-	// joined and never left — a phantom in the repo that nothing removes.
-	// Announced here, it pairs with the left event deferred above.
 	if h.kind == kindHost {
 		emitHostClientJoinEvent(h.eventEmmiter, sessionID, sess.Context().ClientVersion(), sess.PublicKey())
+		defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 	}
 
 	// Whether this client is still connected, handed to the size tracking so
@@ -942,6 +946,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			if err := ptmx.Redraw(); err != nil {
 				h.logger.Debug("redraw nudge skipped", "session-id", sessionID, "error", err)
 			}
+		}
+	}
+
+	if h.kind == kindGuest {
+		if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
+			id := guestEventID(sessionID)
+			emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
+			defer emitClientLeftEvent(h.eventEmmiter, id)
 		}
 	}
 

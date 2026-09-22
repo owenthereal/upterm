@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
@@ -383,10 +385,11 @@ func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
 
 	joined := make(chan struct{})
 	var once sync.Once
+	latch := &guestJoinLatch{update: update, now: time.Now,
+		disarm: func() { once.Do(func() { close(joined) }) }}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now,
-			func() { once.Do(func() { close(joined) }) })
+		errCh <- latch.note(&api.Client{Kind: api.Client_GUEST})
 	}()
 
 	select {
@@ -412,18 +415,62 @@ func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
 
 func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
 	var rec sessiondir.Record
-	update := func(mutate func(*sessiondir.Record)) error { mutate(&rec); return nil }
+	updates := 0
+	update := func(mutate func(*sessiondir.Record)) error { updates++; mutate(&rec); return nil }
 	noop := func() {}
 
 	first := time.Now().UTC().Add(-time.Hour)
-	require.NoError(t, noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, func() time.Time { return first }, noop))
-	require.NoError(t, noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now, noop))
+	latch := &guestJoinLatch{update: update, now: func() time.Time { return first }, disarm: noop}
+	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
+	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
 	require.True(t, rec.FirstGuestJoinedAt.Equal(first), "a later guest must not move it")
+	require.Equal(t, 1, updates, "later guests must not publish the record again")
 
 	var hostOnly sessiondir.Record
 	updateHost := func(mutate func(*sessiondir.Record)) error { mutate(&hostOnly); return nil }
-	require.NoError(t, noteGuestJoined(updateHost, &api.Client{Kind: api.Client_HOST}, time.Now, noop))
+	hostLatch := &guestJoinLatch{update: updateHost, now: time.Now, disarm: noop}
+	require.NoError(t, hostLatch.note(&api.Client{Kind: api.Client_HOST}))
 	require.True(t, hostOnly.FirstGuestJoinedAt.IsZero(), "the host's own terminal is not a guest")
+}
+
+func TestGuestLatchRetriesFailedPublication(t *testing.T) {
+	var rec sessiondir.Record
+	updates := 0
+	update := func(mutate func(*sessiondir.Record)) error {
+		updates++
+		mutate(&rec)
+		if updates == 1 {
+			return errors.New("disk write failed")
+		}
+		return nil
+	}
+	first := time.Now().UTC().Add(-time.Hour)
+	guest := &api.Client{Kind: api.Client_GUEST}
+	now := func() time.Time { return first }
+	noop := func() {}
+	latch := &guestJoinLatch{update: update, now: now, disarm: noop}
+	require.Error(t, latch.note(guest))
+	require.NoError(t, latch.note(guest))
+	require.NoError(t, latch.note(guest))
+	require.Equal(t, 2, updates)
+	require.True(t, rec.FirstGuestJoinedAt.Equal(first))
+}
+
+func TestClientLifecyclePairsLeftBeforeJoined(t *testing.T) {
+	repo := internal.NewClientRepo()
+	var events []string
+	lifecycle := &clientLifecycle{
+		repo:        repo,
+		pendingLeft: make(map[string]struct{}),
+		onGuestJoin: func(*api.Client) error { events = append(events, "latch"); return nil },
+		onJoined:    func(*api.Client) { events = append(events, "joined") },
+		onLeft:      func(*api.Client) { events = append(events, "left") },
+	}
+	guest := &api.Client{Id: "quick-session", Kind: api.Client_GUEST}
+	lifecycle.left(guest.Id)
+	lifecycle.joined(guest)
+	require.Nil(t, repo.Get(guest.Id), "a rapid accepted session must not remain connected")
+	require.Equal(t, []string{"latch", "joined", "left"}, events)
 }
 
 // Through a tunnel, x/crypto hands the callback the proxy's address. Printing
@@ -477,6 +524,7 @@ type joinTimeoutHost struct {
 	root, relayAddr, finishFile string
 	ready                       chan struct{}
 	joined                      chan struct{}
+	left                        chan struct{}
 	created                     *api.GetSessionResponse
 	done                        chan error
 }
@@ -514,7 +562,7 @@ func newJoinTimeoutHost(t *testing.T) *joinTimeoutHost {
 		}
 	})
 	f := &joinTimeoutHost{root: root, relayAddr: ln.Addr().String(), finishFile: filepath.Join(root, "finish"),
-		ready: make(chan struct{}), joined: make(chan struct{}, 4), done: make(chan error, 1)}
+		ready: make(chan struct{}), joined: make(chan struct{}, 4), left: make(chan struct{}, 4), done: make(chan error, 1)}
 	f.h = &Host{Host: "ssh://" + f.relayAddr, Name: "deadline", Logger: logger,
 		KeepAliveDuration: time.Second, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Signers: []ssh.Signer{key}, StopGrace: 50 * time.Millisecond,
 		Command:                []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep 0.01; done; read code < "$1"; exit "$code"`, "sh", f.finishFile},
@@ -523,6 +571,11 @@ func newJoinTimeoutHost(t *testing.T) *joinTimeoutHost {
 		ClientJoinedCallback: func(c *api.Client) {
 			if c.Kind == api.Client_GUEST {
 				f.joined <- struct{}{}
+			}
+		},
+		ClientLeftCallback: func(c *api.Client) {
+			if c.Kind == api.Client_GUEST {
+				f.left <- struct{}{}
 			}
 		},
 	}
@@ -579,6 +632,18 @@ func (f *joinTimeoutHost) record(t *testing.T) *sessiondir.Record {
 
 func (f *joinTimeoutHost) join(t *testing.T) {
 	t.Helper()
+	client := f.guestClient(t)
+	sess, err := client.NewSession()
+	require.NoError(t, err)
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	require.NoError(t, sess.Shell())
+	awaitJoinTimeoutSignal(t, f.joined, "guest join")
+	// Leaving cannot re-arm the deadline.
+	require.NoError(t, client.Close())
+}
+
+func (f *joinTimeoutHost) guestClient(t *testing.T) *ssh.Client {
+	t.Helper()
 	key, err := NewHostKey()
 	require.NoError(t, err)
 	conn, err := net.DialTimeout("tcp", f.relayAddr, 3*time.Second)
@@ -590,13 +655,35 @@ func (f *joinTimeoutHost) join(t *testing.T) {
 	require.NoError(t, err)
 	client := ssh.NewClient(sshConn, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+func TestJoinTimeoutAuthOnlyGuestDoesNotJoin(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 300 * time.Millisecond
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	client := f.guestClient(t)
+	defer client.Close()
+	require.NoError(t, f.result(t))
+	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+	require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
+}
+
+func TestJoinTimeoutRejectedNoPtyGuestDoesNotJoin(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 300 * time.Millisecond
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	client := f.guestClient(t)
+	defer client.Close()
 	sess, err := client.NewSession()
 	require.NoError(t, err)
-	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
 	require.NoError(t, sess.Shell())
-	awaitJoinTimeoutSignal(t, f.joined, "guest join")
-	// Leaving cannot re-arm the deadline.
-	require.NoError(t, client.Close())
+	_ = sess.Wait()
+	require.NoError(t, f.result(t))
+	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+	require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
 }
 
 func TestJoinTimeoutDoesNotEndAJoinedSession(t *testing.T) {
@@ -605,6 +692,7 @@ func TestJoinTimeoutDoesNotEndAJoinedSession(t *testing.T) {
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
 	f.join(t)
+	awaitJoinTimeoutSignal(t, f.left, "guest left")
 	select {
 	case err := <-f.done:
 		t.Fatalf("joined session ended: %v", err)
@@ -613,6 +701,7 @@ func TestJoinTimeoutDoesNotEndAJoinedSession(t *testing.T) {
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonExited, f.record(t).Reason)
+	require.False(t, f.record(t).FirstGuestJoinedAt.IsZero())
 }
 
 func TestJoinTimeoutZeroDoesNotEndASession(t *testing.T) {

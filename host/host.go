@@ -440,8 +440,9 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
-// noteGuestJoined disarms the join deadline and latches the first guest join
-// into the record, in that order.
+// guestJoinLatch disarms the join deadline and publishes the first guest join
+// into the record, in that order. A successful publication is attempted once;
+// a failed publication is retried on a later guest.
 //
 // disarm runs before the record write, not after. The in-memory signal is
 // what the deadline actually watches; making it wait on a filesystem write
@@ -452,22 +453,78 @@ func closed(ch <-chan struct{}) bool {
 // session somebody is sitting in will stop it. The in-memory latch still
 // holds, so this process's own deadline is safe either way -- it is the
 // external reader that loses.
-func noteGuestJoined(
-	update func(func(*sessiondir.Record)) error,
-	client *api.Client,
-	now func() time.Time,
-	disarm func(),
-) error {
+type guestJoinLatch struct {
+	update    func(func(*sessiondir.Record)) error
+	now       func() time.Time
+	disarm    func()
+	published bool
+}
+
+// Emit is asynchronous, so a short session's left may reach the consumer
+// before its joined. This state reconciles both topics in one actor.
+type clientLifecycle struct {
+	repo        *internal.ClientRepo
+	pendingLeft map[string]struct{}
+	onGuestJoin func(*api.Client) error
+	onJoined    func(*api.Client)
+	onLeft      func(*api.Client)
+	logger      *slog.Logger
+	recordPath  string
+}
+
+func (l *clientLifecycle) joined(client *api.Client) {
+	_ = l.repo.Add(client)
+	if l.logger != nil {
+		l.logger.Info("Client joined", "client", client.Addr)
+	}
+	if l.onGuestJoin != nil {
+		if err := l.onGuestJoin(client); err != nil && l.logger != nil {
+			l.logger.Error("failed to publish the first guest join; readers may stop this session as unjoined",
+				"record", l.recordPath, "error", err)
+		}
+	}
+	if l.onJoined != nil {
+		l.onJoined(client)
+	}
+	if _, left := l.pendingLeft[client.Id]; left {
+		delete(l.pendingLeft, client.Id)
+		l.left(client.Id)
+	}
+}
+
+func (l *clientLifecycle) left(id string) {
+	client := l.repo.Get(id)
+	if client == nil {
+		l.pendingLeft[id] = struct{}{}
+		return
+	}
+	if l.logger != nil {
+		l.logger.Info("Client left", "client", client.Addr)
+	}
+	l.repo.Delete(id)
+	if l.onLeft != nil {
+		l.onLeft(client)
+	}
+}
+
+func (l *guestJoinLatch) note(client *api.Client) error {
 	if client.GetKind() != api.Client_GUEST {
 		return nil
 	}
-	disarm()
-	return update(func(r *sessiondir.Record) {
+	l.disarm()
+	if l.published {
+		return nil
+	}
+	err := l.update(func(r *sessiondir.Record) {
 		if !r.FirstGuestJoinedAt.IsZero() {
 			return
 		}
-		r.FirstGuestJoinedAt = now().UTC()
+		r.FirstGuestJoinedAt = l.now().UTC()
 	})
+	if err == nil {
+		l.published = true
+	}
+	return err
 }
 
 // ClaimTimeout bounds how long Run waits for the session registry when it
@@ -832,63 +889,59 @@ func (c *Host) Run(ctx context.Context) error {
 	// it. Off stays in the interrupts, which run once, after Run.
 	clientJoined := eventEmitter.On(upterm.EventClientJoined)
 	clientLeft := eventEmitter.On(upterm.EventClientLeft)
-	{
-		g.Add(func() error {
-			for evt := range clientJoined {
-				args := evt.Args
-				if len(args) == 0 {
-					continue
-				}
-
-				client, ok := args[0].(*api.Client)
-				if ok {
-					_ = clientRepo.Add(client)
-					logger.Info("Client joined", "client", client.Addr)
-					disarm := func() { guestJoinedOnce.Do(func() { close(guestJoined) }) }
-					if c.SessionDir != nil {
-						if err := noteGuestJoined(c.SessionDir.Update, client, time.Now, disarm); err != nil {
-							// Not fatal, but not silent: a reader told "no
-							// guest" for a session in use will stop it.
-							logger.Error("failed to publish the first guest join; readers may stop this session as unjoined",
-								"record", c.SessionDir.RecordPath(), "error", err)
-						}
-					} else if client.GetKind() == api.Client_GUEST {
-						disarm()
-					}
-					if c.ClientJoinedCallback != nil {
-						c.ClientJoinedCallback(client)
-					}
-				}
+	var guestLatch *guestJoinLatch
+	if c.SessionDir != nil {
+		guestLatch = &guestJoinLatch{
+			update: c.SessionDir.Update,
+			now:    time.Now,
+			disarm: func() { guestJoinedOnce.Do(func() { close(guestJoined) }) },
+		}
+	}
+	lifecycle := &clientLifecycle{
+		repo: clientRepo, pendingLeft: make(map[string]struct{}),
+		onJoined: c.ClientJoinedCallback, onLeft: c.ClientLeftCallback,
+		logger: logger,
+	}
+	if guestLatch != nil {
+		lifecycle.onGuestJoin = guestLatch.note
+		lifecycle.recordPath = c.SessionDir.RecordPath()
+	} else {
+		lifecycle.onGuestJoin = func(client *api.Client) error {
+			if client.GetKind() == api.Client_GUEST {
+				guestJoinedOnce.Do(func() { close(guestJoined) })
 			}
-
 			return nil
-		}, func(err error) {
-			eventEmitter.Off(upterm.EventClientJoined)
-		})
+		}
 	}
 	{
 		g.Add(func() error {
-			for evt := range clientLeft {
-				args := evt.Args
-				if len(args) == 0 {
-					continue
-				}
-
-				cid, ok := args[0].(string)
-				if ok {
-					client := clientRepo.Get(cid)
-					if client != nil {
-						logger.Info("Client left", "client", client.Addr)
-						clientRepo.Delete(cid)
-						if c.ClientLeftCallback != nil {
-							c.ClientLeftCallback(client)
+			for clientJoined != nil || clientLeft != nil {
+				select {
+				case evt, ok := <-clientJoined:
+					if !ok {
+						clientJoined = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if client, ok := evt.Args[0].(*api.Client); ok {
+							lifecycle.joined(client)
+						}
+					}
+				case evt, ok := <-clientLeft:
+					if !ok {
+						clientLeft = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if id, ok := evt.Args[0].(string); ok {
+							lifecycle.left(id)
 						}
 					}
 				}
 			}
-
 			return nil
 		}, func(err error) {
+			eventEmitter.Off(upterm.EventClientJoined)
 			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}

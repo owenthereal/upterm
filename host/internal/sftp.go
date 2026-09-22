@@ -26,7 +26,6 @@ type SFTPSession struct {
 // HandleSFTP handles SFTP subsystem requests
 func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
-	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
 
 	// Clean up permission cache when session ends
 	if h.sftpPermissionChecker != nil {
@@ -67,6 +66,11 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 
 	// Set start directory to user's home for relative path resolution
 	server := sftp.NewRequestServer(sess, handlers, sftp.WithStartDirectory(userHome))
+	if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
+		id := guestEventID(sessionID)
+		emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
+		defer emitClientLeftEvent(h.eventEmmiter, id)
+	}
 	if err := server.Serve(); err != nil {
 		if err != io.EOF {
 			h.logger.Error("sftp server error", "error", err)
