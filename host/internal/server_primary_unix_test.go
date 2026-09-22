@@ -377,12 +377,12 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	// parked in the pty; microseconds of work, so the margin is large.
 	time.Sleep(200 * time.Millisecond)
 
-	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
+	_, bOut, _, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
 		withDialDeadline(60*time.Second))
 	bID := nextClientID(t, joined)
 	require.NotEqual(t, aID, bID)
 	awaitLiveQuery(t, bOut)
-	require.Equal(t, bID, h.srv.hostClients.primaryID(), "the elector still holds the disconnected client")
+	require.Equal(t, bGate.transportID, h.srv.hostClients.primaryID(), "the elector still holds the disconnected client")
 
 	aGate.resumeReads()
 }
@@ -407,7 +407,7 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, aOut, "READY")
 	aID := nextClientID(t, joined)
-	require.Equal(t, aID, h.srv.hostClients.primaryID())
+	require.Equal(t, aGate.transportID, h.srv.hostClients.primaryID())
 
 	// More than the 2 MiB SSH channel window, so this can only complete if
 	// the daemon's input actor is draining it into the pty.
@@ -431,13 +431,13 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 		t.Fatal("the flood write was never released")
 	}
 
-	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	_, bOut, _, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	bID := nextClientID(t, joined)
 	require.NotEqual(t, aID, bID)
 	readUntil(t, bOut, "READY") // the replay; proves B is served
 
 	require.Eventually(t, func() bool {
-		return h.srv.hostClients.primaryID() == bID
+		return h.srv.hostClients.primaryID() == bGate.transportID
 	}, harnessTimeout, 10*time.Millisecond, "the elector still holds the client that hung up")
 }
 
@@ -528,8 +528,8 @@ func TestInputAcceptedBeforeAHangUpIsDeliveredWhenTheCommandReads(t *testing.T) 
 	readUntil(t, bOut, "262144")
 }
 
-// nextClientID is the session id of the next client to join, which is how a
-// test names a client the harness only hands it streams for.
+// nextClientID is the lifecycle event ID of the next client to join. It is
+// distinct from the SSH transport ID used by host election and sizing.
 func nextClientID(t *testing.T, joined <-chan emitter.Event) string {
 	t.Helper()
 	select {
