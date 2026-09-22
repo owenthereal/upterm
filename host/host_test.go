@@ -7,8 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -357,6 +361,47 @@ func Test_autoAcceptingHostKeyCallbackValidatesKnownKeys(t *testing.T) {
 	err = cb("127.0.0.1:22", addr, pk)
 	assert.Error(t, err, "should reject mismatched key to prevent MITM")
 	assert.Contains(t, err.Error(), "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED")
+}
+
+func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
+	// The in-memory disarm must not wait on the record write. A slow disk
+	// would otherwise let the deadline fire after the guest had already
+	// arrived, which is the failure the latch exists to prevent.
+	release := make(chan struct{})
+	var rec sessiondir.Record
+	update := func(mutate func(*sessiondir.Record)) error {
+		<-release // publication is stuck
+		mutate(&rec)
+		return nil
+	}
+
+	joined := make(chan struct{})
+	var once sync.Once
+	go noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now,
+		func() { once.Do(func() { close(joined) }) })
+
+	select {
+	case <-joined:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the disarm waited on the record write")
+	}
+	close(release)
+}
+
+func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
+	var rec sessiondir.Record
+	update := func(mutate func(*sessiondir.Record)) error { mutate(&rec); return nil }
+	noop := func() {}
+
+	first := time.Now().UTC().Add(-time.Hour)
+	noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, func() time.Time { return first }, noop)
+	noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now, noop)
+	require.True(t, rec.FirstGuestJoinedAt.Equal(first), "a later guest must not move it")
+
+	var hostOnly sessiondir.Record
+	updateHost := func(mutate func(*sessiondir.Record)) error { mutate(&hostOnly); return nil }
+	noteGuestJoined(updateHost, &api.Client{Kind: api.Client_HOST}, time.Now, noop)
+	require.True(t, hostOnly.FirstGuestJoinedAt.IsZero(), "the host's own terminal is not a guest")
 }
 
 // Through a tunnel, x/crypto hands the callback the proxy's address. Printing

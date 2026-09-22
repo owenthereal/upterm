@@ -429,6 +429,36 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
+// noteGuestJoined disarms the join deadline and latches the first guest join
+// into the record, in that order.
+//
+// disarm runs before the record write, not after. The in-memory signal is
+// what the deadline actually watches; making it wait on a filesystem write
+// would let a slow disk expire a deadline that a guest had already answered.
+//
+// A publication failure is logged by the caller, never swallowed silently:
+// a reader that asks "has anyone ever joined?" and is told "no" for a
+// session somebody is sitting in will stop it. The in-memory latch still
+// holds, so this process's own deadline is safe either way -- it is the
+// external reader that loses.
+func noteGuestJoined(
+	update func(func(*sessiondir.Record)) error,
+	client *api.Client,
+	now func() time.Time,
+	disarm func(),
+) error {
+	if client.GetKind() != api.Client_GUEST {
+		return nil
+	}
+	disarm()
+	return update(func(r *sessiondir.Record) {
+		if !r.FirstGuestJoinedAt.IsZero() {
+			return
+		}
+		r.FirstGuestJoinedAt = now().UTC()
+	})
+}
+
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
 //
@@ -540,6 +570,8 @@ func (c *Host) Run(ctx context.Context) error {
 	// would report "signaled" or "exited 137" for something the operator asked
 	// for, on a platform-dependent basis.
 	var shutdownRequested atomic.Bool
+	guestJoined := make(chan struct{})
+	var guestJoinedOnce sync.Once
 
 	if c.SessionDir != nil {
 		dir := c.SessionDir
@@ -800,6 +832,17 @@ func (c *Host) Run(ctx context.Context) error {
 				if ok {
 					_ = clientRepo.Add(client)
 					logger.Info("Client joined", "client", client.Addr)
+					disarm := func() { guestJoinedOnce.Do(func() { close(guestJoined) }) }
+					if c.SessionDir != nil {
+						if err := noteGuestJoined(c.SessionDir.Update, client, time.Now, disarm); err != nil {
+							// Not fatal, but not silent: a reader told "no
+							// guest" for a session in use will stop it.
+							logger.Error("failed to publish the first guest join; readers may stop this session as unjoined",
+								"record", c.SessionDir.RecordPath(), "error", err)
+						}
+					} else if client.GetKind() == api.Client_GUEST {
+						disarm()
+					}
 					if c.ClientJoinedCallback != nil {
 						c.ClientJoinedCallback(client)
 					}

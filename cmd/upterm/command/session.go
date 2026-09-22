@@ -402,6 +402,11 @@ type sessionInfo struct {
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
 	Signal           string   `json:"signal,omitempty"`
+	// FirstGuestJoinedAt is when a guest first joined, latched and never
+	// moved by a later join; zero and omitted when none ever did. A caller
+	// asking "has anyone ever joined?" reads this, not guestCount, which is
+	// a current count and misses a guest who has already left.
+	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
 }
 
 // statusEnded is the reader's inference, not a status any session writes:
@@ -493,17 +498,18 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 // has decided on.
 func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 	return sessionInfo{
-		Name:         rec.Name,
-		LaunchID:     rec.LaunchID,
-		Status:       status,
-		SessionID:    rec.SessionID,
-		Command:      strings.Join(rec.Command, " "),
-		ForceCommand: strings.Join(rec.ForceCommand, " "),
-		LogPath:      rec.LogPath,
-		Pid:          rec.Pid,
-		Reason:       rec.Reason,
-		ExitCode:     rec.ExitCode,
-		Signal:       rec.Signal,
+		Name:               rec.Name,
+		LaunchID:           rec.LaunchID,
+		Status:             status,
+		SessionID:          rec.SessionID,
+		Command:            strings.Join(rec.Command, " "),
+		ForceCommand:       strings.Join(rec.ForceCommand, " "),
+		LogPath:            rec.LogPath,
+		Pid:                rec.Pid,
+		Reason:             rec.Reason,
+		ExitCode:           rec.ExitCode,
+		Signal:             rec.Signal,
+		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
 	}
 }
 

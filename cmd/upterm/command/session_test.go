@@ -426,6 +426,16 @@ func lookupJSON(t *testing.T, name string) map[string]any {
 	return m
 }
 
+func TestInfoFromRecordCarriesFirstGuestJoinedAt(t *testing.T) {
+	joined := time.Now().UTC().Truncate(time.Second)
+	info := infoFromRecord(&sessiondir.Record{Name: "j", FirstGuestJoinedAt: joined}, statusEnded)
+	require.True(t, info.FirstGuestJoinedAt.Equal(joined))
+
+	raw, err := json.Marshal(infoFromRecord(&sessiondir.Record{Name: "n"}, statusEnded))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "firstGuestJoinedAt")
+}
+
 func Test_lookup_Starting(t *testing.T) {
 	setupSessionRoots(t)
 	buildStarting(t, "starting")
