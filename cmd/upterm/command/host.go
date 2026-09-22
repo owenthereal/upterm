@@ -260,11 +260,11 @@ func resolveTerm(flag, inherited string) string {
 	return defaultTerm
 }
 
-func resolveSessionName(explicit string, command []string) string {
+func resolveSessionName(explicit string, newName func() string) string {
 	if explicit != "" {
 		return explicit
 	}
-	return sessiondir.GenerateName(command)
+	return newName()
 }
 
 // maxGeneratedNameAttempts bounds the retry below. A generated name is a
@@ -286,13 +286,25 @@ const maxGeneratedNameAttempts = 5
 //
 // A nil logger means the package default rather than silence.
 func runWithGeneratedNameRetry(logger *slog.Logger, explicit string, command []string, run func(name string) error) error {
+	return runWithNameRetry(logger, explicit, func() string { return sessiondir.GenerateName(command) }, run)
+}
+
+// runWithNameRetry is runWithGeneratedNameRetry with the source of generated
+// names as an argument, so a test can spell out the draws instead of taking
+// them from crypto/rand.
+//
+// Without the seam, a test that asks for three draws is also betting on three
+// real ones being distinct, and sessiondir's four hex digits collide about
+// once in 22,000 such runs — a property of the generator, not of the retry the
+// test is about, and one that has already been read as a regression (#574).
+func runWithNameRetry(logger *slog.Logger, explicit string, newName func() string, run func(name string) error) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	var err error
 	for attempt := 0; attempt < maxGeneratedNameAttempts; attempt++ {
-		name := resolveSessionName(explicit, command)
+		name := resolveSessionName(explicit, newName)
 		err = run(name)
 		if err == nil {
 			return nil
