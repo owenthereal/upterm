@@ -383,15 +383,31 @@ func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
 
 	joined := make(chan struct{})
 	var once sync.Once
-	go noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now,
-		func() { once.Do(func() { close(joined) }) })
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now,
+			func() { once.Do(func() { close(joined) }) })
+	}()
 
 	select {
 	case <-joined:
 	case <-time.After(2 * time.Second):
+		close(release)
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("noteGuestJoined did not finish after the publication release")
+		}
 		t.Fatal("the disarm waited on the record write")
 	}
 	close(release)
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("noteGuestJoined did not finish after the publication release")
+	}
 }
 
 func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
@@ -400,13 +416,13 @@ func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
 	noop := func() {}
 
 	first := time.Now().UTC().Add(-time.Hour)
-	noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, func() time.Time { return first }, noop)
-	noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now, noop)
+	require.NoError(t, noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, func() time.Time { return first }, noop))
+	require.NoError(t, noteGuestJoined(update, &api.Client{Kind: api.Client_GUEST}, time.Now, noop))
 	require.True(t, rec.FirstGuestJoinedAt.Equal(first), "a later guest must not move it")
 
 	var hostOnly sessiondir.Record
 	updateHost := func(mutate func(*sessiondir.Record)) error { mutate(&hostOnly); return nil }
-	noteGuestJoined(updateHost, &api.Client{Kind: api.Client_HOST}, time.Now, noop)
+	require.NoError(t, noteGuestJoined(updateHost, &api.Client{Kind: api.Client_HOST}, time.Now, noop))
 	require.True(t, hostOnly.FirstGuestJoinedAt.IsZero(), "the host's own terminal is not a guest")
 }
 
