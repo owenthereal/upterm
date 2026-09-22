@@ -125,9 +125,13 @@ func TestAttachedClientIsReleasedWhenTheCommandFailsToStart(t *testing.T) {
 	h := startHost(t, &Server{Command: []string{"/nonexistent/upterm-no-such-binary"}, AwaitInitialClient: true})
 	in, _, sess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	// Typed at once, so the input copy is parked in the shared handle's Write
-	// by the time the start fails.
-	_, err := io.WriteString(in, "x\n")
-	require.NoError(t, err)
+	// by the time the start fails. Best-effort, and deliberately unasserted:
+	// subscribing is what opens the gate, so the start this write is racing is
+	// the one it provokes, and a start that loses no time failing tears the
+	// session down first and fails the write with EOF. Either order parks or
+	// releases the client, which is what the waits below are about, so the
+	// write's own error says nothing about the release path.
+	_, _ = io.WriteString(in, "x\n")
 
 	waited := make(chan error, 1)
 	go func() { waited <- sess.Wait() }()
