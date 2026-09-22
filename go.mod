@@ -51,7 +51,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/charmbracelet/x/conpty v0.2.0
-	github.com/cli/go-gh/v2 v2.16.0
+	github.com/cli/go-gh/v2 v2.16.1
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
