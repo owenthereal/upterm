@@ -188,7 +188,7 @@ func TestAdminShutdownBoundsPendingRPC(t *testing.T) {
 	go func() { served <- s.Serve(context.Background()) }()
 	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{}, "/api.AdminService/GetSession")
@@ -222,4 +222,77 @@ func TestAdminShutdownBeforeServe(t *testing.T) {
 	require.NoError(t, s.Shutdown(context.Background()))
 	require.Error(t, s.Serve(context.Background()))
 	require.NoError(t, s.Shutdown(context.Background()))
+}
+
+// Transport closure does not release a callback that ignores cancellation.
+// Exercise both a live RPC and a departed client: the latter lets gRPC's
+// GracefulStop reach handlersWG.Wait while holding its internal mutex.
+func TestAdminShutdownBoundsBlockedHandler(t *testing.T) {
+	for _, closeClient := range []bool{false, true} {
+		name := "connected"
+		if closeClient {
+			name = "client_closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			entered, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			s := &AdminServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo(), LaunchID: "launch",
+				OnStop: func() { close(entered); <-release; close(returned) },
+			}
+			sock := filepath.Join(shortTempDir(t), "admin.sock")
+			require.NoError(t, s.Listen(sock))
+			served := make(chan error, 1)
+			go func() { served <- s.Serve(context.Background()) }()
+			t.Cleanup(func() {
+				close(release)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = s.Shutdown(ctx)
+				select {
+				case <-served:
+				case <-time.After(time.Second):
+					t.Error("Serve did not return after handler release")
+				}
+			})
+			conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer rpcCancel()
+			rpcDone := make(chan struct{})
+			go func() {
+				_, _ = api.NewAdminServiceClient(conn).StopSession(rpcCtx, &api.StopSessionRequest{LaunchId: "launch"})
+				close(rpcDone)
+			}()
+			select {
+			case <-entered:
+			case <-rpcCtx.Done():
+				t.Fatal("StopSession callback never entered")
+			}
+			if closeClient {
+				require.NoError(t, conn.Close())
+				select {
+				case <-rpcDone:
+				case <-rpcCtx.Done():
+					t.Fatal("client close did not end RPC")
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- s.Shutdown(ctx) }()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("Shutdown waited for a noncooperative StopSession callback beyond its deadline")
+			}
+			select {
+			case <-returned:
+				t.Fatal("callback was released before the bound was tested")
+			default:
+			}
+			// Serve may still wait for gRPC's done signal, which requires the
+			// callback to return. Cleanup releases it; Shutdown cannot kill it.
+		})
+	}
 }

@@ -89,6 +89,9 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 	return srv.Serve(ln)
 }
 
+// Shutdown drains RPCs until ctx expires, then initiates forced transport closure.
+// It cannot terminate a callback that ignores cancellation: gRPC Serve and its
+// shutdown goroutines may still wait for that callback to return.
 func (s *AdminServer) Shutdown(ctx context.Context) error {
 	s.Lock()
 	srv, ln := s.srv, s.ln
@@ -102,10 +105,10 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 		select {
 		case <-drained:
 		case <-ctx.Done():
-			// Stop closes active transports, including streams still waiting for
-			// their request body, and releases the concurrent graceful drain.
-			srv.Stop()
-			<-drained
+			// Stop closes active transports, including incomplete request bodies.
+			// It can itself block behind GracefulStop's handler-wait mutex, so
+			// neither shutdown call may be awaited after the caller's deadline.
+			go srv.Stop()
 		}
 		return nil
 	}
