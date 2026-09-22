@@ -328,6 +328,14 @@ type Host struct {
 	// internal.DefaultStopGrace.
 	StopGrace time.Duration
 
+	// JoinTimeout bounds the wait for the first guest, starting at readiness.
+	// Zero waits forever. The session enforces it independently of its launcher;
+	// a guest joining disarms it permanently, even after that guest leaves.
+	JoinTimeout time.Duration
+
+	// onJoinDeadlineFired is a per-Host test barrier for a late losing deadline.
+	onJoinDeadlineFired func(stop <-chan struct{})
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
@@ -365,6 +373,9 @@ var ErrSessionAbandoned = errors.New("session abandoned before the command start
 // when nobody attached in time. Nothing ran, so it is recorded as
 // startup_abandoned rather than a failure.
 var ErrNoInitialClient = internal.ErrNoInitialClient
+
+// errJoinTimeout requests group teardown; Run maps this winning outcome to success.
+var errJoinTimeout = internal.ErrJoinTimeout
 
 // abandonedBy reports whether ctx was cancelled because the process that
 // started the session went away: a cancellation whose cause is
@@ -723,6 +734,7 @@ func (c *Host) Run(ctx context.Context) error {
 	// the actors that do those things establishes neither.
 	adminReady := make(chan struct{})
 	cmdReady := make(chan struct{})
+	sessionReady := make(chan struct{})
 	// sync.Once on each, since a callback that fires twice must not panic on a
 	// double close.
 	var adminOnce, cmdOnce sync.Once
@@ -892,7 +904,11 @@ func (c *Host) Run(ctx context.Context) error {
 			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
 		}
 
-		ctx, cancel := context.WithCancel(ctx)
+		// The group owns this actor's cancellation. Inheriting the parent's
+		// cancellation could mask an already selected deadline winner before
+		// the interrupt carries its cause to attached clients. The signal
+		// actor still observes the parent and initiates ordinary teardown.
+		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 		sshServer = internal.Server{
 			Command:                 c.Command,
 			CommandEnv:              commandEnv,
@@ -930,7 +946,8 @@ func (c *Host) Run(ctx context.Context) error {
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
 		}, func(err error) {
-			cancel()
+			// Only the winning group error reaches attached clients.
+			cancel(err)
 		})
 	}
 	{
@@ -977,10 +994,65 @@ func (c *Host) Run(ctx context.Context) error {
 				c.SessionReadyCallback(publishedStatus)
 			}
 
+			// Unlike ready (closed on teardown), this signals successful readiness.
+			close(sessionReady)
+
 			<-ready
 			return nil
 		}, func(err error) {
 			close(ready)
+		})
+	}
+
+	if c.JoinTimeout > 0 {
+		stop := make(chan struct{})
+		g.Add(func() error {
+			// Every actor starts together. Only successful readiness starts the
+			// joining window; ready itself signals teardown, not readiness.
+			select {
+			case <-sessionReady:
+			case <-guestJoined:
+				<-stop
+				return nil
+			case <-stop:
+				return nil
+			case <-ctx.Done():
+				return nil
+			}
+
+			timer := time.NewTimer(c.JoinTimeout)
+			defer timer.Stop()
+			select {
+			case <-guestJoined:
+				// Returning would tear down the session the guest just joined.
+				<-stop
+				return nil
+			case <-stop:
+				return nil
+			case <-ctx.Done():
+				return nil
+			case <-timer.C:
+				// Best-effort tie breaking, like setupSignalHandler. Another
+				// actor can still win afterwards: never log or record here.
+				select {
+				case <-guestJoined:
+					<-stop
+					return nil
+				case <-stop:
+					return nil
+				case <-ctx.Done():
+					return nil
+				default:
+				}
+				// After rechecks, so a test can establish another winner and
+				// then exercise this genuinely late losing return.
+				if c.onJoinDeadlineFired != nil {
+					c.onJoinDeadlineFired(stop)
+				}
+				return errJoinTimeout
+			}
+		}, func(err error) {
+			close(stop)
 		})
 	}
 
@@ -993,6 +1065,10 @@ func (c *Host) Run(ctx context.Context) error {
 	// non-zero exit on Windows.
 	res := sshServer.CommandResult()
 	switch {
+	case errors.Is(err, errJoinTimeout):
+		// The group winner alone identifies why teardown happened.
+		logger.Info("no guest joined within the join timeout; session ended", "timeout", c.JoinTimeout)
+		runReason = sessiondir.ReasonJoinTimeout
 	case shutdownRequested.Load():
 		// We asked for this. Whatever the wait says, the reason is that it was
 		// stopped — and the exit code of a process we killed is not the
@@ -1019,6 +1095,9 @@ func (c *Host) Run(ctx context.Context) error {
 		runReason = sessiondir.ReasonStartupFailed
 	}
 
+	if errors.Is(err, errJoinTimeout) {
+		return nil
+	}
 	return err
 }
 

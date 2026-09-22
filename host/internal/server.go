@@ -36,6 +36,10 @@ const DefaultInitialClientTimeout = 10 * time.Second
 // started; the caller records startup_abandoned.
 var ErrNoInitialClient = errors.New("no client attached before the command could start")
 
+// ErrJoinTimeout marks the winning first-guest deadline. Host passes it as
+// the server context cancellation cause so attached clients also exit zero.
+var ErrJoinTimeout = errors.New("no guest joined within the join timeout")
+
 type Server struct {
 	Command      []string
 	CommandEnv   []string
@@ -224,6 +228,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		writers:               writers,
 		keepAliveDuration:     s.KeepAliveDuration,
 		ctx:                   sessCtx,
+		stopCtx:               ctx,
 		logger:                s.Logger,
 		readonly:              s.ReadOnly,
 		sftpPermissionChecker: s.SFTPPermissionChecker,
@@ -551,9 +556,11 @@ type sessionHandler struct {
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
-	logger            *slog.Logger
-	readonly          bool
-	kind              clientKind
+	// stopCtx preserves the winning Host error while ctx waits for output drain.
+	stopCtx  context.Context
+	logger   *slog.Logger
+	readonly bool
+	kind     clientKind
 
 	// cmdDone closes when the hosted command's Run has returned, and
 	// commandResult reports how it ended. A shared-pty client whose session
@@ -1059,6 +1066,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// A forced command ran and terminated under its own control. Its
 		// status is the session's, whichever actor unblocked run.Group first.
 		_ = sess.Exit(cmdCode)
+	case h.kind == kindHost && h.stopCtx != nil && errors.Is(context.Cause(h.stopCtx), ErrJoinTimeout):
+		// The command was killed by a successful first-guest deadline. Its
+		// resulting signal is not the attached foreground client's outcome.
+		_ = sess.Exit(0)
 	case commandDone && h.commandResult != nil:
 		// The session ended because the command did. Its status is the
 		// client's; a command that was signalled rather than exited has none
