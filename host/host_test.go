@@ -450,10 +450,12 @@ func TestGuestLatchRetriesFailedPublication(t *testing.T) {
 	}
 	first := time.Now().UTC().Add(-time.Hour)
 	guest := &api.Client{Kind: api.Client_GUEST}
-	now := func() time.Time { return first }
+	clock := first
+	now := func() time.Time { return clock }
 	noop := func() {}
 	latch := &guestJoinLatch{update: update, now: now, disarm: noop}
 	require.Error(t, latch.note(guest))
+	clock = first.Add(time.Hour)
 	require.NoError(t, latch.note(guest))
 	require.NoError(t, latch.note(guest))
 	require.Equal(t, 2, updates)
@@ -475,6 +477,23 @@ func TestClientLifecyclePairsLeftBeforeJoined(t *testing.T) {
 	lifecycle.joined(guest)
 	require.Nil(t, repo.Get(guest.Id), "a rapid accepted session must not remain connected")
 	require.Equal(t, []string{"latch", "joined", "left"}, events)
+}
+
+func TestClientLifecycleKeepsLaterDistinctIDAfterDepartures(t *testing.T) {
+	repo := internal.NewClientRepo()
+	lifecycle := &clientLifecycle{repo: repo, pendingLeft: make(map[string]struct{})}
+	first := &api.Client{Id: "transport/1", Kind: api.Client_HOST}
+	second := &api.Client{Id: "transport/2", Kind: api.Client_HOST}
+	third := &api.Client{Id: "transport/3", Kind: api.Client_HOST}
+	lifecycle.joined(first)
+	lifecycle.joined(second)
+	lifecycle.left(first.Id)
+	lifecycle.left(second.Id)
+	lifecycle.joined(third)
+	require.Same(t, third, repo.Get(third.Id), "third session must remain until its own departure")
+	require.Len(t, repo.Clients(), 1)
+	lifecycle.left(third.Id)
+	require.Empty(t, repo.Clients())
 }
 
 // Through a tunnel, x/crypto hands the callback the proxy's address. Printing

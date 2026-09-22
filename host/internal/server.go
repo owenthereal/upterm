@@ -510,10 +510,10 @@ type authenticatedGuest struct {
 	key  ssh.PublicKey
 }
 
-var guestEventSequence atomic.Uint64
+var clientEventSequence atomic.Uint64
 
-func guestEventID(transportID string) string {
-	return fmt.Sprintf("%s/%d", transportID, guestEventSequence.Add(1))
+func clientEventID(transportID string) string {
+	return fmt.Sprintf("%s/%d", transportID, clientEventSequence.Add(1))
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
@@ -602,8 +602,9 @@ type sessionHandler struct {
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 	if h.kind == kindHost {
-		emitHostClientJoinEvent(h.eventEmmiter, sessionID, sess.Context().ClientVersion(), sess.PublicKey())
-		defer emitClientLeftEvent(h.eventEmmiter, sessionID)
+		id := clientEventID(sessionID)
+		emitHostClientJoinEvent(h.eventEmmiter, id, sess.Context().ClientVersion(), sess.PublicKey())
+		defer emitClientLeftEvent(h.eventEmmiter, id)
 	}
 
 	// Whether this client is still connected, handed to the size tracking so
@@ -951,7 +952,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 	if h.kind == kindGuest {
 		if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
-			id := guestEventID(sessionID)
+			id := clientEventID(sessionID)
 			emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
 			defer emitClientLeftEvent(h.eventEmmiter, id)
 		}

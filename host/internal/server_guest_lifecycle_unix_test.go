@@ -114,6 +114,8 @@ func TestGuestSessionsOnOneTransportHaveSeparateEventIDs(t *testing.T) {
 		sessions[i], err = client.NewSession()
 		require.NoError(t, err)
 		require.NoError(t, sessions[i].RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+		_, err = sessions[i].StdinPipe() // keep both channels live until explicitly closed
+		require.NoError(t, err)
 		require.NoError(t, sessions[i].Shell())
 		select {
 		case e := <-joined:

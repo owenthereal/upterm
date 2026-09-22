@@ -67,7 +67,7 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 	// Set start directory to user's home for relative path resolution
 	server := sftp.NewRequestServer(sess, handlers, sftp.WithStartDirectory(userHome))
 	if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
-		id := guestEventID(sessionID)
+		id := clientEventID(sessionID)
 		emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
 		defer emitClientLeftEvent(h.eventEmmiter, id)
 	}

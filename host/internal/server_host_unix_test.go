@@ -128,6 +128,50 @@ func TestHostDoorAnnouncesAClientOnlyWhenItOpensASession(t *testing.T) {
 	}
 }
 
+func TestHostDoorUsesDistinctEventIDsForSessionsOnOneTransport(t *testing.T) {
+	srv := &Server{Command: []string{"sh", "-c", "while :; do sleep 1; done"}}
+	h := startHost(t, srv)
+	joined := srv.EventEmitter.On(upterm.EventClientJoined)
+	left := srv.EventEmitter.On(upterm.EventClientLeft)
+	client := h.dialHost(t)
+
+	open := func() (*ssh.Session, string) {
+		sess, err := client.NewSession()
+		require.NoError(t, err)
+		_, err = sess.StdinPipe() // keep the session open until Close
+		require.NoError(t, err)
+		require.NoError(t, sess.Shell())
+		select {
+		case evt := <-joined:
+			c := evt.Args[0].(*api.Client)
+			require.Equal(t, api.Client_HOST, c.Kind)
+			return sess, c.Id
+		case <-time.After(harnessTimeout):
+			t.Fatal("host session did not join")
+			return nil, ""
+		}
+	}
+	first, firstID := open()
+	_, secondID := open()
+	_, thirdID := open()
+	require.NotEqual(t, firstID, secondID)
+	require.NotEqual(t, secondID, thirdID)
+	require.NotEqual(t, firstID, thirdID)
+	_ = first.Close() // host sink cleanup closes this transport and all its channels
+	want := map[string]bool{firstID: true, secondID: true, thirdID: true}
+	for range 3 {
+		select {
+		case evt := <-left:
+			id := evt.Args[0].(string)
+			require.True(t, want[id], "unexpected or duplicate host departure %q", id)
+			delete(want, id)
+		case <-time.After(harnessTimeout):
+			t.Fatal("host session did not leave")
+		}
+	}
+	require.Empty(t, want)
+}
+
 func TestHostDoorReportsHostKind(t *testing.T) {
 	srv := &Server{Command: readsALine("K", 0)}
 	h := startHost(t, srv)
