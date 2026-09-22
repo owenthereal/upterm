@@ -100,6 +100,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(list())
 	cmd.AddCommand(show())
 	cmd.AddCommand(stop())
+	cmd.AddCommand(wait())
 
 	return cmd
 }
@@ -165,6 +166,138 @@ var stopWaitTimeout = 30 * time.Second
 
 // stopPollInterval is how often the release is checked for.
 const stopPollInterval = 200 * time.Millisecond
+
+// waitPollFailureBudget bounds how long consecutive inspection failures are
+// tolerated before one is reported.
+//
+// A read can fail transiently -- the registry lock is held by a session
+// starting up, a rename is mid-flight. It can also fail permanently: a
+// corrupt record, a directory that lost its permissions. The first draft
+// treated every error as transient and would spin forever on the second
+// kind, silently, even after the session had ended. A budget tells them
+// apart without needing to classify the error.
+const waitPollFailureBudget = 30 * time.Second
+
+// wait blocks until the named session has ended and returns its outcome.
+func wait() *cobra.Command {
+	return &cobra.Command{
+		Use:   "wait NAME",
+		Short: "Wait for a session to end",
+		Long: `Block until the named session has ended, then exit with its outcome.
+
+Exit status follows the session:
+
+  the command's own code   the session's command exited
+  0                        the session was stopped, or --join-timeout elapsed
+  128+N                    the session's command was killed by signal N
+  125                      the session produced no exit status of its own
+
+125 is a convention, not a guarantee: a session's own command can exit 125
+too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json'.
+
+A session that has already ended is reported from its record and is not an
+error. Interrupting this command leaves the session running: it observes and
+never stops anything.`,
+		Example: `  # Wait for a detached session and take its exit status:
+  upterm host --detach --accept --name build -- make
+  upterm session wait build`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			code, err := waitSession(c.Context(), args[0], os.Stdout)
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				// Bare, with no Err, exactly as attach.go:202 returns it:
+				// this command succeeded; the thing it watched did not.
+				return ExitCodeError{Code: code}
+			}
+			return nil
+		},
+	}
+}
+
+// waitSession blocks until the named session has ended and returns the exit
+// status this command should carry.
+//
+// Polls the record rather than the admin socket, for stopSession's reason:
+// the socket dies with the process, so it can never answer "did it finish".
+//
+// Bound to the launch resolved on entry. A name is reused, so the session
+// that answers at the end need not be the one the caller asked about.
+func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
+	stateRoot := utils.UptermStateDir()
+
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
+	cancelLookup()
+	if err != nil {
+		return 0, err
+	}
+	if rec == nil {
+		// Absent means only "not found within retained history": Prune
+		// removes anything unheld and older than RecordRetention.
+		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, sessiondir.RecordRetention)
+	}
+
+	waited := rec.LaunchID
+	if !held {
+		return finishWait(out, name, rec)
+	}
+
+	var firstFailure time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			// An observer. ^C here must not be a way to end a session.
+			return 0, ctx.Err()
+		case <-time.After(stopPollInterval):
+		}
+
+		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
+		cancelPoll()
+		if err != nil {
+			if firstFailure.IsZero() {
+				firstFailure = time.Now()
+			}
+			if time.Since(firstFailure) > waitPollFailureBudget {
+				return 0, fmt.Errorf("session %s could not be inspected for %s: %w", name, waitPollFailureBudget, err)
+			}
+			continue
+		}
+		firstFailure = time.Time{}
+
+		if cur == nil {
+			return 0, fmt.Errorf("session %s disappeared while waiting; its outcome is unavailable", name)
+		}
+		if cur.LaunchID != waited {
+			return 0, waitLaunchChanged(name, waited, cur.LaunchID)
+		}
+		if curHeld {
+			continue
+		}
+		// cur is the record Inspect just returned under the registry lock,
+		// and its launch is the one waited on. Re-reading here would open a
+		// replacement/pruning race after a valid outcome was already in hand.
+		return finishWait(out, name, cur)
+	}
+}
+
+func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error) {
+	_, _ = fmt.Fprintf(out, "session %s ended (%s)\n", name, describeOutcome(rec))
+	return waitExitCode(rec), nil
+}
+
+// waitLaunchChanged is the error for a name reused while this command was
+// waiting on it. Never followed silently: a waiter that switched to the
+// replacement would report the new session's outcome as the old one's, and
+// the caller cannot notice -- the name it asked about is the name that
+// answered.
+func waitLaunchChanged(name, waited, found string) error {
+	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, waited, found)
+}
 
 func stop() *cobra.Command {
 	return &cobra.Command{

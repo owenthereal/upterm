@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
@@ -1136,4 +1137,100 @@ func TestWaitExitCodeForReason(t *testing.T) {
 			require.Equal(t, tc.want, waitExitCode(&tc.rec))
 		})
 	}
+}
+
+func TestWaitReturnsImmediatelyForAnEndedSession(t *testing.T) {
+	setupSessionRoots(t)
+	stateRoot := utils.UptermStateDir()
+	seedEndedSessionRecord(t, stateRoot, "done", sessiondir.Record{
+		Name: "done", LaunchID: "L1",
+		Reason: sessiondir.ReasonExited, ExitCode: func(i int) *int { return &i }(7),
+	})
+
+	var out bytes.Buffer
+	code, err := waitSession(context.Background(), "done", &out)
+	require.NoError(t, err)
+	require.Equal(t, 7, code)
+}
+
+func TestWaitErrorsForAMissingSession(t *testing.T) {
+	setupSessionRoots(t)
+	var out bytes.Buffer
+	_, err := waitSession(context.Background(), "nope", &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no session named")
+}
+
+func TestWaitRefusesARealReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setupSessionRoots(t)
+		dir := claimSession(t, "reused") // holds the name, LaunchID L1
+		var out bytes.Buffer
+		done := make(chan error, 1)
+		go func() { _, err := waitSession(context.Background(), "reused", &out); done <- err }()
+
+		// waitSession has completed its first Inspect and is durably blocked on
+		// its polling timer, so it is bound to dir's launch before replacement.
+		synctest.Wait()
+		require.NoError(t, dir.Release(context.Background()))
+		replacement := claimSession(t, "reused")
+		defer func() { _ = replacement.Release(context.Background()) }()
+
+		time.Sleep(stopPollInterval)
+		synctest.Wait()
+		err := <-done
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "replaced while waiting")
+	})
+}
+
+func TestWaitCancellationLeavesTheSessionRunning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setupSessionRoots(t)
+		dir := claimSession(t, "live")
+		defer func() { _ = dir.Release(context.Background()) }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var out bytes.Buffer
+		done := make(chan error, 1)
+		go func() { _, err := waitSession(ctx, "live", &out); done <- err }()
+
+		// The waiter has inspected the real lock and is now waiting to poll.
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		require.ErrorIs(t, <-done, context.Canceled)
+
+		_, held, err := sessiondir.Inspect(context.Background(), utils.UptermStateDir(), "live")
+		require.NoError(t, err)
+		require.True(t, held, "an observer must never end what it watches")
+	})
+}
+
+func TestWaitPropagatesAPermanentReadError(t *testing.T) {
+	setupSessionRoots(t)
+	stateRoot := utils.UptermStateDir()
+	seedCorruptSessionRecord(t, stateRoot, "bad")
+
+	var out bytes.Buffer
+	_, err := waitSession(context.Background(), "bad", &out)
+	require.Error(t, err, "a corrupt record must not spin forever")
+}
+
+func seedEndedSessionRecord(t *testing.T, stateRoot, name string, rec sessiondir.Record) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, "results", name)
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	rec.UpdatedAt = time.Now().UTC()
+	rec.FinishedAt = time.Now().UTC()
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session.json"), raw, 0600))
+}
+
+func seedCorruptSessionRecord(t *testing.T, stateRoot, name string) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, "results", name)
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session.json"), []byte("{not json"), 0600))
 }
