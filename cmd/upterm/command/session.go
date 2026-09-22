@@ -42,6 +42,45 @@ var (
 // on `session list` gets an answer instead of a hang.
 const sessionQueryTimeout = 10 * time.Second
 
+// waitUnavailableCode is what `session wait` exits when the session produced
+// no exit status of its own.
+//
+// 125 by the convention git uses for "the tool could not produce a result".
+// It is NOT distinct from every hosted-command code -- a command can exit 125
+// itself -- and no single integer could be. A caller that must tell the two
+// apart reads `reason` from `session info -o json`; this is a convenience for
+// the common case, not a discriminator.
+const waitUnavailableCode = 125
+
+// waitExitCode maps a finished session's recorded outcome onto this command's
+// exit status. Every reason is named; a default returning 0 would report an
+// outcome nobody established as a success, which is the one answer a waiter
+// must never invent.
+func waitExitCode(rec *sessiondir.Record) int {
+	switch rec.Reason {
+	case sessiondir.ReasonExited:
+		// "exited" with no code is incoherent, not successful.
+		if rec.ExitCode == nil {
+			return waitUnavailableCode
+		}
+		return *rec.ExitCode
+	case sessiondir.ReasonJoinTimeout, sessiondir.ReasonStopped:
+		// Nobody joined, or somebody asked. Neither is a failed build, and
+		// reddening the first would make --join-timeout unusable in CI.
+		return 0
+	case sessiondir.ReasonSignaled:
+		n := signalNumber(rec.Signal)
+		if n == 0 {
+			// 128+0 is a status no process exits with, so an unrecognised
+			// name is unavailable rather than guessed.
+			return waitUnavailableCode
+		}
+		return 128 + n
+	default:
+		return waitUnavailableCode
+	}
+}
+
 // sessionTemplateData holds data for template output
 type sessionTemplateData struct {
 	SessionID    string `json:"sessionId"`
