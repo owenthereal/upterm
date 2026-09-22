@@ -76,10 +76,29 @@ type Record struct {
 	// record that has not finished carried finished_at: "0001-01-01T00:00:00Z"
 	// — a date, and one a reader could easily take for a real one.
 	FinishedAt time.Time `json:"finished_at,omitzero"`
-	Status     string    `json:"status"`
-	Reason     string    `json:"reason"`
-	ExitCode   *int      `json:"exit_code,omitempty"`
-	Signal     string    `json:"signal,omitempty"`
+	// FirstGuestJoinedAt is when a guest first joined this session, or the
+	// zero time when none ever has. It latches: the first join writes it and
+	// no later join moves it.
+	//
+	// Published because "has anyone ever joined?" cannot be answered from
+	// connected_clients, which is a current list. A reader that polls it
+	// misses a guest who joins and leaves between two ticks -- the bug
+	// action-upterm has today, latching in a local variable of its own
+	// poller. One sticky fact with one owner replaces every consumer's
+	// private latch.
+	//
+	// Guests only: the host's own attached terminal is a client of its own
+	// session, so counting clients would make every foreground session look
+	// joined from the moment it starts.
+	//
+	// omitzero for the reason FinishedAt is: omitempty does nothing for a
+	// struct, and a zero time serialises to a date a reader could take for a
+	// real one.
+	FirstGuestJoinedAt time.Time `json:"first_guest_joined_at,omitzero"`
+	Status             string    `json:"status"`
+	Reason             string    `json:"reason"`
+	ExitCode           *int      `json:"exit_code,omitempty"`
+	Signal             string    `json:"signal,omitempty"`
 	// Pid is the process that claimed the name. Set by Claim and never by a
 	// caller: the claimer is the owner by definition, and a reader who finds
 	// the name held but its socket silent needs a process to name.
