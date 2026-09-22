@@ -68,6 +68,47 @@ func TestTmux(t *testing.T) {
 			require.NoError(t, h.waitForText(h.host, "        SPLIT_INPUT", 10*time.Second))
 			require.NoError(t, h.waitForText(client, "        SPLIT_INPUT", 10*time.Second))
 
+			waitForMatchingDisplays := func(marker string) {
+				t.Helper()
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					hostScreen, hostErr := h.host.Capture(h.ctx)
+					guestScreen, guestErr := client.Capture(h.ctx)
+					require.NoError(c, hostErr)
+					require.NoError(c, guestErr)
+					require.Contains(c, hostScreen, marker)
+					require.Equal(c, hostScreen, guestScreen)
+				}, 10*time.Second, 100*time.Millisecond, "tmux displays differ without a forced redraw: %s", marker)
+			}
+			waitForMatchingDisplays("        SPLIT_INPUT")
+
+			// #309 reports corruption after creating another window. Alternate
+			// between the split window and a full-width window through real host
+			// and guest input, checking each switch and subsequent output update.
+			// Do this before resizing or refresh-client can hide stale content.
+			secondRC := h.writeFile("tmux-second-bashrc", "PS1='"+uptermPrompt+" '\nprintf '\033[H\033[2JSECOND_WINDOW_READY\\n'\n", 0600)
+			tmuxCommand("new-window", "-d", "-t", "shared:1", fmt.Sprintf("bash --rcfile %q --noprofile", secondRC))
+			markers := []string{"        SPLIT_INPUT", "SECOND_WINDOW_READY"}
+			for round := range 3 {
+				for _, window := range []int{1, 0} {
+					input := client
+					if window == 0 {
+						input = h.host
+					}
+					require.NoError(t, input.SendKeys(h.ctx, "C-b"))
+					require.NoError(t, input.SendKeys(h.ctx, fmt.Sprint(window)))
+					waitForMatchingDisplays(markers[window])
+
+					for update := range 3 {
+						marker := fmt.Sprintf("WINDOW_%d_ROUND_%d_UPDATE_%d", window, round, update)
+						require.NoError(t, input.SendLine(h.ctx, "printf '\\n%8s%s\\n' '' "+marker))
+						// Rendered spaces distinguish output from command echo;
+						// unique markers require fresh output on every iteration.
+						markers[window] = "        " + marker
+						waitForMatchingDisplays(markers[window])
+					}
+				}
+			}
+
 			// Resize the outer terminals and require the nested tmux window to
 			// adopt the new dimensions delivered through Upterm's PTY handling.
 			// The pane ID identifies its window regardless of the user's base-index.
@@ -85,7 +126,7 @@ func TestTmux(t *testing.T) {
 			for _, tty := range strings.Fields(tmuxCommand("list-clients", "-F", "#{client_name}")) {
 				tmuxCommand("refresh-client", "-t", tty)
 			}
-			require.NoError(t, h.waitForText(client, "        SPLIT_INPUT", 10*time.Second))
+			require.NoError(t, h.waitForText(client, markers[0], 10*time.Second))
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
 				hostScreen, hostErr := h.host.Capture(h.ctx)
 				guestScreen, guestErr := client.Capture(h.ctx)
