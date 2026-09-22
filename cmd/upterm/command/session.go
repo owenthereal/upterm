@@ -69,13 +69,10 @@ func waitExitCode(rec *sessiondir.Record) int {
 		// reddening the first would make --join-timeout unusable in CI.
 		return 0
 	case sessiondir.ReasonSignaled:
-		n := signalNumber(rec.Signal)
-		if n == 0 {
-			// 128+0 is a status no process exits with, so an unrecognised
-			// name is unavailable rather than guessed.
+		if rec.SignalNumber == nil || *rec.SignalNumber < 1 || *rec.SignalNumber > 126 {
 			return waitUnavailableCode
 		}
-		return 128 + n
+		return 128 + *rec.SignalNumber
 	default:
 		return waitUnavailableCode
 	}
@@ -188,9 +185,16 @@ func wait() *cobra.Command {
 Exit status follows the session:
 
   the command's own code   the session's command exited
-  0                        the session was stopped, or --join-timeout elapsed
-  128+N                    the session's command was killed by signal N
-  125                      the session produced no exit status of its own
+  0                        explicit session stop, or --join-timeout elapsed
+  128+N                    the host or command was terminated by signal N
+  125                      canceled, unavailable outcome, or observer failure
+
+Signal N is the recorded originating signal number (signalNumber in session
+info JSON), independent of the machine reading the record. Legacy signal
+records without a valid number are unavailable (125). Parent-context
+cancellation is recorded as canceled (125); legacy stopped records remain 0.
+Lookup, read, replacement and interrupted-observer errors also return 125
+and retain their diagnostic.
 
 125 is a convention, not a guarantee: a session's own command can exit 125
 too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json'.
@@ -206,7 +210,7 @@ never stops anything.`,
 			c.SilenceUsage = true
 			code, err := waitSession(c.Context(), args[0], os.Stdout)
 			if err != nil {
-				return err
+				return ExitCodeError{Code: waitUnavailableCode, Err: err}
 			}
 			if code != 0 {
 				// Bare, with no Err, exactly as attach.go:202 returns it:
@@ -581,6 +585,7 @@ type sessionInfo struct {
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
 	Signal           string   `json:"signal,omitempty"`
+	SignalNumber     *int     `json:"signalNumber,omitempty"`
 	// FirstGuestJoinedAt is when a guest first joined, latched and never
 	// moved by a later join; zero and omitted when none ever did. A caller
 	// asking "has anyone ever joined?" reads this, not guestCount, which is
@@ -688,6 +693,7 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		Reason:             rec.Reason,
 		ExitCode:           rec.ExitCode,
 		Signal:             rec.Signal,
+		SignalNumber:       rec.SignalNumber,
 		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
 	}
 }

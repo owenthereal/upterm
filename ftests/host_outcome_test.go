@@ -458,6 +458,9 @@ func Test_Host_PublishesSignalTermination(t *testing.T) {
 	res := runHostForOutcome(t, shellCommand(t,
 		[]string{"sh", "-c", "kill -TERM $$"},
 		nil))
+	require.NotNil(t, res.SignalNumber)
+	require.Equal(t, 15, *res.SignalNumber)
+	require.NotEmpty(t, res.Signal)
 	require.Equal(t, sessiondir.ReasonSignaled, res.Reason,
 		"a signalled command must not be reported as exited -1")
 	require.Nil(t, res.ExitCode)
@@ -513,23 +516,23 @@ func Test_Host_PublishesStartupFailure(t *testing.T) {
 	require.Nil(t, res.ExitCode)
 }
 
-func Test_Host_PublishesStoppedOnCancellation(t *testing.T) {
+func Test_Host_PublishesCanceledOnCancellation(t *testing.T) {
 	// Review fix: this was skipped, and a skipped test guards nothing. It is
 	// also the one case the wait status cannot answer on its own — our own
-	// teardown kills the command, so without the shutdownRequested flag this
+	// teardown kills the command, so without source-aware cancellation this
 	// reports "signaled" on Unix and a non-zero "exited" on Windows.
 	res := runHostUntilCancelled(t, shellCommand(t,
 		[]string{"sh", "-c", "echo READY; sleep 300"},
 		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}), "READY")
 
-	require.Equal(t, sessiondir.ReasonStopped, res.Reason,
+	require.Equal(t, sessiondir.ReasonCanceled, res.Reason,
 		"a shutdown we initiated must not be reported as the signal it produced")
 	require.Nil(t, res.ExitCode,
 		"the exit code of a process we killed is not the command's own outcome")
 	require.Empty(t, res.Signal)
 }
 
-// Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts is the
+// Test_Host_PublishesCanceledWhenCancelledBeforeTheCommandStarts is the
 // cancellation the signal actor cannot answer for: it is registered only
 // after SessionCreatedCallback returns, so a caller that cancels while the
 // callback is waiting -- or during Establish, before it -- gets ctx.Err()
@@ -537,7 +540,7 @@ func Test_Host_PublishesStoppedOnCancellation(t *testing.T) {
 // the record said the session broke when it had been told to stop. The
 // callback here waits on the context the way the interactive confirmation
 // does, and the test cancels once it is known to be waiting.
-func Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts(t *testing.T) {
+func Test_Host_PublishesCanceledWhenCancelledBeforeTheCommandStarts(t *testing.T) {
 	entered := make(chan struct{})
 	run := newOutcomeRun(t,
 		shellCommand(t,
@@ -573,8 +576,8 @@ func Test_Host_PublishesStoppedWhenCancelledBeforeTheCommandStarts(t *testing.T)
 
 	rec := run.record(t)
 	require.Equal(t, sessiondir.StatusEnding, rec.Status)
-	require.Equal(t, sessiondir.ReasonStopped, rec.Reason,
-		"a session cancelled before its command started was told to stop; nothing failed")
+	require.Equal(t, sessiondir.ReasonCanceled, rec.Reason,
+		"parent cancellation before command startup is not an admin stop")
 	require.Nil(t, rec.ExitCode,
 		"the command never started, so there is no exit code to report")
 	require.Empty(t, rec.Signal)
@@ -923,8 +926,8 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 
 	rec := run.record(t)
 	require.Equal(t, sessiondir.StatusEnding, rec.Status)
-	require.Equal(t, sessiondir.ReasonStopped, rec.Reason,
-		"a session stopped by its operator must not be reported as the network's fault")
+	require.Equal(t, sessiondir.ReasonCanceled, rec.Reason,
+		"parent cancellation must not be reported as the network's fault")
 	require.Nil(t, rec.ExitCode)
 }
 
@@ -1102,7 +1105,7 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		require.Nil(t, rec.ExitCode)
 	})
 
-	t.Run("a plain cancellation is still a stop", func(t *testing.T) {
+	t.Run("a plain cancellation is canceled", func(t *testing.T) {
 		run := newOutcomeRun(t,
 			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
 		run.host.AwaitInitialClient = true
@@ -1114,7 +1117,7 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		run.awaitAttachSocket(t)
 		cancel()
 		<-done
-		require.Equal(t, sessiondir.ReasonStopped, run.record(t).Reason)
+		require.Equal(t, sessiondir.ReasonCanceled, run.record(t).Reason)
 	})
 }
 
@@ -1139,8 +1142,7 @@ func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 }
 
 // Test_Host_StopSessionRPCEndsTheSession: the admin socket's StopSession is
-// what `upterm session stop` calls, and it ends the session the way a
-// SIGTERM to the daemon does — the record reads stopped, no exit code. It
+// what `upterm session stop` calls: the record reads stopped, no exit code. It
 // ends the launch the request names and no other: the socket path belongs to
 // the name, and the name is handed on.
 func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {

@@ -31,7 +31,7 @@ type AdminServer struct {
 	OnListening func()
 
 	// OnStop is called when a client asks the session to end. The daemon
-	// wires it to the cancellation a SIGTERM causes; the RPC returns at
+	// wires it to an explicit stop cause; the RPC returns at
 	// once and the teardown follows.
 	OnStop func()
 

@@ -9,9 +9,16 @@ Block until the named session has ended, then exit with its outcome.
 Exit status follows the session:
 
   the command's own code   the session's command exited
-  0                        the session was stopped, or --join-timeout elapsed
-  128+N                    the session's command was killed by signal N
-  125                      the session produced no exit status of its own
+  0                        explicit session stop, or --join-timeout elapsed
+  128+N                    the host or command was terminated by signal N
+  125                      canceled, unavailable outcome, or observer failure
+
+Signal N is the recorded originating signal number (signalNumber in session
+info JSON), independent of the machine reading the record. Legacy signal
+records without a valid number are unavailable (125). Parent-context
+cancellation is recorded as canceled (125); legacy stopped records remain 0.
+Lookup, read, replacement and interrupted-observer errors also return 125
+and retain their diagnostic.
 
 125 is a convention, not a guarantee: a session's own command can exit 125
 too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json'.

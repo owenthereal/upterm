@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
 
 	"log/slog"
@@ -377,6 +377,13 @@ var ErrNoInitialClient = internal.ErrNoInitialClient
 // errJoinTimeout requests group teardown; Run maps this winning outcome to success.
 var errJoinTimeout = internal.ErrJoinTimeout
 
+// errSessionStopped retains the cancellation contract for Host.Run callers.
+var errSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
+
+type hostSignalError struct{ signal syscall.Signal }
+
+func (e hostSignalError) Error() string { return fmt.Sprintf("received signal %s", e.signal) }
+
 // abandonedBy reports whether ctx was cancelled because the process that
 // started the session went away: a cancellation whose cause is
 // ErrSessionAbandoned. Nothing failed and nothing was asked to stop; the
@@ -405,8 +412,7 @@ func abandonedBy(ctx context.Context) bool {
 //
 // The non-blocking re-check on each teardown branch is what makes that so
 // rather than merely likely: whichever case the select picks, a fact that is
-// established is still established. setupSignalHandler asks its context the
-// same question on the same branch for the same reason.
+// established is still established.
 //
 // A fact that is genuinely not established is still a "no", and that is why
 // this waits on the pair rather than assuming them: a command that could not
@@ -548,7 +554,7 @@ var ClaimTimeout = 10 * time.Second
 // before returning, including the two fields it fills in on the Host itself.
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
-func (c *Host) Run(ctx context.Context) error {
+func (c *Host) Run(ctx context.Context) (runErr error) {
 	// First, before anything here can write a byte. Whatever a
 	// SessionCreatedCallback prints, and whatever a VersionWarningCallback
 	// prints, goes out well before the signal actor is assembled, and for an
@@ -557,13 +563,10 @@ func (c *Host) Run(ctx context.Context) error {
 	// is free.
 	InstallSignalPolicy()
 
-	// Run's working context. A stop requested over the admin socket cancels
-	// it, and from there it is the cancellation the signal actor already
-	// handles: shutdownRequested, the teardown, a record that reads stopped.
-	// Derived once so that every actor and every ctx.Err() below sees the
-	// same context, and context.Cause still reports the caller's cause.
-	ctx, requestStop := context.WithCancel(ctx)
-	defer requestStop()
+	// Admin stop has its own cause; external parent cancellation remains distinct.
+	ctx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	requestStop := func() { cancelRun(errSessionStopped) }
 
 	u, err := url.Parse(c.Host)
 	if err != nil {
@@ -623,21 +626,13 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	var (
-		sessionID   string
-		runReason   = sessiondir.ReasonStartupFailed
-		runExitCode *int
-		runSignal   string
+		sessionID       string
+		runReason       = sessiondir.ReasonStartupFailed
+		runExitCode     *int
+		runSignal       string
+		runSignalNumber *int
 	)
 
-	// shutdownRequested records that *we* initiated the teardown — a signal or
-	// a cancelled context — as distinct from the wait status that results.
-	//
-	// This distinction is load-bearing. Cancelling a running command makes our
-	// own teardown kill it, so the wait reports a signal on Unix and an
-	// ordinary non-zero exit on Windows. Classifying off the wait status alone
-	// would report "signaled" or "exited 137" for something the operator asked
-	// for, on a platform-dependent basis.
-	var shutdownRequested atomic.Bool
 	guestJoined := make(chan struct{})
 	var guestJoinedOnce sync.Once
 
@@ -661,24 +656,16 @@ func (c *Host) Run(ctx context.Context) error {
 			// means the name stays taken until something reaps it. Both are
 			// invisible from outside the process without a line here.
 			//
-			// A cancellation before the command starts is still a stop. The
-			// signal actor that sets shutdownRequested is registered only
-			// after SessionCreatedCallback returns, so a caller that cancels
-			// during Establish, or while the callback is waiting, gets
-			// ctx.Err() back through returns that report startup_failed --
-			// for a session that was told to stop. Decided here, on the
-			// publish itself, so that every early return is covered.
-			// startup_abandoned still wins: an interactive decline whose
-			// embedder also cancels is still a decline. The one corner this
-			// accepts is a genuine startup failure that coincides with a
-			// cancellation, reported as stopped, which is what the caller
-			// asked for.
-			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
-				runReason = sessiondir.ReasonStopped
+			// Early returns have no group winner. Only a returned cancellation
+			// may change startup_failed; a coincident cancellation cannot hide
+			// a genuine startup error.
+			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil && errors.Is(runErr, ctx.Err()) {
+				runReason = sessiondir.ReasonCanceled
 				if abandonedBy(ctx) {
 					runReason = sessiondir.ReasonStartupAbandoned
 				}
 			}
+
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
@@ -686,6 +673,7 @@ func (c *Host) Run(ctx context.Context) error {
 				r.Reason = runReason
 				r.ExitCode = runExitCode
 				r.Signal = runSignal
+				r.SignalNumber = runSignalNumber
 			}); err != nil {
 				logger.Warn("failed to publish final session record", "error", err)
 			}
@@ -927,7 +915,7 @@ func (c *Host) Run(ctx context.Context) error {
 	{
 		// Handle OS signals for graceful shutdown
 		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
-		setupSignalHandler(&g, ctx, &shutdownRequested)
+		setupSignalHandler(&g, ctx)
 	}
 	{
 		ctx, cancel := context.WithCancel(ctx)
@@ -1075,7 +1063,7 @@ func (c *Host) Run(ctx context.Context) error {
 			case <-stop:
 				return nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(ctx.Err(), context.Cause(ctx))
 			}
 
 			timer := time.NewTimer(c.JoinTimeout)
@@ -1088,10 +1076,10 @@ func (c *Host) Run(ctx context.Context) error {
 			case <-stop:
 				return nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(ctx.Err(), context.Cause(ctx))
 			case <-timer.C:
-				// Best-effort tie breaking, like setupSignalHandler. Another
-				// actor can still win afterwards: never log or record here.
+				// Best-effort tie breaking: another actor can still win
+				// afterwards. Never log or record here.
 				select {
 				case <-guestJoined:
 					<-stop
@@ -1099,7 +1087,7 @@ func (c *Host) Run(ctx context.Context) error {
 				case <-stop:
 					return nil
 				case <-ctx.Done():
-					return ctx.Err()
+					return errors.Join(ctx.Err(), context.Cause(ctx))
 				default:
 				}
 				// After rechecks, so a test can establish another winner and
@@ -1122,19 +1110,21 @@ func (c *Host) Run(ctx context.Context) error {
 	// requested shutdown surfaces as a signal on Unix and as an ordinary
 	// non-zero exit on Windows.
 	res := sshServer.CommandResult()
+	var hostSignal hostSignalError
 	switch {
 	case errors.Is(err, errJoinTimeout):
 		// The group winner alone identifies why teardown happened.
 		logger.Info("no guest joined within the join timeout; session ended", "timeout", c.JoinTimeout)
 		runReason = sessiondir.ReasonJoinTimeout
-	case shutdownRequested.Load():
-		// We asked for this. Whatever the wait says, the reason is that it was
-		// stopped — and the exit code of a process we killed is not the
-		// command's own outcome, so it is deliberately not reported. Unless
-		// the asking was the parent going away before the command started,
-		// which is an abandonment: the daemon is the only one who can tell,
-		// because it is the only one who knows whether the command started.
+	case errors.Is(err, errSessionStopped):
 		runReason = sessiondir.ReasonStopped
+	case errors.As(err, &hostSignal):
+		runReason = sessiondir.ReasonSignaled
+		runSignal = hostSignal.signal.String()
+		n := int(hostSignal.signal)
+		runSignalNumber = &n
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		runReason = sessiondir.ReasonCanceled
 		if abandonedBy(ctx) && !closed(cmdReady) {
 			runReason = sessiondir.ReasonStartupAbandoned
 		}
@@ -1148,6 +1138,7 @@ func (c *Host) Run(ctx context.Context) error {
 		runReason = sessiondir.ReasonExited
 	case res.Signal != "":
 		runSignal = res.Signal
+		runSignalNumber = res.SignalNumber
 		runReason = sessiondir.ReasonSignaled
 	default:
 		runReason = sessiondir.ReasonStartupFailed

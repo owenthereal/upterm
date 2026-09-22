@@ -2,6 +2,7 @@ package sessiondir
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -457,4 +458,31 @@ func Test_Prune_RemovesOnlyOldFreeRecords(t *testing.T) {
 		}
 	}
 	require.ElementsMatch(t, []string{"old-held", "recent-free", "unparsable"}, survived)
+}
+
+func TestRecordOriginatingSignalRoundTrip(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	d, err := claim(t, runtimeRoot, stateRoot, "signal")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(context.Background()) }()
+	number := 7
+	require.NoError(t, d.Update(func(r *Record) {
+		r.Reason = ReasonSignaled
+		r.Signal = "bus error"
+		r.SignalNumber = &number
+	}))
+	rec, err := ReadRecord(stateRoot, "signal")
+	require.NoError(t, err)
+	require.Equal(t, &number, rec.SignalNumber)
+	raw, err := os.ReadFile(d.RecordPath())
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Equal(t, float64(7), fields["signal_number"])
+	var legacy Record
+	require.NoError(t, json.Unmarshal([]byte(`{"reason":"signaled","signal":"bus error"}`), &legacy))
+	require.Nil(t, legacy.SignalNumber)
+	raw, err = json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "signal_number")
 }

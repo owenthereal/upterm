@@ -31,6 +31,7 @@ const (
 	ReasonExited   = "exited"
 	ReasonSignaled = "signaled"
 	ReasonStopped  = "stopped"
+	ReasonCanceled = "canceled"
 	// ReasonJoinTimeout means no guest joined before the deadline; this is a successful session end.
 	ReasonJoinTimeout      = "join_timeout"
 	ReasonStartupFailed    = "startup_failed"
@@ -101,6 +102,7 @@ type Record struct {
 	Reason             string    `json:"reason"`
 	ExitCode           *int      `json:"exit_code,omitempty"`
 	Signal             string    `json:"signal,omitempty"`
+	SignalNumber       *int      `json:"signal_number,omitempty"`
 	// Pid is the process that claimed the name. Set by Claim and never by a
 	// caller: the claimer is the owner by definition, and a reader who finds
 	// the name held but its socket silent needs a process to name.

@@ -794,7 +794,7 @@ func TestJoinTimeoutDoesNotStealACompetingOutcome(t *testing.T) {
 	cancel()
 	release()
 	require.ErrorIs(t, f.result(t), context.Canceled, "the winning cancellation must survive")
-	require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
+	require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
 	outcome := <-clientDone
 	require.NoError(t, outcome.err)
 	require.Equal(t, attach.Exited, outcome.result.Reason)
@@ -835,7 +835,7 @@ func TestJoinTimeoutParentCancellationStopsAttachedClient(t *testing.T) {
 	}
 	require.ErrorIs(t, f.result(t), context.Canceled)
 	require.NotContains(t, f.output.String(), "no guest joined")
-	require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
+	require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
 }
 
 type joinAttachmentResult struct {
@@ -942,7 +942,7 @@ func TestJoinTimeoutHeldAdminDoesNotDelayCommandCancellation(t *testing.T) {
 				require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 			} else {
 				require.ErrorIs(t, f.result(t), context.Canceled)
-				require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
+				require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
 			}
 			require.Less(t, time.Since(shutdownStart), 2*time.Second, "one-second admin budget plus fixture teardown")
 			if timeout {
@@ -969,4 +969,93 @@ func TestJoinTimeoutOrdinaryExitHasNoNotice(t *testing.T) {
 	_ = f.result(t)
 	require.Equal(t, sessiondir.ReasonExited, f.record(t).Reason)
 	require.NotContains(t, f.output.String(), "no guest joined")
+}
+
+func TestParentCancellationBeforeSignalActor(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.h.SessionCreatedCallback = func(context.Context, *api.GetSessionResponse) error {
+		cancel()
+		return ctx.Err()
+	}
+	require.ErrorIs(t, f.h.Run(ctx), context.Canceled)
+	require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
+}
+
+func TestStartupFailureBeatsLateCancellation(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failure := errors.New("callback failed")
+	f.h.SessionCreatedCallback = func(context.Context, *api.GetSessionResponse) error {
+		cancel()
+		return failure
+	}
+	require.ErrorIs(t, f.h.Run(ctx), failure)
+	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
+}
+
+func TestAdminStopWithJoinTimerRemainsStopped(t *testing.T) {
+	for i := 0; i < 30; i++ {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			f := newJoinTimeoutHost(t)
+			f.h.JoinTimeout = time.Hour
+			f.start(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+			conn, err := grpc.NewClient("unix://"+f.h.AdminSocketFile, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err = api.NewAdminServiceClient(conn).StopSession(ctx, &api.StopSessionRequest{LaunchId: f.record(t).LaunchID})
+			require.NoError(t, err)
+			require.ErrorIs(t, f.result(t), context.Canceled)
+			require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
+		})
+	}
+}
+
+func TestParentCancellationImmediatelyAfterClaim(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.h.SessionClaimedCallback = func(*sessiondir.Dir) { cancel() }
+	require.ErrorIs(t, f.h.Run(ctx), context.Canceled)
+	require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
+}
+
+func TestLateParentCancellationDoesNotReplaceCommandWinner(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 30 * time.Millisecond
+	reached, selected, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(released) }) }
+	defer release()
+	f.h.onJoinDeadlineFired = func(stop <-chan struct{}) {
+		close(reached)
+		select {
+		case <-stop:
+			close(selected)
+		case <-time.After(5 * time.Second):
+			t.Error("command did not win")
+			return
+		}
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Error("late cancellation barrier not released")
+		}
+	}
+	cancel := f.start(t)
+	awaitJoinTimeoutSignal(t, reached, "timer barrier")
+	f.finish(t, "0")
+	awaitJoinTimeoutSignal(t, selected, "command winner")
+	cancel()
+	release()
+	require.NoError(t, f.result(t))
+	rec := f.record(t)
+	require.Equal(t, sessiondir.ReasonExited, rec.Reason)
+	require.NotNil(t, rec.ExitCode)
+	require.Zero(t, *rec.ExitCode)
 }
