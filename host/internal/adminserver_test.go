@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -177,6 +178,21 @@ func TestGetSessionReportsEachClientsKind(t *testing.T) {
 	require.Equal(t, map[string]api.Client_Kind{"g": api.Client_GUEST, "h": api.Client_HOST}, kinds)
 }
 
+// Match host.AdminClient's explicit Unix dialer: Windows socket paths cannot
+// be used as gRPC URL targets. Keep the connection available for stream and
+// transport-close assertions in the shutdown tests.
+func adminTestConn(t *testing.T, socket string) *grpc.ClientConn {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough:///unix",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}),
+	)
+	require.NoError(t, err)
+	return conn
+}
+
 // A header-only unary stream is accepted but cannot dispatch its handler until
 // its body arrives. A later RPC on the same HTTP/2 transport is our acceptance
 // barrier: the server has processed the earlier stream's headers first.
@@ -186,8 +202,7 @@ func TestAdminShutdownBoundsPendingRPC(t *testing.T) {
 	require.NoError(t, s.Listen(sock))
 	served := make(chan error, 1)
 	go func() { served <- s.Serve(context.Background()) }()
-	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
+	conn := adminTestConn(t, sock)
 	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -253,18 +268,19 @@ func TestAdminShutdownBoundsBlockedHandler(t *testing.T) {
 					t.Error("Serve did not return after handler release")
 				}
 			})
-			conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
-			require.NoError(t, err)
+			conn := adminTestConn(t, sock)
 			defer func() { _ = conn.Close() }()
 			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer rpcCancel()
-			rpcDone := make(chan struct{})
+			rpcDone := make(chan error, 1)
 			go func() {
-				_, _ = api.NewAdminServiceClient(conn).StopSession(rpcCtx, &api.StopSessionRequest{LaunchId: "launch"})
-				close(rpcDone)
+				_, err := api.NewAdminServiceClient(conn).StopSession(rpcCtx, &api.StopSessionRequest{LaunchId: "launch"})
+				rpcDone <- err
 			}()
 			select {
 			case <-entered:
+			case err := <-rpcDone:
+				t.Fatalf("StopSession ended before entering its callback: %v", err)
 			case <-rpcCtx.Done():
 				t.Fatal("StopSession callback never entered")
 			}
