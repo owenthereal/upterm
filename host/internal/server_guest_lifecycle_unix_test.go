@@ -86,10 +86,17 @@ func TestGuestEventsFollowAcceptedSessionLifecycle(t *testing.T) {
 	sess, err := client.NewSession()
 	require.NoError(t, err)
 	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	_, err = sess.StdinPipe() // keep the accepted session live until Close
+	require.NoError(t, err)
 	require.NoError(t, sess.Shell())
 	c := eventClient(t, joined)
 	require.Equal(t, api.Client_GUEST, c.Kind)
 	require.NotEmpty(t, c.PublicKeyFingerprint)
+	select {
+	case e := <-leftEvents:
+		t.Fatalf("accepted guest left before its channel closed: %v", e.Args)
+	case <-time.After(50 * time.Millisecond):
+	}
 	require.NoError(t, sess.Close())
 	select {
 	case e := <-leftEvents:
