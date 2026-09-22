@@ -58,7 +58,7 @@ require (
 	github.com/ncruces/zenity v0.10.15
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/pires/go-proxyproto v0.15.0
-	github.com/pkg/sftp v1.13.10
+	github.com/pkg/sftp v1.13.11
 	github.com/samber/slog-multi v1.8.0
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
