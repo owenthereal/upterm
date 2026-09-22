@@ -220,8 +220,13 @@ func Test_printBanner_DeliversTheWholeBannerToAReaderThatReads(t *testing.T) {
 }
 
 func Test_ResolveSessionName(t *testing.T) {
-	require.Equal(t, "mine", resolveSessionName("mine", []string{"bash"}))
-	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", []string{"/bin/bash", "-l"}))
+	bash := func() string { return sessiondir.GenerateName([]string{"/bin/bash", "-l"}) }
+
+	// One draw, so there is nothing for it to collide with: what is pinned is
+	// that an explicit name is taken as given and an empty one reaches the
+	// generator, not that two generated names differ.
+	require.Equal(t, "mine", resolveSessionName("mine", bash))
+	require.Regexp(t, `^bash-[0-9a-f]{4}$`, resolveSessionName("", bash))
 }
 
 // logRecord is one record a capturingHandler was given, flattened to what a
@@ -285,6 +290,23 @@ func redrawLogs(names ...string) []logRecord {
 	return want
 }
 
+// generatedNames is a stand-in for the real generator that hands out
+// bash-0001, bash-0002, ... on successive calls.
+//
+// A test that asks for three real draws is also betting on three crypto/rand
+// values being distinct, and sessiondir's four hex digits collide about once
+// in 22,000 such runs — which is the generator's business and not the retry's,
+// and was read as a regression on the Windows job before it was recognised
+// (#574). Knowing the names up front also lets the assertions below name what
+// they expect instead of comparing the drawn names to themselves.
+func generatedNames() func() string {
+	var drawn int
+	return func() string {
+		drawn++
+		return fmt.Sprintf("bash-%04d", drawn)
+	}
+}
+
 // Test_runWithGeneratedNameRetry covers the difference between a name upterm
 // picked and a name the user typed. A generated name that collides is a lost
 // dice roll and re-rolling is what the user wants; an explicit one that
@@ -294,6 +316,10 @@ func redrawLogs(names ...string) []logRecord {
 // hosts under a name other than the one it drew, and the operator who later
 // cannot find that name has the log and nothing else — so a redraw that says
 // nothing, or a refusal that claims one happened, are both wrong.
+//
+// The retry itself is exercised through runWithNameRetry with names of the
+// test's own; the last case is the one that holds the wrapper to drawing the
+// real ones.
 func Test_runWithGeneratedNameRetry(t *testing.T) {
 	inUse := func(name string) error {
 		return fmt.Errorf("claiming %s: %w", name, sessiondir.ErrNameInUse)
@@ -302,7 +328,7 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 	t.Run("a generated name is retried with a fresh one", func(t *testing.T) {
 		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(name string) error {
+		err := runWithNameRetry(slog.New(logs), "", generatedNames(), func(name string) error {
 			names = append(names, name)
 			if len(names) < 3 {
 				return inUse(name)
@@ -311,22 +337,19 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		require.Len(t, names, 3)
+		// Every attempt draws: retrying the name that was taken, rather than
+		// drawing a fresh one, would collide again and again until the bound
+		// gave up.
+		require.Equal(t, []string{"bash-0001", "bash-0002", "bash-0003"}, names)
 
-		distinct := map[string]bool{}
-		for _, n := range names {
-			distinct[n] = true
-		}
-		require.Len(t, distinct, 3, "retrying the name that was taken would collide again")
-
-		require.Equal(t, redrawLogs(names[0], names[1]), logs.captured(),
+		require.Equal(t, redrawLogs("bash-0001", "bash-0002"), logs.captured(),
 			"each name that was taken is logged once, as it is given up")
 	})
 
 	t.Run("an explicit name is never retried", func(t *testing.T) {
 		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry(slog.New(logs), "mine", []string{"bash"}, func(name string) error {
+		err := runWithNameRetry(slog.New(logs), "mine", generatedNames(), func(name string) error {
 			names = append(names, name)
 			return inUse(name)
 		})
@@ -340,7 +363,7 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 	t.Run("retrying is bounded", func(t *testing.T) {
 		logs := &capturingHandler{}
 		var names []string
-		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(name string) error {
+		err := runWithNameRetry(slog.New(logs), "", generatedNames(), func(name string) error {
 			names = append(names, name)
 			return fmt.Errorf("attempt %d: %w", len(names), inUse(name))
 		})
@@ -351,15 +374,17 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 
 		// One short of the attempts: the last collision is returned rather
 		// than redrawn, and logging it would claim a session was hosted
-		// somewhere when none was hosted at all.
-		require.Equal(t, redrawLogs(names[:maxGeneratedNameAttempts-1]...), logs.captured())
+		// somewhere when none was hosted at all. Spelled out rather than
+		// sliced out of names, so a redraw that announced the wrong name
+		// would be a failure instead of a tautology.
+		require.Equal(t, redrawLogs("bash-0001", "bash-0002", "bash-0003", "bash-0004"), logs.captured())
 	})
 
 	t.Run("any other failure is final", func(t *testing.T) {
 		logs := &capturingHandler{}
 		refused := errors.New("dial tcp: connection refused")
 		var calls int
-		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"bash"}, func(string) error {
+		err := runWithNameRetry(slog.New(logs), "", generatedNames(), func(string) error {
 			calls++
 			return refused
 		})
@@ -380,7 +405,7 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		// backs the standard log package too — a test that reaches that far
 		// out to check a nil check is worse than the nil check.
 		var names []string
-		err := runWithGeneratedNameRetry(nil, "", []string{"bash"}, func(name string) error {
+		err := runWithNameRetry(nil, "", generatedNames(), func(name string) error {
 			names = append(names, name)
 			if len(names) < 2 {
 				return inUse(name)
@@ -391,6 +416,25 @@ func Test_runWithGeneratedNameRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, names, 2,
 			"the collision was redrawn, so the log line ran with no logger to run it on")
+	})
+
+	t.Run("the wrapper draws from the real generator", func(t *testing.T) {
+		// Every case above supplies its own names, which leaves the wrapper as
+		// the only thing still saying where a real one comes from: a seam that
+		// quietly stopped calling sessiondir would pass all of them. One
+		// attempt is enough to see the generator, and one draw cannot collide
+		// with anything.
+		logs := &capturingHandler{}
+		var names []string
+		err := runWithGeneratedNameRetry(slog.New(logs), "", []string{"/bin/bash", "-l"}, func(name string) error {
+			names = append(names, name)
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.Len(t, names, 1)
+		require.Regexp(t, `^bash-[0-9a-f]{4}$`, names[0])
+		require.Empty(t, logs.captured(), "nothing was redrawn, so nothing is announced")
 	})
 }
 
