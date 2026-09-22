@@ -523,3 +523,7 @@ func Test_ListLive_ReturnsOnlyHeldNames(t *testing.T) {
 	require.Equal(t, StatusReady, live[1].Status, "each record comes back as its owner published it")
 	require.Equal(t, "sid-b", live[1].SessionID)
 }
+
+func TestReasonJoinTimeoutValue(t *testing.T) {
+	require.Equal(t, "join_timeout", ReasonJoinTimeout)
+}

@@ -27,10 +27,12 @@ const (
 // absent record — and an absent record means only "not found within retained
 // history", since Prune removes anything unheld and older than RecordRetention.
 const (
-	ReasonUnknown          = "unknown"
-	ReasonExited           = "exited"
-	ReasonSignaled         = "signaled"
-	ReasonStopped          = "stopped"
+	ReasonUnknown  = "unknown"
+	ReasonExited   = "exited"
+	ReasonSignaled = "signaled"
+	ReasonStopped  = "stopped"
+	// ReasonJoinTimeout means no guest joined before the deadline; this is a successful session end.
+	ReasonJoinTimeout      = "join_timeout"
 	ReasonStartupFailed    = "startup_failed"
 	ReasonStartupAbandoned = "startup_abandoned"
 )
