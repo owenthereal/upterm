@@ -864,6 +864,66 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	var g run.Group
+	// Interrupts run in registration order. Deliver the selected cause to
+	// the command before admin draining or lifecycle unsubscription can block.
+	// Hoisted out of the block below so the classification after g.Run can ask
+	// it what the command actually did.
+	var sshServer internal.Server
+	{
+		logger.Info("Starting sshd server")
+		defer logger.Info("Finishing sshd server")
+
+		commandEnv := []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)}
+		if c.SessionDir != nil {
+			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
+		}
+
+		// The group owns this actor's cancellation. Inheriting the parent's
+		// cancellation could mask an already selected deadline winner before
+		// the interrupt carries its cause to attached clients. The signal
+		// actor still observes the parent and initiates ordinary teardown.
+		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+		sshServer = internal.Server{
+			Command:                 c.Command,
+			CommandEnv:              commandEnv,
+			ForceCommand:            c.ForceCommand,
+			HostKey:                 hostKey,
+			AuthorizedKeys:          aks,
+			EventEmitter:            eventEmitter,
+			KeepAliveDuration:       c.KeepAliveDuration,
+			Logger:                  logger.With("component", "server"),
+			ReadOnly:                c.ReadOnly,
+			AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
+			PtySize:                 c.PtySize,
+			PinPtySize:              c.PinPtySize,
+			Term:                    c.Term,
+			AwaitInitialClient:      c.AwaitInitialClient,
+			InitialClientTimeout:    c.InitialClientTimeout,
+			StopGrace:               c.StopGrace,
+			SFTPDisabled:            c.SFTPDisabled,
+			SFTPPermissionChecker:   c.SFTPPermissionChecker,
+			OnCommandStarted: func() {
+				cmdOnce.Do(func() { close(cmdReady) })
+				if c.CommandStartedCallback != nil {
+					c.CommandStartedCallback()
+				}
+			},
+			OnGuestServerStopped: func(err error) {
+				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
+				if c.SessionDir != nil {
+					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
+						advanceStatus(r, sessiondir.StatusDisconnected)
+					})
+				}
+			},
+		}
+		g.Add(func() error {
+			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
+		}, func(err error) {
+			// Only the winning group error reaches attached clients.
+			cancel(err)
+		})
+	}
 	{
 		// Handle OS signals for graceful shutdown
 		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
@@ -874,7 +934,9 @@ func (c *Host) Run(ctx context.Context) error {
 		g.Add(func() error {
 			return adminServer.Serve(ctx)
 		}, func(err error) {
-			_ = adminServer.Shutdown(ctx)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer shutdownCancel()
+			_ = adminServer.Shutdown(shutdownCtx)
 			cancel()
 		})
 	}
@@ -945,64 +1007,7 @@ func (c *Host) Run(ctx context.Context) error {
 			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}
-	// Hoisted out of the block below so the classification after g.Run can ask
-	// it what the command actually did.
-	var sshServer internal.Server
-	{
-		logger.Info("Starting sshd server")
-		defer logger.Info("Finishing sshd server")
 
-		commandEnv := []string{fmt.Sprintf("%s=%s", upterm.HostAdminSocketEnvVar, c.AdminSocketFile)}
-		if c.SessionDir != nil {
-			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
-		}
-
-		// The group owns this actor's cancellation. Inheriting the parent's
-		// cancellation could mask an already selected deadline winner before
-		// the interrupt carries its cause to attached clients. The signal
-		// actor still observes the parent and initiates ordinary teardown.
-		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-		sshServer = internal.Server{
-			Command:                 c.Command,
-			CommandEnv:              commandEnv,
-			ForceCommand:            c.ForceCommand,
-			HostKey:                 hostKey,
-			AuthorizedKeys:          aks,
-			EventEmitter:            eventEmitter,
-			KeepAliveDuration:       c.KeepAliveDuration,
-			Logger:                  logger.With("component", "server"),
-			ReadOnly:                c.ReadOnly,
-			AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
-			PtySize:                 c.PtySize,
-			PinPtySize:              c.PinPtySize,
-			Term:                    c.Term,
-			AwaitInitialClient:      c.AwaitInitialClient,
-			InitialClientTimeout:    c.InitialClientTimeout,
-			StopGrace:               c.StopGrace,
-			SFTPDisabled:            c.SFTPDisabled,
-			SFTPPermissionChecker:   c.SFTPPermissionChecker,
-			OnCommandStarted: func() {
-				cmdOnce.Do(func() { close(cmdReady) })
-				if c.CommandStartedCallback != nil {
-					c.CommandStartedCallback()
-				}
-			},
-			OnGuestServerStopped: func(err error) {
-				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
-				if c.SessionDir != nil {
-					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
-						advanceStatus(r, sessiondir.StatusDisconnected)
-					})
-				}
-			},
-		}
-		g.Add(func() error {
-			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
-		}, func(err error) {
-			// Only the winning group error reaches attached clients.
-			cancel(err)
-		})
-	}
 	{
 		ready := make(chan struct{})
 		g.Add(func() error {
@@ -1070,7 +1075,7 @@ func (c *Host) Run(ctx context.Context) error {
 			case <-stop:
 				return nil
 			case <-ctx.Done():
-				return nil
+				return ctx.Err()
 			}
 
 			timer := time.NewTimer(c.JoinTimeout)
@@ -1083,7 +1088,7 @@ func (c *Host) Run(ctx context.Context) error {
 			case <-stop:
 				return nil
 			case <-ctx.Done():
-				return nil
+				return ctx.Err()
 			case <-timer.C:
 				// Best-effort tie breaking, like setupSignalHandler. Another
 				// actor can still win afterwards: never log or record here.
@@ -1094,7 +1099,7 @@ func (c *Host) Run(ctx context.Context) error {
 				case <-stop:
 					return nil
 				case <-ctx.Done():
-					return nil
+					return ctx.Err()
 				default:
 				}
 				// After rechecks, so a test can establish another winner and

@@ -91,20 +91,27 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 
 func (s *AdminServer) Shutdown(ctx context.Context) error {
 	s.Lock()
-	defer s.Unlock()
+	srv, ln := s.srv, s.ln
+	// A serving actor that has not started must not resurrect a closed listener.
+	s.ln = nil
+	s.Unlock()
 
-	if s.srv != nil {
-		// Closes the listener too.
-		s.srv.GracefulStop()
+	if srv != nil {
+		drained := make(chan struct{})
+		go func() { srv.GracefulStop(); close(drained) }()
+		select {
+		case <-drained:
+		case <-ctx.Done():
+			// Stop closes active transports, including streams still waiting for
+			// their request body, and releases the concurrent graceful drain.
+			srv.Stop()
+			<-drained
+		}
 		return nil
 	}
-
-	// Bound but never served, which a teardown that arrives before the serving
-	// actor starts leaves behind. Nothing else would close it.
-	if s.ln != nil {
-		return s.ln.Close()
+	if ln != nil {
+		return ln.Close()
 	}
-
 	return nil
 }
 

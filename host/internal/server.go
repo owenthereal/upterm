@@ -1081,6 +1081,18 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	case h.kind == kindHost && h.stopCtx != nil && errors.Is(context.Cause(h.stopCtx), ErrJoinTimeout):
 		// The command was killed by a successful first-guest deadline. Its
 		// resulting signal is not the attached foreground client's outcome.
+		// The group has drained command output before this final notice. Bound
+		// both the write and exit request: a terminal that stopped reading must
+		// not hold teardown open. Closing the transport releases blocked SSH I/O.
+		noticeTimer := time.AfterFunc(guestFlushTimeout, func() {
+			if conn := serverConn(sess); conn != nil {
+				_ = conn.Close()
+			} else {
+				_ = sess.Close()
+			}
+		})
+		defer noticeTimer.Stop()
+		_, _ = io.WriteString(sess, "\r\nupterm: no guest joined within the join timeout; session ended\r\n")
 		_ = sess.Exit(0)
 	case commandDone && h.commandResult != nil:
 		// The session ended because the command did. Its status is the

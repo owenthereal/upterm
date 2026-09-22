@@ -6,10 +6,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -172,4 +175,51 @@ func TestGetSessionReportsEachClientsKind(t *testing.T) {
 		kinds[c.Id] = c.Kind
 	}
 	require.Equal(t, map[string]api.Client_Kind{"g": api.Client_GUEST, "h": api.Client_HOST}, kinds)
+}
+
+// A header-only unary stream is accepted but cannot dispatch its handler until
+// its body arrives. A later RPC on the same HTTP/2 transport is our acceptance
+// barrier: the server has processed the earlier stream's headers first.
+func TestAdminShutdownBoundsPendingRPC(t *testing.T) {
+	s := &AdminServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo()}
+	sock := filepath.Join(shortTempDir(t), "admin.sock")
+	require.NoError(t, s.Listen(sock))
+	served := make(chan error, 1)
+	go func() { served <- s.Serve(context.Background()) }()
+	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{}, "/api.AdminService/GetSession")
+	require.NoError(t, err)
+	_, err = api.NewAdminServiceClient(conn).GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err)
+	shutdownCtx, stop := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- s.Shutdown(shutdownCtx) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		// Release the held stream before reporting a regression.
+		cancel()
+		<-done
+		t.Fatal("Shutdown ignored its context while a real RPC was pending")
+	}
+	require.Error(t, stream.RecvMsg(&api.GetSessionResponse{}), "forced shutdown closes the accepted stream")
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop")
+	}
+}
+
+func TestAdminShutdownBeforeServe(t *testing.T) {
+	s := &AdminServer{}
+	require.NoError(t, s.Listen(filepath.Join(shortTempDir(t), "admin.sock")))
+	require.NoError(t, s.Shutdown(context.Background()))
+	require.Error(t, s.Serve(context.Background()))
+	require.NoError(t, s.Shutdown(context.Background()))
 }
