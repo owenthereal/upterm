@@ -1107,6 +1107,26 @@ func Test_stopSession(t *testing.T) {
 		err := stopSession(context.Background(), "stuck-1", &out)
 		require.ErrorContains(t, err, "still running after")
 	})
+	t.Run("an acknowledged stop with an unreadable record cannot be confirmed", func(t *testing.T) {
+		old := stopWaitTimeout
+		stopWaitTimeout = 80 * time.Millisecond
+		t.Cleanup(func() { stopWaitTimeout = old })
+		setupSessionRoots(t)
+		d := claimSession(t, "corrupt-after-ack")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {
+			_ = os.WriteFile(d.RecordPath(), []byte("{not json"), 0600)
+		})
+		var out bytes.Buffer
+		started := time.Now()
+		err := stopSession(context.Background(), "corrupt-after-ack", &out)
+		require.ErrorContains(t, err, "could not be confirmed")
+		var syntax *json.SyntaxError
+		require.ErrorAs(t, err, &syntax, "the inspection cause must be available to callers")
+		require.Less(t, time.Since(started), time.Second, "stop must remain bounded by its short deadline")
+		require.Empty(t, out.String())
+	})
 }
 
 func TestWaitExitCodeForReason(t *testing.T) {
@@ -1144,6 +1164,46 @@ func TestWaitReturnsImmediatelyForAnEndedSession(t *testing.T) {
 	code, err := waitSession(context.Background(), "done", &out)
 	require.NoError(t, err)
 	require.Equal(t, 7, code)
+}
+
+func TestWaitCobraReportsOutcomeOnceAndDiagnosesObserverErrors(t *testing.T) {
+	setupSessionRoots(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	seedEndedSessionRecord(t, utils.UptermStateDir(), "exit-seven", sessiondir.Record{
+		Name: "exit-seven", LaunchID: "L1",
+		Reason: sessiondir.ReasonExited, ExitCode: func(i int) *int { return &i }(7),
+	})
+	seedCorruptSessionRecord(t, utils.UptermStateDir(), "corrupt")
+
+	for _, tc := range []struct {
+		name, session string
+		wantOutcome   string
+		wantError     string
+	}{
+		{"ended with exit seven", "exit-seven", "session exit-seven ended (", ""},
+		{"missing session", "missing", "", "no session named"},
+		{"corrupt session", "corrupt", "", "invalid character"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := Root()
+			root.SetArgs([]string{"session", "wait", tc.session})
+			var stderr bytes.Buffer
+			root.SetErr(&stderr)
+			var err error
+			stdout := captureStdout(t, func() { err = root.Execute() })
+			require.Error(t, err)
+			if tc.wantOutcome != "" {
+				var exit ExitCodeError
+				require.ErrorAs(t, err, &exit)
+				require.Equal(t, 7, exit.Code)
+				require.Equal(t, 1, strings.Count(stdout, tc.wantOutcome))
+				require.Empty(t, stderr.String(), "Cobra must not invent an error for a completed session")
+			} else {
+				require.Empty(t, stdout)
+				require.Contains(t, stderr.String(), tc.wantError)
+			}
+		})
+	}
 }
 
 func TestWaitErrorsForAMissingSession(t *testing.T) {

@@ -211,6 +211,7 @@ never stops anything.`,
 			if code != 0 {
 				// Bare, with no Err, exactly as attach.go:202 returns it:
 				// this command succeeded; the thing it watched did not.
+				c.SilenceErrors = true
 				return ExitCodeError{Code: code}
 			}
 			return nil
@@ -386,20 +387,26 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	// Acknowledged. The name is free once this launch has released it, or
 	// once another launch holds it, which is the same thing from here.
 	deadline := time.Now().Add(stopWaitTimeout)
+	var lastInspectErr error
 	for {
-		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastInspectErr != nil {
+				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, stopWaitTimeout, lastInspectErr)
+			}
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
+		}
+		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
 		cancelPoll()
 		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
 			break
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
-		}
+		lastInspectErr = err
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(stopPollInterval):
+		case <-time.After(min(stopPollInterval, max(0, time.Until(deadline)))):
 		}
 	}
 	final, err := sessiondir.ReadRecord(stateRoot, name)
