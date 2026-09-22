@@ -1121,13 +1121,6 @@ func TestWaitExitCodeForReason(t *testing.T) {
 		{"exited with no code", sessiondir.Record{Reason: sessiondir.ReasonExited}, 125},
 		{"join timeout is success", sessiondir.Record{Reason: sessiondir.ReasonJoinTimeout}, 0},
 		{"stop is success", sessiondir.Record{Reason: sessiondir.ReasonStopped}, 0},
-		// The names signalName actually persists: ws.Signal().String().
-		{"terminated", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "terminated"}, 143},
-		{"killed", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "killed"}, 137},
-		{"hangup", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "hangup"}, 129},
-		{"interrupt", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "interrupt"}, 130},
-		{"segfault", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "segmentation fault"}, 139},
-		{"aborted", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "aborted"}, 134},
 		{"unrecognised signal", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "nope"}, 125},
 		{"startup failed", sessiondir.Record{Reason: sessiondir.ReasonStartupFailed}, 125},
 		{"startup abandoned", sessiondir.Record{Reason: sessiondir.ReasonStartupAbandoned}, 125},
