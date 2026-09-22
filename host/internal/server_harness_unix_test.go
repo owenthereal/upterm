@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -345,19 +346,51 @@ func (h *hostHarness) connectHostGated(t *testing.T, pty *hostPty, opts ...dialO
 // readUntil reads r until marker appears, returning everything read.
 func readUntil(t *testing.T, r io.Reader, marker string) string {
 	t.Helper()
+	return readUntilWithin(t, r, marker, harnessTimeout)
+}
+
+// readUntilWithin is readUntil with its own budget, for a marker that arrives
+// only behind one of the multi-megabyte payloads. harnessTimeout is sized for
+// a client that never answers at all; six megabytes through a pty takes most
+// of it on a loaded macOS runner, where the stream tests measure 5-6s against
+// its 10, so reading a payload on that budget fails on a slow runner rather
+// than on a broken one. The sibling stream tests already give their own
+// readers and connections a minute for the same reason.
+func readUntilWithin(t *testing.T, r io.Reader, marker string, timeout time.Duration) string {
+	t.Helper()
 	var seen strings.Builder
 	buf := make([]byte, 4096)
-	deadline := time.Now().Add(harnessTimeout)
+	deadline := time.Now().Add(timeout)
+	// Reported through t.Fatalf rather than require, which formats the whole
+	// of what it was given: handed a six-megabyte haystack it prints all of
+	// it, and the padding is never what the failure is about.
 	for !strings.Contains(seen.String(), marker) {
-		require.True(t, time.Now().Before(deadline), "timed out waiting for %q; saw %q", marker, seen.String())
+		if !time.Now().Before(deadline) {
+			t.Fatalf("timed out after %s waiting for %q; saw %s", timeout, marker, summarize(seen.String()))
+		}
 		n, err := r.Read(buf)
 		seen.Write(buf[:n])
 		if err != nil {
-			require.Contains(t, seen.String(), marker, "stream ended before %q: %v", marker, err)
+			if !strings.Contains(seen.String(), marker) {
+				t.Fatalf("stream ended before %q: %v; saw %s", marker, err, summarize(seen.String()))
+			}
 			break
 		}
 	}
 	return seen.String()
+}
+
+// summarize is what a failure message shows of a stream that may be megabytes
+// of padding: its length, and the tail the marker would have been at the end
+// of. Testify renders a message this size and no more — handed the whole of a
+// six-megabyte payload it prints "bufio.Scanner: token too long" instead, so
+// an unbounded message is how a stream test comes to report nothing at all.
+func summarize(s string) string {
+	const tail = 256
+	if len(s) <= tail {
+		return fmt.Sprintf("%d bytes %q", len(s), s)
+	}
+	return fmt.Sprintf("%d bytes ending %q", len(s), s[len(s)-tail:])
 }
 
 // readsALine is a command that prints a marker, waits for one line of input,

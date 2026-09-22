@@ -214,6 +214,10 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 
 	logger = logger.With("node_addr", nodeAddr)
 
+	// Written by the server actor's interrupt below and read after g.Run
+	// returns; see the comment there for why that needs no synchronisation.
+	var serverShutdownErr error
+
 	var g run.Group
 	{
 		var mp provider.Provider
@@ -278,11 +282,22 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 			Logger:              logger.With("component", "server"),
 			MetricsProvider:     mp,
 		}
+		// run.Group's interrupt signature is func(error), so a failing Shutdown
+		// has nowhere to report to and used to be logged and dropped: Start
+		// returned g.Run's error, which on a requested stop is the nil that
+		// ServeWithContext reports, and the process exited 0. A deploy that
+		// failed to delete this node's sessions looked successful to the
+		// supervisor -- the same class of blind spot as #573, one layer in.
+		//
+		// Capturing it here is race-free: run.Group calls every interrupt
+		// serially on the goroutine already inside Run, before Run returns, so
+		// this write happens before the read below.
 		g.Add(func() error {
 			return s.ServeWithContext(ctx, sshln, wsln)
 		}, func(err error) {
-			if err := s.Shutdown(); err != nil {
-				logger.Error("error during server shutdown", "error", err)
+			if shutdownErr := s.Shutdown(); shutdownErr != nil {
+				logger.Error("error during server shutdown", "error", shutdownErr)
+				serverShutdownErr = shutdownErr
 			}
 		})
 	}
@@ -302,7 +317,11 @@ func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
 	logger.Info("starting server")
 	defer logger.Info("shutting down server")
 
-	return g.Run()
+	// A requested stop comes back nil from g.Run, so on that path this returns
+	// whatever Shutdown reported and nothing else. Both are joined rather than
+	// either winning: an actor that failed and a shutdown that then failed to
+	// clean up are two separate things the operator needs to see.
+	return errors.Join(g.Run(), serverShutdownErr)
 }
 
 func parseNetworkOpt(opts []string) NetworkOptions {
@@ -355,6 +374,39 @@ var errShutdownIncomplete = errors.New("serving did not stop within the shutdown
 // A variable so tests can shorten it; nothing outside tests assigns to it.
 var serveStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadline
 
+// errSessionCleanupTimeout reports that deleting this node's sessions did not
+// finish in time, so the store may still route joiners to a node that is gone
+// until the entries reach their TTL.
+var errSessionCleanupTimeout = errors.New("session cleanup did not finish within its deadline")
+
+// sessionCleanupDeadline bounds the session cleanup that follows the wait for
+// serving to stop.
+//
+// Without it Shutdown had a floor but no ceiling: SessionManager.Shutdown lists
+// every session in the store, deletes this node's in serial 64-key Consul
+// transactions and closes the store, none of which carries a deadline of its
+// own. A supervisor's grace period cannot be set against an unbounded shutdown,
+// and uptermd's is set against this one -- fly.toml's kill_timeout has to clear
+// serveStopDeadline + sessionCleanupDeadline.
+//
+// The in-flight store calls are not cancelled when this expires, because
+// SessionStore takes no context; threading one through it is the better fix and
+// the one to reach for if this becomes load-bearing. What expiry does revoke is
+// the cleanup's permission to delete: SessionManager.Shutdown re-checks the
+// context before the deletes, so a cleanup that unblocks later cannot act on a
+// listing that has gone stale. Without that it would delete by node address --
+// which names the node, not the process -- and empty the store under whichever
+// server took that address next.
+//
+// What is left is a goroutine outliving Shutdown until its call returns. In
+// production that is the exit path and it dies with the process moments later;
+// an embedder calling Shutdown against a store that keeps overrunning would
+// accumulate them. A cleanup that half-finished still beats one the supervisor
+// killed outright, with the session TTL catching whatever is left.
+//
+// A variable so tests can shorten it; nothing outside tests assigns to it.
+var sessionCleanupDeadline = 3 * time.Second
+
 // Shutdown cancels serving and waits for it to finish. It deliberately does not
 // close sshln or wsln: each is owned by the component serving it, which closes
 // it from its own run.Group interrupt as the context unwinds. Closing them here
@@ -385,12 +437,34 @@ func (s *Server) Shutdown() error {
 		}
 	}
 
-	// Clean up sessions created by this node
-	if sessionErr := s.SessionManager.Shutdown(s.NodeAddr); sessionErr != nil {
-		s.Logger.Error("failed to cleanup sessions during shutdown", "error", sessionErr)
-		err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
-	} else {
-		s.Logger.Debug("cleaned up sessions during shutdown")
+	// Clean up sessions created by this node, under a deadline of its own so
+	// the whole of Shutdown is bounded and a supervisor's grace period can be
+	// set against it. See sessionCleanupDeadline for why the work is abandoned
+	// rather than cancelled on expiry.
+	//
+	// The deadline is a context rather than a timer so that giving up also
+	// revokes the abandoned cleanup's permission to delete anything: the defer
+	// cancels it the moment this returns, and SessionManager.Shutdown checks it
+	// before the deletes. Otherwise a cleanup that unblocked after a
+	// replacement server had taken this node address would delete that
+	// server's live sessions.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), sessionCleanupDeadline)
+	defer cancelCleanup()
+
+	cleaned := make(chan error, 1)
+	go func() { cleaned <- s.SessionManager.Shutdown(cleanupCtx, s.NodeAddr) }()
+
+	select {
+	case sessionErr := <-cleaned:
+		if sessionErr != nil {
+			s.Logger.Error("failed to cleanup sessions during shutdown", "error", sessionErr)
+			err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
+		} else {
+			s.Logger.Debug("cleaned up sessions during shutdown")
+		}
+	case <-cleanupCtx.Done():
+		s.Logger.Error("timed out cleaning up sessions during shutdown", "deadline", sessionCleanupDeadline)
+		err = errors.Join(err, errSessionCleanupTimeout)
 	}
 
 	if err == nil {

@@ -4,12 +4,11 @@
 app = "my-uptermd-server"  # Change this to your desired app name
 primary_region = "iad"     # Change to your preferred region (iad, fra, nrt, etc.)
 kill_signal = "SIGINT"
-# Keep above 8s: uptermd deletes this node's sessions only after waiting that
-# long for serving to stop, so a shorter grace period can kill the machine
-# before the deletes are attempted. 8s is a floor rather than a bound -- the
-# cleanup itself is not deadlined -- so the rest is headroom. Matters only
-# under UPTERMD_ROUTING=consul; with the embedded store the sessions die with
-# the process. See fly.toml.
+# Keep above 11s, uptermd's worst-case shutdown: up to 8s waiting for serving
+# to stop, then up to 3s deleting this node's sessions from the store. A
+# shorter grace period can kill the machine before the deletes are attempted.
+# Matters only under UPTERMD_ROUTING=consul; with the embedded store the
+# sessions die with the process. See fly.toml.
 kill_timeout = "15s"
 
 [build]

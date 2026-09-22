@@ -79,9 +79,13 @@ func (cmd *rootCmd) RunE(c *cobra.Command, args []string) error {
 
 	c.SetContext(uptermctx.WithLogger(c.Context(), logger))
 
+	// Start covers the whole lifetime, so this is no longer only a startup
+	// failure: a shutdown that could not delete this node's sessions arrives
+	// here too, and calling that "failed to start" sends whoever reads the log
+	// to the wrong end of the run.
 	if err := server.Start(c.Context(), opt, logger.Logger); err != nil {
-		logger.Error("failed to start uptermd", "error", err)
-		return fmt.Errorf("failed to start uptermd: %w", err)
+		logger.Error("uptermd exited with an error", "error", err)
+		return fmt.Errorf("uptermd: %w", err)
 	}
 
 	return nil

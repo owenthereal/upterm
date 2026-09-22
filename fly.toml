@@ -1,15 +1,14 @@
 app = "upterm"
 kill_signal = "SIGINT"
-# Must exceed server.serveStopDeadline (routingShutdownDeadline + 3 *
-# serverShutDownDeadline = 8s), because Server.Shutdown deletes this node's
-# sessions only after waiting that long for serving to stop. At Fly's 5s
-# default the drain alone can outlast the grace period, and the machine is
-# killed before the deletes are attempted -- leaving entries that route
-# joiners to a node that is gone until their Consul TTL expires.
+# Must exceed uptermd's worst-case shutdown, which is 11s: Server.Shutdown
+# waits up to server.serveStopDeadline (routingShutdownDeadline + 3 *
+# serverShutDownDeadline = 8s) for serving to stop, then spends up to
+# server.sessionCleanupDeadline (3s) deleting this node's sessions from the
+# store. Change either constant and change this.
 #
-# 8s is the floor, not a bound: the cleanup that follows the drain is
-# consulSessionStore.BatchDelete, which walks 64-key transactions serially
-# with no deadline of its own. The 7s above the floor is headroom for it.
+# At Fly's 5s default the drain alone could outlast the grace period, so the
+# machine was killed before the deletes were attempted -- leaving entries that
+# route joiners to a node that is gone until their Consul TTL expires.
 kill_timeout = "15s"
 
 [build]

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1006,7 +1007,17 @@ func (sm *SessionManager) GetStore() SessionStore {
 }
 
 // Shutdown cleans up sessions created by this node during server shutdown
-func (sm *SessionManager) Shutdown(nodeAddr string) error {
+// Shutdown deletes the sessions this node created and closes the store.
+//
+// ctx does not cancel the store calls -- SessionStore takes no context -- but
+// it does decide whether the deletes are still allowed to happen. A caller that
+// has stopped waiting cancels it, and the listing this was about to delete from
+// is then already stale: List reports whatever the store holds when it returns,
+// and the node address it filters on identifies the node, not the process. Left
+// unchecked, a cleanup abandoned by one server and unblocked after another had
+// taken the same address would delete the replacement's live sessions out of
+// the shared store.
+func (sm *SessionManager) Shutdown(ctx context.Context, nodeAddr string) error {
 	// Get all sessions
 	sessions, err := sm.store.List()
 	if err != nil {
@@ -1024,6 +1035,9 @@ func (sm *SessionManager) Shutdown(nodeAddr string) error {
 
 		// Batch delete sessions for this node
 		if len(sessionIDsToDelete) > 0 {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("abandoned before deleting %d sessions: %w", len(sessionIDsToDelete), err)
+			}
 			if err := sm.store.BatchDelete(sessionIDsToDelete); err != nil {
 				return fmt.Errorf("failed to batch delete sessions during shutdown: %w", err)
 			}

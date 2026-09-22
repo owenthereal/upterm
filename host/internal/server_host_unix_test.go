@@ -221,7 +221,9 @@ func TestUndrainedViewerDoesNotWedgeTheSession(t *testing.T) {
 	readUntil(t, guestOut, "READY")
 	_, err := io.WriteString(guestIn, "go\n")
 	require.NoError(t, err)
-	readUntil(t, guestOut, "DONE")
+	// On the same budget as the connections, and for the reason they are: the
+	// payload is what this read is waiting behind.
+	readUntilWithin(t, guestOut, "DONE", 60*time.Second)
 
 	waited := make(chan error, 1)
 	go func() { waited <- viewerSess.Wait() }()

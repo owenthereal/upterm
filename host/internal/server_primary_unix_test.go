@@ -587,8 +587,10 @@ func TestSecondaryHostClientOverflowClosesTheConnection(t *testing.T) {
 	bGate.pauseReads()
 
 	// The primary reads to the end regardless: a secondary that overflows is
-	// dropped, never allowed to pace the fan-out.
-	readUntil(t, aOut, "STREAM_DONE")
+	// dropped, never allowed to pace the fan-out. Six megabytes of it, so on
+	// the same budget as this client's connection rather than the harness's
+	// default, which the payload alone spends most of on a macOS runner.
+	readUntilWithin(t, aOut, "STREAM_DONE", 60*time.Second)
 
 	bGate.resumeReads()
 	select {
