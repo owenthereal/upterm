@@ -996,6 +996,81 @@ func TestStartupFailureBeatsLateCancellation(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
 }
 
+// The failure matrix promises "reports, exits" and startup_failed for a bind,
+// mkdir or tunnel failure at startup. These four pin the recorded reason for
+// each row.
+
+func TestRunRecordsStartupFailedWhenTheAttachSocketCannotBeBound(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.SessionClaimedCallback = func(dir *sessiondir.Dir) {
+		// A regular file where the socket goes: bind fails with EADDRINUSE.
+		require.NoError(t, os.WriteFile(dir.AttachSocket(), nil, 0o600))
+	}
+	f.start(t)
+	err := f.result(t)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "attach.sock")
+	select {
+	case <-f.ready:
+		t.Fatal("the session became ready despite the bind failure")
+	default:
+	}
+	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
+}
+
+func TestRunRecordsStartupFailedWhenTheAdminSocketCannotBeBound(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.SessionClaimedCallback = func(dir *sessiondir.Dir) {
+		// A regular file where the socket goes: bind fails with EADDRINUSE.
+		require.NoError(t, os.WriteFile(dir.AdminSocket(), nil, 0o600))
+	}
+	f.start(t)
+	err := f.result(t)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "admin.sock")
+	select {
+	case <-f.ready:
+		t.Fatal("the session became ready despite the bind failure")
+	default:
+	}
+	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
+}
+
+func TestRunFailsBeforeClaimingWhenTheRuntimeDirCannotBeCreated(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	blocker := filepath.Join(f.root, "not-a-dir")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+	t.Setenv("XDG_RUNTIME_DIR", blocker) // the runtime dir would have to live under a file
+	f.start(t)
+	err := f.result(t)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not-a-dir", "the error names the path that could not be created")
+	// Nothing was claimed before CreateUptermRuntimeDir failed, so there is no
+	// directory to publish a record into: the honest outcome is no record at
+	// all, not startup_failed.
+	_, rerr := sessiondir.ReadRecord(utils.UptermStateDir(), f.h.Name)
+	require.Error(t, rerr, "nothing was claimed, so no record may claim this run happened")
+}
+
+func TestRunRecordsStartupFailedWhenTheTunnelCannotBeEstablished(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	dead := ln.Addr().String()
+	require.NoError(t, ln.Close()) // nothing listens here now
+	f.h.Host = "ssh://" + dead
+	f.start(t)
+	runErr := f.result(t)
+	require.Error(t, runErr)
+	require.Contains(t, runErr.Error(), dead)
+	select {
+	case <-f.ready:
+		t.Fatal("the session became ready despite the tunnel failure")
+	default:
+	}
+	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
+}
+
 func TestAdminStopWithJoinTimerRemainsStopped(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
