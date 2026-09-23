@@ -72,3 +72,17 @@ func requirePlatformReports(t *testing.T, log string) {
 	require.Regexp(t, `(?m)REPORT handoff=3$`, log,
 		"ExtraFiles[0], and nothing about that is negotiable: the child looks the descriptor up by the number spawnDaemon hands it")
 }
+
+// TestBootstrapConnRefusesAMalformedDescriptor pins that a non-numeric
+// UPTERM_DAEMON_FD is refused before anything else happens, and that the
+// error names the variable a person would need to fix.
+func TestBootstrapConnRefusesAMalformedDescriptor(t *testing.T) {
+	// Safe in-process: TestMain reads UPTERM_DAEMON_FD only at process start
+	// (see spawn_test.go for the precedent).
+	t.Setenv(daemonFDEnv, "not-a-number")
+	conn, name, err := bootstrapConn()
+	require.Error(t, err)
+	require.Nil(t, conn)
+	require.Empty(t, name)
+	require.Contains(t, err.Error(), daemonFDEnv)
+}
