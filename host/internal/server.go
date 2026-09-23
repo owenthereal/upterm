@@ -36,6 +36,10 @@ const DefaultInitialClientTimeout = 10 * time.Second
 // started; the caller records startup_abandoned.
 var ErrNoInitialClient = errors.New("no client attached before the command could start")
 
+// ErrJoinTimeout marks the winning first-guest deadline. Host passes it as
+// the server context cancellation cause so attached clients also exit zero.
+var ErrJoinTimeout = errors.New("no guest joined within the join timeout")
+
 type Server struct {
 	Command      []string
 	CommandEnv   []string
@@ -224,6 +228,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		writers:               writers,
 		keepAliveDuration:     s.KeepAliveDuration,
 		ctx:                   sessCtx,
+		stopCtx:               ctx,
 		logger:                s.Logger,
 		readonly:              s.ReadOnly,
 		sftpPermissionChecker: s.SFTPPermissionChecker,
@@ -237,7 +242,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	{
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
-			EventEmmiter:   s.EventEmitter,
 			Logger:         s.Logger,
 		}
 
@@ -254,6 +258,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			Handler:          sh.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
+			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
+				// Installed before authentication or any concurrent channel handlers.
+				ctx.SetValue(forwardingPresenceKey{}, &sync.Once{})
+				return conn
+			},
 			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
 				logArgs := []any{
 					"destination-host", destinationHost,
@@ -272,7 +281,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": gssh.DirectTCPIPHandler,
+				"direct-tcpip": forwardingHandler(s.EventEmitter),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
@@ -496,8 +505,20 @@ func serverConn(sess gssh.Session) *ssh.ServerConn {
 
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
-	EventEmmiter   *emitter.Emitter
 	Logger         *slog.Logger
+}
+
+type authenticatedGuestKey struct{}
+
+type authenticatedGuest struct {
+	auth *server.AuthRequest
+	key  ssh.PublicKey
+}
+
+var clientEventSequence atomic.Uint64
+
+func clientEventID(transportID string) string {
+	return fmt.Sprintf("%s/%d", transportID, clientEventSequence.Add(1))
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
@@ -511,13 +532,13 @@ func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey)
 	// TODO: sshproxy already rejects unauthorized keys
 	// Does host still need to check them?
 	if len(h.AuthorizedKeys) == 0 {
-		emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+		ctx.SetValue(authenticatedGuestKey{}, authenticatedGuest{auth, pk})
 		return true
 	}
 
 	for _, k := range h.AuthorizedKeys {
 		if utils.KeysEqual(k, pk) {
-			emitClientJoinEvent(h.EventEmmiter, ctx.SessionID(), auth, pk)
+			ctx.SetValue(authenticatedGuestKey{}, authenticatedGuest{auth, pk})
 			return true
 		}
 	}
@@ -551,9 +572,11 @@ type sessionHandler struct {
 	writers           *uio.MultiWriter
 	keepAliveDuration time.Duration
 	ctx               context.Context
-	logger            *slog.Logger
-	readonly          bool
-	kind              clientKind
+	// stopCtx preserves the winning Host error while ctx waits for output drain.
+	stopCtx  context.Context
+	logger   *slog.Logger
+	readonly bool
+	kind     clientKind
 
 	// cmdDone closes when the hosted command's Run has returned, and
 	// commandResult reports how it ended. A shared-pty client whose session
@@ -583,16 +606,10 @@ type sessionHandler struct {
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
-	defer emitClientLeftEvent(h.eventEmmiter, sessionID)
-
-	// A guest's join is announced by its authentication, where the certificate
-	// that describes it is. The host door has neither: a key that only names
-	// the client, and a connection that may open no session at all. Announced
-	// there, a local process that connects and leaves would be a client that
-	// joined and never left — a phantom in the repo that nothing removes.
-	// Announced here, it pairs with the left event deferred above.
 	if h.kind == kindHost {
-		emitHostClientJoinEvent(h.eventEmmiter, sessionID, sess.Context().ClientVersion(), sess.PublicKey())
+		id := clientEventID(sessionID)
+		emitHostClientJoinEvent(h.eventEmmiter, id, sess.Context().ClientVersion(), sess.PublicKey())
+		defer emitClientLeftEvent(h.eventEmmiter, id)
 	}
 
 	// Whether this client is still connected, handed to the size tracking so
@@ -938,6 +955,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	}
 
+	if h.kind == kindGuest {
+		if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
+			id := clientEventID(sessionID)
+			emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
+			defer emitClientLeftEvent(h.eventEmmiter, id)
+		}
+	}
+
 	if h.kind == kindHost && isPty {
 		// A WINCH signal request is a repaint nudge from a client that has
 		// just come back from a stop. Buffered and drained continuously,
@@ -1059,6 +1084,22 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// A forced command ran and terminated under its own control. Its
 		// status is the session's, whichever actor unblocked run.Group first.
 		_ = sess.Exit(cmdCode)
+	case h.kind == kindHost && h.stopCtx != nil && errors.Is(context.Cause(h.stopCtx), ErrJoinTimeout):
+		// The command was killed by a successful first-guest deadline. Its
+		// resulting signal is not the attached foreground client's outcome.
+		// The group has drained command output before this final notice. Bound
+		// both the write and exit request: a terminal that stopped reading must
+		// not hold teardown open. Closing the transport releases blocked SSH I/O.
+		noticeTimer := time.AfterFunc(guestFlushTimeout, func() {
+			if conn := serverConn(sess); conn != nil {
+				_ = conn.Close()
+			} else {
+				_ = sess.Close()
+			}
+		})
+		defer noticeTimer.Stop()
+		_, _ = io.WriteString(sess, "\r\nupterm: no guest joined within the join timeout; session ended\r\n")
+		_ = sess.Exit(0)
 	case commandDone && h.commandResult != nil:
 		// The session ended because the command did. Its status is the
 		// client's; a command that was signalled rather than exited has none

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/host/api"
@@ -424,6 +425,16 @@ func lookupJSON(t *testing.T, name string) map[string]any {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(raw, &m))
 	return m
+}
+
+func TestInfoFromRecordCarriesFirstGuestJoinedAt(t *testing.T) {
+	joined := time.Now().UTC().Truncate(time.Second)
+	info := infoFromRecord(&sessiondir.Record{Name: "j", FirstGuestJoinedAt: joined}, statusEnded)
+	require.True(t, info.FirstGuestJoinedAt.Equal(joined))
+
+	raw, err := json.Marshal(infoFromRecord(&sessiondir.Record{Name: "n"}, statusEnded))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "firstGuestJoinedAt")
 }
 
 func Test_lookup_Starting(t *testing.T) {
@@ -1096,4 +1107,283 @@ func Test_stopSession(t *testing.T) {
 		err := stopSession(context.Background(), "stuck-1", &out)
 		require.ErrorContains(t, err, "still running after")
 	})
+	t.Run("an acknowledged stop with an unreadable record cannot be confirmed", func(t *testing.T) {
+		old := stopWaitTimeout
+		stopWaitTimeout = 80 * time.Millisecond
+		t.Cleanup(func() { stopWaitTimeout = old })
+		setupSessionRoots(t)
+		d := claimSession(t, "corrupt-after-ack")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {
+			_ = os.WriteFile(d.RecordPath(), []byte("{not json"), 0600)
+		})
+		var out bytes.Buffer
+		started := time.Now()
+		err := stopSession(context.Background(), "corrupt-after-ack", &out)
+		require.ErrorContains(t, err, "could not be confirmed")
+		var syntax *json.SyntaxError
+		require.ErrorAs(t, err, &syntax, "the inspection cause must be available to callers")
+		require.Less(t, time.Since(started), time.Second, "stop must remain bounded by its short deadline")
+		require.Empty(t, out.String())
+	})
+}
+
+func TestWaitExitCodeForReason(t *testing.T) {
+	code := func(i int) *int { return &i }
+	for _, tc := range []struct {
+		name string
+		rec  sessiondir.Record
+		want int
+	}{
+		{"exited zero", sessiondir.Record{Reason: sessiondir.ReasonExited, ExitCode: code(0)}, 0},
+		{"exited non-zero", sessiondir.Record{Reason: sessiondir.ReasonExited, ExitCode: code(3)}, 3},
+		{"exited with no code", sessiondir.Record{Reason: sessiondir.ReasonExited}, 125},
+		{"join timeout is success", sessiondir.Record{Reason: sessiondir.ReasonJoinTimeout}, 0},
+		{"stop is success", sessiondir.Record{Reason: sessiondir.ReasonStopped}, 0},
+		{"parent cancellation unavailable", sessiondir.Record{Reason: sessiondir.ReasonCanceled}, 125},
+		{"unrecognised signal", sessiondir.Record{Reason: sessiondir.ReasonSignaled, Signal: "nope"}, 125},
+		{"startup failed", sessiondir.Record{Reason: sessiondir.ReasonStartupFailed}, 125},
+		{"startup abandoned", sessiondir.Record{Reason: sessiondir.ReasonStartupAbandoned}, 125},
+		{"unknown", sessiondir.Record{Reason: sessiondir.ReasonUnknown}, 125},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, waitExitCode(&tc.rec))
+		})
+	}
+}
+
+func TestWaitReturnsImmediatelyForAnEndedSession(t *testing.T) {
+	setupSessionRoots(t)
+	stateRoot := utils.UptermStateDir()
+	seedEndedSessionRecord(t, stateRoot, "done", sessiondir.Record{
+		Name: "done", LaunchID: "L1",
+		Reason: sessiondir.ReasonExited, ExitCode: func(i int) *int { return &i }(7),
+	})
+
+	var out bytes.Buffer
+	code, err := waitSession(context.Background(), "done", &out)
+	require.NoError(t, err)
+	require.Equal(t, 7, code)
+}
+
+func TestWaitCobraReportsOutcomeOnceAndDiagnosesObserverErrors(t *testing.T) {
+	setupSessionRoots(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	seedEndedSessionRecord(t, utils.UptermStateDir(), "exit-seven", sessiondir.Record{
+		Name: "exit-seven", LaunchID: "L1",
+		Reason: sessiondir.ReasonExited, ExitCode: func(i int) *int { return &i }(7),
+	})
+	seedCorruptSessionRecord(t, utils.UptermStateDir(), "corrupt")
+
+	for _, tc := range []struct {
+		name, session string
+		wantOutcome   string
+		wantError     string
+	}{
+		{"ended with exit seven", "exit-seven", "session exit-seven ended (", ""},
+		{"missing session", "missing", "", "no session named"},
+		{"corrupt session", "corrupt", "", "invalid character"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := Root()
+			root.SetArgs([]string{"session", "wait", tc.session})
+			var stderr bytes.Buffer
+			root.SetErr(&stderr)
+			var err error
+			stdout := captureStdout(t, func() { err = root.Execute() })
+			require.Error(t, err)
+			if tc.wantOutcome != "" {
+				var exit ExitCodeError
+				require.ErrorAs(t, err, &exit)
+				require.Equal(t, 7, exit.Code)
+				require.Equal(t, 1, strings.Count(stdout, tc.wantOutcome))
+				require.Empty(t, stderr.String(), "Cobra must not invent an error for a completed session")
+			} else {
+				var exit ExitCodeError
+				require.ErrorAs(t, err, &exit)
+				require.Equal(t, 125, exit.Code)
+				require.Empty(t, stdout)
+				require.Contains(t, stderr.String(), tc.wantError)
+			}
+		})
+	}
+}
+
+func TestWaitErrorsForAMissingSession(t *testing.T) {
+	setupSessionRoots(t)
+	var out bytes.Buffer
+	_, err := waitSession(context.Background(), "nope", &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no session named")
+}
+
+func TestWaitRefusesARealReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setupSessionRoots(t)
+		dir := claimSession(t, "reused") // holds the name, LaunchID L1
+		root := Root()
+		root.SetArgs([]string{"session", "wait", "reused"})
+		var stderr bytes.Buffer
+		root.SetErr(&stderr)
+		done := make(chan error, 1)
+		go func() { done <- root.Execute() }()
+
+		// waitSession has completed its first Inspect and is durably blocked on
+		// its polling timer, so it is bound to dir's launch before replacement.
+		synctest.Wait()
+		require.NoError(t, dir.Release(context.Background()))
+		replacement := claimSession(t, "reused")
+		defer func() { _ = replacement.Release(context.Background()) }()
+
+		time.Sleep(stopPollInterval)
+		synctest.Wait()
+		err := <-done
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "replaced while waiting")
+		var exit ExitCodeError
+		require.ErrorAs(t, err, &exit)
+		require.Equal(t, 125, exit.Code)
+		require.Contains(t, stderr.String(), "replaced while waiting")
+	})
+}
+
+func TestWaitCancellationLeavesTheSessionRunning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setupSessionRoots(t)
+		dir := claimSession(t, "live")
+		defer func() { _ = dir.Release(context.Background()) }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		root := Root()
+		root.SetArgs([]string{"session", "wait", "live"})
+		var stderr bytes.Buffer
+		root.SetErr(&stderr)
+		done := make(chan error, 1)
+		go func() { done <- root.ExecuteContext(ctx) }()
+
+		// The waiter has inspected the real lock and is now waiting to poll.
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		err := <-done
+		require.ErrorIs(t, err, context.Canceled)
+		var exit ExitCodeError
+		require.ErrorAs(t, err, &exit)
+		require.Equal(t, 125, exit.Code)
+		require.Contains(t, stderr.String(), "context canceled")
+
+		_, held, err := sessiondir.Inspect(context.Background(), utils.UptermStateDir(), "live")
+		require.NoError(t, err)
+		require.True(t, held, "an observer must never end what it watches")
+	})
+}
+
+func TestWaitPropagatesAPermanentReadError(t *testing.T) {
+	setupSessionRoots(t)
+	stateRoot := utils.UptermStateDir()
+	seedCorruptSessionRecord(t, stateRoot, "bad")
+
+	var out bytes.Buffer
+	_, err := waitSession(context.Background(), "bad", &out)
+	require.Error(t, err, "a corrupt record must not spin forever")
+}
+
+func seedEndedSessionRecord(t *testing.T, stateRoot, name string, rec sessiondir.Record) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, "results", name)
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	rec.UpdatedAt = time.Now().UTC()
+	rec.FinishedAt = time.Now().UTC()
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session.json"), raw, 0600))
+}
+
+func seedCorruptSessionRecord(t *testing.T, stateRoot, name string) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, "results", name)
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "session.json"), []byte("{not json"), 0600))
+}
+
+func TestWaitOriginatingSignalNumber(t *testing.T) {
+	for _, tc := range []struct {
+		name, record string
+		want         int
+	}{
+		{"Linux BUS", `{"reason":"signaled","signal":"bus error","signal_number":7}`, 135},
+		{"Darwin BUS", `{"reason":"signaled","signal":"bus error","signal_number":10}`, 138},
+		{"Linux USR1", `{"reason":"signaled","signal":"user defined signal 1","signal_number":10}`, 138},
+		{"legacy", `{"reason":"signaled","signal":"terminated"}`, 125},
+		{"zero", `{"reason":"signaled","signal":"terminated","signal_number":0}`, 125},
+		{"negative", `{"reason":"signaled","signal_number":-1}`, 125},
+		{"too large", `{"reason":"signaled","signal_number":127}`, 125},
+		{"highest valid", `{"reason":"signaled","signal_number":126}`, 254},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec sessiondir.Record
+			require.NoError(t, json.Unmarshal([]byte(tc.record), &rec))
+			require.Equal(t, tc.want, waitExitCode(&rec))
+		})
+	}
+}
+
+func TestWaitCobraLosesObservedRecord(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint("corrupt=", corrupt), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				setupSessionRoots(t)
+				dir := claimSession(t, "observed")
+				defer func() { _ = dir.Release(context.Background()) }()
+				root := Root()
+				root.SetArgs([]string{"session", "wait", "observed"})
+				var stderr bytes.Buffer
+				root.SetErr(&stderr)
+				done := make(chan error, 1)
+				go func() { done <- root.Execute() }()
+				synctest.Wait()
+				want := "disappeared while waiting"
+				if corrupt {
+					require.NoError(t, os.WriteFile(dir.RecordPath(), []byte("{broken"), 0600))
+					want = "could not be inspected"
+				} else {
+					require.NoError(t, dir.Release(context.Background()))
+					require.NoError(t, os.Remove(dir.RecordPath()))
+				}
+				err := <-done
+				var exit ExitCodeError
+				require.ErrorAs(t, err, &exit)
+				require.Equal(t, 125, exit.Code)
+				require.Contains(t, stderr.String(), want)
+			})
+		})
+	}
+}
+
+func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
+	setupSessionRoots(t)
+	number := 7
+	seedEndedSessionRecord(t, utils.UptermStateDir(), "signal-info", sessiondir.Record{
+		Name: "signal-info", LaunchID: "L1", Reason: sessiondir.ReasonSignaled,
+		Signal: "bus error", SignalNumber: &number,
+	})
+	root := Root()
+	root.SetArgs([]string{"session", "info", "signal-info", "-o", "json"})
+	var err error
+	output := captureStdout(t, func() { err = root.Execute() })
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(output), &fields))
+	require.Equal(t, float64(7), fields["signalNumber"])
+	require.Equal(t, "bus error", fields["signal"])
+	root = Root()
+	root.SetArgs([]string{"session", "wait", "signal-info"})
+	var stderr bytes.Buffer
+	root.SetErr(&stderr)
+	captureStdout(t, func() { err = root.Execute() })
+	var exit ExitCodeError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, 135, exit.Code)
+	require.Empty(t, stderr.String())
 }

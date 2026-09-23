@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -192,6 +193,7 @@ type hostPty struct {
 // going away has any effect.
 type gatedConn struct {
 	net.Conn
+	transportID string // SSH handshake ID, used by the host elector
 
 	pause, resume     chan struct{}
 	pauseOnce         sync.Once
@@ -305,6 +307,7 @@ func (h *hostHarness) dialHostConn(t *testing.T, opts ...dialOption) (*ssh.Clien
 		ClientVersion:   upterm.AttachSSHClientVersion,
 	})
 	require.NoError(t, err)
+	gated.transportID = hex.EncodeToString(conn.SessionID())
 	client := ssh.NewClient(conn, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
 	return client, gated

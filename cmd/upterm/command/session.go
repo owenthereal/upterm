@@ -42,6 +42,42 @@ var (
 // on `session list` gets an answer instead of a hang.
 const sessionQueryTimeout = 10 * time.Second
 
+// waitUnavailableCode is what `session wait` exits when the session produced
+// no exit status of its own.
+//
+// 125 by the convention git uses for "the tool could not produce a result".
+// It is NOT distinct from every hosted-command code -- a command can exit 125
+// itself -- and no single integer could be. A caller that must tell the two
+// apart reads `reason` from `session info -o json`; this is a convenience for
+// the common case, not a discriminator.
+const waitUnavailableCode = 125
+
+// waitExitCode maps a finished session's recorded outcome onto this command's
+// exit status. Every reason is named; a default returning 0 would report an
+// outcome nobody established as a success, which is the one answer a waiter
+// must never invent.
+func waitExitCode(rec *sessiondir.Record) int {
+	switch rec.Reason {
+	case sessiondir.ReasonExited:
+		// "exited" with no code is incoherent, not successful.
+		if rec.ExitCode == nil {
+			return waitUnavailableCode
+		}
+		return *rec.ExitCode
+	case sessiondir.ReasonJoinTimeout, sessiondir.ReasonStopped:
+		// Nobody joined, or somebody asked. Neither is a failed build, and
+		// reddening the first would make --join-timeout unusable in CI.
+		return 0
+	case sessiondir.ReasonSignaled:
+		if rec.SignalNumber == nil || *rec.SignalNumber < 1 || *rec.SignalNumber > 126 {
+			return waitUnavailableCode
+		}
+		return 128 + *rec.SignalNumber
+	default:
+		return waitUnavailableCode
+	}
+}
+
 // sessionTemplateData holds data for template output
 type sessionTemplateData struct {
 	SessionID    string `json:"sessionId"`
@@ -61,6 +97,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(list())
 	cmd.AddCommand(show())
 	cmd.AddCommand(stop())
+	cmd.AddCommand(wait())
 
 	return cmd
 }
@@ -126,6 +163,151 @@ var stopWaitTimeout = 30 * time.Second
 
 // stopPollInterval is how often the release is checked for.
 const stopPollInterval = 200 * time.Millisecond
+
+// waitPollFailureBudget bounds how long consecutive inspection failures are
+// tolerated before one is reported.
+//
+// A read can fail transiently -- the registry lock is held by a session
+// starting up, a rename is mid-flight. It can also fail permanently: a
+// corrupt record, a directory that lost its permissions. The first draft
+// treated every error as transient and would spin forever on the second
+// kind, silently, even after the session had ended. A budget tells them
+// apart without needing to classify the error.
+const waitPollFailureBudget = 30 * time.Second
+
+// wait blocks until the named session has ended and returns its outcome.
+func wait() *cobra.Command {
+	return &cobra.Command{
+		Use:   "wait NAME",
+		Short: "Wait for a session to end",
+		Long: `Block until the named session has ended, then exit with its outcome.
+
+Exit status follows the session:
+
+* The command's own code: the session's command exited.
+* 0: explicit session stop, or --join-timeout elapsed.
+* 128+N: the host or command was terminated by signal N.
+* 125: canceled, unavailable outcome, or observer failure.
+
+Signal N is the recorded originating signal number (signalNumber in session
+info JSON), independent of the machine reading the record. Legacy signal
+records without a valid number are unavailable (125). Parent-context
+cancellation is recorded as canceled (125); legacy stopped records remain 0.
+Lookup, read and replacement errors, and cancellation of the waiter's context,
+return 125 and retain their diagnostic.
+
+125 is a convention, not a guarantee: a session's own command can exit 125
+too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json'.
+
+A session that has already ended is reported from its record and is not an
+error. Interrupting this command leaves the session running: it observes and
+never stops anything.
+
+Wait binds to the launch found when it starts. If a new same-named host is
+started in the shell background, wait may return the previous launch's record
+before the new launch claims the name. Start the detached host synchronously
+as in the example below, then run 'upterm session wait NAME'.`,
+		Example: `  # Wait for a detached session and take its exit status:
+  upterm host --detach --accept --name build -- make
+  upterm session wait build`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			code, err := waitSession(c.Context(), args[0], os.Stdout)
+			if err != nil {
+				return ExitCodeError{Code: waitUnavailableCode, Err: err}
+			}
+			if code != 0 {
+				// Bare, with no Err, exactly as attach.go:202 returns it:
+				// this command succeeded; the thing it watched did not.
+				c.SilenceErrors = true
+				return ExitCodeError{Code: code}
+			}
+			return nil
+		},
+	}
+}
+
+// waitSession blocks until the named session has ended and returns the exit
+// status this command should carry.
+//
+// Polls the record rather than the admin socket, for stopSession's reason:
+// the socket dies with the process, so it can never answer "did it finish".
+//
+// Bound to the launch resolved on entry. A name is reused, so the session
+// that answers at the end need not be the one the caller asked about.
+func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
+	stateRoot := utils.UptermStateDir()
+
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
+	cancelLookup()
+	if err != nil {
+		return 0, err
+	}
+	if rec == nil {
+		// Absent means only "not found within retained history": Prune
+		// removes anything unheld and older than RecordRetention.
+		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, sessiondir.RecordRetention)
+	}
+
+	waited := rec.LaunchID
+	if !held {
+		return finishWait(out, name, rec)
+	}
+
+	var firstFailure time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			// An observer. ^C here must not be a way to end a session.
+			return 0, ctx.Err()
+		case <-time.After(stopPollInterval):
+		}
+
+		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
+		cancelPoll()
+		if err != nil {
+			if firstFailure.IsZero() {
+				firstFailure = time.Now()
+			}
+			if time.Since(firstFailure) > waitPollFailureBudget {
+				return 0, fmt.Errorf("session %s could not be inspected for %s: %w", name, waitPollFailureBudget, err)
+			}
+			continue
+		}
+		firstFailure = time.Time{}
+
+		if cur == nil {
+			return 0, fmt.Errorf("session %s disappeared while waiting; its outcome is unavailable", name)
+		}
+		if cur.LaunchID != waited {
+			return 0, waitLaunchChanged(name, waited, cur.LaunchID)
+		}
+		if curHeld {
+			continue
+		}
+		// cur is the record Inspect just returned under the registry lock,
+		// and its launch is the one waited on. Re-reading here would open a
+		// replacement/pruning race after a valid outcome was already in hand.
+		return finishWait(out, name, cur)
+	}
+}
+
+func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error) {
+	_, _ = fmt.Fprintf(out, "session %s ended (%s)\n", name, describeOutcome(rec))
+	return waitExitCode(rec), nil
+}
+
+// waitLaunchChanged is the error for a name reused while this command was
+// waiting on it. Never followed silently: a waiter that switched to the
+// replacement would report the new session's outcome as the old one's, and
+// the caller cannot notice -- the name it asked about is the name that
+// answered.
+func waitLaunchChanged(name, waited, found string) error {
+	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, waited, found)
+}
 
 func stop() *cobra.Command {
 	return &cobra.Command{
@@ -214,20 +396,26 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	// Acknowledged. The name is free once this launch has released it, or
 	// once another launch holds it, which is the same thing from here.
 	deadline := time.Now().Add(stopWaitTimeout)
+	var lastInspectErr error
 	for {
-		pollCtx, cancelPoll := context.WithTimeout(ctx, sessionQueryTimeout)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastInspectErr != nil {
+				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, stopWaitTimeout, lastInspectErr)
+			}
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
+		}
+		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
 		cancelPoll()
 		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
 			break
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
-		}
+		lastInspectErr = err
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(stopPollInterval):
+		case <-time.After(min(stopPollInterval, max(0, time.Until(deadline)))):
 		}
 	}
 	final, err := sessiondir.ReadRecord(stateRoot, name)
@@ -393,15 +581,20 @@ type sessionInfo struct {
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	ClientCount  int    `json:"clientCount"`
-	// GuestCount is ClientCount without the session's own terminals. A script
-	// waiting for someone to join has to watch this one: the host's terminal
-	// is a client of the session, so clientCount is at least one from the
-	// moment a foreground session starts.
+	// GuestCount counts currently connected guests, including forwarding but
+	// excluding the session's own terminals. Scripts asking whether a terminal
+	// or SFTP guest ever joined should use FirstGuestJoinedAt.
 	GuestCount       int      `json:"guestCount"`
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
 	Signal           string   `json:"signal,omitempty"`
+	SignalNumber     *int     `json:"signalNumber,omitempty"`
+	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
+	// latched and never moved by a later join; zero and omitted when none
+	// ever did. Unlike this timestamp, guestCount includes forwarding
+	// presence and misses guests who have already left.
+	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
 }
 
 // statusEnded is the reader's inference, not a status any session writes:
@@ -493,17 +686,19 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 // has decided on.
 func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 	return sessionInfo{
-		Name:         rec.Name,
-		LaunchID:     rec.LaunchID,
-		Status:       status,
-		SessionID:    rec.SessionID,
-		Command:      strings.Join(rec.Command, " "),
-		ForceCommand: strings.Join(rec.ForceCommand, " "),
-		LogPath:      rec.LogPath,
-		Pid:          rec.Pid,
-		Reason:       rec.Reason,
-		ExitCode:     rec.ExitCode,
-		Signal:       rec.Signal,
+		Name:               rec.Name,
+		LaunchID:           rec.LaunchID,
+		Status:             status,
+		SessionID:          rec.SessionID,
+		Command:            strings.Join(rec.Command, " "),
+		ForceCommand:       strings.Join(rec.ForceCommand, " "),
+		LogPath:            rec.LogPath,
+		Pid:                rec.Pid,
+		Reason:             rec.Reason,
+		ExitCode:           rec.ExitCode,
+		Signal:             rec.Signal,
+		SignalNumber:       rec.SignalNumber,
+		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
 	}
 }
 

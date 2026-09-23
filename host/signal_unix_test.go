@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -139,4 +140,37 @@ func Test_InstallSignalPolicy_IgnoresTheJobControlStops(t *testing.T) {
 	// nothing else there, and a require failure in the child fails its binary.
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "child output:\n%s", out)
+}
+
+// Each OS signal is delivered only inside an exactly filtered helper process;
+// no process-wide signal is sent to the shared test runner.
+func TestHostOriginatingSignalOutcome(t *testing.T) {
+	if mode := os.Getenv("UPTERM_OUTCOME_SIGNAL_CHILD"); mode != "" {
+		sig := syscall.SIGTERM
+		if mode == "INT" {
+			sig = syscall.SIGINT
+		}
+		f := newJoinTimeoutHost(t)
+		f.start(t)
+		awaitJoinTimeoutSignal(t, f.ready, "readiness")
+		require.NoError(t, syscall.Kill(os.Getpid(), sig))
+		require.ErrorContains(t, f.result(t), "received signal")
+		rec := f.record(t)
+		require.Equal(t, sessiondir.ReasonSignaled, rec.Reason)
+		require.NotNil(t, rec.SignalNumber)
+		require.Equal(t, int(sig), *rec.SignalNumber, "must preserve host signal instead of child teardown HUP")
+		require.Equal(t, sig.String(), rec.Signal)
+		require.Nil(t, rec.ExitCode)
+		return
+	}
+	for _, mode := range []string{"TERM", "INT"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), childTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostOriginatingSignalOutcome$", "-test.count=1")
+			cmd.Env = append(os.Environ(), "UPTERM_OUTCOME_SIGNAL_CHILD="+mode)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+		})
+	}
 }

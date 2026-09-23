@@ -351,13 +351,14 @@ func TestSlowPrimaryPacesTheCommandAndLosesNothing(t *testing.T) {
 // buffer instead, and on macOS a megabyte of junk is swallowed whole with the
 // write returning success, so a canonical command would park nothing.
 //
-// Unlike its two AwaitInitialClient-gated twins below, this test needs no
-// gate: the assertion below runs only after awaitLiveQuery, by which point
-// the election it cares about has long since settled.
+// Gate command startup on A's election, and output on the input flood being
+// parked. Queries accompany each output chunk: requiring all six megabytes to
+// drain before the first query can confuse slow throughput with failed election.
 func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	shortenStallTimeout(t, 300*time.Millisecond)
-	h := startHost(t, &Server{Command: []string{"sh", "-c",
-		`stty -echo -opost -icanon; printf 'READY\n'; yes | head -c 6000000; while :; do printf '\033[6nQ\n'; sleep 0.2; done`}})
+	startOutput := filepath.Join(t.TempDir(), "start-output")
+	h := startHost(t, &Server{AwaitInitialClient: true, Command: []string{"sh", "-c",
+		`stty -echo -opost -icanon; printf 'READY\n'; while [ ! -f "$1" ]; do sleep 0.01; done; while :; do yes | head -c 65536; printf '\033[6nQ\n'; done`, "sh", startOutput}})
 	joined := h.srv.EventEmitter.On(upterm.EventClientJoined)
 	defer h.srv.EventEmitter.Off(upterm.EventClientJoined, joined)
 
@@ -365,26 +366,47 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 		withDialDeadline(60*time.Second))
 	readUntil(t, aOut, "READY")
 	aID := nextClientID(t, joined)
+	require.Equal(t, aGate.transportID, h.srv.hostClients.primaryID())
 
-	// 64 KiB with no newline in it: a line discipline holds about a kilobyte
-	// on macOS and twenty on Linux, so the pty's input queue fills and the
-	// daemon's ptmx.Write parks in the kernel with the rest of it.
-	_, err := aIn.Write(bytes.Repeat([]byte("x"), 64<<10))
-	require.NoError(t, err)
-	// And now A stops taking bytes off its socket altogether.
+	// Exceed the SSH window as well as the raw pty input queue, proving the
+	// flood is parked while the command neither reads input nor emits output.
+	floodErr := make(chan error, 1)
+	go func() {
+		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
+		floodErr <- err
+	}()
+	select {
+	case <-floodErr:
+		t.Fatal("the flood write completed: the pty is not parking the input actor")
+	case <-time.After(500 * time.Millisecond):
+	}
 	aGate.pauseReads()
-	// Long enough for the daemon to have taken the junk off the channel and
-	// parked in the pty; microseconds of work, so the margin is large.
-	time.Sleep(200 * time.Millisecond)
+	require.NoError(t, os.WriteFile(startOutput, nil, 0600))
 
-	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
+	// The watchdog must remove A while its input actor is still parked. Do
+	// not close A ourselves: that would exercise the hang-up test instead.
+	require.Eventually(t, func() bool {
+		return h.srv.hostClients.primaryID() == ""
+	}, harnessTimeout, 10*time.Millisecond, "the stalled primary was never removed from the elector")
+
+	_, bOut, _, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24},
 		withDialDeadline(60*time.Second))
 	bID := nextClientID(t, joined)
 	require.NotEqual(t, aID, bID)
 	awaitLiveQuery(t, bOut)
-	require.Equal(t, bID, h.srv.hostClients.primaryID(), "the elector still holds the disconnected client")
+	require.Equal(t, bGate.transportID, h.srv.hostClients.primaryID(), "the elector still holds the disconnected client")
 
 	aGate.resumeReads()
+	select {
+	case <-aGate.transportClosed():
+	case <-time.After(harnessTimeout):
+		t.Fatal("the stalled primary's transport was never closed")
+	}
+	select {
+	case <-floodErr:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the flood write was never released after transport closure")
+	}
 }
 
 // This is TestAStalledPrimaryWithParkedInputIsReplaced's twin, but
@@ -407,7 +429,7 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	aIn, aOut, _, aGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, aOut, "READY")
 	aID := nextClientID(t, joined)
-	require.Equal(t, aID, h.srv.hostClients.primaryID())
+	require.Equal(t, aGate.transportID, h.srv.hostClients.primaryID())
 
 	// More than the 2 MiB SSH channel window, so this can only complete if
 	// the daemon's input actor is draining it into the pty.
@@ -431,13 +453,13 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 		t.Fatal("the flood write was never released")
 	}
 
-	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	_, bOut, _, bGate := h.connectHostGated(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	bID := nextClientID(t, joined)
 	require.NotEqual(t, aID, bID)
 	readUntil(t, bOut, "READY") // the replay; proves B is served
 
 	require.Eventually(t, func() bool {
-		return h.srv.hostClients.primaryID() == bID
+		return h.srv.hostClients.primaryID() == bGate.transportID
 	}, harnessTimeout, 10*time.Millisecond, "the elector still holds the client that hung up")
 }
 
@@ -528,8 +550,8 @@ func TestInputAcceptedBeforeAHangUpIsDeliveredWhenTheCommandReads(t *testing.T) 
 	readUntil(t, bOut, "262144")
 }
 
-// nextClientID is the session id of the next client to join, which is how a
-// test names a client the harness only hands it streams for.
+// nextClientID is the lifecycle event ID of the next client to join. It is
+// distinct from the SSH transport ID used by host election and sizing.
 func nextClientID(t *testing.T, joined <-chan emitter.Event) string {
 	t.Helper()
 	select {
@@ -565,7 +587,7 @@ func awaitLiveQuery(t *testing.T, r io.Reader) {
 			t.Fatalf("the stream ended before any live query arrived: %v", err)
 		}
 	}
-	t.Fatal("no live query reached this client within the timeout: it is still a filtered secondary")
+	t.Fatal("no live query reached this client within the timeout")
 }
 
 // The secondary is gated for the same reason the stalled primary is: what has

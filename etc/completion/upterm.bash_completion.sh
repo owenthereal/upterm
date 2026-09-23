@@ -568,6 +568,8 @@ _upterm_host()
     local_nonpersistent_flags+=("--help")
     local_nonpersistent_flags+=("-h")
     flags+=("--hide-client-ip")
+    flags+=("--join-timeout=")
+    two_word_flags+=("--join-timeout")
     flags+=("--known-hosts=")
     two_word_flags+=("--known-hosts")
     flags+=("--name=")
@@ -766,6 +768,31 @@ _upterm_session_stop()
     noun_aliases=()
 }
 
+_upterm_session_wait()
+{
+    last_command="upterm_session_wait"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_session()
 {
     last_command="upterm_session"
@@ -792,6 +819,7 @@ _upterm_session()
         aliashash["ls"]="list"
     fi
     commands+=("stop")
+    commands+=("wait")
 
     flags=()
     two_word_flags=()

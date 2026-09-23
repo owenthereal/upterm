@@ -79,6 +79,8 @@ type CommandResult struct {
 	Code int
 	// Signal names the signal that killed it, when it was killed.
 	Signal string
+	// SignalNumber is the originating Unix terminating signal, when available.
+	SignalNumber *int
 }
 
 // exitCode reports the status a PTY's process exited with, given the error

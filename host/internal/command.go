@@ -177,7 +177,7 @@ func (c *command) recordResult(err error) {
 
 	res := CommandResult{Exited: exited, Code: code}
 	if !exited {
-		res.Signal = signalName(err)
+		res.Signal, res.SignalNumber = signalOutcome(err)
 	}
 
 	c.resultMu.Lock()

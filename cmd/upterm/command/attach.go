@@ -62,10 +62,10 @@ while this terminal is suspended may disconnect it before fg runs (the
 same 254 below); 'upterm attach NAME' brings it back. Everything else is
 sent to the session as typed. A SIGTERM or SIGHUP detaches too.
 
-Exit status: 0 after a detach; the command's own status once the session
-ends; 254 if the session disconnected this terminal (a stalled or overflowed
-terminal, or a daemon that went away — see the log for which); 255 if it
-could not attach.`,
+Exit status: 0 after a detach; the session's reported exit status once it
+ends (0 when --join-timeout expires); 254 if the session disconnected this
+terminal (a stalled or overflowed terminal, or a daemon that went away — see
+the log for which); 255 if it could not attach.`,
 		Example: `  # Attach to the session named build-shell:
   upterm attach build-shell
 
@@ -186,9 +186,8 @@ func describeOutcome(rec *sessiondir.Record) string {
 	return rec.Reason
 }
 
-// commandExitedMessage is the account a terminal gets when the session's
-// command ended under it. Shared with `upterm host`'s spawning parent,
-// which keeps this contract: one sentence, then a status for the script.
+// commandExitedMessage is the nonzero exit-status summary printed by
+// `upterm host`'s spawning parent.
 func commandExitedMessage(name string, status int) string {
 	return fmt.Sprintf("upterm: session %s ended: command exited (status %d)", name, status)
 }
@@ -256,7 +255,7 @@ func attachRunE(c *cobra.Command, args []string) error {
 	case attach.Detached:
 		msg = fmt.Sprintf("upterm: detached from session %s; the session continues", name)
 	case attach.Exited:
-		msg = commandExitedMessage(name, res.Status)
+		msg = fmt.Sprintf("upterm: session %s ended (status %d)", name, res.Status)
 	case attach.Disconnected:
 		msg = fmt.Sprintf("upterm: disconnected from session %s (see %s); reattach with 'upterm attach %s'", name, utils.UptermLogFilePath(), name)
 	}

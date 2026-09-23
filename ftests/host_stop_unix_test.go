@@ -129,5 +129,5 @@ func Test_Host_StopHangsUpTheShellsJobs(t *testing.T) {
 		5*time.Second, 50*time.Millisecond, "the shell's jobs outlived the session (bg %d fg %d)", bg, fg)
 	require.Less(t, time.Since(started), run.host.StopGrace,
 		"the hangup or the master's close must end an interactive shell; a fall-through to SIGTERM takes a whole grace")
-	require.Equal(t, sessiondir.ReasonStopped, run.record(t).Reason)
+	require.Equal(t, sessiondir.ReasonCanceled, run.record(t).Reason)
 }

@@ -27,4 +27,7 @@ const (
 
 	EventClientJoined = "client-joined"
 	EventClientLeft   = "client-left"
+
+	// Forwarding presence is visible, but does not qualify as a first guest join.
+	EventForwardingClientJoined = "forwarding-client-joined"
 )

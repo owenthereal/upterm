@@ -151,6 +151,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Host:              flagServer,
 		Name:              name,
 		Command:           opts.command,
+		JoinTimeout:       opts.joinTimeout,
 		ForceCommand:      opts.forceCommand,
 		Signers:           signers,
 		HostKey:           hostKey,

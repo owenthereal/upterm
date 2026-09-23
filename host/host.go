@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
 
 	"log/slog"
@@ -328,6 +328,14 @@ type Host struct {
 	// internal.DefaultStopGrace.
 	StopGrace time.Duration
 
+	// JoinTimeout bounds the wait for the first guest, starting at readiness.
+	// Zero waits forever. The session enforces it independently of its launcher;
+	// a guest joining disarms it permanently, even after that guest leaves.
+	JoinTimeout time.Duration
+
+	// onJoinDeadlineFired is a per-Host test barrier for a late losing deadline.
+	onJoinDeadlineFired func(stop <-chan struct{})
+
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
 	SFTPPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions (nil = auto-allow)
@@ -366,6 +374,16 @@ var ErrSessionAbandoned = errors.New("session abandoned before the command start
 // startup_abandoned rather than a failure.
 var ErrNoInitialClient = internal.ErrNoInitialClient
 
+// errJoinTimeout requests group teardown; Run maps this winning outcome to success.
+var errJoinTimeout = internal.ErrJoinTimeout
+
+// errSessionStopped retains the cancellation contract for Host.Run callers.
+var errSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
+
+type hostSignalError struct{ signal syscall.Signal }
+
+func (e hostSignalError) Error() string { return fmt.Sprintf("received signal %s", e.signal) }
+
 // abandonedBy reports whether ctx was cancelled because the process that
 // started the session went away: a cancellation whose cause is
 // ErrSessionAbandoned. Nothing failed and nothing was asked to stop; the
@@ -394,8 +412,7 @@ func abandonedBy(ctx context.Context) bool {
 //
 // The non-blocking re-check on each teardown branch is what makes that so
 // rather than merely likely: whichever case the select picks, a fact that is
-// established is still established. setupSignalHandler asks its context the
-// same question on the same branch for the same reason.
+// established is still established.
 //
 // A fact that is genuinely not established is still a "no", and that is why
 // this waits on the pair rather than assuming them: a command that could not
@@ -429,6 +446,93 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
+// guestJoinLatch disarms the join deadline and publishes the first guest join
+// into the record, in that order. A successful publication is attempted once;
+// a failed publication is retried on a later guest.
+//
+// disarm runs before the record write, not after. The in-memory signal is
+// what the deadline actually watches; making it wait on a filesystem write
+// would let a slow disk expire a deadline that a guest had already answered.
+//
+// A publication failure is logged by the caller, never swallowed silently:
+// a reader that asks "has anyone ever joined?" and is told "no" for a
+// session somebody is sitting in will stop it. The in-memory latch still
+// holds, so this process's own deadline is safe either way -- it is the
+// external reader that loses.
+type guestJoinLatch struct {
+	update    func(func(*sessiondir.Record)) error
+	now       func() time.Time
+	disarm    func()
+	published bool
+}
+
+// Emit is asynchronous, so a short session's left may reach the consumer
+// before its joined. This state reconciles both topics in one actor.
+type clientLifecycle struct {
+	repo        *internal.ClientRepo
+	pendingLeft map[string]struct{}
+	onGuestJoin func(*api.Client) error
+	onJoined    func(*api.Client)
+	onLeft      func(*api.Client)
+	logger      *slog.Logger
+	recordPath  string
+}
+
+func (l *clientLifecycle) joined(client *api.Client, qualifiesAsGuestJoin bool) {
+	_ = l.repo.Add(client)
+	if l.logger != nil {
+		l.logger.Info("Client joined", "client", client.Addr)
+	}
+	if qualifiesAsGuestJoin && l.onGuestJoin != nil {
+		if err := l.onGuestJoin(client); err != nil && l.logger != nil {
+			l.logger.Error("failed to publish the first guest join; readers may stop this session as unjoined",
+				"record", l.recordPath, "error", err)
+		}
+	}
+	if l.onJoined != nil {
+		l.onJoined(client)
+	}
+	if _, left := l.pendingLeft[client.Id]; left {
+		delete(l.pendingLeft, client.Id)
+		l.left(client.Id)
+	}
+}
+
+func (l *clientLifecycle) left(id string) {
+	client := l.repo.Get(id)
+	if client == nil {
+		l.pendingLeft[id] = struct{}{}
+		return
+	}
+	if l.logger != nil {
+		l.logger.Info("Client left", "client", client.Addr)
+	}
+	l.repo.Delete(id)
+	if l.onLeft != nil {
+		l.onLeft(client)
+	}
+}
+
+func (l *guestJoinLatch) note(client *api.Client) error {
+	if client.GetKind() != api.Client_GUEST {
+		return nil
+	}
+	l.disarm()
+	if l.published {
+		return nil
+	}
+	err := l.update(func(r *sessiondir.Record) {
+		if !r.FirstGuestJoinedAt.IsZero() {
+			return
+		}
+		r.FirstGuestJoinedAt = l.now().UTC()
+	})
+	if err == nil {
+		l.published = true
+	}
+	return err
+}
+
 // ClaimTimeout bounds how long Run waits for the session registry when it
 // takes a name.
 //
@@ -450,7 +554,7 @@ var ClaimTimeout = 10 * time.Second
 // before returning, including the two fields it fills in on the Host itself.
 // A caller that supplied AdminSocketFile keeps it across runs, since managing
 // the path is what supplying it means.
-func (c *Host) Run(ctx context.Context) error {
+func (c *Host) Run(ctx context.Context) (runErr error) {
 	// First, before anything here can write a byte. Whatever a
 	// SessionCreatedCallback prints, and whatever a VersionWarningCallback
 	// prints, goes out well before the signal actor is assembled, and for an
@@ -459,13 +563,10 @@ func (c *Host) Run(ctx context.Context) error {
 	// is free.
 	InstallSignalPolicy()
 
-	// Run's working context. A stop requested over the admin socket cancels
-	// it, and from there it is the cancellation the signal actor already
-	// handles: shutdownRequested, the teardown, a record that reads stopped.
-	// Derived once so that every actor and every ctx.Err() below sees the
-	// same context, and context.Cause still reports the caller's cause.
-	ctx, requestStop := context.WithCancel(ctx)
-	defer requestStop()
+	// Admin stop has its own cause; external parent cancellation remains distinct.
+	ctx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	requestStop := func() { cancelRun(errSessionStopped) }
 
 	u, err := url.Parse(c.Host)
 	if err != nil {
@@ -525,21 +626,15 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	var (
-		sessionID   string
-		runReason   = sessiondir.ReasonStartupFailed
-		runExitCode *int
-		runSignal   string
+		sessionID       string
+		runReason       = sessiondir.ReasonStartupFailed
+		runExitCode     *int
+		runSignal       string
+		runSignalNumber *int
 	)
 
-	// shutdownRequested records that *we* initiated the teardown — a signal or
-	// a cancelled context — as distinct from the wait status that results.
-	//
-	// This distinction is load-bearing. Cancelling a running command makes our
-	// own teardown kill it, so the wait reports a signal on Unix and an
-	// ordinary non-zero exit on Windows. Classifying off the wait status alone
-	// would report "signaled" or "exited 137" for something the operator asked
-	// for, on a platform-dependent basis.
-	var shutdownRequested atomic.Bool
+	guestJoined := make(chan struct{})
+	var guestJoinedOnce sync.Once
 
 	if c.SessionDir != nil {
 		dir := c.SessionDir
@@ -561,24 +656,16 @@ func (c *Host) Run(ctx context.Context) error {
 			// means the name stays taken until something reaps it. Both are
 			// invisible from outside the process without a line here.
 			//
-			// A cancellation before the command starts is still a stop. The
-			// signal actor that sets shutdownRequested is registered only
-			// after SessionCreatedCallback returns, so a caller that cancels
-			// during Establish, or while the callback is waiting, gets
-			// ctx.Err() back through returns that report startup_failed --
-			// for a session that was told to stop. Decided here, on the
-			// publish itself, so that every early return is covered.
-			// startup_abandoned still wins: an interactive decline whose
-			// embedder also cancels is still a decline. The one corner this
-			// accepts is a genuine startup failure that coincides with a
-			// cancellation, reported as stopped, which is what the caller
-			// asked for.
-			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil {
-				runReason = sessiondir.ReasonStopped
+			// Early returns have no group winner. Only a returned cancellation
+			// may change startup_failed; a coincident cancellation cannot hide
+			// a genuine startup error.
+			if runReason == sessiondir.ReasonStartupFailed && ctx.Err() != nil && errors.Is(runErr, ctx.Err()) {
+				runReason = sessiondir.ReasonCanceled
 				if abandonedBy(ctx) {
 					runReason = sessiondir.ReasonStartupAbandoned
 				}
 			}
+
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
@@ -586,6 +673,7 @@ func (c *Host) Run(ctx context.Context) error {
 				r.Reason = runReason
 				r.ExitCode = runExitCode
 				r.Signal = runSignal
+				r.SignalNumber = runSignalNumber
 			}); err != nil {
 				logger.Warn("failed to publish final session record", "error", err)
 			}
@@ -691,6 +779,7 @@ func (c *Host) Run(ctx context.Context) error {
 	// the actors that do those things establishes neither.
 	adminReady := make(chan struct{})
 	cmdReady := make(chan struct{})
+	sessionReady := make(chan struct{})
 	// sync.Once on each, since a callback that fires twice must not panic on a
 	// double close.
 	var adminOnce, cmdOnce sync.Once
@@ -763,80 +852,8 @@ func (c *Host) Run(ctx context.Context) error {
 	}
 
 	var g run.Group
-	{
-		// Handle OS signals for graceful shutdown
-		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
-		setupSignalHandler(&g, ctx, &shutdownRequested)
-	}
-	{
-		ctx, cancel := context.WithCancel(ctx)
-		g.Add(func() error {
-			return adminServer.Serve(ctx)
-		}, func(err error) {
-			_ = adminServer.Shutdown(ctx)
-			cancel()
-		})
-	}
-	// Subscribed here, before any actor runs, rather than inside the actors
-	// that read them. run.Group starts its actors as goroutines in no
-	// particular order, and by this point the attach socket is bound and its
-	// callback has already told the local terminal to connect — so the door's
-	// join event can be emitted before a subscription made inside an actor
-	// exists. The emitter delivers to whoever is listening at the time and
-	// replays nothing, so that client would be missing from the repo for the
-	// life of the session: `session info` short by one, and no callback for
-	// it. Off stays in the interrupts, which run once, after Run.
-	clientJoined := eventEmitter.On(upterm.EventClientJoined)
-	clientLeft := eventEmitter.On(upterm.EventClientLeft)
-	{
-		g.Add(func() error {
-			for evt := range clientJoined {
-				args := evt.Args
-				if len(args) == 0 {
-					continue
-				}
-
-				client, ok := args[0].(*api.Client)
-				if ok {
-					_ = clientRepo.Add(client)
-					logger.Info("Client joined", "client", client.Addr)
-					if c.ClientJoinedCallback != nil {
-						c.ClientJoinedCallback(client)
-					}
-				}
-			}
-
-			return nil
-		}, func(err error) {
-			eventEmitter.Off(upterm.EventClientJoined)
-		})
-	}
-	{
-		g.Add(func() error {
-			for evt := range clientLeft {
-				args := evt.Args
-				if len(args) == 0 {
-					continue
-				}
-
-				cid, ok := args[0].(string)
-				if ok {
-					client := clientRepo.Get(cid)
-					if client != nil {
-						logger.Info("Client left", "client", client.Addr)
-						clientRepo.Delete(cid)
-						if c.ClientLeftCallback != nil {
-							c.ClientLeftCallback(client)
-						}
-					}
-				}
-			}
-
-			return nil
-		}, func(err error) {
-			eventEmitter.Off(upterm.EventClientLeft)
-		})
-	}
+	// Interrupts run in registration order. Deliver the selected cause to
+	// the command before admin draining or lifecycle unsubscription can block.
 	// Hoisted out of the block below so the classification after g.Run can ask
 	// it what the command actually did.
 	var sshServer internal.Server
@@ -849,7 +866,11 @@ func (c *Host) Run(ctx context.Context) error {
 			commandEnv = append(commandEnv, fmt.Sprintf("%s=%s", upterm.HostSessionNameEnvVar, c.SessionDir.Name()))
 		}
 
-		ctx, cancel := context.WithCancel(ctx)
+		// The group owns this actor's cancellation. Inheriting the parent's
+		// cancellation could mask an already selected deadline winner before
+		// the interrupt carries its cause to attached clients. The signal
+		// actor still observes the parent and initiates ordinary teardown.
+		ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 		sshServer = internal.Server{
 			Command:                 c.Command,
 			CommandEnv:              commandEnv,
@@ -887,9 +908,106 @@ func (c *Host) Run(ctx context.Context) error {
 		g.Add(func() error {
 			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
 		}, func(err error) {
+			// Only the winning group error reaches attached clients.
+			cancel(err)
+		})
+	}
+	{
+		// Handle OS signals for graceful shutdown
+		// Platform-specific: Unix listens for SIGINT+SIGTERM, Windows only SIGTERM
+		setupSignalHandler(&g, ctx)
+	}
+	{
+		ctx, cancel := context.WithCancel(ctx)
+		g.Add(func() error {
+			return adminServer.Serve(ctx)
+		}, func(err error) {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer shutdownCancel()
+			_ = adminServer.Shutdown(shutdownCtx)
 			cancel()
 		})
 	}
+	// Subscribed here, before any actor runs, rather than inside the actors
+	// that read them. run.Group starts its actors as goroutines in no
+	// particular order, and by this point the attach socket is bound and its
+	// callback has already told the local terminal to connect — so the door's
+	// join event can be emitted before a subscription made inside an actor
+	// exists. The emitter delivers to whoever is listening at the time and
+	// replays nothing, so that client would be missing from the repo for the
+	// life of the session: `session info` short by one, and no callback for
+	// it. Off stays in the interrupts, which run once, after Run.
+	clientJoined := eventEmitter.On(upterm.EventClientJoined)
+	forwardingJoined := eventEmitter.On(upterm.EventForwardingClientJoined)
+	clientLeft := eventEmitter.On(upterm.EventClientLeft)
+	var guestLatch *guestJoinLatch
+	if c.SessionDir != nil {
+		guestLatch = &guestJoinLatch{
+			update: c.SessionDir.Update,
+			now:    time.Now,
+			disarm: func() { guestJoinedOnce.Do(func() { close(guestJoined) }) },
+		}
+	}
+	lifecycle := &clientLifecycle{
+		repo: clientRepo, pendingLeft: make(map[string]struct{}),
+		onJoined: c.ClientJoinedCallback, onLeft: c.ClientLeftCallback,
+		logger: logger,
+	}
+	if guestLatch != nil {
+		lifecycle.onGuestJoin = guestLatch.note
+		lifecycle.recordPath = c.SessionDir.RecordPath()
+	} else {
+		lifecycle.onGuestJoin = func(client *api.Client) error {
+			if client.GetKind() == api.Client_GUEST {
+				guestJoinedOnce.Do(func() { close(guestJoined) })
+			}
+			return nil
+		}
+	}
+	{
+		g.Add(func() error {
+			for clientJoined != nil || forwardingJoined != nil || clientLeft != nil {
+				select {
+				case evt, ok := <-clientJoined:
+					if !ok {
+						clientJoined = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if client, ok := evt.Args[0].(*api.Client); ok {
+							lifecycle.joined(client, true)
+						}
+					}
+				case evt, ok := <-forwardingJoined:
+					if !ok {
+						forwardingJoined = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if client, ok := evt.Args[0].(*api.Client); ok {
+							lifecycle.joined(client, false)
+						}
+					}
+				case evt, ok := <-clientLeft:
+					if !ok {
+						clientLeft = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if id, ok := evt.Args[0].(string); ok {
+							lifecycle.left(id)
+						}
+					}
+				}
+			}
+			return nil
+		}, func(err error) {
+			eventEmitter.Off(upterm.EventClientJoined)
+			eventEmitter.Off(upterm.EventForwardingClientJoined)
+			eventEmitter.Off(upterm.EventClientLeft)
+		})
+	}
+
 	{
 		ready := make(chan struct{})
 		g.Add(func() error {
@@ -934,10 +1052,65 @@ func (c *Host) Run(ctx context.Context) error {
 				c.SessionReadyCallback(publishedStatus)
 			}
 
+			// Unlike ready (closed on teardown), this signals successful readiness.
+			close(sessionReady)
+
 			<-ready
 			return nil
 		}, func(err error) {
 			close(ready)
+		})
+	}
+
+	if c.JoinTimeout > 0 {
+		stop := make(chan struct{})
+		g.Add(func() error {
+			// Every actor starts together. Only successful readiness starts the
+			// joining window; ready itself signals teardown, not readiness.
+			select {
+			case <-sessionReady:
+			case <-guestJoined:
+				<-stop
+				return nil
+			case <-stop:
+				return nil
+			case <-ctx.Done():
+				return errors.Join(ctx.Err(), context.Cause(ctx))
+			}
+
+			timer := time.NewTimer(c.JoinTimeout)
+			defer timer.Stop()
+			select {
+			case <-guestJoined:
+				// Returning would tear down the session the guest just joined.
+				<-stop
+				return nil
+			case <-stop:
+				return nil
+			case <-ctx.Done():
+				return errors.Join(ctx.Err(), context.Cause(ctx))
+			case <-timer.C:
+				// Best-effort tie breaking: another actor can still win
+				// afterwards. Never log or record here.
+				select {
+				case <-guestJoined:
+					<-stop
+					return nil
+				case <-stop:
+					return nil
+				case <-ctx.Done():
+					return errors.Join(ctx.Err(), context.Cause(ctx))
+				default:
+				}
+				// After rechecks, so a test can establish another winner and
+				// then exercise this genuinely late losing return.
+				if c.onJoinDeadlineFired != nil {
+					c.onJoinDeadlineFired(stop)
+				}
+				return errJoinTimeout
+			}
+		}, func(err error) {
+			close(stop)
 		})
 	}
 
@@ -949,15 +1122,21 @@ func (c *Host) Run(ctx context.Context) error {
 	// requested shutdown surfaces as a signal on Unix and as an ordinary
 	// non-zero exit on Windows.
 	res := sshServer.CommandResult()
+	var hostSignal hostSignalError
 	switch {
-	case shutdownRequested.Load():
-		// We asked for this. Whatever the wait says, the reason is that it was
-		// stopped — and the exit code of a process we killed is not the
-		// command's own outcome, so it is deliberately not reported. Unless
-		// the asking was the parent going away before the command started,
-		// which is an abandonment: the daemon is the only one who can tell,
-		// because it is the only one who knows whether the command started.
+	case errors.Is(err, errJoinTimeout):
+		// The group winner alone identifies why teardown happened.
+		logger.Info("no guest joined within the join timeout; session ended", "timeout", c.JoinTimeout)
+		runReason = sessiondir.ReasonJoinTimeout
+	case errors.Is(err, errSessionStopped):
 		runReason = sessiondir.ReasonStopped
+	case errors.As(err, &hostSignal):
+		runReason = sessiondir.ReasonSignaled
+		runSignal = hostSignal.signal.String()
+		n := int(hostSignal.signal)
+		runSignalNumber = &n
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		runReason = sessiondir.ReasonCanceled
 		if abandonedBy(ctx) && !closed(cmdReady) {
 			runReason = sessiondir.ReasonStartupAbandoned
 		}
@@ -971,11 +1150,15 @@ func (c *Host) Run(ctx context.Context) error {
 		runReason = sessiondir.ReasonExited
 	case res.Signal != "":
 		runSignal = res.Signal
+		runSignalNumber = res.SignalNumber
 		runReason = sessiondir.ReasonSignaled
 	default:
 		runReason = sessiondir.ReasonStartupFailed
 	}
 
+	if errors.Is(err, errJoinTimeout) {
+		return nil
+	}
 	return err
 }
 

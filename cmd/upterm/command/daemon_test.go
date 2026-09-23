@@ -387,3 +387,40 @@ func TestRunDaemonProcessIgnoresTheParentLeavingAfterStart(t *testing.T) {
 	require.NoError(t, <-done, "a parent leaving after the command started is not abandonment")
 	require.NoError(t, cause, "the parent leaving after start must not be recorded as an abandonment cause")
 }
+
+func TestJoinTimeoutFlagReachesHostOptions(t *testing.T) {
+	cmd := hostCmd()
+	t.Cleanup(func() { flagJoinTimeout = 0 })
+	require.NoError(t, cmd.PersistentFlags().Parse([]string{"--join-timeout", "9m"}))
+	opts, err := parseHostOptions([]string{"sh"})
+	require.NoError(t, err)
+	require.Equal(t, 9*time.Minute, opts.joinTimeout)
+}
+
+func TestJoinTimeoutReachesTheDaemonHost(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	opts := testHostOptions()
+	opts.joinTimeout = 7 * time.Minute
+	h, err := buildDaemonHost(context.Background(), "n", opts, child, discardLogger())
+	require.NoError(t, err)
+	require.Equal(t, 7*time.Minute, h.JoinTimeout)
+}
+
+func TestJoinTimeoutFlagDefaultsToOff(t *testing.T) {
+	f := hostCmd().PersistentFlags().Lookup("join-timeout")
+	require.NotNil(t, f)
+	require.Equal(t, "0s", f.DefValue)
+}
+
+func TestJoinTimeoutFlagRejectsNegative(t *testing.T) {
+	cmd := hostCmd()
+	t.Cleanup(func() { flagJoinTimeout = 0 })
+	require.NoError(t, cmd.PersistentFlags().Parse([]string{"--join-timeout", "-5m"}))
+	err := cmd.PreRunE(cmd, nil)
+	require.ErrorContains(t, err, "--join-timeout cannot be negative")
+}

@@ -135,7 +135,9 @@ func newTestHarness(t *testing.T, width int) *testHarness {
 	h.stopOnCleanup(name)
 
 	t.Cleanup(func() {
-		_ = session.Kill(ctx)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = session.Kill(cleanupCtx)
 	})
 
 	return h

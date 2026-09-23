@@ -167,6 +167,25 @@ func Test_Claim_PublishesUnknownResultImmediately(t *testing.T) {
 	require.Contains(t, fields, "started_at", "the keys that are always present still are")
 }
 
+func TestRecordFirstGuestJoinedAtRoundTripsAndOmitsZero(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	dir, err := claim(t, runtimeRoot, stateRoot, "fgj")
+	require.NoError(t, err)
+	defer func() { _ = dir.Release(context.Background()) }()
+
+	raw, err := os.ReadFile(dir.RecordPath())
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "first_guest_joined_at",
+		"a session with no guest must not publish the field at all")
+
+	joined := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, dir.Update(func(r *Record) { r.FirstGuestJoinedAt = joined }))
+
+	got, err := ReadRecord(stateRoot, "fgj")
+	require.NoError(t, err)
+	require.True(t, got.FirstGuestJoinedAt.Equal(joined))
+}
+
 func Test_Claim_SupersedesAPreviousRunsResult(t *testing.T) {
 	runtimeRoot, stateRoot := roots(t)
 
@@ -503,4 +522,8 @@ func Test_ListLive_ReturnsOnlyHeldNames(t *testing.T) {
 	require.Equal(t, []string{"bash"}, live[0].Command)
 	require.Equal(t, StatusReady, live[1].Status, "each record comes back as its owner published it")
 	require.Equal(t, "sid-b", live[1].SessionID)
+}
+
+func TestReasonJoinTimeoutValue(t *testing.T) {
+	require.Equal(t, "join_timeout", ReasonJoinTimeout)
 }

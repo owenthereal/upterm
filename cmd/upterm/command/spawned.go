@@ -227,10 +227,9 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		if out.res.Status == 0 {
 			return nil
 		}
-		// The same account `upterm attach` gives, for the same reason: the
-		// line is the whole story and the status below is for a script, so
-		// the error carries no message of its own and host.go silences
-		// cobra's.
+		// Preserve the foreground host's command-exit message; attach uses a
+		// generic session status. The line is the whole story, so the error
+		// carries only the script exit code and host.go silences cobra.
 		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+commandExitedMessage(s.name, out.res.Status)+"\r\n")
 		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:

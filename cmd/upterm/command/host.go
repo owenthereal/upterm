@@ -106,6 +106,7 @@ var (
 	flagName                    string
 	flagDetach                  bool
 	flagHostOutput              string
+	flagJoinTimeout             time.Duration
 	// flagHostEscapeChar carries its flag's default here as well as in the
 	// registration below, so parseEscapeChar has a value to accept when the
 	// var is read without hostCmd having run — which is every unit test that
@@ -200,6 +201,7 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().StringVar(&flagPtySize, "pty-size", "", "Pin the session's terminal size as COLSxROWS (e.g. 132x43). Client resize requests are then ignored. Defaults to the attached terminal's size, or 80x24 when there is none.")
 	cmd.PersistentFlags().StringVar(&flagTerm, "term", "", "Set TERM for the hosted command. Defaults to the inherited TERM, or "+defaultTerm+" when TERM is unset or "+dumbTerm+".")
 	cmd.PersistentFlags().StringVar(&flagName, "name", "", "Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.")
+	cmd.PersistentFlags().DurationVar(&flagJoinTimeout, "join-timeout", 0, "End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it.")
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
@@ -345,6 +347,9 @@ func validateSessionNameFlag(name string) error {
 
 func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 	var result error
+	if flagJoinTimeout < 0 {
+		result = multierror.Append(result, fmt.Errorf("--join-timeout cannot be negative; use 0 to wait forever"))
+	}
 
 	if flagReadOnly && flagAllowLocalTCPForwarding {
 		result = multierror.Append(result, fmt.Errorf("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host"))
@@ -425,6 +430,7 @@ func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
 // the daemon it spawns compute it, from the same argv, and get the same
 // answer.
 type hostOptions struct {
+	joinTimeout  time.Duration
 	command      []string
 	forceCommand []string
 	proxyURL     *url.URL
@@ -440,6 +446,7 @@ func parseHostOptions(args []string) (hostOptions, error) {
 	if opts.proxyURL, err = parseProxyURL(flagProxy); err != nil {
 		return opts, err
 	}
+	opts.joinTimeout = flagJoinTimeout
 	opts.command = args
 	if len(opts.command) == 0 {
 		if opts.command, err = shlex.Split(getDefaultShell()); err != nil {
@@ -710,6 +717,7 @@ func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) e
 			Host:              flagServer,
 			Name:              name,
 			Command:           opts.command,
+			JoinTimeout:       opts.joinTimeout,
 			ForceCommand:      opts.forceCommand,
 			Signers:           signers,
 			HostKey:           hostKey,

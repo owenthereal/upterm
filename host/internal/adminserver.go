@@ -31,7 +31,7 @@ type AdminServer struct {
 	OnListening func()
 
 	// OnStop is called when a client asks the session to end. The daemon
-	// wires it to the cancellation a SIGTERM causes; the RPC returns at
+	// wires it to an explicit stop cause; the RPC returns at
 	// once and the teardown follows.
 	OnStop func()
 
@@ -89,22 +89,32 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 	return srv.Serve(ln)
 }
 
+// Shutdown drains RPCs until ctx expires, then initiates forced transport closure.
+// It cannot terminate a callback that ignores cancellation: gRPC Serve and its
+// shutdown goroutines may still wait for that callback to return.
 func (s *AdminServer) Shutdown(ctx context.Context) error {
 	s.Lock()
-	defer s.Unlock()
+	srv, ln := s.srv, s.ln
+	// A serving actor that has not started must not resurrect a closed listener.
+	s.ln = nil
+	s.Unlock()
 
-	if s.srv != nil {
-		// Closes the listener too.
-		s.srv.GracefulStop()
+	if srv != nil {
+		drained := make(chan struct{})
+		go func() { srv.GracefulStop(); close(drained) }()
+		select {
+		case <-drained:
+		case <-ctx.Done():
+			// Stop closes active transports, including incomplete request bodies.
+			// It can itself block behind GracefulStop's handler-wait mutex, so
+			// neither shutdown call may be awaited after the caller's deadline.
+			go srv.Stop()
+		}
 		return nil
 	}
-
-	// Bound but never served, which a teardown that arrives before the serving
-	// actor starts leaves behind. Nothing else would close it.
-	if s.ln != nil {
-		return s.ln.Close()
+	if ln != nil {
+		return ln.Close()
 	}
-
 	return nil
 }
 
