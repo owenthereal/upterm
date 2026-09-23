@@ -261,9 +261,9 @@ func TestSpawnedSessionForegroundExitStatuses(t *testing.T) {
 			var ec ExitCodeError
 			require.ErrorAs(t, err, &ec)
 			require.Equal(t, 7, ec.Code)
-			// The sentence is the account, exactly as `upterm attach`
-			// gives it; the nil Err is what makes host.go silence cobra
-			// so nothing else is printed after it.
+			// Foreground host preserves its command-exit sentence; attach
+			// uses a generic session status. The nil Err makes host.go
+			// silence cobra so nothing else is printed after it.
 			require.Contains(t, stderr, "upterm: session s ended: command exited (status 7)")
 			require.NoError(t, ec.Err)
 		}},

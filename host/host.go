@@ -478,12 +478,12 @@ type clientLifecycle struct {
 	recordPath  string
 }
 
-func (l *clientLifecycle) joined(client *api.Client) {
+func (l *clientLifecycle) joined(client *api.Client, qualifiesAsGuestJoin bool) {
 	_ = l.repo.Add(client)
 	if l.logger != nil {
 		l.logger.Info("Client joined", "client", client.Addr)
 	}
-	if l.onGuestJoin != nil {
+	if qualifiesAsGuestJoin && l.onGuestJoin != nil {
 		if err := l.onGuestJoin(client); err != nil && l.logger != nil {
 			l.logger.Error("failed to publish the first guest join; readers may stop this session as unjoined",
 				"record", l.recordPath, "error", err)
@@ -938,6 +938,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// life of the session: `session info` short by one, and no callback for
 	// it. Off stays in the interrupts, which run once, after Run.
 	clientJoined := eventEmitter.On(upterm.EventClientJoined)
+	forwardingJoined := eventEmitter.On(upterm.EventForwardingClientJoined)
 	clientLeft := eventEmitter.On(upterm.EventClientLeft)
 	var guestLatch *guestJoinLatch
 	if c.SessionDir != nil {
@@ -965,7 +966,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	}
 	{
 		g.Add(func() error {
-			for clientJoined != nil || clientLeft != nil {
+			for clientJoined != nil || forwardingJoined != nil || clientLeft != nil {
 				select {
 				case evt, ok := <-clientJoined:
 					if !ok {
@@ -974,7 +975,17 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					}
 					if len(evt.Args) > 0 {
 						if client, ok := evt.Args[0].(*api.Client); ok {
-							lifecycle.joined(client)
+							lifecycle.joined(client, true)
+						}
+					}
+				case evt, ok := <-forwardingJoined:
+					if !ok {
+						forwardingJoined = nil
+						continue
+					}
+					if len(evt.Args) > 0 {
+						if client, ok := evt.Args[0].(*api.Client); ok {
+							lifecycle.joined(client, false)
 						}
 					}
 				case evt, ok := <-clientLeft:
@@ -992,6 +1003,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			return nil
 		}, func(err error) {
 			eventEmitter.Off(upterm.EventClientJoined)
+			eventEmitter.Off(upterm.EventForwardingClientJoined)
 			eventEmitter.Off(upterm.EventClientLeft)
 		})
 	}

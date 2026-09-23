@@ -258,6 +258,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			Handler:          sh.HandleSession,
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: ph.HandlePublicKey,
+			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
+				// Installed before authentication or any concurrent channel handlers.
+				ctx.SetValue(forwardingPresenceKey{}, &sync.Once{})
+				return conn
+			},
 			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
 				logArgs := []any{
 					"destination-host", destinationHost,
@@ -276,7 +281,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": gssh.DirectTCPIPHandler,
+				"direct-tcpip": forwardingHandler(s.EventEmitter),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {

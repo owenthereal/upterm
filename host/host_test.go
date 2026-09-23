@@ -474,7 +474,7 @@ func TestClientLifecyclePairsLeftBeforeJoined(t *testing.T) {
 	}
 	guest := &api.Client{Id: "quick-session", Kind: api.Client_GUEST}
 	lifecycle.left(guest.Id)
-	lifecycle.joined(guest)
+	lifecycle.joined(guest, true)
 	require.Nil(t, repo.Get(guest.Id), "a rapid accepted session must not remain connected")
 	require.Equal(t, []string{"latch", "joined", "left"}, events)
 }
@@ -485,11 +485,11 @@ func TestClientLifecycleKeepsLaterDistinctIDAfterDepartures(t *testing.T) {
 	first := &api.Client{Id: "transport/1", Kind: api.Client_HOST}
 	second := &api.Client{Id: "transport/2", Kind: api.Client_HOST}
 	third := &api.Client{Id: "transport/3", Kind: api.Client_HOST}
-	lifecycle.joined(first)
-	lifecycle.joined(second)
+	lifecycle.joined(first, true)
+	lifecycle.joined(second, true)
 	lifecycle.left(first.Id)
 	lifecycle.left(second.Id)
-	lifecycle.joined(third)
+	lifecycle.joined(third, true)
 	require.Same(t, third, repo.Get(third.Id), "third session must remain until its own departure")
 	require.Len(t, repo.Clients(), 1)
 	lifecycle.left(third.Id)

@@ -591,10 +591,10 @@ type sessionInfo struct {
 	ExitCode         *int     `json:"exitCode,omitempty"`
 	Signal           string   `json:"signal,omitempty"`
 	SignalNumber     *int     `json:"signalNumber,omitempty"`
-	// FirstGuestJoinedAt is when a guest first joined, latched and never
-	// moved by a later join; zero and omitted when none ever did. A caller
-	// asking "has anyone ever joined?" reads this, not guestCount, which is
-	// a current count and misses a guest who has already left.
+	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
+	// latched and never moved by a later join; zero and omitted when none
+	// ever did. Unlike this timestamp, guestCount includes forwarding
+	// presence and misses guests who have already left.
 	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
 }
 
