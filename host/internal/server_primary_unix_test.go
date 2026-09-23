@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -407,6 +409,68 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 	case <-time.After(harnessTimeout):
 		t.Fatal("the flood write was never released after transport closure")
 	}
+}
+
+// TestTeardownIsNotHeldByParkedInputAndQueuedOutput pins the macOS teardown
+// deadlock: a command whose hangup handler writes, with a client's input
+// parked on a full pty input queue. XNU holds the session leader in exit
+// until the tty's output queue drains, and the master's close cannot land
+// behind the parked write, so without the flush terminate gives up after
+// hangupGrace + 3 graces and leaves the group stuck in exit.
+//
+// TestAStalledPrimaryWithParkedInputIsReplaced hits the same deadlock about
+// once in a hundred runs, when its stream races bytes into the queue after
+// the last master read. Here the trap makes it certain, and it writes twice
+// for that. The read the output copy abandoned when the session began ending
+// is still parked on the master and takes the first write after the hangup;
+// only a write after that one stays queued. The trap's own "HUP" is that
+// first write, so BYE-BYE-BYE, 0.2 s later, always finds no reader. Without
+// it the test would lean on bash's report of the sleep the hangup killed
+// ("Hangup: 1") to absorb that read, and bash prints none when the hangup
+// lands between two sleeps -- which would let this pass without the fix.
+func TestTeardownIsNotHeldByParkedInputAndQueuedOutput(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the leader-exit drain wait is XNU's")
+	}
+	h := startHost(t, &Server{AwaitInitialClient: true, Command: []string{"sh", "-c",
+		`stty raw -echo; trap 'printf "HUP\n"; sleep 0.2; printf "BYE-BYE-BYE"; exit 0' HUP; printf 'READY %s\n' $$; while :; do sleep 0.1; done`}})
+	aIn, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
+	pid := readPID(t, aOut)
+
+	// More than the SSH window and the raw pty input queue: parked, since the
+	// command never reads its stdin.
+	floodErr := make(chan error, 1)
+	go func() {
+		_, err := aIn.Write(bytes.Repeat([]byte("x"), 4<<20))
+		floodErr <- err
+	}()
+	select {
+	case <-floodErr:
+		t.Fatal("the flood write completed: nothing is parked, so this would pass for the wrong reason")
+	case <-time.After(500 * time.Millisecond):
+	}
+	// Keep A's output drained, so nothing but the parked write is in play.
+	go func() { _, _ = io.Copy(io.Discard, aOut) }()
+
+	elapsed := h.stop(t)
+	t.Logf("teardown took %s", elapsed)
+	require.Less(t, elapsed, hangupGrace+DefaultStopGrace,
+		"teardown walked past the close step: the close did not release the leader")
+	require.Eventually(t, func() bool { return syscall.Kill(-pid, 0) == syscall.ESRCH },
+		2*time.Second, 20*time.Millisecond, "the command's process group is still there: terminate gave up on it")
+}
+
+// readPID reads r up to the command's "READY <pid>" line and returns the pid.
+func readPID(t *testing.T, r io.Reader) int {
+	t.Helper()
+	seen := readUntil(t, r, "READY ")
+	line := seen[strings.Index(seen, "READY ")+len("READY "):]
+	if !strings.Contains(line, "\n") {
+		line += readUntil(t, r, "\n")
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(line[:strings.Index(line, "\n")]))
+	require.NoError(t, err, "no pid after READY in %q", seen)
+	return pid
 }
 
 // This is TestAStalledPrimaryWithParkedInputIsReplaced's twin, but

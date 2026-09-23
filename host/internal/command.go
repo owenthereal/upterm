@@ -406,6 +406,15 @@ func closeAsync(ptmx PTY) {
 	go func() { _ = ptmx.Close() }()
 }
 
+// outputFlusher is a PTY that can discard its tty's output queue without
+// the pty's RWMutex -- whose read lock an abandoned read may hold, and whose
+// write lock a pending close may be queued for: the macOS pty
+// (pty_darwin.go). terminate flushes through it where it can; a PTY without
+// it -- every other platform, and the tests' fakes -- is simply not flushed.
+type outputFlusher interface {
+	FlushOutput() error
+}
+
 // terminate ends a command that has been told to stop, the design's own
 // sequence: SIGHUP to its process group, which a job-control shell forwards
 // to every job; if it stays past hangupGrace, close the pty master --
@@ -440,6 +449,27 @@ func closeAsync(ptmx PTY) {
 // leader already stuck in exit() because its slave is already closed -- the
 // close lands, and anything still holding the master open past that point
 // fails its next read or write.
+//
+// That release needs nothing to be holding the master in the kernel, and a
+// write can: a client's input parked on a full input queue, sent to a
+// raw-mode command that has stopped reading. On macOS that write is released
+// only when the slave is revoked, which happens only once the leader's exit
+// completes -- and XNU does not let that exit complete while the tty's
+// output queue holds anything. The write waits for the exit, the exit for
+// the output to drain, the drain for the close, and the close for the write:
+// the close alone can never land, and every step after it is futile, since
+// the leader is already exiting. So the output queue -- bytes nothing will
+// read, since the reader has stopped -- is discarded just before the close,
+// through outputFlusher, which reaches the master without the pty's lock.
+// The leader then finishes exiting, the parked write fails, and the close
+// lands. Once, and only there: when the close reaches the file, control
+// reports os.ErrClosed, and until it does a read still parked on the master
+// takes whatever is queued, so a flush at any later step would have nothing
+// useful to do. Output queued after the close has been issued -- a hangup
+// handler writing more than hangupGrace after SIGHUP while an input write is
+// parked -- is not rescued, and the teardown walks the rest of the
+// escalation as it would without the flush. A failed flush is logged and
+// changes nothing that follows it.
 func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *slog.Logger, name string) {
 	// gone reports whether exited has already closed, without blocking:
 	// sending a signal after that would reach whatever pid the kernel has
@@ -537,6 +567,16 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 		return
 	}
 
+	// Discard the output queue a leader stuck in exit is waiting on, before
+	// the close and never after it (see the doc comment above). Not waited on
+	// beyond the ioctl returning, and a failure is only logged: the close
+	// goes ahead exactly as it would have.
+	if f, ok := ptmx.(outputFlusher); ok {
+		if err := f.FlushOutput(); err != nil {
+			logger.Debug("the tty's output queue was not flushed; closing the master anyway",
+				"name", name, "error", err)
+		}
+	}
 	closeAsync(ptmx)
 	if wait(grace) {
 		return
