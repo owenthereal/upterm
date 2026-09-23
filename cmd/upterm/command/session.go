@@ -184,10 +184,10 @@ func wait() *cobra.Command {
 
 Exit status follows the session:
 
-  the command's own code   the session's command exited
-  0                        explicit session stop, or --join-timeout elapsed
-  128+N                    the host or command was terminated by signal N
-  125                      canceled, unavailable outcome, or observer failure
+* The command's own code: the session's command exited.
+* 0: explicit session stop, or --join-timeout elapsed.
+* 128+N: the host or command was terminated by signal N.
+* 125: canceled, unavailable outcome, or observer failure.
 
 Signal N is the recorded originating signal number (signalNumber in session
 info JSON), independent of the machine reading the record. Legacy signal
@@ -201,7 +201,12 @@ too. To tell the two apart, read 'reason' from 'upterm session info NAME -o json
 
 A session that has already ended is reported from its record and is not an
 error. Interrupting this command leaves the session running: it observes and
-never stops anything.`,
+never stops anything.
+
+Wait binds to the launch found when it starts. If a new same-named host is
+started in the shell background, wait may return the previous launch's record
+before the new launch claims the name. Start the detached host synchronously
+as in the example below, then run 'upterm session wait NAME'.`,
 		Example: `  # Wait for a detached session and take its exit status:
   upterm host --detach --accept --name build -- make
   upterm session wait build`,

@@ -256,7 +256,7 @@ func attachRunE(c *cobra.Command, args []string) error {
 	case attach.Detached:
 		msg = fmt.Sprintf("upterm: detached from session %s; the session continues", name)
 	case attach.Exited:
-		msg = commandExitedMessage(name, res.Status)
+		msg = fmt.Sprintf("upterm: session %s ended (status %d)", name, res.Status)
 	case attach.Disconnected:
 		msg = fmt.Sprintf("upterm: disconnected from session %s (see %s); reattach with 'upterm attach %s'", name, utils.UptermLogFilePath(), name)
 	}

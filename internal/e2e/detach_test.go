@@ -124,12 +124,12 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 
 // A stop reaches every terminal attached to the session, not only the one
 // that started it. Both the host's own terminal and an `upterm attach` see
-// it exactly as they would see the command exiting on its own: the door
-// gives a command that was signalled rather than exited sess.Exit(1)
+// the resulting exit status: the door gives a command that was signalled
+// rather than exited sess.Exit(1)
 // (host/internal/server.go's commandDone branch — a stop sends SIGHUP to
 // the command's process group, so bash dies by signal, not by exiting), and
-// each terminal prints commandExitedMessage — the same sentence `upterm
-// attach` prints for a command exit — before it goes. Both restore the
+// the host prints commandExitedMessage while `upterm attach` reports the
+// status without attributing a cause it cannot observe. Both restore the
 // terminal modes they found on the way out: the host's own through
 // localclient.go, `upterm attach` through withRawTerminal in
 // cmd/upterm/command/terminal.go. Every other stop test in this file stops
@@ -201,14 +201,15 @@ func TestSessionStopReleasesAttachedTerminals(t *testing.T) {
 	require.NoError(t, ctl.SendLine(h.ctx, "upterm session stop "+name+"; echo STOP_STATUS=$?"))
 	require.NoError(t, h.waitForText(ctl, "STOP_STATUS=0", 40*time.Second))
 
-	// Both attached terminals see the stop as a command exit: the sentence,
-	// the signalled-command status, and their terminal back the way they
+	// Both attached terminals see the stop: the host reports its command
+	// exit, and attach reports the status without guessing the cause. Both
+	// receive the signalled-command status and their terminal back the way they
 	// found it. A failed restore shows up in the wait's error as
 	// "…_TTY=CHANGED [before] [after]", which is the diagnostic wanted.
 	require.NoError(t, h.waitForText(h.host, "ended: command exited (status 1)", 20*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_STATUS=1", 15*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_TTY=same", 15*time.Second))
-	require.NoError(t, h.waitForText(term, "ended: command exited (status 1)", 20*time.Second))
+	require.NoError(t, h.waitForText(term, "session "+name+" ended (status 1)", 20*time.Second))
 	require.NoError(t, h.waitForText(term, "ATTACH_STATUS=1", 15*time.Second))
 	require.NoError(t, h.waitForText(term, "ATTACH_TTY=same", 15*time.Second))
 

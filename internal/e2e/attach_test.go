@@ -63,7 +63,7 @@ func TestAttachDetachReattach(t *testing.T) {
 	// the attach: nothing is typed into the handover, where an input read
 	// abandoned by the exiting attach could still swallow it.
 	require.NoError(t, term.SendLine(h.ctx, "exit 3"))
-	require.NoError(t, h.waitForText(term, "command exited (status 3)", 10*time.Second))
+	require.NoError(t, h.waitForText(term, "session "+name+" ended (status 3)", 10*time.Second))
 	require.NoError(t, h.waitForText(term, "STATUS=3", 10*time.Second))
 
 	// And the host says only that. A command's exit status arrives as an

@@ -135,6 +135,37 @@ func TestDetachedJoinTimeoutWithoutGuestExitsZero(t *testing.T) {
 	require.Equal(t, 0, ended.GuestCount)
 }
 
+// The local terminal is attached when the first-guest deadline fires, but it
+// is not a guest. Its SSH exit status alone cannot explain why the session
+// ended, so the terminal must not describe the timeout as a command exit.
+func TestAttachReportsJoinTimeoutWithoutClaimingCommandExit(t *testing.T) {
+	h := newDeadlineHarness(t)
+	h.startDetachedDeadlineHost([]string{"--join-timeout", "10s"},
+		"bash", "--rcfile", h.rcFile, "--noprofile")
+
+	statusFile := filepath.Join(h.tmpDir, "attach-exit")
+	script := h.writeFile("attach-timeout.sh", fmt.Sprintf(
+		"upterm attach %q\nprintf '%%s\\n' \"$?\" > %q\n", h.name, statusFile), 0700)
+	term := h.splitPane(h.host)
+	require.NoError(t, term.SendLine(h.ctx, fmt.Sprintf("sh %q", script)))
+	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second), "attach did not reach the session's prompt before the deadline")
+	require.NoError(t, waitForFile(statusFile, 20*time.Second))
+	status, err := os.ReadFile(statusFile)
+	require.NoError(t, err)
+	require.Equal(t, "0\n", string(status), "the attached terminal must exit successfully")
+
+	out, err := term.Capture(h.ctx)
+	require.NoError(t, err)
+	require.Contains(t, out, "upterm: no guest joined within the join timeout; session ended")
+	require.Contains(t, out, "upterm: session "+h.name+" ended (status 0)")
+	require.NotContains(t, out, "command exited")
+
+	ended := h.deadlineInfo()
+	require.Equal(t, "ended", ended.Status)
+	require.Equal(t, "join_timeout", ended.Reason)
+	require.Empty(t, ended.FirstGuestJoinedAt)
+}
+
 func TestSessionWaitReturnsCommandExitStatus(t *testing.T) {
 	h := newDeadlineHarness(t)
 	h.startDetachedDeadlineHost(nil, "sh", "-c", "exit 7")
