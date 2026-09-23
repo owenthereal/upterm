@@ -189,7 +189,7 @@ Put a terminal on a session started without one, from any shell on the same mach
 upterm attach build-shell
 ```
 
-Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and `guestCount` in the JSON is what a script should watch.
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host` and guests as `guest`. In its JSON, `guestCount` counts currently connected guests (including forwarding, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
 
 ### File Transfer (SFTP/SCP)
 

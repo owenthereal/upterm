@@ -18,10 +18,19 @@ type forwardingPresenceKey struct{}
 // Keep its protocol handling and proxy implementation intact.
 func forwardingHandler(events *emitter.Emitter) gssh.ChannelHandler {
 	return func(srv *gssh.Server, conn *ssh.ServerConn, channel ssh.NewChannel, ctx gssh.Context) {
+		once, ok := ctx.Value(forwardingPresenceKey{}).(*sync.Once)
+		if !ok || once == nil {
+			_ = channel.Reject(ssh.ConnectionFailed, "forwarding connection metadata unavailable")
+			return
+		}
+		guest, ok := ctx.Value(authenticatedGuestKey{}).(authenticatedGuest)
+		if !ok || guest.auth == nil || guest.key == nil {
+			_ = channel.Reject(ssh.ConnectionFailed, "forwarding connection metadata unavailable")
+			return
+		}
+
 		gssh.DirectTCPIPHandler(srv, conn, &forwardingChannel{NewChannel: channel, accepted: func() {
-			once := ctx.Value(forwardingPresenceKey{}).(*sync.Once)
 			once.Do(func() {
-				guest := ctx.Value(authenticatedGuestKey{}).(authenticatedGuest)
 				id := clientEventID(ctx.SessionID())
 				events.Emit(upterm.EventForwardingClientJoined, &api.Client{
 					Id: id, Version: guest.auth.ClientVersion, Addr: guest.auth.RemoteAddr,

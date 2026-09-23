@@ -581,10 +581,9 @@ type sessionInfo struct {
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	ClientCount  int    `json:"clientCount"`
-	// GuestCount is ClientCount without the session's own terminals. A script
-	// waiting for someone to join has to watch this one: the host's terminal
-	// is a client of the session, so clientCount is at least one from the
-	// moment a foreground session starts.
+	// GuestCount counts currently connected guests, including forwarding but
+	// excluding the session's own terminals. Scripts asking whether a terminal
+	// or SFTP guest ever joined should use FirstGuestJoinedAt.
 	GuestCount       int      `json:"guestCount"`
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
