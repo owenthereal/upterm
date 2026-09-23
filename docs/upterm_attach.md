@@ -17,10 +17,10 @@ while this terminal is suspended may disconnect it before fg runs (the
 same 254 below); 'upterm attach NAME' brings it back. Everything else is
 sent to the session as typed. A SIGTERM or SIGHUP detaches too.
 
-Exit status: 0 after a detach; the command's own status once the session
-ends; 254 if the session disconnected this terminal (a stalled or overflowed
-terminal, or a daemon that went away — see the log for which); 255 if it
-could not attach.
+Exit status: 0 after a detach; the session's reported exit status once it
+ends (0 when --join-timeout expires); 254 if the session disconnected this
+terminal (a stalled or overflowed terminal, or a daemon that went away — see
+the log for which); 255 if it could not attach.
 
 ```
 upterm attach [NAME] [flags]
