@@ -54,8 +54,9 @@ func reportDaemonFailure(conn net.Conn, err error) {
 	child.Failed(err.Error(), false, false)
 }
 
-// runDaemonProcess is upterm host as the daemon: everything the foreground
-// did in-process, with the operator's terminal on the far end of conn.
+// runDaemonProcess is upterm host's session logic run as the daemon, with
+// the operator's terminal on the far end of conn rather than this process's
+// own stdin and stdout.
 //
 // The context run is given is cancelled with ErrSessionAbandoned as its
 // cause if the parent goes away before the command starts; Run reads the
@@ -133,11 +134,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		sftpPermissionChecker = &AutoAllowPermissionChecker{}
 	}
 
-	// Generated here rather than left to Run, for the same reason the
-	// in-process path generates it: the parent pins the door's keys from
-	// what Listening reports, and it must be this run's session host key —
-	// what the embedded sshd actually presents — not the --private-key
-	// signers, which authenticate the tunnel and nothing else.
+	// Generated here rather than left to Run: the parent pins the door's keys
+	// from what Listening reports, and it must be this run's session host
+	// key — what the embedded sshd actually presents — not the
+	// --private-key signers, which authenticate the tunnel and nothing else.
 	hostKey, err := host.NewHostKey()
 	if err != nil {
 		return nil, fmt.Errorf("error generating host key: %w", err)

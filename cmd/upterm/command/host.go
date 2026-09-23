@@ -25,12 +25,10 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
-	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/icon"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/tty"
-	"github.com/owenthereal/upterm/internal/version"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
@@ -548,9 +546,6 @@ func shareRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !spawnSupported {
-		return runInProcessHost(c, logger.Logger, opts)
-	}
 	return runHostParent(c, logger.Logger, opts)
 }
 
@@ -641,131 +636,6 @@ func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
 		defer func() { _, _ = fmt.Fprintln(stderr) }()
 		return term.ReadPassword(int(stdin.Fd()))
 	}
-}
-
-// runInProcessHost runs the daemon in this process and attaches this
-// process's terminal to it. It is what upterm host was in stage 2, and what
-// it still is where spawning is not supported.
-func runInProcessHost(c *cobra.Command, logger *slog.Logger, opts hostOptions) error {
-	authorizedKeys, err := resolveAuthorizedKeys(c.Context(), opts, logger)
-	if err != nil {
-		return err
-	}
-
-	// SignersWith rather than Signers, for OnSkip alone: the daemon reports
-	// which identity it is not using and this path was still silent about it,
-	// so "the skip now says which key" was true of a spawned session only and
-	// not of the platforms that host in-process. No Passphrase, which is the
-	// difference that remains and is right: this process has the terminal,
-	// and SignersWith prompts on it when Passphrase is nil.
-	//
-	// Both halves, because the daemon's OnSkip is both halves. logger is the
-	// file logger root.go builds, so a warning that stops there is in
-	// upterm.log and nowhere the operator is looking; the daemon's second
-	// half, child.Print, is relayed to the parent's stderr, which is where
-	// the operator actually reads it. The line is the daemon's, character for
-	// character. Written synchronously, like the daemon's own relay and like
-	// the version warning above: one short line into an empty stream is
-	// smaller than any pipe buffer, which is the argument printBanner makes
-	// for leaving that warning synchronous too.
-	signers, cleanup, err := host.SignersWith(host.SignerOptions{
-		PrivateKeys:    flagPrivateKeys,
-		IdentitiesOnly: identitiesOnlyRequested(),
-		OnSkip: func(file string, err error) {
-			logger.Warn("skipping private key", "file", file, "error", err)
-			fmt.Fprintf(os.Stderr, "warning: skipping private key %s: %v\n", file, err)
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("error reading private keys: %w", err)
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	// Generated here rather than left to Run: this process attaches its own
-	// terminal to the door the daemon presents, and needs the public half to
-	// pin it.
-	hostKey, err := host.NewHostKey()
-	if err != nil {
-		return fmt.Errorf("error generating host key: %w", err)
-	}
-
-	var hkcb ssh.HostKeyCallback
-	if flagSkipHostKeyCheck {
-		hkcb, err = host.NewAutoAcceptingHostKeyCallback(os.Stdout, flagKnownHostsFilename)
-	} else {
-		hkcb, err = host.NewPromptingHostKeyCallback(os.Stdin, os.Stdout, flagKnownHostsFilename, connectionIsProxied(flagServer, opts.proxyURL))
-	}
-	if err != nil {
-		return err
-	}
-
-	// Set up SFTP permission checker based on --accept flag
-	var sftpPermissionChecker sftp.PermissionChecker
-	if flagAccept {
-		sftpPermissionChecker = &AutoAllowPermissionChecker{}
-	} else {
-		sftpPermissionChecker = &DialogPermissionChecker{}
-	}
-
-	// A fresh Host per attempt, because every field that names the session —
-	// Name and the banner the callback prints — belongs to the name this
-	// attempt drew, and because Run fills fields in on the Host it is given.
-	err = runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
-		h := &host.Host{
-			Host:              flagServer,
-			Name:              name,
-			Command:           opts.command,
-			JoinTimeout:       opts.joinTimeout,
-			ForceCommand:      opts.forceCommand,
-			Signers:           signers,
-			HostKey:           hostKey,
-			HostKeyCallback:   hkcb,
-			AuthorizedKeys:    authorizedKeys,
-			KeepAliveDuration: 50 * time.Second, // nlb is 350 sec & heroku router is 55 sec
-			ProxyURL:          opts.proxyURL,
-			SessionCreatedCallback: func(ctx context.Context, s *api.GetSessionResponse) error {
-				return displaySession(ctx, s, name)
-			},
-			ClientJoinedCallback:    clientJoinedCallback,
-			ClientLeftCallback:      clientLeftCallback,
-			Logger:                  logger,
-			ReadOnly:                flagReadOnly,
-			AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
-			PtySize:                 opts.ptySize,
-			PinPtySize:              flagPtySize != "",
-			Term:                    opts.term,
-			SFTPDisabled:            flagNoSFTP,
-			SFTPPermissionChecker:   sftpPermissionChecker,
-			// The local terminal attaches before the command starts, so a
-			// command that exits at once cannot beat it to the output.
-			AwaitInitialClient: true,
-			// The daemon has no terminal; this process does.
-			VersionWarningCallback: func(r *version.CompatibilityResult) {
-				host.DisplayVersionWarning(os.Stdout, logger, r)
-			},
-		}
-
-		return runLocalSession(c.Context(), name, os.Stderr, logger,
-			func(ctx context.Context, onAttachSocket func(string), onCommandStarted func()) error {
-				h.AttachListeningCallback = onAttachSocket
-				h.CommandStartedCallback = onCommandStarted
-				return h.Run(ctx)
-			},
-			func(ctx context.Context, socket string) (attach.Result, error) {
-				lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
-				// The daemon's own host key, not a re-read of the record: this
-				// is the process presenting the door, so it has the key
-				// directly.
-				keys := []ssh.PublicKey{hostKey.PublicKey()}
-				// Not opts.escape: this process is the daemon, so a ~. here
-				// would detach the only terminal a foreground process has.
-				return attachLocalTerminal(ctx, socket, keys, lt, 0, os.Stdin, os.Stdout, logger)
-			})
-	})
-
-	return mapUserAction(c, err)
 }
 
 // mapUserAction turns a UserDiscardedError or UserInterruptedError from a

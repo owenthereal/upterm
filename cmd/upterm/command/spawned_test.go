@@ -313,7 +313,7 @@ func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
 	err := s.run(context.Background())
 	require.Equal(t, api.Accept_DECLINED, <-dec)
 	var discarded UserDiscardedError
-	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0, as it did in-process")
+	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0")
 }
 
 func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {

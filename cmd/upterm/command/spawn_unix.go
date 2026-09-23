@@ -23,10 +23,6 @@ const (
 	daemonNameEnv = "UPTERM_DAEMON_NAME"
 )
 
-// spawnSupported says whether this platform can run the daemon in a child
-// of its own. Where it cannot, upterm host runs the daemon in-process.
-const spawnSupported = true
-
 // spawnOptions describes the child. executable, args and env default to
 // this process's own.
 type spawnOptions struct {
