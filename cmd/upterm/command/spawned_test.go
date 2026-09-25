@@ -434,3 +434,96 @@ func TestSpawnedSessionWaitsForTheVerdictAfterAnEarlyDetach(t *testing.T) {
 		require.NotContains(t, stderr.String(), "the session continues", "never claimed on the strength of the client's result")
 	})
 }
+
+// TestSpawnedSessionRefusesAnUnreadableHostKey pins that the parent refuses a
+// host key it cannot parse, without ever starting the attach client on it,
+// and tells the daemon at once rather than leaving it to its own timeout.
+//
+// run is driven from a goroutine with its own bounded wait, rather than
+// called inline: the path this pins is what closes the parent's end of the
+// connection at all, so a regression that drops that close leaves nothing to
+// unblock parent.Run's Recv, and the test must fail on its own timeout
+// instead of hanging until the package's.
+func TestSpawnedSessionRefusesAnUnreadableHostKey(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	client := func(context.Context, string, []ssh.PublicKey) (attach.Result, error) {
+		t.Error("the client must not be started with keys that did not parse")
+		return attach.Result{}, nil
+	}
+	s := newSession(t, spawn, client, &stdout, &stderr)
+	go func() {
+		child := d.await()
+		_ = child.Claimed(&api.Claimed{Name: "s", LaunchId: "l", AttachSocket: "/run/t.sock"})
+		if dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u"}); err != nil || dec != api.Accept_ACCEPTED {
+			return
+		}
+		_ = child.Listening("/run/t.sock", []string{"not a key"})
+	}()
+	runDone := make(chan error, 1)
+	go func() { runDone <- s.run(context.Background()) }()
+	select {
+	case err := <-runDone:
+		require.ErrorContains(t, err, "cannot be read")
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return for an unreadable host key; the parent must close its end rather than wait")
+	}
+	select {
+	case <-d.gone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the daemon was not told")
+	}
+}
+
+// TestSpawnedSessionReportsAnAbandonmentItDidNotCause pins that an
+// abandonment the operator did not cause -- the daemon reporting no initial
+// client rather than this process's own decline or interrupt -- is reported
+// as the session never having started, not folded into the generic
+// could-not-start case.
+func TestSpawnedSessionReportsAnAbandonmentItDidNotCause(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach = true
+	go func() { d.await().Failed("no initial client", false, true) }()
+	err := s.run(context.Background())
+	require.EqualError(t, err, "session s was not started: no initial client")
+}
+
+// TestSpawnedSessionSendsInterruptedForADisplayFailure pins that a display
+// error which is not a decline (UserDiscardedError) is answered as
+// INTERRUPTED, not DECLINED -- the two put the daemon through different
+// abandonment paths, and only DECLINED is the operator saying no.
+func TestSpawnedSessionSendsInterruptedForADisplayFailure(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach = true
+	s.display = func(context.Context, *api.GetSessionResponse, string) error { return errors.New("terminal went away") }
+	dec := d.startup(t, "s")
+	_ = s.run(context.Background())
+	require.Equal(t, api.Accept_INTERRUPTED, <-dec)
+}
+
+// TestSpawnedSessionDetachRefusesAMissingClaim pins that --detach refuses to
+// print a session whose claim never arrived, rather than printing a report
+// built on a nil Claimed.
+func TestSpawnedSessionDetachRefusesAMissingClaim(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach = true
+	s.jsonOut = true
+	go func() {
+		child := d.await()
+		// No Claimed.
+		if dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u"}); err != nil || dec != api.Accept_ACCEPTED {
+			return
+		}
+		child.Disarm()
+		_ = child.Started("sid", sessiondir.StatusReady)
+	}()
+	err := s.run(context.Background())
+	require.ErrorContains(t, err, "never reported its claim")
+	require.Empty(t, stdout.String(), "nothing a script would parse is printed")
+}

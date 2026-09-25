@@ -388,6 +388,96 @@ func TestRunDaemonProcessIgnoresTheParentLeavingAfterStart(t *testing.T) {
 	require.NoError(t, cause, "the parent leaving after start must not be recorded as an abandonment cause")
 }
 
+// TestBuildDaemonHostRefusesAnEmptyName pins the guard at the top of
+// buildDaemonHost: a daemon started without a session name refuses before
+// touching anything else.
+func TestBuildDaemonHostRefusesAnEmptyName(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	_, err := buildDaemonHost(context.Background(), "", testHostOptions(), child, discardLogger())
+	require.ErrorContains(t, err, "without a session name")
+}
+
+// TestRunDaemonProcessReportsAGenericFailure pins that a run error which is
+// neither ErrNameInUse nor ErrSessionAbandoned reaches the parent as neither.
+func TestRunDaemonProcessReportsAGenericFailure(t *testing.T) {
+	daemonTestRoots(t)
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	parent := bootstrap.NewParent(b, nil, io.Discard, nil)
+	done := make(chan error, 1)
+	go func() {
+		err := runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, "boom", fakeRun(t, "sid", errors.New("boom")))
+		_ = a.Close()
+		done <- err
+	}()
+	out, err := parent.Run(context.Background(), bootstrap.Handlers{})
+	require.NoError(t, err)
+	require.EqualError(t, <-done, "boom")
+	require.NotNil(t, out.Failed)
+	require.Equal(t, "boom", out.Failed.Error)
+	require.False(t, out.Failed.NameInUse)
+	require.False(t, out.Failed.Abandoned)
+}
+
+// TestRunDaemonProcessTreatsALostParentAtSessionCreatedAsAbandonment pins the
+// wrap buildDaemonHost's SessionCreatedCallback puts on a transport failure
+// while reporting the session: host.ErrSessionAbandoned, not the raw error,
+// so Host.Run records startup_abandoned rather than startup_failed.
+func TestRunDaemonProcessTreatsALostParentAtSessionCreatedAsAbandonment(t *testing.T) {
+	daemonTestRoots(t)
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	var runErr error
+	run := func(ctx context.Context, h *host.Host) error {
+		// Not fakeRun: its SessionCreatedCallback error is returned as-is, and
+		// what this pins is the wrap buildDaemonHost puts on it.
+		runErr = h.SessionCreatedCallback(ctx, &api.GetSessionResponse{SessionId: "sid"})
+		return runErr
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- runDaemonProcess(context.Background(), discardLogger(), testHostOptions(), a, "gone", run)
+	}()
+	// The parent leaves without answering.
+	require.NoError(t, b.Close())
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, host.ErrSessionAbandoned)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the daemon did not notice its parent leaving")
+	}
+	require.ErrorIs(t, runErr, host.ErrSessionAbandoned)
+}
+
+// TestBuildDaemonHostReportsAnUnusableKnownHostsFile pins that a known_hosts
+// path that cannot be created fails the build with the host-key callback's
+// own error, naming the path that could not be used.
+func TestBuildDaemonHostReportsAnUnusableKnownHostsFile(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	file := filepath.Join(t.TempDir(), "a-file")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	orig := flagKnownHostsFilename
+	flagKnownHostsFilename = filepath.Join(file, "known_hosts") // under a regular file
+	t.Cleanup(func() { flagKnownHostsFilename = orig })
+	origSkip := flagSkipHostKeyCheck
+	flagSkipHostKeyCheck = true
+	t.Cleanup(func() { flagSkipHostKeyCheck = origSkip })
+
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	_, err := buildDaemonHost(context.Background(), "kh", testHostOptions(), child, discardLogger())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), file, "the error names the path that could not be used")
+}
+
 func TestJoinTimeoutFlagReachesHostOptions(t *testing.T) {
 	cmd := hostCmd()
 	t.Cleanup(func() { flagJoinTimeout = 0 })
