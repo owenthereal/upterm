@@ -424,3 +424,44 @@ func TestJoinTimeoutFlagRejectsNegative(t *testing.T) {
 	err := cmd.PreRunE(cmd, nil)
 	require.ErrorContains(t, err, "--join-timeout cannot be negative")
 }
+
+// TestBuildDaemonHostTellsTheParentWhichPrivateKeyItSkipped pins that a
+// private key the daemon cannot use is named on the operator's terminal, not
+// only in the daemon log: the session goes on with another key, and the
+// operator should know which identity it is not using. It was pinned for
+// the in-process host until that path was deleted; the daemon is where the
+// keys are read now.
+func TestBuildDaemonHostTellsTheParentWhichPrivateKeyItSkipped(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	// No agent: with one, SignersWith would take its keys and never read the
+	// file this case is about.
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	bad := filepath.Join(t.TempDir(), "id_bad")
+	require.NoError(t, os.WriteFile(bad, []byte("not a private key\n"), 0o600))
+	orig := flagPrivateKeys
+	flagPrivateKeys = []string{bad}
+	t.Cleanup(func() { flagPrivateKeys = orig })
+
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	var printed strings.Builder
+	parent := bootstrap.NewParent(b, nil, &printed, nil)
+	parentDone := make(chan error, 1)
+	go func() {
+		_, err := parent.Run(context.Background(), bootstrap.Handlers{})
+		parentDone <- err
+	}()
+
+	child := bootstrap.NewChild(a, nil)
+	_, err := buildDaemonHost(context.Background(), "skip", testHostOptions(), child, discardLogger())
+	// Closing the child ends the exchange, so the parent's Run returns and
+	// everything it printed is in the builder.
+	require.NoError(t, child.Close())
+	<-parentDone
+
+	require.Contains(t, printed.String(), "warning: skipping private key "+bad,
+		"the operator is told which key is not being used")
+	_ = err // whether the build then succeeds depends on the fallback key and is not this test's concern
+}

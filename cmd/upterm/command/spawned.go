@@ -109,7 +109,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 	//
 	// Deferred rather than written out before each return, so no path out
 	// can skip it. A path that takes the outcome for itself nils the channel
-	// afterwards, exactly as runLocalSession does.
+	// afterwards, so this defer finds nothing left to drain.
 	defer func() {
 		if clientDone == nil {
 			return
@@ -246,8 +246,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 // and a stdout nobody reads must not hold the exit forever; and after
 // cancelling it beyond that, but always until it has returned, since
 // cancellation is what makes it finish and returning before it has is
-// exiting with the terminal in raw mode. The same contract runLocalSession
-// keeps for the in-process foreground, for the same reason.
+// exiting with the terminal in raw mode.
 func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.CancelFunc) clientOutcome {
 	select {
 	case out := <-done:

@@ -1,7 +1,6 @@
 package command
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -22,7 +21,6 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -719,122 +717,6 @@ func Test_identitiesOnlyRequested(t *testing.T) {
 
 	suppliedFlags = map[string]bool{"authorized-keys": true}
 	assert.False(t, identitiesOnlyRequested())
-}
-
-// captureStderr collects what fn writes to os.Stderr.
-//
-// The in-process host's operator-facing notices go to a file, not to an
-// injected writer, so swapping the file is the only way a test can see them.
-// Shaped like captureStdout in session_test.go, including the concurrent
-// drain: a warning larger than a pipe buffer would otherwise deadlock the
-// test rather than fail it.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-
-	orig := os.Stderr
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
-
-	collected := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, r)
-		collected <- buf.String()
-	}()
-
-	// Registered before fn runs, because a require failure inside it calls
-	// Goexit: the close below would be skipped and the copier would sit on a
-	// pipe whose write end nobody ever closes. Closing twice is harmless.
-	defer func() { _ = w.Close() }()
-
-	fn()
-
-	require.NoError(t, w.Close())
-	out := <-collected
-	require.NoError(t, r.Close())
-	return out
-}
-
-// Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped pins that the
-// in-process host names a key it could not load, the way the daemon does.
-// The two paths are the same session on different platforms, and a skip that
-// is announced on one and silent on the other leaves the operator of the
-// other wondering why their identity was not offered.
-//
-// Both halves are asserted, because the daemon does both: the log record an
-// operator finds afterwards, and the line they see at the time. A warning
-// that reached only the log would be parity with the daemon's logger and not
-// with what the daemon's parent prints, which is the half that answers the
-// question while it is being asked.
-//
-// The session itself cannot start — the server is a port nothing listens on
-// — which is deliberate: the warning is emitted while the signers are being
-// resolved, long before anything is dialled, so the failure that follows
-// costs a connection refused and no session.
-func Test_runInProcessHost_WarnsWhichPrivateKeyItSkipped(t *testing.T) {
-	setupSessionRoots(t)
-	dir := t.TempDir()
-
-	// Exists, so the default key list would carry it, and unparseable, so it
-	// is skipped rather than refused: that is the case OnSkip is for.
-	keyFile := filepath.Join(dir, "id_ed25519")
-	require.NoError(t, os.WriteFile(keyFile, []byte("not a private key\n"), 0600))
-
-	// No agent, so the file list is what is read at all; and no
-	// --private-key, so the list is the default set and a file that fails to
-	// load is skipped instead of failing the set.
-	t.Setenv("SSH_AUTH_SOCK", "")
-	origSupplied := suppliedFlags
-	suppliedFlags = map[string]bool{}
-	t.Cleanup(func() { suppliedFlags = origSupplied })
-
-	restoreString := func(p *string, v string) {
-		orig := *p
-		*p = v
-		t.Cleanup(func() { *p = orig })
-	}
-	restoreString(&flagServer, "ssh://127.0.0.1:1")
-	restoreString(&flagKnownHostsFilename, filepath.Join(dir, "known_hosts"))
-	restoreString(&flagName, "")
-	// The one other global on this path that can decide the outcome:
-	// resolveAuthorizedKeys runs before the signers, so a file left behind by
-	// another test would fail this one above the line it is about. The rest
-	// of what runInProcessHost reads (flagAccept, flagReadOnly, flagPtySize,
-	// flagNoSFTP …) only furnishes the Host, which never gets to dial.
-	restoreString(&flagAuthorizedKeys, "")
-	origKeys := flagPrivateKeys
-	flagPrivateKeys = []string{keyFile}
-	t.Cleanup(func() { flagPrivateKeys = origKeys })
-	origSkip := flagSkipHostKeyCheck
-	flagSkipHostKeyCheck = true
-	t.Cleanup(func() { flagSkipHostKeyCheck = origSkip })
-
-	logs := &capturingHandler{}
-	c := &cobra.Command{}
-	c.SetContext(context.Background())
-	stderr := captureStderr(t, func() {
-		// The dial is what this returns on, and it is expected to fail.
-		_ = runInProcessHost(c, slog.New(logs), hostOptions{command: []string{"true"}, term: "xterm"})
-	})
-
-	var found bool
-	for _, rec := range logs.captured() {
-		if rec.Msg == "skipping private key" && rec.Attrs["file"] == keyFile {
-			assert.Equal(t, slog.LevelWarn, rec.Level, "a skipped identity is a warning, as it is in the daemon")
-			assert.NotEmpty(t, rec.Attrs["error"], "the warning has to say why it was skipped")
-			found = true
-		}
-	}
-	assert.True(t, found, "the in-process host must name the key it skipped, as the daemon does: %+v", logs.captured())
-
-	// The half the operator actually reads. The prefix and shape are the
-	// daemon's own, so the same session says the same thing however it was
-	// started.
-	assert.Contains(t, stderr, "warning: skipping private key "+keyFile+":",
-		"the skip has to reach the operator, not only upterm.log: %q", stderr)
 }
 
 // Test_guardedSpawn_RefusesInsideATestBinary pins hostSpawn's default: the

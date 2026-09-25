@@ -36,10 +36,6 @@ const (
 	daemonNameEnv = "UPTERM_DAEMON_NAME"
 )
 
-// spawnSupported says whether this platform can run the daemon in a child
-// of its own. Where it cannot, upterm host runs the daemon in-process.
-const spawnSupported = true
-
 // bootstrapTimeout bounds both halves of the callback: the wait for a
 // connection, and the wait for the hello on it. Neither covers more than a
 // process creation, a dial and twenty bytes — everything the daemon does that
