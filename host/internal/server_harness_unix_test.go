@@ -45,6 +45,12 @@ type hostHarness struct {
 	// returned, so a test can assert the session outlived something.
 	srv  *Server
 	done <-chan error
+
+	// cancel ends the server's context and stopped closes once
+	// ServeWithContext has returned: what startHost's cleanup uses, and what
+	// stop uses to end the session before the test does.
+	cancel  context.CancelFunc
+	stopped <-chan struct{}
 }
 
 // startHost wires srv to a loopback listener, a host-door socket and a
@@ -99,7 +105,24 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 
 	return &hostHarness{addr: ln.Addr().String(),
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
-		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done}
+		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done,
+		cancel: cancel, stopped: stopped}
+}
+
+// stop ends the session mid-test the way the test's own end does, by
+// cancelling the server's context, and reports how long ServeWithContext
+// took to return. Bounded by harnessTimeout like the cleanup's own wait,
+// which is a no-op once this has returned.
+func (h *hostHarness) stop(t *testing.T) time.Duration {
+	t.Helper()
+	start := time.Now()
+	h.cancel()
+	select {
+	case <-h.stopped:
+	case <-time.After(harnessTimeout):
+		t.Fatalf("host server did not stop within %s", harnessTimeout)
+	}
+	return time.Since(start)
 }
 
 // dialGuest opens an SSH session to the host with an xterm PTY and starts its
