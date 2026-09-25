@@ -262,12 +262,38 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Setup upterm session
-      uses: owenthereal/action-upterm@v1
+      uses: owenthereal/action-upterm@v2
 ```
 
 This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
 
+action-upterm v2 runs the session on upterm's own background daemon (`upterm host --detach`) instead of tmux, and requires upterm v0.31.0 or newer, which it installs by default. Its `wait-timeout-minutes` countdown ends for good once upterm records a guest joining (`firstGuestJoinedAt`), even one who left before the countdown began.
+
 For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
+
+### Debug Other CI Systems
+
+Everything the GitHub Action does is available from the CLI, so the same pattern works on GitLab, Buildkite, a self-hosted runner, or any script: start a detached session, print the join command, and block until someone has used it — or until nobody has joined in time.
+
+```sh
+# Start detached, capture name + join command in one shot.
+upterm host --detach --accept --output json \
+  --skip-host-key-check \
+  --authorized-user "github:${DEBUG_USER:?set DEBUG_USER to the GitHub user who may join}" \
+  --join-timeout 10m -- bash > session.json
+
+name=$(jq -r .name session.json)
+echo "join: $(jq -r .sshCommand session.json)"
+
+upterm session wait "$name" || true
+upterm session stop "$name" 2>/dev/null || true   # idempotent; no-op if already ended
+```
+
+- `--skip-host-key-check` lets a clean runner, with an empty `known_hosts` and no terminal to answer a prompt, trust the relay on first connection; a job that ships its own `known_hosts` passes `--known-hosts` instead.
+- `--authorized-user` is not optional on a shared runner: the join command ends up in a log. Set `DEBUG_USER` to the GitHub account that should get in; the recipe stops if it is unset. For another provider, replace the whole `github:` value (`gitlab:NAME`, `codeberg:NAME`, `srht:NAME`, `gitea:NAME@HOST` and `--authorized-keys FILE` work too).
+- Leaving out `--name` lets upterm pick a name no other session on the machine holds, so concurrent jobs on one worker cannot stop each other's sessions; the recipe reads it back from the JSON.
+- `--join-timeout` ends the session if no guest joins within that long, and exits 0, so an unanswered debug session does not fail the build. Once a guest has joined it never re-arms.
+- `upterm session wait` blocks until the session ends and exits with its outcome — 0 for a join timeout or an explicit `session stop`. A guest who disconnects without exiting the shell leaves the session running, so the job's own timeout is what bounds a session someone has joined.
 
 ## :bulb: Tips
 
