@@ -83,7 +83,9 @@ func TestJoinTimeoutGuestLatchSurvivesDisconnectAndSessionEnd(t *testing.T) {
 	// host/host.go): repo.Add, then onGuestJoin. A read taken immediately
 	// after the guest connects can land between those two steps and see
 	// guestCount: 1 with no timestamp yet. Poll until both are published
-	// together, then treat that read as live.
+	// together, then treat that read as live. The window is the deadline
+	// itself, longer than one attempt's timeout; the assertion that the guest
+	// left before the deadline still bounds the whole sequence.
 	var live deadlineSessionInfo
 	require.Eventually(t, func() bool {
 		out, err := h.runCLI(2*time.Second, "session", "info", h.name, "-o", "json")
@@ -93,7 +95,7 @@ func TestJoinTimeoutGuestLatchSurvivesDisconnectAndSessionEnd(t *testing.T) {
 		}
 		live = info
 		return info.GuestCount == 1 && info.FirstGuestJoinedAt != ""
-	}, 2*time.Second, 100*time.Millisecond, "the daemon must publish guestCount and firstGuestJoinedAt from the same join")
+	}, joinTimeout, 100*time.Millisecond, "the daemon must publish guestCount and firstGuestJoinedAt from the same join")
 	require.Equal(t, "ready", live.Status)
 	require.Equal(t, 1, live.GuestCount)
 	require.Equal(t, initial.LaunchID, live.LaunchID)
