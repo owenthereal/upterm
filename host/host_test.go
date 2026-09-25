@@ -644,7 +644,16 @@ func (f *joinTimeoutHost) result(t *testing.T) error {
 
 func (f *joinTimeoutHost) finish(t *testing.T, code string) {
 	t.Helper()
-	require.NoError(t, os.WriteFile(f.finishFile, []byte(code+"\n"), 0600))
+	// The fixture command polls for finishFile to exist, then reads it:
+	// `while [ ! -f "$1" ]; do sleep 0.01; done; read code < "$1"`. Writing
+	// directly with os.WriteFile creates the file before its content is
+	// flushed, so the poll can observe the file between create and write and
+	// read an empty code (sh then runs `exit ""`, which is status 2). Write
+	// to a sibling temp file and rename it into place so the file only ever
+	// appears with its content already written.
+	tmp := f.finishFile + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, []byte(code+"\n"), 0600))
+	require.NoError(t, os.Rename(tmp, f.finishFile))
 }
 
 func (f *joinTimeoutHost) record(t *testing.T) *sessiondir.Record {
