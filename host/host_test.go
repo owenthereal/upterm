@@ -1049,20 +1049,31 @@ func TestRunFailsBeforeClaimingWhenTheRuntimeDirCannotBeCreated(t *testing.T) {
 	// directory to publish a record into: the honest outcome is no record at
 	// all, not startup_failed.
 	_, rerr := sessiondir.ReadRecord(utils.UptermStateDir(), f.h.Name)
-	require.Error(t, rerr, "nothing was claimed, so no record may claim this run happened")
+	require.True(t, os.IsNotExist(rerr), "nothing was claimed, so no record may claim this run happened: %v", rerr)
 }
 
 func TestRunRecordsStartupFailedWhenTheTunnelCannotBeEstablished(t *testing.T) {
 	f := newJoinTimeoutHost(t)
+	// A server that hangs up on every connection, so the SSH handshake fails
+	// at once. Holding the port, rather than closing it to leave it dead,
+	// keeps anything else from binding it before the dial.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	dead := ln.Addr().String()
-	require.NoError(t, ln.Close()) // nothing listens here now
-	f.h.Host = "ssh://" + dead
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	f.h.Host = "ssh://" + ln.Addr().String()
 	f.start(t)
 	runErr := f.result(t)
 	require.Error(t, runErr)
-	require.Contains(t, runErr.Error(), dead)
+	require.Contains(t, runErr.Error(), "ssh dial error")
 	select {
 	case <-f.ready:
 		t.Fatal("the session became ready despite the tunnel failure")
