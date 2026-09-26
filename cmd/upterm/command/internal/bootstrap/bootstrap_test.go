@@ -89,7 +89,7 @@ func TestExchangeInOrder(t *testing.T) {
 				return err
 			}
 			child.Disarm()
-			return child.Started("sid", "ready")
+			return child.Started("sid", "ready", nil)
 		}()
 	}()
 
@@ -274,7 +274,7 @@ func TestFailedAfterStartedIsNotSent(t *testing.T) {
 			got <- m
 		}
 	}()
-	require.NoError(t, child.Started("sid", "ready"))
+	require.NoError(t, child.Started("sid", "ready", nil))
 	m := <-got
 	require.NotNil(t, m.GetStarted())
 	child.Failed("late", false, false)

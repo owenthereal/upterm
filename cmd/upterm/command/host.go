@@ -603,7 +603,6 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			detach:       flagDetach,
 			jsonOut:      flagHostOutput == "json",
 			logPath:      utils.UptermLogFilePath(),
-			joinTimeout:  opts.joinTimeout,
 			stdin:        os.Stdin,
 			stdout:       os.Stdout,
 			stderr:       os.Stderr,

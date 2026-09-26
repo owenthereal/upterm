@@ -147,7 +147,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	hostKeys := []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())), "\n")}
 
 	var sessionID string
-	return &host.Host{
+	// A variable rather than a bare return, so the ready callback can ask the
+	// Host it belongs to for its join state.
+	var h *host.Host
+	h = &host.Host{
 		Host:              flagServer,
 		Name:              name,
 		Command:           opts.command,
@@ -212,10 +215,14 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 			// Disarm before saying so: a parent that exits the instant it
 			// reads started must not be read as leaving.
 			child.Disarm()
-			_ = child.Started(sessionID, status)
+			// The join state too, taken after any timeout has started
+			// counting, so the parent prints what `session info` would rather
+			// than inferring it from the flag.
+			_ = child.Started(sessionID, status, h.JoinState())
 		},
 		VersionWarningCallback: func(r *version.CompatibilityResult) {
 			host.DisplayVersionWarning(child.Writer(), logger, r)
 		},
-	}, nil
+	}
+	return h, nil
 }

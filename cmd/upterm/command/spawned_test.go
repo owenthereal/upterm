@@ -83,10 +83,17 @@ func (d *scriptedDaemon) start() {
 
 // startWith is start for a case about the status the daemon publishes: the
 // record's status travels in Started and the parent prints what it is given.
+// The join state is a real daemon's with no timeout set.
 func (d *scriptedDaemon) startWith(status string) {
+	d.startWithJoinState(status, &api.JoinState{})
+}
+
+// startWithJoinState is start for a case about the join state the daemon
+// holds as it reports readiness.
+func (d *scriptedDaemon) startWithJoinState(status string, js *api.JoinState) {
 	child := d.await()
 	child.Disarm()
-	_ = child.Started("sid-1", status)
+	_ = child.Started("sid-1", status, js)
 }
 
 func newSession(t *testing.T, spawn spawnFunc, client clientFunc, stdout, stderr *bytes.Buffer) *spawnedSession {
@@ -164,7 +171,8 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonUnknown, info.Reason,
 		"reason is a key `session info -o json` always publishes; this shape has to match it")
 	require.Equal(t, joinStateFromDaemon, info.JoinStateSource,
-		"joinStateSource is a key `session info -o json` always publishes; this shape has to match it too")
+		"joinStateSource is a key `session info -o json` always publishes; this shape has to match it too, "+
+			"and a daemon that reported its join state is the source even when there is no timeout")
 	require.Empty(t, stderr.String())
 
 	// The parent left after started; the daemon's watcher stays quiet.
@@ -176,23 +184,28 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 }
 
 // TestSpawnedSessionDetachPrintsJoinTimeout pins that a session started with
-// --join-timeout reports it: the daemon sends Started from its ready
-// callback, before the join timeout starts counting, so at this instant it
-// holds the launch's timeout pending and there is no deadline yet -- a
-// `session info` run a moment later sees the same timeout counting, with one.
+// --join-timeout reports it as the daemon holds it: Started carries the
+// daemon's snapshot, taken once the timeout is counting, so the JSON has the
+// deadline a `session info` run a moment later would show, not an inference
+// from the flag.
 func TestSpawnedSessionDetachPrintsJoinTimeout(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
 	s.detach, s.jsonOut = true, true
-	s.joinTimeout = 10 * time.Minute
+	deadline := time.Date(2026, 9, 25, 12, 10, 0, 0, time.UTC)
 	dec := d.startup(t, "s")
-	go func() { <-dec; d.start() }()
+	go func() {
+		<-dec
+		d.startWithJoinState(sessiondir.StatusReady,
+			&api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: deadline.UnixNano()})
+	}()
 
 	require.NoError(t, s.run(context.Background()))
 
 	require.Contains(t, stdout.String(), `"joinTimeout": "10m"`)
-	require.NotContains(t, stdout.String(), "joinDeadline")
+	require.Contains(t, stdout.String(), `"joinDeadline": "2026-09-25T12:10:00Z"`)
+	require.Contains(t, stdout.String(), `"joinStateSource": "daemon"`)
 	require.Empty(t, stderr.String())
 }
 
@@ -544,7 +557,7 @@ func TestSpawnedSessionDetachRefusesAMissingClaim(t *testing.T) {
 			return
 		}
 		child.Disarm()
-		_ = child.Started("sid", sessiondir.StatusReady)
+		_ = child.Started("sid", sessiondir.StatusReady, &api.JoinState{})
 	}()
 	err := s.run(context.Background())
 	require.ErrorContains(t, err, "never reported its claim")

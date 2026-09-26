@@ -342,6 +342,10 @@ type Host struct {
 	// record write: blocking in it holds the write, and an error skips it as
 	// a failed write.
 	onJoinPublish func() error
+	// joins is the running session's join state, for JoinState. Set by Run
+	// before any actor starts and cleared on its way out, so a callback Run
+	// makes reads it without a lock of its own.
+	joins *joinState
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -646,6 +650,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	)
 
 	joins := newJoinState(c.JoinTimeout)
+	// On the Host for JoinState, before anything that could ask runs. Cleared
+	// on the way out for SessionDir's reason: a Host between runs has no
+	// session to answer for.
+	c.joins = joins
+	defer func() { c.joins = nil }()
 
 	if c.SessionDir != nil {
 		dir := c.SessionDir
@@ -1113,6 +1122,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					return fmt.Errorf("failed to publish the session as ready: %w", err)
 				}
 			}
+			// The join timeout starts counting here, before the callback
+			// rather than after it: the callback is what tells a parent the
+			// session is ready -- it is what makes --detach return -- so the
+			// timeout must already be counting when it runs, or a `session
+			// set` made the moment --detach returns would answer "pending"
+			// for a session the record calls ready.
+			if joins.markReady() {
+				markJoinDirty()
+			}
 			if c.SessionReadyCallback != nil {
 				c.SessionReadyCallback(publishedStatus)
 			}
@@ -1165,15 +1183,14 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 				// tell "set, not counting yet" from "none".
 				markJoinDirty()
 			}
+			// The ready actor starts the clock, before it reports readiness;
+			// nothing can fire before then.
 			select {
 			case <-sessionReady:
 			case <-stop:
 				return nil
 			case <-ctx.Done():
 				return errors.Join(ctx.Err(), context.Cause(ctx))
-			}
-			if joins.markReady() {
-				markJoinDirty()
 			}
 			select {
 			case <-joins.Fired():
@@ -1241,6 +1258,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		return nil
 	}
 	return err
+}
+
+// JoinState reports the running session's join timeout as its daemon
+// holds it, for a caller reporting readiness; nil when Run is not running.
+func (c *Host) JoinState() *api.JoinState {
+	if c.joins == nil {
+		return nil
+	}
+	return apiJoinState(c.joins.snapshot())
 }
 
 func keyType(t string) string {

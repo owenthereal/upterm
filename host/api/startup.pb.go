@@ -597,7 +597,11 @@ type Started struct {
 	// starting and that write, which leaves the earlier status standing. The
 	// parent reports this rather than assuming ready, so that what it prints
 	// and what `upterm session info` answers cannot disagree.
-	Status        string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Status string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	// join_state is the join timeout as the daemon holds it at the moment
+	// readiness is reported, so that `--detach -o json` shows what `upterm
+	// session info` would.
+	JoinState     *JoinState `protobuf:"bytes,3,opt,name=join_state,json=joinState,proto3" json:"join_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -644,6 +648,13 @@ func (x *Started) GetStatus() string {
 		return x.Status
 	}
 	return ""
+}
+
+func (x *Started) GetJoinState() *JoinState {
+	if x != nil {
+		return x.JoinState
+	}
+	return nil
 }
 
 // Failed: the session did not start. name_in_use asks the parent to draw
@@ -927,11 +938,13 @@ const file_startup_proto_rawDesc = "" +
 	"\asession\x18\x01 \x01(\v2\x17.api.GetSessionResponseR\asession\"M\n" +
 	"\tListening\x12#\n" +
 	"\rattach_socket\x18\x01 \x01(\tR\fattachSocket\x12\x1b\n" +
-	"\thost_keys\x18\x02 \x03(\tR\bhostKeys\"@\n" +
+	"\thost_keys\x18\x02 \x03(\tR\bhostKeys\"o\n" +
 	"\aStarted\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
-	"\x06status\x18\x02 \x01(\tR\x06status\"\\\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12-\n" +
+	"\n" +
+	"join_state\x18\x03 \x01(\v2\x0e.api.JoinStateR\tjoinState\"\\\n" +
 	"\x06Failed\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\vname_in_use\x18\x02 \x01(\bR\tnameInUse\x12\x1c\n" +
@@ -979,6 +992,7 @@ var file_startup_proto_goTypes = []any{
 	(*ReadFailed)(nil),         // 11: api.ReadFailed
 	(*Accept)(nil),             // 12: api.Accept
 	(*GetSessionResponse)(nil), // 13: api.GetSessionResponse
+	(*JoinState)(nil),          // 14: api.JoinState
 }
 var file_startup_proto_depIdxs = []int32{
 	2,  // 0: api.Startup.print:type_name -> api.Print
@@ -993,12 +1007,13 @@ var file_startup_proto_depIdxs = []int32{
 	11, // 9: api.Startup.read_failed:type_name -> api.ReadFailed
 	12, // 10: api.Startup.accept:type_name -> api.Accept
 	13, // 11: api.SessionCreated.session:type_name -> api.GetSessionResponse
-	0,  // 12: api.Accept.decision:type_name -> api.Accept.Decision
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	14, // 12: api.Started.join_state:type_name -> api.JoinState
+	0,  // 13: api.Accept.decision:type_name -> api.Accept.Decision
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_startup_proto_init() }

@@ -778,12 +778,22 @@ func TestJoinTimeoutZeroDoesNotEndASession(t *testing.T) {
 func TestJoinTimeoutClockStartsAtReadiness(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = 400 * time.Millisecond
-	f.h.SessionReadyCallback = func(string) { time.Sleep(700 * time.Millisecond); close(f.ready) }
+	// Readiness waits for the initial attach, held back 700ms: a clock that
+	// started any earlier would end the session well inside a second.
+	hold := make(chan struct{})
 	start := time.Now()
-	f.start(t)
+	time.AfterFunc(700*time.Millisecond, func() { close(hold) })
+	clientDone, _ := f.attachAfter(t, hold)
 	require.NoError(t, f.result(t))
 	require.Greater(t, time.Since(start), 1000*time.Millisecond)
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+	select {
+	case outcome := <-clientDone:
+		require.NoError(t, outcome.err)
+		require.Equal(t, attach.Exited, outcome.result.Reason, "the timeout ending the session releases its terminal")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attached client was not released")
+	}
 }
 
 func TestJoinTimeoutEndsAnUnjoinedSessionWithReasonAndZero(t *testing.T) {
@@ -877,6 +887,15 @@ type joinAttachmentResult struct {
 
 func (f *joinTimeoutHost) attach(t *testing.T) (<-chan joinAttachmentResult, context.CancelFunc) {
 	t.Helper()
+	return f.attachAfter(t, nil)
+}
+
+// attachAfter is attach with the local terminal held back until hold closes.
+// The command waits for that terminal, and readiness for the command, so this
+// is how a test holds the session short of readiness without blocking inside
+// Run itself.
+func (f *joinTimeoutHost) attachAfter(t *testing.T, hold <-chan struct{}) (<-chan joinAttachmentResult, context.CancelFunc) {
+	t.Helper()
 	f.h.AwaitInitialClient = true
 	listening := make(chan string, 1)
 	f.h.AttachListeningCallback = func(socket string) { listening <- socket }
@@ -895,7 +914,18 @@ func (f *joinTimeoutHost) attach(t *testing.T) (<-chan joinAttachmentResult, con
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(clientCancel)
 	clientDone := make(chan joinAttachmentResult, 1)
-	go func() { result, err := client.Run(clientCtx); clientDone <- joinAttachmentResult{result, err} }()
+	go func() {
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-clientCtx.Done():
+				clientDone <- joinAttachmentResult{err: clientCtx.Err()}
+				return
+			}
+		}
+		result, err := client.Run(clientCtx)
+		clientDone <- joinAttachmentResult{result, err}
+	}()
 	return clientDone, cancel
 }
 
@@ -1294,23 +1324,51 @@ func TestGetSessionReportsTheLiveJoinState(t *testing.T) {
 func TestJoinTimeoutIsPublishedPendingThenCounting(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = time.Hour
-	released := make(chan struct{})
-	var once sync.Once
-	release := func() { once.Do(func() { close(released) }) }
-	f.h.SessionReadyCallback = func(string) { <-released; close(f.ready) }
-	f.start(t)
-	t.Cleanup(release) // after start, so it runs before start's cleanup waits for Run
+	// Held short of readiness by the initial attach, which is let through only
+	// once the pending record has been seen.
+	hold := make(chan struct{})
+	clientDone, _ := f.attachAfter(t, hold)
 
 	require.Eventually(t, func() bool {
 		rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "deadline")
 		return err == nil && rec.JoinTimeout == time.Hour && rec.JoinDeadline.IsZero()
 	}, 5*time.Second, 10*time.Millisecond, "a launch-time timeout is published pending before readiness")
+	select {
+	case <-f.ready:
+		t.Fatal("ready before the initial client attached")
+	default:
+	}
 
-	release()
+	close(hold)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
-	require.Eventually(t, func() bool { return !f.record(t).JoinDeadline.IsZero() }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return !f.record(t).JoinDeadline.IsZero() }, 5*time.Second, 10*time.Millisecond,
+		"counting from readiness, with a deadline")
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
+	select {
+	case outcome := <-clientDone:
+		require.NoError(t, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attached client was not released")
+	}
+}
+
+// Readiness is reported with the timeout already counting, so a caller told
+// "ready" -- `--detach` returning -- never finds it still pending.
+func TestJoinTimeoutIsCountingWhenReadinessIsReported(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = time.Hour
+	var atReady *api.JoinState
+	f.h.SessionReadyCallback = func(string) { atReady = f.h.JoinState(); close(f.ready) }
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	require.NotNil(t, atReady, "the join state is there to ask while Run runs")
+	require.Equal(t, int64(time.Hour), atReady.GetTimeoutNanos())
+	require.NotZero(t, atReady.GetDeadlineUnixNano(), "counting, not pending, by the time readiness is reported")
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+	require.Nil(t, f.h.JoinState(), "nothing to report once Run has returned")
 }
 
 // The guarantee is exact: shutting the command and its clients down never
@@ -1343,7 +1401,6 @@ func TestJoinTimeoutShutsDownWhileARecordWriteIsBlocked(t *testing.T) {
 		t.Fatalf("Run finished, releasing the name, with a record write still pending: %v", err)
 	case <-time.After(200 * time.Millisecond):
 	}
-
 	unblock()
 	require.NoError(t, f.result(t), "finalisation completes once the write is released")
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
