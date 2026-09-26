@@ -285,7 +285,7 @@ jobs:
 
 This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
 
-action-upterm v2 runs the session on upterm's own background daemon (`upterm host --detach`) instead of tmux, and requires upterm v0.31.0 or newer, which it installs by default. Its `wait-timeout-minutes` countdown ends for good once upterm records a guest joining (`firstGuestJoinedAt`), even one who left before the countdown began.
+action-upterm v2 runs the session on upterm's own background daemon (`upterm host --detach`) instead of tmux, and requires upterm v0.32.0 or newer, which it installs by default. upterm itself enforces `wait-timeout-minutes`: attached mode passes it as `--join-timeout`, and detached mode hands it over with `upterm session set` once the job's other steps are done. The first guest to join claims the session for good, even one who left again before the window opened.
 
 For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
 
@@ -312,6 +312,7 @@ upterm session stop "$name" 2>/dev/null || true   # idempotent; no-op if already
 - Leaving out `--name` lets upterm pick a name no other session on the machine holds, so concurrent jobs on one worker cannot stop each other's sessions; the recipe reads it back from the JSON.
 - `--join-timeout` ends the session if no guest joins within that long, and exits 0, so an unanswered debug session does not fail the build. Once a guest has joined it never re-arms.
 - `upterm session wait` blocks until the session ends and exits with its outcome — 0 for a join timeout or an explicit `session stop`. A guest who disconnects without exiting the shell leaves the session running, so the job's own timeout is what bounds a session someone has joined.
+- To open the session before the build and count only after a failure, leave `--join-timeout` off the `upterm host` line and use the failed-build script under "Running Without a Terminal".
 
 ## :bulb: Tips
 
