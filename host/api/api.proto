@@ -7,6 +7,7 @@ option go_package = "github.com/owenthereal/upterm/host/api";
 service AdminService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {}
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse) {}
+  rpc SetJoinTimeout(SetJoinTimeoutRequest) returns (SetJoinTimeoutResponse) {}
 }
 
 message GetSessionRequest {}
@@ -25,6 +26,36 @@ message StopSessionRequest {
 
 message StopSessionResponse {}
 
+// SetJoinTimeoutRequest sets how long the session waits for its first guest,
+// counted from now, or from readiness if it is not ready yet. It replaces any
+// timeout already set; zero disables it.
+message SetJoinTimeoutRequest {
+  // launch_id binds the request to the launch the caller read, for the reason
+  // StopSessionRequest's does.
+  string launch_id = 1;
+  int64 timeout_nanos = 2;
+}
+
+message SetJoinTimeoutResponse {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    COUNTING = 1; // state.deadline_unix_nano says when it fires
+    PENDING = 2;  // not ready yet; state.timeout_nanos counts from readiness
+    DISABLED = 3;
+    CLAIMED = 4;  // a guest had joined, at state.first_guest_joined_unix_nano; nothing was set
+    ENDING = 5;   // the timeout already fired, or the session is tearing down
+  }
+  Outcome outcome = 1;
+  JoinState state = 2;
+}
+
+// JoinState is a session's join timeout. A zero field is absent.
+message JoinState {
+  int64 timeout_nanos = 1;                // set and not claimed
+  int64 deadline_unix_nano = 2;           // counting, or the deadline that fired
+  int64 first_guest_joined_unix_nano = 3; // the first guest's join
+}
+
 message GetSessionResponse {
   string session_id = 1;
   repeated string command = 2;
@@ -35,6 +66,11 @@ message GetSessionResponse {
   repeated AuthorizedKey authorized_keys = 7;
   string ssh_user = 8; // SSH username for client connections
   bool sftp_disabled = 9; // true if SFTP is disabled (--no-sftp)
+  JoinState join_state = 10; // the join timeout as the daemon holds it
+  // launch_id is the launch this daemon speaks for, so a reader can tell the
+  // run it read a record for from one that has since claimed the name. Empty
+  // from a daemon that claimed no name, and from daemons before this field.
+  string launch_id = 11;
 }
 
 message AuthorizedKey {

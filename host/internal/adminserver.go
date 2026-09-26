@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/owenthereal/upterm/host/api"
 	"google.golang.org/grpc"
@@ -34,6 +35,14 @@ type AdminServer struct {
 	// wires it to an explicit stop cause; the RPC returns at
 	// once and the teardown follows.
 	OnStop func()
+
+	// OnSetJoinTimeout sets the session's join timeout and reports what it
+	// found. Nil answers Unimplemented, as a daemon without the call would.
+	OnSetJoinTimeout func(time.Duration) *api.SetJoinTimeoutResponse
+
+	// JoinState reports the join timeout as the daemon holds it, for
+	// GetSession. Nil reports none.
+	JoinState func() *api.JoinState
 
 	srv *grpc.Server
 	ln  net.Listener
@@ -78,10 +87,12 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 	}
 	s.srv = grpc.NewServer()
 	api.RegisterAdminServiceServer(s.srv, &adminServiceServer{
-		Session:    s.Session,
-		ClientRepo: s.ClientRepo,
-		LaunchID:   s.LaunchID,
-		OnStop:     s.OnStop,
+		Session:          s.Session,
+		ClientRepo:       s.ClientRepo,
+		LaunchID:         s.LaunchID,
+		OnStop:           s.OnStop,
+		OnSetJoinTimeout: s.OnSetJoinTimeout,
+		JoinState:        s.JoinState,
 	})
 	srv := s.srv
 	s.Unlock()
@@ -119,10 +130,12 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 }
 
 type adminServiceServer struct {
-	Session    *api.GetSessionResponse
-	ClientRepo *ClientRepo
-	LaunchID   string
-	OnStop     func()
+	Session          *api.GetSessionResponse
+	ClientRepo       *ClientRepo
+	LaunchID         string
+	OnStop           func()
+	OnSetJoinTimeout func(time.Duration) *api.SetJoinTimeoutResponse
+	JoinState        func() *api.JoinState
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
@@ -136,7 +149,17 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
 		ConnectedClients: s.ClientRepo.Clients(),
 		SftpDisabled:     s.Session.SftpDisabled,
+		JoinState:        s.joinState(),
+		LaunchId:         s.LaunchID,
 	}, nil
+}
+
+// joinState is the live join timeout, or none for a server that has none.
+func (s *adminServiceServer) joinState() *api.JoinState {
+	if s.JoinState == nil {
+		return nil
+	}
+	return s.JoinState()
 }
 
 // StopSession ends the launch the request names, and only that one.
@@ -168,4 +191,25 @@ func (s *adminServiceServer) StopSession(ctx context.Context, in *api.StopSessio
 		s.OnStop()
 	}
 	return &api.StopSessionResponse{}, nil
+}
+
+// SetJoinTimeout sets the join timeout of the launch the request names, and
+// only that one, for StopSession's reason: a session that ended between the
+// caller's read and this call has handed its name and socket to another.
+func (s *adminServiceServer) SetJoinTimeout(ctx context.Context, in *api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+	if s.LaunchID == "" {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"this session has no launch to be changed by name; the request named %q", in.GetLaunchId())
+	}
+	if in.GetLaunchId() != s.LaunchID {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"this socket holds launch %s; the request named %q", s.LaunchID, in.GetLaunchId())
+	}
+	if in.GetTimeoutNanos() < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "a join timeout cannot be negative: %s", time.Duration(in.GetTimeoutNanos()))
+	}
+	if s.OnSetJoinTimeout == nil {
+		return nil, status.Error(codes.Unimplemented, "this session does not take a join timeout")
+	}
+	return s.OnSetJoinTimeout(time.Duration(in.GetTimeoutNanos())), nil
 }

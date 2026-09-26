@@ -312,3 +312,78 @@ func TestAdminShutdownBoundsBlockedHandler(t *testing.T) {
 		})
 	}
 }
+
+// SetJoinTimeout is bound to a launch for StopSession's reason: the name and
+// the socket outlive the run, so only the launch ID says which session the
+// caller inspected.
+func Test_AdminServer_SetJoinTimeoutOnlyChangesTheLaunchItNames(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		held     string
+		asked    string
+		wantSet  bool
+		wantSays []string
+	}{
+		{name: "the launch the caller read", held: "launch-1", asked: "launch-1", wantSet: true},
+		{name: "another launch", held: "launch-1", asked: "launch-2", wantSays: []string{"launch-1", "launch-2"}},
+		{name: "no launch named", held: "launch-1", asked: "", wantSays: []string{"launch-1"}},
+		{name: "a session with no launch of its own", held: "", asked: "launch-1", wantSays: []string{"no launch", "launch-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []time.Duration
+			s := &adminServiceServer{
+				Session:    &api.GetSessionResponse{},
+				ClientRepo: NewClientRepo(),
+				LaunchID:   tc.held,
+				OnSetJoinTimeout: func(d time.Duration) *api.SetJoinTimeoutResponse {
+					got = append(got, d)
+					return &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_COUNTING}
+				},
+			}
+
+			resp, err := s.SetJoinTimeout(context.Background(), &api.SetJoinTimeoutRequest{LaunchId: tc.asked, TimeoutNanos: int64(time.Minute)})
+
+			if tc.wantSet {
+				require.NoError(t, err)
+				require.Equal(t, api.SetJoinTimeoutResponse_COUNTING, resp.GetOutcome())
+				require.Equal(t, []time.Duration{time.Minute}, got, "the duration reaches the session unchanged")
+				return
+			}
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.Empty(t, got, "nothing may change for a request that does not name this launch")
+			for _, says := range tc.wantSays {
+				require.Contains(t, err.Error(), says)
+			}
+		})
+	}
+}
+
+func Test_AdminServer_SetJoinTimeoutRefusesANegativeDuration(t *testing.T) {
+	called := false
+	s := &adminServiceServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo(), LaunchID: "launch-1",
+		OnSetJoinTimeout: func(time.Duration) *api.SetJoinTimeoutResponse { called = true; return nil }}
+	_, err := s.SetJoinTimeout(context.Background(), &api.SetJoinTimeoutRequest{LaunchId: "launch-1", TimeoutNanos: -1})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.False(t, called)
+}
+
+func Test_AdminServer_SetJoinTimeoutWithoutAHandlerIsUnimplemented(t *testing.T) {
+	s := &adminServiceServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo(), LaunchID: "launch-1"}
+	_, err := s.SetJoinTimeout(context.Background(), &api.SetJoinTimeoutRequest{LaunchId: "launch-1", TimeoutNanos: int64(time.Minute)})
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+func TestGetSessionReportsTheJoinStateAndLaunch(t *testing.T) {
+	want := &api.JoinState{TimeoutNanos: int64(time.Minute), DeadlineUnixNano: 42}
+	s := &adminServiceServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo(), LaunchID: "launch-1",
+		JoinState: func() *api.JoinState { return want }}
+	resp, err := s.GetSession(context.Background(), &api.GetSessionRequest{})
+	require.NoError(t, err)
+	require.Equal(t, want, resp.GetJoinState())
+	require.Equal(t, "launch-1", resp.GetLaunchId(), "a reader validates the answer against the launch it read")
+
+	s.JoinState = nil
+	resp, err = s.GetSession(context.Background(), &api.GetSessionRequest{})
+	require.NoError(t, err)
+	require.Nil(t, resp.GetJoinState(), "a server with no join state reports none")
+}

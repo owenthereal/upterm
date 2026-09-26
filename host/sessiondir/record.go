@@ -98,11 +98,21 @@ type Record struct {
 	// struct, and a zero time serialises to a date a reader could take for a
 	// real one.
 	FirstGuestJoinedAt time.Time `json:"first_guest_joined_at,omitzero"`
-	Status             string    `json:"status"`
-	Reason             string    `json:"reason"`
-	ExitCode           *int      `json:"exit_code,omitempty"`
-	Signal             string    `json:"signal,omitempty"`
-	SignalNumber       *int      `json:"signal_number,omitempty"`
+	// JoinTimeout is the join timeout the session holds, so a reader can tell
+	// "none" from "set, but not counting yet": zero when none is set or a
+	// guest has joined. JoinDeadline is when it ends the session unless a
+	// guest joins first: zero unless it is counting.
+	//
+	// Persistence, not the source of truth: a live `session info` reads both
+	// from the daemon. They stay as they were when the session ended, so a
+	// join_timeout record shows the deadline that fired.
+	JoinTimeout  time.Duration `json:"join_timeout,omitempty"`
+	JoinDeadline time.Time     `json:"join_deadline,omitzero"`
+	Status       string        `json:"status"`
+	Reason       string        `json:"reason"`
+	ExitCode     *int          `json:"exit_code,omitempty"`
+	Signal       string        `json:"signal,omitempty"`
+	SignalNumber *int          `json:"signal_number,omitempty"`
 	// Pid is the process that claimed the name. Set by Claim and never by a
 	// caller: the claimer is the owner by definition, and a reader who finds
 	// the name held but its socket silent needs a process to name.

@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion7
 type AdminServiceClient interface {
 	GetSession(ctx context.Context, in *GetSessionRequest, opts ...grpc.CallOption) (*GetSessionResponse, error)
 	StopSession(ctx context.Context, in *StopSessionRequest, opts ...grpc.CallOption) (*StopSessionResponse, error)
+	SetJoinTimeout(ctx context.Context, in *SetJoinTimeoutRequest, opts ...grpc.CallOption) (*SetJoinTimeoutResponse, error)
 }
 
 type adminServiceClient struct {
@@ -52,12 +53,22 @@ func (c *adminServiceClient) StopSession(ctx context.Context, in *StopSessionReq
 	return out, nil
 }
 
+func (c *adminServiceClient) SetJoinTimeout(ctx context.Context, in *SetJoinTimeoutRequest, opts ...grpc.CallOption) (*SetJoinTimeoutResponse, error) {
+	out := new(SetJoinTimeoutResponse)
+	err := c.cc.Invoke(ctx, "/api.AdminService/SetJoinTimeout", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations should embed UnimplementedAdminServiceServer
 // for forward compatibility
 type AdminServiceServer interface {
 	GetSession(context.Context, *GetSessionRequest) (*GetSessionResponse, error)
 	StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error)
+	SetJoinTimeout(context.Context, *SetJoinTimeoutRequest) (*SetJoinTimeoutResponse, error)
 }
 
 // UnimplementedAdminServiceServer should be embedded to have forward compatible implementations.
@@ -69,6 +80,9 @@ func (UnimplementedAdminServiceServer) GetSession(context.Context, *GetSessionRe
 }
 func (UnimplementedAdminServiceServer) StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StopSession not implemented")
+}
+func (UnimplementedAdminServiceServer) SetJoinTimeout(context.Context, *SetJoinTimeoutRequest) (*SetJoinTimeoutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetJoinTimeout not implemented")
 }
 
 // UnsafeAdminServiceServer may be embedded to opt out of forward compatibility for this service.
@@ -118,6 +132,24 @@ func _AdminService_StopSession_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_SetJoinTimeout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetJoinTimeoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).SetJoinTimeout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/api.AdminService/SetJoinTimeout",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).SetJoinTimeout(ctx, req.(*SetJoinTimeoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -132,6 +164,10 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StopSession",
 			Handler:    _AdminService_StopSession_Handler,
+		},
+		{
+			MethodName: "SetJoinTimeout",
+			Handler:    _AdminService_SetJoinTimeout_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

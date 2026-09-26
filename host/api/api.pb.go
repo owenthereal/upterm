@@ -21,6 +21,64 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type SetJoinTimeoutResponse_Outcome int32
+
+const (
+	SetJoinTimeoutResponse_OUTCOME_UNSPECIFIED SetJoinTimeoutResponse_Outcome = 0
+	SetJoinTimeoutResponse_COUNTING            SetJoinTimeoutResponse_Outcome = 1 // state.deadline_unix_nano says when it fires
+	SetJoinTimeoutResponse_PENDING             SetJoinTimeoutResponse_Outcome = 2 // not ready yet; state.timeout_nanos counts from readiness
+	SetJoinTimeoutResponse_DISABLED            SetJoinTimeoutResponse_Outcome = 3
+	SetJoinTimeoutResponse_CLAIMED             SetJoinTimeoutResponse_Outcome = 4 // a guest had joined, at state.first_guest_joined_unix_nano; nothing was set
+	SetJoinTimeoutResponse_ENDING              SetJoinTimeoutResponse_Outcome = 5 // the timeout already fired, or the session is tearing down
+)
+
+// Enum value maps for SetJoinTimeoutResponse_Outcome.
+var (
+	SetJoinTimeoutResponse_Outcome_name = map[int32]string{
+		0: "OUTCOME_UNSPECIFIED",
+		1: "COUNTING",
+		2: "PENDING",
+		3: "DISABLED",
+		4: "CLAIMED",
+		5: "ENDING",
+	}
+	SetJoinTimeoutResponse_Outcome_value = map[string]int32{
+		"OUTCOME_UNSPECIFIED": 0,
+		"COUNTING":            1,
+		"PENDING":             2,
+		"DISABLED":            3,
+		"CLAIMED":             4,
+		"ENDING":              5,
+	}
+)
+
+func (x SetJoinTimeoutResponse_Outcome) Enum() *SetJoinTimeoutResponse_Outcome {
+	p := new(SetJoinTimeoutResponse_Outcome)
+	*p = x
+	return p
+}
+
+func (x SetJoinTimeoutResponse_Outcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SetJoinTimeoutResponse_Outcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_proto_enumTypes[0].Descriptor()
+}
+
+func (SetJoinTimeoutResponse_Outcome) Type() protoreflect.EnumType {
+	return &file_api_proto_enumTypes[0]
+}
+
+func (x SetJoinTimeoutResponse_Outcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SetJoinTimeoutResponse_Outcome.Descriptor instead.
+func (SetJoinTimeoutResponse_Outcome) EnumDescriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{4, 0}
+}
+
 type Client_Kind int32
 
 const (
@@ -51,11 +109,11 @@ func (x Client_Kind) String() string {
 }
 
 func (Client_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_enumTypes[0].Descriptor()
+	return file_api_proto_enumTypes[1].Descriptor()
 }
 
 func (Client_Kind) Type() protoreflect.EnumType {
-	return &file_api_proto_enumTypes[0]
+	return &file_api_proto_enumTypes[1]
 }
 
 func (x Client_Kind) Number() protoreflect.EnumNumber {
@@ -64,7 +122,7 @@ func (x Client_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Client_Kind.Descriptor instead.
 func (Client_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{5, 0}
+	return file_api_proto_rawDescGZIP(), []int{8, 0}
 }
 
 type Identifier_Type int32
@@ -97,11 +155,11 @@ func (x Identifier_Type) String() string {
 }
 
 func (Identifier_Type) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_proto_enumTypes[1].Descriptor()
+	return file_api_proto_enumTypes[2].Descriptor()
 }
 
 func (Identifier_Type) Type() protoreflect.EnumType {
-	return &file_api_proto_enumTypes[1]
+	return &file_api_proto_enumTypes[2]
 }
 
 func (x Identifier_Type) Number() protoreflect.EnumNumber {
@@ -110,7 +168,7 @@ func (x Identifier_Type) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Identifier_Type.Descriptor instead.
 func (Identifier_Type) EnumDescriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{6, 0}
+	return file_api_proto_rawDescGZIP(), []int{9, 0}
 }
 
 type GetSessionRequest struct {
@@ -237,6 +295,176 @@ func (*StopSessionResponse) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{2}
 }
 
+// SetJoinTimeoutRequest sets how long the session waits for its first guest,
+// counted from now, or from readiness if it is not ready yet. It replaces any
+// timeout already set; zero disables it.
+type SetJoinTimeoutRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// launch_id binds the request to the launch the caller read, for the reason
+	// StopSessionRequest's does.
+	LaunchId      string `protobuf:"bytes,1,opt,name=launch_id,json=launchId,proto3" json:"launch_id,omitempty"`
+	TimeoutNanos  int64  `protobuf:"varint,2,opt,name=timeout_nanos,json=timeoutNanos,proto3" json:"timeout_nanos,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetJoinTimeoutRequest) Reset() {
+	*x = SetJoinTimeoutRequest{}
+	mi := &file_api_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetJoinTimeoutRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetJoinTimeoutRequest) ProtoMessage() {}
+
+func (x *SetJoinTimeoutRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetJoinTimeoutRequest.ProtoReflect.Descriptor instead.
+func (*SetJoinTimeoutRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SetJoinTimeoutRequest) GetLaunchId() string {
+	if x != nil {
+		return x.LaunchId
+	}
+	return ""
+}
+
+func (x *SetJoinTimeoutRequest) GetTimeoutNanos() int64 {
+	if x != nil {
+		return x.TimeoutNanos
+	}
+	return 0
+}
+
+type SetJoinTimeoutResponse struct {
+	state         protoimpl.MessageState         `protogen:"open.v1"`
+	Outcome       SetJoinTimeoutResponse_Outcome `protobuf:"varint,1,opt,name=outcome,proto3,enum=api.SetJoinTimeoutResponse_Outcome" json:"outcome,omitempty"`
+	State         *JoinState                     `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetJoinTimeoutResponse) Reset() {
+	*x = SetJoinTimeoutResponse{}
+	mi := &file_api_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetJoinTimeoutResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetJoinTimeoutResponse) ProtoMessage() {}
+
+func (x *SetJoinTimeoutResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetJoinTimeoutResponse.ProtoReflect.Descriptor instead.
+func (*SetJoinTimeoutResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SetJoinTimeoutResponse) GetOutcome() SetJoinTimeoutResponse_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return SetJoinTimeoutResponse_OUTCOME_UNSPECIFIED
+}
+
+func (x *SetJoinTimeoutResponse) GetState() *JoinState {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
+// JoinState is a session's join timeout. A zero field is absent.
+type JoinState struct {
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	TimeoutNanos             int64                  `protobuf:"varint,1,opt,name=timeout_nanos,json=timeoutNanos,proto3" json:"timeout_nanos,omitempty"`                                           // set and not claimed
+	DeadlineUnixNano         int64                  `protobuf:"varint,2,opt,name=deadline_unix_nano,json=deadlineUnixNano,proto3" json:"deadline_unix_nano,omitempty"`                             // counting, or the deadline that fired
+	FirstGuestJoinedUnixNano int64                  `protobuf:"varint,3,opt,name=first_guest_joined_unix_nano,json=firstGuestJoinedUnixNano,proto3" json:"first_guest_joined_unix_nano,omitempty"` // the first guest's join
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *JoinState) Reset() {
+	*x = JoinState{}
+	mi := &file_api_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JoinState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JoinState) ProtoMessage() {}
+
+func (x *JoinState) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JoinState.ProtoReflect.Descriptor instead.
+func (*JoinState) Descriptor() ([]byte, []int) {
+	return file_api_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *JoinState) GetTimeoutNanos() int64 {
+	if x != nil {
+		return x.TimeoutNanos
+	}
+	return 0
+}
+
+func (x *JoinState) GetDeadlineUnixNano() int64 {
+	if x != nil {
+		return x.DeadlineUnixNano
+	}
+	return 0
+}
+
+func (x *JoinState) GetFirstGuestJoinedUnixNano() int64 {
+	if x != nil {
+		return x.FirstGuestJoinedUnixNano
+	}
+	return 0
+}
+
 type GetSessionResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	SessionId        string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -248,13 +476,18 @@ type GetSessionResponse struct {
 	AuthorizedKeys   []*AuthorizedKey       `protobuf:"bytes,7,rep,name=authorized_keys,json=authorizedKeys,proto3" json:"authorized_keys,omitempty"`
 	SshUser          string                 `protobuf:"bytes,8,opt,name=ssh_user,json=sshUser,proto3" json:"ssh_user,omitempty"`                 // SSH username for client connections
 	SftpDisabled     bool                   `protobuf:"varint,9,opt,name=sftp_disabled,json=sftpDisabled,proto3" json:"sftp_disabled,omitempty"` // true if SFTP is disabled (--no-sftp)
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	JoinState        *JoinState             `protobuf:"bytes,10,opt,name=join_state,json=joinState,proto3" json:"join_state,omitempty"`          // the join timeout as the daemon holds it
+	// launch_id is the launch this daemon speaks for, so a reader can tell the
+	// run it read a record for from one that has since claimed the name. Empty
+	// from a daemon that claimed no name, and from daemons before this field.
+	LaunchId      string `protobuf:"bytes,11,opt,name=launch_id,json=launchId,proto3" json:"launch_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetSessionResponse) Reset() {
 	*x = GetSessionResponse{}
-	mi := &file_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -266,7 +499,7 @@ func (x *GetSessionResponse) String() string {
 func (*GetSessionResponse) ProtoMessage() {}
 
 func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -279,7 +512,7 @@ func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionResponse.ProtoReflect.Descriptor instead.
 func (*GetSessionResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetSessionResponse) GetSessionId() string {
@@ -345,6 +578,20 @@ func (x *GetSessionResponse) GetSftpDisabled() bool {
 	return false
 }
 
+func (x *GetSessionResponse) GetJoinState() *JoinState {
+	if x != nil {
+		return x.JoinState
+	}
+	return nil
+}
+
+func (x *GetSessionResponse) GetLaunchId() string {
+	if x != nil {
+		return x.LaunchId
+	}
+	return ""
+}
+
 type AuthorizedKey struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	PublicKeyFingerprints []string               `protobuf:"bytes,1,rep,name=public_key_fingerprints,json=publicKeyFingerprints,proto3" json:"public_key_fingerprints,omitempty"`
@@ -355,7 +602,7 @@ type AuthorizedKey struct {
 
 func (x *AuthorizedKey) Reset() {
 	*x = AuthorizedKey{}
-	mi := &file_api_proto_msgTypes[4]
+	mi := &file_api_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -367,7 +614,7 @@ func (x *AuthorizedKey) String() string {
 func (*AuthorizedKey) ProtoMessage() {}
 
 func (x *AuthorizedKey) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[4]
+	mi := &file_api_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -380,7 +627,7 @@ func (x *AuthorizedKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorizedKey.ProtoReflect.Descriptor instead.
 func (*AuthorizedKey) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *AuthorizedKey) GetPublicKeyFingerprints() []string {
@@ -412,7 +659,7 @@ type Client struct {
 
 func (x *Client) Reset() {
 	*x = Client{}
-	mi := &file_api_proto_msgTypes[5]
+	mi := &file_api_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -424,7 +671,7 @@ func (x *Client) String() string {
 func (*Client) ProtoMessage() {}
 
 func (x *Client) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[5]
+	mi := &file_api_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -437,7 +684,7 @@ func (x *Client) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Client.ProtoReflect.Descriptor instead.
 func (*Client) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Client) GetId() string {
@@ -486,7 +733,7 @@ type Identifier struct {
 
 func (x *Identifier) Reset() {
 	*x = Identifier{}
-	mi := &file_api_proto_msgTypes[6]
+	mi := &file_api_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -498,7 +745,7 @@ func (x *Identifier) String() string {
 func (*Identifier) ProtoMessage() {}
 
 func (x *Identifier) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_msgTypes[6]
+	mi := &file_api_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -511,7 +758,7 @@ func (x *Identifier) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Identifier.ProtoReflect.Descriptor instead.
 func (*Identifier) Descriptor() ([]byte, []int) {
-	return file_api_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Identifier) GetId() string {
@@ -543,7 +790,25 @@ const file_api_proto_rawDesc = "" +
 	"\x11GetSessionRequest\"1\n" +
 	"\x12StopSessionRequest\x12\x1b\n" +
 	"\tlaunch_id\x18\x01 \x01(\tR\blaunchId\"\x15\n" +
-	"\x13StopSessionResponse\"\xda\x02\n" +
+	"\x13StopSessionResponse\"Y\n" +
+	"\x15SetJoinTimeoutRequest\x12\x1b\n" +
+	"\tlaunch_id\x18\x01 \x01(\tR\blaunchId\x12#\n" +
+	"\rtimeout_nanos\x18\x02 \x01(\x03R\ftimeoutNanos\"\xe3\x01\n" +
+	"\x16SetJoinTimeoutResponse\x12=\n" +
+	"\aoutcome\x18\x01 \x01(\x0e2#.api.SetJoinTimeoutResponse.OutcomeR\aoutcome\x12$\n" +
+	"\x05state\x18\x02 \x01(\v2\x0e.api.JoinStateR\x05state\"d\n" +
+	"\aOutcome\x12\x17\n" +
+	"\x13OUTCOME_UNSPECIFIED\x10\x00\x12\f\n" +
+	"\bCOUNTING\x10\x01\x12\v\n" +
+	"\aPENDING\x10\x02\x12\f\n" +
+	"\bDISABLED\x10\x03\x12\v\n" +
+	"\aCLAIMED\x10\x04\x12\n" +
+	"\n" +
+	"\x06ENDING\x10\x05\"\x9e\x01\n" +
+	"\tJoinState\x12#\n" +
+	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
+	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xa6\x03\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -554,7 +819,11 @@ const file_api_proto_rawDesc = "" +
 	"\x11connected_clients\x18\x06 \x03(\v2\v.api.ClientR\x10connectedClients\x12;\n" +
 	"\x0fauthorized_keys\x18\a \x03(\v2\x12.api.AuthorizedKeyR\x0eauthorizedKeys\x12\x19\n" +
 	"\bssh_user\x18\b \x01(\tR\asshUser\x12#\n" +
-	"\rsftp_disabled\x18\t \x01(\bR\fsftpDisabled\"a\n" +
+	"\rsftp_disabled\x18\t \x01(\bR\fsftpDisabled\x12-\n" +
+	"\n" +
+	"join_state\x18\n" +
+	" \x01(\v2\x0e.api.JoinStateR\tjoinState\x12\x1b\n" +
+	"\tlaunch_id\x18\v \x01(\tR\blaunchId\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xbf\x01\n" +
@@ -575,11 +844,12 @@ const file_api_proto_rawDesc = "" +
 	"\x04Type\x12\b\n" +
 	"\x04HOST\x10\x00\x12\n" +
 	"\n" +
-	"\x06CLIENT\x10\x012\x93\x01\n" +
+	"\x06CLIENT\x10\x012\xe0\x01\n" +
 	"\fAdminService\x12?\n" +
 	"\n" +
 	"GetSession\x12\x16.api.GetSessionRequest\x1a\x17.api.GetSessionResponse\"\x00\x12B\n" +
-	"\vStopSession\x12\x17.api.StopSessionRequest\x1a\x18.api.StopSessionResponse\"\x00B(Z&github.com/owenthereal/upterm/host/apib\x06proto3"
+	"\vStopSession\x12\x17.api.StopSessionRequest\x1a\x18.api.StopSessionResponse\"\x00\x12K\n" +
+	"\x0eSetJoinTimeout\x12\x1a.api.SetJoinTimeoutRequest\x1a\x1b.api.SetJoinTimeoutResponse\"\x00B(Z&github.com/owenthereal/upterm/host/apib\x06proto3"
 
 var (
 	file_api_proto_rawDescOnce sync.Once
@@ -593,33 +863,42 @@ func file_api_proto_rawDescGZIP() []byte {
 	return file_api_proto_rawDescData
 }
 
-var file_api_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_api_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_api_proto_goTypes = []any{
-	(Client_Kind)(0),            // 0: api.Client.Kind
-	(Identifier_Type)(0),        // 1: api.Identifier.Type
-	(*GetSessionRequest)(nil),   // 2: api.GetSessionRequest
-	(*StopSessionRequest)(nil),  // 3: api.StopSessionRequest
-	(*StopSessionResponse)(nil), // 4: api.StopSessionResponse
-	(*GetSessionResponse)(nil),  // 5: api.GetSessionResponse
-	(*AuthorizedKey)(nil),       // 6: api.AuthorizedKey
-	(*Client)(nil),              // 7: api.Client
-	(*Identifier)(nil),          // 8: api.Identifier
+	(SetJoinTimeoutResponse_Outcome)(0), // 0: api.SetJoinTimeoutResponse.Outcome
+	(Client_Kind)(0),                    // 1: api.Client.Kind
+	(Identifier_Type)(0),                // 2: api.Identifier.Type
+	(*GetSessionRequest)(nil),           // 3: api.GetSessionRequest
+	(*StopSessionRequest)(nil),          // 4: api.StopSessionRequest
+	(*StopSessionResponse)(nil),         // 5: api.StopSessionResponse
+	(*SetJoinTimeoutRequest)(nil),       // 6: api.SetJoinTimeoutRequest
+	(*SetJoinTimeoutResponse)(nil),      // 7: api.SetJoinTimeoutResponse
+	(*JoinState)(nil),                   // 8: api.JoinState
+	(*GetSessionResponse)(nil),          // 9: api.GetSessionResponse
+	(*AuthorizedKey)(nil),               // 10: api.AuthorizedKey
+	(*Client)(nil),                      // 11: api.Client
+	(*Identifier)(nil),                  // 12: api.Identifier
 }
 var file_api_proto_depIdxs = []int32{
-	7, // 0: api.GetSessionResponse.connected_clients:type_name -> api.Client
-	6, // 1: api.GetSessionResponse.authorized_keys:type_name -> api.AuthorizedKey
-	0, // 2: api.Client.kind:type_name -> api.Client.Kind
-	1, // 3: api.Identifier.type:type_name -> api.Identifier.Type
-	2, // 4: api.AdminService.GetSession:input_type -> api.GetSessionRequest
-	3, // 5: api.AdminService.StopSession:input_type -> api.StopSessionRequest
-	5, // 6: api.AdminService.GetSession:output_type -> api.GetSessionResponse
-	4, // 7: api.AdminService.StopSession:output_type -> api.StopSessionResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: api.SetJoinTimeoutResponse.outcome:type_name -> api.SetJoinTimeoutResponse.Outcome
+	8,  // 1: api.SetJoinTimeoutResponse.state:type_name -> api.JoinState
+	11, // 2: api.GetSessionResponse.connected_clients:type_name -> api.Client
+	10, // 3: api.GetSessionResponse.authorized_keys:type_name -> api.AuthorizedKey
+	8,  // 4: api.GetSessionResponse.join_state:type_name -> api.JoinState
+	1,  // 5: api.Client.kind:type_name -> api.Client.Kind
+	2,  // 6: api.Identifier.type:type_name -> api.Identifier.Type
+	3,  // 7: api.AdminService.GetSession:input_type -> api.GetSessionRequest
+	4,  // 8: api.AdminService.StopSession:input_type -> api.StopSessionRequest
+	6,  // 9: api.AdminService.SetJoinTimeout:input_type -> api.SetJoinTimeoutRequest
+	9,  // 10: api.AdminService.GetSession:output_type -> api.GetSessionResponse
+	5,  // 11: api.AdminService.StopSession:output_type -> api.StopSessionResponse
+	7,  // 12: api.AdminService.SetJoinTimeout:output_type -> api.SetJoinTimeoutResponse
+	10, // [10:13] is the sub-list for method output_type
+	7,  // [7:10] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_init() }
@@ -632,8 +911,8 @@ func file_api_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_rawDesc), len(file_api_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   7,
+			NumEnums:      3,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
