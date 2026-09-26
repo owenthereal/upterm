@@ -484,11 +484,11 @@ leaves the session running. 'upterm session stop NAME' ends it.
 
 Durations are shown compact and normalised: 90m shows as 1h30m.
 
-Exits 0 when the session took the change, is ending, or has already ended, 4
-when no session has the name, and 1 for any other failure -- including a
-change that could not be confirmed, which may still have taken effect: running
-set again restarts the window, and 'upterm session info NAME' shows what the
-session holds.`,
+Exits 0 when the session took the change, was already claimed, is ending, or
+has already ended, 4 when no session has the name, and 1 for any other
+failure -- including a change that could not be confirmed, which may still
+have taken effect: running set again restarts the window, and 'upterm session
+info NAME' shows what the session holds.`,
 		Example: `  # Debug a failed build: open the session first, give people 10 minutes to
   # join only if the build fails, and keep the build's exit status. Safe under
   # set -e and in zsh, where $status is read-only:
