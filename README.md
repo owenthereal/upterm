@@ -294,6 +294,8 @@ For comprehensive details on configuring and using this integration, visit the [
 Everything the GitHub Action does is available from the CLI, so the same pattern works on GitLab, Buildkite, a self-hosted runner, or any script: start a detached session, print the join command, and block until someone has used it — or until nobody has joined in time.
 
 ```sh
+command -v jq >/dev/null || { echo "this recipe needs jq" >&2; exit 1; }
+
 # Start detached, capture name + join command in one shot.
 upterm host --detach --accept --output json \
   --skip-host-key-check \
@@ -303,19 +305,20 @@ name=$(jq -er .name session.json) || exit
 
 # End the session however this script ends: finished, cancelled or timed out.
 trap 'upterm session stop "$name" 2>/dev/null || true' EXIT
-trap exit INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "join: $(jq -r .sshCommand session.json)"
-upterm session wait "$name" || true
+upterm session wait "$name" & wait $! || true   # waiting in the shell lets a signal interrupt it
 ```
 
 - `--skip-host-key-check` lets a clean runner, with an empty `known_hosts` and no terminal to answer a prompt, trust the relay on first connection; a job that ships its own `known_hosts` passes `--known-hosts` instead.
 - `--authorized-user` is not optional on a shared runner: the join command ends up in a log. Set `DEBUG_USER` to the GitHub account that should get in; the recipe stops if it is unset. For another provider, replace the whole `github:` value (`gitlab:NAME`, `codeberg:NAME`, `srht:NAME`, `gitea:NAME@HOST` and `--authorized-keys FILE` work too).
 - Leaving out `--name` lets upterm pick a name no other session on the machine holds, so concurrent jobs on one worker cannot stop each other's sessions; the recipe reads it back from the JSON.
-- `|| exit` stops the step when the session did not start (the relay is unreachable, or `jq` is missing), instead of letting it pass without one.
+- The recipe checks for `jq` before it starts anything, and `|| exit` stops the step when the session did not start (for example, the relay is unreachable), instead of letting it pass without one.
 - `--join-timeout` ends the session if no guest joins within that long, and exits 0, so an unanswered debug session does not fail the build. Once a guest has joined it never re-arms.
 - `upterm session wait` blocks until the session ends and exits with its outcome — 0 for a join timeout or an explicit `session stop`. A guest who disconnects without exiting the shell leaves the session running until the job ends.
-- The session runs in its own background daemon, which a runner that stops only the job's processes would leave behind, so the `trap` stops it when the script finishes, is cancelled or times out. A runner that kills the job outright, with no SIGINT or SIGTERM first, gives the trap no chance: stop the session from the job's cleanup hook there.
+- The session runs in its own background daemon, which a runner that stops only the job's processes would leave behind, so the `trap` stops it when the script finishes, is cancelled or times out, whether the runner signals the whole job or only this shell; a cancelled script still exits non-zero (130 for SIGINT, 143 for SIGTERM). A runner that kills the job outright, with no SIGINT or SIGTERM first, gives the trap no chance: stop the session from the job's cleanup hook there.
 - To open the session before the build and count only after a failure, leave `--join-timeout` off the `upterm host` line and use the failed-build script under "Running Without a Terminal".
 
 ## :bulb: Tips
