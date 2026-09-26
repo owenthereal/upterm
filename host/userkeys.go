@@ -268,6 +268,10 @@ var credentialTimeout = 5 * time.Second
 // hostScopedTokenFunc is a variable so tests can pin credential resolution.
 var hostScopedTokenFunc = hostScopedToken
 
+// keyringTokenFunc is a variable so tests can pin the keyring lookup on every
+// platform; the real one shells out to gh.
+var keyringTokenFunc = keyringToken
+
 // hostScopedToken returns a token stored specifically for hostname, ignoring
 // GH_ENTERPRISE_TOKEN and GITHUB_ENTERPRISE_TOKEN. Those variables are not
 // host-scoped: go-gh returns them for *any* non-github.com host, so honoring
@@ -348,7 +352,7 @@ func resolveToken(ctx context.Context, ref UserRef, hostname string) (string, er
 		if token, _ := auth.TokenFromEnvOrConfig(hostname); token != "" {
 			return token, nil
 		}
-		return keyringToken(ctx, hostname)
+		return keyringTokenFunc(ctx, hostname)
 	default:
 		return "", nil
 	}
@@ -377,7 +381,12 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref U
 
 	token, err := resolveToken(ctx, ref, authority)
 	if err != nil {
-		return nil, err
+		if !anonymousAfterIncompleteLookup(ctx, ref, authority, err) {
+			return nil, err
+		}
+		logger.Warn("credential lookup did not complete; fetching public keys anonymously",
+			"host", authority, "timeout", credentialTimeout, "error", err)
+		token = ""
 	}
 	if token == "" {
 		if ref.Mode == CredentialHostScoped {
@@ -451,6 +460,30 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref U
 	}
 
 	return parseAuthorizedKeys([]byte(strings.Join(lines, "\n")), ref.Display())
+}
+
+// anonymousAfterIncompleteLookup reports whether a credential lookup that did
+// not complete may fall back to fetching keys anonymously.
+//
+// Only for github.com in the default mode. Its keys endpoint is public and
+// returns the same keys with or without a credential, so a credential buys
+// rate limit and nothing else, and "could not check" cannot change who is
+// authorized. A cold `gh auth token` on a Windows runner outlived
+// credentialTimeout often enough to fail sessions outright.
+//
+// Everywhere else the failure stands, which is keyringToken's rule: an
+// Enterprise instance in private mode answers an anonymous request
+// differently, so fetching anonymously there would report "could not check"
+// as "confirmed none". Never when the caller's own context has ended either:
+// that is cancellation, not a slow lookup.
+func anonymousAfterIncompleteLookup(ctx context.Context, ref UserRef, authority string, err error) bool {
+	if ref.Mode != CredentialDefault || ctx.Err() != nil {
+		return false
+	}
+	if auth.NormalizeHostname(authority) != "github.com" {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay)
 }
 
 // readKeyPage fetches one page of a GitHub key listing and reports the next

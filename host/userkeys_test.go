@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1156,4 +1157,201 @@ func Test_githubUserKeys_defaultModeUsesAmbientCredentials(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "token ambient-token", gotAuth)
+}
+
+func pinKeyringToken(t *testing.T, fn func(context.Context, string) (string, error)) {
+	t.Helper()
+	restore := keyringTokenFunc
+	keyringTokenFunc = fn
+	t.Cleanup(func() { keyringTokenFunc = restore })
+}
+
+// noAmbientCredential leaves the keyring as the only place a token could come
+// from, so the lookup under test is the one that runs.
+func noAmbientCredential(t *testing.T) {
+	t.Helper()
+	for _, v := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		t.Setenv(v, "")
+	}
+	t.Setenv("GH_CONFIG_DIR", t.TempDir())
+}
+
+func Test_anonymousAfterIncompleteLookup(t *testing.T) {
+	timedOut := fmt.Errorf("credential lookup for github.com did not complete: %w", context.DeadlineExceeded)
+	heldPipe := fmt.Errorf("credential lookup for github.com did not complete: %w", exec.ErrWaitDelay)
+	defaultRef, err := ParseUserRef("github:alice")
+	require.NoError(t, err)
+	scopedRef, err := ParseUserRef("github:alice@github.com")
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name      string
+		ctx       context.Context
+		ref       UserRef
+		authority string
+		err       error
+		want      bool
+	}{
+		{"github.com, the lookup timed out", context.Background(), defaultRef, "github.com", timedOut, true},
+		{"github.com, gh held its pipe past WaitDelay", context.Background(), defaultRef, "github.com", heldPipe, true},
+		{"github.com, the caller cancelled", cancelled, defaultRef, "github.com", fmt.Errorf("did not complete: %w", context.Canceled), false},
+		{"github.com, a timeout after the caller cancelled", cancelled, defaultRef, "github.com", timedOut, false},
+		{"an Enterprise host through GH_HOST", context.Background(), defaultRef, "ghe.corp.com", timedOut, false},
+		{"a host-scoped github.com reference", context.Background(), scopedRef, "github.com", timedOut, false},
+		{"any other failure", context.Background(), defaultRef, "github.com", errors.New("boom"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, anonymousAfterIncompleteLookup(tc.ctx, tc.ref, tc.authority, tc.err))
+		})
+	}
+}
+
+// The whole fetch, with the keyring lookup pinned instead of shelled out, so
+// the fallback is exercised on Windows too.
+func Test_githubUserKeys_fallbackDecisionThroughTheLookup(t *testing.T) {
+	timedOut := func(_ context.Context, host string) (string, error) {
+		return "", fmt.Errorf("credential lookup for %s did not complete: %w", host, context.DeadlineExceeded)
+	}
+
+	t.Run("github.com fetches the public keys anonymously", func(t *testing.T) {
+		noAmbientCredential(t)
+		pinKeyringToken(t, timedOut)
+		pinGitHubHost(t, "github.com")
+		rec := &recordingRT{body: testPublicKey}
+		ref, err := ParseUserRef("github:alice")
+		require.NoError(t, err)
+
+		aks, err := (&Fetcher{Logger: testLogger(), Transport: rec}).AuthorizedKeys(t.Context(), []UserRef{ref})
+		require.NoError(t, err)
+		require.Len(t, aks, 1)
+		require.Len(t, rec.reqs, 1)
+		assert.Equal(t, "/alice.keys", rec.reqs[0].URL.Path)
+		assert.Empty(t, rec.reqs[0].Header.Get("Authorization"))
+	})
+	t.Run("an Enterprise host through GH_HOST stays closed", func(t *testing.T) {
+		noAmbientCredential(t)
+		pinKeyringToken(t, timedOut)
+		pinGitHubHost(t, "ghe.corp.com")
+		rec := &recordingRT{body: testPublicKey}
+		ref, err := ParseUserRef("github:alice")
+		require.NoError(t, err)
+
+		_, err = (&Fetcher{Logger: testLogger(), Transport: rec}).AuthorizedKeys(t.Context(), []UserRef{ref})
+		require.ErrorContains(t, err, "did not complete")
+		require.Empty(t, rec.reqs)
+	})
+	t.Run("a host-scoped reference stays closed", func(t *testing.T) {
+		noAmbientCredential(t)
+		restore := hostScopedTokenFunc
+		hostScopedTokenFunc = timedOut
+		t.Cleanup(func() { hostScopedTokenFunc = restore })
+		rec := &recordingRT{body: testPublicKey}
+		ref, err := ParseUserRef("github:alice@github.com")
+		require.NoError(t, err)
+
+		_, err = (&Fetcher{Logger: testLogger(), Transport: rec}).AuthorizedKeys(t.Context(), []UserRef{ref})
+		require.ErrorContains(t, err, "did not complete")
+		require.Empty(t, rec.reqs)
+	})
+	t.Run("a cancelled caller stays closed", func(t *testing.T) {
+		noAmbientCredential(t)
+		pinKeyringToken(t, func(ctx context.Context, host string) (string, error) {
+			return "", fmt.Errorf("credential lookup for %s did not complete: %w", host, ctx.Err())
+		})
+		pinGitHubHost(t, "github.com")
+		rec := &recordingRT{body: testPublicKey}
+		ref, err := ParseUserRef("github:alice")
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, err = (&Fetcher{Logger: testLogger(), Transport: rec}).AuthorizedKeys(ctx, []UserRef{ref})
+		require.Error(t, err)
+		require.Empty(t, rec.reqs)
+	})
+}
+
+// stubHungGH makes `gh auth token` hang past a shortened credentialTimeout, as
+// a cold gh on a Windows runner did, with no ambient credential to short-cut
+// the keyring lookup.
+func stubHungGH(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub is POSIX-only")
+	}
+	sleepExe, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+	stub := filepath.Join(t.TempDir(), "fake-gh")
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexec "+sleepExe+" 60\n"), 0o755))
+	t.Setenv("GH_PATH", stub)
+	noAmbientCredential(t)
+	shortCredentialTimeout(t)
+}
+
+// github.com's keys are public: a credential buys rate limit and nothing
+// else, so a lookup that could not finish must not fail the session.
+func Test_githubUserKeys_githubDotComFetchesAnonymouslyAfterATimedOutLookup(t *testing.T) {
+	stubHungGH(t)
+	pinGitHubHost(t, "github.com")
+	rec := &recordingRT{body: testPublicKey}
+
+	ref, err := ParseUserRef("github:alice")
+	require.NoError(t, err)
+	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.NoError(t, err)
+	require.Len(t, aks, 1)
+
+	require.Len(t, rec.reqs, 1)
+	assert.Equal(t, "github.com", rec.reqs[0].URL.Host)
+	assert.Equal(t, "/alice.keys", rec.reqs[0].URL.Path, "the anonymous endpoint")
+	assert.Empty(t, rec.reqs[0].Header.Get("Authorization"))
+}
+
+// An Enterprise instance in private mode answers anonymous requests
+// differently, so there "could not check" must not become "confirmed none".
+func Test_githubUserKeys_enterpriseDefaultStaysClosedAfterATimedOutLookup(t *testing.T) {
+	stubHungGH(t)
+	pinGitHubHost(t, "ghe.corp.com")
+	rec := &recordingRT{body: testPublicKey}
+
+	ref, err := ParseUserRef("github:alice")
+	require.NoError(t, err)
+	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.ErrorContains(t, err, "did not complete")
+	require.Empty(t, rec.reqs, "no request may go out")
+}
+
+// A host-scoped reference means "only credentials stored for this host", even
+// when the host is github.com.
+func Test_githubUserKeys_hostScopedStaysClosedAfterATimedOutLookup(t *testing.T) {
+	stubHungGH(t)
+	rec := &recordingRT{body: testPublicKey}
+
+	ref, err := ParseUserRef("github:alice@github.com")
+	require.NoError(t, err)
+	require.Equal(t, CredentialHostScoped, ref.Mode)
+	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+	require.ErrorContains(t, err, "did not complete")
+	require.Empty(t, rec.reqs)
+}
+
+// The caller's own cancellation is not a slow lookup.
+func Test_githubUserKeys_cancelledCallerStaysClosed(t *testing.T) {
+	stubHungGH(t)
+	pinGitHubHost(t, "github.com")
+	rec := &recordingRT{body: testPublicKey}
+
+	ref, err := ParseUserRef("github:alice")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	_, err = f.AuthorizedKeys(ctx, []UserRef{ref})
+	require.Error(t, err)
+	require.Empty(t, rec.reqs)
 }
