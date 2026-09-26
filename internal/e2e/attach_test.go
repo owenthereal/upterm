@@ -25,6 +25,7 @@ func TestAttachDetachReattach(t *testing.T) {
 		h.serverURL, h.keyFile, name, h.rcFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+	h.waitForReady(name)
 
 	term := h.splitPane(h.host)
 	require.NoError(t, term.SendLine(h.ctx, "upterm attach "+name+"; echo DETACH_STATUS=$?"))
@@ -101,6 +102,7 @@ func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
 		h.serverURL, h.keyFile, name, h.rcFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+	h.waitForReady(name)
 
 	// The comparison lives in a script rather than on the command line: a
 	// pane is narrower than the line this would otherwise be, and a marker
@@ -159,6 +161,7 @@ func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 		h.serverURL, h.keyFile, name, h.rcFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+	h.waitForReady(name)
 
 	term := h.splitPane(h.host)
 	marker := fmt.Sprintf("NORMAL_SCREEN_%d", time.Now().UnixNano()%1_000_000)
@@ -212,6 +215,7 @@ func TestAttachSuspendsAndResumes(t *testing.T) {
 		h.serverURL, h.keyFile, name, h.rcFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "SSH:", 30*time.Second))
+	h.waitForReady(name)
 
 	term := h.splitPane(h.host)
 	// No trailing "; echo STATUS=$?" here, unlike the plain detach tests: bash

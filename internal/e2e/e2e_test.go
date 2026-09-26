@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/tmux"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -234,6 +236,24 @@ func (h *testHarness) waitForText(pane *tmux.Pane, expected string, timeout time
 	}
 	content, _ := pane.Capture(h.ctx)
 	return fmt.Errorf("timeout waiting for %q after %v\nPane content:\n%s", expected, timeout, content)
+}
+
+// waitForReady polls `session info` until the named session is ready. A
+// foreground host prints "SSH:" when the server creates the session, before
+// its attach socket is bound and the keys to pin it are published, so an
+// `upterm attach` sent on "SSH:" alone can be told the session is still
+// starting. A ready record already carries those keys.
+func (h *testHarness) waitForReady(name string) {
+	h.t.Helper()
+	require.EventuallyWithT(h.t, func(c *assert.CollectT) {
+		out, err := h.runCLI(5*time.Second, "session", "info", name, "-o", "json")
+		require.NoError(c, err, "%s", out)
+		var info struct {
+			Status string `json:"status"`
+		}
+		require.NoError(c, json.Unmarshal(out, &info), "%s", out)
+		require.Equal(c, "ready", info.Status)
+	}, 30*time.Second, 100*time.Millisecond, "session %s never became ready", name)
 }
 
 // writeFile writes content to a file in the test's temp directory.
