@@ -1199,6 +1199,7 @@ func Test_anonymousAfterIncompleteLookup(t *testing.T) {
 		{"github.com, the caller cancelled", cancelled, defaultRef, "github.com", fmt.Errorf("did not complete: %w", context.Canceled), false},
 		{"github.com, a timeout after the caller cancelled", cancelled, defaultRef, "github.com", timedOut, false},
 		{"an Enterprise host through GH_HOST", context.Background(), defaultRef, "ghe.corp.com", timedOut, false},
+		{"a github.com subdomain through GH_HOST", context.Background(), defaultRef, "foo.github.com", timedOut, false},
 		{"a host-scoped github.com reference", context.Background(), scopedRef, "github.com", timedOut, false},
 		{"any other failure", context.Background(), defaultRef, "github.com", errors.New("boom"), false},
 	} {

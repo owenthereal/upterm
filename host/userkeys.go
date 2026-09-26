@@ -480,7 +480,11 @@ func anonymousAfterIncompleteLookup(ctx context.Context, ref UserRef, authority 
 	if ref.Mode != CredentialDefault || ctx.Err() != nil {
 		return false
 	}
-	if auth.NormalizeHostname(authority) != "github.com" {
+	// The authority itself, not its normalized form: NormalizeHostname folds
+	// subdomains such as foo.github.com into github.com, but the anonymous
+	// fetch goes to the authority as written, which is not github.com's
+	// public keys endpoint.
+	if !strings.EqualFold(authority, "github.com") {
 		return false
 	}
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay)
