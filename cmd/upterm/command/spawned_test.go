@@ -163,6 +163,8 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.Equal(t, "ssh u@127.0.0.1 -p 2222", info.SSHCommand)
 	require.Equal(t, sessiondir.ReasonUnknown, info.Reason,
 		"reason is a key `session info -o json` always publishes; this shape has to match it")
+	require.Equal(t, joinStateFromDaemon, info.JoinStateSource,
+		"joinStateSource is a key `session info -o json` always publishes; this shape has to match it too")
 	require.Empty(t, stderr.String())
 
 	// The parent left after started; the daemon's watcher stays quiet.
@@ -171,6 +173,27 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 		t.Fatal("a parent that exits after started must not be read as abandonment")
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestSpawnedSessionDetachPrintsJoinTimeout pins that a session started with
+// --join-timeout reports it: the daemon sends Started from its ready
+// callback, before the join timeout starts counting, so at this instant it
+// holds the launch's timeout pending and there is no deadline yet -- a
+// `session info` run a moment later sees the same timeout counting, with one.
+func TestSpawnedSessionDetachPrintsJoinTimeout(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach, s.jsonOut = true, true
+	s.joinTimeout = 10 * time.Minute
+	dec := d.startup(t, "s")
+	go func() { <-dec; d.start() }()
+
+	require.NoError(t, s.run(context.Background()))
+
+	require.Contains(t, stdout.String(), `"joinTimeout": "10m"`)
+	require.NotContains(t, stdout.String(), "joinDeadline")
+	require.Empty(t, stderr.String())
 }
 
 // TestSpawnedSessionDetachPrintsTheStatusItWasGiven: the JSON's status is the

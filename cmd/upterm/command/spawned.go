@@ -39,6 +39,11 @@ type spawnedSession struct {
 	jsonOut bool
 	logPath string
 
+	// joinTimeout is the launch's --join-timeout, for printStarted: the
+	// daemon holds it pending from the moment it reports ready, before this
+	// process ever asks, so it is not a guess.
+	joinTimeout time.Duration
+
 	stdin      io.Reader
 	stdout     io.Writer
 	stderr     io.Writer
@@ -316,6 +321,15 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 		// only just started. Set explicitly so the two shapes match —
 		// reason is a key `session info` always publishes.
 		Reason: sessiondir.ReasonUnknown,
+		// The daemon's own state, not a guess: Started is sent from the
+		// daemon's ready callback, before the join timeout starts counting,
+		// so at this instant it holds the launch's --join-timeout pending
+		// and nothing has claimed it yet. A `session info` run a moment
+		// later sees the same timeout counting, with a deadline.
+		JoinStateSource: joinStateFromDaemon,
+	}
+	if s.joinTimeout > 0 {
+		info.JoinTimeout = shortDuration(s.joinTimeout)
 	}
 	if sess != nil {
 		if detail, err := buildSessionDetail(sess); err == nil {
