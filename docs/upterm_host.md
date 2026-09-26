@@ -76,7 +76,7 @@ upterm host [flags]
   -f, --force-command string         Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.
   -h, --help                         help for host
       --hide-client-ip               Hide client IP addresses from output (auto-enabled in CI environments).
-      --join-timeout duration        End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it.
+      --join-timeout duration        End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.
       --known-hosts string           Specify a file containing known keys for remote hosts (required). (default "~/.ssh/known_hosts")
       --name string                  Name this session. Determines the socket paths, so it can be looked up with 'upterm session info NAME'. Defaults to COMMAND-XXXX.
       --no-sftp                      Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.

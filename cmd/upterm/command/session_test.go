@@ -309,6 +309,10 @@ type stubAdminServer struct {
 	// stoppedLaunchID records what the last StopSession was asked to stop,
 	// which is the only place the request's own content is observable.
 	stoppedLaunchID string
+
+	// onSet, if set, answers SetJoinTimeout; nil answers Unimplemented, the
+	// way a daemon from before `session set` does.
+	onSet func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error)
 }
 
 // GetSession answers with the next response in the sequence and repeats the
@@ -339,6 +343,13 @@ func (s *stubAdminServer) StopSession(_ context.Context, in *api.StopSessionRequ
 	}
 	s.onStop()
 	return &api.StopSessionResponse{}, nil
+}
+
+func (s *stubAdminServer) SetJoinTimeout(_ context.Context, in *api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+	if s.onSet == nil {
+		return nil, status.Error(codes.Unimplemented, "no set")
+	}
+	return s.onSet(in)
 }
 
 func serveStubAdmin(t *testing.T, socket string, resps ...*api.GetSessionResponse) {
@@ -376,6 +387,25 @@ func (s *stubAdminServer) lastStoppedLaunchID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stoppedLaunchID
+}
+
+func serveStubAdminWithSet(t *testing.T, socket string, onSet func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error)) {
+	t.Helper()
+	ln, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	srv := grpc.NewServer()
+	api.RegisterAdminServiceServer(srv, &stubAdminServer{resps: []*api.GetSessionResponse{{}}, onSet: onSet})
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(srv.Stop)
+}
+
+// heldReady claims name and publishes it ready, as a live daemon would.
+func heldReady(t *testing.T, name string) *sessiondir.Dir {
+	t.Helper()
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+	return d
 }
 
 // captureStdout collects what fn prints. `session info` answers on stdout, so
@@ -898,7 +928,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 	// nothing ever clears it — it is what `kill` names when a session's socket
 	// has stopped answering. logPath is not: only a daemon publishes one, and
 	// these fixtures are claims without a daemon behind them.
-	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount", "pid"}
+	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "joinStateSource"}
 
 	for _, tc := range []struct {
 		name  string
@@ -911,14 +941,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// published all the same: the name is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// The one state whose socket answers, and the only one that can
 			// carry a connect string.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -926,7 +956,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// the live detail may not, since only ready is joinable.
 			name:  "disconnected",
 			build: buildDisconnected,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "adminSocket", "attachSocket"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// The only state that can carry an exit code, because it is the
@@ -934,14 +964,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// session, no socket path, since there is nothing left to dial.
 			name:  "exited",
 			build: buildEndedAfterExit,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "exitCode"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "exitCode", "joinStateSource"},
 		},
 		{
 			// Killed before it could publish an outcome: the same shape as a
 			// clean exit, minus the code nobody recorded.
 			name:  "killed",
 			build: buildEndedAfterKill,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "joinStateSource"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1419,4 +1449,350 @@ func TestFailuresOtherThanNotFoundKeepExitOne(t *testing.T) {
 	require.Error(t, err)
 	var ec ExitCodeError
 	require.False(t, errors.As(err, &ec), "a held session whose socket does not answer is not a missing one")
+}
+
+func Test_setSession(t *testing.T) {
+	at := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		resp *api.SetJoinTimeoutResponse
+		want string
+	}{
+		{"counting", &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_COUNTING,
+			State: &api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: at.UnixNano()}},
+			"session s1 ends at 2026-09-25T12:40:00Z unless a guest joins\n"},
+		{"pending", &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_PENDING,
+			State: &api.JoinState{TimeoutNanos: int64(10 * time.Minute)}},
+			"session s1: join timeout 10m, counting from when the session is ready\n"},
+		{"disabled", &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_DISABLED, State: &api.JoinState{}},
+			"session s1: join timeout disabled\n"},
+		{"claimed", &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_CLAIMED,
+			State: &api.JoinState{FirstGuestJoinedUnixNano: at.UnixNano()}},
+			"session s1: a guest joined at 2026-09-25T12:40:00Z; automatic join timeout disabled\n"},
+		{"ending", &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_ENDING, State: &api.JoinState{}},
+			"session s1 is ending\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			d := heldReady(t, "s1")
+			asked := make(chan *api.SetJoinTimeoutRequest, 1)
+			serveStubAdminWithSet(t, d.AdminSocket(), func(in *api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+				asked <- in
+				return tc.resp, nil
+			})
+			var out bytes.Buffer
+			require.NoError(t, setSession(context.Background(), "s1", 10*time.Minute, &out))
+			require.Equal(t, tc.want, out.String())
+			in := <-asked
+			require.Equal(t, d.LaunchID(), in.GetLaunchId(), "the request names the launch the record named")
+			require.Equal(t, int64(10*time.Minute), in.GetTimeoutNanos())
+		})
+	}
+}
+
+func Test_setSession_failures(t *testing.T) {
+	t.Run("no such session exits 4", func(t *testing.T) {
+		setupSessionRoots(t)
+		err := setSession(context.Background(), "nobody", time.Minute, io.Discard)
+		var ec ExitCodeError
+		require.ErrorAs(t, err, &ec)
+		require.Equal(t, notFoundCode, ec.Code)
+	})
+	t.Run("an ended session is not an error", func(t *testing.T) {
+		setupSessionRoots(t)
+		buildEndedAfterExit(t, "gone-2")
+		var out bytes.Buffer
+		require.NoError(t, setSession(context.Background(), "gone-2", time.Minute, &out))
+		require.Contains(t, out.String(), "session gone-2 has already ended")
+	})
+	t.Run("a daemon that predates the RPC says so", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "old-2")
+		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid"})
+		err := setSession(context.Background(), "old-2", time.Minute, io.Discard)
+		require.ErrorContains(t, err, "older than 0.32.0")
+		require.ErrorContains(t, err, "start it again", "upgrading the CLI alone does not help, and the message says so")
+		var ec ExitCodeError
+		require.False(t, errors.As(err, &ec), "exit 1, not a missing session")
+	})
+	t.Run("a session replaced since it was read is not changed", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "raced-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.FailedPrecondition, "this socket holds launch other")
+		})
+		err := setSession(context.Background(), "raced-2", time.Minute, io.Discard)
+		require.ErrorContains(t, err, "has been replaced since it was read")
+	})
+	t.Run("a held ready session that does not answer could not confirm", func(t *testing.T) {
+		// An unreachable socket on a held name is not evidence of teardown:
+		// Unavailable can be transient, and reporting success here would
+		// leave a session running without the timeout its caller asked for.
+		setupSessionRoots(t)
+		heldReady(t, "mute-2")
+		var out bytes.Buffer
+		err := setSession(context.Background(), "mute-2", time.Minute, &out)
+		require.ErrorContains(t, err, "could not confirm the change to session mute-2")
+		require.Empty(t, out.String(), "nothing may read as success")
+	})
+	t.Run("a held session whose record says ending is ending", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "torn-2")
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusEnding }))
+		var out bytes.Buffer
+		require.NoError(t, setSession(context.Background(), "torn-2", time.Minute, &out))
+		require.Equal(t, "session torn-2 is ending\n", out.String())
+	})
+	t.Run("a timed-out request could not confirm, and says retrying restarts the window", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "slow-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.DeadlineExceeded, "too slow")
+		})
+		err := setSession(context.Background(), "slow-2", time.Minute, io.Discard)
+		require.ErrorContains(t, err, "could not confirm the change")
+		require.ErrorContains(t, err, "restarts the window")
+	})
+	t.Run("a session still starting says so", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "early-2")
+		releaseAtEnd(t, d)
+		err := setSession(context.Background(), "early-2", time.Minute, io.Discard)
+		require.ErrorContains(t, err, "is still starting and its admin socket is not up yet")
+	})
+	t.Run("any other refusal is reported", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "odd-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.Internal, "boom")
+		})
+		err := setSession(context.Background(), "odd-2", time.Minute, io.Discard)
+		require.ErrorContains(t, err, "could not confirm the change")
+		require.ErrorContains(t, err, "boom")
+	})
+}
+
+func TestSetCommandRejectsNoSettingAndANegativeTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"s1"}, "nothing to set"},
+		{[]string{"s1", "--join-timeout=-1m"}, "must not be negative"},
+	} {
+		cmd := setCmd()
+		cmd.SetArgs(tc.args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		require.ErrorContains(t, cmd.Execute(), tc.want)
+	}
+}
+
+func TestInfoPublishesTheJoinTimeoutByState(t *testing.T) {
+	deadline := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name         string
+		rec          sessiondir.Record
+		wantTimeout  string
+		wantDeadline time.Time
+	}{
+		{"none", sessiondir.Record{}, "", time.Time{}},
+		{"pending", sessiondir.Record{JoinTimeout: 10 * time.Minute}, "10m", time.Time{}},
+		{"counting", sessiondir.Record{JoinTimeout: 10 * time.Minute, JoinDeadline: deadline}, "10m", deadline},
+		{"claimed, whatever a stale write left", sessiondir.Record{JoinTimeout: 10 * time.Minute, JoinDeadline: deadline,
+			FirstGuestJoinedAt: deadline.Add(-time.Minute)}, "", time.Time{}},
+		{"ended by the timeout", sessiondir.Record{Reason: sessiondir.ReasonJoinTimeout, JoinTimeout: 10 * time.Minute,
+			JoinDeadline: deadline}, "10m", deadline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := infoFromRecord(&tc.rec, sessiondir.StatusReady)
+			require.Equal(t, tc.wantTimeout, info.JoinTimeout)
+			require.True(t, tc.wantDeadline.Equal(info.JoinDeadline), "got %s", info.JoinDeadline)
+			require.Equal(t, "record", info.JoinStateSource, "present in every state, empty included")
+		})
+	}
+}
+
+func TestLiveJoinStateOverridesTheRecord(t *testing.T) {
+	deadline := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	stale := infoFromRecord(&sessiondir.Record{JoinTimeout: time.Minute}, sessiondir.StatusReady)
+	require.Equal(t, "record", stale.JoinStateSource)
+
+	got := withLiveJoinState(stale, &api.GetSessionResponse{
+		JoinState: &api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: deadline.UnixNano()}})
+	require.Equal(t, "10m", got.JoinTimeout, "the daemon's memory, not the last record write")
+	require.True(t, got.JoinDeadline.Equal(deadline))
+	require.Equal(t, "daemon", got.JoinStateSource)
+
+	got = withLiveJoinState(stale, &api.GetSessionResponse{JoinState: &api.JoinState{FirstGuestJoinedUnixNano: deadline.UnixNano()}})
+	require.Empty(t, got.JoinTimeout, "a live join clears what the record still says")
+	require.True(t, got.JoinDeadline.IsZero())
+	require.True(t, got.FirstGuestJoinedAt.Equal(deadline))
+	require.Equal(t, "daemon", got.JoinStateSource)
+
+	got = withLiveJoinState(stale, &api.GetSessionResponse{JoinState: &api.JoinState{}})
+	require.Empty(t, got.JoinTimeout, "the daemon confirms there is none")
+	require.Equal(t, "daemon", got.JoinStateSource, "a confirmed none still says who confirmed it")
+
+	got = withLiveJoinState(stale, &api.GetSessionResponse{})
+	require.Equal(t, "1m", got.JoinTimeout, "a daemon without join state leaves the record's view")
+	require.Equal(t, "record", got.JoinStateSource)
+	require.Equal(t, caveatUnreported, got.joinCaveat)
+}
+
+// Through lookup, the way `session info` gets there: every held state takes
+// the daemon's join state, and only a ready one is advertised as joinable.
+func Test_lookupTakesTheJoinStateFromTheDaemon(t *testing.T) {
+	deadline := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	for _, st := range []string{sessiondir.StatusStarting, sessiondir.StatusReady, sessiondir.StatusDisconnected} {
+		t.Run(st, func(t *testing.T) {
+			setupSessionRoots(t)
+			name := "live-" + st
+			d := claimSession(t, name)
+			releaseAtEnd(t, d)
+			require.NoError(t, d.Update(func(r *sessiondir.Record) {
+				r.Status = st
+				r.SessionID = "sid"
+				r.JoinTimeout = time.Minute // stale: the daemon holds 10m now
+			}))
+			serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
+				LaunchId: d.LaunchID(), JoinState: &api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: deadline.UnixNano()}})
+
+			info, live, err := lookup(context.Background(), name)
+			require.NoError(t, err)
+			require.Equal(t, "10m", info.JoinTimeout)
+			require.True(t, info.JoinDeadline.Equal(deadline))
+			require.Equal(t, "daemon", info.JoinStateSource)
+			if st != sessiondir.StatusReady {
+				require.Nil(t, live)
+				require.Empty(t, info.SSHCommand, "only a ready session is advertised as joinable")
+			}
+		})
+	}
+}
+
+func Test_lookupIgnoresAnAnswerForAnotherLaunch(t *testing.T) {
+	setupSessionRoots(t)
+	d := heldReady(t, "raced-3")
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.JoinTimeout = time.Minute }))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
+		LaunchId: "another-launch", JoinState: &api.JoinState{TimeoutNanos: int64(time.Hour)}})
+
+	info, live, err := lookup(context.Background(), "raced-3")
+	require.NoError(t, err)
+	require.Nil(t, live, "an answer for another launch is not this session's")
+	require.Equal(t, "1m", info.JoinTimeout)
+	require.Equal(t, "record", info.JoinStateSource)
+}
+
+func Test_lookupSaysWhenTheDaemonDidNotAnswer(t *testing.T) {
+	t.Run("a recorded timeout", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "mute-3")
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.JoinTimeout = time.Minute }))
+
+		info, _, err := lookup(context.Background(), "mute-3")
+		require.NoError(t, err)
+		require.Equal(t, "record", info.JoinStateSource)
+		require.Equal(t, "Join timeout: 1m (counts from readiness) (from the record; the session did not answer)", joinTimeoutLine(info))
+	})
+	t.Run("nothing recorded", func(t *testing.T) {
+		// A timeout armed, its write failed, and the daemon then stopped
+		// answering, looks exactly like this from outside -- so it must not
+		// look like a confirmed "none".
+		setupSessionRoots(t)
+		heldReady(t, "mute-4")
+
+		info, _, err := lookup(context.Background(), "mute-4")
+		require.NoError(t, err)
+		require.Empty(t, info.JoinTimeout)
+		require.Equal(t, "record", info.JoinStateSource)
+		require.Equal(t, "Join timeout: none recorded (from the record; the session did not answer)", joinTimeoutLine(info))
+	})
+}
+
+func Test_lookupSaysWhenTheDaemonConfirmsNone(t *testing.T) {
+	setupSessionRoots(t)
+	d := heldReady(t, "none-3")
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
+		LaunchId: d.LaunchID(), JoinState: &api.JoinState{}})
+
+	info, _, err := lookup(context.Background(), "none-3")
+	require.NoError(t, err)
+	require.Empty(t, info.JoinTimeout)
+	require.Equal(t, "daemon", info.JoinStateSource)
+	require.Empty(t, joinTimeoutLine(info), "a confirmed none prints nothing")
+}
+
+func TestInfoJSONNamesTheJoinFields(t *testing.T) {
+	deadline := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	raw, err := json.Marshal(sessionInfo{Name: "s1", JoinTimeout: "10m", JoinDeadline: deadline})
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"joinTimeout":"10m"`)
+	require.Contains(t, string(raw), `"joinDeadline":"2026-09-25T12:40:00Z"`)
+
+	raw, err = json.Marshal(sessionInfo{Name: "s1", JoinStateSource: "daemon", joinCaveat: caveatUnanswered})
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "joinTimeout")
+	require.NotContains(t, string(raw), "joinDeadline")
+	require.Contains(t, string(raw), `"joinStateSource":"daemon"`, "present even with nothing set")
+	require.NotContains(t, string(raw), "caveat", "the caveat is for the human line only")
+}
+
+func TestJoinTimeoutLineSaysWhatHappened(t *testing.T) {
+	at := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		info sessionInfo
+		want string
+	}{
+		{"none, confirmed by the daemon", sessionInfo{Status: "ready", JoinStateSource: "daemon"}, ""},
+		{"none recorded, the daemon did not answer", sessionInfo{Status: "ready", JoinStateSource: "record", joinCaveat: caveatUnanswered},
+			"Join timeout: none recorded (from the record; the session did not answer)"},
+		{"none recorded, an upterm that does not report it", sessionInfo{Status: "ready", JoinStateSource: "record", joinCaveat: caveatUnreported},
+			"Join timeout: none recorded (from the record; the session's upterm does not report it)"},
+		{"counting", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"},
+			"Join deadline: 2026-09-25T12:40:00Z"},
+		{"pending", sessionInfo{Status: "starting", JoinTimeout: "10m", JoinStateSource: "daemon"},
+			"Join timeout: 10m (counts from readiness)"},
+		{"claimed", sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "record"},
+			"Join timeout: disabled (guest joined at 2026-09-25T12:40:00Z)"},
+		{"counting, from the record", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record", joinCaveat: caveatUnanswered},
+			"Join deadline: 2026-09-25T12:40:00Z (from the record; the session did not answer)"},
+		{"ended by the timeout", sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record"},
+			"Join timeout: fired at 2026-09-25T12:40:00Z"},
+		{"ended otherwise, deadline recorded", sessionInfo{Status: statusEnded, Reason: "unknown", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record"},
+			"Join deadline: 2026-09-25T12:40:00Z (last recorded before the session ended)"},
+		{"ended otherwise, timeout recorded", sessionInfo{Status: statusEnded, Reason: "unknown", JoinTimeout: "10m", JoinStateSource: "record"},
+			"Join timeout: 10m (last recorded before the session ended)"},
+		{"ended, nothing recorded", sessionInfo{Status: statusEnded, Reason: "exited", JoinStateSource: "record"}, ""},
+		{"ended, claimed", sessionInfo{Status: statusEnded, Reason: "exited", FirstGuestJoinedAt: at, JoinStateSource: "record"},
+			"Join timeout: disabled (guest joined at 2026-09-25T12:40:00Z)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, joinTimeoutLine(tc.info))
+		})
+	}
+}
+
+func TestSummaryPrintsTheJoinTimeoutLine(t *testing.T) {
+	at := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	out := captureStdout(t, func() {
+		printSessionSummary(sessionInfo{Name: "s1", Status: statusEnded, Reason: "join_timeout", JoinTimeout: "10m", JoinDeadline: at})
+	})
+	require.Contains(t, out, "Join timeout: fired at 2026-09-25T12:40:00Z")
+}
+
+func TestShortDurationDropsZeroUnits(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		10 * time.Minute:           "10m",
+		time.Hour:                  "1h",
+		90 * time.Minute:           "1h30m",
+		90 * time.Second:           "1m30s",
+		3 * time.Second:            "3s",
+		1500 * time.Millisecond:    "1.5s",
+		time.Hour + 30*time.Second: "1h0m30s",
+	} {
+		require.Equal(t, want, shortDuration(d), "%v", d)
+	}
 }

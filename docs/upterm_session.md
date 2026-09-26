@@ -20,6 +20,7 @@ Display and manage terminal sessions
 * [upterm session current](upterm_session_current.md)	 - Display the current terminal session
 * [upterm session info](upterm_session_info.md)	 - Display terminal session by name
 * [upterm session list](upterm_session_list.md)	 - List shared sessions
+* [upterm session set](upterm_session_set.md)	 - Change a session's join timeout
 * [upterm session stop](upterm_session_stop.md)	 - Stop a running session
 * [upterm session wait](upterm_session_wait.md)	 - Wait for a session to end
 
