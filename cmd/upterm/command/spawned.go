@@ -315,8 +315,14 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 		// ReasonUnknown and nothing has replaced it, since the session has
 		// only just started. Set explicitly so the two shapes match —
 		// reason is a key `session info` always publishes.
-		Reason: sessiondir.ReasonUnknown,
+		Reason:          sessiondir.ReasonUnknown,
+		JoinStateSource: joinStateFromRecord,
 	}
+	// The join fields are the daemon's own snapshot, taken as it reported
+	// readiness with any timeout already counting, and applied the way
+	// `session info` applies a live answer, so the two agree. Without one
+	// nothing is guessed: the source stays "record".
+	info = withLiveJoinState(info, &api.GetSessionResponse{JoinState: st.GetJoinState()})
 	if sess != nil {
 		if detail, err := buildSessionDetail(sess); err == nil {
 			info.Command = detail.Command

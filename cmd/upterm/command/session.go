@@ -114,6 +114,7 @@ func sessionCmd() *cobra.Command {
 	cmd.AddCommand(list())
 	cmd.AddCommand(show())
 	cmd.AddCommand(stop())
+	cmd.AddCommand(setCmd())
 	cmd.AddCommand(wait())
 
 	return cmd
@@ -457,6 +458,180 @@ func pidOf(rec *sessiondir.Record) string {
 	return fmt.Sprintf("pid %d", rec.Pid)
 }
 
+// setCmd changes a running session's settings. --join-timeout is the only one
+// today, so its help says what it does now; the command is named for the verb
+// so later settings can join it.
+func setCmd() *cobra.Command {
+	var joinTimeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "set NAME",
+		Short: "Change a session's join timeout",
+		Long: `Change a session's join timeout.
+
+--join-timeout D ends the session D from now unless a guest joins first. It
+replaces any join timeout already set, including one given to
+'upterm host --join-timeout', so each call restarts the window: running it
+again with the same duration extends the deadline. 0 disables it. Before the
+session is ready, the timeout counts from readiness.
+
+A guest who joins, however briefly and whether by terminal or SFTP, claims the
+session: the automatic join timeout is disabled for the rest of its life, and
+a later set says so and changes nothing. After that, nothing ends the session
+but its command exiting or 'upterm session stop'.
+
+'upterm session wait NAME' blocks until the session ends; interrupting it
+leaves the session running. 'upterm session stop NAME' ends it.
+
+Durations are shown compact and normalised: 90m shows as 1h30m.
+
+Exits 0 when the session took the change, is ending, or has already ended, 4
+when no session has the name, and 1 for any other failure -- including a
+change that could not be confirmed, which may still have taken effect: running
+set again restarts the window, and 'upterm session info NAME' shows what the
+session holds.`,
+		Example: `  # Debug a failed build: open the session first, give people 10 minutes to
+  # join only if the build fails, and keep the build's exit status. Safe under
+  # set -e and in zsh, where $status is read-only:
+  upterm host --detach --accept --name build -- bash
+  build_exit_code=0
+  make || build_exit_code=$?
+  if [ "$build_exit_code" -ne 0 ]; then
+    # Ten minutes for someone to join; once they have, it runs until they exit.
+    if upterm session set build --join-timeout 10m; then
+      upterm session wait build || true
+    fi
+  fi
+  upterm session stop build || true   # ends it either way; never masks the build's result
+  exit "$build_exit_code"
+
+  # Give 20 more minutes from now, replacing the current window:
+  upterm session set build --join-timeout 20m
+
+  # Turn the join timeout off:
+  upterm session set build --join-timeout 0`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if !c.Flags().Changed("join-timeout") {
+				return fmt.Errorf("nothing to set: pass --join-timeout")
+			}
+			if joinTimeout < 0 {
+				return fmt.Errorf("--join-timeout must not be negative, got %s", joinTimeout)
+			}
+			c.SilenceUsage = true
+			return setSession(c.Context(), args[0], joinTimeout, os.Stdout)
+		},
+	}
+	cmd.Flags().DurationVar(&joinTimeout, "join-timeout", 0, "End the session this long from now unless a guest joins first (e.g. 10m). Replaces any join timeout already set; 0 disables it.")
+	return cmd
+}
+
+// setSession sets the named session's join timeout and reports what the
+// session answered.
+func setSession(ctx context.Context, name string, joinTimeout time.Duration, out io.Writer) error {
+	stateRoot := utils.UptermStateDir()
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
+	cancelLookup()
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		return errNoSession(name)
+	}
+	if !held {
+		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
+		return err
+	}
+
+	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	if err != nil {
+		return err
+	}
+	client, err := host.AdminClient(adminSocket)
+	if err != nil {
+		return err
+	}
+	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
+	// The launch that was inspected, for stopSession's reason: a session that
+	// ended between the read and this call hands its name and socket on.
+	resp, err := client.SetJoinTimeout(rpcCtx, &api.SetJoinTimeoutRequest{LaunchId: rec.LaunchID, TimeoutNanos: int64(joinTimeout)})
+	cancelRPC()
+	if err != nil {
+		return setFailed(ctx, name, rec, err, out)
+	}
+	return printSetOutcome(out, name, resp)
+}
+
+// setFailed explains a SetJoinTimeout that got no answer. It reports what
+// it has evidence for and nothing more: a request that timed out may have
+// taken effect, and an unreachable socket does not mean the session is
+// ending -- Unavailable can be transient -- so anything short of evidence is
+// "could not confirm", exit 1, never a success.
+func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr error, out io.Writer) error {
+	switch status.Code(rpcErr) {
+	case codes.Unimplemented:
+		return fmt.Errorf("session %s was started by an upterm older than 0.32.0 and cannot take a join timeout (%s); upgrading this upterm does not change a running session, so start it again with upterm 0.32.0 or newer", name, pidOf(rec))
+	case codes.FailedPrecondition:
+		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+	case codes.Unavailable:
+		// Unreachable: the record may say where the session is.
+	default:
+		return notConfirmed(name, rec, rpcErr)
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
+	cur, curHeld, err := sessiondir.Inspect(lookupCtx, utils.UptermStateDir(), name)
+	cancel()
+	switch {
+	case err != nil:
+		return notConfirmed(name, rec, rpcErr)
+	case cur == nil:
+		return errNoSession(name)
+	case cur.LaunchID != rec.LaunchID:
+		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+	case !curHeld:
+		// The name was released: the session is over.
+		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(cur))
+		return err
+	case cur.Status == sessiondir.StatusEnding:
+		_, err := fmt.Fprintf(out, "session %s is ending\n", name)
+		return err
+	case cur.Status == sessiondir.StatusStarting:
+		return fmt.Errorf("session %s is still starting and its admin socket is not up yet (%s); try again in a moment", name, pidOf(cur))
+	default:
+		return notConfirmed(name, rec, rpcErr)
+	}
+}
+
+// notConfirmed is the failure for a change nobody can vouch for either way.
+func notConfirmed(name string, rec *sessiondir.Record, rpcErr error) error {
+	return fmt.Errorf("could not confirm the change to session %s (%s): %w; it may still have taken effect, running 'upterm session set' again restarts the window, and 'upterm session info %s' shows what the session holds", name, pidOf(rec), rpcErr, name)
+}
+
+// printSetOutcome says what the session did with the request, one line.
+func printSetOutcome(out io.Writer, name string, resp *api.SetJoinTimeoutResponse) error {
+	st := resp.GetState()
+	var err error
+	switch resp.GetOutcome() {
+	case api.SetJoinTimeoutResponse_COUNTING:
+		_, err = fmt.Fprintf(out, "session %s ends at %s unless a guest joins\n", name,
+			time.Unix(0, st.GetDeadlineUnixNano()).UTC().Format(time.RFC3339))
+	case api.SetJoinTimeoutResponse_PENDING:
+		_, err = fmt.Fprintf(out, "session %s: join timeout %s, counting from when the session is ready\n", name,
+			shortDuration(time.Duration(st.GetTimeoutNanos())))
+	case api.SetJoinTimeoutResponse_DISABLED:
+		_, err = fmt.Fprintf(out, "session %s: join timeout disabled\n", name)
+	case api.SetJoinTimeoutResponse_CLAIMED:
+		_, err = fmt.Fprintf(out, "session %s: a guest joined at %s; automatic join timeout disabled\n", name,
+			time.Unix(0, st.GetFirstGuestJoinedUnixNano()).UTC().Format(time.RFC3339))
+	case api.SetJoinTimeoutResponse_ENDING:
+		_, err = fmt.Fprintf(out, "session %s is ending\n", name)
+	default:
+		return fmt.Errorf("session %s answered with an outcome this upterm does not know (%v), so the change may have taken effect; 'upterm session info %s' shows what the session holds", name, resp.GetOutcome(), name)
+	}
+	return err
+}
+
 func current() *cobra.Command {
 	runtimeDir := utils.UptermRuntimeDir()
 	cmd := &cobra.Command{
@@ -616,12 +791,38 @@ type sessionInfo struct {
 	// ever did. Unlike this timestamp, guestCount includes forwarding
 	// presence and misses guests who have already left.
 	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
+	// JoinTimeout is the join timeout set on the session, compact and
+	// normalised (90m shows as 1h30m); absent when none is set or a guest has
+	// joined. JoinDeadline is when the session ends unless a guest joins
+	// first; absent unless the timeout is counting, or it was when the
+	// session ended.
+	JoinTimeout  string    `json:"joinTimeout,omitempty"`
+	JoinDeadline time.Time `json:"joinDeadline,omitzero"`
+	// JoinStateSource says where those two came from, in every state, empty
+	// and claimed included: "daemon" when the daemon answered for this
+	// launch, even to say there is no timeout; "record" otherwise. Without
+	// it, "no timeout, confirmed" and "a timeout whose write failed, from a
+	// daemon that is not answering" would look the same.
+	JoinStateSource string `json:"joinStateSource,omitempty"`
+	// joinCaveat is why a held session's join fields came from the record,
+	// for the human line; not part of the JSON.
+	joinCaveat string
 }
 
 // statusEnded is the reader's inference, not a status any session writes:
 // sessiondir records what a session published, and "ended" is what a free lock
 // means regardless of what the record still says.
 const statusEnded = "ended"
+
+// Where a sessionInfo's join fields came from, and why a held session's
+// came from the record.
+const (
+	joinStateFromDaemon = "daemon"
+	joinStateFromRecord = "record"
+
+	caveatUnanswered = "the session did not answer"
+	caveatUnreported = "the session's upterm does not report it"
+)
 
 // lookup resolves a session by name.
 //
@@ -630,11 +831,17 @@ const statusEnded = "ended"
 // with B's ownership — and, more immediately, could dereference a nil record:
 // ReadRecord returns not-found, a claim completes, IsHeld returns true.
 //
+// The daemon is asked for every held record, not only a ready one: its join
+// state is what governs the session from the moment the name is claimed. Its
+// answer is validated by launch ID -- by session ID only for a daemon from
+// before that field -- so an answer from a launch that has since taken the
+// name is ignored rather than trusted.
+//
 // The response is the one this lookup validated, and is nil unless the record
-// says ready, the admin socket answered and its session ID matched the record.
-// Handing it back is what stops a caller that wants the full live detail from
-// asking again: a second query returns whatever holds the name at that
-// instant, which need not be the session the first one confirmed.
+// says ready and the admin socket answered for this launch. Handing it back is
+// what stops a caller that wants the full live detail from asking again: a
+// second query returns whatever holds the name at that instant, which need
+// not be the session the first one confirmed.
 func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
@@ -673,40 +880,70 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// bound at.
 	info.AttachSocket = rec.AttachSocket
 
-	// A record with no session ID has not reached ready, so there is nothing
-	// for the admin socket to confirm and nothing to compare against. Skip it
-	// rather than issue a query whose generation check could not succeed.
-	if rec.SessionID == "" {
-		return info, nil, nil
-	}
-
-	// The socket answers about a session, and only ready says its answer is
-	// one anyone can act on. After a tunnel loss the host keeps its command
-	// and its admin server running until the session ends — stage 1 has no
-	// way back from disconnected — so a disconnected session's socket
-	// answers as readily as a live one's, with a connect string that cannot
-	// connect. The record's view is the whole answer. A later stage that
-	// reconnects needs nothing more here: a record back at ready is dialled
-	// again.
-	if rec.Status != sessiondir.StatusReady {
-		return info, nil, nil
-	}
-
-	// Live detail is a second observation, taken outside the lock, so it is
-	// validated rather than merged on faith: between Inspect and this call the
-	// session could have ended and a replacement claimed the name. The session
-	// ID is the generation marker.
+	// Ask the daemon about any held session whose socket answers -- starting
+	// once the socket is up, ready, disconnected -- so the join timeout shown
+	// is the one the daemon enforces, not the last record write. A socket
+	// that does not answer, or answers for another launch, leaves the
+	// record's view, which JoinStateSource says.
 	sess, err := session(ctx, adminSocket)
-	if err != nil || sess.SessionId != rec.SessionID {
+	if err != nil || !sameLaunch(rec, sess) {
+		info.joinCaveat = caveatUnanswered
+		return info, nil, nil
+	}
+	info = withLiveJoinState(info, sess)
+
+	// Only ready says the connect string is one anyone can act on. After a
+	// tunnel loss the host keeps its admin server running with a connect
+	// string that cannot connect, so a disconnected session gets its join
+	// state from the daemon and nothing that would advertise it as joinable.
+	if rec.Status != sessiondir.StatusReady {
 		return info, nil, nil
 	}
 	return withLiveDetail(info, sess), sess, nil
 }
 
+// sameLaunch reports whether sess answered for the run rec describes: between
+// Inspect and the query the session could have ended and a replacement
+// claimed the name. A daemon that publishes its launch is checked by launch;
+// one from before that field by session ID, which only a ready record
+// carries, as lookup always did.
+func sameLaunch(rec *sessiondir.Record, sess *api.GetSessionResponse) bool {
+	if id := sess.GetLaunchId(); id != "" {
+		return id == rec.LaunchID
+	}
+	return rec.SessionID != "" && sess.GetSessionId() == rec.SessionID
+}
+
+// withLiveJoinState takes the join fields from the daemon's memory. A daemon
+// from before join state reports none, and the record's view stands, saying
+// why.
+func withLiveJoinState(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
+	js := sess.GetJoinState()
+	if js == nil {
+		info.joinCaveat = caveatUnreported
+		return info
+	}
+	info.JoinTimeout = ""
+	if js.GetTimeoutNanos() > 0 {
+		info.JoinTimeout = shortDuration(time.Duration(js.GetTimeoutNanos()))
+	}
+	info.JoinDeadline = time.Time{}
+	if js.GetDeadlineUnixNano() != 0 {
+		info.JoinDeadline = time.Unix(0, js.GetDeadlineUnixNano()).UTC()
+	}
+	if js.GetFirstGuestJoinedUnixNano() != 0 && info.FirstGuestJoinedAt.IsZero() {
+		info.FirstGuestJoinedAt = time.Unix(0, js.GetFirstGuestJoinedUnixNano()).UTC()
+	}
+	info = withClaimRule(info)
+	info.JoinStateSource = joinStateFromDaemon
+	info.joinCaveat = ""
+	return info
+}
+
 // infoFromRecord reports what the record knows, under the status the caller
 // has decided on.
 func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
-	return sessionInfo{
+	info := sessionInfo{
 		Name:               rec.Name,
 		LaunchID:           rec.LaunchID,
 		Status:             status,
@@ -720,6 +957,89 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		Signal:             rec.Signal,
 		SignalNumber:       rec.SignalNumber,
 		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
+	}
+	if rec.JoinTimeout > 0 {
+		info.JoinTimeout = shortDuration(rec.JoinTimeout)
+	}
+	info.JoinDeadline = rec.JoinDeadline
+	info = withClaimRule(info)
+	info.JoinStateSource = joinStateFromRecord
+	return info
+}
+
+// withClaimRule drops the join timeout from a session a guest has joined:
+// joining claims it for good, so a deadline beside a join is stale, whatever
+// the last write said.
+func withClaimRule(info sessionInfo) sessionInfo {
+	if !info.FirstGuestJoinedAt.IsZero() {
+		info.JoinTimeout = ""
+		info.JoinDeadline = time.Time{}
+	}
+	return info
+}
+
+// shortDuration writes d compact and normalised: Go's duration syntax
+// without zero units, so 10m rather than 10m0s, 90m as 1h30m, and 1h0m30s as
+// 1h30s. The result still parses as a --join-timeout value.
+func shortDuration(d time.Duration) string {
+	// Go writes minutes whenever there are hours, and seconds whenever there
+	// are minutes, so zero minutes are always "h0m" and zero seconds a
+	// trailing "0s" after "m" -- or after "h", once the minutes are gone.
+	s := strings.Replace(d.String(), "h0m", "h", 1)
+	if strings.HasSuffix(s, "m0s") || strings.HasSuffix(s, "h0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	return s
+}
+
+// joinTimeoutLine says what happened to the session's join timeout, not only
+// what is set: a claimed session and one with no timeout would otherwise
+// print the same nothing, and a held session shown from the record says so
+// and why. An ended session's history is only as good as its last write -- a
+// crash can leave a pending snapshot after counting began -- so only
+// join_timeout, the outcome the session recorded itself, is stated as fact.
+func joinTimeoutLine(info sessionInfo) string {
+	deadline := info.JoinDeadline.UTC().Format(time.RFC3339)
+	if !info.FirstGuestJoinedAt.IsZero() {
+		return "Join timeout: disabled (guest joined at " + info.FirstGuestJoinedAt.UTC().Format(time.RFC3339) + ")"
+	}
+	if info.Status == statusEnded {
+		switch {
+		case info.Reason == sessiondir.ReasonJoinTimeout && !info.JoinDeadline.IsZero():
+			return "Join timeout: fired at " + deadline
+		case !info.JoinDeadline.IsZero():
+			return "Join deadline: " + deadline + " (last recorded before the session ended)"
+		case info.JoinTimeout != "":
+			return "Join timeout: " + info.JoinTimeout + " (last recorded before the session ended)"
+		default:
+			return ""
+		}
+	}
+	var line string
+	switch {
+	case !info.JoinDeadline.IsZero():
+		line = "Join deadline: " + deadline
+	case info.JoinTimeout != "":
+		line = "Join timeout: " + info.JoinTimeout + " (counts from readiness)"
+	case info.JoinStateSource == joinStateFromRecord:
+		line = "Join timeout: none recorded"
+	default:
+		return "" // the daemon confirms there is none
+	}
+	if info.JoinStateSource == joinStateFromRecord {
+		caveat := info.joinCaveat
+		if caveat == "" {
+			caveat = caveatUnanswered
+		}
+		line += " (from the record; " + caveat + ")"
+	}
+	return line
+}
+
+// printJoinTimeout prints joinTimeoutLine, if there is one.
+func printJoinTimeout(info sessionInfo) {
+	if line := joinTimeoutLine(info); line != "" {
+		fmt.Println(line)
 	}
 }
 
@@ -825,6 +1145,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 			// and disagree with the socket that just answered.
 			detail.AdminSocket = info.AdminSocket
 			tui.PrintSessionDetail(detail)
+			printJoinTimeout(info)
 			return nil
 		}
 	}
@@ -849,6 +1170,7 @@ func printSessionSummary(info sessionInfo) {
 	if info.Signal != "" {
 		fmt.Printf("Signal:    %s\n", info.Signal)
 	}
+	printJoinTimeout(info)
 }
 
 func currentRunE(c *cobra.Command, args []string) error {

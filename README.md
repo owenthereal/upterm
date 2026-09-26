@@ -181,6 +181,24 @@ The `status` field is `starting`, `ready`, `disconnected` or `ending` while the 
 
 `upterm session wait NAME` returns the command's exit code, 0 for explicit stop or join timeout, 128 plus the originating signal number for host or command signals, and 125 for cancellation or unavailable outcomes. Lookup, read and replacement failures, and cancellation of the waiter's context, return 125 with a diagnostic; interrupting the observer leaves the session alive. Legacy stopped records remain successful; legacy signal records without a valid numeric signal return 125. The on-disk record calls the numeric field `signal_number`.
 
+To keep a session open while a build runs and give people a window to join only if it fails, set the join timeout when the build is done instead of at launch. The script keeps the build's exit status, and works under `set -e`:
+
+```sh
+upterm host --detach --accept --name build -- bash
+build_exit_code=0
+make || build_exit_code=$?
+if [ "$build_exit_code" -ne 0 ]; then
+  # Ten minutes for someone to join; once they have, it runs until they exit.
+  if upterm session set build --join-timeout 10m; then
+    upterm session wait build || true
+  fi
+fi
+upterm session stop build || true   # ends it either way; never masks the build's result
+exit "$build_exit_code"
+```
+
+The variable is `build_exit_code` rather than `status`, which zsh reserves. Interrupting `upterm session wait` on its own leaves the session running; in this script it falls through to `session stop`, which ends it. Each `session set` restarts the window from now, so running it again with the same duration extends the deadline; `--join-timeout 0` turns it off. A guest who joins at any point, even briefly or only over SFTP, claims the session: the join timeout is off for the rest of its life, and a later `session set` says so. `session info` shows the timeout and its deadline (`joinTimeout`, `joinDeadline` in the JSON), and where they came from (`joinStateSource`: the daemon, or the record when the session did not answer). `session info`, `session stop` and `session set` exit 4 when no session has the name.
+
 The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — reached through the admin socket path its record carries. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
 
 Put a terminal on a session started without one, from any shell on the same machine:

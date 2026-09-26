@@ -28,7 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -389,8 +391,7 @@ func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
 
 	joined := make(chan struct{})
 	var once sync.Once
-	latch := &guestJoinLatch{update: update, now: time.Now,
-		disarm: func() { once.Do(func() { close(joined) }) }}
+	latch := &guestJoinLatch{update: update, disarm: func() (time.Time, bool) { once.Do(func() { close(joined) }); return time.Now().UTC(), false }}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- latch.note(&api.Client{Kind: api.Client_GUEST})
@@ -421,10 +422,9 @@ func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
 	var rec sessiondir.Record
 	updates := 0
 	update := func(mutate func(*sessiondir.Record)) error { updates++; mutate(&rec); return nil }
-	noop := func() {}
 
 	first := time.Now().UTC().Add(-time.Hour)
-	latch := &guestJoinLatch{update: update, now: func() time.Time { return first }, disarm: noop}
+	latch := &guestJoinLatch{update: update, disarm: func() (time.Time, bool) { return first, false }}
 	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
 	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
 	require.True(t, rec.FirstGuestJoinedAt.Equal(first), "a later guest must not move it")
@@ -432,7 +432,7 @@ func TestGuestLatchIgnoresHostAndLaterGuests(t *testing.T) {
 
 	var hostOnly sessiondir.Record
 	updateHost := func(mutate func(*sessiondir.Record)) error { mutate(&hostOnly); return nil }
-	hostLatch := &guestJoinLatch{update: updateHost, now: time.Now, disarm: noop}
+	hostLatch := &guestJoinLatch{update: updateHost, disarm: func() (time.Time, bool) { return time.Now(), false }}
 	require.NoError(t, hostLatch.note(&api.Client{Kind: api.Client_HOST}))
 	require.True(t, hostOnly.FirstGuestJoinedAt.IsZero(), "the host's own terminal is not a guest")
 }
@@ -450,16 +450,39 @@ func TestGuestLatchRetriesFailedPublication(t *testing.T) {
 	}
 	first := time.Now().UTC().Add(-time.Hour)
 	guest := &api.Client{Kind: api.Client_GUEST}
-	clock := first
-	now := func() time.Time { return clock }
-	noop := func() {}
-	latch := &guestJoinLatch{update: update, now: now, disarm: noop}
+	latch := &guestJoinLatch{update: update, disarm: func() (time.Time, bool) { return first, false }}
 	require.Error(t, latch.note(guest))
-	clock = first.Add(time.Hour)
 	require.NoError(t, latch.note(guest))
 	require.NoError(t, latch.note(guest))
 	require.Equal(t, 2, updates)
 	require.True(t, rec.FirstGuestJoinedAt.Equal(first))
+}
+
+// A join registered after the timeout committed is late: publishing it would
+// leave a record claiming a join beside reason join_timeout.
+func TestGuestLatchDoesNotPublishALateJoin(t *testing.T) {
+	updates := 0
+	latch := &guestJoinLatch{
+		update: func(func(*sessiondir.Record)) error { updates++; return nil },
+		disarm: func() (time.Time, bool) { return time.Time{}, true },
+	}
+	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
+	require.Zero(t, updates)
+}
+
+// Joining claims the session for good, so the write that publishes the join
+// also clears the join timeout, whatever an earlier write left.
+func TestGuestLatchClearsTheJoinTimeoutWithTheJoin(t *testing.T) {
+	first := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	rec := sessiondir.Record{JoinTimeout: time.Minute, JoinDeadline: first.Add(time.Minute)}
+	latch := &guestJoinLatch{
+		update: func(mutate func(*sessiondir.Record)) error { mutate(&rec); return nil },
+		disarm: func() (time.Time, bool) { return first, false },
+	}
+	require.NoError(t, latch.note(&api.Client{Kind: api.Client_GUEST}))
+	require.True(t, rec.FirstGuestJoinedAt.Equal(first))
+	require.Zero(t, rec.JoinTimeout)
+	require.True(t, rec.JoinDeadline.IsZero())
 }
 
 func TestClientLifecyclePairsLeftBeforeJoined(t *testing.T) {
@@ -755,12 +778,22 @@ func TestJoinTimeoutZeroDoesNotEndASession(t *testing.T) {
 func TestJoinTimeoutClockStartsAtReadiness(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = 400 * time.Millisecond
-	f.h.SessionReadyCallback = func(string) { time.Sleep(700 * time.Millisecond); close(f.ready) }
+	// Readiness waits for the initial attach, held back 700ms: a clock that
+	// started any earlier would end the session well inside a second.
+	hold := make(chan struct{})
 	start := time.Now()
-	f.start(t)
+	time.AfterFunc(700*time.Millisecond, func() { close(hold) })
+	clientDone, _ := f.attachAfter(t, hold)
 	require.NoError(t, f.result(t))
 	require.Greater(t, time.Since(start), 1000*time.Millisecond)
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+	select {
+	case outcome := <-clientDone:
+		require.NoError(t, outcome.err)
+		require.Equal(t, attach.Exited, outcome.result.Reason, "the timeout ending the session releases its terminal")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attached client was not released")
+	}
 }
 
 func TestJoinTimeoutEndsAnUnjoinedSessionWithReasonAndZero(t *testing.T) {
@@ -854,6 +887,15 @@ type joinAttachmentResult struct {
 
 func (f *joinTimeoutHost) attach(t *testing.T) (<-chan joinAttachmentResult, context.CancelFunc) {
 	t.Helper()
+	return f.attachAfter(t, nil)
+}
+
+// attachAfter is attach with the local terminal held back until hold closes.
+// The command waits for that terminal, and readiness for the command, so this
+// is how a test holds the session short of readiness without blocking inside
+// Run itself.
+func (f *joinTimeoutHost) attachAfter(t *testing.T, hold <-chan struct{}) (<-chan joinAttachmentResult, context.CancelFunc) {
+	t.Helper()
 	f.h.AwaitInitialClient = true
 	listening := make(chan string, 1)
 	f.h.AttachListeningCallback = func(socket string) { listening <- socket }
@@ -872,7 +914,18 @@ func (f *joinTimeoutHost) attach(t *testing.T) (<-chan joinAttachmentResult, con
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(clientCancel)
 	clientDone := make(chan joinAttachmentResult, 1)
-	go func() { result, err := client.Run(clientCtx); clientDone <- joinAttachmentResult{result, err} }()
+	go func() {
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-clientCtx.Done():
+				clientDone <- joinAttachmentResult{err: clientCtx.Err()}
+				return
+			}
+		}
+		result, err := client.Run(clientCtx)
+		clientDone <- joinAttachmentResult{result, err}
+	}()
 	return clientDone, cancel
 }
 
@@ -1153,4 +1206,285 @@ func TestLateParentCancellationDoesNotReplaceCommandWinner(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonExited, rec.Reason)
 	require.NotNil(t, rec.ExitCode)
 	require.Zero(t, *rec.ExitCode)
+}
+
+func (f *joinTimeoutHost) admin(t *testing.T) api.AdminServiceClient {
+	t.Helper()
+	conn, err := grpc.NewClient("unix://"+f.h.AdminSocketFile, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return api.NewAdminServiceClient(conn)
+}
+
+func (f *joinTimeoutHost) set(t *testing.T, d time.Duration) (*api.SetJoinTimeoutResponse, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return f.admin(t).SetJoinTimeout(ctx, &api.SetJoinTimeoutRequest{LaunchId: f.record(t).LaunchID, TimeoutNanos: int64(d)})
+}
+
+func (f *joinTimeoutHost) stillRunning(t *testing.T, d time.Duration, why string) {
+	t.Helper()
+	select {
+	case err := <-f.done:
+		t.Fatalf("%s: session ended: %v", why, err)
+	case <-time.After(d):
+	}
+}
+
+func TestSessionSetArmsTheJoinTimeoutAfterReadiness(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	f.stillRunning(t, 300*time.Millisecond, "no join timeout was set")
+
+	resp, err := f.set(t, 200*time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, api.SetJoinTimeoutResponse_COUNTING, resp.GetOutcome())
+	deadline := time.Unix(0, resp.GetState().GetDeadlineUnixNano()).UTC()
+
+	require.NoError(t, f.result(t), "a join timeout is not a failure")
+	rec := f.record(t)
+	require.Equal(t, sessiondir.ReasonJoinTimeout, rec.Reason)
+	require.True(t, rec.JoinDeadline.Equal(deadline), "the ended record shows the deadline that fired")
+	require.True(t, rec.FirstGuestJoinedAt.IsZero())
+}
+
+func TestSessionSetReplacesAndDisablesALaunchTimeTimeout(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 300 * time.Millisecond
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+	resp, err := f.set(t, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, api.SetJoinTimeoutResponse_COUNTING, resp.GetOutcome())
+	f.stillRunning(t, 700*time.Millisecond, "the launch-time timeout was replaced")
+
+	resp, err = f.set(t, 0)
+	require.NoError(t, err)
+	require.Equal(t, api.SetJoinTimeoutResponse_DISABLED, resp.GetOutcome())
+	require.Eventually(t, func() bool {
+		rec := f.record(t)
+		return rec.JoinTimeout == 0 && rec.JoinDeadline.IsZero()
+	}, 5*time.Second, 10*time.Millisecond, "the publisher writes the disabled state")
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+	require.Equal(t, sessiondir.ReasonExited, f.record(t).Reason)
+}
+
+func TestSessionSetAfterAJoinIsClaimed(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	f.join(t)
+
+	resp, err := f.set(t, 50*time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, api.SetJoinTimeoutResponse_CLAIMED, resp.GetOutcome())
+	require.True(t, time.Unix(0, resp.GetState().GetFirstGuestJoinedUnixNano()).Equal(f.record(t).FirstGuestJoinedAt))
+	f.stillRunning(t, 300*time.Millisecond, "a claimed session is never armed")
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+func TestSessionSetRefusesAnotherLaunch(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := f.admin(t).SetJoinTimeout(ctx, &api.SetJoinTimeoutRequest{LaunchId: "not-this-one", TimeoutNanos: int64(time.Millisecond)})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	f.stillRunning(t, 200*time.Millisecond, "nothing was set")
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+func TestGetSessionReportsTheLiveJoinState(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	resp, err := f.set(t, time.Hour)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int64(time.Hour), sess.GetJoinState().GetTimeoutNanos())
+	require.Equal(t, resp.GetState().GetDeadlineUnixNano(), sess.GetJoinState().GetDeadlineUnixNano())
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+func TestJoinTimeoutIsPublishedPendingThenCounting(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = time.Hour
+	// Held short of readiness by the initial attach, which is let through only
+	// once the pending record has been seen.
+	hold := make(chan struct{})
+	clientDone, _ := f.attachAfter(t, hold)
+
+	require.Eventually(t, func() bool {
+		rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "deadline")
+		return err == nil && rec.JoinTimeout == time.Hour && rec.JoinDeadline.IsZero()
+	}, 5*time.Second, 10*time.Millisecond, "a launch-time timeout is published pending before readiness")
+	select {
+	case <-f.ready:
+		t.Fatal("ready before the initial client attached")
+	default:
+	}
+
+	close(hold)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	require.Eventually(t, func() bool { return !f.record(t).JoinDeadline.IsZero() }, 5*time.Second, 10*time.Millisecond,
+		"counting from readiness, with a deadline")
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+	select {
+	case outcome := <-clientDone:
+		require.NoError(t, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attached client was not released")
+	}
+}
+
+// Readiness is reported with the timeout already counting, so a caller told
+// "ready" -- `--detach` returning -- never finds it still pending.
+func TestJoinTimeoutIsCountingWhenReadinessIsReported(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = time.Hour
+	var atReady *api.JoinState
+	f.h.SessionReadyCallback = func(string) { atReady = f.h.JoinState(); close(f.ready) }
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	require.NotNil(t, atReady, "the join state is there to ask while Run runs")
+	require.Equal(t, int64(time.Hour), atReady.GetTimeoutNanos())
+	require.NotZero(t, atReady.GetDeadlineUnixNano(), "counting, not pending, by the time readiness is reported")
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+	require.Nil(t, f.h.JoinState(), "nothing to report once Run has returned")
+}
+
+// The guarantee is exact: shutting the command and its clients down never
+// waits on a record write. The final bookkeeping -- the last write and
+// releasing the name -- may, because the publisher is a run-group actor and
+// must never write to a Dir that has been released.
+func TestJoinTimeoutShutsDownWhileARecordWriteIsBlocked(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 100 * time.Millisecond
+	writing, unblocked := make(chan struct{}), make(chan struct{})
+	var writingOnce, unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(unblocked) }) }
+	f.h.onJoinPublish = func() error {
+		writingOnce.Do(func() { close(writing) })
+		<-unblocked
+		return nil
+	}
+	clientDone, _ := f.attach(t)
+	t.Cleanup(unblock)
+
+	awaitJoinTimeoutSignal(t, writing, "a record write held open")
+	select {
+	case outcome := <-clientDone:
+		require.NoError(t, outcome.err, "the attached terminal is released while the write is still blocked")
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutting the command down waited on a blocked record write")
+	}
+	select {
+	case err := <-f.done:
+		t.Fatalf("Run finished, releasing the name, with a record write still pending: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	require.Equal(t, sessiondir.ReasonUnknown, f.record(t).Reason,
+		"the final bookkeeping waits for the held write: no outcome is recorded yet")
+
+	unblock()
+	require.NoError(t, f.result(t), "finalisation completes once the write is released")
+	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
+}
+
+// When a record write fails, the daemon's live answer is still right.
+func TestLiveJoinStateSurvivesAFailedPublication(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	failed := make(chan struct{})
+	var failedOnce sync.Once
+	f.h.onJoinPublish = func() error {
+		failedOnce.Do(func() { close(failed) })
+		return errors.New("disk full")
+	}
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+	resp, err := f.set(t, time.Hour)
+	require.NoError(t, err)
+	// Only once the publisher has actually tried and failed does the live
+	// answer prove anything about a failed write.
+	awaitJoinTimeoutSignal(t, failed, "the failed record write")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err)
+	require.Equal(t, resp.GetState().GetDeadlineUnixNano(), sess.GetJoinState().GetDeadlineUnixNano())
+	require.True(t, f.record(t).JoinDeadline.IsZero(), "the failed write left the record without it")
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+// parkAfterCommit holds the deadline actor just after the timeout commits,
+// before it returns, so a test can act in the window after the commit. The
+// caller registers release as a cleanup *after* f.start, so it runs before
+// start's own cleanup waits for Run: cleanups run last-registered first.
+func parkAfterCommit(t *testing.T, f *joinTimeoutHost) (reached <-chan struct{}, release func()) {
+	t.Helper()
+	r, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(released) }) }
+	f.h.onJoinDeadlineFired = func(<-chan struct{}) {
+		close(r)
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Error("deadline barrier not released")
+		}
+	}
+	return r, release
+}
+
+func TestJoinAfterTheJoinTimeoutCommitsIsNotRecorded(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 50 * time.Millisecond
+	reached, release := parkAfterCommit(t, f)
+	f.start(t)
+	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, reached, "committed expiry")
+
+	f.join(t) // registered after the commit
+	release()
+	require.NoError(t, f.result(t))
+	rec := f.record(t)
+	require.Equal(t, sessiondir.ReasonJoinTimeout, rec.Reason)
+	require.True(t, rec.FirstGuestJoinedAt.IsZero(), "a join after the commit must not be published beside join_timeout")
+}
+
+func TestSessionSetAfterTheJoinTimeoutCommitsAnswersEnding(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.JoinTimeout = 50 * time.Millisecond
+	reached, release := parkAfterCommit(t, f)
+	f.start(t)
+	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, reached, "committed expiry")
+
+	resp, err := f.set(t, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, api.SetJoinTimeoutResponse_ENDING, resp.GetOutcome())
+	release()
+	require.NoError(t, f.result(t))
+	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 }

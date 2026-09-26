@@ -196,11 +196,12 @@ func (c *Child) Disarm() { c.armed.Store(false) }
 
 // Started is gate 3. Disarm first.
 //
-// status is what the session's record says at this moment, which the parent
-// reports rather than assuming: see the Started message in startup.proto.
-func (c *Child) Started(sessionID, status string) error {
+// status is what the session's record says at this moment, and joinState the
+// join timeout as the daemon holds it, both of which the parent reports
+// rather than assuming: see the Started message in startup.proto.
+func (c *Child) Started(sessionID, status string, joinState *api.JoinState) error {
 	c.started.Store(true)
-	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID, Status: status}}})
+	return c.send(&api.Startup{Msg: &api.Startup_Started{Started: &api.Started{SessionId: sessionID, Status: status, JoinState: joinState}}})
 }
 
 // Failed reports that the session did not start. Nothing is sent after
