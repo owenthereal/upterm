@@ -329,12 +329,19 @@ type Host struct {
 	StopGrace time.Duration
 
 	// JoinTimeout bounds the wait for the first guest, starting at readiness.
-	// Zero waits forever. The session enforces it independently of its launcher;
-	// a guest joining disarms it permanently, even after that guest leaves.
+	// Zero waits forever. A running session's timeout can be replaced or
+	// disabled over the admin socket (`upterm session set`); each replacement
+	// counts from when it is made. The session enforces it independently of its
+	// launcher; a guest joining disarms it permanently, even after that guest
+	// leaves.
 	JoinTimeout time.Duration
 
 	// onJoinDeadlineFired is a per-Host test barrier for a late losing deadline.
 	onJoinDeadlineFired func(stop <-chan struct{})
+	// onJoinPublish is a per-Host test barrier run before each join-timeout
+	// record write: blocking in it holds the write, and an error skips it as
+	// a failed write.
+	onJoinPublish func() error
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -446,23 +453,25 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
-// guestJoinLatch disarms the join deadline and publishes the first guest join
-// into the record, in that order. A successful publication is attempted once;
-// a failed publication is retried on a later guest.
+// guestJoinLatch publishes the first guest join into the record. A
+// successful publication is attempted once; a failed publication is retried
+// on a later guest, carrying the first join's time, which disarm returns.
 //
-// disarm runs before the record write, not after. The in-memory signal is
-// what the deadline actually watches; making it wait on a filesystem write
-// would let a slow disk expire a deadline that a guest had already answered.
+// disarm is the join state's join, and runs before the record write, not
+// after: the in-memory state is what enforces the timeout, and making it wait
+// on a filesystem write would let a slow disk expire a timeout a guest had
+// already answered. A late join -- one registered after the timeout
+// committed -- is not published: the session is ending for want of a guest,
+// and a record claiming one beside join_timeout would say both.
 //
 // A publication failure is logged by the caller, never swallowed silently:
 // a reader that asks "has anyone ever joined?" and is told "no" for a
-// session somebody is sitting in will stop it. The in-memory latch still
+// session somebody is sitting in will stop it. The in-memory state still
 // holds, so this process's own deadline is safe either way -- it is the
 // external reader that loses.
 type guestJoinLatch struct {
 	update    func(func(*sessiondir.Record)) error
-	now       func() time.Time
-	disarm    func()
+	disarm    func() (joinedAt time.Time, late bool)
 	published bool
 }
 
@@ -517,15 +526,18 @@ func (l *guestJoinLatch) note(client *api.Client) error {
 	if client.GetKind() != api.Client_GUEST {
 		return nil
 	}
-	l.disarm()
-	if l.published {
+	joinedAt, late := l.disarm()
+	if late || l.published {
 		return nil
 	}
 	err := l.update(func(r *sessiondir.Record) {
-		if !r.FirstGuestJoinedAt.IsZero() {
-			return
+		if r.FirstGuestJoinedAt.IsZero() {
+			r.FirstGuestJoinedAt = joinedAt
 		}
-		r.FirstGuestJoinedAt = l.now().UTC()
+		// Joining claims the session for good, so no join timeout applies
+		// any more, and the record must not keep advertising one beside it.
+		r.JoinTimeout = 0
+		r.JoinDeadline = time.Time{}
 	})
 	if err == nil {
 		l.published = true
@@ -633,8 +645,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		runSignalNumber *int
 	)
 
-	guestJoined := make(chan struct{})
-	var guestJoinedOnce sync.Once
+	joins := newJoinState(c.JoinTimeout)
 
 	if c.SessionDir != nil {
 		dir := c.SessionDir
@@ -793,6 +804,40 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		launchID = c.SessionDir.LaunchID()
 	}
 
+	// publishJoin writes the join timeout as it stands into the record. The
+	// snapshot is taken inside Update, under the record's own lock, so
+	// whichever write lands last carries the latest state: an arm whose write
+	// is overtaken by a join's cannot put a deadline back. It runs only in the
+	// publisher actor below; everything else calls markJoinDirty.
+	publishJoin := func() {
+		if c.SessionDir == nil {
+			return
+		}
+		if c.onJoinPublish != nil {
+			if err := c.onJoinPublish(); err != nil {
+				logger.Warn("failed to publish the join timeout; the session enforces it regardless", "error", err)
+				return
+			}
+		}
+		if err := c.SessionDir.Update(func(r *sessiondir.Record) {
+			s := joins.snapshot()
+			r.JoinTimeout = s.Timeout
+			r.JoinDeadline = s.Deadline
+		}); err != nil {
+			logger.Warn("failed to publish the join timeout; the session enforces it regardless", "error", err)
+		}
+	}
+	// markJoinDirty asks the publisher for a write and never blocks: one
+	// pending request covers any number of changes, since each write takes a
+	// fresh snapshot.
+	joinDirty := make(chan struct{}, 1)
+	markJoinDirty := func() {
+		select {
+		case joinDirty <- struct{}{}:
+		default:
+		}
+	}
+
 	// Bound here, not inside the group. A bind failure is a startup failure and
 	// has to be reported as one: inside the group it raced the command's start,
 	// and whichever actor lost the race decided the classification — the same
@@ -809,6 +854,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		LaunchID:    launchID,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
 		OnStop:      requestStop,
+		OnSetJoinTimeout: func(timeout time.Duration) *api.SetJoinTimeoutResponse {
+			res := joins.set(timeout)
+			switch res.Outcome {
+			case joinCounting, joinPending, joinDisabled:
+				markJoinDirty()
+			}
+			return setJoinTimeoutResponse(res)
+		},
+		JoinState: func() *api.JoinState { return apiJoinState(joins.snapshot()) },
 	}
 	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
 		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)
@@ -854,6 +908,21 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	var g run.Group
 	// Interrupts run in registration order. Deliver the selected cause to
 	// the command before admin draining or lifecycle unsubscription can block.
+	{
+		// First, so its interrupt runs first: from the moment teardown
+		// begins the join timeout takes no more changes, and a
+		// `session set` that reaches the admin socket while it drains is
+		// told the session is ending rather than handed a deadline nothing
+		// will enforce.
+		tearingDown := make(chan struct{})
+		g.Add(func() error {
+			<-tearingDown
+			return nil
+		}, func(error) {
+			joins.close()
+			close(tearingDown)
+		})
+	}
 	// Hoisted out of the block below so the classification after g.Run can ask
 	// it what the command actually did.
 	var sshServer internal.Server
@@ -942,11 +1011,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	clientLeft := eventEmitter.On(upterm.EventClientLeft)
 	var guestLatch *guestJoinLatch
 	if c.SessionDir != nil {
-		guestLatch = &guestJoinLatch{
-			update: c.SessionDir.Update,
-			now:    time.Now,
-			disarm: func() { guestJoinedOnce.Do(func() { close(guestJoined) }) },
-		}
+		guestLatch = &guestJoinLatch{update: c.SessionDir.Update, disarm: joins.join}
 	}
 	lifecycle := &clientLifecycle{
 		repo: clientRepo, pendingLeft: make(map[string]struct{}),
@@ -959,7 +1024,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	} else {
 		lifecycle.onGuestJoin = func(client *api.Client) error {
 			if client.GetKind() == api.Client_GUEST {
-				guestJoinedOnce.Do(func() { close(guestJoined) })
+				joins.join()
 			}
 			return nil
 		}
@@ -1062,52 +1127,68 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	if c.JoinTimeout > 0 {
+	{
+		// The join timeout's record writes, in their own actor, so a write
+		// that blocks can never stand between a committed expiry and
+		// teardown, nor hold up a `session set`. A write still pending when
+		// teardown begins is flushed, so the final record shows what was
+		// current.
 		stop := make(chan struct{})
 		g.Add(func() error {
-			// Every actor starts together. Only successful readiness starts the
-			// joining window; ready itself signals teardown, not readiness.
+			for {
+				select {
+				case <-joinDirty:
+					publishJoin()
+				case <-stop:
+					select {
+					case <-joinDirty:
+						publishJoin()
+					default:
+					}
+					return nil
+				}
+			}
+		}, func(error) {
+			close(stop)
+		})
+	}
+	{
+		// The join timeout's enforcement. Always registered, idle until a
+		// timeout is set, because `session set` can set one at any point in
+		// the session's life. joinState decides everything about it; this
+		// actor turns a committed expiry into the group's winner, and never
+		// writes the record itself.
+		stop := make(chan struct{})
+		g.Add(func() error {
+			if c.JoinTimeout > 0 {
+				// Pending until ready, and published as such, so a reader can
+				// tell "set, not counting yet" from "none".
+				markJoinDirty()
+			}
 			select {
 			case <-sessionReady:
-			case <-guestJoined:
-				<-stop
-				return nil
 			case <-stop:
 				return nil
 			case <-ctx.Done():
 				return errors.Join(ctx.Err(), context.Cause(ctx))
 			}
-
-			timer := time.NewTimer(c.JoinTimeout)
-			defer timer.Stop()
+			if joins.markReady() {
+				markJoinDirty()
+			}
 			select {
-			case <-guestJoined:
-				// Returning would tear down the session the guest just joined.
-				<-stop
-				return nil
-			case <-stop:
-				return nil
-			case <-ctx.Done():
-				return errors.Join(ctx.Err(), context.Cause(ctx))
-			case <-timer.C:
-				// Best-effort tie breaking: another actor can still win
-				// afterwards. Never log or record here.
-				select {
-				case <-guestJoined:
-					<-stop
-					return nil
-				case <-stop:
-					return nil
-				case <-ctx.Done():
-					return errors.Join(ctx.Err(), context.Cause(ctx))
-				default:
-				}
-				// After rechecks, so a test can establish another winner and
-				// then exercise this genuinely late losing return.
+			case <-joins.Fired():
+				// Committed: from here no join can claim the session. The
+				// barrier is after the commit, so a test can establish
+				// another winner and then exercise this genuinely late
+				// losing return.
 				if c.onJoinDeadlineFired != nil {
 					c.onJoinDeadlineFired(stop)
 				}
 				return errJoinTimeout
+			case <-stop:
+				return nil
+			case <-ctx.Done():
+				return errors.Join(ctx.Err(), context.Cause(ctx))
 			}
 		}, func(err error) {
 			close(stop)

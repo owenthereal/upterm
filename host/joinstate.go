@@ -3,6 +3,8 @@ package host
 import (
 	"sync"
 	"time"
+
+	"github.com/owenthereal/upterm/host/api"
 )
 
 // joinOutcome is what a request to set the join timeout found.
@@ -181,4 +183,34 @@ func (s *joinState) disarmLocked() {
 		s.stopTimer = nil
 	}
 	s.deadline = time.Time{}
+}
+
+// apiJoinState is s as the admin API carries it: a zero field is absent.
+func apiJoinState(s joinSnapshot) *api.JoinState {
+	st := &api.JoinState{TimeoutNanos: int64(s.Timeout)}
+	if !s.Deadline.IsZero() {
+		st.DeadlineUnixNano = s.Deadline.UnixNano()
+	}
+	if !s.JoinedAt.IsZero() {
+		st.FirstGuestJoinedUnixNano = s.JoinedAt.UnixNano()
+	}
+	return st
+}
+
+// setJoinTimeoutResponse is set's result as the admin API carries it.
+func setJoinTimeoutResponse(s joinSnapshot) *api.SetJoinTimeoutResponse {
+	var outcome api.SetJoinTimeoutResponse_Outcome
+	switch s.Outcome {
+	case joinCounting:
+		outcome = api.SetJoinTimeoutResponse_COUNTING
+	case joinPending:
+		outcome = api.SetJoinTimeoutResponse_PENDING
+	case joinDisabled:
+		outcome = api.SetJoinTimeoutResponse_DISABLED
+	case joinClaimed:
+		outcome = api.SetJoinTimeoutResponse_CLAIMED
+	case joinEnding:
+		outcome = api.SetJoinTimeoutResponse_ENDING
+	}
+	return &api.SetJoinTimeoutResponse{Outcome: outcome, State: apiJoinState(s)}
 }
