@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -1386,4 +1387,36 @@ func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
 	require.ErrorAs(t, err, &exit)
 	require.Equal(t, 135, exit.Code)
 	require.Empty(t, stderr.String())
+}
+
+// A script has to be able to tell "no such session" from "could not ask"
+// without reading stderr, so the first carries its own exit code. The message
+// is the one these commands have always printed.
+func TestNotFoundExitsFour(t *testing.T) {
+	setupSessionRoots(t)
+
+	_, _, err := lookup(context.Background(), "nobody")
+	var ec ExitCodeError
+	require.ErrorAs(t, err, &ec, "session info")
+	require.Equal(t, notFoundCode, ec.Code)
+	require.EqualError(t, err, `no session named "nobody"`)
+
+	err = stopSession(context.Background(), "nobody", io.Discard)
+	require.ErrorAs(t, err, &ec, "session stop")
+	require.Equal(t, notFoundCode, ec.Code)
+	require.EqualError(t, err, `no session named "nobody"`)
+}
+
+// Only a missing session carries its own code; a session that is there but
+// cannot be asked still exits 1.
+func TestFailuresOtherThanNotFoundKeepExitOne(t *testing.T) {
+	setupSessionRoots(t)
+	d := claimSession(t, "mute-4")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+
+	err := stopSession(context.Background(), "mute-4", io.Discard)
+	require.Error(t, err)
+	var ec ExitCodeError
+	require.False(t, errors.As(err, &ec), "a held session whose socket does not answer is not a missing one")
 }

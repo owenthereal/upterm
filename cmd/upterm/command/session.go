@@ -52,6 +52,23 @@ const sessionQueryTimeout = 10 * time.Second
 // the common case, not a discriminator.
 const waitUnavailableCode = 125
 
+// notFoundCode is what `session info`, `session stop` and `session set` exit
+// with when no record for the name exists within retention: 4, after
+// systemctl's "no such unit". Every other failure of those commands keeps 1,
+// so a script can tell "no such session" from "could not ask" without reading
+// stderr.
+//
+// Not `session wait`: it passes the hosted command's own exit code through,
+// so no code of its own could be unambiguous there, and it keeps
+// waitUnavailableCode for every lookup failure.
+const notFoundCode = 4
+
+// errNoSession is the not-found failure, carrying notFoundCode. Its message
+// is the one these commands have always printed.
+func errNoSession(name string) error {
+	return ExitCodeError{Code: notFoundCode, Err: fmt.Errorf("no session named %q", name)}
+}
+
 // waitExitCode maps a finished session's recorded outcome onto this command's
 // exit status. Every reason is named; a default returning 0 would report an
 // outcome nobody established as a success, which is the one answer a waiter
@@ -138,7 +155,9 @@ A session that has ended still answers, from the record it left behind: its
 admin socket died with its process, but its outcome did not.
 
 Output formats:
-  -o json                           JSON output`,
+  -o json                           JSON output
+
+Exits 4 when no session has the name, and 1 for any other failure.`,
 		Example: `  # Display session by name:
   upterm session info NAME
 
@@ -319,7 +338,9 @@ The session's command is hung up, then terminated, then killed if it stays,
 and every attached terminal is released. The session's record keeps its
 outcome: 'upterm session info NAME' reports it as stopped.
 
-A session that has already ended is reported as such and is not an error.`,
+A session that has already ended is reported as such and is not an error.
+
+Exits 4 when no session has the name, and 1 for any other failure.`,
 		Example: `  # Stop the session named build-shell:
   upterm session stop build-shell`,
 		Args: cobra.ExactArgs(1),
@@ -340,7 +361,7 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		return err
 	}
 	if rec == nil {
-		return fmt.Errorf("no session named %q", name)
+		return errNoSession(name)
 	}
 	if !held {
 		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
@@ -624,7 +645,7 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		// No record at all, held or not: not found within retained history.
 		// Checked before either branch uses rec, which is the nil dereference
 		// the earlier draft had.
-		return sessionInfo{}, nil, fmt.Errorf("no session named %q", name)
+		return sessionInfo{}, nil, errNoSession(name)
 	}
 
 	if !held {
