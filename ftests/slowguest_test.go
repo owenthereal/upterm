@@ -40,23 +40,10 @@ const (
 	// burstChunkTimeout bounds the wait for one 256 KiB chunk to cross the whole
 	// path. Measured on the happy path a chunk takes tens of milliseconds, so
 	// this is about whether the fan-out is stuck, not about how loaded the
-	// machine is. It is deliberately shorter than burstBudget, so a fan-out that
-	// has genuinely wedged is reported against the chunk it wedged on rather
-	// than against the loop as a whole.
+	// machine is. It is deliberately shorter than the loop's budget
+	// (burstLoopBudget), so a fan-out that has genuinely wedged is reported
+	// against the chunk it wedged on rather than against the loop as a whole.
 	burstChunkTimeout = 10 * time.Second
-
-	// burstBudget bounds the paced loop in wall-clock time, which burstChunks
-	// alone does not: a platform whose socket buffers push the drop late can
-	// legitimately produce all 64 chunks, once per topology, inside a binary
-	// that make test gives 180 s in total.
-	//
-	// 25 s is a little over twice the slowest healthy run measured here
-	// (ssh/multiNodes, 28 chunks, 11.8 s under -race), and four of those on top
-	// of the ~56 s the rest of the suite costs still fits. The loop clamps it
-	// further against the binary's own deadline, because a case that fails
-	// naming its knob is worth more than a timeout panic that takes every other
-	// ftest down with it.
-	burstBudget = 25 * time.Second
 
 	// guestDropTimeout is how long the dropped guest has to observe its own
 	// disconnect. It budgets a different mechanism from the two above: the drop
@@ -233,7 +220,7 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	var produced int
 	for chunk := 0; chunk < burstChunks && dropped == nil; chunk++ {
 		if time.Now().After(expiry) {
-			t.Fatalf("the stalled guest was not dropped within %s, after %d of %d bytes of output; raise burstBudget, and burstChunks with it if the whole ceiling was spent",
+			t.Fatalf("the stalled guest was not dropped within %s, half of what the test binary's -timeout had left, after %d of %d bytes of output",
 				budget, produced, burstChunks*burstChunkBytes)
 		}
 
@@ -288,21 +275,30 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	}
 }
 
-// burstLoopBudget is how long the paced loop may run.
+// burstLoopBudget is how long the paced loop may run: half of what is left of
+// the binary's own -timeout. That deadline is what the loop is really
+// competing for, and overrunning it is a panic that takes every other ftest
+// with it, whereas overrunning the budget is one failure that says how far the
+// burst got.
 //
-// burstBudget is the figure to tune, but it is clamped against what is left of
-// the binary's own -timeout, which is what the loop is really competing for:
-// four topologies run this case, and make test gives the whole ftests binary
-// 180 s. Overrunning that is a panic that takes every other ftest with it,
-// whereas overrunning burstBudget is one failure naming one knob.
+// It is not a fixed figure, because how long a healthy loop takes is set by
+// the machine, not by upterm: the drop lands at the same chunk on every run of
+// a platform, but each chunk is a 256 KiB render through the host's terminal.
+// On a Windows runner under make test, where the other packages' -race binaries
+// compete for its four CPUs, ConPTY takes about 1.4 s a chunk against 0.2 s
+// with ftests alone, and ssh/singleNode's 18 chunks took 25-26 s — a fixed
+// 25 s budget, calibrated where the slowest healthy loop took 11.8 s, failed
+// runs whose drop was on its way. A wedged fan-out is still caught by
+// burstChunkTimeout, and a drop that never comes by burstChunks.
+//
+// Without a -timeout, those two are the only bounds the loop needs.
 func burstLoopBudget(t *testing.T) time.Duration {
-	budget := burstBudget
 	if deadline, ok := t.Deadline(); ok {
-		if half := time.Until(deadline) / 2; half > 0 && half < budget {
-			budget = half
+		if half := time.Until(deadline) / 2; half > 0 {
+			return half
 		}
 	}
-	return budget
+	return burstChunks * burstChunkTimeout
 }
 
 // A guest that keeps its SSH connection open after the host's command exits
