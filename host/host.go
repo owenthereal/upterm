@@ -922,7 +922,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// begins the join timeout takes no more changes, and a
 		// `session set` that reaches the admin socket while it drains is
 		// told the session is ending rather than handed a deadline nothing
-		// will enforce.
+		// will enforce. joins.close() never blocks -- it only stops a timer
+		// under a mutex nothing holds across a wait -- which is why it may
+		// run before the cause reaches the command.
 		tearingDown := make(chan struct{})
 		g.Add(func() error {
 			<-tearingDown
@@ -1224,7 +1226,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	switch {
 	case errors.Is(err, errJoinTimeout):
 		// The group winner alone identifies why teardown happened.
-		logger.Info("no guest joined within the join timeout; session ended", "timeout", c.JoinTimeout)
+		// The timeout that fired, which `session set` may have replaced
+		// since launch.
+		logger.Info("no guest joined within the join timeout; session ended", "timeout", joins.snapshot().Timeout)
 		runReason = sessiondir.ReasonJoinTimeout
 	case errors.Is(err, errSessionStopped):
 		runReason = sessiondir.ReasonStopped

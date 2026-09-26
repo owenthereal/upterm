@@ -9,22 +9,24 @@ Change a session's join timeout.
 --join-timeout D ends the session D from now unless a guest joins first. It
 replaces any join timeout already set, including one given to
 'upterm host --join-timeout', so each call restarts the window: running it
-again extends the deadline. 0 disables it. Before the session is ready, the
-timeout counts from readiness.
+again with the same duration extends the deadline. 0 disables it. Before the
+session is ready, the timeout counts from readiness.
 
 A guest who joins, however briefly and whether by terminal or SFTP, claims the
 session: the automatic join timeout is disabled for the rest of its life, and
-a later set says so and changes nothing.
+a later set says so and changes nothing. After that, nothing ends the session
+but its command exiting or 'upterm session stop'.
 
 'upterm session wait NAME' blocks until the session ends; interrupting it
 leaves the session running. 'upterm session stop NAME' ends it.
 
 Durations are shown compact and normalised: 90m shows as 1h30m.
 
-Exits 0 when the session answered or has already ended, 4 when no session has
-the name, and 1 for any other failure -- including a change that could not be
-confirmed, which may still have taken effect: running set again restarts the
-window, and 'upterm session info NAME' shows what the session holds.
+Exits 0 when the session took the change, is ending, or has already ended, 4
+when no session has the name, and 1 for any other failure -- including a
+change that could not be confirmed, which may still have taken effect: running
+set again restarts the window, and 'upterm session info NAME' shows what the
+session holds.
 
 ```
 upterm session set NAME [flags]
@@ -40,11 +42,12 @@ upterm session set NAME [flags]
   build_exit_code=0
   make || build_exit_code=$?
   if [ "$build_exit_code" -ne 0 ]; then
+    # Ten minutes for someone to join; once they have, it runs until they exit.
     if upterm session set build --join-timeout 10m; then
       upterm session wait build || true
     fi
   fi
-  upterm session stop build || true
+  upterm session stop build || true   # ends it either way; never masks the build's result
   exit "$build_exit_code"
 
   # Give 20 more minutes from now, replacing the current window:

@@ -471,22 +471,24 @@ func setCmd() *cobra.Command {
 --join-timeout D ends the session D from now unless a guest joins first. It
 replaces any join timeout already set, including one given to
 'upterm host --join-timeout', so each call restarts the window: running it
-again extends the deadline. 0 disables it. Before the session is ready, the
-timeout counts from readiness.
+again with the same duration extends the deadline. 0 disables it. Before the
+session is ready, the timeout counts from readiness.
 
 A guest who joins, however briefly and whether by terminal or SFTP, claims the
 session: the automatic join timeout is disabled for the rest of its life, and
-a later set says so and changes nothing.
+a later set says so and changes nothing. After that, nothing ends the session
+but its command exiting or 'upterm session stop'.
 
 'upterm session wait NAME' blocks until the session ends; interrupting it
 leaves the session running. 'upterm session stop NAME' ends it.
 
 Durations are shown compact and normalised: 90m shows as 1h30m.
 
-Exits 0 when the session answered or has already ended, 4 when no session has
-the name, and 1 for any other failure -- including a change that could not be
-confirmed, which may still have taken effect: running set again restarts the
-window, and 'upterm session info NAME' shows what the session holds.`,
+Exits 0 when the session took the change, is ending, or has already ended, 4
+when no session has the name, and 1 for any other failure -- including a
+change that could not be confirmed, which may still have taken effect: running
+set again restarts the window, and 'upterm session info NAME' shows what the
+session holds.`,
 		Example: `  # Debug a failed build: open the session first, give people 10 minutes to
   # join only if the build fails, and keep the build's exit status. Safe under
   # set -e and in zsh, where $status is read-only:
@@ -494,11 +496,12 @@ window, and 'upterm session info NAME' shows what the session holds.`,
   build_exit_code=0
   make || build_exit_code=$?
   if [ "$build_exit_code" -ne 0 ]; then
+    # Ten minutes for someone to join; once they have, it runs until they exit.
     if upterm session set build --join-timeout 10m; then
       upterm session wait build || true
     fi
   fi
-  upterm session stop build || true
+  upterm session stop build || true   # ends it either way; never masks the build's result
   exit "$build_exit_code"
 
   # Give 20 more minutes from now, replacing the current window:
@@ -624,7 +627,7 @@ func printSetOutcome(out io.Writer, name string, resp *api.SetJoinTimeoutRespons
 	case api.SetJoinTimeoutResponse_ENDING:
 		_, err = fmt.Fprintf(out, "session %s is ending\n", name)
 	default:
-		return fmt.Errorf("session %s answered with an outcome this upterm does not know: %v", name, resp.GetOutcome())
+		return fmt.Errorf("session %s answered with an outcome this upterm does not know (%v), so the change may have taken effect; 'upterm session info %s' shows what the session holds", name, resp.GetOutcome(), name)
 	}
 	return err
 }
@@ -828,15 +831,17 @@ const (
 // with B's ownership — and, more immediately, could dereference a nil record:
 // ReadRecord returns not-found, a claim completes, IsHeld returns true.
 //
-// The response is the one this lookup validated, and is nil unless the record
-// says ready, the admin socket answered and its session ID matched the record.
-// Handing it back is what stops a caller that wants the full live detail from
-// asking again: a second query returns whatever holds the name at that
-// instant, which need not be the session the first one confirmed.
+// The daemon is asked for every held record, not only a ready one: its join
+// state is what governs the session from the moment the name is claimed. Its
+// answer is validated by launch ID -- by session ID only for a daemon from
+// before that field -- so an answer from a launch that has since taken the
+// name is ignored rather than trusted.
 //
-// Every held record is asked, not only a ready one with a session ID: the
-// daemon's join state is what governs the session from the moment it is
-// claimed, and validated by sameLaunch rather than trusted on faith.
+// The response is the one this lookup validated, and is nil unless the record
+// says ready and the admin socket answered for this launch. Handing it back is
+// what stops a caller that wants the full live detail from asking again: a
+// second query returns whatever holds the name at that instant, which need
+// not be the session the first one confirmed.
 func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
@@ -974,15 +979,15 @@ func withClaimRule(info sessionInfo) sessionInfo {
 }
 
 // shortDuration writes d compact and normalised: Go's duration syntax
-// without zero units, so 10m rather than 10m0s, and 90m as 1h30m. The result
-// still parses as a --join-timeout value.
+// without zero units, so 10m rather than 10m0s, 90m as 1h30m, and 1h0m30s as
+// 1h30s. The result still parses as a --join-timeout value.
 func shortDuration(d time.Duration) string {
-	s := d.String()
-	if strings.HasSuffix(s, "m0s") {
+	// Go writes minutes whenever there are hours, and seconds whenever there
+	// are minutes, so zero minutes are always "h0m" and zero seconds a
+	// trailing "0s" after "m" -- or after "h", once the minutes are gone.
+	s := strings.Replace(d.String(), "h0m", "h", 1)
+	if strings.HasSuffix(s, "m0s") || strings.HasSuffix(s, "h0s") {
 		s = strings.TrimSuffix(s, "0s")
-	}
-	if strings.HasSuffix(s, "h0m") {
-		s = strings.TrimSuffix(s, "0m")
 	}
 	return s
 }

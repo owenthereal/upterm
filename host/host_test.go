@@ -1401,6 +1401,9 @@ func TestJoinTimeoutShutsDownWhileARecordWriteIsBlocked(t *testing.T) {
 		t.Fatalf("Run finished, releasing the name, with a record write still pending: %v", err)
 	case <-time.After(200 * time.Millisecond):
 	}
+	require.Equal(t, sessiondir.ReasonUnknown, f.record(t).Reason,
+		"the final bookkeeping waits for the held write: no outcome is recorded yet")
+
 	unblock()
 	require.NoError(t, f.result(t), "finalisation completes once the write is released")
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)

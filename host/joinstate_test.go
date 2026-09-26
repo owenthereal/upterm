@@ -153,6 +153,7 @@ func TestJoinStateStaleFireAfterDisableIsNoOp(t *testing.T) {
 	old := c.timer(t)
 
 	require.Equal(t, joinSnapshot{Outcome: joinDisabled}, s.set(0))
+	require.True(t, old.stopped, "disabling stops the timer that was counting")
 	old.fire()
 	require.False(t, hasFired(s))
 	require.Equal(t, joinSnapshot{}, s.snapshot())
@@ -201,8 +202,19 @@ func TestJoinStateTeardownStopsTheTimerAndRefusesChanges(t *testing.T) {
 	require.False(t, s.markReady())
 }
 
-// With real timers and real goroutines, under -race in CI: whatever the
-// interleaving, the timeout never both fires and records a join.
+// Teardown that beats readiness: a session torn down before it was ready
+// never starts counting.
+func TestJoinStateCloseBeforeReadyArmsNothing(t *testing.T) {
+	s, c := newTestJoinState(time.Minute)
+	s.close()
+	require.False(t, s.markReady())
+	require.Empty(t, c.timers, "no timer is armed after teardown")
+	require.True(t, s.snapshot().Deadline.IsZero())
+}
+
+// A -race smoke test, with real timers and real goroutines: whatever the
+// interleaving, the timeout never both fires and records a join. It proves
+// nothing about ordering on its own; the deterministic tests above pin that.
 func TestJoinStateNeverFiresAndRecordsAJoin(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		s := newJoinState(time.Millisecond)

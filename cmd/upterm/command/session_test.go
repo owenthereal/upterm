@@ -936,16 +936,18 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 		want  []string
 	}{
 		{
-			// No session ID yet, so there is nothing to ask the admin socket
-			// and no connect string to hand back. The socket's path is
-			// published all the same: the name is held, so there is one.
+			// The admin socket is asked, but nothing answers yet, so there is
+			// no connect string to hand back and the join state is the
+			// record's. The socket's path is published all the same: the name
+			// is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
 			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
-			// The one state whose socket answers, and the only one that can
-			// carry a connect string.
+			// The only state that can carry a connect string: a disconnected
+			// session's socket answers too, but it is never advertised as
+			// joinable.
 			name:  "ready",
 			build: buildReady,
 			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket", "joinStateSource"},
@@ -1543,6 +1545,64 @@ func Test_setSession_failures(t *testing.T) {
 		require.NoError(t, setSession(context.Background(), "torn-2", time.Minute, &out))
 		require.Equal(t, "session torn-2 is ending\n", out.String())
 	})
+	// Unavailable, and the re-read then finds the session ended, replaced or
+	// gone: each onSet stages that before answering, as a session that went
+	// away while the request was in flight would.
+	t.Run("ended", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "ended-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			_ = d.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusEnding
+				r.Reason = sessiondir.ReasonJoinTimeout
+			})
+			_ = d.Release(context.Background())
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		var out bytes.Buffer
+		require.NoError(t, setSession(context.Background(), "ended-2", time.Minute, &out))
+		require.Equal(t, "session ended-2 has already ended (join_timeout)\n", out.String())
+	})
+	t.Run("replaced", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "replaced-2")
+		successor := make(chan *sessiondir.Dir, 1)
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			_ = d.Release(context.Background())
+			// A new launch takes the name before the re-read.
+			next, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+				RuntimeRoot: utils.UptermRuntimeDir(), StateRoot: utils.UptermStateDir(),
+				Name: "replaced-2", Command: []string{"bash"},
+			})
+			if err == nil {
+				successor <- next
+			}
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		var out bytes.Buffer
+		err := setSession(context.Background(), "replaced-2", time.Minute, &out)
+		select {
+		case next := <-successor:
+			releaseAtEnd(t, next)
+		default:
+			t.Fatal("the name was not claimed again")
+		}
+		require.ErrorContains(t, err, "has been replaced since it was read")
+		require.Empty(t, out.String())
+	})
+	t.Run("no record", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "vanished-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			_ = d.Release(context.Background())
+			_ = os.Remove(d.RecordPath())
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		err := setSession(context.Background(), "vanished-2", time.Minute, io.Discard)
+		var ec ExitCodeError
+		require.ErrorAs(t, err, &ec)
+		require.Equal(t, notFoundCode, ec.Code)
+	})
 	t.Run("a timed-out request could not confirm, and says retrying restarts the window", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := heldReady(t, "slow-2")
@@ -1652,7 +1712,11 @@ func Test_lookupTakesTheJoinStateFromTheDaemon(t *testing.T) {
 			releaseAtEnd(t, d)
 			require.NoError(t, d.Update(func(r *sessiondir.Record) {
 				r.Status = st
-				r.SessionID = "sid"
+				// A starting record has no session ID yet: the ready write
+				// publishes it. The launch ID is what validates the answer.
+				if st != sessiondir.StatusStarting {
+					r.SessionID = "sid"
+				}
 				r.JoinTimeout = time.Minute // stale: the daemon holds 10m now
 			}))
 			serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
@@ -1791,7 +1855,8 @@ func TestShortDurationDropsZeroUnits(t *testing.T) {
 		90 * time.Second:           "1m30s",
 		3 * time.Second:            "3s",
 		1500 * time.Millisecond:    "1.5s",
-		time.Hour + 30*time.Second: "1h0m30s",
+		time.Hour + 30*time.Second: "1h30s",
+		2 * time.Hour:              "2h",
 	} {
 		require.Equal(t, want, shortDuration(d), "%v", d)
 	}
