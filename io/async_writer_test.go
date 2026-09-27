@@ -582,6 +582,31 @@ func TestAsyncWriterAbortIfNoProgress(t *testing.T) {
 	}
 }
 
+// An abort with a nil error must still end the writer. A writer counts as
+// failed only once it holds a non-nil error, so passing nil through would
+// discard the queue and spend onDrop while leaving the writer live, accepting
+// writes, and its drain still running.
+func TestAsyncWriterAbortIfNoProgressTreatsANilErrorAsStalled(t *testing.T) {
+	drops := make(chan error, 2)
+	a := NewAsyncWriter(&recordingWriter{}, DefaultGuestBufferSize, func(err error) { drops <- err })
+	defer func() { _ = a.Close() }()
+
+	require.True(t, a.AbortIfNoProgress(a.Backlog().Delivered, nil))
+	require.False(t, a.Backlog().Live, "an abort with a nil error left the writer live")
+	require.ErrorIs(t, a.Err(), ErrStalled)
+
+	_, err := a.Write([]byte("more"))
+	require.ErrorIs(t, err, ErrStalled, "writes after the abort must fail with its error")
+
+	select {
+	case err := <-drops:
+		require.ErrorIs(t, err, ErrStalled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("onDrop never fired")
+	}
+	require.Eventually(t, a.stopped, 2*time.Second, time.Millisecond, "the drain outlived the abort")
+}
+
 // A burst that has been fully delivered must not leave its backing array behind
 // for the rest of the session.
 //

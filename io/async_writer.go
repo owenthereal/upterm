@@ -268,11 +268,18 @@ func (a *AsyncWriter) Backlog() Backlog {
 // equals since. It reports whether it aborted. The check and the failure
 // happen under one lock, so a piece delivered after the caller's last
 // snapshot always wins.
+//
+// A nil err aborts with ErrStalled: a writer counts as failed only once it
+// holds an error, so failing it with nil would discard the queue and spend
+// onDrop while leaving it live.
 func (a *AsyncWriter) AbortIfNoProgress(since uint64, err error) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed || a.err != nil || a.delivered != since {
 		return false
+	}
+	if err == nil {
+		err = ErrStalled
 	}
 	a.fail(err)
 	return true
