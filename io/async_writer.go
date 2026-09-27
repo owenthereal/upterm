@@ -15,8 +15,10 @@ const (
 	// rather than stalled, accrues backlog at the difference between that pace
 	// and its own drain rate, and a sustained mismatch exhausts any finite cap:
 	// this number sets how long a slow guest survives, not whether. The pacing
-	// guest itself never approaches it, since output waits for that guest at a
-	// low mark far below. Total slack is roughly 5 MiB, the cap plus a 2 MiB
+	// guest adds no backlog while it paces, since the pty is held to its
+	// drain, but it can inherit one of up to the cap when it takes over from
+	// a primary or an earlier pacer, and output after pacing is released at
+	// exit is unpaced. Total slack is roughly 5 MiB, the cap plus a 2 MiB
 	// SSH window on each of the two legs between host and guest. The buffer
 	// exists to decouple the fan-out from a blocking write, not to store the
 	// session.

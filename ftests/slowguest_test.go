@@ -18,20 +18,25 @@ import (
 )
 
 const (
-	// burstChunkBytes is how much output the host produces per go-ahead. It is
-	// the bound on how far the guest that keeps reading may fall behind, because
-	// the test never asks for the next chunk until that guest has seen the last
-	// one, so it has to stay well under the 1 MiB host-side cap.
+	// burstChunkBytes is how much output the host produces per go-ahead. In
+	// testClientSlowGuestDropped it is the bound on how far the guest that
+	// keeps reading may fall behind, because that case never asks for the
+	// next chunk until the guest has seen the last one, so it has to stay well
+	// under the 1 MiB host-side cap. testClientSurvivesBurstWithoutPrimary
+	// sends every go-ahead at once and leaves the pacing to the pacer.
 	burstChunkBytes = 256 << 10
 
-	// burstChunks caps the burst at burstChunks * burstChunkBytes = 16 MiB. That
-	// has to exceed what the path already buffers before the host's write to a
-	// stalled guest blocks: up to 2 MiB of SSH window on each leg between host
-	// and guest, plus TCP socket buffers, plus the 1 MiB host-side cap — roughly
-	// 5.5 MiB for one node and more for two, and platform-dependent because
-	// Windows autotunes its socket buffers. The loop stops as soon as the drop
-	// lands, so the margin costs nothing when it lands early; if it never lands,
-	// this is the knob to raise.
+	// burstChunks caps the burst at burstChunks * burstChunkBytes = 16 MiB. For
+	// testClientSlowGuestDropped that has to exceed what the path already
+	// buffers before the host's write to a stalled guest blocks: up to 2 MiB of
+	// SSH window on each leg between host and guest, plus TCP socket buffers,
+	// plus the 1 MiB host-side cap — roughly 5.5 MiB for one node and more for
+	// two, and platform-dependent because Windows autotunes its socket buffers.
+	// The loop stops as soon as the drop lands, so the margin costs nothing
+	// when it lands early; if it never lands, this is the knob to raise. For
+	// testClientSurvivesBurstWithoutPrimary it has to be far enough past the
+	// same slack that a guest nothing paces would be dropped outright, not
+	// scrape through, so that the guest staying shows the pacer at work.
 	burstChunks = 64
 
 	// burstLineWidth matches the guests' 80-column pty, so the burst is not
@@ -66,8 +71,9 @@ const (
 
 // TestBurstHelper is not a test. It is the host command for
 // testClientSlowGuestDropped and testClientSurvivesBurstWithoutPrimary:
-// re-executing this binary generates the burst without a shell, so the cases
-// run identically on macOS, Linux and Windows.
+// re-executing this binary generates the burst without a shell, so the same
+// command runs on macOS, Linux and Windows. The second case skips Windows,
+// where ConPTY produces more slowly than the guest reads and nothing is paced.
 //
 // It skips unless invoked with a chunk count, so an ordinary suite run walks
 // past it.
@@ -497,10 +503,11 @@ func testClientSurvivesBurstWithoutPrimary(t *testing.T, hostURL, hostNodeAddr, 
 // A guest that joins while another is pacing the session must not take the
 // pace from it. The newcomer arrives with megabytes of empty SSH window on its
 // way through uptermd, and host-side backlog is all the pacer can judge by, so
-// until those windows fill even a guest that never reads looks the fastest. Were the fastest guest to pace, the newcomer would open the
-// gate and the established guest, held to its own link, would overflow and be
-// dropped. With the earliest pacing, the newcomer follows, overflows, and is
-// the one dropped.
+// until those windows fill even a guest that never reads looks the fastest.
+// Were the fastest guest to pace, the newcomer would open the gate and the
+// established guest, held to its own link, would overflow and be dropped.
+// With the earliest pacing, the newcomer follows, overflows, and is the one
+// dropped.
 //
 // Hence the order: the newcomer joins only once the established guest's link
 // is what holds the command back. Joined before the output started, both

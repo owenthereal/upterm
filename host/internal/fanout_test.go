@@ -269,14 +269,16 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 // pty as quiet, and the cancel after it would cut the command's tail off. The
 // interrupt releases pacing before it waits.
 //
-// The guest delivers nothing, so two 32 KiB writes put it at the low mark —
-// one in flight on its link, one queued — and hold tail-1. exitedPTY hands out
-// one chunk per Read and drops whatever does not fit io.Copy's buffer, hence
-// chunks of exactly that size. With the release after waitIdle instead,
-// tail-1 is held until waitIdle gives up on the quiet, and tail-2 is cut off
-// by the cancel that follows; with no release at all, Run never returns. The
-// synchronous recorder on the fan-out is the reference for what got past the
-// pacer.
+// What the test pins is that order. The guest delivers nothing, so two 32 KiB
+// writes would put it at the low mark — one in flight on its link, one
+// queued — and hold tail-1. Released before waitIdle, as here, every tail
+// arrives: the fake's Wait returns at once, so the release precedes the
+// first read and nothing is ever held. Released after it, tail-1 is held past
+// the idle wait and tail-2 is cut off by the cancel that follows; never
+// released, Run hangs. exitedPTY hands out one chunk per Read and drops
+// whatever does not fit io.Copy's buffer, hence chunks of exactly that size.
+// The synchronous recorder on the fan-out is the reference for what got past
+// the pacer.
 func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
 	p, writers := newTestPacer(t, time.Minute)
 	var accepted recordingWriter

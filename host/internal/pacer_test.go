@@ -289,8 +289,9 @@ func TestGuestPacerPassesThroughWhenNothingPaces(t *testing.T) {
 // The earliest guest sets the rate and a faster one follows it. At one 32 KiB
 // piece per 10 ms, the first guest has to deliver all of 2 MiB but the low
 // mark and a write before the last write goes out: about 60 pieces, 600 ms.
-// Unpaced, or paced by the faster guest, the same 2 MiB goes by in a few
-// milliseconds and overflows the first guest's 1 MiB on the way.
+// Unpaced, or paced by the faster guest, the same 2 MiB goes by in a fraction
+// of the 500 ms asserted below and overflows the first guest's 1 MiB on the
+// way.
 func TestGuestPacerHoldsOutputToTheEarliestGuest(t *testing.T) {
 	p, writers := newTestPacer(t, time.Minute)
 	first := uio.NewAsyncWriter(&meteredWriter{every: 10 * time.Millisecond}, uio.DefaultGuestBufferSize, nil)

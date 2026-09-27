@@ -18,10 +18,11 @@ var (
 	// chunk plus one pty write, so how far the command runs ahead of the
 	// guest is set by the SSH windows between them, as it is over plain ssh.
 	pacingLowWater = 64 << 10
-	// pacingStallTimeout is the primary's bound, measured from the last piece
-	// the pacer delivered rather than from when a write began to wait: a
-	// pacer working steadily through a large backlog is never dropped for how
-	// long the backlog takes, only for delivering nothing.
+	// pacingStallTimeout is the primary's bound. Its deadline is armed when
+	// a write starts waiting and restarted by every piece the pacer delivers,
+	// so it bounds time without progress, not time spent waiting: a pacer
+	// working steadily through a large backlog is never dropped for how long
+	// the backlog takes, only for delivering nothing.
 	pacingStallTimeout = 5 * time.Second
 )
 
