@@ -235,7 +235,7 @@ func TestAttachSuspendsAndResumes(t *testing.T) {
 
 	// The pane is cleared, and the clear confirmed, before fg: the pane is
 	// showing the outer shell while the job is stopped, and uptermPrompt has
-	// already been on it since line 212. Without the clear, waiting for it
+	// already been on it since the attach. Without the clear, waiting for it
 	// again below would match on its first poll no matter what fg did, the
 	// same trap TestAttachDetachReattach guards against for its own replay
 	// assertion.
