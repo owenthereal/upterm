@@ -42,10 +42,6 @@ func TestSFTPPromptNamesTheGuestKey(t *testing.T) {
 	checker := &denyingChecker{}
 	h := startHost(t, &Server{Command: readsALine("READY", 0), SFTPPermissionChecker: checker})
 
-	_, relayKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	relay, err := ssh.NewSignerFromKey(relayKey)
-	require.NoError(t, err)
 	guestPublic, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	guestKey, err := ssh.NewPublicKey(guestPublic)
@@ -54,7 +50,10 @@ func TestSFTPPromptNamesTheGuestKey(t *testing.T) {
 		User: "guest", SessionID: t.Name(),
 		AuthRequest: &server.AuthRequest{AuthorizedKey: ssh.MarshalAuthorizedKey(guestKey)},
 	}
-	h.guestSigner, err = cert.SignCert(relay)
+	// Signed by the harness's relay, the authority this host trusts: a
+	// certificate from anyone else is refused at the guest door, so the prompt
+	// would never be reached.
+	h.guestSigner, err = cert.SignCert(h.relaySigner)
 	require.NoError(t, err)
 
 	sftpClient, err := sftp.NewClient(h.guestClient(t))

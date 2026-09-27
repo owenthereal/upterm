@@ -35,6 +35,9 @@ type hostHarness struct {
 	addr        string
 	hostKey     ssh.PublicKey
 	guestSigner ssh.Signer
+	// relaySigner is the harness's stand-in relay: the authority srv trusts,
+	// and what a test mints its own guest certificates with.
+	relaySigner ssh.Signer
 
 	// attachSocket is the path of the host door's socket, and hostListener is
 	// the listener bound to it, so a test can fail the door on its own.
@@ -60,6 +63,20 @@ type hostHarness struct {
 func startHost(t *testing.T, srv *Server) *hostHarness {
 	t.Helper()
 
+	return startHostWith(t, srv, true)
+}
+
+// startHostNoRelayAuthority is startHost for a test about the nil authority --
+// a server whose handshake never recorded a relay key.
+func startHostNoRelayAuthority(t *testing.T, srv *Server) *hostHarness {
+	t.Helper()
+
+	return startHostWith(t, srv, false)
+}
+
+func startHostWith(t *testing.T, srv *Server, setAuthority bool) *hostHarness {
+	t.Helper()
+
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	signer, err := ssh.NewSignerFromKey(key)
@@ -70,6 +87,16 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 	}
 	guestSigner, err := cert.SignCert(signer)
 	require.NoError(t, err)
+
+	// The harness's relay: one key stands in for both the session host key and
+	// the relay that mints guest certificates, which is all a door that never
+	// dials a relay needs.
+	if setAuthority && srv.GuestCertAuthority == nil {
+		relay := signer.PublicKey()
+		srv.GuestCertAuthority = func(k ssh.PublicKey) bool {
+			return k != nil && string(k.Marshal()) == string(relay.Marshal())
+		}
+	}
 
 	// A test that wants to watch the door's key sets HostKey itself.
 	if srv.HostKey == nil {
@@ -106,7 +133,8 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 	return &hostHarness{addr: ln.Addr().String(),
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
 		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done,
-		cancel: cancel, stopped: stopped}
+		relaySigner: signer,
+		cancel:      cancel, stopped: stopped}
 }
 
 // stop ends the session mid-test the way the test's own end does, by
@@ -144,9 +172,13 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 	if err := raw.SetDeadline(time.Now().Add(cfg.deadline)); err != nil {
 		return nil, nil, nil, err
 	}
+	auth := []ssh.Signer{h.guestSigner}
+	if len(cfg.signers) > 0 {
+		auth = cfg.signers
+	}
 	conn, chans, reqs, err := ssh.NewClientConn(raw, h.addr, &ssh.ClientConfig{
 		Config: ssh.Config{RekeyThreshold: cfg.rekeyThreshold},
-		User:   "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(h.guestSigner)},
+		User:   "guest", Auth: []ssh.AuthMethod{ssh.PublicKeys(auth...)},
 		HostKeyCallback: ssh.FixedHostKey(h.hostKey),
 	})
 	if err != nil {
@@ -266,12 +298,21 @@ type dialConfig struct {
 	// rekeyThreshold, when non-zero, makes the client renegotiate keys after
 	// that many bytes. x/crypto clamps it to its 256-byte minimum.
 	rekeyThreshold uint64
+	// signers, when non-empty, replaces the harness's guest credential, so a
+	// test can offer a certificate of its own making.
+	signers []ssh.Signer
 }
 
 // withRekeyThreshold forces key renegotiation early, so a test can watch what
 // a rekey signs with.
 func withRekeyThreshold(n uint64) dialOption {
 	return func(c *dialConfig) { c.rekeyThreshold = n }
+}
+
+// withGuestSigners offers these credentials instead of the harness's own, in
+// the order given.
+func withGuestSigners(signers ...ssh.Signer) dialOption {
+	return func(c *dialConfig) { c.signers = signers }
 }
 
 // withDialDeadline replaces the harness's absolute connection deadline for one

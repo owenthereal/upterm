@@ -70,6 +70,7 @@ func Test_sshd_DisallowSession(t *testing.T) {
 			return sm
 		}(),
 		HostSigners:     []ssh.Signer{signer},
+		Signers:         []ssh.Signer{signer},
 		NodeAddr:        addr,
 		MetricsProvider: provider.NewDiscardProvider(),
 		Logger:          logger,
@@ -143,6 +144,7 @@ func newTestSSHD(t *testing.T) *testSSHD {
 	sshd := &sshd{
 		SessionManager:      newEmbeddedSessionManager(logger),
 		HostSigners:         []ssh.Signer{signer},
+		Signers:             []ssh.Signer{signer},
 		NodeAddr:            addr,
 		SessionDialListener: network.Session(),
 		MetricsProvider:     mp,

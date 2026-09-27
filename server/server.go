@@ -572,6 +572,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 		sshd := sshd{
 			SessionManager:      s.SessionManager,
 			HostSigners:         s.HostSigners, // TODO: use different host keys
+			Signers:             s.Signers,
 			NodeAddr:            s.NodeAddr,
 			SessionDialListener: sessionDialListener,
 			MetricsProvider:     s.MetricsProvider,

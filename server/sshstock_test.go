@@ -83,7 +83,11 @@ func stockTestUpstream(t *testing.T, reject bool, hostKey string) (string, <-cha
 		if err := checker.CheckCert(c.User(), cert); err != nil {
 			return nil, err
 		}
-		auth, _, err := (&UserCertChecker{}).Authenticate(c.User(), cert)
+		auth, _, err := (&UserCertChecker{
+			// This stands in for a host's sshd, which trusts the relay it
+			// verified; the CertChecker above already says so.
+			IsUserAuthority: func(ssh.PublicKey) bool { return true },
+		}).Authenticate(c.User(), cert)
 		if err != nil {
 			return nil, err
 		}

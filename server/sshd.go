@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,8 +29,12 @@ type ServerInfo struct {
 }
 
 type sshd struct {
-	SessionManager      *SessionManager
-	HostSigners         []gossh.Signer
+	SessionManager *SessionManager
+	HostSigners    []gossh.Signer
+	// Signers is what the relay mints guest certificates with, and so the only
+	// authority whose AuthRequest this door believes. Certificates reaching it
+	// were minted by a proxy in this cluster; nothing else should get in.
+	Signers             []gossh.Signer
 	NodeAddr            string
 	SessionDialListener SessionDialListener
 	MetricsProvider     provider.Provider
@@ -226,19 +231,8 @@ func (s *sshd) Serve(ln net.Listener) error {
 			s.Logger.Info("attempt to bind", "tunnel-host", host, "tunnel-port", port)
 			return true
 		}),
-		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			checker := UserCertChecker{}
-			_, _, err := checker.Authenticate(ctx.User(), key)
-			if err != nil {
-				s.Logger.Error("error parsing auth request from cert", "error", err)
-				return false
-			}
-
-			// TOOD: validate pk
-
-			return true
-		},
-		ChannelHandlers: make(map[string]ssh.ChannelHandler), // disallow channel requests, e.g. shell
+		PublicKeyHandler: s.handlePublicKey,
+		ChannelHandlers:  make(map[string]ssh.ChannelHandler), // disallow channel requests, e.g. shell
 		RequestHandlers: map[string]ssh.RequestHandler{
 			streamlocalForwardChannelType:         sh.Handler,
 			cancelStreamlocalForwardChannelType:   sh.Handler,
@@ -262,6 +256,41 @@ func (s *sshd) Serve(ln net.Listener) error {
 	}
 
 	return err
+}
+
+// handlePublicKey admits a peer on the internal node door. Everything that
+// reaches it was minted by a proxy in this cluster, so an unrecognized
+// authority is refused outright rather than falling back to the offered key:
+// this door has no authorized-key check of its own to catch it.
+func (s *sshd) handlePublicKey(ctx ssh.Context, key ssh.PublicKey) bool {
+	checker := UserCertChecker{IsUserAuthority: s.isOwnAuthority}
+	if _, _, err := checker.Authenticate(ctx.User(), key); err != nil {
+		s.Logger.Error("error parsing auth request from cert", "error", err)
+		return false
+	}
+
+	return true
+}
+
+// isOwnAuthority reports whether key is one of this relay's signing keys.
+//
+// The comparison is exact, on the marshalled key, and deliberately not
+// utils.KeysEqual: that unwraps a certificate to the key it certifies, so a
+// certificate that merely certified a signing key would be accepted as the
+// authority itself. An authority is one specific key, as
+// RelayAuthority.IsUserAuthority says of the host's side.
+func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
+	if key == nil {
+		return false
+	}
+
+	for _, signer := range s.Signers {
+		if bytes.Equal(key.Marshal(), signer.PublicKey().Marshal()) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
