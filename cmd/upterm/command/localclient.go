@@ -60,7 +60,7 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	}
 	defer raw.restore()
 	if suspendSupported && suspendAvailable() {
-		client.Suspend = func() termsize.Size { return suspendLocalTerminal(raw, stdout, stopSelf) }
+		client.Suspend = func() (termsize.Size, bool) { return suspendLocalTerminal(raw, stdout, stopSelf) }
 	}
 	return client.Run(ctx)
 }
@@ -84,18 +84,19 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 // deferred restore. Left cooked in that case; the EIO the input goroutine
 // gets on its next read of a background terminal is what detaches it.
 //
+// It reports whether the terminal is this process's again, in raw mode: the
+// client puts the session's modes back on it only then.
+//
 // stop is stopSelf in production; a test injects one that does not actually
 // stop the process, so the terminal's state at the instant it runs — and
 // after this returns — can both be observed without staging real job
 // control.
-func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func() error) termsize.Size {
+func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func() error) (termsize.Size, bool) {
 	raw.restore()
 	_ = stop()
-	if raw.owned(raw.f) {
-		_ = raw.enter()
-	}
+	owned := raw.owned(raw.f) && raw.enter() == nil
 	size, _ := tty.Size(stdout)
-	return size
+	return size, owned
 }
 
 // localDisconnectMessage is what upterm host prints when the daemon

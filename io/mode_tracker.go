@@ -33,6 +33,11 @@ const maxStringBytes = 4096
 //
 // The three alternate-screen modes are listed here because they are worth
 // restoring, but they are not kept in decPrivate: see altScreenModes.
+//
+// 1048 is not listed: it saves the cursor on set and restores it on reset, as
+// DECSC and DECRC do, and leaves the terminal in no mode. Replayed, it would
+// save wherever a terminal's cursor happens to be, and undone, it would move
+// the cursor to wherever the session last saved it.
 var restorable = map[int]bool{
 	1:    false, // DECCKM, application cursor keys
 	7:    true,  // DECAWM, autowrap
@@ -45,7 +50,6 @@ var restorable = map[int]bool{
 	1005: false, // UTF-8 mouse encoding
 	1006: false, // SGR mouse encoding
 	1047: false, // alternate screen
-	1048: false, // save/restore cursor
 	1049: false, // alternate screen + cursor, the common one
 	2004: false, // bracketed paste
 }
@@ -116,11 +120,8 @@ const (
 // one decision: BEL terminates an OSC and nothing else -- xterm accepts it
 // there, and for a DCS, PM, APC or SOS only ST will do.
 //
-// CAN (0x18) and SUB (0x1a) end a string on the DEC state machine too, and are
-// not honoured here, as they are not in the CSI parser either. The cost is
-// paid in the partial: a string cancelled that way stays open, so the ordinary
-// text that follows the CAN goes on being recorded as payload -- up to
-// maxStringBytes of it -- until an ESC or, in an OSC, a BEL closes it.
+// CAN (0x18) and SUB (0x1a) end a string too, as they end every other
+// sequence; step handles them before any state does.
 //
 // The 8-bit C1 introducers (0x9b for CSI, 0x9d for OSC, 0x90 for DCS and the
 // rest) are out of scope. The tracker decodes no character set, and in the
@@ -160,6 +161,17 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 }
 
 func (m *ModeTracker) step(b byte) {
+	if (b == 0x18 || b == 0x1a) && m.state != msNormal {
+		// CAN or SUB: whatever sequence was in progress is cancelled, from
+		// any state, as the DEC parser terminals implement has it, and what
+		// follows prints. Kept open, its text would be recorded as the
+		// sequence's payload and replayed as a partial by Snapshot.
+		m.state = msNormal
+		m.kind = skNone
+		m.reset()
+		m.closePartial()
+		return
+	}
 	switch m.state {
 	case msNormal:
 		if b == 0x1b {
@@ -354,7 +366,7 @@ func (m *ModeTracker) resetToDefaults() {
 // verified against xterm's ReallyReset. tmux has no handler for CSI ! p at
 // all, so it ignores DECSTR and resets nothing -- it keeps this set, and
 // everything else the tracker records -- the screen buffer, the mouse modes,
-// focus reporting, 1048 and bracketed paste included -- across it too.
+// focus reporting and bracketed paste included -- across it too.
 var softResetModes = []int{1, 7, 25} // DECCKM, DECAWM, DECTCEM
 
 // softReset applies DECSTR. It is not RIS with a different spelling: it leaves
@@ -473,11 +485,23 @@ func (m *ModeTracker) finishCSI(final byte) {
 // keeps the mouse or the alternate screen while running a child, which is not
 // how a program that shells out behaves.
 //
-// The order is the order a terminal has to receive it in: leave the alternate
-// screen first, through the mode that entered it, since everything after it
+// Being inside a sequence is state too. Output can stop anywhere — between
+// the chunks a suspend falls between, or at a session's last byte — and a
+// terminal left inside a sequence reads whatever the shell prints next as the
+// rest of it: an unfinished OSC swallows the prompt whole. CAN cancels a
+// sequence from any state on the DEC parser terminals implement, and does
+// nothing outside one.
+//
+// The order is the order a terminal has to receive it in: out of any sequence
+// first, so the rest is not read as part of it; then off the alternate
+// screen, through the mode that entered it, since everything after that
 // applies to the screen the terminal is going back to.
 func (m *ModeTracker) Restore() []byte {
 	var out []byte
+
+	if m.state != msNormal {
+		out = append(out, 0x18)
+	}
 
 	if m.altActive() {
 		out = append(out, 0x1b, '[', '?')

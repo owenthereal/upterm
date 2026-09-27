@@ -72,15 +72,18 @@ type Client struct {
 	// terminal to whatever bound the socket.
 	HostKeys []ssh.PublicKey
 
-	// Suspend stops the process this client runs in and returns the
-	// terminal's size once it is running again — for a local terminal:
-	// restore the terminal, SIGTSTP, re-enter raw mode, measure. Nil
-	// disables the ~^Z sequence, and the bytes reach the session instead.
+	// Suspend stops the process this client runs in and returns once it is
+	// running again, with the terminal's size and whether the terminal is
+	// this client's again — for a local terminal: restore the terminal,
+	// SIGTSTP, re-enter raw mode if still the foreground, measure. owned is
+	// false after bg: the terminal is the foreground job's, and the
+	// attachment ends there, writing nothing more to it. Nil disables the ~^Z
+	// sequence, and the bytes reach the session instead.
 	//
 	// It is the embedder's because what "suspend" means is the terminal's
 	// business, not the protocol's: this package never touches termios and
 	// never signals its own process.
-	Suspend func() termsize.Size
+	Suspend func() (size termsize.Size, owned bool)
 
 	// dial reaches the socket; nil is a unix dial. Tests hand over a
 	// connection they can block, to stand in for a daemon that has stopped
@@ -276,13 +279,18 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		// redirected into a pipe or a file is not left in any modes, and mode
 		// sequences appended to a captured log are nothing but noise.
 		modes *uio.ModeTracker
+		// Whose turn it is to write to Stdout, and so to use the tracker: the
+		// copy's for each chunk, a suspend's for as long as the terminal is
+		// out of the session's modes. A channel rather than a mutex so that a
+		// suspend can give up waiting for it.
+		turn = make(chan struct{}, 1)
 	)
 	if c.Pty != nil {
 		modes = uio.NewModeTracker()
 	}
 	go func() {
 		defer close(copied)
-		copyErr = c.copyOutput(stdout, modes, &abandoned)
+		copyErr = c.copyOutput(stdout, modes, turn, &abandoned)
 	}()
 
 	var g run.Group
@@ -323,7 +331,7 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	}
 	if c.Stdin != nil {
 		g.Add(func() error {
-			if c.forwardInput(ctx, sess, stdin, logger) {
+			if c.forwardInput(ctx, sess, stdin, modes, turn, &abandoned, logger) {
 				record(Result{Reason: Detached})
 			}
 			return nil
@@ -385,12 +393,13 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		// screen, cursor hidden, mouse reporting on. Restoring the termios
 		// settings around this call says nothing about any of that.
 		//
-		// Here rather than in the copy goroutine because the tracker is that
-		// goroutine's until it ends, and only this path has seen it end. On
-		// the timeout below the copy may still be inside a write to a
-		// terminal that is not taking bytes, which is the one case where
-		// writing more is the wrong answer anyway.
-		if modes != nil {
+		// Here rather than in the copy goroutine because only this path has
+		// seen it end, which leaves the tracker free: a suspend, its one
+		// other user, ended with the group. On the timeout below the copy
+		// may still be inside a write to a terminal that is not taking
+		// bytes, which is the one case where writing more is the wrong
+		// answer anyway.
+		if modes != nil && !abandoned.Load() {
 			if restore := modes.Restore(); len(restore) > 0 {
 				c.writeWithin(tail.C, restore, logger)
 			}
@@ -434,16 +443,75 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 }
 
 // suspend stops the process and puts the session back in step with the
-// terminal that comes back. Two requests, both best-effort: the size, because
-// the terminal may have been resized while this process was stopped, and a
-// WINCH, because a full-screen program repaints on it and the scrollback this
-// client stopped reading is already behind it.
+// terminal that comes back.
+//
+// The terminal goes to the shell out of the session's modes, as a detach
+// leaves it; otherwise the shell's prompt is drawn on the alternate screen,
+// with no cursor and the mouse reporting clicks as input. It is put back into
+// them only if it is this client's again, and before the WINCH below, so the
+// program repaints onto the screen it believes it is drawing on. The way back
+// is the tracker's Snapshot, the bytes a joiner is given, partial sequence
+// included: a chunk that stopped mid-sequence before the suspend is followed
+// by one that completes it rather than printing.
+//
+// The output is held from the one to the other: written in between, it would
+// be drawn over the shell's screen, and a mode it set would make a liar of
+// the restore. The hold is taken from the copy within outputDrainTimeout,
+// because the copy may be parked in a write to a terminal that has stopped
+// taking bytes, and nothing interrupts that.
+//
+// It reports whether the terminal is still this client's to draw on. It is
+// not when the process came back without it — bg: the terminal is the
+// foreground job's, and SIGTTOU, ignored, stops no write to it — or when the
+// terminal stopped taking bytes within the bound, leaving a write parked
+// that completes whenever it can, beside anything written after it. Then
+// Stdout is abandoned before the hold is released, so nothing more is
+// written, and the caller detaches. If the terminal stopped before the
+// process did, the process is not stopped at all: the parked write would
+// land on the foreground shell's screen once bg continued it.
+//
+// Then, if it is, two requests, both best-effort: the size, because the
+// terminal may have been resized while this process was stopped, and a
+// WINCH, because a full-screen program repaints on it and the scrollback
+// this client stopped reading is already behind it.
 //
 // Both are bounded for the reason every other request on this path is: they
 // fail when the connection has gone, which is when the group is unwinding,
 // and a handler blocked on a stopped terminal would park the unwind here.
-func (c *Client) suspend(sess *ssh.Session, logger *slog.Logger) {
-	size := c.Suspend()
+func (c *Client) suspend(sess *ssh.Session, modes *uio.ModeTracker, turn chan struct{}, abandoned *atomic.Bool, logger *slog.Logger) (kept bool) {
+	if modes != nil {
+		leave := time.NewTimer(outputDrainTimeout)
+		defer leave.Stop()
+		select {
+		case turn <- struct{}{}:
+		case <-leave.C:
+			logging.WarnWithin(logger, logging.LogBound, "detaching instead of suspending: the terminal is not taking output", "timeout", outputDrainTimeout)
+			abandoned.Store(true)
+			return false
+		}
+		if restore := modes.Restore(); len(restore) > 0 && !c.writeWithin(leave.C, restore, logger) {
+			abandoned.Store(true)
+			<-turn
+			return false
+		}
+	}
+	size, kept := c.Suspend()
+	if kept && modes != nil {
+		back := time.NewTimer(outputDrainTimeout)
+		defer back.Stop()
+		if snapshot := modes.Snapshot(); len(snapshot) > 0 {
+			kept = c.writeWithin(back.C, snapshot, logger)
+		}
+	}
+	if !kept {
+		abandoned.Store(true)
+	}
+	if modes != nil {
+		<-turn
+	}
+	if !kept {
+		return false
+	}
 	if c.Pty != nil && size.Valid() {
 		if err := sess.WindowChange(size.Rows, size.Cols); err != nil {
 			logging.LogWithin(logger, slog.LevelDebug, logging.LogBound, "window change not delivered after resume", "error", err)
@@ -454,11 +522,13 @@ func (c *Client) suspend(sess *ssh.Session, logger *slog.Logger) {
 	if err := sess.Signal(ssh.Signal("WINCH")); err != nil {
 		logging.LogWithin(logger, slog.LevelDebug, logging.LogBound, "redraw nudge not delivered after resume", "error", err)
 	}
+	return true
 }
 
 // writeWithin writes p to Stdout, giving up on waiting for it when deadline
-// fires. It exists for the mode restore, which is the one write Run makes
-// after the session is gone.
+// fires, and reports whether the terminal took it. It exists for the mode
+// writes: the restore Run makes after the session is gone, and the two a
+// suspend makes around the stop.
 //
 // The write is on a goroutine because a write to a terminal cannot be
 // interrupted: it is the descriptor's owner that would have to close it, and
@@ -471,7 +541,7 @@ func (c *Client) suspend(sess *ssh.Session, logger *slog.Logger) {
 // Its error is logged within a bound too: this is the path a stopped terminal
 // takes, and a logger writing to that same terminal is the classic way to
 // turn a bounded wait into an unbounded one.
-func (c *Client) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.Logger) {
+func (c *Client) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.Logger) (written bool) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := c.Stdout.Write(p)
@@ -482,8 +552,10 @@ func (c *Client) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 		if err != nil {
 			logging.WarnWithin(logger, logging.LogBound, "could not restore the terminal's modes", "error", err)
 		}
+		return err == nil
 	case <-deadline:
 		logging.WarnWithin(logger, logging.LogBound, "the terminal did not take its mode restore", "timeout", outputDrainTimeout)
+		return false
 	}
 }
 
@@ -496,19 +568,24 @@ func (c *Client) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 // so that the terminal can be put back afterwards. It is fed what was read
 // rather than what was written: a write that fails has still reached the
 // terminal as far as the modes in it are concerned, and the tracker is the
-// record of what this terminal was asked to do, not of what arrived.
-func (c *Client) copyOutput(r io.Reader, modes *uio.ModeTracker, abandoned *atomic.Bool) error {
+// record of what this terminal was asked to do, not of what arrived. Each
+// chunk is fed and written on turn, which a suspend takes to keep the
+// terminal to itself while it is out of the session's modes.
+func (c *Client) copyOutput(r io.Reader, modes *uio.ModeTracker, turn chan struct{}, abandoned *atomic.Bool) error {
 	buf := make([]byte, 32<<10)
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {
+			turn <- struct{}{}
 			if abandoned.Load() {
+				<-turn
 				return nil
 			}
 			if modes != nil {
 				_, _ = modes.Write(buf[:n])
 			}
 			nw, werr := c.Stdout.Write(buf[:n])
+			<-turn
 			if werr != nil {
 				return werr
 			}
@@ -542,7 +619,7 @@ func (c *Client) copyOutput(r io.Reader, modes *uio.ModeTracker, abandoned *atom
 // would park it here, before the caller has recorded the detach and before
 // anything has cancelled: the attachment is ending either way, and the
 // connection close that follows cancellation says so.
-func (c *Client) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, logger *slog.Logger) (detached bool) {
+func (c *Client) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, modes *uio.ModeTracker, turn chan struct{}, abandoned *atomic.Bool, logger *slog.Logger) (detached bool) {
 	filter := NewEscapeFilter(c.Escape, c.Suspend != nil)
 	buf := make([]byte, 4096)
 	r := uio.NewContextReader(ctx, c.Stdin)
@@ -592,8 +669,9 @@ func (c *Client) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.W
 				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
 					"backlog-bytes", inputBacklogLimit)
 			}
-			if action == EscapeSuspend {
-				c.suspend(sess, logger)
+			if action == EscapeSuspend && !c.suspend(sess, modes, turn, abandoned, logger) {
+				flush()
+				return true
 			}
 		}
 		if err != nil {

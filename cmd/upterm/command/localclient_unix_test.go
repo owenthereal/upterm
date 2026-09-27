@@ -74,7 +74,7 @@ func TestSuspendLocalTerminal(t *testing.T) {
 				return nil
 			}
 
-			suspendLocalTerminal(r, tty, stop)
+			_, owned := suspendLocalTerminal(r, tty, stop)
 
 			require.NotNil(t, stateAtStop, "stop was never called")
 			require.True(t, reflect.DeepEqual(cooked, stateAtStop),
@@ -82,6 +82,8 @@ func TestSuspendLocalTerminal(t *testing.T) {
 
 			got, err := term.GetState(fd)
 			require.NoError(t, err)
+			require.Equal(t, tc.wantRawAtEnd, owned,
+				"reports the terminal as its own again exactly when it took it back: the session's modes go back on with raw mode, or not at all")
 			if tc.wantRawAtEnd {
 				require.True(t, reflect.DeepEqual(raw, got), "still the foreground: must re-enter raw mode on the way out")
 			} else {
