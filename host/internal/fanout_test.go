@@ -280,6 +280,7 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 // The synchronous recorder on the fan-out is the reference for what got past
 // the pacer.
 func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
+	patientExitDrain(t)
 	p, writers := newTestPacer(t, time.Minute)
 	var accepted recordingWriter
 	require.NoError(t, writers.Append(&accepted))
