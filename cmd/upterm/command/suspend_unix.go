@@ -18,6 +18,11 @@ const suspendSupported = true
 // test can shorten it.
 var suspendContWait = 2 * time.Second
 
+// suspendContGrace is how much longer stopSelf waits for a continue once
+// suspendContWait has expired; see stopSelf. A package var so a test can
+// lengthen it.
+var suspendContGrace = 250 * time.Millisecond
+
 // tstpIgnored reports whether SIGTSTP is ignored through os/signal.
 // Injectable so the guard's wiring can be tested without changing the
 // process's real disposition, which os/signal cannot undo.
@@ -37,7 +42,21 @@ var tstpIgnored = func() bool { return signal.Ignored(syscall.SIGTSTP) }
 func suspendAvailable() bool { return !tstpIgnored() }
 
 // stopSelf stops this process and returns once it has been continued — or
-// once suspendContWait has gone by without the stop ever landing.
+// once suspendContWait has gone by without the stop ever landing — and
+// reports which.
+//
+// unless, when not nil, is asked once the continue is being watched and just
+// before the raise; when it holds, nothing is raised and a continue is
+// reported, there being nothing to wait for. It is how a stop again after bg
+// avoids stopping a job that fg has already put back in the foreground:
+// bg; fg typed together can land between the caller's own check and this
+// raise. Asked after the watch is armed, fg is either seen by it — fg hands
+// the terminal over before it sends SIGCONT — or its SIGCONT comes after the
+// raise, where POSIX has it discard a stop still pending or continue one that
+// has landed. Only a SIGCONT in the instant between the question and the
+// raise is mistaken for the stop's own: raw mode is re-entered, the stop
+// lands after it, and the fg that follows resumes the process in whatever
+// modes the shell puts back.
 //
 // The signal goes to this pid, not the group, exactly as ssh's ~^Z does: the
 // shell that started us reports "Stopped" and fg is what comes back. Unlike
@@ -74,25 +93,38 @@ func suspendAvailable() bool { return !tstpIgnored() }
 // The timer cannot take the select during a genuine stop: no Go code runs
 // while the process is stopped, so that branch is only reachable once the
 // process is running again. Being stopped for longer than the bound is
-// therefore not a misfire — it leaves both channels ready at the instant of
-// the continue, and the select may pick either, which is harmless precisely
-// because both branches do the same thing. The wait exists only so that raw
-// mode is not re-entered *before* the stop lands (the Linux bug above); it
-// is not a promise that a continue happened. Nothing is printed when the
-// bound expires: the client is holding a terminal the session is drawing on,
-// and ssh's ~^Z is just as silent when its own stop is discarded.
-func stopSelf() error {
+// therefore not a misfire, but it does come back with the timer expired and
+// the continue arriving at the same instant — ready beside it in a select
+// that may pick either, or still on its way through os/signal. So an expired
+// bound waits suspendContGrace more before reporting that no continue came:
+// the caller stops again when continued in the background, and a long stop
+// mistaken for a discarded one would have it give up and detach instead.
+// Nothing is printed when the bound expires: the client is holding a
+// terminal the session is drawing on, and ssh's ~^Z is just as silent when
+// its own stop is discarded.
+func stopSelf(unless func() bool) bool {
 	cont := make(chan os.Signal, 1)
 	signal.Notify(cont, syscall.SIGCONT)
 	defer signal.Stop(cont)
+	if unless != nil && unless() {
+		return true
+	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTSTP); err != nil {
-		return err
+		return false
 	}
 	timer := time.NewTimer(suspendContWait)
 	defer timer.Stop()
 	select {
 	case <-cont:
+		return true
 	case <-timer.C:
 	}
-	return nil
+	grace := time.NewTimer(suspendContGrace)
+	defer grace.Stop()
+	select {
+	case <-cont:
+		return true
+	case <-grace.C:
+		return false
+	}
 }

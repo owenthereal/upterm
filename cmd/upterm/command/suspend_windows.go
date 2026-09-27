@@ -2,8 +2,6 @@
 
 package command
 
-import "errors"
-
 // suspendSupported is false: Windows has no job control to hand the terminal
 // back to, so ~^Z is not offered and ^Z reaches the session as a keystroke.
 const suspendSupported = false
@@ -12,4 +10,4 @@ const suspendSupported = false
 // reads the same on every platform.
 func suspendAvailable() bool { return false }
 
-func stopSelf() error { return errors.ErrUnsupported }
+func stopSelf(func() bool) bool { return false }
