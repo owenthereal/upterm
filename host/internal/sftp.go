@@ -32,12 +32,15 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		defer h.sftpPermissionChecker.ClearSession(sessionID)
 	}
 
-	// Get client info for permission dialogs
+	// Get client info for permission dialogs. The fingerprint is the guest's
+	// own key, as the client list shows it: sess.PublicKey() is the
+	// certificate the relay minted for its hop to the host.
 	clientInfo := hostsftp.ClientInfo{
 		SessionID: sessionID,
 	}
-	if pk := sess.PublicKey(); pk != nil {
-		clientInfo.Fingerprint = utils.FingerprintSHA256(pk)
+	guest, isGuest := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest)
+	if isGuest && guest.key != nil {
+		clientInfo.Fingerprint = utils.FingerprintSHA256(guest.key)
 	}
 
 	h.logger.Info("SFTP session started", "readonly", h.readonly, "client", clientInfo.Fingerprint)
@@ -66,7 +69,7 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 
 	// Set start directory to user's home for relative path resolution
 	server := sftp.NewRequestServer(sess, handlers, sftp.WithStartDirectory(userHome))
-	if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
+	if isGuest {
 		id := clientEventID(sessionID)
 		emitClientJoinEvent(h.eventEmmiter, id, guest.auth, guest.key)
 		defer emitClientLeftEvent(h.eventEmmiter, id)
