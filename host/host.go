@@ -342,6 +342,9 @@ type Host struct {
 	// record write: blocking in it holds the write, and an error skips it as
 	// a failed write.
 	onJoinPublish func() error
+	// onReadyPublish is a per-Host test barrier run before the ready record
+	// write: an error skips it as a failed write.
+	onReadyPublish func() error
 	// joins is the running session's join state, for JoinState. Set by Run
 	// before any actor starts and cleared on its way out, so a callback Run
 	// makes reads it without a lock of its own.
@@ -390,6 +393,12 @@ var errJoinTimeout = internal.ErrJoinTimeout
 
 // errSessionStopped retains the cancellation contract for Host.Run callers.
 var errSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
+
+// errReadyUnpublished marks a run ended because its readiness could not be
+// published. The command is running by then, so it is teardown that stops
+// it, and what that does to the command is not the command's own ending: the
+// session never became ready, and is recorded as startup_failed.
+var errReadyUnpublished = errors.New("failed to publish the session as ready")
 
 type hostSignalError struct{ signal syscall.Signal }
 
@@ -1106,11 +1115,18 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			// synchronously under its own lock, once.
 			publishedStatus := sessiondir.StatusReady
 			if c.SessionDir != nil {
-				if err := c.SessionDir.Update(func(r *sessiondir.Record) {
-					r.SessionID = sessionID
-					advanceStatus(r, sessiondir.StatusReady)
-					publishedStatus = r.Status
-				}); err != nil {
+				var err error
+				if c.onReadyPublish != nil {
+					err = c.onReadyPublish()
+				}
+				if err == nil {
+					err = c.SessionDir.Update(func(r *sessiondir.Record) {
+						r.SessionID = sessionID
+						advanceStatus(r, sessiondir.StatusReady)
+						publishedStatus = r.Status
+					})
+				}
+				if err != nil {
 					// Fatal to the run, where every other record write here
 					// is not, because this one is the word readiness is made
 					// of: the callback below tells a parent the session is
@@ -1121,7 +1137,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					// caller already has, rather than running on unreachable.
 					logger.Error("Failed to publish the session as ready",
 						"record", c.SessionDir.RecordPath(), "error", err)
-					return fmt.Errorf("failed to publish the session as ready: %w", err)
+					return fmt.Errorf("%w: %w", errReadyUnpublished, err)
 				}
 			}
 			// The join timeout starts counting here, before the callback
@@ -1246,6 +1262,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// Nobody attached, so nothing ran and nothing failed: the session
 		// was abandoned before its command started.
 		runReason = sessiondir.ReasonStartupAbandoned
+	case errors.Is(err, errReadyUnpublished):
+		// Ahead of the command's result, which here says only what teardown
+		// did to it.
+		runReason = sessiondir.ReasonStartupFailed
 	case res.Exited:
 		code := res.Code
 		runExitCode = &code
