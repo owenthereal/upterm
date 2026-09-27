@@ -394,9 +394,9 @@ func TestClient_SuspendSequenceCallsTheHookThenResizesAndNudges(t *testing.T) {
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
 		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
-	c.Suspend = func() termsize.Size {
+	c.Suspend = func() (termsize.Size, bool) {
 		calls.Add(1)
-		return termsize.Size{Rows: 24, Cols: 100}
+		return termsize.Size{Rows: 24, Cols: 100}, true
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -464,6 +464,228 @@ func TestClient_SuspendSequenceIsPassedThroughWithoutAHook(t *testing.T) {
 	require.Equal(t, "\r~\x1a", door.taken(), "with no Suspend hook both escape bytes are the session's")
 
 	cancel()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// syncSink is a terminal that takes every write and can be read back while
+// the client is still writing to it.
+type syncSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// suspendScreen is what a full-screen program leaves a terminal in: the
+// alternate screen, with no cursor.
+const suspendScreen = "\x1b[?1049h\x1b[?25lfull screen"
+
+// suspendingDoor writes suspendScreen, then whatever arrives on more, and
+// hands every signal its session receives to sigs — the WINCH a resume ends
+// with is how a test knows the suspend has finished.
+func suspendingDoor(t *testing.T, sigs chan<- gssh.Signal, more <-chan string) *fakeDoor {
+	t.Helper()
+	return serveDoor(t, func(s gssh.Session) {
+		s.Signals(sigs)
+		_, _ = io.WriteString(s, suspendScreen)
+		for {
+			select {
+			case p := <-more:
+				_, _ = io.WriteString(s, p)
+			case <-s.Context().Done():
+				return
+			}
+		}
+	})
+}
+
+// waitFor polls cond until it holds or testTimeout passes, and fails with msg
+// if it never does.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// ~^Z hands the terminal to the shell, whose prompt used to be drawn on
+// whatever the session had left there: the alternate screen, with no cursor
+// — what a detach undoes, and for the same reason. So the terminal is taken
+// out of the session's modes before the hook stops the process, and put back
+// into them once it is running again, before the WINCH that has the program
+// repaint: the repaint lands where the program believes it is drawing.
+//
+// Put back only when the hook reports the terminal is this client's again.
+// Continued by bg, it is the foreground job's, and the session's modes
+// written over it would put that job's shell on the alternate screen.
+func TestClient_SuspendTakesTheTerminalOutOfTheSessionsModesAndBack(t *testing.T) {
+	const restore = "\x1b[?1049l\x1b[?25h"
+	for _, tc := range []struct {
+		name  string
+		owned bool   // what the hook reports: fg (true) or bg (false)
+		want  string // the whole terminal, once the resume's WINCH has been sent
+	}{
+		{name: "fg: put back", owned: true, want: suspendScreen + restore + "\x1b[?25l\x1b[?1049h"},
+		{name: "bg: left out", owned: false, want: suspendScreen + restore},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sigs := make(chan gssh.Signal, 1)
+			d := suspendingDoor(t, sigs, nil)
+
+			var out syncSink
+			atStop := make(chan string, 1)
+			pr, pw := io.Pipe()
+			defer func() { _ = pw.Close() }()
+			c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: &out, Escape: '~',
+				Pty: &Pty{Term: "xterm", Size: termsize.Default},
+				Suspend: func() (termsize.Size, bool) {
+					atStop <- out.String()
+					return termsize.Size{}, tc.owned
+				}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := runAsync(t, ctx, c)
+
+			waitFor(t, func() bool { return out.String() == suspendScreen }, "the session's screen never reached the terminal")
+			_, err := pw.Write([]byte("\r~\x1a"))
+			require.NoError(t, err)
+
+			select {
+			case got := <-atStop:
+				require.Equal(t, suspendScreen+restore, got, "out of the session's modes by the time the process stops")
+			case <-time.After(testTimeout):
+				t.Fatal("the hook was never called")
+			}
+			select {
+			case <-sigs:
+			case <-time.After(testTimeout):
+				t.Fatal("the resume never nudged the session")
+			}
+			require.Equal(t, tc.want, out.String())
+
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(testTimeout):
+				t.Fatal("Run did not return after cancellation")
+			}
+		})
+	}
+}
+
+// Nothing the session sends may reach the terminal between the two: drawn
+// there, it lands on the shell's screen, and a mode it sets makes a liar of
+// the restore. Held until the modes are back, it lands after them.
+func TestClient_SuspendHoldsTheSessionsOutputUntilTheTerminalIsBack(t *testing.T) {
+	sigs := make(chan gssh.Signal, 1)
+	more := make(chan string, 1)
+	d := suspendingDoor(t, sigs, more)
+
+	var out syncSink
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: &out, Escape: '~',
+		Pty: &Pty{Term: "xterm", Size: termsize.Default},
+		Suspend: func() (termsize.Size, bool) {
+			more <- "while stopped"
+			// Long enough for the output copy to have written it, were it
+			// free to.
+			time.Sleep(200 * time.Millisecond)
+			return termsize.Size{}, true
+		}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAsync(t, ctx, c)
+
+	waitFor(t, func() bool { return out.String() == suspendScreen }, "the session's screen never reached the terminal")
+	_, err := pw.Write([]byte("\r~\x1a"))
+	require.NoError(t, err)
+
+	select {
+	case <-sigs:
+	case <-time.After(testTimeout):
+		t.Fatal("the resume never nudged the session")
+	}
+	waitFor(t, func() bool { return strings.HasSuffix(out.String(), "while stopped") }, "the held output never arrived")
+	require.Equal(t, suspendScreen+"\x1b[?1049l\x1b[?25h"+"\x1b[?25l\x1b[?1049h"+"while stopped", out.String())
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// The output is held by taking it from the copy, which can be parked in a
+// write to a terminal that has stopped taking bytes, and nothing interrupts
+// that. So ~^Z waits for it only within the bound a detach's drain has; past
+// it the process is suspended with the modes untouched, as it was before they
+// were handled at all, rather than parking the input — and ~. with it —
+// behind a write that may never return.
+func TestClient_SuspendIsNotHeldByATerminalThatStoppedTakingOutput(t *testing.T) {
+	orig := outputDrainTimeout
+	outputDrainTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { outputDrainTimeout = orig })
+
+	sigs := make(chan gssh.Signal, 1)
+	d := suspendingDoor(t, sigs, nil)
+
+	sink := newBlockedSink()
+	suspended := make(chan int, 1)
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: sink, Escape: '~',
+		Pty: &Pty{Term: "xterm", Size: termsize.Default},
+		Suspend: func() (termsize.Size, bool) {
+			suspended <- sink.count()
+			return termsize.Size{}, true
+		}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAsync(t, ctx, c)
+
+	select {
+	case <-sink.entered:
+	case <-time.After(testTimeout):
+		t.Fatal("the session's screen never reached the terminal")
+	}
+	_, err := pw.Write([]byte("\r~\x1a"))
+	require.NoError(t, err)
+
+	select {
+	case writes := <-suspended:
+		require.Equal(t, 1, writes, "nothing is written behind a parked write")
+	case <-time.After(5 * time.Second):
+		t.Fatal("~^Z was held by a terminal that stopped taking output")
+	}
+	select {
+	case <-sigs:
+	case <-time.After(testTimeout):
+		t.Fatal("the resume never nudged the session")
+	}
+	require.Equal(t, 1, sink.count(), "and nothing put back that was never taken out")
+
+	cancel()
+	close(sink.release)
 	select {
 	case <-done:
 	case <-time.After(testTimeout):
