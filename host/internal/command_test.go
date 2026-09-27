@@ -121,6 +121,19 @@ func (p *exitedPTY) Read(b []byte) (int, error) {
 	return n, nil
 }
 
+// patientExitDrain gives the exit drain seconds rather than 100ms of quiet,
+// for a test that needs every chunk exitedPTY holds but is not about the drain
+// window itself. Each read is paced by a sleep, and on a loaded CI runner a
+// goroutine woken from one has arrived more than 100ms late (Windows, under
+// -race): the drain took that for quiet and cancelled the copy before the
+// tail.
+func patientExitDrain(t *testing.T) {
+	t.Helper()
+	idle, deadline := outputIdleTimeout, outputDrainTimeout
+	t.Cleanup(func() { outputIdleTimeout, outputDrainTimeout = idle, deadline })
+	outputIdleTimeout, outputDrainTimeout = 5*time.Second, 5*time.Second
+}
+
 func (p *exitedPTY) Write(b []byte) (int, error) { return len(b), nil }
 func (p *exitedPTY) Close() error {
 	p.mu.Lock()
@@ -164,6 +177,7 @@ func (p *exitedPTY) Signal(syscall.Signal) error { return nil }
 // just before exiting is delivered rather than dropped when Run notices the
 // exit.
 func TestCommand_DrainsOutputAfterExit(t *testing.T) {
+	patientExitDrain(t)
 	require := require.New(t)
 
 	const lastLine = "written just before exit"
