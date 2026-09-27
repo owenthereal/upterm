@@ -224,7 +224,7 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 **Security model:**
 
 - File transfers have the same access as the terminal session (clients can already access any file via the shell)
-- Without `--accept`, each file operation prompts the host for approval via a dialog
+- Without `--accept`, each file operation prompts the host for approval via a dialog. Where no dialog can be shown (no display, such as over SSH, or on Linux no `zenity`, `qarma` or `matedialog` to draw it), the operation is denied
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 

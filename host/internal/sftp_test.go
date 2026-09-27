@@ -1,12 +1,14 @@
 package internal
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	hostsftp "github.com/owenthereal/upterm/host/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -269,4 +271,22 @@ func TestListerat(t *testing.T) {
 	n, err = lister.ListAt(buf, int64(len(infos)))
 	assert.ErrorIs(t, err, io.EOF)
 	assert.Equal(t, 0, n)
+}
+
+// unavailableChecker is the dialog checker where no dialog can be shown: no
+// display, or no dialog tool to draw one.
+type unavailableChecker struct{}
+
+func (unavailableChecker) CheckPermission(hostsftp.Operation, hostsftp.ClientInfo, ...string) (hostsftp.PermissionResult, error) {
+	return hostsftp.PermissionDenied, errors.New("no display")
+}
+
+func (unavailableChecker) ClearSession(string) {}
+
+// An operation nobody can be asked about is denied. A host that wants
+// transfers without being asked passes --accept, which replaces the dialog
+// with a checker that allows everything.
+func TestSFTPSession_checkPermissionDeniesWhenNobodyCanBeAsked(t *testing.T) {
+	session := &SFTPSession{permissionChecker: unavailableChecker{}, logger: discardLogger()}
+	require.Error(t, session.checkPermission(hostsftp.OpDownload, "/notes.txt"))
 }
