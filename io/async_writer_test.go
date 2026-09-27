@@ -523,7 +523,7 @@ func TestAsyncWriterBacklogReleasesWaitersWhenItStops(t *testing.T) {
 //
 // The case that matters is a piece landing after the snapshot was taken: the
 // abort must be refused even though since is not "stale" in the sense of
-// being ahead of Delivered. Invariant 3 is "Delivered == since", not "since
+// being ahead of Delivered. The condition is "Delivered == since", not "since
 // is not greater than Delivered" — an implementation that refused only when
 // since > delivered would still abort a guest that made progress after the
 // pacer's last look.

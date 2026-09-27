@@ -37,9 +37,10 @@ var (
 	ErrStalled = errors.New("asyncwriter: no progress within the stall timeout")
 
 	// deadProgress is the Progress channel a writer that has already failed or
-	// closed hands out. Nothing will ever arrive on it, so a caller that took
-	// it after the writer died still sees it as fired rather than blocking on
-	// a channel from before the writer's end.
+	// closed hands out. Such a writer's own progress channel is the
+	// replacement that Close or fail installed, and nothing will ever close
+	// it; handing out one that is already closed instead wakes a waiter at
+	// once, so it re-reads the Backlog and sees Live is false.
 	deadProgress = func() <-chan struct{} {
 		ch := make(chan struct{})
 		close(ch)
