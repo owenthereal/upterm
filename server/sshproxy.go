@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -128,24 +127,8 @@ func (a proxyAuth) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 // recognizes because the nodes of a cluster share these keys -- as the sideway
 // branch of prepare's host key callback already requires of HostSigners, which
 // is cloned from Signers.
-//
-// The comparison is exact, on the marshalled key, and deliberately not
-// utils.KeysEqual: that unwraps a certificate to the key it certifies, so a
-// certificate that merely certified a signing key would be accepted as the
-// authority itself. An authority is one specific key, as
-// RelayAuthority.IsUserAuthority says of the host's side.
 func (a proxyAuth) isOwnAuthority(key ssh.PublicKey) bool {
-	if key == nil {
-		return false
-	}
-
-	for _, s := range a.Signers {
-		if bytes.Equal(key.Marshal(), s.PublicKey().Marshal()) {
-			return true
-		}
-	}
-
-	return false
+	return signerAuthority(a.Signers, key)
 }
 
 // publicKeyFingerprint returns the SHA256 fingerprint of the underlying

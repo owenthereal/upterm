@@ -13,9 +13,8 @@ import (
 // signature makes a guest certificate's AuthRequest believable.
 //
 // The relay mints every guest's credential, naming in it the key the guest
-// authenticated with, and the host's sshd authorizes that name. Without an
-// authority to check, any self-signed certificate naming an authorized key is
-// accepted, so --authorized-user means nothing. The key to check against is not
+// authenticated with, and the host's sshd authorizes that name. For that name
+// to mean anything the host has to know which key may sign it. That key is not
 // a new thing to configure: it is the relay host key this host already decided
 // to trust, in its own host key callback. Wrap records it there.
 //

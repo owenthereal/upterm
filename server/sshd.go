@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -273,24 +272,8 @@ func (s *sshd) handlePublicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 }
 
 // isOwnAuthority reports whether key is one of this relay's signing keys.
-//
-// The comparison is exact, on the marshalled key, and deliberately not
-// utils.KeysEqual: that unwraps a certificate to the key it certifies, so a
-// certificate that merely certified a signing key would be accepted as the
-// authority itself. An authority is one specific key, as
-// RelayAuthority.IsUserAuthority says of the host's side.
 func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
-	if key == nil {
-		return false
-	}
-
-	for _, signer := range s.Signers {
-		if bytes.Equal(key.Marshal(), signer.PublicKey().Marshal()) {
-			return true
-		}
-	}
-
-	return false
+	return signerAuthority(s.Signers, key)
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {

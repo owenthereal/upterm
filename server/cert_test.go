@@ -79,9 +79,10 @@ func TestParseAuthRequestFromCert(t *testing.T) {
 		require.Equal(t, named.Marshal(), key.Marshal())
 	})
 
-	t.Run("an untrusted authority falls back to the certified key", func(t *testing.T) {
+	t.Run("an untrusted authority yields the certified key and no AuthRequest", func(t *testing.T) {
 		after, before := wide()
-		// The attack: a self-signed certificate naming an authorized key.
+		// A self-signed certificate naming an authorized key: its signer is not
+		// an authority, so the name must not be honoured.
 		cert := userCert(t, other, "session", authExt(t, named), after, before)
 
 		auth, key, err := parseAuthRequestFromCert("session", cert, authorityOf(relay))
@@ -101,9 +102,8 @@ func TestParseAuthRequestFromCert(t *testing.T) {
 		require.Equal(t, cert.Key.Marshal(), key.Marshal())
 	})
 
-	// Review Focus 1: a genuine certificate for one session, replayed at
-	// another on the same relay. The authority matches, so only the principal
-	// check can refuse it.
+	// A genuine certificate for one session, replayed at another on the same
+	// relay. The authority matches, so only the principal check can refuse it.
 	t.Run("a trusted certificate for another session is refused", func(t *testing.T) {
 		after, before := wide()
 		cert := userCert(t, relay, "session-a", authExt(t, named), after, before)
@@ -116,8 +116,8 @@ func TestParseAuthRequestFromCert(t *testing.T) {
 		require.Equal(t, cert.Key.Marshal(), key.Marshal())
 	})
 
-	// Review Focus 3: the validity window still bites, with the authority check
-	// now ahead of it. The window here is the one UserCertSigner mints, whose
+	// The validity window still bites, with the authority check now ahead of
+	// it. The window here is the one UserCertSigner mints, whose
 	// bounds are the skew tolerance either side of now -- CheckCert applies no
 	// tolerance of its own, so what the skew buys a host belongs with
 	// UserCertSigner, not here.
@@ -149,7 +149,7 @@ func TestParseAuthRequestFromCert(t *testing.T) {
 		require.Equal(t, cert.Key.Marshal(), key.Marshal())
 	})
 
-	// Review Focus 4: a trusted signer but a broken payload. Never guessed.
+	// A trusted signer but a broken payload. Never guessed.
 	t.Run("an unparseable extension payload is refused", func(t *testing.T) {
 		after, before := wide()
 		ext := map[string]string{upterm.SSHCertExtension: "\xff\xfe not protobuf"}
@@ -177,8 +177,8 @@ func TestParseAuthRequestFromCert(t *testing.T) {
 			"a failed parse must not return the key it failed to parse")
 	})
 
-	// Review Focus 5: the relay's own host certificate, replayed as a guest
-	// credential. Refused on type, before the authority is even consulted.
+	// The relay's own host certificate, replayed as a guest credential.
+	// Refused on type, before the authority is even consulted.
 	t.Run("a host certificate is not a user certificate", func(t *testing.T) {
 		hcs := HostCertSigner{Hostnames: []string{"relay"}}
 		certSigner, err := hcs.SignCert(relay)

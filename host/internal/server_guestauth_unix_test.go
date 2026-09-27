@@ -28,7 +28,7 @@ func guestCert(t *testing.T, relay ssh.Signer, authorizedKey ssh.PublicKey) ssh.
 	return signer
 }
 
-// Review Focus 2: relay B is a real relay, but not the one this host verified.
+// Relay B is a real relay, but not the one this host verified.
 func TestGuestCertFromAnotherAuthorityIsRefused(t *testing.T) {
 	authorized := testSigner(t)
 	h := startHost(t, &Server{

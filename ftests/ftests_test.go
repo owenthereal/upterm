@@ -108,6 +108,8 @@ var AuthTestCases = []FtestCase{
 	testHostNoAuthorizedKeyAnyClientJoin,
 	testClientAuthorizedKeyNotMatching,
 	testHostFailToShareWithoutPrivateKey,
+	testClientCertFromUnknownAuthorityRejected,
+	testClientAgentCertAuthorizedAsItsOwnKey,
 }
 
 // SessionTestCases contains all session management test functions
@@ -712,6 +714,9 @@ func (c *Host) InputOutput() (chan string, chan string) {
 
 type Client struct {
 	PrivateKeys []string
+	// Signers, when non-empty, replaces the credentials built from
+	// PrivateKeys, so a test can offer a certificate of its own making.
+	Signers []ssh.Signer
 	// NoDrainStdout leaves the session's stdout unread, modelling a guest that
 	// has stopped draining its SSH channel. Its window fills, and the host's
 	// write to it blocks.
@@ -792,6 +797,10 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 	auths, err := authMethodsFromFiles(c.PrivateKeys)
 	if err != nil {
 		return err
+	}
+
+	if len(c.Signers) > 0 {
+		auths = []ssh.AuthMethod{ssh.PublicKeys(c.Signers...)}
 	}
 
 	config := &ssh.ClientConfig{

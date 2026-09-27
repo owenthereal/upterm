@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"time"
@@ -91,10 +92,10 @@ func parseAuthRequestFromCert(principal string, cert *ssh.Certificate, isAuthori
 	}
 
 	// ssh.CertChecker.CheckCert below verifies that the signature matches
-	// cert.SignatureKey, and nothing more: it never asks whose key that is.
-	// Only CertChecker.Authenticate does, and upterm does not call it. So this
-	// check is the one standing between a self-signed certificate and an
-	// identity of its own choosing.
+	// cert.SignatureKey, and nothing more: it does not ask whose key that is.
+	// CertChecker.Authenticate is the API that consults IsUserAuthority, and
+	// this function calls CheckCert directly, so the authority has to be
+	// checked here for the AuthRequest below to mean anything.
 	if isAuthority == nil || !isAuthority(cert.SignatureKey) {
 		return nil, cert.Key, errCertUntrustedAuthority
 	}
@@ -120,6 +121,29 @@ func parseAuthRequestFromCert(principal string, cert *ssh.Certificate, isAuthori
 	}
 
 	return &auth, key, nil
+}
+
+// signerAuthority reports whether key is one of signers' public keys, and so
+// may vouch for a certificate's AuthRequest. Only the relay mints those, so its
+// own signing keys are the authorities its doors recognize.
+//
+// The comparison is exact, on the marshalled key, and deliberately not
+// utils.KeysEqual: that unwraps a certificate to the key it certifies, so a
+// certificate that merely certified a signing key would be accepted as the
+// authority itself. An authority is one specific key, as
+// RelayAuthority.IsUserAuthority says of the host's side.
+func signerAuthority(signers []ssh.Signer, key ssh.PublicKey) bool {
+	if key == nil {
+		return false
+	}
+
+	for _, s := range signers {
+		if bytes.Equal(key.Marshal(), s.PublicKey().Marshal()) {
+			return true
+		}
+	}
+
+	return false
 }
 
 type UserCertSigner struct {
