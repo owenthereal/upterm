@@ -91,6 +91,7 @@ func (d *delayedWriter) Write(p []byte) (int, error) {
 // it a barrier — and asserting *immediately after Run returns*, rather than
 // eventually, is what makes this test notice if it moves back.
 func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
+	patientExitDrain(t)
 	const lastLine = "written just before exit"
 
 	var guestOut recordingWriter
@@ -128,6 +129,7 @@ func TestCommandRunFlushesAcceptedOutputBeforeReturning(t *testing.T) {
 // whose last screenful never arrived looks from the outside like output the
 // command never produced.
 func TestCommandRunLogsAGuestThatNeverReceivedItsTail(t *testing.T) {
+	patientExitDrain(t)
 	// Never released, so the flush can only end at its deadline.
 	gate := make(chan struct{})
 	defer close(gate)
@@ -215,14 +217,18 @@ func TestCommandRunDoesNotHangOnABlockedLogger(t *testing.T) {
 // for this test to check, because the interrupt starts watching from the
 // moment the mock pty's Wait returns -- immediately -- so a gap wide enough
 // to read as quiet is also wide enough to swallow the first chunk before it
-// ever arrives. The chunks here instead arrive well inside that 100ms window,
-// so waitIdle never sees quiet at all; it is only cut off by the 1s deadline,
+// ever arrives. So the test widens the quiet window past the deadline:
+// waitIdle never sees quiet at all; it is only cut off by the 1s deadline,
 // with the pty still holding chunks the copy never got to. That is the other
 // half of "waitIdle does not establish nothing more can be produced": even
 // its own deadline leaves the copy still running when the interrupt cancels
 // it. The comparison is against a synchronous writer attached to the same
 // fan-out, which by definition has everything the fan-out accepted.
 func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
+	idle := outputIdleTimeout
+	t.Cleanup(func() { outputIdleTimeout = idle })
+	outputIdleTimeout = 5 * time.Second
+
 	var accepted recordingWriter // synchronous: the reference for what got in
 	var guestOut recordingWriter
 	guest := uio.NewAsyncWriter(&delayedWriter{delay: 200 * time.Millisecond, rec: &guestOut},
@@ -243,15 +249,11 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 		ctx:     t.Context(),
 		ptmx: &exitedPTY{
 			pending: pending,
-			// waitIdle's clock starts before the very first Read returns, so a
-			// slow first read -- scheduler contention, not design -- competes
-			// with outputIdleTimeout the same way a real mid-stream gap would.
-			// 20ms leaves 80ms of slack for that: a widened margin was the
-			// point of picking this value over a larger one, since a larger
-			// delay leaves less room before the first read is mistaken for
-			// quiet. 75 chunks at this cadence total 1.5s, longer than
+			// 75 chunks at this cadence total 1.5s, longer than
 			// outputDrainTimeout, so it is that 1s deadline -- not quiet --
-			// that ends the wait while the copy is still producing.
+			// that ends the wait while the copy is still producing. With the
+			// quiet window widened above, a first read slowed by scheduler
+			// contention can no longer be taken for quiet instead.
 			readDelay: 20 * time.Millisecond,
 		},
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,30 @@ func newGateWriter() *gateWriter {
 func (g *gateWriter) Write(p []byte) (int, error) {
 	g.once.Do(func() { close(g.entered) })
 	<-g.release
+	return g.recordingWriter.Write(p)
+}
+
+// pieceGate counts Write entries and parks only on the first one, so a test
+// can observe that no second piece ever started while the first is still
+// parked. Counting entries rather than completions is what makes that
+// observable: a gate that counted completions could not tell "one write,
+// still in flight" from "one write, already returned".
+type pieceGate struct {
+	recordingWriter
+	entries int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newPieceGate() *pieceGate {
+	return &pieceGate{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *pieceGate) Write(p []byte) (int, error) {
+	if atomic.AddInt32(&g.entries, 1) == 1 {
+		close(g.entered)
+		<-g.release
+	}
 	return g.recordingWriter.Write(p)
 }
 
@@ -302,8 +327,12 @@ func TestAsyncWriterCoalescesUpToTheChunkCap(t *testing.T) {
 	require.NoError(t, err)
 	<-gate.entered // the drain holds "first"; everything below queues behind it
 
-	block := bytes.Repeat([]byte("y"), 32<<10)
-	const blocks = 8 // 256 KiB, four chunks' worth
+	// 32 KiB blocks would arrive one by one whether or not the drain coalesced
+	// them, now that pieces are themselves capped at maxDrainWrite (32 KiB), so
+	// 1 KiB blocks are what makes coalescing into fewer, larger writes
+	// observable here.
+	block := bytes.Repeat([]byte("y"), 1<<10)
+	const blocks = 256 // 256 KiB, four chunks' worth
 	for range blocks {
 		_, err := a.Write(block)
 		require.NoError(t, err)
@@ -315,10 +344,267 @@ func TestAsyncWriterCoalescesUpToTheChunkCap(t *testing.T) {
 		5*time.Second, time.Millisecond, "everything queued must be delivered")
 
 	sizes := gate.writeSizes()
-	require.Less(t, len(sizes), blocks, "queued writes should coalesce, not arrive one by one")
+	require.Less(t, len(sizes), blocks/8, "queued writes should coalesce, not arrive one by one")
 	for _, n := range sizes {
-		require.LessOrEqual(t, n, maxDrainChunk, "no write may exceed the chunk cap")
+		require.LessOrEqual(t, n, maxDrainWrite, "no write may exceed the piece cap")
 	}
+}
+
+// The property piece delivery rests on: a chunk larger than maxDrainWrite must
+// still reach the writer as multiple bounded pieces rather than one large one.
+func TestAsyncWriterWritesInPiecesOfAtMostMaxDrainWrite(t *testing.T) {
+	gate := newGateWriter()
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write([]byte("first"))
+	require.NoError(t, err)
+	<-gate.entered // the drain holds "first"; everything below queues behind it
+
+	const total = 256 << 10
+	block := bytes.Repeat([]byte("p"), 32<<10)
+	for written := 0; written < total; written += len(block) {
+		_, err := a.Write(block)
+		require.NoError(t, err)
+	}
+
+	close(gate.release)
+	wantLen := len("first") + total
+	require.Eventually(t, func() bool { return len(gate.bytes()) == wantLen },
+		5*time.Second, time.Millisecond, "everything queued must be delivered")
+
+	sizes := gate.writeSizes()
+	for _, n := range sizes {
+		require.LessOrEqual(t, n, maxDrainWrite, "no write may exceed the piece cap")
+	}
+	// More than one write per chunk (256 KiB / maxDrainChunk chunks, plus the
+	// initial "first") is what shows chunks are actually split into pieces,
+	// rather than merely bounded at the existing chunk cap.
+	require.Greater(t, len(sizes), 1+total/maxDrainChunk,
+		"a chunk must be split into more than one piece")
+}
+
+// Close's promise is that the drain exits when its in-flight write returns:
+// once closed, no second piece of the chunk already being delivered may start.
+func TestAsyncWriterStopsBetweenPiecesWhenClosed(t *testing.T) {
+	gate := newPieceGate()
+	onDrop := make(chan error, 1)
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, func(err error) { onDrop <- err })
+
+	// One chunk, exactly two pieces: the first parks in the gate.
+	_, err := a.Write(bytes.Repeat([]byte("q"), maxDrainChunk))
+	require.NoError(t, err)
+	<-gate.entered
+
+	require.NoError(t, a.Close())
+	close(gate.release)
+
+	require.Eventually(t, a.stopped, 2*time.Second, time.Millisecond,
+		"the drain must exit once its in-flight piece returns")
+	require.EqualValues(t, 1, atomic.LoadInt32(&gate.entries),
+		"a second piece must never start once Close has happened")
+
+	select {
+	case <-onDrop:
+		t.Fatal("Close must never invoke onDrop")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// AbortIfNoProgress fails the writer exactly as an overflow or a write error
+// does: the drain must not start another piece of the chunk in flight.
+func TestAsyncWriterStopsBetweenPiecesWhenAborted(t *testing.T) {
+	gate := newPieceGate()
+	onDrop := make(chan error, 1)
+	a := NewAsyncWriter(gate, DefaultGuestBufferSize, func(err error) { onDrop <- err })
+	defer func() { _ = a.Close() }()
+
+	_, err := a.Write(bytes.Repeat([]byte("q"), maxDrainChunk))
+	require.NoError(t, err)
+	<-gate.entered
+
+	require.True(t, a.AbortIfNoProgress(0, ErrStalled))
+	close(gate.release)
+
+	require.Eventually(t, a.stopped, 2*time.Second, time.Millisecond,
+		"the drain must exit once its in-flight piece returns")
+	require.EqualValues(t, 1, atomic.LoadInt32(&gate.entries),
+		"a second piece must never start once aborted")
+
+	select {
+	case err := <-onDrop:
+		require.ErrorIs(t, err, ErrStalled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("onDrop never fired")
+	}
+}
+
+// Backlog.Bytes counts the undelivered rest of the chunk in flight, not just
+// pending: a caller pacing on this writer needs to know about output that has
+// already left pending but has not yet reached the underlying writer.
+func TestAsyncWriterBacklogCountsTheUndeliveredChunk(t *testing.T) {
+	step := newStepWriter()
+	a := NewAsyncWriter(step, DefaultGuestBufferSize, nil)
+	defer func() {
+		_ = a.Close()
+		step.step <- struct{}{} // let the drain, parked mid-chunk, see closed and exit
+	}()
+
+	const total = 100 << 10
+	_, err := a.Write(bytes.Repeat([]byte("d"), total))
+	require.NoError(t, err)
+
+	backlog := a.Backlog()
+	require.Equal(t, total, backlog.Bytes)
+	require.EqualValues(t, 0, backlog.Delivered)
+	require.True(t, backlog.Live)
+
+	// stepWriter.release returns once the bytes land in the recorder, which is
+	// before deliver updates delivered under the lock, so waiting on the
+	// Progress channel taken before releasing is what makes the update
+	// observable without a sleep.
+	progress := backlog.Progress
+	step.release(t)
+	select {
+	case <-progress:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Progress never closed after a piece was delivered")
+	}
+
+	backlog = a.Backlog()
+	require.EqualValues(t, maxDrainWrite, backlog.Delivered)
+	require.Equal(t, total-maxDrainWrite, backlog.Bytes)
+}
+
+// A caller waiting on Progress must be released whether the writer stops by
+// Close or by abort, and a Backlog taken afterwards must report dead rather
+// than hand out a channel nothing will ever signal again.
+func TestAsyncWriterBacklogReleasesWaitersWhenItStops(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(a *AsyncWriter)
+	}{
+		{"close", func(a *AsyncWriter) { _ = a.Close() }},
+		{"abort", func(a *AsyncWriter) { a.AbortIfNoProgress(0, ErrStalled) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newGateWriter()
+			defer close(gate.release)
+
+			a := NewAsyncWriter(gate, DefaultGuestBufferSize, nil)
+			defer func() { _ = a.Close() }()
+
+			_, err := a.Write([]byte("first"))
+			require.NoError(t, err)
+			<-gate.entered
+
+			progress := a.Backlog().Progress
+			tc.stop(a)
+
+			select {
+			case <-progress:
+			case <-time.After(2 * time.Second):
+				t.Fatal("a waiter on Progress was never released")
+			}
+
+			require.False(t, a.Backlog().Live)
+
+			select {
+			case <-a.Backlog().Progress:
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("a dead writer must hand out an already-closed Progress")
+			}
+		})
+	}
+}
+
+// AbortIfNoProgress must only fail the writer when Delivered has not moved
+// since the caller's snapshot, and must never invoke onDrop a second time.
+//
+// The case that matters is a piece landing after the snapshot was taken: the
+// abort must be refused even though since is not "stale" in the sense of
+// being ahead of Delivered. The condition is "Delivered == since", not "since
+// is not greater than Delivered" — an implementation that refused only when
+// since > delivered would still abort a guest that made progress after the
+// pacer's last look.
+func TestAsyncWriterAbortIfNoProgress(t *testing.T) {
+	step := newStepWriter()
+	drops := make(chan error, 4)
+	a := NewAsyncWriter(step, DefaultGuestBufferSize, func(err error) { drops <- err })
+	defer func() {
+		_ = a.Close()
+		step.step <- struct{}{} // let the drain, parked mid-chunk, see closed and exit
+	}()
+
+	// More than maxDrainWrite, so a piece can land while the chunk still has a
+	// piece left in flight.
+	_, err := a.Write(bytes.Repeat([]byte("d"), 100<<10))
+	require.NoError(t, err)
+
+	before := a.Backlog()
+	require.EqualValues(t, 0, before.Delivered)
+
+	require.False(t, a.AbortIfNoProgress(1, ErrStalled), "a since ahead of Delivered must not abort")
+	require.True(t, a.Backlog().Live, "a refused abort must leave the writer live")
+
+	// stepWriter.release returns once the bytes land in the recorder, which is
+	// before deliver updates delivered under the lock, so waiting on the
+	// Progress channel taken before releasing is what makes the update
+	// observable without a sleep.
+	step.release(t)
+	select {
+	case <-before.Progress:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Progress never closed after a piece was delivered")
+	}
+
+	require.False(t, a.AbortIfNoProgress(before.Delivered, ErrStalled),
+		"a piece delivered after the snapshot must refuse the abort")
+	require.True(t, a.Backlog().Live, "a refused abort must leave the writer live")
+
+	require.True(t, a.AbortIfNoProgress(a.Backlog().Delivered, ErrStalled), "the current Delivered count must abort")
+
+	select {
+	case err := <-drops:
+		require.ErrorIs(t, err, ErrStalled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("onDrop never fired")
+	}
+
+	_, err = a.Write([]byte("more"))
+	require.ErrorIs(t, err, ErrStalled, "writes after an abort must fail with its error")
+
+	require.False(t, a.AbortIfNoProgress(0, ErrStalled), "a second call on a dead writer must not abort again")
+	select {
+	case <-drops:
+		t.Fatal("onDrop fired a second time")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// An abort with a nil error must still end the writer. A writer counts as
+// failed only once it holds a non-nil error, so passing nil through would
+// discard the queue and spend onDrop while leaving the writer live, accepting
+// writes, and its drain still running.
+func TestAsyncWriterAbortIfNoProgressTreatsANilErrorAsStalled(t *testing.T) {
+	drops := make(chan error, 2)
+	a := NewAsyncWriter(&recordingWriter{}, DefaultGuestBufferSize, func(err error) { drops <- err })
+	defer func() { _ = a.Close() }()
+
+	require.True(t, a.AbortIfNoProgress(a.Backlog().Delivered, nil))
+	require.False(t, a.Backlog().Live, "an abort with a nil error left the writer live")
+	require.ErrorIs(t, a.Err(), ErrStalled)
+
+	_, err := a.Write([]byte("more"))
+	require.ErrorIs(t, err, ErrStalled, "writes after the abort must fail with its error")
+
+	select {
+	case err := <-drops:
+		require.ErrorIs(t, err, ErrStalled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("onDrop never fired")
+	}
+	require.Eventually(t, a.stopped, 2*time.Second, time.Millisecond, "the drain outlived the abort")
 }
 
 // A burst that has been fully delivered must not leave its backing array behind

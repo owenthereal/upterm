@@ -171,10 +171,12 @@ func TestStalledPrimaryIsDisconnectedAndTheFanOutRecovers(t *testing.T) {
 	// Append completes: a new host client attaches to a fan-out whose writeMu
 	// the stalled primary was holding, is elected, and reads to the end. This
 	// is the recovery — nothing but closing the connection underneath the
-	// parked write can produce it.
+	// parked write can produce it. Its marker arrives behind the six
+	// megabytes, which under -race take 7-10s even when nothing is wrong, so
+	// it gets the minute its connection does rather than harnessTimeout.
 	_, bOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24},
 		withDialDeadline(60*time.Second))
-	readUntil(t, bOut, "STREAM_DONE")
+	readUntilWithin(t, bOut, "STREAM_DONE", 60*time.Second)
 
 	select {
 	case err := <-guestDone:

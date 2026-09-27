@@ -19,12 +19,16 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-const (
+// Vars so a test whose subject is not the drain window can widen it.
+var (
 	// outputIdleTimeout is how long output may stay quiet after the process
 	// exits before the pty is considered drained.
 	outputIdleTimeout = 100 * time.Millisecond
 	// outputDrainTimeout bounds the total time spent draining after exit.
 	outputDrainTimeout = time.Second
+)
+
+const (
 	// guestFlushTimeout bounds how long the fan-out waits for asynchronous
 	// guests to receive what it has already accepted, once the producer has
 	// stopped. A guest still behind when it expires loses the remainder; it is
