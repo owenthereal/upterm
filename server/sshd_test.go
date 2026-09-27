@@ -365,6 +365,90 @@ func Test_localSessions_SlowDeleteDoesNotBlockAdd(t *testing.T) {
 	require.Equal(t, 1.0, v)
 }
 
+// Test_sshd_PublicKeyAuthority pins what the internal node door accepts. It has
+// no authorized-key check of its own, so a certificate from a signer that is
+// not one of this relay's own has to be refused outright.
+func Test_sshd_PublicKeyAuthority(t *testing.T) {
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
+
+	relay, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	// A real signer, but not this relay's.
+	other, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	require.NoError(t, err)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	addr := ln.Addr().String()
+
+	s := &sshd{
+		SessionManager: func() *SessionManager {
+			sm, _ := NewSessionManager(routing.ModeEmbedded,
+				WithSessionManagerLogger(logger))
+			return sm
+		}(),
+		HostSigners:     []ssh.Signer{relay},
+		Signers:         []ssh.Signer{relay},
+		NodeAddr:        addr,
+		MetricsProvider: provider.NewDiscardProvider(),
+		Logger:          logger,
+	}
+	go func() { _ = s.Serve(ln) }()
+	defer func() { _ = s.Shutdown() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, utils.WaitForServer(ctx, addr))
+
+	// mint is what a proxy hands the node door: a user certificate carrying an
+	// AuthRequest, signed by the given key.
+	mint := func(t *testing.T, signer ssh.Signer) ssh.Signer {
+		t.Helper()
+
+		cs := UserCertSigner{
+			SessionID: "1234",
+			User:      "owen",
+			AuthRequest: &AuthRequest{
+				ClientVersion: upterm.HostSSHClientVersion,
+				RemoteAddr:    addr,
+				AuthorizedKey: []byte(TestPublicKeyContent),
+			},
+		}
+		certSigner, err := cs.SignCert(signer)
+		require.NoError(t, err)
+		return certSigner
+	}
+
+	cases := []struct {
+		name    string
+		auth    func(t *testing.T) ssh.Signer
+		wantErr bool
+	}{
+		{"a certificate this relay minted is admitted", func(t *testing.T) ssh.Signer { return mint(t, relay) }, false},
+		{"a certificate from another signer is refused", func(t *testing.T) ssh.Signer { return mint(t, other) }, true},
+		{"a plain public key is refused", func(t *testing.T) ssh.Signer { return relay }, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+				User:            "owen",
+				Auth:            []ssh.AuthMethod{ssh.PublicKeys(tc.auth(t))},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         10 * time.Second,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "unable to authenticate")
+				return
+			}
+			require.NoError(t, err)
+			_ = client.Close()
+		})
+	}
+}
+
 func Test_sshd_ClosesTunnelChannelWhenGuestLeaves(t *testing.T) {
 	s := newTestSSHD(t)
 
