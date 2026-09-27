@@ -21,6 +21,7 @@ type SFTPSession struct {
 	readOnly          bool                       // Only allow downloads (no upload/delete)
 	permissionChecker hostsftp.PermissionChecker // Optional: prompts user for permission (nil = auto-allow)
 	clientInfo        hostsftp.ClientInfo        // Client information for permission dialogs
+	logger            *slog.Logger
 }
 
 // HandleSFTP handles SFTP subsystem requests
@@ -50,6 +51,7 @@ func (h *sessionHandler) HandleSFTP(sess gssh.Session) {
 		readOnly:          h.readonly,
 		permissionChecker: h.sftpPermissionChecker,
 		clientInfo:        clientInfo,
+		logger:            h.logger,
 	}
 
 	handlers := sftp.Handlers{
@@ -95,9 +97,13 @@ func (s *SFTPSession) checkPermission(op hostsftp.Operation, paths ...string) er
 	// Check permission (the checker handles caching of "Allow All" decisions)
 	result, err := s.permissionChecker.CheckPermission(op, s.clientInfo, paths...)
 	if err != nil {
-		// Checker unavailable (headless system)
-		// Allow operation - connection-level consent is sufficient
-		return nil
+		// Nobody could be asked: no display, or no dialog tool to draw the
+		// dialog. Deny rather than assume consent; a host that wants
+		// transfers without being asked passes --accept, which replaces
+		// the dialog with a checker that allows everything.
+		s.logger.Warn("SFTP operation denied: no permission dialog could be shown; pass --accept to allow transfers without asking",
+			"op", op.String(), "paths", paths, "client", s.clientInfo.Fingerprint, "error", err)
+		return fmt.Errorf("permission dialog unavailable: %w", err)
 	}
 
 	if result == hostsftp.PermissionDenied {
