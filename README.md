@@ -165,23 +165,22 @@ Host a session from a script or CI step with nothing attached to its terminal. `
 upterm host --accept --name build-shell --pty-size 132x43 -- bash &
 ```
 
-In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Download the published pin to a temp file, check its fingerprint, and only then add it to `known_hosts`:
+In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Pin it directly:
 
 ```console
-kh=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev -o "$kh" || exit
-grep -v '^#' "$kh" | head -1 | cut -d' ' -f2- > "$kh.key"
-ssh-keygen -lf "$kh.key"   # expect SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE
-mkdir -p ~/.ssh && cat "$kh" >> ~/.ssh/known_hosts
+mkdir -p ~/.ssh && cat >> ~/.ssh/known_hosts <<'EOF'
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+@cert-authority [uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+EOF
 ```
 
-`uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`. Compare it against what `ssh-keygen` printed above before the append runs.
+The same two lines are committed at [`etc/known_hosts/uptermd.upterm.dev`](etc/known_hosts/uptermd.upterm.dev), for anyone who would rather fetch the file than paste it — compare the fingerprint of *every* line in whatever you fetch before trusting it. `uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`; that's the value to check against, however you obtained the key.
 
 Note that `ssh-keyscan uptermd.upterm.dev` is **not** equivalent. The relay presents an SSH host certificate, and a `known_hosts` entry only authorizes one when the line is marked `@cert-authority` — which `ssh-keyscan` does not emit. With a plain key line, upterm falls back to its first-connection prompt: an operator at a terminal still sees the fingerprint there and can compare it by hand, but on a runner with no terminal that prompt can't be answered, so nothing gets verified.
 
 `--skip-host-key-check` accepts whatever answers on the first connection. It is convenient for a self-hosted relay you are bringing up, and it is not a substitute for pinning: on a fresh runner it will trust anything that can intercept that connection.
 
-If this key is ever rotated, every client pinning it has to be updated: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. Watch this section after upgrading.
+If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin fails closed — a rotated key produces a host-key mismatch rather than silently trusting whatever answers — but that failure is what to expect until the pin is updated. Watch this section after upgrading.
 
 Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
 
@@ -312,7 +311,10 @@ command -v jq >/dev/null || { echo "this recipe needs jq" >&2; exit 1; }
 # of trusting whatever answers; see "Running Without a Terminal" for the
 # fingerprint to check it against.
 known_hosts=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev -o "$known_hosts" || exit
+cat > "$known_hosts" <<'EOF'
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+@cert-authority [uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+EOF
 
 # Start detached, capture name + join command in one shot.
 upterm host --detach --accept --output json \
