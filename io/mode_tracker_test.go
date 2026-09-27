@@ -554,6 +554,37 @@ func Test_ModeTracker_RestoreLeavesThroughTheModeThatEntered(t *testing.T) {
 		"a terminal told to leave by a mode it never entered through is a terminal left on the wrong screen")
 }
 
+// Output can stop anywhere, including inside a sequence: between the chunks a
+// suspend lands between, or at the last byte a session sent before it ended.
+// The terminal is left inside that sequence too, and whatever the shell
+// prints next is read as the rest of it: an unfinished OSC swallows the
+// prompt whole. So a terminal leaving mid-sequence is told to abandon it, with
+// CAN, which cancels a sequence from any state on the DEC parser every
+// terminal implements; and before anything else, so the rest is not read as
+// part of it either.
+func Test_ModeTracker_RestoreCancelsASequenceInProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{name: "after ESC", stream: "\x1b", want: "\x18"},
+		{name: "in a CSI", stream: "\x1b[?10", want: "\x18"},
+		{name: "in a charset designation", stream: "\x1b(", want: "\x18"},
+		{name: "in an OSC", stream: "\x1b]0;a title", want: "\x18"},
+		{name: "at an ESC in an OSC", stream: "\x1b]0;a title\x1b", want: "\x18"},
+		{name: "in an overflowed CSI", stream: "\x1b[" + strings.Repeat("1", 2*maxSequenceBytes), want: "\x18"},
+		{name: "before the modes it undoes", stream: "\x1b[?1049h\x1b[?25", want: "\x18\x1b[?1049l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Restore()))
+		})
+	}
+}
+
 // The property that makes this safe to send on every detach: a session that
 // changed nothing produces nothing, so no terminal is reset on the strength
 // of a guess about what might have been done to it.

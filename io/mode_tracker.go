@@ -473,11 +473,23 @@ func (m *ModeTracker) finishCSI(final byte) {
 // keeps the mouse or the alternate screen while running a child, which is not
 // how a program that shells out behaves.
 //
-// The order is the order a terminal has to receive it in: leave the alternate
-// screen first, through the mode that entered it, since everything after it
+// Being inside a sequence is state too. Output can stop anywhere — between
+// the chunks a suspend falls between, or at a session's last byte — and a
+// terminal left inside a sequence reads whatever the shell prints next as the
+// rest of it: an unfinished OSC swallows the prompt whole. CAN cancels a
+// sequence from any state on the DEC parser terminals implement, and does
+// nothing outside one.
+//
+// The order is the order a terminal has to receive it in: out of any sequence
+// first, so the rest is not read as part of it; then off the alternate
+// screen, through the mode that entered it, since everything after that
 // applies to the screen the terminal is going back to.
 func (m *ModeTracker) Restore() []byte {
 	var out []byte
+
+	if m.state != msNormal {
+		out = append(out, 0x18)
+	}
 
 	if m.altActive() {
 		out = append(out, 0x1b, '[', '?')
