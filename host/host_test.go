@@ -1144,6 +1144,28 @@ func TestRunRecordsStartupFailedWhenTheTunnelCannotBeEstablished(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonStartupFailed, f.record(t).Reason)
 }
 
+// A failed ready write ends the run with the command already running, and it
+// is the teardown that follows which stops the command. Whatever the command
+// did under that teardown is not its own ending, and the record must not say
+// it is: `session wait` turns exited and signaled into the command's status.
+func TestRunRecordsStartupFailedWhenReadinessCannotBePublished(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	failure := errors.New("disk full")
+	f.h.onReadyPublish = func() error { return failure }
+	f.start(t)
+	require.ErrorIs(t, f.result(t), failure)
+	select {
+	case <-f.ready:
+		t.Fatal("the session was reported ready despite the failed write")
+	default:
+	}
+	rec := f.record(t)
+	require.Equal(t, sessiondir.ReasonStartupFailed, rec.Reason)
+	require.Nil(t, rec.ExitCode)
+	require.Empty(t, rec.Signal)
+	require.Nil(t, rec.SignalNumber)
+}
+
 func TestAdminStopWithJoinTimerRemainsStopped(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
