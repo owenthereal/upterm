@@ -165,17 +165,17 @@ Host a session from a script or CI step with nothing attached to its terminal. `
 upterm host --accept --name build-shell --pty-size 132x43 -- bash &
 ```
 
-In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Pin the public relay's key instead of accepting whatever answers:
+In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Download the published pin to a temp file, check its fingerprint, and only then add it to `known_hosts`:
 
 ```console
-mkdir -p ~/.ssh && curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev >> ~/.ssh/known_hosts
+kh=$(mktemp)
+curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev -o "$kh" || exit
+grep -v '^#' "$kh" | head -1 | cut -d' ' -f2- > "$kh.key"
+ssh-keygen -lf "$kh.key"   # expect SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE
+mkdir -p ~/.ssh && cat "$kh" >> ~/.ssh/known_hosts
 ```
 
-`uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`. Check it before trusting the file above:
-
-```console
-ssh-keygen -lf <(grep -v '^#' ~/.ssh/known_hosts | grep uptermd.upterm.dev | head -1 | cut -d' ' -f2-)
-```
+`uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`. Compare it against what `ssh-keygen` printed above before the append runs.
 
 Note that `ssh-keyscan uptermd.upterm.dev` is **not** equivalent. The relay presents an SSH host certificate, and a `known_hosts` entry only authorizes one when the line is marked `@cert-authority` — which `ssh-keyscan` does not emit. With a plain key line, upterm falls back to its first-connection prompt: an operator at a terminal still sees the fingerprint there and can compare it by hand, but on a runner with no terminal that prompt can't be answered, so nothing gets verified.
 
@@ -312,7 +312,7 @@ command -v jq >/dev/null || { echo "this recipe needs jq" >&2; exit 1; }
 # of trusting whatever answers; see "Running Without a Terminal" for the
 # fingerprint to check it against.
 known_hosts=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev >> "$known_hosts"
+curl -fsSL https://raw.githubusercontent.com/owenthereal/upterm/master/etc/known_hosts/uptermd.upterm.dev -o "$known_hosts" || exit
 
 # Start detached, capture name + join command in one shot.
 upterm host --detach --accept --output json \
