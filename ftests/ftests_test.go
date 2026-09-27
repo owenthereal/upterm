@@ -125,6 +125,8 @@ var ConnectionTestCases = []FtestCase{
 	testClientLocalPortForwardDisabled,
 	testClientLocalPortForward,
 	testClientSlowGuestDropped,
+	testClientSurvivesBurstWithoutPrimary,
+	testClientNewcomerDoesNotDisplacePacer,
 	testHostExitsWhileGuestHoldsConnection,
 	testHostKindAndGuestKindInConnectedClients,
 }
