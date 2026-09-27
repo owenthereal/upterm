@@ -185,11 +185,18 @@ func TestServerAttachedTerminalTakesOverFromAStalledGuest(t *testing.T) {
 	readAtLeast(t, hOut, 1<<20, harnessTimeout)
 }
 
-// Stopping the session is not held up by a guest the gate is waiting on. The
-// command ignores the hangup, so the teardown walks on to closing the pty with
-// the gate still holding; what ends the hold is the pacer's context, which is
-// the command's, or the release in the command's exit, each enough alone.
-// Without either, the output copy never returns and stop fails at its bound.
+// Stopping the session is not held up by a guest the gate is waiting on, and
+// both of the things that should end that hold are in place. The command
+// ignores the hangup, so the teardown walks on to closing the pty with the
+// gate still holding. What should end the hold, each enough alone, is the
+// pacer's context, which is the command's and so ends with the session, and
+// the release the command's exit makes before it waits for output to go quiet.
+//
+// The bound on stop cannot tell whether either is there. The guest door's
+// interrupt releases the sessions after a bounded wait for the command, and
+// the stalled guest's handler, returning, takes its sink out of the pacer,
+// which opens the gate as well: with neither mechanism, stop still finishes
+// inside the bound. So once stop has returned, the pacer is asked directly.
 func TestServerStopIsNotHeldByAStalledPacer(t *testing.T) {
 	setPacingStall(t, time.Minute)
 	pacers := capturePacer(t)
@@ -205,4 +212,12 @@ func TestServerStopIsNotHeldByAStalledPacer(t *testing.T) {
 		"the gate never held output for the stalled guest")
 
 	t.Logf("stop took %s", h.stop(t))
+
+	// Serve has returned, so the command's context has ended and its Run has
+	// run every interrupt: both hold whenever the wiring is right.
+	require.Error(t, pacer.ctx.Err(), "the pacer's context outlived the session: it is not the command's")
+	pacer.mu.Lock()
+	released := pacer.released
+	pacer.mu.Unlock()
+	require.True(t, released, "the command's exit never released pacing")
 }
