@@ -728,11 +728,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 
 	logger := c.Logger.With("server", u.String())
 	logger.Info("Establishing reverse tunnel")
+	// The relay this host verifies is the only authority for the guest
+	// certificates it will be shown. Recorded by the callback that does the
+	// verifying, read by the guest door below.
+	relayAuthority := &internal.RelayAuthority{}
 	rt := internal.ReverseTunnel{
 		Host:              u,
 		Signers:           c.Signers,
 		HostKey:           hostKey,
-		HostKeyCallback:   c.HostKeyCallback,
+		HostKeyCallback:   relayAuthority.Wrap(c.HostKeyCallback),
 		AuthorizedKeys:    aks,
 		KeepAliveDuration: c.KeepAliveDuration,
 		ProxyURL:          c.ProxyURL,
@@ -966,6 +970,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			ForceCommand:            c.ForceCommand,
 			HostKey:                 hostKey,
 			AuthorizedKeys:          aks,
+			GuestCertAuthority:      relayAuthority.IsUserAuthority,
 			EventEmitter:            eventEmitter,
 			KeepAliveDuration:       c.KeepAliveDuration,
 			Logger:                  logger.With("component", "server"),

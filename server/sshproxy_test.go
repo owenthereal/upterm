@@ -97,6 +97,7 @@ func Test_sshProxy_dialUpstream(t *testing.T) {
 	sshd := &sshd{
 		SessionManager:  newEmbeddedSessionManager(logger),
 		HostSigners:     []ssh.Signer{signer},
+		Signers:         []ssh.Signer{signer},
 		NodeAddr:        sshdAddr,
 		MetricsProvider: provider.NewDiscardProvider(),
 		Logger:          logger,

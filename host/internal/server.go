@@ -48,8 +48,14 @@ type Server struct {
 	// operator's identity: a key exchange signs with whatever is here, on
 	// every join, attach and rekey, and an identity held by a confirming
 	// agent would be asked each time.
-	HostKey                 ssh.Signer
-	AuthorizedKeys          []ssh.PublicKey
+	HostKey        ssh.Signer
+	AuthorizedKeys []ssh.PublicKey
+	// GuestCertAuthority reports whether a key may vouch for a guest
+	// certificate's AuthRequest -- in production, the relay key the host key
+	// callback accepted, via RelayAuthority. Nil admits no guest: the only
+	// legitimate guest credential is one the relay minted, and without knowing
+	// which relay, no claim in one can be believed.
+	GuestCertAuthority      func(ssh.PublicKey) bool
 	EventEmitter            *emitter.Emitter
 	KeepAliveDuration       time.Duration
 	Logger                  *slog.Logger
@@ -242,6 +248,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	{
 		ph := publicKeyHandler{
 			AuthorizedKeys: s.AuthorizedKeys,
+			CertAuthority:  s.GuestCertAuthority,
 			Logger:         s.Logger,
 		}
 
@@ -505,7 +512,10 @@ func serverConn(sess gssh.Session) *ssh.ServerConn {
 
 type publicKeyHandler struct {
 	AuthorizedKeys []ssh.PublicKey
-	Logger         *slog.Logger
+	// CertAuthority is the key allowed to have signed a guest's certificate.
+	// Nil refuses every guest.
+	CertAuthority func(ssh.PublicKey) bool
+	Logger        *slog.Logger
 }
 
 type authenticatedGuestKey struct{}
@@ -522,9 +532,12 @@ func clientEventID(transportID string) string {
 }
 
 func (h *publicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.PublicKey) bool {
-	checker := server.UserCertChecker{}
+	checker := server.UserCertChecker{IsUserAuthority: h.CertAuthority}
 	auth, pk, err := checker.Authenticate(ctx.User(), key)
 	if err != nil {
+		// A certificate from anyone but the verified relay is refused here and
+		// not passed on as a plain key: the AuthorizedKeys check below cannot
+		// catch it, because a session with no authorized keys admits anyone.
 		h.Logger.Error("error parsing auth request from cert", "error", err)
 		return false
 	}

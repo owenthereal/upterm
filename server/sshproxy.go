@@ -119,6 +119,18 @@ func (a proxyAuth) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) 
 	return fmt.Errorf("public key is not authorized")
 }
 
+// isOwnAuthority reports whether key is one of this relay's signing keys, and
+// so may vouch for a certificate's AuthRequest. Only the relay mints them.
+//
+// Signers, not HostSigners: Signers is what newUserCertSigners signs with. A
+// cross-node hop arrives carrying a certificate a neighbour minted, which this
+// recognizes because the nodes of a cluster share these keys -- as the sideway
+// branch of prepare's host key callback already requires of HostSigners, which
+// is cloned from Signers.
+func (a proxyAuth) isOwnAuthority(key ssh.PublicKey) bool {
+	return signerAuthority(a.Signers, key)
+}
+
 // publicKeyFingerprint returns the SHA256 fingerprint of the underlying
 // public key, unwrapping any SSH certificate. authorized_keys files contain
 // raw key entries, but hosts authenticating with a CertSigner (commonly
@@ -173,6 +185,7 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 		return nil, nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
 	}
 	checker := UserCertChecker{
+		IsUserAuthority: a.isOwnAuthority,
 		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
 			return key, nil
 		},
@@ -184,7 +197,13 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 	}
 
 	auth, key, err := checker.Authenticate(conn.User(), pk)
-	if err == errCertNotSignedByHost {
+	// A certificate this relay did not mint is not a credential, it is just a
+	// key the peer holds: an ssh-agent's own CA certificate arrives this way.
+	// Authorizing cert.Key rather than refusing keeps who may join unchanged,
+	// and the authorized-key check below is what then decides. A malformed
+	// AuthRequest from a signer we do trust is a different matter and is not
+	// tolerated.
+	if errors.Is(err, errCertNotSignedByHost) || errors.Is(err, errCertUntrustedAuthority) {
 		err = nil
 	}
 	if err != nil {
