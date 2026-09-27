@@ -142,6 +142,11 @@ type command struct {
 	ptmx PTY
 
 	writers *uio.MultiWriter
+	// pacer, when set, is what the output copy writes to: it holds a write
+	// while the session has no primary and its earliest guest is behind, and
+	// passes it on to writers otherwise. Nil copies straight into writers.
+	// Set by the caller after construction, not a newCommand parameter.
+	pacer *guestPacer
 
 	eventEmitter *emitter.Emitter
 	logger       *slog.Logger
@@ -174,6 +179,15 @@ func (c *command) grace() time.Duration {
 		return c.stopGrace
 	}
 	return DefaultStopGrace
+}
+
+// copyTarget is where the output copy writes: the pacer if there is one, the
+// fan-out itself if not.
+func (c *command) copyTarget() io.Writer {
+	if c.pacer != nil {
+		return c.pacer
+	}
+	return c.writers
 }
 
 func (c *command) recordResult(err error) {
@@ -255,10 +269,12 @@ func (c *command) Run() error {
 	{
 		// output: the pty into the fan-out. Every consumer — the local
 		// terminal included — is a client of the fan-out now, so there is
-		// nothing here to attach or pace: the primary client's synchronous
-		// writer is what keeps the pty from running ahead of a terminal.
+		// nothing here to attach: what keeps the pty from running ahead of
+		// its readers is the primary client's synchronous writer or, with no
+		// primary, the pacer holding each write until the earliest guest has
+		// caught up.
 		ctx, cancel := context.WithCancel(c.ctx)
-		output := &activityWriter{Writer: c.writers}
+		output := &activityWriter{Writer: c.copyTarget()}
 		done := make(chan struct{})
 		g.Add(func() error {
 			// Runs last, by LIFO. The copy has returned, so the producer has
@@ -321,6 +337,16 @@ func (c *command) Run() error {
 			// ends by itself once the slave side closes; ConPTY never signals
 			// EOF until closed, and a background child can keep a Unix pty
 			// open, so the wait is bounded.
+			//
+			// Pacing ends first. A write the pacer is holding is not
+			// activity — activityWriter records a write when it returns — so
+			// waitIdle would read a gated pty as quiet and the cancel below
+			// would cut its tail off; and a slow guest would hold the exit
+			// open for as long as it took. From here the tail goes out
+			// unpaced, as best-effort as the flush after it.
+			if c.pacer != nil {
+				c.pacer.release()
+			}
 			output.waitIdle(done, outputIdleTimeout, outputDrainTimeout)
 			cancel()
 		})

@@ -299,6 +299,32 @@ func TestHostClientsElectTheEarliestAndReelectOnRemoval(t *testing.T) {
 	require.Empty(t, hc.primaryID(), "no host client, no primary")
 }
 
+// The pacer stands aside while there is a primary, so it has to hear of every
+// change and only of changes: elected, lost, the next one elected, lost.
+func TestHostClientsReportThePrimaryToThePacer(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		reports []bool
+	)
+	hc := &hostClients{logger: discardLogger(), onPrimary: func(has bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		reports = append(reports, has)
+	}}
+	a := &hostClient{id: "a", sink: newHostSink(io.Discard, nil, "a", discardLogger())}
+	b := &hostClient{id: "b", sink: newHostSink(io.Discard, nil, "b", discardLogger())}
+	defer func() { _ = a.sink.Close(); _ = b.sink.Close() }()
+
+	hc.add(a)
+	hc.add(b)
+	hc.remove(a)
+	hc.remove(b)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []bool{true, false, true, false}, reports)
+}
+
 // Removal now runs on whichever goroutine saw the connection go, which can be
 // the watchdog's, and it can land between the handler publishing its client
 // and registering it. A client that has been removed is gone for good: adding

@@ -265,6 +265,50 @@ func TestCommandRunLosesNothingWhenTheProducerOutlivesWaitIdle(t *testing.T) {
 		"output accepted by the fan-out was lost at teardown")
 }
 
+// A write the pacer is holding is not activity, so waitIdle would read a gated
+// pty as quiet, and the cancel after it would cut the command's tail off. The
+// interrupt releases pacing before it waits.
+//
+// The guest delivers nothing, so two 32 KiB writes put it at the low mark —
+// one in flight on its link, one queued — and hold tail-1. exitedPTY hands out
+// one chunk per Read and drops whatever does not fit io.Copy's buffer, hence
+// chunks of exactly that size. With the release after waitIdle instead,
+// tail-1 is held until waitIdle gives up on the quiet, and tail-2 is cut off
+// by the cancel that follows; with no release at all, Run never returns. The
+// synchronous recorder on the fan-out is the reference for what got past the
+// pacer.
+func TestCommandRunReleasesPacingBeforeWaitingForIdle(t *testing.T) {
+	p, writers := newTestPacer(t, time.Minute)
+	var accepted recordingWriter
+	require.NoError(t, writers.Append(&accepted))
+	attachPaced(t, p, writers, stuckSink(t, nil))
+
+	cmd := &command{
+		logger:  discardLogger(),
+		writers: writers,
+		pacer:   p,
+		ctx:     t.Context(),
+		ptmx: &exitedPTY{
+			pending: [][]byte{
+				make([]byte, ptyWriteSize),
+				make([]byte, ptyWriteSize),
+				[]byte("tail-1\r\n"),
+				[]byte("tail-2\r\n"),
+			},
+			readDelay: 20 * time.Millisecond,
+		},
+	}
+
+	var runErr error
+	done := goWrite(t, p, func() { runErr = cmd.Run() })
+	requireReturns(t, done, 10*time.Second)
+	require.NoError(t, runErr)
+
+	got := string(accepted.bytes())
+	require.Contains(t, got, "tail-1", "a write held by the pacer was lost at exit")
+	require.Contains(t, got, "tail-2", "the pty's tail was cut off behind a held write")
+}
+
 // Under parent cancellation the command and the session handlers would
 // otherwise be released together, so a guest's channel could close while the
 // flush was still delivering into it. Sessions therefore do not inherit the
