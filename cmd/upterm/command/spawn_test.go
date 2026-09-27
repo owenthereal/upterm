@@ -78,6 +78,30 @@ func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, proc)
+	// The child's stdout and stderr are the log, and Windows will not remove a
+	// file another process has open. Its last report is not its exit: under
+	// -race, os.Exit first sleeps for the race runtime's atexit_sleep_ms, a
+	// second by default, with the log still open, and that outlasted
+	// t.TempDir's own retries often enough to fail the Windows job. So the
+	// child is waited out here, registered after t.TempDir so it runs first,
+	// on every way out of the test. This Wait races spawnDaemon's own reaper
+	// and may lose it with an error, but either way it returns only once the
+	// child has exited. One that hasn't within the bound is stuck rather than
+	// slow, and is killed rather than left to hold the log.
+	t.Cleanup(func() {
+		exited := make(chan struct{})
+		go func() {
+			_, _ = proc.Wait()
+			close(exited)
+		}()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("the child was still running 10s after the test finished with it; killing it")
+			_ = proc.Kill()
+			<-exited
+		}
+	})
 	defer func() { _ = conn.Close() }()
 
 	c := bootstrap.NewConn(conn)
