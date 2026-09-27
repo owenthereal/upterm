@@ -60,14 +60,16 @@ func TestPtyKillDoesNotWaitOnTheLock(t *testing.T) {
 	p := ptmx.(*pty)
 
 	readDone := make(chan struct{})
-	closeDone := make(chan struct{})
+	var closeDone chan struct{} // made only once the Close goroutine starts
 	t.Cleanup(func() {
 		// Only the command's exit releases the parked Read, and with it the
 		// lock: end it directly, never through the pty, in case Kill did not.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		<-readDone
-		<-closeDone
+		if closeDone != nil {
+			<-closeDone
+		}
 	})
 
 	// sleep writes nothing, so this Read holds the read lock until the
@@ -86,6 +88,7 @@ func TestPtyKillDoesNotWaitOnTheLock(t *testing.T) {
 
 	// Close queues for the write lock behind that Read; once it has, not
 	// even a read lock can be had.
+	closeDone = make(chan struct{})
 	go func() {
 		defer close(closeDone)
 		_ = p.Close()
