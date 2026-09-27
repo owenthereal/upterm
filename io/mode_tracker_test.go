@@ -554,6 +554,20 @@ func Test_ModeTracker_RestoreLeavesThroughTheModeThatEntered(t *testing.T) {
 		"a terminal told to leave by a mode it never entered through is a terminal left on the wrong screen")
 }
 
+// ?1048 is not a mode a terminal is left in but an action: set saves the
+// cursor, reset restores it, as DECSC and DECRC do. Treated as a mode, Restore
+// moved the cursor to wherever the session last saved it — on a detach, and
+// on ~^Z just before the shell prints — and Snapshot saved the cursor where
+// the terminal happened to be, which on a ~^Z resume overwrote the session's
+// own saved cursor with the shell's and sent its next ?1048l somewhere else.
+func Test_ModeTracker_SaveCursorIsNotAMode(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?1048h\x1b[?25l"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1b[?25l", string(m.Snapshot()), "a saved cursor is not replayed")
+	require.Equal(t, "\x1b[?25h", string(m.Restore()), "and not restored on the way out")
+}
+
 // CAN and SUB cancel a sequence from any state on the DEC parser terminals
 // implement, and a terminal that has seen one is back at ground: what follows
 // prints. A tracker that stayed inside the sequence recorded that text as the

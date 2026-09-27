@@ -33,6 +33,11 @@ const maxStringBytes = 4096
 //
 // The three alternate-screen modes are listed here because they are worth
 // restoring, but they are not kept in decPrivate: see altScreenModes.
+//
+// 1048 is not listed: it saves the cursor on set and restores it on reset, as
+// DECSC and DECRC do, and leaves the terminal in no mode. Replayed, it would
+// save wherever a terminal's cursor happens to be, and undone, it would move
+// the cursor to wherever the session last saved it.
 var restorable = map[int]bool{
 	1:    false, // DECCKM, application cursor keys
 	7:    true,  // DECAWM, autowrap
@@ -45,7 +50,6 @@ var restorable = map[int]bool{
 	1005: false, // UTF-8 mouse encoding
 	1006: false, // SGR mouse encoding
 	1047: false, // alternate screen
-	1048: false, // save/restore cursor
 	1049: false, // alternate screen + cursor, the common one
 	2004: false, // bracketed paste
 }
@@ -362,7 +366,7 @@ func (m *ModeTracker) resetToDefaults() {
 // verified against xterm's ReallyReset. tmux has no handler for CSI ! p at
 // all, so it ignores DECSTR and resets nothing -- it keeps this set, and
 // everything else the tracker records -- the screen buffer, the mouse modes,
-// focus reporting, 1048 and bracketed paste included -- across it too.
+// focus reporting and bracketed paste included -- across it too.
 var softResetModes = []int{1, 7, 25} // DECCKM, DECAWM, DECTCEM
 
 // softReset applies DECSTR. It is not RIS with a different spelling: it leaves
