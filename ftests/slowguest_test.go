@@ -46,12 +46,15 @@ const (
 	burstChunkMarker = "BURST-CHUNK-"
 
 	// burstChunkTimeout bounds the wait for one 256 KiB chunk to cross the whole
-	// path. Measured on the happy path a chunk takes tens of milliseconds, so
-	// this is about whether the fan-out is stuck, not about how loaded the
-	// machine is. It is deliberately shorter than the loop's budget
-	// (burstLoopBudget), so a fan-out that has genuinely wedged is reported
-	// against the chunk it wedged on rather than against the loop as a whole.
-	burstChunkTimeout = 10 * time.Second
+	// path. It exists only to report a wedged fan-out against the chunk it
+	// wedged on rather than against the loop as a whole, which is why it is
+	// deliberately shorter than the loop's budget (burstLoopBudget). It is not
+	// a tight bound: in testClientSlowGuestDropped the stalled guest joins
+	// first, so it paces, and the chunk that fills its windows is held for the
+	// pacer's 5 s stall bound before that guest is dropped. That comes on top
+	// of the chunk's own crossing time, which is tens of milliseconds on a
+	// quiet machine but about 1.4 s where ConPTY renders it under make test.
+	burstChunkTimeout = 15 * time.Second
 
 	// guestDropTimeout is how long the dropped guest has to observe its own
 	// disconnect. It budgets a different mechanism from the two above: the drop
@@ -337,9 +340,11 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 		hostInput <- "" // go-ahead for one chunk
 		produced += burstChunkBytes
 
-		// The host's own terminal keeps up. This is the head-of-line assertion
-		// for the host: the fan-out writes to it synchronously, so before
-		// per-guest buffering the stalled guest froze the host's own screen.
+		// The host's own terminal gets every chunk. It does not keep up
+		// throughout: while the stalled guest paces, output pauses for up to
+		// the stall bound, then that guest is dropped and output resumes. This
+		// is the head-of-line assertion for the host: before per-guest
+		// buffering the stalled guest froze the host's own screen.
 		awaitBurstChunk(t, hostMarkers, chunk, "the host's terminal")
 
 		// So does the guest that kept reading — the head-of-line assertion for
