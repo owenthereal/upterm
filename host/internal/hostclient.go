@@ -228,10 +228,26 @@ type hostClients struct {
 	order   []*hostClient
 	primary *hostClient
 
+	// onPrimary, if set, is told whether there is a primary each time that
+	// changes: the guest pacer, which stands aside while one paces the command.
+	// Called under mu, at the assignment itself, so the reports arrive in the
+	// order the changes happened; a report made after unlocking could be
+	// overtaken by the next one, and leave the pacer believing the opposite of
+	// the truth. It must not block.
+	onPrimary func(has bool)
+
 	// electMu serialises elections, which block for up to
 	// promoteFlushTimeout per candidate and must not run concurrently.
 	electMu sync.Mutex
 	logger  *slog.Logger
+}
+
+// reportPrimary tells onPrimary whether there is a primary. Callers must hold
+// h.mu.
+func (h *hostClients) reportPrimary(has bool) {
+	if h.onPrimary != nil {
+		h.onPrimary(has)
+	}
 }
 
 func (h *hostClients) add(c *hostClient) {
@@ -257,6 +273,7 @@ func (h *hostClients) remove(c *hostClient) {
 	}
 	if h.primary == c {
 		h.primary = nil
+		h.reportPrimary(false)
 	}
 	h.mu.Unlock()
 	h.elect()
@@ -337,6 +354,7 @@ func (h *hostClients) electOne() string {
 			h.mu.Lock()
 			if h.primary == nil && slices.Contains(h.order, c) {
 				h.primary = c
+				h.reportPrimary(true)
 				h.mu.Unlock()
 				return c.id
 			}
@@ -368,9 +386,10 @@ type drainWatch struct {
 // primary that leaves while every client left is more than a second behind —
 // which is what a burst of output and a stopped terminal or two look like —
 // ends with nobody promoted, and the session stays that way until the next
-// attach or detach happens to run another election. Nobody paces the command
-// meanwhile and no terminal is sent the queries a full-screen program asks,
-// which is the whole of what a primary is for.
+// attach or detach happens to run another election. No terminal paces the
+// command meanwhile — the earliest guest does, through the pacer, at whatever
+// rate its link allows — and no terminal is sent the queries a full-screen
+// program asks: the two things a primary is for.
 //
 // Waiting on the queue rather than polling it keeps the cost where the fault
 // is: a session with a primary arms nothing, and a client that never catches

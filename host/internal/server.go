@@ -148,6 +148,10 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 	release()
 }
 
+// onGuestPacer, when set, is handed each session's pacer as ServeWithContext
+// builds it, so a test can watch the gate hold. Nil in production.
+var onGuestPacer func(*guestPacer)
+
 // ServeWithContext runs the session: the hosted command, the guest door on
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
@@ -176,6 +180,14 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.Logger,
 	)
 	cmd.stopGrace = s.StopGrace
+	// With no primary, the earliest guest paces the command, through this.
+	// It lives on the command's context, so stopping the session ends any
+	// hold at once rather than waiting on a slow guest.
+	pacer := newGuestPacer(cmdCtx, writers)
+	if onGuestPacer != nil {
+		onGuestPacer(pacer)
+	}
+	cmd.pacer = pacer
 	s.cmd = cmd
 
 	var g run.Group
@@ -232,6 +244,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		eventEmmiter:          s.EventEmitter,
 		terminals:             newTerminalWindows(s.Logger),
 		writers:               writers,
+		pacer:                 pacer,
 		keepAliveDuration:     s.KeepAliveDuration,
 		ctx:                   sessCtx,
 		stopCtx:               ctx,
@@ -381,6 +394,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		// And the elector: exactly one of the clients on this door paces the
 		// command and is sent its live terminal queries.
 		s.hostClients.logger = s.Logger
+		// The pacer stands aside while there is a primary, which paces the
+		// command itself, so it is told of every change.
+		s.hostClients.onPrimary = pacer.setPrimary
 		hostSH.hostClients = &s.hostClients
 
 		hostServer := gssh.Server{
@@ -581,8 +597,12 @@ type sessionHandler struct {
 	// terminals is the geometry of every terminal attached to the session,
 	// shared by both doors: guests count towards the minimum as host clients
 	// do.
-	terminals         *terminalWindows
-	writers           *uio.MultiWriter
+	terminals *terminalWindows
+	writers   *uio.MultiWriter
+	// pacer is what a guest's sink registers with as it attaches, so that
+	// with no primary the earliest guest paces the command. Host clients and
+	// viewers never register. Nil attaches guests straight to writers.
+	pacer             *guestPacer
 	keepAliveDuration time.Duration
 	ctx               context.Context
 	// stopCtx preserves the winning Host error while ctx waits for output drain.
@@ -889,25 +909,15 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 			// And wrap that in a sink with its own goroutine and a bounded buffer,
 			// so this guest cannot hold up the fan-out for the host or anyone else.
-			// A guest that overflows is disconnected: a terminal stream is not
-			// resumable, so dropping bytes out of the middle would leave a corrupted
-			// screen it could not detect, while a closed session it can simply
-			// rejoin. See owenthereal/upterm#524.
-			onDrop := func(err error) {
-				if errors.Is(err, uio.ErrOverflow) {
-					h.logger.Warn("dropping guest: too far behind to keep up with output",
-						"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
-				} else {
-					h.logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
-				}
-				// Closing the channel is what makes the drop real: it fails the
-				// blocked write, and it fails the stdin copy below, so run.Group
-				// returns and the deferred client-left event fires.
-				_ = sess.Close()
-			}
+			// A guest that overflows is disconnected, and so is one that paces the
+			// session and delivers nothing for the stall timeout: a terminal stream
+			// is not resumable, so dropping bytes out of the middle would leave a
+			// corrupted screen it could not detect, while a closed session it can
+			// simply rejoin. See owenthereal/upterm#524.
+			onDrop := guestDropHandler(sess.Close, h.logger, sessionID, pacingStallTimeout)
 
 			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
-			if err := attachGuestOutput(h.writers, sink); err != nil {
+			if err := h.attachGuest(sink); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This guest arrived a
 					// moment too late, which is not its error.
@@ -920,7 +930,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			}
 
 			defer func() {
-				h.writers.Remove(sink)
+				h.detachGuest(sink)
 				_ = sink.Close()
 			}()
 
@@ -1149,6 +1159,54 @@ func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 		return err
 	}
 	return nil
+}
+
+// attachGuest attaches a guest's sink to the fan-out through the pacer, which
+// registers it first and takes the registration back if the fan-out refuses:
+// see guestPacer.attach for why the order is what bounds a new guest's
+// exposure. Without a pacer it attaches directly.
+func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter) error {
+	if h.pacer == nil {
+		return attachGuestOutput(h.writers, sink)
+	}
+	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, sink) })
+}
+
+// detachGuest takes a guest's sink out of the fan-out, then out of the
+// pacer's order. The caller closes it.
+func (h *sessionHandler) detachGuest(sink *uio.AsyncWriter) {
+	h.writers.Remove(sink)
+	if h.pacer != nil {
+		h.pacer.remove(sink)
+	}
+}
+
+// guestDropHandler is what a guest's sink calls when it gives up on the guest:
+// it closes the guest's session, then says why.
+//
+// Closing the channel is what makes the drop real: it fails the write the
+// sink's goroutine is blocked in, and it fails the handler's stdin copy, so
+// run.Group returns and the deferred client-left event fires. The close comes
+// before the line, as it does in hostSink's callbacks: a logger blocked on a
+// stopped terminal must not keep a dropped guest attached.
+//
+// stall is the bound to report for a stalled pacer, passed in rather than read
+// from pacingStallTimeout when the drop happens: this runs on a goroutine of
+// its own, where reading the package var would race a test that restores it.
+func guestDropHandler(closeSession func() error, logger *slog.Logger, sessionID string, stall time.Duration) func(error) {
+	return func(err error) {
+		_ = closeSession()
+		switch {
+		case errors.Is(err, uio.ErrOverflow):
+			logger.Warn("dropping guest: too far behind to keep up with output",
+				"session-id", sessionID, "buffer-bytes", uio.DefaultGuestBufferSize)
+		case errors.Is(err, uio.ErrStalled):
+			logger.Warn("dropping guest: no output delivered within the stall timeout",
+				"session-id", sessionID, "timeout", stall)
+		default:
+			logger.Debug("guest output sink failed", "session-id", sessionID, "error", err)
+		}
+	}
 }
 
 // isInteractive reports whether a host client declared that it forwards its
