@@ -24,8 +24,14 @@ func TestGuestDropClosesBeforeLogging(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			blocked := make(chan struct{})
 			closed := make(chan struct{})
+			// At Debug, so every case's line reaches the gate: a failure that
+			// is neither an overflow nor a stall is logged at Debug, and a
+			// handler at the default Info level would discard that line
+			// without blocking, so the case could not see the order at all.
+			logger := slog.New(slog.NewTextHandler(&gatedWriter{gate: blocked, rec: &recordingWriter{}},
+				&slog.HandlerOptions{Level: slog.LevelDebug}))
 			onDrop := guestDropHandler(func() error { close(closed); return nil },
-				slog.New(newBlockingHandler(blocked)), "s", pacingStallTimeout)
+				logger, "s", pacingStallTimeout)
 
 			done := make(chan struct{})
 			go func() {
