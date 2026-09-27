@@ -415,6 +415,9 @@ func testClientSurvivesBurstWithoutPrimary(t *testing.T, hostURL, hostNodeAddr, 
 	if !strings.HasPrefix(hostURL, "ssh://") {
 		t.Skip("covered on ssh; the backpressure is SSH channel windowing, not transport-specific")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("ConPTY produces more slowly than the guest reads, so nothing is ever paced and the case would prove nothing; the server-level unix test and the pacer's unit tests cover the policy")
+	}
 
 	// The guest's link. The host reads its pty slowest under -race, at about
 	// 6.8 MiB/s where this was written, so unpaced the whole burst, all
