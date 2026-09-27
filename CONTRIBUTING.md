@@ -73,12 +73,21 @@ further defined and clarified by project maintainers.
 ### Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by [contacting GitHub Support](https://support.github.com/contact/report-abuse),
-which can act on conduct in this repository. Security vulnerabilities go
-through [SECURITY.md](SECURITY.md) instead, not here. All
-complaints will be reviewed and investigated and will result in a response that
-is deemed necessary and appropriate to the circumstances. The project team is
-obligated to maintain confidentiality with regard to the reporter of an incident.
+reported by [contacting GitHub Support](https://support.github.com/contact/report-abuse).
+GitHub reviews those reports under its
+[Acceptable Use Policies](https://docs.github.com/site-policy/acceptable-use-policies/github-acceptable-use-policies)
+and can act directly on accounts and content, including in this repository;
+confidentiality is handled as part of that process, by GitHub rather than by the
+maintainers.
+
+For conduct GitHub cannot reach — at an event, or on another platform — ask a
+maintainer to make contact by opening a private report through the
+[Security tab](https://github.com/owenthereal/upterm/security/advisories/new).
+That form is labelled for vulnerabilities, but it is the private channel to the
+maintainers; you do not need to include any details in it to get a reply.
+
+Security vulnerabilities are not conduct reports: see [SECURITY.md](SECURITY.md).
+
 Further details of specific enforcement policies may be posted separately.
 
 Project maintainers who do not follow or enforce the Code of Conduct in good
