@@ -554,6 +554,45 @@ func Test_ModeTracker_RestoreLeavesThroughTheModeThatEntered(t *testing.T) {
 		"a terminal told to leave by a mode it never entered through is a terminal left on the wrong screen")
 }
 
+// CAN and SUB cancel a sequence from any state on the DEC parser terminals
+// implement, and a terminal that has seen one is back at ground: what follows
+// prints. A tracker that stayed inside the sequence recorded that text as the
+// sequence's payload, and replayed it as a partial on the next Snapshot — to
+// a joiner, or to its own terminal on every ~^Z resume, printing it twice —
+// and Restore cancelled a sequence the terminal had already left.
+func Test_ModeTracker_CANAndSUBCancelASequence(t *testing.T) {
+	for _, cancel := range []string{"\x18", "\x1a"} {
+		for _, tc := range []struct {
+			name         string
+			stream       string // cancel is placed at "|"
+			wantSnapshot string
+			wantRestore  string
+		}{
+			{name: "after ESC", stream: "\x1b|hello"},
+			{name: "in a CSI", stream: "\x1b[?1049|h"},
+			{name: "in an overflowed CSI", stream: "\x1b[" + strings.Repeat("1", 2*maxSequenceBytes) + "|hello"},
+			{name: "in a charset designation", stream: "\x1b(|0"},
+			{name: "in an OSC", stream: "\x1b]0;a title|hello"},
+			{name: "at an ESC in an OSC", stream: "\x1b]0;a title\x1b|hello"},
+			{name: "in a DCS", stream: "\x1bPq|hello"},
+			{
+				name:         "and the next sequence is still read",
+				stream:       "\x1b]0;a title|\x1b[?1049h",
+				wantSnapshot: "\x1b[?1049h",
+				wantRestore:  "\x1b[?1049l",
+			},
+		} {
+			t.Run(fmt.Sprintf("%q %s", cancel, tc.name), func(t *testing.T) {
+				m := NewModeTracker()
+				_, err := m.Write([]byte(strings.Replace(tc.stream, "|", cancel, 1)))
+				require.NoError(t, err)
+				require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "nothing of the cancelled sequence is replayed")
+				require.Equal(t, tc.wantRestore, string(m.Restore()), "and there is no sequence left to cancel")
+			})
+		}
+	}
+}
+
 // Output can stop anywhere, including inside a sequence: between the chunks a
 // suspend lands between, or at the last byte a session sent before it ended.
 // The terminal is left inside that sequence too, and whatever the shell

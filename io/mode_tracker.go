@@ -116,11 +116,8 @@ const (
 // one decision: BEL terminates an OSC and nothing else -- xterm accepts it
 // there, and for a DCS, PM, APC or SOS only ST will do.
 //
-// CAN (0x18) and SUB (0x1a) end a string on the DEC state machine too, and are
-// not honoured here, as they are not in the CSI parser either. The cost is
-// paid in the partial: a string cancelled that way stays open, so the ordinary
-// text that follows the CAN goes on being recorded as payload -- up to
-// maxStringBytes of it -- until an ESC or, in an OSC, a BEL closes it.
+// CAN (0x18) and SUB (0x1a) end a string too, as they end every other
+// sequence; step handles them before any state does.
 //
 // The 8-bit C1 introducers (0x9b for CSI, 0x9d for OSC, 0x90 for DCS and the
 // rest) are out of scope. The tracker decodes no character set, and in the
@@ -160,6 +157,17 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 }
 
 func (m *ModeTracker) step(b byte) {
+	if (b == 0x18 || b == 0x1a) && m.state != msNormal {
+		// CAN or SUB: whatever sequence was in progress is cancelled, from
+		// any state, as the DEC parser terminals implement has it, and what
+		// follows prints. Kept open, its text would be recorded as the
+		// sequence's payload and replayed as a partial by Snapshot.
+		m.state = msNormal
+		m.kind = skNone
+		m.reset()
+		m.closePartial()
+		return
+	}
 	switch m.state {
 	case msNormal:
 		if b == 0x1b {
