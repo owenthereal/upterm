@@ -520,22 +520,49 @@ func TestAsyncWriterBacklogReleasesWaitersWhenItStops(t *testing.T) {
 
 // AbortIfNoProgress must only fail the writer when Delivered has not moved
 // since the caller's snapshot, and must never invoke onDrop a second time.
+//
+// The case that matters is a piece landing after the snapshot was taken: the
+// abort must be refused even though since is not "stale" in the sense of
+// being ahead of Delivered. Invariant 3 is "Delivered == since", not "since
+// is not greater than Delivered" — an implementation that refused only when
+// since > delivered would still abort a guest that made progress after the
+// pacer's last look.
 func TestAsyncWriterAbortIfNoProgress(t *testing.T) {
-	gate := newGateWriter()
-	defer close(gate.release)
-
+	step := newStepWriter()
 	drops := make(chan error, 4)
-	a := NewAsyncWriter(gate, DefaultGuestBufferSize, func(err error) { drops <- err })
-	defer func() { _ = a.Close() }()
+	a := NewAsyncWriter(step, DefaultGuestBufferSize, func(err error) { drops <- err })
+	defer func() {
+		_ = a.Close()
+		step.step <- struct{}{} // let the drain, parked mid-chunk, see closed and exit
+	}()
 
-	_, err := a.Write([]byte("first"))
+	// More than maxDrainWrite, so a piece can land while the chunk still has a
+	// piece left in flight.
+	_, err := a.Write(bytes.Repeat([]byte("d"), 100<<10))
 	require.NoError(t, err)
-	<-gate.entered
 
-	require.False(t, a.AbortIfNoProgress(1, ErrStalled), "a since that does not match Delivered must not abort")
+	before := a.Backlog()
+	require.EqualValues(t, 0, before.Delivered)
+
+	require.False(t, a.AbortIfNoProgress(1, ErrStalled), "a since ahead of Delivered must not abort")
 	require.True(t, a.Backlog().Live, "a refused abort must leave the writer live")
 
-	require.True(t, a.AbortIfNoProgress(0, ErrStalled), "the current Delivered count must abort")
+	// stepWriter.release returns once the bytes land in the recorder, which is
+	// before deliver updates delivered under the lock, so waiting on the
+	// Progress channel taken before releasing is what makes the update
+	// observable without a sleep.
+	step.release(t)
+	select {
+	case <-before.Progress:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Progress never closed after a piece was delivered")
+	}
+
+	require.False(t, a.AbortIfNoProgress(before.Delivered, ErrStalled),
+		"a piece delivered after the snapshot must refuse the abort")
+	require.True(t, a.Backlog().Live, "a refused abort must leave the writer live")
+
+	require.True(t, a.AbortIfNoProgress(a.Backlog().Delivered, ErrStalled), "the current Delivered count must abort")
 
 	select {
 	case err := <-drops:
