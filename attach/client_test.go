@@ -726,26 +726,29 @@ func TestClient_SuspendHoldsTheSessionsOutputUntilTheTerminalIsBack(t *testing.T
 
 // The output is held by taking it from the copy, which can be parked in a
 // write to a terminal that has stopped taking bytes, and nothing interrupts
-// that. So ~^Z waits for it only within the bound a detach's drain has; past
-// it the process is suspended with the modes untouched, as it was before they
-// were handled at all, rather than parking the input — and ~. with it —
-// behind a write that may never return.
-func TestClient_SuspendIsNotHeldByATerminalThatStoppedTakingOutput(t *testing.T) {
+// that. So ~^Z waits for it only within the bound a detach's drain has, and
+// past it the client detaches without stopping, as it does when the terminal
+// does not take a mode write: the input — and ~. with it — is not parked
+// behind a write that may never return, and the process is not stopped with
+// that write still in flight, to complete over the foreground shell's screen
+// once bg has continued it.
+func TestClient_SuspendDetachesWhenATerminalStoppedTakingOutput(t *testing.T) {
 	orig := outputDrainTimeout
 	outputDrainTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { outputDrainTimeout = orig })
 
 	sigs := make(chan gssh.Signal, 1)
-	d := suspendingDoor(t, sigs, nil)
+	more := make(chan string, 1)
+	d := suspendingDoor(t, sigs, more)
 
 	sink := newBlockedSink()
-	suspended := make(chan int, 1)
+	var hooked atomic.Bool
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: sink, Escape: '~',
 		Pty: &Pty{Term: "xterm", Size: termsize.Default},
 		Suspend: func() (termsize.Size, bool) {
-			suspended <- sink.count()
+			hooked.Store(true)
 			return termsize.Size{}, true
 		}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -757,29 +760,21 @@ func TestClient_SuspendIsNotHeldByATerminalThatStoppedTakingOutput(t *testing.T)
 	case <-time.After(testTimeout):
 		t.Fatal("the session's screen never reached the terminal")
 	}
+	more <- "queued behind the parked write"
 	_, err := pw.Write([]byte("\r~\x1a"))
 	require.NoError(t, err)
 
 	select {
-	case writes := <-suspended:
-		require.Equal(t, 1, writes, "nothing is written behind a parked write")
+	case res := <-done:
+		require.Equal(t, Result{Reason: Detached}, res)
 	case <-time.After(5 * time.Second):
 		t.Fatal("~^Z was held by a terminal that stopped taking output")
 	}
-	select {
-	case <-sigs:
-	case <-time.After(testTimeout):
-		t.Fatal("the resume never nudged the session")
-	}
-	require.Equal(t, 1, sink.count(), "and nothing put back that was never taken out")
+	require.False(t, hooked.Load(), "the process must not be stopped with a write still in flight")
 
-	cancel()
 	close(sink.release)
-	select {
-	case <-done:
-	case <-time.After(testTimeout):
-		t.Fatal("Run did not return after cancellation")
-	}
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 1, sink.count(), "nothing written once the parked write is released")
 }
 
 func TestClientStdinEOFDetaches(t *testing.T) {

@@ -458,46 +458,45 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 // be drawn over the shell's screen, and a mode it set would make a liar of
 // the restore. The hold is taken from the copy within outputDrainTimeout,
 // because the copy may be parked in a write to a terminal that has stopped
-// taking bytes, and nothing interrupts that. Past the bound the process is
-// suspended with the modes left on, rather than parking the input — and ~.
-// with it — behind that write.
+// taking bytes, and nothing interrupts that.
 //
 // It reports whether the terminal is still this client's to draw on. It is
-// not when the process came back without it — bg, when the terminal is the
-// foreground job's and SIGTTOU, ignored, stops no write to it — or when the
-// terminal did not take a mode write within the bound, which leaves that
-// write parked beside any that would follow. Then Stdout is abandoned before
-// the hold is released, so nothing more is written to it, and the caller
-// detaches. A restore the terminal did not take also means the process is
-// not stopped: fg would only bring back a detach.
+// not when the process came back without it — bg: the terminal is the
+// foreground job's, and SIGTTOU, ignored, stops no write to it — or when the
+// terminal stopped taking bytes within the bound, leaving a write parked
+// that completes whenever it can, beside anything written after it. Then
+// Stdout is abandoned before the hold is released, so nothing more is
+// written, and the caller detaches. If the terminal stopped before the
+// process did, the process is not stopped at all: the parked write would
+// land on the foreground shell's screen once bg continued it.
 //
-// Then two requests, both best-effort: the size, because the terminal may
-// have been resized while this process was stopped, and a WINCH, because a
-// full-screen program repaints on it and the scrollback this client stopped
-// reading is already behind it.
+// Then, if it is, two requests, both best-effort: the size, because the
+// terminal may have been resized while this process was stopped, and a
+// WINCH, because a full-screen program repaints on it and the scrollback
+// this client stopped reading is already behind it.
 //
 // Both are bounded for the reason every other request on this path is: they
 // fail when the connection has gone, which is when the group is unwinding,
 // and a handler blocked on a stopped terminal would park the unwind here.
 func (c *Client) suspend(sess *ssh.Session, modes *uio.ModeTracker, turn chan struct{}, abandoned *atomic.Bool, logger *slog.Logger) (kept bool) {
-	held := false
 	if modes != nil {
 		leave := time.NewTimer(outputDrainTimeout)
 		defer leave.Stop()
 		select {
 		case turn <- struct{}{}:
-			held = true
-			if restore := modes.Restore(); len(restore) > 0 && !c.writeWithin(leave.C, restore, logger) {
-				abandoned.Store(true)
-				<-turn
-				return false
-			}
 		case <-leave.C:
-			logging.WarnWithin(logger, logging.LogBound, "suspending with the session's modes still on the terminal: it is not taking output", "timeout", outputDrainTimeout)
+			logging.WarnWithin(logger, logging.LogBound, "detaching instead of suspending: the terminal is not taking output", "timeout", outputDrainTimeout)
+			abandoned.Store(true)
+			return false
+		}
+		if restore := modes.Restore(); len(restore) > 0 && !c.writeWithin(leave.C, restore, logger) {
+			abandoned.Store(true)
+			<-turn
+			return false
 		}
 	}
 	size, kept := c.Suspend()
-	if kept && held {
+	if kept && modes != nil {
 		back := time.NewTimer(outputDrainTimeout)
 		defer back.Stop()
 		if snapshot := modes.Snapshot(); len(snapshot) > 0 {
@@ -507,7 +506,7 @@ func (c *Client) suspend(sess *ssh.Session, modes *uio.ModeTracker, turn chan st
 	if !kept {
 		abandoned.Store(true)
 	}
-	if held {
+	if modes != nil {
 		<-turn
 	}
 	if !kept {
