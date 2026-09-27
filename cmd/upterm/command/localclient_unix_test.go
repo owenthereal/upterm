@@ -30,11 +30,15 @@ import (
 // the process stops again, as SIGTTOU would have stopped it had it not been
 // ignored and as ssh's ~^Z does, until fg hands the terminal back — unless
 // the stop is discarded, which is a process group with no job control left
-// to continue it.
+// to continue it, or fg has already handed the terminal back by the time the
+// stop is raised: bg; fg typed together can land between the check that
+// found the process in the background and the stop that follows it, and a
+// foreground job stopped for nothing needs a second fg.
 func TestSuspendLocalTerminal(t *testing.T) {
 	type stopResult struct {
-		continued  bool // what stop reports: the continue arrived, or the stop never landed
-		foreground bool // what raw.owned answers after it: fg (true) or bg (false)
+		fgBeforeRaise bool // fg lands after the process last found itself in the background, before this stop is raised
+		continued     bool // what stop reports: the continue arrived, or the stop never landed
+		foreground    bool // what raw.owned answers after it: fg (true) or bg (false)
 	}
 	for _, tc := range []struct {
 		name         string
@@ -60,6 +64,11 @@ func TestSuspendLocalTerminal(t *testing.T) {
 			name:         "bg, then the stop again is discarded: left cooked, not written over",
 			stops:        []stopResult{{continued: true, foreground: false}, {continued: false, foreground: false}},
 			wantRawAtEnd: false,
+		},
+		{
+			name:         "bg, then fg before the stop again is raised: not stopped again",
+			stops:        []stopResult{{continued: true, foreground: false}, {fgBeforeRaise: true}},
+			wantRawAtEnd: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,29 +98,47 @@ func TestSuspendLocalTerminal(t *testing.T) {
 			r := &rawTerminal{f: tty, owned: func(*os.File) bool { return foreground }}
 			require.NoError(t, r.enter())
 
-			var statesAtStop []*term.State
-			stop := func() bool {
+			// The fake keeps stopSelf's contract: unless is asked just
+			// before the raise, and when it holds nothing is raised and a
+			// continue is reported, there being nothing to wait for.
+			calls := 0
+			var statesAtStop []*term.State // one per stop actually raised
+			stop := func(unless func() bool) bool {
+				calls++
+				if calls > len(tc.stops) {
+					// Not Fatal: this runs on the goroutine under test, and
+					// an unexpected stop must end the loop, not hang it.
+					t.Errorf("stopped %d times; want %d", calls, len(tc.stops))
+					return false
+				}
+				step := tc.stops[calls-1]
+				if step.fgBeforeRaise {
+					foreground = true
+				}
+				if unless != nil && unless() {
+					return true
+				}
 				st, err := term.GetState(fd)
 				require.NoError(t, err)
 				statesAtStop = append(statesAtStop, st)
-				n := len(statesAtStop)
-				if n > len(tc.stops) {
-					// Not Fatal: this runs on the goroutine under test, and
-					// an unexpected stop must end the loop, not hang it.
-					t.Errorf("stopped %d times; want %d", n, len(tc.stops))
-					return false
-				}
 				// What the user chose while this process was stopped, observed
 				// by raw.owned the next time suspendLocalTerminal asks it —
 				// exactly as tty.Owned would answer differently after fg
 				// versus bg in production.
-				foreground = tc.stops[n-1].foreground
-				return tc.stops[n-1].continued
+				foreground = step.foreground
+				return step.continued
 			}
 
 			_, owned := suspendLocalTerminal(r, tty, stop)
 
-			require.Len(t, statesAtStop, len(tc.stops))
+			require.Equal(t, len(tc.stops), calls, "stop attempts")
+			raised := 0
+			for _, step := range tc.stops {
+				if !step.fgBeforeRaise {
+					raised++
+				}
+			}
+			require.Len(t, statesAtStop, raised, "stops raised: none once fg has handed the terminal back, and never the ~^Z one skipped")
 			for i, st := range statesAtStop {
 				require.True(t, reflect.DeepEqual(cooked, st),
 					"stop %d: the terminal must be cooked -- echoing -- for the instant it is stopped, whoever is watching it then", i+1)

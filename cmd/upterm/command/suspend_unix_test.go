@@ -60,7 +60,7 @@ func TestStopSelfReturnsWhenTheStopNeverLands(t *testing.T) {
 	t.Cleanup(func() { suspendContWait = prev })
 
 	done := make(chan bool, 1)
-	go func() { done <- stopSelf() }()
+	go func() { done <- stopSelf(nil) }()
 
 	select {
 	case continued := <-done:
@@ -88,7 +88,7 @@ func TestStopSelfReportsAContinueThatArrivesAfterTheBound(t *testing.T) {
 	t.Cleanup(func() { suspendContWait, suspendContGrace = prevWait, prevGrace })
 
 	done := make(chan bool, 1)
-	go func() { done <- stopSelf() }()
+	go func() { done <- stopSelf(nil) }()
 	// stopSelf raises SIGTSTP only once it is watching SIGCONT, so the raise
 	// arriving is what makes it safe to send the continue.
 	select {
@@ -104,5 +104,37 @@ func TestStopSelfReportsAContinueThatArrivesAfterTheBound(t *testing.T) {
 		require.True(t, continued, "a continue that arrived after the bound is still a continue")
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopSelf never returned")
+	}
+}
+
+// unless is how a stop again after bg avoids stopping a job that fg has
+// already put back in the foreground: asked just before the raise, and when
+// it holds, nothing is raised — a foreground job stopped for nothing needs a
+// second fg — and a continue is reported, there being nothing to wait for.
+func TestStopSelfRaisesNothingWhenUnlessHolds(t *testing.T) {
+	// Not parallel: signal dispositions and the bounds are process-wide.
+	tstp := make(chan os.Signal, 1)
+	signal.Notify(tstp, syscall.SIGTSTP)
+	t.Cleanup(func() { signal.Stop(tstp) })
+
+	// A raise would stop nothing here, and leave stopSelf waiting out the
+	// whole bound for a continue that never comes.
+	prev := suspendContWait
+	suspendContWait = 5 * time.Second
+	t.Cleanup(func() { suspendContWait = prev })
+
+	done := make(chan bool, 1)
+	go func() { done <- stopSelf(func() bool { return true }) }()
+
+	select {
+	case continued := <-done:
+		require.True(t, continued, "nothing to wait for is not a stop that never landed")
+	case <-time.After(time.Second):
+		t.Fatal("stopSelf raised the stop, or waited for a continue, although unless held")
+	}
+	select {
+	case <-tstp:
+		t.Fatal("SIGTSTP was raised although unless held")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

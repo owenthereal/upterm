@@ -45,6 +45,19 @@ func suspendAvailable() bool { return !tstpIgnored() }
 // once suspendContWait has gone by without the stop ever landing — and
 // reports which.
 //
+// unless, when not nil, is asked once the continue is being watched and just
+// before the raise; when it holds, nothing is raised and a continue is
+// reported, there being nothing to wait for. It is how a stop again after bg
+// avoids stopping a job that fg has already put back in the foreground:
+// bg; fg typed together can land between the caller's own check and this
+// raise. Asked after the watch is armed, fg is either seen by it — fg hands
+// the terminal over before it sends SIGCONT — or its SIGCONT comes after the
+// raise, where POSIX has it discard a stop still pending or continue one that
+// has landed. Only a SIGCONT in the instant between the question and the
+// raise is mistaken for the stop's own: raw mode is re-entered, the stop
+// lands after it, and the fg that follows resumes the process in whatever
+// modes the shell puts back.
+//
 // The signal goes to this pid, not the group, exactly as ssh's ~^Z does: the
 // shell that started us reports "Stopped" and fg is what comes back. Unlike
 // ssh's, this waits for SIGCONT, because kill(2) to ourselves returns before
@@ -89,10 +102,13 @@ func suspendAvailable() bool { return !tstpIgnored() }
 // Nothing is printed when the bound expires: the client is holding a
 // terminal the session is drawing on, and ssh's ~^Z is just as silent when
 // its own stop is discarded.
-func stopSelf() bool {
+func stopSelf(unless func() bool) bool {
 	cont := make(chan os.Signal, 1)
 	signal.Notify(cont, syscall.SIGCONT)
 	defer signal.Stop(cont)
+	if unless != nil && unless() {
+		return true
+	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTSTP); err != nil {
 		return false
 	}

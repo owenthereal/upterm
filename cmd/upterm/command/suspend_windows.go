@@ -10,4 +10,4 @@ const suspendSupported = false
 // reads the same on every platform.
 func suspendAvailable() bool { return false }
 
-func stopSelf() bool { return false }
+func stopSelf(func() bool) bool { return false }
