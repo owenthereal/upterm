@@ -81,8 +81,15 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 // tcsetattr would otherwise succeed against a terminal that is no longer
 // this process's to touch — writing raw termios over the foreground shell's,
 // exactly the hazard withRawTerminal's own comment describes for its
-// deferred restore. Left cooked in that case; the EIO the input goroutine
-// gets on its next read of a background terminal is what detaches it.
+// deferred restore.
+//
+// So a process continued in the background stops again, as that tcsetattr's
+// SIGTTOU would have stopped it had it not been ignored, and as ssh's ~^Z
+// does: the shell reports the job stopped, and fg brings it back, raw and
+// all. Reporting the terminal lost instead would detach the client, and fg
+// would find the job gone. Only a stop that is discarded ends this in the
+// background — the process group has been orphaned, so nothing is left to
+// continue it — and then the terminal is left cooked and reported lost.
 //
 // It reports whether the terminal is this process's again, in raw mode: the
 // client puts the session's modes back on it only then.
@@ -91,9 +98,11 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 // stop the process, so the terminal's state at the instant it runs — and
 // after this returns — can both be observed without staging real job
 // control.
-func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func() error) (termsize.Size, bool) {
+func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func() bool) (termsize.Size, bool) {
 	raw.restore()
-	_ = stop()
+	for stop() && !raw.owned(raw.f) {
+		// Continued without the terminal: stop again until fg.
+	}
 	owned := raw.owned(raw.f) && raw.enter() == nil
 	size, _ := tty.Size(stdout)
 	return size, owned

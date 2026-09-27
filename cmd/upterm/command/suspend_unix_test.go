@@ -59,13 +59,50 @@ func TestStopSelfReturnsWhenTheStopNeverLands(t *testing.T) {
 	suspendContWait = 100 * time.Millisecond
 	t.Cleanup(func() { suspendContWait = prev })
 
-	done := make(chan error, 1)
+	done := make(chan bool, 1)
 	go func() { done <- stopSelf() }()
 
 	select {
-	case err := <-done:
-		require.NoError(t, err, "a stop that is discarded is not an error: the suspend simply did not happen")
+	case continued := <-done:
+		require.False(t, continued, "a stop that is discarded is never continued, and reporting one would have a backgrounded client stop again for nothing")
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopSelf never returned from a stop that did not land, which leaves the client in cooked mode with no way out but SIGKILL")
+	}
+}
+
+// A process stopped for longer than suspendContWait comes back with the
+// bound expired and the continue on its way through os/signal at the same
+// instant, and it was continued all the same: reported as a stop that never
+// landed, a client continued by bg would give up on stopping again and
+// detach. The continue is sent here well after the bound, from a process
+// that was never stopped, so a stopSelf that trusts the timer alone reports
+// the wrong one every time rather than on the scheduler's whim.
+func TestStopSelfReportsAContinueThatArrivesAfterTheBound(t *testing.T) {
+	// Not parallel: signal dispositions and the bounds are process-wide.
+	tstp := make(chan os.Signal, 1)
+	signal.Notify(tstp, syscall.SIGTSTP)
+	t.Cleanup(func() { signal.Stop(tstp) })
+
+	prevWait, prevGrace := suspendContWait, suspendContGrace
+	suspendContWait, suspendContGrace = 10*time.Millisecond, 5*time.Second
+	t.Cleanup(func() { suspendContWait, suspendContGrace = prevWait, prevGrace })
+
+	done := make(chan bool, 1)
+	go func() { done <- stopSelf() }()
+	// stopSelf raises SIGTSTP only once it is watching SIGCONT, so the raise
+	// arriving is what makes it safe to send the continue.
+	select {
+	case <-tstp:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopSelf never raised SIGTSTP")
+	}
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGCONT))
+
+	select {
+	case continued := <-done:
+		require.True(t, continued, "a continue that arrived after the bound is still a continue")
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopSelf never returned")
 	}
 }
