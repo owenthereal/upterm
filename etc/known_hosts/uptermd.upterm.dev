@@ -1,0 +1,15 @@
+# The public upterm relay's host key, as an SSH certificate authority.
+#
+# uptermd presents a host certificate, so an ordinary key line does not
+# authorize it: golang.org/x/crypto/ssh/knownhosts only treats a key as a host
+# authority when its line is marked @cert-authority. An `ssh-keyscan` of this
+# relay emits a plain key line, which never matches, and upterm then falls
+# through to its first-connection prompt.
+#
+# Both lines are needed because a known_hosts pattern matches the port exactly:
+# a bare host means port 22, and a wss:// connection is keyed as [host]:443.
+#
+# Verify against the fingerprint published in the README before trusting this
+# file.
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+@cert-authority [uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
