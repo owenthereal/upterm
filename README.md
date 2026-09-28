@@ -180,7 +180,7 @@ Note that `ssh-keyscan uptermd.upterm.dev` is **not** equivalent. The relay pres
 
 `--skip-host-key-check` accepts whatever answers on the first connection. It is convenient for a self-hosted relay you are bringing up, and it is not a substitute for pinning: on a fresh runner it will trust anything that can intercept that connection.
 
-If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin fails closed — a rotated key produces a host-key mismatch rather than silently trusting whatever answers — but that failure is what to expect until the pin is updated. Watch this section after upgrading.
+If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin does not surface as a host-key mismatch: `known_hosts` simply holds no authority for the rotated key, which upterm treats as an unknown host. A job with no terminal therefore fails, because the first-connection prompt cannot be answered; an interactive run is prompted instead and could accept the new key, so update the pin rather than accepting at the prompt. Watch this section after upgrading.
 
 Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
 
