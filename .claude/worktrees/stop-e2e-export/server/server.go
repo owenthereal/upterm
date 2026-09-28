@@ -1,0 +1,661 @@
+package server
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"log/slog"
+
+	gliderssh "charm.land/ssh"
+	"github.com/go-kit/kit/metrics/provider"
+	"github.com/oklog/run"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/utils"
+	"github.com/owenthereal/upterm/ws"
+	"github.com/pires/go-proxyproto"
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/crypto/ssh"
+)
+
+const (
+	tcpDialTimeout = 1 * time.Second
+)
+
+type Opt struct {
+	HandshakeTimeout    time.Duration `mapstructure:"handshake-timeout"`
+	SSHAddr             string        `mapstructure:"ssh-addr"`
+	SSHProxyProtocol    bool          `mapstructure:"ssh-proxy-protocol"`
+	WSAddr              string        `mapstructure:"ws-addr"`
+	NodeAddr            string        `mapstructure:"node-addr"`
+	AuthorizedKeysFiles []string      `mapstructure:"authorized-keys"`
+	PrivateKeys         []string      `mapstructure:"private-key"`
+	Hostnames           []string      `mapstructure:"hostname"`
+	Network             string        `mapstructure:"network"`
+	NetworkOpts         []string      `mapstructure:"network-opt"`
+	MetricAddr          string        `mapstructure:"metric-addr"`
+	Debug               bool          `mapstructure:"debug"`
+	Routing             routing.Mode  `mapstructure:"routing"`
+	ConsulURL           string        `mapstructure:"consul-url"`
+	ConsulSessionTTL    string        `mapstructure:"consul-session-ttl"`
+	SentryDSN           string        `mapstructure:"sentry-dsn"`
+}
+
+// ResolvedRouting returns the effective routing mode. It resolves ModeAuto
+// against whether a Consul URL was configured, and supplies the ModeEmbedded
+// default for a zero value.
+func (opt *Opt) ResolvedRouting() routing.Mode {
+	switch opt.Routing {
+	case routing.ModeAuto:
+		if opt.ConsulURL != "" {
+			return routing.ModeConsul
+		}
+		return routing.ModeEmbedded
+	case "":
+		return routing.ModeEmbedded
+	default:
+		return opt.Routing
+	}
+}
+
+// Validate validates the server configuration
+func (opt *Opt) Validate() error {
+	if err := validateHandshakeTimeout(opt.HandshakeTimeout); err != nil {
+		return err
+	}
+	// Operator config gets the stricter floor; 0 still selects the default.
+	if opt.HandshakeTimeout > 0 && opt.HandshakeTimeout < minHandshakeTimeout {
+		return fmt.Errorf("handshake-timeout must be at least %s: half of it must cover a full SSH handshake", minHandshakeTimeout)
+	}
+	// Basic validation
+	if opt.SSHAddr == "" {
+		return fmt.Errorf("ssh-addr is required")
+	}
+
+	// Routing-specific validation
+	switch routingMode := opt.ResolvedRouting(); routingMode {
+	case routing.ModeConsul:
+		return opt.validateConsulConfig()
+	case routing.ModeEmbedded:
+		return opt.validateEmbeddedConfig()
+	default:
+		return fmt.Errorf("unsupported routing mode: %s", routingMode)
+	}
+}
+
+// validateConsulConfig validates Consul-specific configuration
+func (opt *Opt) validateConsulConfig() error {
+	if opt.ConsulURL == "" {
+		return fmt.Errorf("consul-url is required for consul routing mode")
+	}
+
+	// Validate Consul URL format
+	if _, err := url.Parse(opt.ConsulURL); err != nil {
+		return fmt.Errorf("invalid consul URL format: %w", err)
+	}
+
+	// Validate TTL format if provided
+	if opt.ConsulSessionTTL != "" {
+		if _, err := time.ParseDuration(opt.ConsulSessionTTL); err != nil {
+			return fmt.Errorf("invalid consul session TTL format: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// validateEmbeddedConfig validates embedded mode configuration
+func (opt *Opt) validateEmbeddedConfig() error {
+	// No special validation needed for embedded mode
+	return nil
+}
+
+func Start(ctx context.Context, opt Opt, logger *slog.Logger) error {
+	// Validate configuration upfront
+	if err := opt.Validate(); err != nil {
+		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	network := networks.Get(opt.Network)
+	if network == nil {
+		return fmt.Errorf("unsupported network provider %q", opt.Network)
+	}
+
+	opts := parseNetworkOpt(opt.NetworkOpts)
+	if err := network.SetOpts(opts); err != nil {
+		return fmt.Errorf("network provider option error: %s", err)
+	}
+
+	privateKeys, err := utils.ReadFiles(opt.PrivateKeys)
+	if err != nil {
+		return nil
+	}
+
+	if pp := os.Getenv("PRIVATE_KEY"); pp != "" {
+		privateKeys = append(privateKeys, []byte(pp))
+	}
+
+	signers, err := utils.CreateSigners(privateKeys)
+	if err != nil {
+		return err
+	}
+
+	// key signers + corresponding cert signers
+	hostSigners := slices.Clone(signers)
+	for _, s := range signers {
+		hs := HostCertSigner{
+			Hostnames: opt.Hostnames,
+		}
+		ss, err := hs.SignCert(s)
+		if err != nil {
+			return err
+		}
+
+		hostSigners = append(hostSigners, ss)
+	}
+
+	// logger is already the parameter, just add context
+	logger = logger.With("app", "uptermd", "network", opt.Network, "network_opt", opt.NetworkOpts)
+
+	var (
+		sshln net.Listener
+		wsln  net.Listener
+	)
+
+	if opt.SSHAddr != "" {
+		sshln, err = net.Listen("tcp", opt.SSHAddr)
+		if err != nil {
+			return err
+		}
+		logger = logger.With("ssh_addr", sshln.Addr().String())
+		if opt.SSHProxyProtocol {
+			// Wrap the SSH listener with proxyproto.Listener to preserve the real client IP
+			// when connections are coming through a TCP proxy (e.g., AWS ELB, HAProxy).
+			// Internal node hops and the WebSocket bridge use plain SSH on
+			// this same listener, so PROXY headers must remain optional.
+			sshln = &proxyproto.Listener{
+				Listener: sshln,
+				ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+					return proxyproto.USE, nil
+				},
+			}
+		}
+	}
+
+	if opt.WSAddr != "" {
+		wsln, err = net.Listen("tcp", opt.WSAddr)
+		if err != nil {
+			return err
+		}
+		logger = logger.With("ws_addr", wsln.Addr().String())
+	}
+
+	// fallback node addr to ssh addr or ws addr if empty
+	nodeAddr := opt.NodeAddr
+	if nodeAddr == "" && sshln != nil {
+		nodeAddr = sshln.Addr().String()
+	}
+	if nodeAddr == "" && wsln != nil {
+		nodeAddr = wsln.Addr().String()
+	}
+	if nodeAddr == "" {
+		return fmt.Errorf("node address can't by empty")
+	}
+
+	logger = logger.With("node_addr", nodeAddr)
+
+	var g run.Group
+	{
+		var mp provider.Provider
+		if opt.MetricAddr == "" {
+			mp = provider.NewDiscardProvider()
+		} else {
+			mp = newPrometheusProvider("upterm", "uptermd", prometheus.DefaultRegisterer)
+		}
+
+		// Determine session routing mode
+		sessionRouting := opt.ResolvedRouting()
+
+		// Create session manager with the appropriate routing mode
+		var sessionManager *SessionManager
+		switch sessionRouting {
+		case routing.ModeConsul:
+			var consulTTL time.Duration
+			if opt.ConsulSessionTTL != "" {
+				if parsedTTL, err := time.ParseDuration(opt.ConsulSessionTTL); err == nil {
+					consulTTL = parsedTTL
+				} else {
+					logger.Warn("invalid consul session TTL, using default", "error", err)
+				}
+			}
+
+			// Parse Consul address as URL
+			consulURL, err := url.Parse(opt.ConsulURL)
+			if err != nil {
+				return fmt.Errorf("invalid consul address URL: %w", err)
+			}
+
+			sm, err := NewSessionManager(routing.ModeConsul,
+				WithSessionManagerLogger(logger.With("component", "session-manager")),
+				WithSessionManagerConsulURL(consulURL),
+				WithSessionManagerConsulTTL(consulTTL))
+			if err != nil {
+				return fmt.Errorf("failed to create consul session manager: %w", err)
+			}
+			sessionManager = sm
+
+			logger.Info("using consul session store for routing")
+		case routing.ModeEmbedded:
+			sm, err := NewSessionManager(routing.ModeEmbedded,
+				WithSessionManagerLogger(logger.With("component", "session-manager")))
+			if err != nil {
+				return fmt.Errorf("failed to create embedded session manager: %w", err)
+			}
+			sessionManager = sm
+			logger.Info("using embedded session routing (in-memory session store)")
+		default:
+			return fmt.Errorf("invalid session routing mode: %s (supported: %s, %s)", sessionRouting, routing.ModeEmbedded, routing.ModeConsul)
+		}
+
+		s := &Server{
+			HandshakeTimeout:    opt.HandshakeTimeout,
+			NodeAddr:            nodeAddr,
+			AuthorizedKeysFiles: opt.AuthorizedKeysFiles,
+			HostSigners:         hostSigners,
+			Signers:             signers,
+			NetworkProvider:     network,
+			SessionManager:      sessionManager,
+			Logger:              logger.With("component", "server"),
+			MetricsProvider:     mp,
+		}
+		g.Add(func() error {
+			return s.ServeWithContext(ctx, sshln, wsln)
+		}, func(err error) {
+			if err := s.Shutdown(); err != nil {
+				logger.Error("error during server shutdown", "error", err)
+			}
+		})
+	}
+	{
+		if opt.MetricAddr != "" {
+			logger = logger.With("metric_addr", opt.MetricAddr)
+
+			m := &metricServer{}
+			g.Add(func() error {
+				return m.ListenAndServe(opt.MetricAddr)
+			}, func(err error) {
+				_ = m.Shutdown(ctx)
+			})
+		}
+	}
+
+	logger.Info("starting server")
+	defer logger.Info("shutting down server")
+
+	return g.Run()
+}
+
+func parseNetworkOpt(opts []string) NetworkOptions {
+	result := make(NetworkOptions)
+	for _, opt := range opts {
+		split := strings.SplitN(opt, "=", 2)
+		result[split[0]] = split[1]
+	}
+
+	return result
+}
+
+type Server struct {
+	HandshakeTimeout    time.Duration
+	NodeAddr            string
+	AuthorizedKeysFiles []string
+	HostSigners         []ssh.Signer
+	Signers             []ssh.Signer
+	NetworkProvider     NetworkProvider
+	MetricsProvider     provider.Provider
+	SessionManager      *SessionManager
+	Logger              *slog.Logger
+
+	mux    sync.Mutex
+	ctx    context.Context
+	cancel func()
+	// served closes when ServeWithContext returns, which is the moment every
+	// component has run its own shutdown and released its listener. Shutdown
+	// waits on it so that callers keep the guarantee they had when Shutdown
+	// closed the listeners itself: once it returns, nothing is still bound.
+	served chan struct{}
+}
+
+// errShutdownIncomplete reports that serving did not finish inside the
+// shutdown deadline, so a listener may still be bound.
+var errShutdownIncomplete = errors.New("serving did not stop within the shutdown deadline")
+
+// serveStopDeadline bounds how long Shutdown waits for serving to stop.
+//
+// run.Group runs its interrupts one after another, so the components' own
+// budgets add up: routing joins its workers for up to routingShutdownDeadline,
+// then the websocket server and sshd each drain for up to
+// serverShutDownDeadline. That sum is the floor, not the target -- a saturated
+// shutdown that spends all of it is still healthy, and scheduling, timer
+// granularity and the race detector all push it over. Budgeting exactly the sum
+// would answer such a shutdown with a false errShutdownIncomplete and an Error
+// log, which is the noise this deadline exists alongside. Hence the extra
+// serverShutDownDeadline of slack.
+//
+// A variable so tests can shorten it; nothing outside tests assigns to it.
+var serveStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadline
+
+// Shutdown cancels serving and waits for it to finish. It deliberately does not
+// close sshln or wsln: each is owned by the component serving it, which closes
+// it from its own run.Group interrupt as the context unwinds. Closing them here
+// as well made every listener close twice with no ordering between the two, and
+// the loser of that race reported "use of closed network connection" from
+// whichever side it landed on.
+func (s *Server) Shutdown() error {
+	s.mux.Lock()
+	cancel, served := s.cancel, s.served
+	s.mux.Unlock()
+
+	var err error
+
+	if cancel != nil {
+		cancel()
+	}
+
+	// A Server that never served has nothing to wait for. Waiting on a nil
+	// channel would block until the deadline and report a false timeout.
+	if served != nil {
+		timer := time.NewTimer(serveStopDeadline)
+		defer timer.Stop()
+		select {
+		case <-served:
+		case <-timer.C:
+			s.Logger.Error("timed out waiting for serving to stop", "deadline", serveStopDeadline)
+			err = errors.Join(err, errShutdownIncomplete)
+		}
+	}
+
+	// Clean up sessions created by this node
+	if sessionErr := s.SessionManager.Shutdown(s.NodeAddr); sessionErr != nil {
+		s.Logger.Error("failed to cleanup sessions during shutdown", "error", sessionErr)
+		err = errors.Join(err, fmt.Errorf("session cleanup: %w", sessionErr))
+	} else {
+		s.Logger.Debug("cleaned up sessions during shutdown")
+	}
+
+	if err == nil {
+		s.Logger.Debug("server shutdown completed")
+	}
+
+	return err
+}
+
+func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln net.Listener) error {
+	s.mux.Lock()
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	// Shutdown may already be waiting on a previous run's channel, so give it a
+	// fresh one rather than reusing whatever is there.
+	s.served = make(chan struct{})
+	served := s.served
+	s.mux.Unlock()
+	defer close(served)
+
+	sshdDialListener := s.NetworkProvider.SSHD()
+	sessionDialListener := s.NetworkProvider.Session()
+
+	var g run.Group
+	{
+		g.Add(func() error {
+			<-s.ctx.Done()
+			return s.ctx.Err()
+		}, func(err error) {
+			s.cancel()
+		})
+	}
+	{
+		if sshln != nil {
+			cd := sidewayConnDialer{
+				NodeAddr:            s.NodeAddr,
+				SSHDDialListener:    sshdDialListener,
+				SessionDialListener: sessionDialListener,
+				NeighbourDialer:     tcpConnDialer{},
+				Logger:              s.Logger.With("component", "ssh-conn-dialer"),
+			}
+			sp := &sshProxy{
+				HandshakeTimeout:    s.HandshakeTimeout,
+				HostSigners:         s.HostSigners,
+				Signers:             s.Signers,
+				NodeAddr:            s.NodeAddr,
+				AuthorizedKeysFiles: s.AuthorizedKeysFiles,
+				ConnDialer:          cd,
+				SessionManager:      s.SessionManager,
+				Logger:              s.Logger.With("component", "ssh-proxy"),
+				MetricsProvider:     s.MetricsProvider,
+			}
+			g.Add(func() error {
+				return sp.Serve(sshln)
+			}, func(err error) {
+				if err := sp.Shutdown(); err != nil {
+					sp.Logger.Error("error during ssh proxy shutdown", "error", err)
+				}
+			})
+		}
+	}
+	{
+		if wsln != nil {
+			var cd connDialer
+			if sshln == nil {
+				cd = sidewayConnDialer{
+					NodeAddr:            s.NodeAddr,
+					SSHDDialListener:    sshdDialListener,
+					SessionDialListener: sessionDialListener,
+					NeighbourDialer:     wsConnDialer{},
+					Logger:              s.Logger.With("component", "ws-conn-dialer"),
+				}
+			} else {
+				// If sshln is not nil, always dial to SSHProxy.
+				// So Host/Client -> WSProxy -> SSHProxy -> sshd/Session
+				// This makes sure that SSHProxy terminates all SSH requests
+				// which provides a consistent authentication mechanism.
+				cd = sshProxyDialer{
+					sshProxyAddr: sshln.Addr().String(),
+					Logger:       s.Logger.With("component", "ws-sshproxy-dialer"),
+				}
+			}
+			ws := &webSocketProxy{
+				ConnDialer:     cd,
+				SessionManager: s.SessionManager,
+				Logger:         s.Logger.With("component", "ws-proxy"),
+			}
+			g.Add(func() error {
+				return ws.Serve(wsln)
+			}, func(err error) {
+				if err := ws.Shutdown(); err != nil {
+					ws.Logger.Error("error during websocket proxy shutdown", "error", err)
+				}
+			})
+		}
+	}
+	{
+		ln, err := sshdDialListener.Listen()
+		if err != nil {
+			// run.Group actors do not start until Run, so nothing has taken
+			// sshln or wsln over yet and they are still this call's to release.
+			closeListeners(s.Logger, sshln, wsln)
+			return err
+		}
+
+		sshd := sshd{
+			SessionManager:      s.SessionManager,
+			HostSigners:         s.HostSigners, // TODO: use different host keys
+			NodeAddr:            s.NodeAddr,
+			SessionDialListener: sessionDialListener,
+			MetricsProvider:     s.MetricsProvider,
+			Logger:              s.Logger.With("component", "sshd"),
+		}
+		g.Add(func() error {
+			return sshd.Serve(ln)
+		}, func(err error) {
+			if err := sshd.Shutdown(); err != nil {
+				sshd.Logger.Error("error during sshd shutdown", "error", err)
+			}
+		})
+	}
+
+	// A shutdown someone asked for is not a failure. Each component reports the
+	// stop in its own vocabulary -- routing its ErrListnerClosed, http.Server
+	// its ErrServerClosed, the context watcher a cancellation -- and run.Group
+	// hands back whichever happened to return first, so without this the same
+	// clean shutdown surfaced a different error run to run and every caller,
+	// the ftests harness included, logged it.
+	if err := g.Run(); !isRequestedStop(err) {
+		return err
+	}
+
+	return nil
+}
+
+// closeListeners releases listeners that no component has taken over, for the
+// paths that give up before serving starts. Each listener otherwise has exactly
+// one owner, so this is only ever reached when there is no owner at all.
+func closeListeners(logger *slog.Logger, lns ...net.Listener) {
+	for _, ln := range lns {
+		if ln == nil {
+			continue
+		}
+		if err := ln.Close(); err != nil {
+			logger.Error("error releasing listener after a failed start", "error", err)
+		}
+	}
+}
+
+// isRequestedStop reports whether err is how a component says it stopped
+// because it was told to, rather than because something went wrong.
+func isRequestedStop(err error) bool {
+	return err == nil ||
+		errors.Is(err, ErrListnerClosed) ||
+		errors.Is(err, http.ErrServerClosed) ||
+		errors.Is(err, gliderssh.ErrServerClosed) ||
+		errors.Is(err, context.Canceled)
+}
+
+// connDialer reaches the node or socket an identifier resolves to. DialContext
+// is required, not optional: the SSH front door bounds upstream establishment
+// with it, and a dialer that only offers Dial would pass every Dial-based path
+// (the WebSocket proxy, sshd) and then fail every SSH connection after
+// downstream authentication had already succeeded.
+type connDialer interface {
+	Dial(id *api.Identifier) (net.Conn, error)
+	DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error)
+}
+
+type sshProxyDialer struct {
+	sshProxyAddr string
+	Logger       *slog.Logger
+}
+
+func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: tcpDialTimeout}
+
+	// If it's a host request, dial to SSHProxy in the same node.
+	// Otherwise, dial to the specified SSHProxy.
+	if id.Type == api.Identifier_HOST {
+		d.Logger.With("host", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy sshd")
+		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
+	}
+
+	d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr, "addr", id.NodeAddr).Info("dialing sshproxy session")
+	return dialer.DialContext(ctx, "tcp", id.NodeAddr)
+}
+
+type tcpConnDialer struct {
+}
+
+func (d tcpConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d tcpConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	return (&net.Dialer{Timeout: tcpDialTimeout}).DialContext(ctx, "tcp", id.NodeAddr)
+}
+
+type wsConnDialer struct {
+}
+
+func (d wsConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d wsConnDialer) DialContext(_ context.Context, id *api.Identifier) (net.Conn, error) {
+	u, err := url.Parse("ws://" + id.NodeAddr)
+	if err != nil {
+		return nil, err
+	}
+	encodedNodeAddr := base64.StdEncoding.EncodeToString([]byte(id.NodeAddr))
+	u.User = url.UserPassword(id.Id, encodedNodeAddr)
+
+	return ws.NewWSConn(u, true, nil)
+}
+
+type sidewayConnDialer struct {
+	NodeAddr            string
+	SSHDDialListener    SSHDDialListener
+	SessionDialListener SessionDialListener
+	NeighbourDialer     connDialer
+	Logger              *slog.Logger
+}
+
+func (cd sidewayConnDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return cd.DialContext(context.Background(), id)
+}
+
+// DialContext makes the routing decision, so it owns the logging for it. The
+// SSH front door only ever calls this path, and these three lines are the
+// breadcrumb that tells a local dial from a cross-node hop.
+func (cd sidewayConnDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	logger := cd.logger().With("session", id.Id, "node", cd.NodeAddr, "type", api.Identifier_Type_name[int32(id.Type)])
+
+	if id.Type == api.Identifier_HOST {
+		logger.Info("dialing sshd")
+		return cd.SSHDDialListener.DialContext(ctx)
+	}
+
+	host, port, err := net.SplitHostPort(id.NodeAddr)
+	if err != nil {
+		return nil, fmt.Errorf("host address %s is malformed: %w", id.NodeAddr, err)
+	}
+	addr := net.JoinHostPort(host, port)
+	logger = logger.With("addr", addr)
+
+	// if current node is matching, dial to session.
+	// Otherwise, dial to neighbour node
+	if cd.NodeAddr == addr {
+		logger.Info("dialing session")
+		return cd.SessionDialListener.DialContext(ctx, id.Id)
+	}
+
+	logger.Info("dialing neighbour")
+	return cd.NeighbourDialer.DialContext(ctx, id)
+}
+
+// logger tolerates the zero value, which tests construct directly.
+func (cd sidewayConnDialer) logger() *slog.Logger {
+	if cd.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return cd.Logger
+}

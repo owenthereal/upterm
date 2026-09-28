@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "github.com/owenthereal/upterm/host/api";
+
+service AdminService {
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {}
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse) {}
+}
+
+message GetSessionRequest {}
+
+// StopSessionRequest asks the session to end: the command is hung up, then
+// terminated, then killed, and the record reads stopped.
+message StopSessionRequest {
+  // launch_id must be the launch_id of the record the caller read. A name
+  // and a socket path are reused by whoever claims the name next, so they
+  // do not say which run is being stopped; the launch does. The daemon
+  // refuses any other value, an empty one included, so that a session that
+  // ended and was replaced between the read and this call is not stopped in
+  // place of the one that was inspected.
+  string launch_id = 1;
+}
+
+message StopSessionResponse {}
+
+message GetSessionResponse {
+  string session_id = 1;
+  repeated string command = 2;
+  repeated string force_command = 3;
+  string host = 4;
+  string node_addr = 5;
+  repeated Client connected_clients = 6;
+  repeated AuthorizedKey authorized_keys = 7;
+  string ssh_user = 8; // SSH username for client connections
+  bool sftp_disabled = 9; // true if SFTP is disabled (--no-sftp)
+}
+
+message AuthorizedKey {
+  repeated string public_key_fingerprints = 1;
+  string comment = 2;
+}
+
+message Client {
+  string id = 1;
+  string version = 2;
+  string addr = 3;
+  string public_key_fingerprint = 4;
+  // Which door the client came in by. GUEST is zero so a reader built before
+  // this field existed sees every client as a guest, which is what they were.
+  Kind kind = 5;
+
+  enum Kind {
+    GUEST = 0;
+    HOST = 1;
+  }
+}
+
+message Identifier {
+  string id = 1;
+  Type type = 2;
+  string node_addr = 3;
+
+  enum Type {
+    HOST = 0;
+    CLIENT = 1;
+  }
+}

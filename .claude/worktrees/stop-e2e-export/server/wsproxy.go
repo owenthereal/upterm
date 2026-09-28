@@ -1,0 +1,203 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/oklog/run"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/ws"
+	"log/slog"
+)
+
+type webSocketProxy struct {
+	ConnDialer     connDialer
+	SessionManager *SessionManager
+	Logger         *slog.Logger
+
+	srv *http.Server
+	mux sync.Mutex
+	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
+	stopped bool
+}
+
+func webHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
+			return
+		case strings.HasPrefix(r.URL.Path, "/getting-started"):
+			w.Header().Add("Content-Type", "text/plain")
+			// TODO: better getting-started guide
+			data := `1. Install the upterm CLI by following https://github.com/owenthereal/upterm#installation.
+2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.
+3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
+`
+			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+			return
+		default:
+			h.ServeHTTP(w, r)
+		}
+	})
+}
+
+func (s *webSocketProxy) Serve(ln net.Listener) error {
+	s.mux.Lock()
+	if s.stopped {
+		s.mux.Unlock()
+		_ = ln.Close()
+		return http.ErrServerClosed
+	}
+	s.srv = &http.Server{
+		Handler: webHandler(&wsHandler{
+			ConnDialer:     s.ConnDialer,
+			SessionManager: s.SessionManager,
+			Logger:         s.Logger,
+		}),
+	}
+	s.mux.Unlock()
+
+	return s.srv.Serve(ln)
+}
+
+func (s *webSocketProxy) Shutdown() error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	s.stopped = true
+
+	if s.srv != nil {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(serverShutDownDeadline))
+		defer cancel()
+
+		// http.Server owns wsln outright -- Server.Shutdown no longer closes it --
+		// so Shutdown closes it exactly once and a close error here is a real one.
+		return s.srv.Shutdown(ctx)
+	}
+
+	return nil
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+type wsHandler struct {
+	ConnDialer     connDialer
+	SessionManager *SessionManager
+	Logger         *slog.Logger
+}
+
+// ServeHTTP checks the following header:
+// * Authorization
+// * Upterm-Client-Version
+func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	clientVersion := r.Header.Get(upterm.HeaderUptermClientVersion)
+	if clientVersion == "" {
+		h.httpError(w, fmt.Errorf("missing upterm client version"))
+		return
+	}
+
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		h.httpError(w, fmt.Errorf("basic auth failed"))
+		return
+	}
+
+	sshUser := user
+	if h.SessionManager.GetRoutingMode() == routing.ModeEmbedded {
+		sshUser = user + ":" + pass
+	}
+
+	wsc, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.httpError(w, fmt.Errorf("ws upgrade failed"))
+		return
+	}
+	wsconn := ws.WrapWSConn(wsc)
+	defer func() {
+		_ = wsconn.Close()
+	}()
+
+	// Determine connection type and decode identifier using SessionManager
+	var id *api.Identifier
+	if string(clientVersion) == upterm.HostSSHClientVersion {
+		// HOST connection: sshUser is the session ID
+		id = &api.Identifier{
+			Id:   sshUser,
+			Type: api.Identifier_HOST,
+		}
+	} else {
+		// CLIENT connection: decode the SSH user using SessionManager
+		sessionID, nodeAddr, err := h.SessionManager.ResolveSSHUser(sshUser)
+		if err != nil {
+			h.wsError(wsc, fmt.Errorf("error resolving SSH user %s: %w", sshUser, err), "error resolving SSH user")
+			return
+		}
+
+		id = &api.Identifier{
+			Id:       sessionID,
+			NodeAddr: nodeAddr,
+			Type:     api.Identifier_CLIENT,
+		}
+	}
+
+	conn, err := h.ConnDialer.Dial(id)
+	if err != nil {
+		h.wsError(wsc, err, "error dialing")
+		return
+	}
+
+	var o sync.Once
+	cl := func() {
+		_ = wsconn.Close()
+		_ = conn.Close()
+	}
+
+	var g run.Group
+	{
+		g.Add(func() error {
+			_, err := io.Copy(wsconn, conn)
+			return err
+		}, func(err error) {
+			o.Do(cl)
+		})
+	}
+	{
+		g.Add(func() error {
+			_, err := io.Copy(conn, wsconn)
+			return err
+		}, func(err error) {
+			o.Do(cl)
+		})
+	}
+
+	if err := g.Run(); err != nil {
+		h.wsError(wsc, err, "error piping")
+	}
+}
+
+func (h *wsHandler) httpError(w http.ResponseWriter, err error) {
+	h.Logger.Error("http error", "error", err)
+	w.WriteHeader(400)
+	_, _ = w.Write([]byte(err.Error()))
+}
+
+func (h *wsHandler) wsError(ws *websocket.Conn, err error, msg string) {
+	h.Logger.Error(msg, "error", err)
+	_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+}

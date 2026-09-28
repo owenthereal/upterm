@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -e
+
+project_name="owenthereal/upterm"
+tag_name="${1?}"
+[[ $tag_name == *-* ]] && pre=1 || pre=
+
+notes="$(git tag --list "$tag_name" --format='%(contents:subject)%0a%0a%(contents:body)')"
+
+if hub release --include-drafts | grep -q "^${tag_name}\$"; then
+  hub release edit "$tag_name" -m ""
+elif [ $(wc -l <<<"$notes") -gt 1 ]; then
+  hub release create ${pre:+--prerelease} - "$tag_name" <<<"$notes"
+else
+  { echo "${project_name} ${tag_name#v}"
+    echo
+    bin/changelog
+  } | hub release create --draft ${pre:+--prerelease} - "$tag_name"
+fi

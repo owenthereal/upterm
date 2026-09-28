@@ -1,0 +1,87 @@
+# Default values for upterm.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/owenthereal/upterm/uptermd
+  pullPolicy: Always
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+debug: false
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  # Set to LoadBalancer to accept traffic from outside the cluster
+  # type: LoadBalancer
+  annotations: {}
+
+resources: 
+  limits:
+    cpu: 100m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+host_keys: {}
+
+# SSH public keys (in `authorized_keys` line format, one entry per list item)
+# permitted to register as hosts on this uptermd. When empty, any client may
+# register. Edits require restarting uptermd to take effect.
+# Example:
+#   authorized_keys:
+#     - "ssh-ed25519 AAAA... alice@laptop"
+#     - "ssh-ed25519 BBBB... bob@desktop"
+authorized_keys: []
+
+hostname: my-upterm-host
+
+# Require ingress-nginx & cert-manager
+websocket:
+  enabled: false
+  cert_manager_acme_email: your_email
+  ingress_nginx_ingress_class: nginx
+  ingress:
+    annotations: {}

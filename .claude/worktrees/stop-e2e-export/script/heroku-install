@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+set -e
+
+TERRAFORM_STATES_DIR=$(pwd)/terraform_states
+mkdir -p $TERRAFORM_STATES_DIR
+
+pushd  ./terraform/heroku
+
+echo "Initializing terraform..."
+terraform init
+
+echo "Applying terraform..."
+export TF_VAR_git_commit_sha="${TF_VAR_git_commit_sha:-$(git rev-parse HEAD)}" # default version to current HEAD
+terraform apply -state $TERRAFORM_STATES_DIR/heroku.tfstate
+
+popd > /dev/null

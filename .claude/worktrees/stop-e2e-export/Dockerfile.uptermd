@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+# Build stage - builds from source (used by docker-compose and local builds).
+# Version stamping lives in .goreleaser.yml; source builds intentionally report
+# the internal/version defaults.
+FROM golang:latest AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+ENV CGO_ENABLED=0
+RUN --mount=target=. \
+  --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/go/pkg \
+  GOOS=$TARGETOS GOARCH=$TARGETARCH go install \
+  -ldflags="-s -w" \
+  ./cmd/...
+
+# Base runtime stage
+FROM gcr.io/distroless/static:nonroot AS base
+
+WORKDIR /app
+ENV PATH="/app:${PATH}"
+
+# sshd ws & prometheus
+EXPOSE 2222 8080 9091
+
+# Pre-built binary stage (used by GoReleaser)
+FROM base AS pre-built-binary
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/uptermd /app/
+ENTRYPOINT ["uptermd"]
+
+# Default stage
+FROM base AS uptermd
+COPY --from=builder /go/bin/uptermd /app/
+ENTRYPOINT ["uptermd"]

@@ -1,0 +1,78 @@
+app = "upterm"
+kill_signal = "SIGINT"
+kill_timeout = "5s"
+
+[build]
+image = "ghcr.io/owenthereal/upterm/uptermd:latest"
+
+[metrics]
+port = 9091
+path = "/metrics"
+
+[env]
+UPTERMD_SSH_ADDR           = "[::]:2222"
+UPTERMD_WS_ADDR            = "[::]:8080"
+UPTERMD_METRIC_ADDR        = "[::]:9091"
+UPTERMD_SSH_PROXY_PROTOCOL = "true"
+UPTERMD_NODE_ADDR          = "${FLY_MACHINE_ID}.vm.${FLY_APP_NAME}.internal:2222"
+UPTERMD_ROUTING            = "auto"
+UPTERMD_CONSUL_URL         = "${FLY_CONSUL_URL:-}"
+UPTERMD_CONSUL_SESSION_TTL = "1h"
+
+[vm]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256
+
+[[services]]
+protocol = "tcp"
+internal_port = 2222
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 3
+processes = ["app"]
+
+[[services.ports]]
+port = 22
+handlers = ["proxy_proto"]
+proxy_proto_options = { version = "v2" }
+
+[services.concurrency]
+type = "connections"
+hard_limit = 2500
+soft_limit = 2000
+
+[[services.tcp_checks]]
+interval = "15s"
+timeout = "2s"
+grace_period = "5s"
+restart_limit = 3
+
+[[services]]
+protocol = "tcp"
+internal_port = 8080
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 3
+processes = ["app"]
+
+[[services.ports]]
+port = 80
+handlers = ["http"]
+force_https = true
+
+[[services.ports]]
+port = 443
+handlers = ["tls", "http"]
+[services.concurrency]
+type = "connections"
+hard_limit = 2500
+soft_limit = 2000
+
+[[services.http_checks]]
+interval = "30s"
+timeout = "5s"
+grace_period = "10s"
+restart_limit = 3
+path = "/health"
+protocol = "http"

@@ -1,0 +1,570 @@
+# Upterm
+
+[Upterm](https://github.com/owenthereal/upterm) is an open-source tool enabling developers to share terminal sessions securely over the web. It’s perfect for remote pair programming, accessing computers behind NATs/firewalls, remote debugging, and more.
+
+This is a [blog post](https://owenou.com/upterm) to describe Upterm in depth.
+
+## :movie_camera: Quick Demo
+
+[![demo](https://raw.githubusercontent.com/owenthereal/upterm/gh-pages/demo.gif)](https://asciinema.org/a/efeKPxxzKi3pkyu9LWs1yqdbB)
+
+## :rocket: Getting Started
+
+## Installation
+
+### Mac
+
+```console
+brew install --cask owenthereal/upterm/upterm
+```
+
+#### Migrating from Formula to Cask
+
+If you previously installed upterm using the Homebrew formula (without `--cask`), you'll need to migrate to the Cask version:
+
+```console
+# Uninstall the old formula version
+brew uninstall upterm
+
+# Install the new Cask version
+brew install --cask owenthereal/upterm/upterm
+```
+
+**Note:** Running `brew upgrade` with the old formula installed will fail with an error. Follow the migration steps above to resolve this.
+
+### Windows
+
+```powershell
+scoop bucket add upterm https://github.com/owenthereal/scoop-upterm
+scoop install upterm
+```
+
+### Standalone
+
+`upterm` can be easily installed as an executable. Download the latest [compiled binaries](https://github.com/owenthereal/upterm/releases) and put it in your executable path.
+
+### Go
+
+```console
+go install github.com/owenthereal/upterm/cmd/upterm@latest
+```
+
+### From source
+
+```console
+git clone https://github.com/owenthereal/upterm.git
+cd upterm
+go install ./cmd/upterm/...
+```
+
+## :wrench: Basic Usage
+
+1. Host starts a terminal session:
+
+   ```console
+   upterm host
+   ```
+
+1. Host retrieves and shares the SSH connection string:
+
+   ```console
+   upterm session current
+   ```
+
+1. Client connects using the shared string:
+
+   ```console
+   ssh TOKEN@uptermd.upterm.dev
+   ```
+
+## :blue_book: Quick Reference
+
+Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
+Below are some notable highlights:
+
+### Command Execution
+
+Host a session with any desired command:
+
+```console
+upterm host -- docker run --rm -ti ubuntu bash
+```
+
+### Access Control
+
+Host a session with specified client public key(s) authorized to connect:
+
+```console
+upterm host --authorized-keys PATH_TO_PUBLIC_KEY
+```
+
+Or authorize users by `provider:username`, fetching their public keys from a
+code-hosting service:
+
+```console
+upterm host --authorized-user github:username
+upterm host --authorized-user gitlab:username
+upterm host --authorized-user srht:username
+upterm host --authorized-user codeberg:username
+```
+
+Self-hosted instances are supported by naming the host. `gitea` and `forgejo`
+always require one, since there is no default instance. Keys are always fetched
+over HTTPS:
+
+```console
+upterm host --authorized-user github:username@ghe.example.com
+upterm host --authorized-user gitea:username@git.example.com
+upterm host --authorized-user forgejo:username@git.example.com
+upterm host --authorized-user https://git.example.com/username
+```
+
+For a GitHub Enterprise Server instance that requires a login, authenticate
+first with `gh auth login --hostname ghe.example.com`; only credentials stored
+for that host are used.
+
+### SSH agents and hardware keys
+
+`upterm host` authenticates to the server with your SSH identity once, when
+the tunnel is established, the same as `ssh` would. Everything after that —
+guest joins, `upterm attach`, key renegotiation — uses a key generated for
+the session, so an agent that confirms each signature (gpg-agent with a
+smartcard, 1Password, a FIDO key) asks once, at start.
+
+To keep such an agent out of it entirely, name a plain key. A supplied
+`--private-key` is the whole set, like OpenSSH's `IdentitiesOnly`:
+
+```console
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/upterm
+upterm host --private-key ~/.ssh/upterm
+```
+
+To use one particular agent identity, name its public key:
+
+```console
+upterm host --private-key ~/.ssh/id_ed25519_sk.pub
+```
+
+Guests still authenticate with a key of their own. A session with no
+`--authorized-keys` or `--authorized-user` accepts any key, but not none.
+
+### Force command
+
+Host a session initiating `tmux new -t pair-programming`, while ensuring clients join with `tmux attach -t pair-programming`.
+This mirrors functionality provided by tmate:
+
+```console
+upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
+```
+
+### Running Without a Terminal
+
+Host a session from a script or CI step with nothing attached to its terminal. `--accept` skips the confirmation prompt, `--name` gives the session a local name you choose, and `--pty-size` pins the terminal geometry so the command renders the same for every client:
+
+```console
+upterm host --accept --name build-shell --pty-size 132x43 -- bash &
+```
+
+In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Add it first, or pass `--skip-host-key-check` to accept an unknown key on the first connection:
+
+```console
+mkdir -p ~/.ssh && ssh-keyscan uptermd.upterm.dev >> ~/.ssh/known_hosts
+```
+
+Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
+
+```console
+upterm session info build-shell -o json
+```
+
+The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled`, `stopped`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — reached through the admin socket path its record carries. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
+
+Put a terminal on a session started without one, from any shell on the same machine:
+
+```console
+upterm attach build-shell
+```
+
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and `guestCount` in the JSON is what a script should watch.
+
+### File Transfer (SFTP/SCP)
+
+Clients can transfer files using standard `scp` or `sftp` commands. The connection details are shown when running `upterm session current`:
+
+```console
+# Download a file from host
+scp -P PORT USER@HOST:/path/to/file.txt ./local/
+
+# Upload a file to host
+scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
+```
+
+**Security model:**
+
+- File transfers have the same access as the terminal session (clients can already access any file via the shell)
+- Without `--accept`, each file operation prompts the host for approval via a dialog
+- Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
+- Use `--no-sftp` to disable file transfers entirely
+
+### Local TCP Forwarding
+
+Clients can use standard SSH local forwarding through a hosted session when the host opts in:
+
+```console
+upterm host --allow-local-tcp-forwarding
+ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
+```
+
+### WebSocket Connection
+
+In scenarios where your host restricts ssh transport, establish a connection to `uptermd.upterm.dev` (or your self-hosted server) via WebSocket:
+
+```console
+upterm host --server wss://uptermd.upterm.dev -- bash
+```
+
+Clients can connect to the host session via WebSocket as well:
+
+```console
+ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
+```
+
+### HTTP Proxy
+
+If the host can only reach the internet through an HTTP proxy, pass it with `--proxy`. It works with `ssh://`, `ws://` and `wss://` servers, so the default server works too as long as the proxy allows `CONNECT` to port 22:
+
+```console
+upterm host --proxy http://proxy.example.com:3128 -- bash
+```
+
+Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
+
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
+
+### Debug GitHub Actions
+
+`upterm` can be integrated with GitHub Actions to enable real-time SSH debugging, allowing you to interact directly with the runner system during workflow execution. This is achieved through [action-upterm](https://github.com/owenthereal/action-upterm), which sets up an `upterm` session within your CI pipeline.
+
+To get started, include `action-upterm` in your GitHub Actions workflow as follows:
+
+```yaml
+name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup upterm session
+      uses: owenthereal/action-upterm@v1
+```
+
+This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
+
+For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
+
+## :bulb: Tips
+
+### Resolving Tmux Session Display Issue
+
+**Issue**: The command `upterm session current` does not display the current session when used within Tmux.
+
+**Cause**: This occurs because `upterm session current` requires the `UPTERM_ADMIN_SOCKET` environment variable, which is set in the specified command. Tmux, however, does not carry over environment variables not on its default list to any Tmux session unless instructed to do so ([Reference](http://man.openbsd.org/i386/tmux.1#GLOBAL_AND_SESSION_ENVIRONMENT)).
+
+**Solution**: To rectify this, add the following line to your `~/.tmux.conf`:
+
+```conf
+set-option -ga update-environment " UPTERM_ADMIN_SOCKET UPTERM_SESSION_NAME"
+```
+
+### Identifying Upterm Session
+
+**Issue**: It might be unclear whether your shell command is running in an upterm session, especially with common shell commands like `bash` or `zsh`.
+
+**Solution**: Use `upterm session current -o go-template` to customize your shell prompt with session info. Add to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+# Show 🆙 emoji and connected client count when in upterm session
+export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+```
+
+**Template variables available** (Go templates use PascalCase field names):
+
+- `{{.SessionID}}` - Session ID
+- `{{.ClientCount}}` - Number of connected clients
+- `{{.Host}}` - Server host
+- `{{.Command}}` - Command being shared
+- `{{.ForceCommand}}` - Force command (if set)
+
+> **Note**: JSON output (`-o json`) uses camelCase keys (e.g., `sessionId`, `clientCount`).
+>
+> **Tip**: The same template mechanism can be used for terminal titles or other integrations.
+
+**Alternative** (simpler, without client count):
+
+```bash
+export PS1="$([[ ! -z "${UPTERM_ADMIN_SOCKET}"  ]] && echo -e '\xF0\x9F\x86\x99 ')$PS1"
+```
+
+## :gear: How it works
+
+Upterm starts an SSH server (a.k.a. `sshd`) in the host machine and sets up a reverse SSH tunnel to a [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`).
+Clients connect to a terminal session over the public internet via `uptermd` using `ssh` or `ssh` over WebSocket.
+
+![upterm flowchart](https://raw.githubusercontent.com/owenthereal/upterm/gh-pages/upterm-flowchart.svg?sanitize=true)
+
+## :hammer_and_wrench: Deployment
+
+### Kubernetes
+
+You can deploy uptermd to a Kubernetes cluster. Install it with [helm](https://helm.sh):
+
+```console
+helm repo add upterm https://upterm.dev
+helm repo update
+helm install uptermd upterm/uptermd
+```
+
+### Fly.io
+
+The cheapest way to deploy a worry-free [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) is to use [Fly.io](https://fly.io).
+Fly offers a generous free tier and excellent global performance. The official uptermd community server is hosted on Fly.
+
+1. Install the Fly CLI and authenticate:
+
+   ```console
+   curl -L https://fly.io/install.sh | sh
+   flyctl auth login
+   ```
+
+1. Copy [`fly.example.toml`](./fly.example.toml) to `fly.toml` and set your app
+   name. It pulls the published `ghcr.io/owenthereal/upterm/uptermd` image, so
+   no local build is needed.
+1. Deploy your uptermd server:
+
+  ```console
+  flyctl deploy
+  ```
+
+Your uptermd server will be available at `your-app-name.fly.dev`. You can connect using either SSH or WebSocket protocols.
+
+> **Upgrading from an earlier release:** `uptermd-fly` no longer exists. Replace your `[build] dockerfile`/`build-target` and `[experimental] entrypoint` settings with the `[build] image` and `[env]` blocks shown in [`fly.example.toml`](./fly.example.toml).
+
+### Variable expansion in configuration
+
+`uptermd` expands environment variable references in its text configuration
+values — flags, `UPTERMD_*` environment variables, and config files alike. This
+exists because the container image has no shell, so values that need a runtime
+value (a machine ID, a pod IP) cannot be interpolated before the process starts.
+
+Expansion applies to text values only. Boolean options — `--debug` and
+`--ssh-proxy-protocol` — are parsed before expansion runs, so a reference such
+as `UPTERMD_DEBUG=${DEBUG_ENABLED}` fails at startup with a parse error rather
+than being substituted. Give booleans a literal `true` or `false`.
+
+| Syntax | Meaning |
+| --- | --- |
+| `${NAME}` | Required. `uptermd` exits at startup if `NAME` is unset or empty. |
+| `${NAME:-default}` | Uses `default` when `NAME` is unset or empty. |
+| `$${` | A literal `${` (outside defaults only). |
+
+A `$` not followed by `{` is always literal, and substituted values are never
+rescanned — a password containing `${TOKEN}` is passed through untouched. The `$${` escape applies only outside defaults; a default value cannot contain `${` or `}`.
+
+Comma-separated lists are split before expansion, so a substituted value is always a single element — with `HOSTS=a.example.com,b.example.com`, setting `UPTERMD_HOSTNAME=${HOSTS}` produces one element, not two.
+
+If an existing configuration value contains a literal `${`, escape it as `$${`.
+
+### Heroku
+
+You can deploy an [Upterm server](https://github.com/owenthereal/upterm/tree/master/cmd/uptermd) (a.k.a. `uptermd`) to [Heroku](https://heroku.com).
+Note that Heroku discontinued their free tier in November 2022, so this option now requires paid plans.
+
+You can deploy with one click of the following button:
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+
+You can also automate the deployment with [Heroku Terraform](https://devcenter.heroku.com/articles/using-terraform-with-heroku).
+The Heroku Terraform scripts are in the [terraform/heroku folder](./terraform/heroku).
+A [util script](./bin/heroku-install) is provided for your convenience to automate everything:
+
+```console
+git clone https://github.com/owenthereal/upterm
+cd upterm
+```
+
+Provision uptermd in Heroku Common Runtime. Follow instructions.
+
+```console
+bin/heroku-install
+```
+
+Provision uptermd in Heroku Private Spaces. Follow instructions.
+
+```console
+TF_VAR_heroku_region=REGION TF_VAR_heroku_space=SPACE_NAME TF_VAR_heroku_team=TEAM_NAME bin/heroku-install
+```
+
+You **must** use WebSocket as the protocol for a Heroku-deployed Uptermd server because the platform only support HTTP/HTTPS routing.
+This is how you host a session and join a session:
+
+Use the Heroku-deployed Uptermd server via WebSocket
+
+```console
+upterm host --server wss://YOUR_HEROKU_APP_URL -- YOUR_COMMAND
+```
+
+A client connects to the host session via WebSocket
+
+```console
+ssh -o ProxyCommand='upterm proxy wss://TOKEN@YOUR_HEROKU_APP_URL' TOKEN@YOUR_HEROKU_APP_URL:443
+```
+
+### Digital Ocean
+
+There is an util script that makes provisioning [Digital Ocean Kubernetes](https://www.digitalocean.com/products/kubernetes) and an Upterm server easier:
+
+```bash
+TF_VAR_do_token=$DO_PAT \
+TF_VAR_uptermd_host=uptermd.upterm.dev \
+TF_VAR_uptermd_acme_email=YOUR_EMAIL \
+TF_VAR_uptermd_helm_repo=http://localhost:8080 \
+TF_VAR_uptermd_host_keys_dir=PATH_TO_HOST_KEYS \
+bin/do-install
+```
+
+### Systemd
+
+A hardened systemd service is provided in `systemd/uptermd.service`. You can use it to easily run a
+secured `uptermd` on your machine:
+
+```console
+cp systemd/uptermd.service /etc/systemd/system/uptermd.service
+systemctl daemon-reload
+systemctl start uptermd
+```
+
+### Traefik
+
+Below is an example `docker-compose` configuration for deploying `uptermd` behind [Traefik](https://doc.traefik.io/traefik/), including support for both SSH and WebSocket connections:
+
+```yaml
+services:
+  upterm:
+    build: 
+        context: https://github.com/owenthereal/upterm.git
+        dockerfile: Dockerfile.uptermd
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      # SSH over TCP (port 2222)
+      - "traefik.tcp.services.uptermd.loadbalancer.server.port=2222"
+      - "traefik.tcp.services.uptermd.loadbalancer.proxyProtocol.version=2" # required for real IP forwarding over TCP
+      - "traefik.tcp.routers.uptermd.service=uptermd"
+      - "traefik.tcp.routers.uptermd.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.uptermd.entrypoints=uptermd"
+      # WebSocket over HTTPS (port 8443)
+      - "traefik.http.services.uptermd-wss.loadbalancer.server.port=8443"
+      - "traefik.http.routers.uptermd-wss.service=uptermd-wss"
+      - "traefik.http.routers.uptermd-wss.rule=Host(`upterm.example.com`)" # edit as needed
+      - "traefik.http.routers.uptermd-wss.entrypoints=websecure"
+      - "traefik.http.routers.uptermd-wss.tls.certresolver=<your cert resolver here>"
+
+    command:
+      - --ssh-addr=0.0.0.0:2222
+      - --ws-addr=0.0.0.0:8443
+      - --ssh-proxy-protocol
+
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+```
+
+**Important notes:**
+
+- **Proxy Protocol:**
+  The `--ssh-proxy-protocol` flag (or `UPTERMD_SSH_PROXY_PROTOCOL=true` environment variable) tells `uptermd` to expect the [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) header on incoming SSH connections. This is essential when using Traefik (or other TCP proxies like HAProxy or AWS ELB) to preserve the real client IP address.
+  **If you enable `--ssh-proxy-protocol`, all incoming SSH connections must come through a proxy that supports and is configured to use the PROXY protocol. Direct SSH connections will fail, as `uptermd` will expect the protocol header.**
+
+- **Entrypoints:**
+  Make sure to configure the appropriate [Traefik entrypoints](https://doc.traefik.io/traefik/routing/entrypoints/). This example uses two: one for SSH (`uptermd` on port `2222`) and one for WebSocket/HTTPS (`websecure` on port `443`).
+
+- **WebSocket:**
+  The WebSocket service allows clients to connect to `uptermd` over HTTPS, which is useful in restrictive network environments.
+
+- **Certificates:**
+  Replace `<your cert resolver here>` with your actual Traefik certificate resolver for TLS.
+
+For more details on Traefik TCP and HTTP routing, see the [Traefik documentation](https://doc.traefik.io/traefik/routing/overview/).
+
+### Restricting Host Registration
+
+By default, any SSH client that can reach `uptermd` can register a session as a host.
+For private or invite-only deployments, the `--authorized-keys` flag (or `UPTERMD_AUTHORIZED_KEYS` environment variable) restricts host registration to a specific set of public keys.
+This mirrors OpenSSH's [`AuthorizedKeysFile`](https://man.openbsd.org/sshd_config#AuthorizedKeysFile) directive.
+
+```console
+uptermd --authorized-keys /etc/uptermd/authorized_keys
+```
+
+The flag accepts standard `authorized_keys`-formatted files (one key per line, comments allowed) and may be repeated to compose keys from multiple sources:
+
+```console
+uptermd --authorized-keys /etc/uptermd/team.keys --authorized-keys /etc/uptermd/ops.keys
+```
+
+Files are read once at startup; restart `uptermd` to pick up edits. Joiners (clients connecting to a session) are unaffected — they continue to be authorized by the host's own `authorized_keys`.
+
+For the Helm chart, populate the `authorized_keys` value:
+
+```yaml
+authorized_keys:
+  - "ssh-ed25519 AAAA... alice@laptop"
+  - "ssh-ed25519 BBBB... bob@desktop"
+```
+
+### Connection Establishment Budget
+
+The `--handshake-timeout` flag (or `UPTERMD_HANDSHAKE_TIMEOUT` environment variable) bounds how long a
+connection may take to be established, defaulting to `60s`. The budget is split evenly: the first half
+covers authenticating the incoming connection, the second half covers dialing the upstream and
+handshaking with it. A connection that exhausts either half is dropped.
+
+```console
+uptermd --handshake-timeout 90s
+```
+
+Raise it for clients on high-latency links or when the session store is slow to answer; lower it to shed
+half-open connections sooner. The value must be at least `1s`, since each half has to cover a complete SSH
+handshake, and less than `2m`, since each half must also fit inside the validity window of the short-lived
+user certificate `uptermd` mints while authenticating. `0` selects the default rather than disabling the
+timeout.
+
+## :chart_with_upwards_trend: Monitoring
+
+`uptermd` exposes Prometheus metrics at the `/metrics` endpoint when configured with `--metric-addr` (or `UPTERMD_METRIC_ADDR` environment variable).
+
+Available metrics:
+
+- `routing_connections_count` (Counter) - Total number of SSH connections accepted
+- `routing_active_connections_count` (Gauge) - Current number of active SSH connections
+- `routing_connection_duration_seconds` (Histogram) - Connection duration in seconds
+- `routing_errors_count` (Counter) - Total number of connection errors
+- `routing_connection_timeout_count` (Counter) - Number of connections that timed out during establishment
+
+## :balance_scale: Comparison with Prior Arts
+
+Upterm stands as a modern alternative to [Tmate](https://github.com/tmate-io/tmate).
+
+Tmate originates as a fork from an older iteration of Tmux, extending terminal sharing capabilities atop Tmux 2.x. However, Tmate has no plans to align with the latest Tmux updates, compelling Tmate & Tmux users to manage two separate configurations. For instance, the necessity to [bind identical keys twice, conditionally](https://github.com/tmate-io/tmate/issues/108).
+
+On the flip side, Upterm is architected from the ground up to be an independent solution, not a fork. It embodies the idea of connecting the input & output of any shell command between a host and its clients, transcending beyond merely `tmux`. This paves the way for securely sharing terminal sessions utilizing containers.
+
+Written in Go, Upterm is more hack-friendly compared to Tmate, which is crafted in C, akin to Tmux. The seamless compilation of Upterm CLI and server (`uptermd`) into a single binary facilitates swift [deployment of your pairing server](#hammer_and_wrench-deployment) across any cloud environment, devoid of dependencies.
+
+## License
+
+[Apache 2.0](https://github.com/owenthereal/upterm/blob/master/LICENSE)

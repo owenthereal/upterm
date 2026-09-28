@@ -1,0 +1,217 @@
+// Package version provides version management and compatibility checking for upterm/uptermd.
+//
+// This package centralizes version handling across the upterm ecosystem, including:
+//   - Single source of truth for version constants
+//   - Semantic version parsing and comparison
+//   - SSH server version extraction and validation
+//   - Host/server compatibility checking with detailed results
+//
+// The main entry point is CheckCompatibility() which compares the current host version
+// with a server's SSH version string and returns detailed compatibility information.
+//
+// Example usage:
+//
+//	result := version.CheckCompatibility("SSH-2.0-uptermd-0.14.3")
+//	if !result.Compatible {
+//	    fmt.Printf("Warning: %s\n", result.Message)
+//	    fmt.Printf("Host: %s, Server: %s\n", result.HostVersion, result.ServerVersion)
+//	}
+package version
+
+import (
+	"fmt"
+	"regexp"
+	"runtime/debug"
+	"strings"
+
+	"github.com/hashicorp/go-version"
+	"github.com/owenthereal/upterm/upterm"
+)
+
+// devVersion is what Version holds when no build-time version is available.
+const devVersion = "0.0.0+dev"
+
+// moduleName is the module these packages belong to. Update it alongside the
+// module path in go.mod, including if a major-version suffix is ever added.
+const moduleName = "github.com/owenthereal/upterm"
+
+// Version is the semantic version of upterm/uptermd
+// This is the single source of truth for both client and server versions
+// Can be overridden at build time with ldflags
+var Version = devVersion
+
+func init() {
+	if Version != devVersion {
+		return // set at build time via ldflags
+	}
+	// `go install github.com/owenthereal/upterm@latest` applies no ldflags, so
+	// the module version stamped into the binary is the only version there is.
+	// Without this those builds report 0.0.0+dev, which never matches a release
+	// tag, so `upterm upgrade` re-downloads on every invocation and bug reports
+	// carry no usable version.
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	if v, ok := versionFromBuildInfo(bi); ok {
+		Version = v
+	}
+}
+
+// versionFromBuildInfo reports the recorded version of this module, and only
+// this module. A program that embeds upterm's packages is its own main module
+// on its own unrelated version, and adopting that would have ServerSSHVersion
+// advertise it as an upterm version and CheckCompatibility compare against it.
+// Current() panics on an unparseable Version and a source build records
+// "(devel)", so only a version that parses is reported.
+func versionFromBuildInfo(bi *debug.BuildInfo) (string, bool) {
+	recorded := ""
+	if bi.Main.Path == moduleName {
+		recorded = bi.Main.Version
+	} else {
+		for _, dep := range bi.Deps {
+			if dep.Path == moduleName {
+				recorded = dep.Version
+				break
+			}
+		}
+	}
+	v := strings.TrimPrefix(recorded, "v")
+	if _, err := Parse(v); err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// Build-time variables set via ldflags
+var (
+	GitCommit string // Git commit SHA
+	Date      string // Build date
+)
+
+// BuildInfo contains version and build information
+type BuildInfo struct {
+	Version   string `json:"version"`
+	GitCommit string `json:"git_commit,omitempty"`
+	BuildDate string `json:"build_date,omitempty"`
+}
+
+// Parse parses a version string using hashicorp's go-version library
+func Parse(v string) (*version.Version, error) {
+	return version.NewVersion(v)
+}
+
+// ParseFromSSHVersion extracts version from SSH version strings like "SSH-2.0-uptermd-0.14.3"
+// Uses regex for precise parsing and supports complex semantic versions like "1.0.0-beta.1+build.123"
+func ParseFromSSHVersion(sshVersion string) (*version.Version, error) {
+	// Build regex pattern using the constant to ensure consistency
+	// Escape dots in the server version string for regex safety
+	escapedServerVersion := regexp.QuoteMeta(upterm.ServerSSHServerVersion)
+	pattern := fmt.Sprintf(`^%s-(.+)$`, escapedServerVersion)
+
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(sshVersion)
+	if len(matches) != 2 {
+		return nil, fmt.Errorf("not a valid uptermd SSH version: %s", sshVersion)
+	}
+
+	// Extract and parse the version string
+	versionStr := matches[1]
+	v, err := Parse(versionStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid version format in SSH string %s: %w", sshVersion, err)
+	}
+
+	return v, nil
+}
+
+// Current returns the current version as a parsed version object
+// Panics if Version constant is not a valid semantic version
+func Current() *version.Version {
+	v, err := Parse(Version)
+	if err != nil {
+		panic(fmt.Sprintf("invalid version constant %q: %v", Version, err))
+	}
+	return v
+}
+
+// String returns the current version as a string
+func String() string {
+	return Version
+}
+
+// GetBuildInfo returns comprehensive build information
+func GetBuildInfo() BuildInfo {
+	return BuildInfo{
+		Version:   Version,
+		GitCommit: GitCommit,
+		BuildDate: Date,
+	}
+}
+
+// PrintVersion prints version information with the given binary name
+func PrintVersion(binaryName string) {
+	buildInfo := GetBuildInfo()
+	fmt.Printf("%s version %s\n", binaryName, buildInfo.Version)
+
+	if buildInfo.GitCommit != "" {
+		fmt.Printf("Git commit: %s\n", buildInfo.GitCommit)
+	}
+
+	if buildInfo.BuildDate != "" {
+		fmt.Printf("Build date: %s\n", buildInfo.BuildDate)
+	}
+}
+
+// ServerSSHVersion returns the SSH server version string with embedded version
+func ServerSSHVersion() string {
+	return fmt.Sprintf("%s-%s", upterm.ServerSSHServerVersion, Version)
+}
+
+// CompatibilityResult contains the result of version compatibility checking
+type CompatibilityResult struct {
+	Compatible    bool
+	HostVersion   string
+	ServerVersion string
+	Message       string
+}
+
+// CheckCompatibility checks if the server version is compatible with the current host version
+// Always returns a result - Compatible=false for unparseable server versions to indicate incompatibility
+func CheckCompatibility(sshVersion string) *CompatibilityResult {
+	hostVersion := Current()
+	hostVersionStr := "v" + hostVersion.String()
+
+	serverVersion, err := ParseFromSSHVersion(sshVersion)
+	if err != nil {
+		// Can't parse server version - could be older upterm server or non-upterm server
+		return &CompatibilityResult{
+			Compatible:    false,
+			HostVersion:   hostVersionStr,
+			ServerVersion: "unknown",
+			Message:       "Unable to determine server version - possibly older upterm server or non-upterm server",
+		}
+	}
+
+	serverVersionStr := "v" + serverVersion.String()
+
+	// Check if major versions match (semantic versioning compatibility)
+	hostMajor := hostVersion.Segments()[0]
+	serverMajor := serverVersion.Segments()[0]
+
+	if hostMajor != serverMajor {
+		return &CompatibilityResult{
+			Compatible:    false,
+			HostVersion:   hostVersionStr,
+			ServerVersion: serverVersionStr,
+			Message:       fmt.Sprintf("Major version mismatch: host %s, server %s", hostVersionStr, serverVersionStr),
+		}
+	}
+
+	return &CompatibilityResult{
+		Compatible:    true,
+		HostVersion:   hostVersionStr,
+		ServerVersion: serverVersionStr,
+		Message:       "",
+	}
+}

@@ -1,0 +1,28 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+  packages: write
+jobs:
+  build-and-release:
+    name: Release binaries and Docker images
+    uses: ./.github/workflows/build-and-release.yaml
+    with:
+      snapshot: false
+      docker_repo: ghcr.io/owenthereal/upterm/uptermd
+    secrets: inherit
+  deploy:
+    name: Deploy app
+    runs-on: ubuntu-latest
+    needs: [build-and-release]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly.io
+        run: |
+          flyctl deploy --image "ghcr.io/owenthereal/upterm/uptermd:${GITHUB_REF_NAME}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

@@ -1,0 +1,338 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
+	"golang.org/x/crypto/ssh"
+)
+
+type sshProxy struct {
+	HandshakeTimeout    time.Duration
+	HostSigners         []ssh.Signer
+	Signers             []ssh.Signer
+	NodeAddr            string
+	AuthorizedKeysFiles []string
+	ConnDialer          connDialer
+	SessionManager      *SessionManager
+	Logger              *slog.Logger
+	MetricsProvider     provider.Provider
+
+	routing *SSHRouting
+	mux     sync.Mutex
+	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
+	stopped bool
+}
+
+func (r *sshProxy) Shutdown() error {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+
+	r.stopped = true
+
+	if r.routing != nil {
+		return r.routing.Shutdown()
+	}
+
+	return nil
+}
+
+func (r *sshProxy) Serve(ln net.Listener) error {
+	authorizedKeys, err := loadAuthorizedKeys(r.AuthorizedKeysFiles)
+	if err != nil {
+		// Serve owns ln once it is handed over, and Shutdown can only close what
+		// routing has recorded -- which has not happened yet. Returning without
+		// releasing it here leaves the port bound for the life of the process.
+		_ = ln.Close()
+		return err
+	}
+
+	r.mux.Lock()
+	if r.stopped {
+		r.mux.Unlock()
+		_ = ln.Close()
+		return ErrListnerClosed
+	}
+	r.routing = &SSHRouting{
+		HostSigners:      r.HostSigners,
+		HandshakeTimeout: r.HandshakeTimeout,
+		Auth: &proxyAuth{
+			HostSigners:    r.HostSigners,
+			Signers:        r.Signers,
+			SessionManager: r.SessionManager,
+			ConnDialer:     r.ConnDialer,
+			NodeAddr:       r.NodeAddr,
+			authorizedKeys: authorizedKeys,
+			Logger:         r.Logger.With("component", "auth"),
+		},
+		MetricsProvider: r.MetricsProvider,
+		Logger:          r.Logger,
+	}
+	r.mux.Unlock()
+
+	return r.routing.Serve(ln)
+}
+
+// errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
+// A sentinel rather than an ad-hoc error so the failure can be recognized after
+// x/crypto has wrapped it, and reported to the peer by identity, not by text.
+var errUpstreamHostKeyMismatch = errors.New("ssh: host key mismatch")
+
+type proxyAuth struct {
+	NodeAddr       string
+	authorizedKeys map[string]struct{} // SHA256 fingerprints; nil disables the gate
+	SessionManager *SessionManager
+	ConnDialer     connDialer
+	Signers        []ssh.Signer
+	HostSigners    []ssh.Signer
+
+	Logger *slog.Logger
+}
+
+func (a proxyAuth) checkAuthorizedKeys(conn ssh.ConnMetadata, pk ssh.PublicKey) error {
+	if a.authorizedKeys == nil {
+		return nil
+	}
+
+	// Only HOST connections (uptermd hosts registering with the proxy) are gated by authorized_keys.
+	if string(conn.ClientVersion()) != upterm.HostSSHClientVersion {
+		return nil
+	}
+
+	fp := publicKeyFingerprint(pk)
+	if _, ok := a.authorizedKeys[fp]; ok {
+		a.Logger.Info("access granted", "fingerprint", fp)
+		return nil
+	}
+
+	a.Logger.Warn("access denied", "fingerprint", fp)
+	return fmt.Errorf("public key is not authorized")
+}
+
+// publicKeyFingerprint returns the SHA256 fingerprint of the underlying
+// public key, unwrapping any SSH certificate. authorized_keys files contain
+// raw key entries, but hosts authenticating with a CertSigner (commonly
+// supplied by ssh-agent) present a certificate; matching must be done on
+// the underlying key identity, not the certificate blob.
+func publicKeyFingerprint(pk ssh.PublicKey) string {
+	if cert, ok := pk.(*ssh.Certificate); ok {
+		pk = cert.Key
+	}
+	return utils.FingerprintSHA256(pk)
+}
+
+// loadAuthorizedKeys reads the configured authorized_keys files once at
+// startup and returns the set of SHA256 fingerprints permitted to register
+// as hosts. Returns nil when paths is empty, signaling that the gate is
+// disabled. Edits to the files require restarting uptermd to take effect.
+func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	fps := make(map[string]struct{})
+	for _, path := range paths {
+		rest, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read authorized_keys %s: %w", path, err)
+		}
+
+		for len(rest) > 0 {
+			pk, _, _, next, perr := ssh.ParseAuthorizedKey(rest)
+			if perr != nil {
+				// No more parseable keys (trailing comments, blanks, or junk).
+				break
+			}
+			rest = next
+			fps[publicKeyFingerprint(pk)] = struct{}{}
+		}
+	}
+	return fps, nil
+}
+
+// authorize decides whether an offered key may proceed, and resolves the
+// session it maps to. Stock SSH calls this for unsigned public-key queries as
+// well, and a successful query does not count against MaxAuthTries, so it must
+// stay cheap: no certificate minting and no upstream connection.
+func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, *Session, error) {
+	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
+		if conn.User() == "" {
+			return nil, nil, nil, fmt.Errorf("empty session ID for host connection")
+		}
+	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
+	}
+	checker := UserCertChecker{
+		UserKeyFallback: func(user string, key ssh.PublicKey) (ssh.PublicKey, error) {
+			return key, nil
+		},
+	}
+
+	// Gate registration based on authorized_keys before any cert/upstream work.
+	if err := a.checkAuthorizedKeys(conn, pk); err != nil {
+		return nil, nil, nil, err
+	}
+
+	auth, key, err := checker.Authenticate(conn.User(), pk)
+	if err == errCertNotSignedByHost {
+		err = nil
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("error checking user cert: %w", err)
+	}
+
+	// Use the public-key if a key can't be parsed from cert
+	if key == nil {
+		key = pk
+	}
+
+	if auth == nil {
+		auth = &AuthRequest{
+			ClientVersion: string(conn.ClientVersion()),
+			RemoteAddr:    conn.RemoteAddr().String(),
+			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
+		}
+	}
+
+	hostSess, err := a.hostSession(conn)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// TODO: simplify auth key validation by moving it to host validation only
+	if hostSess != nil && !hostSess.IsClientKeyAllowed(key) {
+		return nil, nil, nil, fmt.Errorf("public key not allowed")
+	}
+
+	return auth, key, hostSess, nil
+}
+
+// prepare mints upstream credentials for a key whose ownership the client has
+// already proven. It re-runs authorization so the decision and the credentials
+// it produces cannot disagree; that costs one extra session lookup, on success
+// only. It does not open a connection.
+func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.ClientConfig, error) {
+	auth, _, hostSess, err := a.authorize(conn, pk)
+	if err != nil {
+		return nil, err
+	}
+
+	signers, err := a.newUserCertSigners(conn, auth)
+	if err != nil {
+		return nil, fmt.Errorf("error creating cert signers: %w", err)
+	}
+
+	hostKeyCb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if hostSess == nil {
+			// check host keys for sideway connections
+			for _, s := range a.HostSigners {
+				if utils.KeysEqual(key, s.PublicKey()) {
+					return nil
+				}
+			}
+		} else {
+			for _, pk := range hostSess.HostPublicKeys {
+				if utils.KeysEqual(key, pk) {
+					return nil
+				}
+			}
+		}
+
+		return errUpstreamHostKeyMismatch
+	}
+
+	return &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}, nil
+}
+
+func (a *proxyAuth) dialUpstreamContext(ctx context.Context, conn ssh.ConnMetadata) (net.Conn, error) {
+	id, err := a.upstreamIdentifier(conn)
+	if err != nil {
+		return nil, err
+	}
+	return a.ConnDialer.DialContext(ctx, id)
+}
+
+func (a *proxyAuth) upstreamIdentifier(conn ssh.ConnMetadata) (*api.Identifier, error) {
+	var (
+		user          = conn.User()
+		clientVersion = string(conn.ClientVersion())
+	)
+
+	// Determine connection type and create identifier accordingly
+	var id *api.Identifier
+	if clientVersion == upterm.HostSSHClientVersion {
+		// HOST connection: user is the session ID
+		id = &api.Identifier{
+			Id:   user,
+			Type: api.Identifier_HOST,
+		}
+	} else {
+		// CLIENT connection: decode the SSH user
+		sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
+		if err != nil {
+			return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
+		}
+
+		id = &api.Identifier{
+			Id:       sessionID,
+			NodeAddr: nodeAddr,
+			Type:     api.Identifier_CLIENT,
+		}
+	}
+
+	return id, nil
+}
+
+func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
+	var certSigners []ssh.Signer
+	for _, s := range a.Signers {
+		ucs := UserCertSigner{
+			SessionID:   string(conn.SessionID()),
+			User:        conn.User(),
+			AuthRequest: auth,
+		}
+
+		cs, err := ucs.SignCert(s)
+		if err != nil {
+			return nil, err
+		}
+
+		certSigners = append(certSigners, cs)
+	}
+
+	return certSigners, nil
+}
+
+// hostSession returns a session if the routing is required to be done on client side and the current
+// is proxy node.
+func (a *proxyAuth) hostSession(conn ssh.ConnMetadata) (*Session, error) {
+	user := conn.User()
+	clientVersion := string(conn.ClientVersion())
+
+	// HOST connections don't validate authorized keys
+	if clientVersion == upterm.HostSSHClientVersion {
+		return nil, nil
+	}
+
+	// CLIENT connection: decode the SSH user to get session ID and node address
+	sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding SSH user %s: %w", user, err)
+	}
+
+	// Don't validate authorized key if the node does not match the request that routing is needed
+	if a.NodeAddr != nodeAddr {
+		return nil, nil
+	}
+
+	return a.SessionManager.GetSession(sessionID)
+}

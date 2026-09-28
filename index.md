@@ -98,14 +98,55 @@ Host a session with specified client public key(s) authorized to connect:
 upterm host --authorized-keys PATH_TO_PUBLIC_KEY
 ```
 
-Authorize specified GitHub, GitLab, SourceHut, Codeberg users with their corresponding public keys:
+Or authorize users by `provider:username`, fetching their public keys from a
+code-hosting service:
 
 ```console
-upterm host --github-user username
-upterm host --gitlab-user username
-upterm host --srht-user username
-upterm host --codeberg-user username
+upterm host --authorized-user github:username
+upterm host --authorized-user gitlab:username
+upterm host --authorized-user srht:username
+upterm host --authorized-user codeberg:username
 ```
+
+Self-hosted instances are supported by naming the host. `gitea` and `forgejo`
+always require one, since there is no default instance. Keys are always fetched
+over HTTPS:
+
+```console
+upterm host --authorized-user github:username@ghe.example.com
+upterm host --authorized-user gitea:username@git.example.com
+upterm host --authorized-user forgejo:username@git.example.com
+upterm host --authorized-user https://git.example.com/username
+```
+
+For a GitHub Enterprise Server instance that requires a login, authenticate
+first with `gh auth login --hostname ghe.example.com`; only credentials stored
+for that host are used.
+
+### SSH agents and hardware keys
+
+`upterm host` authenticates to the server with your SSH identity once, when
+the tunnel is established, the same as `ssh` would. Everything after that —
+guest joins, `upterm attach`, key renegotiation — uses a key generated for
+the session, so an agent that confirms each signature (gpg-agent with a
+smartcard, 1Password, a FIDO key) asks once, at start.
+
+To keep such an agent out of it entirely, name a plain key. A supplied
+`--private-key` is the whole set, like OpenSSH's `IdentitiesOnly`:
+
+```console
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/upterm
+upterm host --private-key ~/.ssh/upterm
+```
+
+To use one particular agent identity, name its public key:
+
+```console
+upterm host --private-key ~/.ssh/id_ed25519_sk.pub
+```
+
+Guests still authenticate with a key of their own. A session with no
+`--authorized-keys` or `--authorized-user` accepts any key, but not none.
 
 ### Force command
 
@@ -115,6 +156,69 @@ This mirrors functionality provided by tmate:
 ```console
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
+
+### Running Without a Terminal
+
+Host a session from a script or CI step with nothing attached to its terminal. `--accept` skips the confirmation prompt, `--name` gives the session a local name you choose, and `--pty-size` pins the terminal geometry so the command renders the same for every client:
+
+```console
+upterm host --accept --name build-shell --pty-size 132x43 -- bash &
+```
+
+In a fresh environment `known_hosts` does not yet hold the relay's key, and the host-key confirmation cannot be answered without a terminal. Pin it directly:
+
+```console
+mkdir -p ~/.ssh && cat >> ~/.ssh/known_hosts <<'EOF'
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+@cert-authority [uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+EOF
+```
+
+The same two lines are committed at [`etc/known_hosts/uptermd.upterm.dev`](etc/known_hosts/uptermd.upterm.dev), for anyone who would rather fetch the file than paste it — compare the fingerprint of *every* line in whatever you fetch before trusting it. `uptermd.upterm.dev`'s host key has the SHA256 fingerprint `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`; that's the value to check against, however you obtained the key.
+
+Note that `ssh-keyscan uptermd.upterm.dev` is **not** equivalent. The relay presents an SSH host certificate, and a `known_hosts` entry only authorizes one when the line is marked `@cert-authority` — which `ssh-keyscan` does not emit. With a plain key line, upterm falls back to its first-connection prompt: an operator at a terminal still sees the fingerprint there and can compare it by hand, but on a runner with no terminal that prompt can't be answered, so nothing gets verified.
+
+`--skip-host-key-check` accepts whatever answers on the first connection. It is convenient for a self-hosted relay you are bringing up, and it is not a substitute for pinning: on a fresh runner it will trust anything that can intercept that connection.
+
+If this key is ever rotated, a pin pasted into a job has to be updated by hand: the fingerprint here changes, and so does the copy bundled with [action-upterm](https://github.com/owenthereal/action-upterm), which needs a release of its own. A stale pin does not surface as a host-key mismatch: `known_hosts` simply holds no authority for the rotated key, which upterm treats as an unknown host. A job with no terminal therefore fails, because the first-connection prompt cannot be answered; an interactive run is prompted instead and could accept the new key, so update the pin rather than accepting at the prompt. Watch this section after upgrading.
+
+Look the session up by name while it runs and after it ends. The record outlives the process and carries how the command finished:
+
+```console
+upterm session info build-shell -o json
+```
+
+The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled` (with `signal` and originating `signalNumber`), `stopped` (explicit admin stop), `canceled` (parent cancellation), `join_timeout`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`.
+
+`upterm session wait NAME` returns the command's exit code, 0 for explicit stop or join timeout, 128 plus the originating signal number for host or command signals, and 125 for cancellation or unavailable outcomes. Lookup, read and replacement failures, and cancellation of the waiter's context, return 125 with a diagnostic; interrupting the observer leaves the session alive. Legacy stopped records remain successful; legacy signal records without a valid numeric signal return 125. The on-disk record calls the numeric field `signal_number`.
+
+To keep a session open while a build runs and give people a window to join only if it fails, set the join timeout when the build is done instead of at launch. The script keeps the build's exit status, and works under `set -e`:
+
+```sh
+upterm host --detach --accept --name build -- bash
+build_exit_code=0
+make || build_exit_code=$?
+if [ "$build_exit_code" -ne 0 ]; then
+  # Ten minutes for someone to join; once they have, it runs until they exit.
+  if upterm session set build --join-timeout 10m; then
+    upterm session wait build || true
+  fi
+fi
+upterm session stop build || true   # ends it either way; never masks the build's result
+exit "$build_exit_code"
+```
+
+The variable is `build_exit_code` rather than `status`, which zsh reserves. Interrupting `upterm session wait` on its own leaves the session running; in this script it falls through to `session stop`, which ends it. Each `session set` restarts the window from now, so running it again with the same duration extends the deadline; `--join-timeout 0` turns it off. A guest who joins at any point, even briefly or only over SFTP, claims the session: the join timeout is off for the rest of its life, and a later `session set` says so. `session info` shows the timeout and its deadline (`joinTimeout`, `joinDeadline` in the JSON), and where they came from (`joinStateSource`: the daemon, or the record when the session did not answer). `session info`, `session stop` and `session set` exit 4 when no session has the name.
+
+The hosted command sees its own name in `UPTERM_SESSION_NAME`. `upterm session list` shows every live session, including one started under a different `XDG_RUNTIME_DIR` — a cron job or a system service — reached through the admin socket path its record carries. Records outlive the sessions that wrote them for seven days, and the listing prunes the ones past that.
+
+Put a terminal on a session started without one, from any shell on the same machine:
+
+```console
+upterm attach build-shell
+```
+
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host` and guests as `guest`. In its JSON, `guestCount` counts currently connected guests (including forwarding, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
 
 ### File Transfer (SFTP/SCP)
 
@@ -131,7 +235,7 @@ scp -P PORT ./local/file.txt USER@HOST:/path/to/destination/
 **Security model:**
 
 - File transfers have the same access as the terminal session (clients can already access any file via the shell)
-- Without `--accept`, each file operation prompts the host for approval via a dialog
+- Without `--accept`, each file operation prompts the host for approval via a dialog. Where no dialog can be shown (no display, such as over SSH, or on Linux no `zenity`, `qarma` or `matedialog` to draw it), the operation is denied
 - Use `--read-only` to restrict SFTP to downloads only (no uploads, deletes, or modifications)
 - Use `--no-sftp` to disable file transfers entirely
 
@@ -143,6 +247,8 @@ Clients can use standard SSH local forwarding through a hosted session when the 
 upterm host --allow-local-tcp-forwarding
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
+
+After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
 
 ### WebSocket Connection
 
@@ -157,6 +263,18 @@ Clients can connect to the host session via WebSocket as well:
 ```console
 ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
+
+### HTTP Proxy
+
+If the host can only reach the internet through an HTTP proxy, pass it with `--proxy`. It works with `ssh://`, `ws://` and `wss://` servers, so the default server works too as long as the proxy allows `CONNECT` to port 22:
+
+```console
+upterm host --proxy http://proxy.example.com:3128 -- bash
+```
+
+Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
+
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
 
 ### Debug GitHub Actions
 
@@ -173,12 +291,55 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Setup upterm session
-      uses: owenthereal/action-upterm@v1
+      uses: owenthereal/action-upterm@v2
 ```
 
 This setup allows you to SSH into the workflow runner whenever you need to troubleshoot or inspect the execution environment. Find the SSH connection string in the `Checks` tab of your Pull Request or in the workflow logs.
 
+action-upterm v2 runs the session on upterm's own background daemon (`upterm host --detach`) instead of tmux, and requires upterm v0.32.0 or newer, which it installs by default. upterm itself enforces `wait-timeout-minutes`: attached mode passes it as `--join-timeout`, and detached mode hands it over with `upterm session set` once the job's other steps are done. The first guest to join claims the session for good, even one who left again before the window opened.
+
 For comprehensive details on configuring and using this integration, visit the [action-upterm GitHub repo](https://github.com/owenthereal/action-upterm).
+
+### Debug Other CI Systems
+
+Everything the GitHub Action does is available from the CLI, so the same pattern works on GitLab, Buildkite, a self-hosted runner, or any script: start a detached session, print the join command, and block until someone has used it — or until nobody has joined in time.
+
+```sh
+command -v jq >/dev/null || { echo "this recipe needs jq" >&2; exit 1; }
+
+# Pin the relay's key so a clean runner with no terminal verifies it instead
+# of trusting whatever answers; see "Running Without a Terminal" for the
+# fingerprint to check it against.
+known_hosts=$(mktemp)
+cat > "$known_hosts" <<'EOF'
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+@cert-authority [uptermd.upterm.dev]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+EOF
+
+# Start detached, capture name + join command in one shot.
+upterm host --detach --accept --output json \
+  --known-hosts "$known_hosts" \
+  --authorized-user "github:${DEBUG_USER:?set DEBUG_USER to the GitHub user who may join}" \
+  --join-timeout 10m -- bash > session.json || exit
+name=$(jq -er .name session.json) || exit
+
+# End the session however this script ends: finished, cancelled or timed out.
+trap 'upterm session stop "$name" 2>/dev/null || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+echo "join: $(jq -r .sshCommand session.json)"
+upterm session wait "$name" & wait $! || true   # waiting in the shell lets a signal interrupt it
+```
+
+- The job pins the relay's key with `--known-hosts`, so a fresh runner with no terminal verifies the relay rather than trusting whatever answers. See "Running Without a Terminal" for the published key and its fingerprint.
+- `--authorized-user` is not optional on a shared runner: the join command ends up in a log. Set `DEBUG_USER` to the GitHub account that should get in; the recipe stops if it is unset. For another provider, replace the whole `github:` value (`gitlab:NAME`, `codeberg:NAME`, `srht:NAME`, `gitea:NAME@HOST` and `--authorized-keys FILE` work too).
+- Leaving out `--name` lets upterm pick a name no other session on the machine holds, so concurrent jobs on one worker cannot stop each other's sessions; the recipe reads it back from the JSON.
+- The recipe checks for `jq` before it starts anything, and `|| exit` stops the step when the session did not start (for example, the relay is unreachable), instead of letting it pass without one.
+- `--join-timeout` ends the session if no guest joins within that long, and exits 0, so an unanswered debug session does not fail the build. Once a guest has joined it never re-arms.
+- `upterm session wait` blocks until the session ends and exits with its outcome — 0 for a join timeout or an explicit `session stop`. A guest who disconnects without exiting the shell leaves the session running until the job ends.
+- The session runs in its own background daemon, which a runner that stops only the job's processes would leave behind, so the `trap` stops it when the script finishes, is cancelled or times out, whether the runner signals the whole job or only this shell; a cancelled script still exits non-zero (130 for SIGINT, 143 for SIGTERM). A runner that kills the job outright, with no SIGINT or SIGTERM first, gives the trap no chance: stop the session from the job's cleanup hook there. Expect this on Windows: GitHub Actions' Windows runners end a cancelled Git Bash step without running any of its traps.
+- To open the session before the build and count only after a failure, leave `--join-timeout` off the `upterm host` line and use the failed-build script under "Running Without a Terminal".
 
 ## :bulb: Tips
 
@@ -191,7 +352,7 @@ For comprehensive details on configuring and using this integration, visit the [
 **Solution**: To rectify this, add the following line to your `~/.tmux.conf`:
 
 ```conf
-set-option -ga update-environment " UPTERM_ADMIN_SOCKET"
+set-option -ga update-environment " UPTERM_ADMIN_SOCKET UPTERM_SESSION_NAME"
 ```
 
 ### Identifying Upterm Session

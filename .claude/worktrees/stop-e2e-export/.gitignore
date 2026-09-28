@@ -1,0 +1,12 @@
+build
+c.out
+release
+.terraform
+*.tfstate
+*.tfstate.backup
+dist
+bin
+CLAUDE.md
+.claude/
+*.exe
+*.exe~
