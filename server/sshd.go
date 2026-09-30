@@ -99,16 +99,21 @@ type localSessions struct {
 	gauge          metrics.Gauge
 	sessionManager *SessionManager
 	logger         *slog.Logger
+	timing         leaseTiming
 
 	mu   sync.Mutex
 	regs map[string]*localRegistration // by session ID
 }
 
 // localRegistration is a registration this node adopted, and the host
-// connection it was made on, which a takeover closes (I5).
+// connection it was made on, which a takeover closes (I5). reg is the handle
+// its lease keeper last rebuilt, if the keeper rebuilt one.
 type localRegistration struct {
 	reg  *Registration
 	conn io.Closer
+	// stopLease stops the lease keeper; nil when the store's entries don't
+	// expire.
+	stopLease context.CancelFunc
 }
 
 func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
@@ -118,6 +123,7 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 		gauge:          gauge,
 		sessionManager: sessionManager,
 		logger:         logger,
+		timing:         defaultLeaseTiming,
 		regs:           make(map[string]*localRegistration),
 	}
 }
@@ -130,19 +136,65 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 // registrations can commit in one order and adopt in the other. Checking again
 // here, under the lock, means a delayed older registration can never evict a
 // newer one (I3).
+//
+// reg's lease keeper starts only once reg is accepted, so a refused
+// registration is never renewed or rebuilt, and the one it replaced stops
+// being kept at the moment it's replaced.
 func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistration, error) {
+	ttl := l.sessionManager.LeaseTTL()
+
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	cur, ok := l.regs[reg.ID()]
 	if ok && cur.conn != conn && !supersedes(reg.Session, cur.reg.Session) {
+		l.mu.Unlock()
 		return nil, supersededError(reg.Session, cur.reg.Session)
 	}
-	l.regs[reg.ID()] = &localRegistration{reg: reg, conn: conn}
+	lr := &localRegistration{reg: reg, conn: conn}
+	var (
+		keeper    *leaseKeeper
+		keeperCtx context.Context
+	)
+	if ttl > 0 {
+		keeperCtx, lr.stopLease = context.WithCancel(context.Background())
+		keeper = &leaseKeeper{
+			sm:        l.sessionManager,
+			ttl:       ttl,
+			timing:    l.timing,
+			closeConn: func() { _ = conn.Close() },
+			replace:   l.replace,
+			logger:    l.logger.With("session-id", reg.ID(), "generation", reg.Generation()),
+		}
+	}
+	l.regs[reg.ID()] = lr
 	if !ok {
 		l.gauge.Add(1)
+	} else if cur.stopLease != nil {
+		cur.stopLease()
+	}
+	l.mu.Unlock()
+
+	if keeper != nil {
+		go keeper.run(keeperCtx, reg)
+	}
+	if !ok {
 		return nil, nil
 	}
 	return cur, nil
+}
+
+// replace makes next, a rebuilt handle, the one this node serves for its
+// registration, and reports whether it did. It doesn't once that registration
+// has ended or been replaced: the rebuild then belongs to no one, and the
+// keeper releases it.
+func (l *localSessions) replace(next *Registration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cur, ok := l.regs[next.ID()]
+	if !ok || !cur.reg.Same(next) {
+		return false
+	}
+	l.regs[next.ID()] = &localRegistration{reg: next, conn: cur.conn, stopLease: cur.stopLease}
+	return true
 }
 
 // active reports whether reg is the registration this node serves for its ID:
@@ -154,25 +206,43 @@ func (l *localSessions) active(reg *Registration) bool {
 	return ok && cur.reg.Same(reg)
 }
 
-// end releases reg's store entry, and its slot and count while reg is still
-// the one this node serves. It releases every time, because a replaced
-// registration still holds a lease of its own; the store leaves an entry reg no
-// longer holds alone. The count is released even if the store release fails:
-// the host is gone either way.
+// end releases reg's store entry, and its slot, count and lease keeper while
+// reg is still the one this node serves. It releases every time, because a
+// replaced registration still holds a lease of its own; the store leaves an
+// entry reg no longer holds alone. The count is released even if the store
+// release fails: the host is gone either way.
+//
+// Every path that ends a registration holds the handle it was adopted with,
+// but a rebuild stores the registration under a new lease that only the slot
+// knows. So ending the one this node serves releases the slot's handle, and
+// reg's too if its lease differs; otherwise a rebuilt entry would outlive its
+// host until the lease expired.
 func (l *localSessions) end(reg *Registration) {
+	release := []*Registration{reg}
 	l.mu.Lock()
 	if cur, ok := l.regs[reg.ID()]; ok && cur.reg.Same(reg) {
 		delete(l.regs, reg.ID())
 		l.gauge.Add(-1)
+		// Stopped before the release below, so the keeper can't take that
+		// release for a lost lease and rebuild the entry.
+		if cur.stopLease != nil {
+			cur.stopLease()
+		}
+		release = []*Registration{cur.reg}
+		if cur.reg.lease != reg.lease {
+			release = append(release, reg)
+		}
 	}
 	// Release before touching the store: a Consul call can be slow, and
 	// holding the lock across it would stall unrelated session creation.
 	l.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
-	defer cancel()
-	if err := l.sessionManager.Release(ctx, reg); err != nil {
-		l.logger.Error("error deleting session", "error", err, "session-id", reg.ID())
+	for _, r := range release {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+		if err := l.sessionManager.Release(ctx, r); err != nil {
+			l.logger.Error("error deleting session", "error", err, "session-id", r.ID())
+		}
+		cancel()
 	}
 }
 
