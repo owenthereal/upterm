@@ -55,7 +55,9 @@ func TestProofRoundTripAndRefusals(t *testing.T) {
 	for name, verify := range map[string]func() error{
 		"another key":        func() error { return Verify(other.PublicKey(), []byte("conn-1"), secret, 3, proof) },
 		"another connection": func() error { return Verify(key.PublicKey(), []byte("conn-2"), secret, 3, proof) },
-		"another secret":     func() error { return Verify(key.PublicKey(), []byte("conn-1"), bytes.Repeat([]byte{8}, SecretLen), 3, proof) },
+		"another secret": func() error {
+			return Verify(key.PublicKey(), []byte("conn-1"), bytes.Repeat([]byte{8}, SecretLen), 3, proof)
+		},
 		"another generation": func() error { return Verify(key.PublicKey(), []byte("conn-1"), secret, 4, proof) },
 		"malformed":          func() error { return Verify(key.PublicKey(), []byte("conn-1"), secret, 3, []byte("junk")) },
 		"short secret":       func() error { return Verify(key.PublicKey(), []byte("conn-1"), secret[:8], 3, proof) },

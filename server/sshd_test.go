@@ -511,8 +511,8 @@ func Test_localSessions_TakeoverKeepsOneCount(t *testing.T) {
 	require.Equal(t, 0.0, gauge())
 }
 
-// Review P1, at this layer: an older registration adopting after a newer one
-// changes nothing and closes nothing.
+// At the node: an older registration adopting after a newer one changes
+// nothing and closes nothing.
 func Test_localSessions_OlderAdoptionIsRefused(t *testing.T) {
 	sessions, _, gauge := newTestLocalSessions(t)
 	gen1 := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
@@ -703,7 +703,10 @@ func Test_sshd_ProvenRegistrationDerivesTheID(t *testing.T) {
 	}
 }
 
-// Review Focus 1 and 2.
+// A proof is refused, and the derived ID left unregistered, when it was signed
+// by another key, over another connection or for another generation; when it
+// doesn't parse; when the request names two host keys; and when its secret is
+// short or its generation zero.
 func Test_sshd_ProofRefusals(t *testing.T) {
 	s := newTestSSHD(t)
 	host, other := newProven(t), newProven(t)
@@ -757,7 +760,7 @@ func Test_sshd_NewerRegistrationSupersedesTheOlder(t *testing.T) {
 	second := s.dialAs(t, "conn-2")
 	ok, body = host.register(t, second, "conn-2", 2)
 	require.True(t, ok, string(body))
-	waitClosed(t, first, "the superseded registration's connection (I5)")
+	waitClosed(t, first, "the superseded registration's connection")
 	require.Equal(t, 1.0, s.gauge(t))
 	ok, reason = forwardRequest(t, second, streamlocalForwardChannelType, host.id())
 	require.True(t, ok, reason)
@@ -767,7 +770,7 @@ func Test_sshd_NewerRegistrationSupersedesTheOlder(t *testing.T) {
 	require.Equal(t, registration.Superseded, string(body))
 }
 
-// Review P1, end to end: generation 1 commits, then pauses before adoption
+// End to end: generation 1 commits, then pauses before adoption
 // while generation 2 commits and adopts. When 1 resumes it is refused, and 2
 // keeps its connection and its listener.
 func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
@@ -820,7 +823,7 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	defer func() { _ = guest.Close() }()
 	select {
 	case ch := <-incoming:
-		_ = ch.Reject(ssh.Prohibited, "test") // sshd_test.go imports x/crypto/ssh as ssh
+		_ = ch.Reject(ssh.Prohibited, "test")
 	case <-time.After(2 * time.Second):
 		t.Fatal("a guest reaching the session socket never reached generation 2")
 	}

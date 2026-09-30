@@ -21,8 +21,8 @@ var defaultLeaseTiming = leaseTiming{time.Second, 10 * time.Second, 60 * time.Se
 
 // leaseMargin is how long before its lease could expire a capable
 // registration's connection is closed when renewals keep failing. The close
-// then comes before the entry can vanish, however late the keeper's own timer
-// runs, and the host redials while it still stands.
+// then comes before the entry can vanish, unless the keeper's timer runs more
+// than the margin late, and the host redials while it still stands.
 func leaseMargin(ttl time.Duration) time.Duration {
 	return min(ttl/10, time.Minute)
 }

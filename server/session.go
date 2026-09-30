@@ -34,10 +34,10 @@ func (e *ErrSessionNotFound) Error() string {
 
 var (
 	// ErrSuperseded refuses a registration that doesn't supersede the one the
-	// store holds for its ID (I3).
+	// store holds for its ID.
 	ErrSuperseded = errors.New("superseded by a newer registration")
 	// ErrLeaseLost is the definite answer that a registration no longer holds
-	// its entry, as opposed to a renewal that merely failed (spec 6.4).
+	// its entry, as opposed to a renewal that merely failed.
 	ErrLeaseLost = errors.New("session lease lost")
 )
 
@@ -55,7 +55,7 @@ const (
 type Session struct {
 	ID       string
 	NodeAddr string
-	// Generation orders registrations of the same ID (I3). 0 is a legacy
+	// Generation orders registrations of the same ID. 0 is a legacy
 	// registration: a random ID with no proof behind it.
 	Generation           uint64
 	HostUser             string
@@ -155,13 +155,13 @@ func (s *Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 
 // Registration is one stored claim to a session ID. Whatever later renews,
 // releases or rebuilds the entry acts through the handle, so it can only touch
-// its own claim, never a successor's (I2, I4).
+// its own claim, never a successor's.
 type Registration struct {
 	Session *Session
 	// ConfirmedAt is the send time of the lock-session creation this
 	// registration's lease came from (memory: taken before the write). The
 	// expiry budget counts from it, and the lease's TTL clock can't have
-	// started earlier, so the budget can only end early (spec 6.4).
+	// started earlier, so the budget can only end early.
 	ConfirmedAt time.Time
 	lease       string // Consul lock session; "" in memory
 	index       uint64 // Consul ModifyIndex as written; 0 in memory
@@ -172,7 +172,7 @@ func (r *Registration) ID() string { return r.Session.ID }
 func (r *Registration) Generation() uint64 { return r.Session.Generation }
 
 // Capable reports whether the host proved its key, and so can reconnect. A
-// legacy registration keeps today's behaviour (I10).
+// legacy registration keeps today's behaviour.
 func (r *Registration) Capable() bool { return r.Session.Generation > 0 }
 
 // Same reports whether r and o are the same registration. A rebuild stores the
@@ -189,7 +189,7 @@ func sameIdentity(a, b *Session) bool {
 	return a.ID == b.ID && a.Generation == b.Generation && a.NodeAddr == b.NodeAddr
 }
 
-// supersedes reports whether next may replace cur (I3). A higher generation
+// supersedes reports whether next may replace cur. A higher generation
 // always may. The same generation may only from cur's own node, which is that
 // node rebuilding its registration: from anywhere else it is a stale or
 // foreign claim.
@@ -210,6 +210,8 @@ func supersededError(next, cur *Session) error {
 type SessionStore interface {
 	// Register stores s when its ID is absent or s supersedes the stored entry.
 	// Otherwise it returns an error wrapping ErrSuperseded and writes nothing.
+	// A Register that fails may outlast ctx by up to DefaultConsulTimeout,
+	// while it destroys a lease it created.
 	Register(ctx context.Context, s *Session) (*Registration, error)
 	// Release removes reg's entry if reg still holds it.
 	Release(ctx context.Context, reg *Registration) error
@@ -398,7 +400,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 	return store, nil
 }
 
-// Register stores session under a lock session of its own (spec 6.3). The
+// Register stores session under a lock session of its own. The
 // generation check and the move of the lock are one transaction, conditional on
 // the entry the decision was read from, so no other registration can land
 // between them: whichever commits second finds the entry changed, and reads and
@@ -547,7 +549,7 @@ func (c *consulSessionStore) destroyUnusedLease(lease string) {
 
 // Release destroys reg's lock session. Consul deletes the entry with it only
 // while that lock session still holds it, so a registration that was taken
-// over leaves its successor's entry in place (I4).
+// over leaves its successor's entry in place.
 func (c *consulSessionStore) Release(ctx context.Context, reg *Registration) error {
 	return c.release(ctx, reg.ID(), reg.lease)
 }
@@ -600,8 +602,8 @@ func (c *consulSessionStore) forget(sessionID, lease string) {
 }
 
 // Renew renews reg's lock session. Consul answers one it no longer has with no
-// entry and no error, which is the definite loss of spec 6.4. A transport
-// error says nothing either way, and is returned as it came.
+// entry and no error, which is a definite loss, unlike a failed renewal. A
+// transport error says nothing either way, and is returned as it came.
 func (c *consulSessionStore) Renew(ctx context.Context, reg *Registration) error {
 	entry, _, err := c.client.Session().Renew(reg.lease, (&api.WriteOptions{}).WithContext(ctx))
 	if err != nil {
@@ -1001,7 +1003,7 @@ func newMemorySessionStore(logger *slog.Logger) *memorySessionStore {
 	}
 }
 
-// Register stores session unless the entry it would replace outranks it (I3).
+// Register stores session unless the entry it would replace outranks it.
 func (m *memorySessionStore) Register(_ context.Context, session *Session) (*Registration, error) {
 	confirmed := time.Now()
 
@@ -1243,7 +1245,8 @@ func (sm *SessionManager) CreateSession(session *Session) (string, error) {
 }
 
 // Register stores s under the ordering rule, and returns its handle and the
-// encoded SSH user identifier.
+// encoded SSH user identifier. A Register that fails may outlast ctx by up to
+// DefaultConsulTimeout, while the store destroys a lease it created.
 func (sm *SessionManager) Register(ctx context.Context, s *Session) (*Registration, string, error) {
 	reg, err := sm.store.Register(ctx, s)
 	if err != nil {
@@ -1265,9 +1268,10 @@ func (sm *SessionManager) Renew(ctx context.Context, reg *Registration) error {
 }
 
 // Reregister rebuilds reg after a known loss: the same registration, stored
-// again under the ordering rule with a lease of its own (spec 6.4). The handle
-// it returns is Same as reg. reg's old lease, if it still exists, is the
-// caller's to Release.
+// again under the ordering rule with a lease of its own. The handle it returns
+// is Same as reg. Release reg afterwards only if its lease is non-empty and
+// differs from the new handle's: a store without leases keeps one entry for
+// both handles, and releasing reg there would delete the entry just rebuilt.
 func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
 	return sm.store.Register(ctx, reg.Session)
 }

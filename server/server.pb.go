@@ -26,10 +26,17 @@ type CreateSessionRequest struct {
 	HostUser             string                 `protobuf:"bytes,1,opt,name=hostUser,proto3" json:"hostUser,omitempty"`
 	HostPublicKeys       [][]byte               `protobuf:"bytes,2,rep,name=hostPublicKeys,proto3" json:"hostPublicKeys,omitempty"`
 	ClientAuthorizedKeys [][]byte               `protobuf:"bytes,3,rep,name=clientAuthorizedKeys,proto3" json:"clientAuthorizedKeys,omitempty"`
-	// A proven claim on an ID derived from the one host key and this secret
-	// (designs/2026-09-29-reconnect-design.md, section 3). No proof: random ID.
+	// The next three fields claim a session ID derived from the host's key. The
+	// relay honours them only with a proof; a request without one gets a random
+	// ID.
+	//
+	// The per-run secret the ID derives from, together with the single host key
+	// in hostPublicKeys.
 	SessionSecret []byte `protobuf:"bytes,4,opt,name=sessionSecret,proto3" json:"sessionSecret,omitempty"`
-	Generation    uint64 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Orders registrations of the same ID; at least 1.
+	Generation uint64 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	// The host key's signature over this connection's SSH session ID, the
+	// secret and the generation.
 	HostKeyProof  []byte `protobuf:"bytes,6,opt,name=hostKeyProof,proto3" json:"hostKeyProof,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -112,8 +119,8 @@ type CreateSessionResponse struct {
 	SessionID string                 `protobuf:"bytes,1,opt,name=sessionID,proto3" json:"sessionID,omitempty"`
 	NodeAddr  string                 `protobuf:"bytes,2,opt,name=nodeAddr,proto3" json:"nodeAddr,omitempty"`
 	SshUser   string                 `protobuf:"bytes,3,opt,name=ssh_user,json=sshUser,proto3" json:"ssh_user,omitempty"` // SSH username for client connections
-	// True when this relay admits any host key, so a host may redial with its
-	// session key and never touch its agent (spec 5.6).
+	// True when this relay admits any host key (no --authorized-keys), so a
+	// host can authenticate a redial with its session key alone.
 	SessionKeyRedial bool `protobuf:"varint,4,opt,name=sessionKeyRedial,proto3" json:"sessionKeyRedial,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

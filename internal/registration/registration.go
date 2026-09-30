@@ -1,5 +1,5 @@
 // Package registration derives a session's ID from its host key and proves,
-// over one connection, that a host holds that key (reconnect spec, section 3).
+// over one connection, that a host holds that key.
 package registration
 
 import (
@@ -26,9 +26,9 @@ const (
 	idDomain    = "upterm-session-id-v1"
 	proofDomain = "upterm-session-v1"
 
-	// RefusedProof is what the relay sends when it refuses a registration.
-	// The host classifies this refusal by this exact text, so it is part of
-	// the wire contract.
+	// RefusedProof is what the relay sends when it refuses a registration's
+	// proof. The host classifies this refusal by this exact text, so it is
+	// part of the wire contract.
 	RefusedProof = "upterm: session proof refused"
 	// Superseded is what the relay sends when a newer registration supersedes
 	// an older one. The host classifies this refusal by this exact text, so it
@@ -53,8 +53,8 @@ func NewSecret() ([]byte, error) {
 
 // ID derives a deterministic session ID from the session key and secret.
 // Host and relay both compute it independently and may run different versions,
-// so the output is pinned by a golden test. It is domain-separated from the
-// proof so the two hashes can never be confused.
+// so the output is pinned by a golden test. Its hash input is domain-separated
+// from the message a proof signs, so neither can be passed off as the other.
 func ID(sessionKey ssh.PublicKey, secret []byte) string {
 	sum := sha256.Sum256(ssh.Marshal(struct {
 		Domain      string

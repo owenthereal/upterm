@@ -42,7 +42,7 @@ type sshd struct {
 	Logger              *slog.Logger
 	// HostGateEnabled is set when the relay admits only the host keys in its
 	// --authorized-keys. Without the gate any key gets in, so a host can redial
-	// with its session key alone and never touch its agent (spec 5.6).
+	// with its session key alone and never touch its agent.
 	HostGateEnabled bool
 
 	// onRegistered is a test hook, run after the store takes a registration and
@@ -87,7 +87,7 @@ func (l *closeOnceListener) Close() error {
 
 // localSessions tracks the registrations this process adopted, one per session
 // ID: a host that reconnects registers the same ID again, possibly while its
-// old connection lingers, so the ID alone can't say whose a resource is (I2).
+// old connection lingers, so the ID alone can't say whose a resource is.
 // It drives sessions_active_count, which counts IDs, so a takeover on this node
 // leaves the count alone. Every registration's store entry is released when it
 // ends, whether the host cancels its forward or its connection ends first; the
@@ -106,7 +106,7 @@ type localSessions struct {
 }
 
 // localRegistration is a registration this node adopted, and the host
-// connection it was made on, which a takeover closes (I5). reg is the handle
+// connection it was made on, which a takeover closes. reg is the handle
 // its lease keeper last rebuilt, if the keeper rebuilt one.
 type localRegistration struct {
 	reg  *Registration
@@ -135,7 +135,7 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 // The store already ordered reg against the entry it replaced, but two
 // registrations can commit in one order and adopt in the other. Checking again
 // here, under the lock, means a delayed older registration can never evict a
-// newer one (I3).
+// newer one.
 //
 // reg's lease keeper starts only once reg is accepted, so a refused
 // registration is never renewed or rebuilt, and the one it replaced stops
@@ -398,9 +398,9 @@ type contextKeyDownstreamSessionID struct{}
 
 // sessionIdentity returns the session ID and generation req registers. A
 // request without a proof is an old host's, and gets a random ID as it always
-// has (I10). One with a proof gets the ID derived from its host key, but only
-// if the proof verifies over the host's own connection, so neither the ID nor
-// a proof captured elsewhere is enough to claim it (I1).
+// has. One with a proof gets the ID derived from its host key, but only if the
+// proof verifies over the host's own connection, so neither the ID nor a proof
+// captured elsewhere is enough to claim it.
 func (s *sshd) sessionIdentity(ctx ssh.Context, req *CreateSessionRequest) (id string, generation uint64, err error) {
 	if len(req.HostKeyProof) == 0 {
 		return utils.GenerateSessionID(), 0, nil
@@ -452,7 +452,7 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	if prev != nil && prev.conn != conn {
 		// A takeover on this node. The old listener goes first, so the new
 		// registration can bind the session socket's name, and then the old
-		// host connection, so its guests go with it (I5).
+		// host connection, so its guests go with it.
 		s.forwardHandler.closeListener(prev.reg)
 		_ = prev.conn.Close()
 	}
@@ -467,7 +467,7 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	}()
 
 	// The host may have gone while the store call ran. Its registration would
-	// then hold the ID for no one, so end it before replying (spec 6.1).
+	// then hold the ID for no one, so end it before replying.
 	if ctx.Err() != nil {
 		s.sessions.end(reg)
 		return false, nil

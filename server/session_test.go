@@ -278,7 +278,7 @@ func (suite *MemoryStoreTestSuite) TestStoreOperations() {
 	suite.Equal(session.ID, retrievedSession.ID)
 	suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
 
-	// Another node can't take over the same generation (I3): the entry stays.
+	// Another node can't take over the same generation: the entry stays.
 	moved := &Session{ID: sessionID, NodeAddr: "192.168.1.100:2222"}
 	_, err = suite.store.Register(context.Background(), moved)
 	suite.ErrorIs(err, ErrSuperseded)
@@ -599,7 +599,7 @@ func (suite *ConsulStoreTestSuite) TestTakeoverMovesTheLease() {
 	suite.Require().NoError(err)
 	defer func() { _ = suite.store2.Release(ctx, reg2) }()
 	pair, _ := suite.consulGet(id)
-	suite.Equal(reg2.lease, pair.Session, "held by the new owner's lease (I4)")
+	suite.Equal(reg2.lease, pair.Session, "held by the new owner's lease")
 	suite.Equal(pair.ModifyIndex, reg2.index, "the handle records the index it wrote")
 	suite.Require().NoError(suite.store1.Release(ctx, reg1))
 	pair, s := suite.consulGet(id)
@@ -622,7 +622,8 @@ func (suite *ConsulStoreTestSuite) TestRenewOfALostLeaseAndLockDelay() {
 	suite.ErrorIs(suite.store1.Renew(ctx, reg), ErrLeaseLost)
 }
 
-// Review Focus 3.
+// An entry that doesn't parse ranks as generation 0: a proven registration
+// takes it over, a legacy one can't.
 func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
 	ctx, id := context.Background(), suite.uniq("junk")
 	_, err := suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte("not json")}, nil)
@@ -634,7 +635,8 @@ func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
 	suite.NoError(suite.store1.Release(ctx, reg))
 }
 
-// Review Focus 5.
+// Shutdown cleanup from a stale listing leaves an entry another lease took
+// over.
 func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesAnotherLeaseHolds() {
 	ctx, a, b := context.Background(), suite.uniq("batch-a"), suite.uniq("batch-b")
 	_, err := suite.store1.Register(ctx, &Session{ID: a, NodeAddr: "a:22", Generation: 1})
@@ -675,7 +677,7 @@ func (f *firstSend) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // The lease's TTL clock starts when Consul creates its lock session, so the
-// expiry budget must start no later than that request was sent (spec 6.4).
+// expiry budget must start no later than that request was sent.
 func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
 	consulURL, err := url.Parse(testhelpers.ConsulURL())
 	suite.Require().NoError(err)
@@ -703,8 +705,8 @@ func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
 	suite.False(reg.ConfirmedAt.After(created), "the budget starts after the lease's TTL clock")
 }
 
-// The bug the spike confirmed. Consul's minimum TTL is 10 s, and it may take
-// twice that to expire.
+// Without renewal, Consul expires an entry within twice its TTL, which is at
+// least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
 	consulURL, err := url.Parse(testhelpers.ConsulURL())
 	suite.Require().NoError(err)
