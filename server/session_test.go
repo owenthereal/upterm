@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -772,6 +773,148 @@ func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
 	suite.False(reg.ConfirmedAt.After(created), "the budget starts after the lease's TTL clock")
 }
 
+// delayedTxnReply lets Consul apply every transaction at once, but holds the
+// reply to the first one until release is called. entered closes once it is
+// holding that reply.
+type delayedTxnReply struct {
+	entered chan struct{}
+	resume  chan struct{}
+	delayed atomic.Bool // not a sync.Once: later transactions mustn't wait on the first
+	resumed sync.Once
+	next    http.RoundTripper
+}
+
+func (d *delayedTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := d.next.RoundTrip(r)
+	if err == nil && r.URL.Path == "/v1/txn" && d.delayed.CompareAndSwap(false, true) {
+		close(d.entered)
+		<-d.resume
+	}
+	return resp, err
+}
+
+func (d *delayedTxnReply) release() { d.resumed.Do(func() { close(d.resume) }) }
+
+// storeWithADelayedReply is a store of its own, on the suite's key prefix,
+// whose first transaction's reply arrives only once the returned delay is
+// released. Its watch runs on a client of its own, and isn't delayed.
+func (suite *ConsulStoreTestSuite) storeWithADelayedReply() (*consulSessionStore, *delayedTxnReply) {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+	suite.Require().NoError(err)
+	delay := &delayedTxnReply{entered: make(chan struct{}), resume: make(chan struct{}), next: http.DefaultTransport}
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
+	cfg.HttpClient = &http.Client{Transport: delay}
+	store.client, err = api.NewClient(cfg)
+	suite.Require().NoError(err)
+	return store, delay
+}
+
+type registered struct {
+	reg *Registration
+	err error
+}
+
+// registerDelayed registers s on store, whose reply delay holds, and returns
+// once Consul has applied it; the reply arrives on the channel once delay is
+// released.
+func (suite *ConsulStoreTestSuite) registerDelayed(store *consulSessionStore, delay *delayedTxnReply, s *Session) <-chan registered {
+	done := make(chan registered, 1)
+	go func() {
+		reg, err := store.Register(context.Background(), s)
+		done <- registered{reg, err}
+	}()
+	select {
+	case <-delay.entered:
+	case <-time.After(5 * time.Second):
+		suite.FailNow("the delayed registration never committed")
+	}
+	return done
+}
+
+func (suite *ConsulStoreTestSuite) awaitRegistered(done <-chan registered) *Registration {
+	select {
+	case r := <-done:
+		suite.Require().NoError(r.err)
+		return r.reg
+	case <-time.After(5 * time.Second):
+		suite.FailNow("the delayed registration never returned")
+		return nil
+	}
+}
+
+// cachedGeneration is the generation store's cache holds for id; 0 if none.
+func cachedGeneration(store *consulSessionStore, id string) uint64 {
+	if s, ok := store.cache.Get(id); ok {
+		return s.Generation
+	}
+	return 0
+}
+
+// heldLease is the lock session store records itself holding id under.
+func heldLease(store *consulSessionStore, id string) string {
+	store.heldMu.Lock()
+	defer store.heldMu.Unlock()
+	return store.held[id].lease
+}
+
+// A registration's reply can arrive after a later registration of the same ID
+// has committed and been recorded on the same store. Recording the earlier one
+// then would make its release forget the later one's hold, and shutdown would
+// leave the later one's entry behind.
+func (suite *ConsulStoreTestSuite) TestALateReplyLeavesTheNewerHoldInPlace() {
+	store, delay := suite.storeWithADelayedReply()
+	defer func() { _ = store.Close() }()
+	defer delay.release()
+	ctx, id := context.Background(), suite.uniq("late-reply")
+
+	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	reg2, err := store.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 2})
+	suite.Require().NoError(err)
+	defer func() { _ = store.Release(ctx, reg2) }()
+	delay.release()
+	reg1 := suite.awaitRegistered(first)
+
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the late reply replaced the newer registration in the cache")
+	// The node refuses the older registration when it adopts, and releases it.
+	suite.Require().NoError(store.Release(ctx, reg1))
+	suite.Equal(reg2.lease, heldLease(store, id), "the older registration's release forgot the newer one's hold")
+	suite.Require().NoError(store.BatchDelete([]string{id}))
+	pair, _ := suite.consulGet(id)
+	suite.Nil(pair, "shutdown left the newer registration's entry behind")
+}
+
+// Likewise when the newer registration is another node's, which this store
+// learned of from its watch: a late reply mustn't put the older registration
+// back in the cache, where no later watch delivery would correct it, and guests
+// would be routed to a superseded node.
+func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCached() {
+	store, delay := suite.storeWithADelayedReply()
+	defer func() { _ = store.Close() }()
+	defer delay.release()
+	ctx, id := context.Background(), suite.uniq("late-reply-other-node")
+
+	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store2.Release(ctx, reg2) }()
+	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
+		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	delay.release()
+	reg1 := suite.awaitRegistered(first)
+
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the late reply replaced the newer registration in the cache")
+	// The older registration ends.
+	suite.Require().NoError(store.Release(ctx, reg1))
+	suite.Equal(uint64(2), cachedGeneration(store, id), "the older registration's release dropped the newer entry from the cache")
+	suite.NotEqual(reg1.lease, heldLease(store, id), "the older registration is still recorded as held")
+	pair, _ := suite.consulGet(id)
+	suite.Require().NotNil(pair)
+	suite.Equal(reg2.lease, pair.Session)
+}
+
 // Without renewal, Consul expires an entry within twice its TTL, which is at
 // least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
@@ -808,6 +951,43 @@ func (suite *ConsulStoreTestSuite) waitForSessionRemovedFromCache(sessionID stri
 		assert := assert.New(t)
 		assert.False(suite.store2.HasInCache(sessionID), "Session should be removed from store2's cache via watch")
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+// The cache takes writes in whatever order they reach it, and keeps the
+// latest. A watch snapshot older than a write made here leaves that write in
+// place, and one that has caught up with it decides, including by leaving it
+// out.
+func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
+	c := newSessionCache(sessionTestLogger)
+	gen := func() uint64 {
+		if s, ok := c.Get("id"); ok {
+			return s.Generation
+		}
+		return 0
+	}
+	snapshot := func(gen, index uint64) map[string]cachedSession {
+		return map[string]cachedSession{"id": {session: &Session{ID: "id", Generation: gen}, index: index}}
+	}
+
+	c.Set("id", &Session{ID: "id", Generation: 2}, 20)
+	c.Set("id", &Session{ID: "id", Generation: 1}, 10)
+	assert.Equal(t, uint64(2), gen(), "an earlier write replaced a later one")
+
+	c.ReplaceAll(15, snapshot(1, 10))
+	assert.Equal(t, uint64(2), gen(), "a snapshot from before the write undid it")
+	c.ReplaceAll(19, map[string]cachedSession{})
+	assert.Equal(t, uint64(2), gen(), "a snapshot from before the write removed it")
+	c.ReplaceAll(25, snapshot(3, 25))
+	assert.Equal(t, uint64(3), gen(), "a snapshot past the write didn't replace it")
+
+	c.Delete("id", 20)
+	assert.Equal(t, uint64(3), gen(), "a release removed a later write")
+	c.Delete("id", 25)
+	assert.Zero(t, gen())
+
+	c.Set("id", &Session{ID: "id", Generation: 3}, 25)
+	c.ReplaceAll(30, map[string]cachedSession{})
+	assert.Zero(t, gen(), "a snapshot past the write kept an entry it no longer has")
 }
 
 //

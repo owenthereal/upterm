@@ -232,17 +232,26 @@ type SessionStore interface {
 	Close() error
 }
 
-// sessionCache provides thread-safe in-memory caching for sessions
+// sessionCache provides thread-safe in-memory caching for sessions. Writes
+// reach it out of order, from replies and from the watch, so each entry keeps
+// the Consul ModifyIndex of the write it describes, and an earlier write never
+// replaces a later one.
 type sessionCache struct {
-	sessions map[string]*Session
+	sessions map[string]cachedSession
 	mutex    sync.RWMutex
 	logger   *slog.Logger
+}
+
+// cachedSession is a session as the Consul write at index stored it.
+type cachedSession struct {
+	session *Session
+	index   uint64
 }
 
 // newSessionCache creates a new session cache
 func newSessionCache(logger *slog.Logger) *sessionCache {
 	return &sessionCache{
-		sessions: make(map[string]*Session),
+		sessions: make(map[string]cachedSession),
 		logger:   logger,
 	}
 }
@@ -252,8 +261,8 @@ func (c *sessionCache) Get(sessionID string) (*Session, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	session, exists := c.sessions[sessionID]
-	return session, exists
+	entry, exists := c.sessions[sessionID]
+	return entry.session, exists
 }
 
 // Has checks if a session exists in cache without retrieving it (useful for testing)
@@ -265,33 +274,52 @@ func (c *sessionCache) Has(sessionID string) bool {
 	return exists
 }
 
-// Set stores a session in cache
-func (c *sessionCache) Set(sessionID string, session *Session) {
+// Set caches session as the write at index stored it, unless the cache already
+// describes that write or a later one: a reply can arrive after the watch, or
+// a later registration, has delivered something newer.
+func (c *sessionCache) Set(sessionID string, session *Session, index uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	c.sessions[sessionID] = session
+	if cur, ok := c.sessions[sessionID]; ok && cur.index >= index {
+		return
+	}
+	c.sessions[sessionID] = cachedSession{session: session, index: index}
 	c.logger.Debug("cached session", "session", sessionID)
 }
 
-// Delete removes a session from cache
-func (c *sessionCache) Delete(sessionID string) {
+// Delete removes sessionID's entry unless it describes a write later than
+// index. A release removes what its own write stored, not what a later
+// registration stored since.
+func (c *sessionCache) Delete(sessionID string, index uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	if cur, ok := c.sessions[sessionID]; !ok || cur.index > index {
+		return
+	}
 	delete(c.sessions, sessionID)
 	c.logger.Debug("removed session from cache", "session", sessionID)
 }
 
-// ReplaceAll atomically replaces all sessions in cache
-func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updated, deleted int) {
+// ReplaceAll replaces the cache with snapshot, the watch's view of every
+// session as of index, and takes ownership of snapshot. An entry a later write
+// stored stays: the watch hasn't caught up with that write, and the snapshot
+// that does will include it, or its removal.
+func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (added, updated, deleted int) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	for sessionID, cur := range c.sessions {
+		if cur.index > index {
+			snapshot[sessionID] = cur
+		}
+	}
+
 	// Calculate changes for logging
-	for sessionID, newSession := range newSessions {
-		if oldSession, exists := c.sessions[sessionID]; exists {
-			if !reflect.DeepEqual(oldSession, newSession) {
+	for sessionID, next := range snapshot {
+		if cur, exists := c.sessions[sessionID]; exists {
+			if !reflect.DeepEqual(cur, next) {
 				updated++
 			}
 		} else {
@@ -301,16 +329,16 @@ func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updat
 
 	// Count deleted sessions
 	for sessionID := range c.sessions {
-		if _, exists := newSessions[sessionID]; !exists {
+		if _, exists := snapshot[sessionID]; !exists {
 			deleted++
 		}
 	}
 
 	// Replace the entire session map atomically
-	c.sessions = newSessions
+	c.sessions = snapshot
 
 	if added > 0 || updated > 0 || deleted > 0 {
-		c.logger.Info("updated session cache", "total", len(newSessions), "added", added, "updated", updated, "deleted", deleted)
+		c.logger.Info("updated session cache", "total", len(snapshot), "added", added, "updated", updated, "deleted", deleted)
 	}
 
 	return added, updated, deleted
@@ -329,8 +357,16 @@ type consulSessionStore struct {
 	// held maps each session ID this instance registered to the lock session
 	// it registered it under. Delete and BatchDelete act only through it, so
 	// neither can remove an entry another node registered or took over.
-	held   map[string]string
+	held   map[string]hold
 	heldMu sync.Mutex
+}
+
+// hold is a lock session this instance registered an ID under, and the
+// ModifyIndex of the write that stored it. Replies can arrive out of commit
+// order, so only a later write replaces a hold.
+type hold struct {
+	lease string
+	index uint64
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
@@ -373,7 +409,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
 		cache:     newSessionCache(logger),
-		held:      make(map[string]string),
+		held:      make(map[string]hold),
 	}
 
 	// Register the node with Consul
@@ -489,10 +525,16 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 		return nil, err
 	}
 
-	// Immediately update local cache for strong consistency
+	// Immediately update local cache for strong consistency. A reply can
+	// arrive after a later registration of the ID has committed and been
+	// recorded here, or delivered by the watch, so record this one only where
+	// nothing later is: otherwise its release would forget the later hold, and
+	// the cache would route guests to a superseded registration.
 	c.heldMu.Lock()
-	c.held[session.ID] = lease
-	c.cache.Set(session.ID, session)
+	if cur, ok := c.held[session.ID]; !ok || index > cur.index {
+		c.held[session.ID] = hold{lease: lease, index: index}
+	}
+	c.cache.Set(session.ID, session, index)
 	c.heldMu.Unlock()
 
 	c.logger.Debug("registered session in consul and cache",
@@ -580,13 +622,15 @@ func (c *consulSessionStore) release(ctx context.Context, sessionID, lease strin
 
 // forget drops this instance's record of sessionID, and its cache entry, only
 // if lease is still the one it registered the ID under. After a rebuild the
-// new lease holds the entry, and the cache still describes it.
+// new lease holds the entry, and the cache still describes it. A cache entry
+// that a later write stored, such as another node's takeover, stays too: the
+// release didn't touch it.
 func (c *consulSessionStore) forget(sessionID, lease string) {
 	c.heldMu.Lock()
 	defer c.heldMu.Unlock()
-	if held, ok := c.held[sessionID]; ok && held == lease {
+	if h, ok := c.held[sessionID]; ok && h.lease == lease {
 		delete(c.held, sessionID)
-		c.cache.Delete(sessionID)
+		c.cache.Delete(sessionID, h.index)
 	}
 }
 
@@ -631,7 +675,10 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, error) {
 	kvStoreKey := c.SessionKey(sessionID)
 
-	var session *Session
+	var (
+		session *Session
+		index   uint64
+	)
 	err := retry.Do(
 		func() error {
 			kvPair, _, err := c.client.KV().Get(kvStoreKey, nil)
@@ -647,7 +694,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 				return fmt.Errorf("failed to unmarshal session data: %w", err)
 			}
 
-			session = &s
+			session, index = &s, kvPair.ModifyIndex
 			return nil
 		},
 		retry.Attempts(DefaultMaxRetries),
@@ -671,7 +718,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	}
 
 	// Update local cache with fetched data
-	c.cache.Set(sessionID, session)
+	c.cache.Set(sessionID, session, index)
 
 	c.logger.Debug("retrieved session data from consul and cached",
 		"session", sessionID,
@@ -690,14 +737,14 @@ func (c *consulSessionStore) Delete(sessionID string) error {
 	}
 
 	c.heldMu.Lock()
-	lease, ok := c.held[sessionID]
+	h, ok := c.held[sessionID]
 	c.heldMu.Unlock()
 	if !ok {
 		c.logger.Debug("not deleting a session this instance doesn't hold", "session", sessionID)
 		return nil
 	}
 
-	return c.release(context.Background(), sessionID, lease)
+	return c.release(context.Background(), sessionID, h.lease)
 }
 
 // heldEntry is a session ID and the lock session this instance holds it under.
@@ -713,8 +760,8 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 	c.heldMu.Lock()
 	var entries []heldEntry
 	for _, id := range sessionIDs {
-		if lease, ok := c.held[id]; ok {
-			entries = append(entries, heldEntry{id: id, lease: lease})
+		if h, ok := c.held[id]; ok {
+			entries = append(entries, heldEntry{id: id, lease: h.lease})
 		}
 	}
 	c.heldMu.Unlock()
@@ -931,7 +978,7 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 	// Set up the handler to update local session replica
 	watchPlan.Handler = func(idx uint64, data interface{}) {
 		if kvPairs, ok := data.(api.KVPairs); ok {
-			c.updateSessionReplica(kvPairs)
+			c.updateSessionReplica(idx, kvPairs)
 		}
 	}
 
@@ -961,10 +1008,12 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 	return nil
 }
 
-// updateSessionReplica updates the local session replica based on Consul data
-func (c *consulSessionStore) updateSessionReplica(kvPairs api.KVPairs) {
+// updateSessionReplica updates the local session replica based on Consul
+// data: every session under the prefix as of index, which is no earlier than
+// any write it includes.
+func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPairs) {
 	// Create new session map from Consul data
-	newSessions := make(map[string]*Session)
+	newSessions := make(map[string]cachedSession)
 
 	for _, kvPair := range kvPairs {
 		var session Session
@@ -974,11 +1023,11 @@ func (c *consulSessionStore) updateSessionReplica(kvPairs api.KVPairs) {
 		}
 
 		// Use session.ID from the unmarshaled value directly
-		newSessions[session.ID] = &session
+		newSessions[session.ID] = cachedSession{session: &session, index: kvPair.ModifyIndex}
 	}
 
 	// Atomically replace cache contents and get change statistics
-	c.cache.ReplaceAll(newSessions)
+	c.cache.ReplaceAll(index, newSessions)
 }
 
 // Close gracefully stops the session watch and cleans up resources
