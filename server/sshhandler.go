@@ -311,10 +311,12 @@ func (h *streamlocalForwardHandler) bind(reg *Registration) (net.Listener, error
 	}
 	h.Unlock()
 
-	// Outside the lock: ending releases the store entry, and a Consul call can
-	// be slow. The release is conditional, so it leaves reg's entry alone.
+	// In the background, as a takeover releases the registration it replaced:
+	// ending releases the store entry, and a slow Consul call mustn't hold up
+	// the reply to reg's forward. The release is conditional, so it leaves
+	// reg's entry alone.
 	if evicted != nil {
-		h.sessions.end(evicted)
+		go h.sessions.end(evicted)
 	}
 	if err != nil {
 		return nil, err

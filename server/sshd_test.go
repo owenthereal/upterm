@@ -594,10 +594,18 @@ func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
 // that registration leaves generation 3's entry and slot alone. Generation
 // 3's own listener is never closed that way.
 func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
-	sessions, sm, gauge := newTestLocalSessions(t)
+	logger := slog.New(slog.DiscardHandler)
+	store := &releaseRecordingStore{SessionStore: newMemorySessionStore(logger)}
+	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
+	mp, metrics := newTestMetrics(t)
+	sessions := newLocalSessions(mp, sm, logger)
+	gauge := func() float64 {
+		v, _ := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
+		return v
+	}
 	network := &MemoryProvider{}
 	require.NoError(t, network.SetOpts(nil))
-	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, slog.New(slog.DiscardHandler))
+	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, logger)
 	register := func(gen uint64) *Registration {
 		reg, _, err := sm.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
 		require.NoError(t, err)
@@ -637,6 +645,10 @@ func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("generation 1's listener is still open")
 	}
+	// Generation 1 is ended in the background; once it has been released,
+	// generation 3's entry and slot are still in place.
+	require.Eventually(t, func() bool { return store.releasedHandle(gen1) }, 2*time.Second, 10*time.Millisecond,
+		"generation 1 was never ended")
 	require.True(t, sessions.active(gen3))
 	require.Equal(t, 1.0, gauge())
 	sess, err := sm.GetSession("id")
@@ -794,19 +806,29 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 	require.True(t, ok, string(body))
 }
 
-// releaseRecordingStore records the lease of every handle it is asked to
-// release.
+// releaseRecordingStore records every handle it is asked to release, and its
+// lease.
 type releaseRecordingStore struct {
 	SessionStore
-	mu     sync.Mutex
-	leases []string
+	mu      sync.Mutex
+	leases  []string
+	handles []*Registration
 }
 
 func (s *releaseRecordingStore) Release(ctx context.Context, reg *Registration) error {
+	err := s.SessionStore.Release(ctx, reg)
 	s.mu.Lock()
 	s.leases = append(s.leases, reg.lease)
+	s.handles = append(s.handles, reg)
 	s.mu.Unlock()
-	return s.SessionStore.Release(ctx, reg)
+	return err
+}
+
+// releasedHandle reports whether reg itself has been released.
+func (s *releaseRecordingStore) releasedHandle(reg *Registration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Contains(s.handles, reg)
 }
 
 func (s *releaseRecordingStore) released(lease string) bool {
