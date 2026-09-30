@@ -226,7 +226,7 @@ func (k *leaseKeeper) release(reg *Registration) {
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
 		defer cancel()
 		if err := k.sm.Release(ctx, reg); err != nil {
-			k.logger.Warn("failed to release a session lease", "error", err)
+			k.logger.Warn("failed to release a session lease", "error", err, "lease", reg.lease)
 		}
 	}
 	if reg.Capable() {

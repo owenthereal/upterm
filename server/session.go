@@ -283,17 +283,6 @@ func (c *sessionCache) Delete(sessionID string) {
 	c.logger.Debug("removed session from cache", "session", sessionID)
 }
 
-// BatchDelete removes multiple sessions from cache
-func (c *sessionCache) BatchDelete(sessionIDs []string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	for _, sessionID := range sessionIDs {
-		delete(c.sessions, sessionID)
-	}
-	c.logger.Debug("batch removed sessions from cache", "count", len(sessionIDs))
-}
-
 // ReplaceAll atomically replaces all sessions in cache
 func (c *sessionCache) ReplaceAll(newSessions map[string]*Session) (added, updated, deleted int) {
 	c.mutex.Lock()
