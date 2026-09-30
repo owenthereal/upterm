@@ -47,8 +47,9 @@ type sshd struct {
 
 	// onRegistered is a test hook, run after the store takes a registration and
 	// before this node adopts it: the window in which two registrations can
-	// commit in one order and adopt in the other.
-	onRegistered func(*Registration)
+	// commit in one order and adopt in the other, and in which the host can
+	// go. ctx is the host connection's.
+	onRegistered func(ctx context.Context, reg *Registration)
 
 	server         *ssh.Server
 	sessions       *localSessions
@@ -535,7 +536,7 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
 	if s.onRegistered != nil {
-		s.onRegistered(reg)
+		s.onRegistered(ctx, reg)
 	}
 	if ok, refusal := s.adopt(ctx, reg, conn); !ok {
 		return false, refusal

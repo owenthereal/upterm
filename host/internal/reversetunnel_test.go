@@ -274,12 +274,21 @@ func TestReverseTunnelWithAMalformedSecretDoesNotEstablish(t *testing.T) {
 	hostKey, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
 	tunnel := relay.tunnel(hostKey[0], relay.url)
-	tunnel.SessionSecret, tunnel.Generation = []byte("too short"), 1
+	secret := []byte("too short")
+	tunnel.SessionSecret, tunnel.Generation = secret, 1
 	t.Cleanup(tunnel.Close)
 	_, err = tunnel.Establish(t.Context())
+	require.ErrorContains(t, err, "error signing session proof")
 	require.ErrorContains(t, err, "session secret must be")
 	require.False(t, tunnel.ReconnectSupported())
 	require.Nil(t, tunnel.Listener())
+	// Nothing reached the relay: not the derived ID, nor a random one issued to
+	// a request sent without its proof.
+	_, err = relay.sessions.GetSession(registration.ID(hostKey[0].PublicKey(), secret))
+	require.Error(t, err)
+	sessions, err := relay.sessions.GetStore().List()
+	require.NoError(t, err)
+	require.Empty(t, sessions)
 }
 
 func TestReverseTunnelWithoutASecretGetsARandomID(t *testing.T) {

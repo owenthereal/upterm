@@ -908,10 +908,29 @@ func Test_sshd_ProvenRegistrationDerivesTheID(t *testing.T) {
 	}
 }
 
+// Without a proof, the secret and generation a request carries count for
+// nothing: it gets a random ID at generation 0, as an old host always has, and
+// the ID they would derive stays unclaimed.
+func Test_sshd_UnprovenRequestGetsARandomID(t *testing.T) {
+	s := newTestSSHD(t)
+	host := newProven(t)
+	ok, body := host.send(t, s.dialAs(t, "conn-1"), 3, nil, host.hostKeys())
+	require.True(t, ok, string(body))
+	var resp CreateSessionResponse
+	require.NoError(t, proto.Unmarshal(body, &resp))
+	require.NotEqual(t, host.id(), resp.SessionID)
+	sess, err := s.sshd.SessionManager.GetSession(resp.SessionID)
+	require.NoError(t, err)
+	require.Zero(t, sess.Generation)
+	_, err = s.sshd.SessionManager.GetSession(host.id())
+	require.Error(t, err)
+}
+
 // A proof is refused, and the derived ID left unregistered, when it was signed
 // by another key, over another connection or for another generation; when it
-// doesn't parse; when the request names two host keys; and when its secret is
-// short or its generation zero.
+// doesn't parse; when the request names two host keys, or one that doesn't
+// parse; when its secret is short or its generation zero; and when the
+// connection carries no SSH session ID to verify it over.
 func Test_sshd_ProofRefusals(t *testing.T) {
 	s := newTestSSHD(t)
 	host, other := newProven(t), newProven(t)
@@ -941,6 +960,12 @@ func Test_sshd_ProofRefusals(t *testing.T) {
 		},
 		"generation zero": func(t *testing.T, c *ssh.Client) (bool, []byte) {
 			return host.send(t, c, 0, sign(t, host.key, "conn-1", 1), host.hostKeys())
+		},
+		"unparseable host key": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 1, sign(t, host.key, "conn-1", 1), [][]byte{[]byte("not a key")})
+		},
+		"no SSH session ID": func(t *testing.T, _ *ssh.Client) (bool, []byte) {
+			return host.send(t, s.dialAs(t, ""), 1, sign(t, host.key, "conn-1", 1), host.hostKeys())
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -975,6 +1000,45 @@ func Test_sshd_NewerRegistrationSupersedesTheOlder(t *testing.T) {
 	require.Equal(t, registration.Superseded, string(body))
 }
 
+// A host that goes while its registration is being stored leaves nothing
+// behind: the node releases the registration rather than holding the ID for
+// no one.
+func Test_sshd_RegistrationOfAGoneHostIsReleased(t *testing.T) {
+	clients, registered := make(chan *ssh.Client, 1), make(chan string, 1)
+	s := newTestSSHD(t, func(d *sshd) {
+		d.onRegistered = func(ctx context.Context, reg *Registration) {
+			_ = (<-clients).Close()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
+			registered <- reg.ID()
+		}
+	})
+	host := newProven(t)
+	client := s.dialAs(t, "conn-1")
+	clients <- client
+	proof, err := registration.Sign(host.key, []byte("conn-1"), host.secret, 1)
+	require.NoError(t, err)
+	req, err := proto.Marshal(&CreateSessionRequest{HostUser: "owen", HostPublicKeys: host.hostKeys(),
+		SessionSecret: host.secret, Generation: 1, HostKeyProof: proof})
+	require.NoError(t, err)
+	_, _, err = client.SendRequest(upterm.ServerCreateSessionRequestType, true, req)
+	require.Error(t, err, "the host went before its reply")
+
+	select {
+	case id := <-registered: // the store took it before the host went
+		require.Equal(t, host.id(), id)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the registration never reached the store")
+	}
+	require.Eventually(t, func() bool {
+		_, err := s.sshd.SessionManager.GetSession(host.id())
+		return err != nil
+	}, 5*time.Second, 10*time.Millisecond, "the registration outlived its host")
+	require.Equal(t, 0.0, s.gauge(t))
+}
+
 // End to end: generation 1 commits, then pauses before adoption
 // while generation 2 commits and adopts. When 1 resumes it is refused, and 2
 // keeps its connection and its listener.
@@ -982,7 +1046,7 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	var stall sync.Once
 	paused, resume := make(chan struct{}), make(chan struct{})
 	s := newTestSSHD(t, func(d *sshd) {
-		d.onRegistered = func(reg *Registration) {
+		d.onRegistered = func(_ context.Context, reg *Registration) {
 			if reg.Generation() == 1 {
 				stall.Do(func() { close(paused); <-resume })
 			}
@@ -1005,7 +1069,11 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 		_, body, err := first.SendRequest(upterm.ServerCreateSessionRequestType, true, req)
 		result <- reply{body, err}
 	}()
-	<-paused
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation 1 never reached adoption")
+	}
 
 	second := s.dialAs(t, "conn-2")
 	incoming := second.HandleChannelOpen(forwardedStreamlocalChannelType)
@@ -1015,7 +1083,12 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	require.True(t, ok, reason)
 
 	close(resume)
-	r := <-result
+	var r reply
+	select {
+	case r = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation 1 never got a reply")
+	}
 	require.NoError(t, r.err)
 	require.Equal(t, registration.Superseded, string(r.body))
 	sess, err := s.sshd.SessionManager.GetSession(host.id())

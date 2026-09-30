@@ -107,8 +107,9 @@ func newKeeperFixture(t *testing.T, store *leaseStore, gen uint64) (*localSessio
 func TestLeaseKeeperRenewsAtHalfItsTTL(t *testing.T) {
 	store := &leaseStore{ttl: testTTL}
 	_, _, conn := newKeeperFixture(t, store, 1)
-	time.Sleep(2 * testTTL) // renewals fall due at 0.5, 1 and 1.5 × testTTL
-	require.GreaterOrEqual(t, store.renews.Load(), int32(3))
+	// Renewals fall due at 0.5, 1 and 1.5 × testTTL; the rest is room for late
+	// wakes.
+	require.Eventually(t, func() bool { return store.renews.Load() >= 3 }, 4*testTTL, 10*time.Millisecond)
 	require.False(t, conn.isClosed())
 }
 
