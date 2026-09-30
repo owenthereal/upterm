@@ -47,8 +47,10 @@ var (
 // session ID constant across redials.
 func NewSecret() ([]byte, error) {
 	b := make([]byte, SecretLen)
-	_, err := rand.Read(b)
-	return b, err
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // ID derives a deterministic session ID from the session key and secret.
@@ -114,6 +116,12 @@ func Verify(sessionKey ssh.PublicKey, sshSessionID, secret []byte, generation ui
 	var sig ssh.Signature
 	if err := ssh.Unmarshal(proof, &sig); err != nil {
 		return fmt.Errorf("malformed proof: %w", err)
+	}
+	// Only security keys put anything after the signature blob, and a session
+	// key is generated in process, so never one. Accepting bytes there would
+	// give one proof many encodings.
+	if len(sig.Rest) != 0 {
+		return errors.New("malformed proof: trailing bytes after the signature")
 	}
 	return sessionKey.Verify(message(sshSessionID, secret, generation), &sig)
 }

@@ -63,6 +63,9 @@ func TestProofRoundTripAndRefusals(t *testing.T) {
 		"short secret":       func() error { return Verify(key.PublicKey(), []byte("conn-1"), secret[:8], 3, proof) },
 		"generation zero":    func() error { return Verify(key.PublicKey(), []byte("conn-1"), secret, 0, proof) },
 		"no connection":      func() error { return Verify(key.PublicKey(), nil, secret, 3, proof) },
+		"trailing bytes": func() error {
+			return Verify(key.PublicKey(), []byte("conn-1"), secret, 3, append(bytes.Clone(proof), 0))
+		},
 	} {
 		t.Run(name, func(t *testing.T) { require.Error(t, verify()) })
 	}
