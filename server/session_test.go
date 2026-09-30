@@ -1106,6 +1106,34 @@ func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	assert.Equal(t, uint64(4), gen(), "a write past the last snapshot was dropped")
 }
 
+// Consul's index goes backwards only when its data was reset. Nothing cached
+// from before the reset outranks the snapshot that shows it, and writes after
+// it are taken, for IDs cached before it too.
+func TestSessionCacheTakesTheSnapshotWholeAfterAReset(t *testing.T) {
+	c := newSessionCache(sessionTestLogger)
+	entry := func(gen, index uint64) cachedSession {
+		return cachedSession{session: &Session{Generation: gen}, index: index}
+	}
+	gen := func(id string) uint64 {
+		if s, ok := c.Get(id); ok {
+			return s.Generation
+		}
+		return 0
+	}
+
+	c.ReplaceAll(100, map[string]cachedSession{"old": entry(1, 90)})
+	c.Set("local", &Session{Generation: 1}, 101) // written past the last snapshot
+	c.ReplaceAll(5, map[string]cachedSession{"new": entry(1, 4)})
+	assert.False(t, c.Has("old"), "an entry from before the reset survived it")
+	assert.False(t, c.Has("local"), "a write from before the reset survived it")
+	assert.Equal(t, uint64(1), gen("new"))
+
+	c.Set("old", &Session{Generation: 2}, 6)
+	assert.Equal(t, uint64(2), gen("old"), "a write after the reset was refused")
+	c.Set("again", &Session{Generation: 1}, 5)
+	assert.Zero(t, gen("again"), "the reset snapshot's index isn't the floor")
+}
+
 //
 // Test Suite Runners
 //

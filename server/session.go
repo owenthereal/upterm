@@ -327,14 +327,18 @@ func (c *sessionCache) Delete(sessionID string, index uint64) {
 // ReplaceAll replaces the cache with snapshot, the watch's view of every
 // session as of index, and takes ownership of snapshot. An entry a later write
 // stored stays: the watch hasn't caught up with that write, and the snapshot
-// that does will include it, or its removal.
+// that does will include it, or its removal. An index below the last
+// snapshot's means Consul's data was reset, and no index from before the
+// reset orders against one after it, so the snapshot is then taken whole.
 func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (added, updated, deleted int) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	for sessionID, cur := range c.sessions {
-		if cur.index > index {
-			snapshot[sessionID] = cur
+	if index >= c.watched {
+		for sessionID, cur := range c.sessions {
+			if cur.index > index {
+				snapshot[sessionID] = cur
+			}
 		}
 	}
 
