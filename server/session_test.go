@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -946,6 +947,53 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	pair, _ := suite.consulGet(id)
 	suite.Require().NotNil(pair)
 	suite.Equal(reg2.lease, pair.Session)
+}
+
+// lostTxnReply lets Consul apply every transaction, but loses the reply to the
+// first one, as a client timeout or a failure after the write would.
+type lostTxnReply struct {
+	lost atomic.Bool
+	next http.RoundTripper
+}
+
+func (l *lostTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := l.next.RoundTrip(r)
+	if err == nil && r.URL.Path == "/v1/txn" && l.lost.CompareAndSwap(false, true) {
+		_ = resp.Body.Close()
+		return nil, errors.New("reply lost")
+	}
+	return resp, err
+}
+
+// A registration whose transaction committed but whose reply was lost finds
+// its own entry when it retries. That is its own write, not a registration to
+// order it against: it succeeds, and the entry stays under its lease.
+func (suite *ConsulStoreTestSuite) TestALostReplyToACommittedRegistrationStillSucceeds() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	for _, gen := range []uint64{0, 1} {
+		suite.Run(fmt.Sprintf("generation %d", gen), func() {
+			store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+			suite.Require().NoError(err)
+			defer func() { _ = store.Close() }()
+			lost := &lostTxnReply{next: http.DefaultTransport}
+			cfg := api.DefaultConfig()
+			cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
+			cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: lost}
+			store.client, err = api.NewClient(cfg)
+			suite.Require().NoError(err)
+
+			ctx := context.Background()
+			reg, err := store.Register(ctx, &Session{ID: suite.uniq("lost-reply"), NodeAddr: "a:22", Generation: gen})
+			suite.Require().True(lost.lost.Load(), "no transaction reply was lost")
+			suite.Require().NoError(err)
+			defer func() { _ = store.Release(ctx, reg) }()
+			pair, _ := suite.consulGet(reg.ID())
+			suite.Require().NotNil(pair, "the committed entry was deleted")
+			suite.Equal(reg.lease, pair.Session)
+			suite.Equal(pair.ModifyIndex, reg.index)
+		})
+	}
 }
 
 // And when the newer registration has come and gone, and the watch has

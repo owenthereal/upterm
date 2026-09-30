@@ -508,6 +508,15 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 				return fmt.Errorf("failed to read session data: %w", err)
 			}
 
+			// The lock session is this call's alone, so finding it on the entry
+			// means an earlier attempt committed and only its reply was lost:
+			// the entry is this registration's own write, not one to order it
+			// against.
+			if pair != nil && pair.Session == lease {
+				index = pair.ModifyIndex
+				return nil
+			}
+
 			var ops api.KVTxnOps
 			if pair == nil {
 				ops = api.KVTxnOps{
