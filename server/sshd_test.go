@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	gliderssh "charm.land/ssh"
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/registration"
@@ -562,6 +563,132 @@ func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
 	require.NoError(t, err, "the new listener must still be open")
 	_ = c.Close()
 	require.NoError(t, <-accepted)
+}
+
+// testConnContext stands in for a host connection's context, for tests that
+// drive the node's handlers without an SSH connection. It carries no
+// connection, so nothing may be dialed through it.
+type testConnContext struct {
+	context.Context
+	sync.Mutex // the connection lock an ssh.Context carries
+
+	valuesMu sync.Mutex
+	values   map[any]any
+}
+
+func newTestConnContext(t *testing.T) (*testConnContext, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &testConnContext{
+		Context: ctx,
+		values:  map[any]any{gliderssh.ContextKeyConn: (*ssh.ServerConn)(nil)},
+	}, cancel
+}
+
+func (c *testConnContext) Value(key any) any {
+	c.valuesMu.Lock()
+	v, ok := c.values[key]
+	c.valuesMu.Unlock()
+	if ok {
+		return v
+	}
+	return c.Context.Value(key)
+}
+
+func (c *testConnContext) SetValue(key, value any) {
+	c.valuesMu.Lock()
+	defer c.valuesMu.Unlock()
+	c.values[key] = value
+}
+
+func (*testConnContext) User() string                        { return "owen" }
+func (*testConnContext) SessionID() string                   { return "" }
+func (*testConnContext) ClientVersion() string               { return "" }
+func (*testConnContext) ServerVersion() string               { return "" }
+func (*testConnContext) RemoteAddr() net.Addr                { return nil }
+func (*testConnContext) LocalAddr() net.Addr                 { return nil }
+func (*testConnContext) Permissions() *gliderssh.Permissions { return nil }
+
+// pausingGetStore holds the first Get until release is closed, and closes
+// entered when that Get arrives.
+type pausingGetStore struct {
+	SessionStore
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (s *pausingGetStore) Get(sessionID string) (*Session, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.SessionStore.Get(sessionID)
+}
+
+// A takeover on this node closes the old registration's listener before the
+// new host binds the socket's name. A forward the old registration began
+// before the takeover, and that is still reading the store, must not bind in
+// between: it is refused, and the new host's forward binds.
+func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	store := &pausingGetStore{
+		SessionStore: newMemorySessionStore(logger),
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
+	mp, _ := newTestMetrics(t)
+	sessions := newLocalSessions(mp, sm, logger)
+	network := &MemoryProvider{}
+	require.NoError(t, network.SetOpts(nil))
+	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, logger)
+	srv := &gliderssh.Server{ReversePortForwardingCallback: func(gliderssh.Context, string, uint32) bool { return true }}
+	forward := func(conn gliderssh.Context) (bool, []byte) {
+		return h.Handler(conn, srv, &ssh.Request{
+			Type:    streamlocalForwardChannelType,
+			Payload: ssh.Marshal(&streamlocalChannelForwardMsg{SocketPath: "id"}),
+		})
+	}
+	ctx := context.Background()
+
+	gen1, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
+	require.NoError(t, err)
+	_, err = sessions.add(gen1, newCloser())
+	require.NoError(t, err)
+	conn1, closeConn1 := newTestConnContext(t)
+	ownSession(conn1, gen1)
+	old := make(chan bool, 1)
+	go func() {
+		ok, _ := forward(conn1)
+		old <- ok
+	}()
+	select {
+	case <-store.entered: // past its first check, and reading the store
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old forward never reached the store")
+	}
+
+	// The takeover, in adopt's order.
+	gen2, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
+	require.NoError(t, err)
+	prev, err := sessions.add(gen2, newCloser())
+	require.NoError(t, err)
+	h.closeListener(prev.reg)
+	closeConn1()
+
+	close(store.release)
+	select {
+	case ok := <-old:
+		require.False(t, ok, "the old forward bound the socket after the takeover")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old forward never finished")
+	}
+
+	conn2, _ := newTestConnContext(t)
+	ownSession(conn2, gen2)
+	ok, body := forward(conn2)
+	require.True(t, ok, string(body))
 }
 
 // Test_sshd_PublicKeyAuthority pins what the internal node door accepts. It has

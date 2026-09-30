@@ -212,13 +212,15 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 			return false, []byte(err.Error())
 		}
 
-		ln, err := h.sessionDialListener.Listen(sessionID)
+		ln, err := h.bind(reg)
+		if errors.Is(err, errForwardEnded) {
+			logger.Warn("rejected forward for ended session")
+			return false, []byte("session has ended")
+		}
 		if err != nil {
 			logger.Error("error listening socket", "error", err)
 			return false, []byte(err.Error())
 		}
-
-		h.trackListener(reg, ln)
 
 		var g run.Group
 		{
@@ -269,6 +271,31 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	default:
 		return false, nil
 	}
+}
+
+// errForwardEnded refuses a forward whose registration ended, or was replaced,
+// before it could bind.
+var errForwardEnded = errors.New("session has ended")
+
+// bind listens on reg's session socket and records the listener as reg's,
+// provided reg is still the registration this node serves. The check, the bind
+// and the record all happen under the handler lock, which a takeover's
+// closeListener takes too: a forward that began before the takeover either
+// binds before the old listener is closed, and is closed with it, or finds its
+// registration replaced. It can't bind after that close and take the socket's
+// name from the successor.
+func (h *streamlocalForwardHandler) bind(reg *Registration) (net.Listener, error) {
+	h.Lock()
+	defer h.Unlock()
+	if !h.sessions.active(reg) {
+		return nil, errForwardEnded
+	}
+	ln, err := h.sessionDialListener.Listen(reg.ID())
+	if err != nil {
+		return nil, err
+	}
+	h.forwards[reg.ID()] = forward{reg: reg, ln: ln}
+	return ln, nil
 }
 
 func (h *streamlocalForwardHandler) trackListener(reg *Registration, ln net.Listener) {
