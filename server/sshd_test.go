@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -309,60 +311,168 @@ func Test_sshd_ForwardRequiresSessionOwnership(t *testing.T) {
 	require.Equal(t, 0.0, s.gauge(t))
 }
 
-// blockingDeleteStore signals on entered when Delete is called, then holds
+// blockingReleaseStore signals on entered when Release is called, then holds
 // the call until release is closed.
-type blockingDeleteStore struct {
+type blockingReleaseStore struct {
 	SessionStore
 	entered chan struct{}
 	release chan struct{}
 }
 
-func (s blockingDeleteStore) Delete(sessionID string) error {
+func (s blockingReleaseStore) Release(ctx context.Context, reg *Registration) error {
 	close(s.entered)
 	<-s.release
-	return s.SessionStore.Delete(sessionID)
+	return s.SessionStore.Release(ctx, reg)
 }
 
-func Test_localSessions_SlowDeleteDoesNotBlockAdd(t *testing.T) {
+func Test_localSessions_SlowReleaseDoesNotBlockAdd(t *testing.T) {
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
-	store := blockingDeleteStore{
+	store := blockingReleaseStore{
 		SessionStore: newMemorySessionStore(logger),
 		entered:      make(chan struct{}),
 		release:      make(chan struct{}),
 	}
 	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
-	mp, reg := newTestMetrics(t)
+	mp, metrics := newTestMetrics(t)
 	sessions := newLocalSessions(mp, sm, logger)
 
-	_, err := sm.CreateSession(NewSession("slow", "node", "owen", nil, nil))
+	slow, _, err := sm.Register(context.Background(), NewSession("slow", "node", "owen", nil, nil))
 	require.NoError(t, err)
-	sessions.add("slow")
+	_, err = sessions.add(slow, newCloser())
+	require.NoError(t, err)
+	other, _, err := sm.Register(context.Background(), NewSession("other", "node", "owen", nil, nil))
+	require.NoError(t, err)
 
 	ended := make(chan struct{})
 	go func() {
-		sessions.end("slow")
+		sessions.end(slow)
 		close(ended)
 	}()
-	<-store.entered // end is now inside the store delete
+	<-store.entered // end is now inside the store release
 
-	// A Consul delete can take a while; other hosts creating sessions must
+	// A Consul release can take a while; other hosts creating sessions must
 	// not queue behind it.
 	added := make(chan struct{})
 	go func() {
-		sessions.add("other")
+		_, _ = sessions.add(other, newCloser())
 		close(added)
 	}()
 	select {
 	case <-added:
 	case <-time.After(2 * time.Second):
-		t.Fatal("add blocked behind a slow delete")
+		t.Fatal("add blocked behind a slow release")
 	}
 
 	close(store.release)
 	<-ended
-	v, ok := gatherValue(t, reg, "test_server_sessions_active_count", nil)
+	v, ok := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
 	require.True(t, ok)
 	require.Equal(t, 1.0, v)
+}
+
+// closer records a close; a second close is fine, as for a real connection.
+type closer struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func newCloser() *closer       { return &closer{closed: make(chan struct{})} }
+func (c *closer) Close() error { c.once.Do(func() { close(c.closed) }); return nil }
+
+func (c *closer) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func newTestLocalSessions(t *testing.T) (*localSessions, *SessionManager, func() float64) {
+	t.Helper()
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
+	sm := newEmbeddedSessionManager(logger)
+	mp, metrics := newTestMetrics(t)
+	return newLocalSessions(mp, sm, logger), sm, func() float64 {
+		v, _ := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
+		return v
+	}
+}
+
+func Test_localSessions_TakeoverKeepsOneCount(t *testing.T) {
+	sessions, sm, gauge := newTestLocalSessions(t)
+	ctx := context.Background()
+	gen1, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
+	require.NoError(t, err)
+	prev, err := sessions.add(gen1, newCloser())
+	require.NoError(t, err)
+	require.Nil(t, prev)
+	gen2, _, err := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
+	require.NoError(t, err)
+	prev, err = sessions.add(gen2, newCloser())
+	require.NoError(t, err)
+	require.True(t, prev.reg.Same(gen1))
+	require.Equal(t, 1.0, gauge())
+	sessions.end(gen1)
+	require.Equal(t, 1.0, gauge())
+	got, err := sm.GetSession("id")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), got.Generation)
+	sessions.end(gen2)
+	require.Equal(t, 0.0, gauge())
+}
+
+// Review P1, at this layer: an older registration adopting after a newer one
+// changes nothing and closes nothing.
+func Test_localSessions_OlderAdoptionIsRefused(t *testing.T) {
+	sessions, _, gauge := newTestLocalSessions(t)
+	gen1 := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
+	gen2 := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 2}}
+	conn2 := newCloser()
+	_, err := sessions.add(gen2, conn2)
+	require.NoError(t, err)
+	prev, err := sessions.add(gen1, newCloser())
+	require.ErrorIs(t, err, ErrSuperseded)
+	require.Nil(t, prev)
+	require.True(t, sessions.active(gen2))
+	require.False(t, conn2.isClosed())
+	require.Equal(t, 1.0, gauge())
+}
+
+func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
+	sessions, sm, _ := newTestLocalSessions(t)
+	network := &MemoryProvider{}
+	require.NoError(t, network.SetOpts(nil))
+	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, slog.New(slog.DiscardHandler))
+	ctx := context.Background()
+	gen1, _, _ := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
+	_, _ = sessions.add(gen1, newCloser())
+	ln1, err := network.Session().Listen("id")
+	require.NoError(t, err)
+	h.trackListener(gen1, ln1)
+	gen2, _, _ := sm.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 2})
+	_, _ = sessions.add(gen2, newCloser())
+	h.closeListener(gen1) // the takeover frees the socket name
+	ln2, err := network.Session().Listen("id")
+	require.NoError(t, err)
+	h.trackListener(gen2, ln2)
+
+	h.closeListener(gen1) // the old registration's late cleanup
+
+	accepted := make(chan error, 1) // a bufconn dial blocks until accepted
+	go func() {
+		c, err := ln2.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+		accepted <- err
+	}()
+	dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	c, err := network.Session().DialContext(dctx, "id")
+	require.NoError(t, err, "the new listener must still be open")
+	_ = c.Close()
+	require.NoError(t, <-accepted)
 }
 
 // Test_sshd_PublicKeyAuthority pins what the internal node door accepts. It has

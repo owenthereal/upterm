@@ -73,7 +73,7 @@ func newStreamlocalForwardHandler(
 		sessionManager:      sessionManager,
 		sessionDialListener: sessionDialListener,
 		sessions:            sessions,
-		forwards:            make(map[string]net.Listener),
+		forwards:            make(map[string]forward),
 		logger:              logger,
 	}
 }
@@ -82,9 +82,17 @@ type streamlocalForwardHandler struct {
 	sessionManager      *SessionManager
 	sessionDialListener SessionDialListener
 	sessions            *localSessions
-	forwards            map[string]net.Listener
+	forwards            map[string]forward // by session ID
 	logger              *slog.Logger
 	sync.Mutex
+}
+
+// forward is a registration's session socket listener. The socket is named by
+// the session ID, which a newer registration of the same ID binds after a
+// takeover, so the listener is kept with the registration that bound it.
+type forward struct {
+	reg *Registration
+	ln  net.Listener
 }
 
 func (h *streamlocalForwardHandler) listen(ctx ssh.Context, ln net.Listener, sessionID string, logger *slog.Logger) error {
@@ -185,16 +193,18 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		sessionID := reqPayload.SocketPath
 		logger := h.logger.With("session-id", sessionID)
 
-		// Only the connection that created a session may open its tunnel,
-		// and only while the session is still active here. The store is
-		// shared across nodes, so existence alone proves nothing about who
-		// is asking; and an ended session whose store delete failed must not
-		// be reopened uncounted.
-		if !ownsSession(ctx, sessionID) {
+		// Only the connection that registered a session may open its tunnel,
+		// and only while that registration is still the one this node serves.
+		// The store is shared across nodes, so existence alone proves nothing
+		// about who is asking; an ended registration whose store release
+		// failed must not be reopened uncounted; and a replaced one must not
+		// take the socket from its successor.
+		reg := ownedRegistration(ctx, sessionID)
+		if reg == nil {
 			logger.Warn("rejected forward for session not created on this connection")
 			return false, []byte("session not created on this connection")
 		}
-		if !h.sessions.active(sessionID) {
+		if !h.sessions.active(reg) {
 			logger.Warn("rejected forward for ended session")
 			return false, []byte("session has ended")
 		}
@@ -208,7 +218,7 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 			return false, []byte(err.Error())
 		}
 
-		h.trackListener(sessionID, ln)
+		h.trackListener(reg, ln)
 
 		var g run.Group
 		{
@@ -216,14 +226,14 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 				<-ctx.Done()
 				return ctx.Err()
 			}, func(err error) {
-				h.closeListener(sessionID)
+				h.closeListener(reg)
 			})
 		}
 		{
 			g.Add(func() error {
 				return h.listen(ctx, ln, sessionID, logger)
 			}, func(err error) {
-				h.closeListener(sessionID)
+				h.closeListener(reg)
 			})
 		}
 
@@ -247,11 +257,12 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 		}
 
 		sessionID := reqPayload.SocketPath
-		if !ownsSession(ctx, sessionID) {
+		reg := ownedRegistration(ctx, sessionID)
+		if reg == nil {
 			h.logger.Warn("rejected cancel for session not created on this connection", "session-id", sessionID)
 			return false, []byte("session not created on this connection")
 		}
-		h.closeListener(sessionID)
+		h.closeListener(reg)
 
 		return true, nil
 
@@ -260,31 +271,34 @@ func (h *streamlocalForwardHandler) Handler(ctx ssh.Context, srv *ssh.Server, re
 	}
 }
 
-func (h *streamlocalForwardHandler) trackListener(sessionID string, ln net.Listener) {
+func (h *streamlocalForwardHandler) trackListener(reg *Registration, ln net.Listener) {
 	h.Lock()
 	defer h.Unlock()
-	h.forwards[sessionID] = ln
+	h.forwards[reg.ID()] = forward{reg: reg, ln: ln}
 }
 
-func (h *streamlocalForwardHandler) closeListener(sessionID string) {
+// closeListener closes reg's listener and ends reg. A listener for reg's ID
+// that another registration bound is left alone, so a replaced registration's
+// late cleanup can't close its successor's socket.
+func (h *streamlocalForwardHandler) closeListener(reg *Registration) {
+	logger := h.logger.With("session-id", reg.ID())
+
 	h.Lock()
-	defer h.Unlock()
-
-	logger := h.logger.With("session-id", sessionID)
-
-	ln, ok := h.forwards[sessionID]
-	if !ok {
-		// Already closed
+	fwd, ok := h.forwards[reg.ID()]
+	if !ok || !fwd.reg.Same(reg) {
+		// Already closed, or not reg's
+		h.Unlock()
 		return
 	}
-
-	if err := ln.Close(); err != nil {
+	if err := fwd.ln.Close(); err != nil {
 		logger.Error("error closing listener", "error", err)
 	} else {
 		logger.Debug("closed listener")
 	}
+	delete(h.forwards, reg.ID())
+	h.Unlock()
 
-	delete(h.forwards, sessionID)
-
-	h.sessions.end(sessionID)
+	// Outside the lock: ending releases the store entry, and a Consul call
+	// can be slow.
+	h.sessions.end(reg)
 }
