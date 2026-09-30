@@ -580,6 +580,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			SessionDialListener: sessionDialListener,
 			MetricsProvider:     s.MetricsProvider,
 			Logger:              s.Logger.With("component", "sshd"),
+			HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
 		}
 		g.Add(func() error {
 			return sshd.Serve(ln)

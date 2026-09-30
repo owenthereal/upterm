@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"log/slog"
 	"net"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -108,14 +111,15 @@ func Test_sshd_DisallowSession(t *testing.T) {
 // testSSHD is an sshd on a loopback listener with a private metrics
 // registry and an in-memory session network.
 type testSSHD struct {
-	sshd       *sshd
-	addr       string
-	certSigner ssh.Signer
-	reg        *prometheus.Registry
-	network    *MemoryProvider
+	sshd    *sshd
+	addr    string
+	signer  ssh.Signer // the relay's own key, which mints the proxy's certificates
+	reg     *prometheus.Registry
+	network *MemoryProvider
 }
 
-func newTestSSHD(t *testing.T) *testSSHD {
+// newTestSSHD starts an sshd, applying options to it before it serves.
+func newTestSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
 	t.Helper()
 	logger := logging.Must(logging.Console(), logging.Debug()).Logger
 
@@ -125,18 +129,6 @@ func newTestSSHD(t *testing.T) *testSSHD {
 	addr := ln.Addr().String()
 
 	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
-	require.NoError(t, err)
-
-	cs := UserCertSigner{
-		SessionID: "1234",
-		User:      "owen",
-		AuthRequest: &AuthRequest{
-			ClientVersion: upterm.HostSSHClientVersion,
-			RemoteAddr:    addr,
-			AuthorizedKey: []byte(TestPublicKeyContent),
-		},
-	}
-	certSigner, err := cs.SignCert(signer)
 	require.NoError(t, err)
 
 	network := &MemoryProvider{}
@@ -152,6 +144,9 @@ func newTestSSHD(t *testing.T) *testSSHD {
 		MetricsProvider:     mp,
 		Logger:              logger,
 	}
+	for _, option := range options {
+		option(sshd)
+	}
 	go func() {
 		_ = sshd.Serve(ln)
 	}()
@@ -160,19 +155,105 @@ func newTestSSHD(t *testing.T) *testSSHD {
 	defer cancel()
 	require.NoError(t, utils.WaitForServer(ctx, addr))
 
-	return &testSSHD{sshd: sshd, addr: addr, certSigner: certSigner, reg: reg, network: network}
+	return &testSSHD{sshd: sshd, addr: addr, signer: signer, reg: reg, network: network}
 }
 
 func (s *testSSHD) dial(t *testing.T) *ssh.Client {
 	t.Helper()
+	return s.dialAs(t, "1234")
+}
+
+// dialAs connects as the proxy does on behalf of a host whose own connection
+// has the SSH session ID keyID: the proxy mints that ID into the certificate's
+// KeyId, and a proof is bound to it.
+func (s *testSSHD) dialAs(t *testing.T, keyID string) *ssh.Client {
+	t.Helper()
+	cs := UserCertSigner{
+		SessionID: keyID,
+		User:      "owen",
+		AuthRequest: &AuthRequest{
+			ClientVersion: upterm.HostSSHClientVersion,
+			RemoteAddr:    s.addr,
+			AuthorizedKey: []byte(TestPublicKeyContent),
+		},
+	}
+	certSigner, err := cs.SignCert(s.signer)
+	require.NoError(t, err)
+
 	client, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(s.certSigner)},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
 		User:            "owen",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client
+}
+
+// waitClosed fails with what unless client's connection ends within 5 s.
+func waitClosed(t *testing.T, client *ssh.Client, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		_ = client.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s stayed open", what)
+	}
+}
+
+// proven is a host that proves its session key: the key and the secret its
+// session ID derives from.
+type proven struct {
+	key    ssh.Signer
+	secret []byte
+}
+
+func newProven(t *testing.T) proven {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	key, err := ssh.NewSignerFromKey(priv)
+	require.NoError(t, err)
+	secret, err := registration.NewSecret()
+	require.NoError(t, err)
+	return proven{key: key, secret: secret}
+}
+
+// id is the session ID the relay derives for p.
+func (p proven) id() string { return registration.ID(p.key.PublicKey(), p.secret) }
+
+func (p proven) hostKeys() [][]byte {
+	return [][]byte{ssh.MarshalAuthorizedKey(p.key.PublicKey())}
+}
+
+// register creates p's session at generation gen over client, with a proof
+// bound to keyID, the SSH session ID client was dialed as.
+func (p proven) register(t *testing.T, client *ssh.Client, keyID string, gen uint64) (bool, []byte) {
+	t.Helper()
+	proof, err := registration.Sign(p.key, []byte(keyID), p.secret, gen)
+	require.NoError(t, err)
+	return p.send(t, client, gen, proof, p.hostKeys())
+}
+
+// send creates a session over client with p's secret and whatever generation,
+// proof and host keys it is given.
+func (p proven) send(t *testing.T, client *ssh.Client, gen uint64, proof []byte, hostKeys [][]byte) (bool, []byte) {
+	t.Helper()
+	req, err := proto.Marshal(&CreateSessionRequest{
+		HostUser:       "owen",
+		HostPublicKeys: hostKeys,
+		SessionSecret:  p.secret,
+		Generation:     gen,
+		HostKeyProof:   proof,
+	})
+	require.NoError(t, err)
+	ok, body, err := client.SendRequest(upterm.ServerCreateSessionRequestType, true, req)
+	require.NoError(t, err)
+	return ok, body
 }
 
 func (s *testSSHD) gauge(t *testing.T) float64 {
@@ -595,5 +676,144 @@ func Test_sshd_ClosesTunnelChannelWhenGuestLeaves(t *testing.T) {
 		require.ErrorIs(t, err, io.EOF)
 	case <-time.After(2 * time.Second):
 		t.Fatal("channel stayed open after the guest disconnected")
+	}
+}
+
+func Test_sshd_ProvenRegistrationDerivesTheID(t *testing.T) {
+	for _, gated := range []bool{false, true} {
+		s := newTestSSHD(t, func(d *sshd) { d.HostGateEnabled = gated })
+		host := newProven(t)
+		ok, body := host.register(t, s.dialAs(t, "conn-1"), "conn-1", 1)
+		require.True(t, ok, string(body))
+		var resp CreateSessionResponse
+		require.NoError(t, proto.Unmarshal(body, &resp))
+		require.Equal(t, host.id(), resp.SessionID)
+		require.Equal(t, !gated, resp.SessionKeyRedial)
+		sess, err := s.sshd.SessionManager.GetSession(resp.SessionID)
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), sess.Generation)
+	}
+}
+
+// Review Focus 1 and 2.
+func Test_sshd_ProofRefusals(t *testing.T) {
+	s := newTestSSHD(t)
+	host, other := newProven(t), newProven(t)
+	sign := func(t *testing.T, key ssh.Signer, keyID string, gen uint64) []byte {
+		p, err := registration.Sign(key, []byte(keyID), host.secret, gen)
+		require.NoError(t, err)
+		return p
+	}
+	for name, send := range map[string]func(t *testing.T, c *ssh.Client) (bool, []byte){
+		"another key": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 1, sign(t, other.key, "conn-1", 1), host.hostKeys())
+		},
+		"another connection": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 1, sign(t, host.key, "conn-2", 1), host.hostKeys())
+		},
+		"tampered generation": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 2, sign(t, host.key, "conn-1", 1), host.hostKeys())
+		},
+		"malformed": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 1, []byte("junk"), host.hostKeys())
+		},
+		"two host keys": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 1, sign(t, host.key, "conn-1", 1), append(host.hostKeys(), other.hostKeys()...))
+		},
+		"short secret": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return proven{host.key, host.secret[:8]}.send(t, c, 1, sign(t, host.key, "conn-1", 1), host.hostKeys())
+		},
+		"generation zero": func(t *testing.T, c *ssh.Client) (bool, []byte) {
+			return host.send(t, c, 0, sign(t, host.key, "conn-1", 1), host.hostKeys())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ok, body := send(t, s.dialAs(t, "conn-1"))
+			require.False(t, ok)
+			require.Contains(t, string(body), registration.RefusedProof)
+			_, err := s.sshd.SessionManager.GetSession(host.id())
+			require.Error(t, err)
+		})
+	}
+}
+
+func Test_sshd_NewerRegistrationSupersedesTheOlder(t *testing.T) {
+	s := newTestSSHD(t)
+	host := newProven(t)
+	first := s.dialAs(t, "conn-1")
+	ok, body := host.register(t, first, "conn-1", 1)
+	require.True(t, ok, string(body))
+	ok, reason := forwardRequest(t, first, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, reason)
+
+	second := s.dialAs(t, "conn-2")
+	ok, body = host.register(t, second, "conn-2", 2)
+	require.True(t, ok, string(body))
+	waitClosed(t, first, "the superseded registration's connection (I5)")
+	require.Equal(t, 1.0, s.gauge(t))
+	ok, reason = forwardRequest(t, second, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, reason)
+
+	ok, body = host.register(t, s.dialAs(t, "conn-3"), "conn-3", 1)
+	require.False(t, ok)
+	require.Equal(t, registration.Superseded, string(body))
+}
+
+// Review P1, end to end: generation 1 commits, then pauses before adoption
+// while generation 2 commits and adopts. When 1 resumes it is refused, and 2
+// keeps its connection and its listener.
+func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
+	var stall sync.Once
+	paused, resume := make(chan struct{}), make(chan struct{})
+	s := newTestSSHD(t, func(d *sshd) {
+		d.onRegistered = func(reg *Registration) {
+			if reg.Generation() == 1 {
+				stall.Do(func() { close(paused); <-resume })
+			}
+		}
+	})
+	host := newProven(t)
+	first := s.dialAs(t, "conn-1")
+	// Signed here: require must not run on the goroutine below.
+	proof, err := registration.Sign(host.key, []byte("conn-1"), host.secret, 1)
+	require.NoError(t, err)
+	req, err := proto.Marshal(&CreateSessionRequest{HostUser: "owen", HostPublicKeys: host.hostKeys(),
+		SessionSecret: host.secret, Generation: 1, HostKeyProof: proof})
+	require.NoError(t, err)
+	type reply struct {
+		body []byte
+		err  error
+	}
+	result := make(chan reply, 1)
+	go func() {
+		_, body, err := first.SendRequest(upterm.ServerCreateSessionRequestType, true, req)
+		result <- reply{body, err}
+	}()
+	<-paused
+
+	second := s.dialAs(t, "conn-2")
+	incoming := second.HandleChannelOpen(forwardedStreamlocalChannelType)
+	ok, body := host.register(t, second, "conn-2", 2)
+	require.True(t, ok, string(body))
+	ok, reason := forwardRequest(t, second, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, reason)
+
+	close(resume)
+	r := <-result
+	require.NoError(t, r.err)
+	require.Equal(t, registration.Superseded, string(r.body))
+	sess, err := s.sshd.SessionManager.GetSession(host.id())
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), sess.Generation)
+
+	// Generation 2's listener still routes to generation 2's connection.
+	guest, err := s.network.Session().Dial(host.id())
+	require.NoError(t, err, "generation 2's listener was closed")
+	defer func() { _ = guest.Close() }()
+	select {
+	case ch := <-incoming:
+		_ = ch.Reject(ssh.Prohibited, "test") // sshd_test.go imports x/crypto/ssh as ssh
+	case <-time.After(2 * time.Second):
+		t.Fatal("a guest reaching the session socket never reached generation 2")
 	}
 }

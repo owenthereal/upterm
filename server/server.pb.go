@@ -26,8 +26,13 @@ type CreateSessionRequest struct {
 	HostUser             string                 `protobuf:"bytes,1,opt,name=hostUser,proto3" json:"hostUser,omitempty"`
 	HostPublicKeys       [][]byte               `protobuf:"bytes,2,rep,name=hostPublicKeys,proto3" json:"hostPublicKeys,omitempty"`
 	ClientAuthorizedKeys [][]byte               `protobuf:"bytes,3,rep,name=clientAuthorizedKeys,proto3" json:"clientAuthorizedKeys,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// A proven claim on an ID derived from the one host key and this secret
+	// (designs/2026-09-29-reconnect-design.md, section 3). No proof: random ID.
+	SessionSecret []byte `protobuf:"bytes,4,opt,name=sessionSecret,proto3" json:"sessionSecret,omitempty"`
+	Generation    uint64 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	HostKeyProof  []byte `protobuf:"bytes,6,opt,name=hostKeyProof,proto3" json:"hostKeyProof,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateSessionRequest) Reset() {
@@ -81,13 +86,37 @@ func (x *CreateSessionRequest) GetClientAuthorizedKeys() [][]byte {
 	return nil
 }
 
+func (x *CreateSessionRequest) GetSessionSecret() []byte {
+	if x != nil {
+		return x.SessionSecret
+	}
+	return nil
+}
+
+func (x *CreateSessionRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *CreateSessionRequest) GetHostKeyProof() []byte {
+	if x != nil {
+		return x.HostKeyProof
+	}
+	return nil
+}
+
 type CreateSessionResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionID     string                 `protobuf:"bytes,1,opt,name=sessionID,proto3" json:"sessionID,omitempty"`
-	NodeAddr      string                 `protobuf:"bytes,2,opt,name=nodeAddr,proto3" json:"nodeAddr,omitempty"`
-	SshUser       string                 `protobuf:"bytes,3,opt,name=ssh_user,json=sshUser,proto3" json:"ssh_user,omitempty"` // SSH username for client connections
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SessionID string                 `protobuf:"bytes,1,opt,name=sessionID,proto3" json:"sessionID,omitempty"`
+	NodeAddr  string                 `protobuf:"bytes,2,opt,name=nodeAddr,proto3" json:"nodeAddr,omitempty"`
+	SshUser   string                 `protobuf:"bytes,3,opt,name=ssh_user,json=sshUser,proto3" json:"ssh_user,omitempty"` // SSH username for client connections
+	// True when this relay admits any host key, so a host may redial with its
+	// session key and never touch its agent (spec 5.6).
+	SessionKeyRedial bool `protobuf:"varint,4,opt,name=sessionKeyRedial,proto3" json:"sessionKeyRedial,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *CreateSessionResponse) Reset() {
@@ -139,6 +168,13 @@ func (x *CreateSessionResponse) GetSshUser() string {
 		return x.SshUser
 	}
 	return ""
+}
+
+func (x *CreateSessionResponse) GetSessionKeyRedial() bool {
+	if x != nil {
+		return x.SessionKeyRedial
+	}
+	return false
 }
 
 type AuthRequest struct {
@@ -205,15 +241,21 @@ var File_server_proto protoreflect.FileDescriptor
 
 const file_server_proto_rawDesc = "" +
 	"\n" +
-	"\fserver.proto\x12\x06server\"\x8e\x01\n" +
+	"\fserver.proto\x12\x06server\"\xf8\x01\n" +
 	"\x14CreateSessionRequest\x12\x1a\n" +
 	"\bhostUser\x18\x01 \x01(\tR\bhostUser\x12&\n" +
 	"\x0ehostPublicKeys\x18\x02 \x03(\fR\x0ehostPublicKeys\x122\n" +
-	"\x14clientAuthorizedKeys\x18\x03 \x03(\fR\x14clientAuthorizedKeys\"l\n" +
+	"\x14clientAuthorizedKeys\x18\x03 \x03(\fR\x14clientAuthorizedKeys\x12$\n" +
+	"\rsessionSecret\x18\x04 \x01(\fR\rsessionSecret\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x05 \x01(\x04R\n" +
+	"generation\x12\"\n" +
+	"\fhostKeyProof\x18\x06 \x01(\fR\fhostKeyProof\"\x98\x01\n" +
 	"\x15CreateSessionResponse\x12\x1c\n" +
 	"\tsessionID\x18\x01 \x01(\tR\tsessionID\x12\x1a\n" +
 	"\bnodeAddr\x18\x02 \x01(\tR\bnodeAddr\x12\x19\n" +
-	"\bssh_user\x18\x03 \x01(\tR\asshUser\"|\n" +
+	"\bssh_user\x18\x03 \x01(\tR\asshUser\x12*\n" +
+	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"|\n" +
 	"\vAuthRequest\x12%\n" +
 	"\x0eclient_version\x18\x01 \x01(\tR\rclientVersion\x12\x1f\n" +
 	"\vremote_addr\x18\x02 \x01(\tR\n" +

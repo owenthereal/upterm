@@ -40,6 +40,15 @@ type sshd struct {
 	SessionDialListener SessionDialListener
 	MetricsProvider     provider.Provider
 	Logger              *slog.Logger
+	// HostGateEnabled is set when the relay admits only the host keys in its
+	// --authorized-keys. Without the gate any key gets in, so a host can redial
+	// with its session key alone and never touch its agent (spec 5.6).
+	HostGateEnabled bool
+
+	// onRegistered is a test hook, run after the store takes a registration and
+	// before this node adopts it: the window in which two registrations can
+	// commit in one order and adopt in the other.
+	onRegistered func(*Registration)
 
 	server         *ssh.Server
 	sessions       *localSessions
@@ -301,7 +310,51 @@ func (s *sshd) handlePublicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 		return false
 	}
 
+	// The proxy minted the host's own SSH session ID into the certificate. It
+	// is the one value both ends of that connection share, and so what a
+	// session proof is bound to.
+	if cert, ok := key.(*gossh.Certificate); ok {
+		ctx.Lock()
+		ctx.SetValue(contextKeyDownstreamSessionID{}, []byte(cert.KeyId))
+		ctx.Unlock()
+	}
+
 	return true
+}
+
+// contextKeyDownstreamSessionID holds the SSH session ID of the host's
+// connection to the proxy, which this connection carries.
+type contextKeyDownstreamSessionID struct{}
+
+// sessionIdentity returns the session ID and generation req registers. A
+// request without a proof is an old host's, and gets a random ID as it always
+// has (I10). One with a proof gets the ID derived from its host key, but only
+// if the proof verifies over the host's own connection, so neither the ID nor
+// a proof captured elsewhere is enough to claim it (I1).
+func (s *sshd) sessionIdentity(ctx ssh.Context, req *CreateSessionRequest) (id string, generation uint64, err error) {
+	if len(req.HostKeyProof) == 0 {
+		return utils.GenerateSessionID(), 0, nil
+	}
+	// The ID derives from one key, and the proxy accepts the host's end of a
+	// guest's connection by these keys: a second key would be one whose holder
+	// proved nothing.
+	if n := len(req.HostPublicKeys); n != 1 {
+		return "", 0, fmt.Errorf("a proof needs exactly one host key, got %d", n)
+	}
+	key, _, _, _, err := gossh.ParseAuthorizedKey(req.HostPublicKeys[0])
+	if err != nil {
+		return "", 0, fmt.Errorf("parsing host key: %w", err)
+	}
+	ctx.Lock()
+	sshSessionID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+	ctx.Unlock()
+	if len(sshSessionID) == 0 {
+		return "", 0, errors.New("no host SSH session ID to verify the proof over")
+	}
+	if err := registration.Verify(key, sshSessionID, req.SessionSecret, req.Generation, req.HostKeyProof); err != nil {
+		return "", 0, err
+	}
+	return registration.ID(key, req.SessionSecret), req.Generation, nil
 }
 
 // isOwnAuthority reports whether key is one of this relay's signing keys.
@@ -360,7 +413,11 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		return false, []byte(err.Error())
 	}
 
-	sessionID := utils.GenerateSessionID()
+	sessionID, generation, err := s.sessionIdentity(ctx, &sessReq)
+	if err != nil {
+		s.Logger.Warn("refused a session proof", "error", err, "node", s.NodeAddr)
+		return false, []byte(registration.RefusedProof + ": " + err.Error())
+	}
 
 	// Store complete session data for routing and session management
 	session := NewSession(
@@ -370,8 +427,13 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		sessReq.HostPublicKeys,
 		sessReq.ClientAuthorizedKeys,
 	)
+	session.Generation = generation
 
 	reg, sshUser, err := s.SessionManager.Register(context.Background(), session)
+	if errors.Is(err, ErrSuperseded) {
+		s.Logger.Warn("refused a superseded registration", "error", err, "session-id", sessionID)
+		return false, []byte(registration.Superseded)
+	}
 	if err != nil {
 		s.Logger.Error("failed to create session",
 			"error", err,
@@ -380,14 +442,18 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		)
 		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
+	if s.onRegistered != nil {
+		s.onRegistered(reg)
+	}
 	if ok, refusal := s.adopt(ctx, reg, conn); !ok {
 		return false, refusal
 	}
 
 	sessResp := &CreateSessionResponse{
-		SessionID: sessionID,
-		NodeAddr:  s.NodeAddr,
-		SshUser:   sshUser,
+		SessionID:        sessionID,
+		NodeAddr:         s.NodeAddr,
+		SshUser:          sshUser,
+		SessionKeyRedial: !s.HostGateEnabled,
 	}
 
 	b, err := proto.Marshal(sessResp)

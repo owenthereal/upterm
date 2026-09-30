@@ -8,12 +8,20 @@ message CreateSessionRequest {
   string hostUser = 1;
   repeated bytes hostPublicKeys = 2;
   repeated bytes clientAuthorizedKeys = 3;
+  // A proven claim on an ID derived from the one host key and this secret
+  // (designs/2026-09-29-reconnect-design.md, section 3). No proof: random ID.
+  bytes sessionSecret = 4;
+  uint64 generation = 5;
+  bytes hostKeyProof = 6;
 }
 
 message CreateSessionResponse {
   string sessionID = 1;
   string nodeAddr = 2;
   string ssh_user = 3; // SSH username for client connections
+  // True when this relay admits any host key, so a host may redial with its
+  // session key and never touch its agent (spec 5.6).
+  bool sessionKeyRedial = 4;
 }
 
 message AuthRequest {
