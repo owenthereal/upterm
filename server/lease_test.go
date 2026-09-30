@@ -48,6 +48,31 @@ var testLeaseTiming = leaseTiming{retryBase: 10 * time.Millisecond, retryMax: 40
 
 const testTTL = 400 * time.Millisecond // renew at 200 ms; budget at 360 ms
 
+// lateWake is how late a woken goroutine may run on a loaded CI runner under
+// -race; GitHub's Windows runners have woken them more than 100 ms late. A
+// close is asserted never to come before its deadline, which the keeper
+// guarantees, and at most this long after it.
+const lateWake = 150 * time.Millisecond
+
+// awaitClose waits for conn to close until well past deadline, and returns
+// when it closed; false if it didn't.
+func awaitClose(conn *closer, deadline time.Time) (time.Time, bool) {
+	select {
+	case <-conn.closed:
+		return conn.at, true
+	case <-time.After(time.Until(deadline.Add(2 * lateWake))):
+		return time.Time{}, false
+	}
+}
+
+// requireClosedAt asserts a close at deadline: never before it, and no more
+// than lateWake after it.
+func requireClosedAt(t *testing.T, at, deadline time.Time, what string) {
+	t.Helper()
+	require.False(t, at.Before(deadline), "closed %v before %s", deadline.Sub(at), what)
+	require.LessOrEqual(t, at.Sub(deadline), lateWake, "closed %v after %s", at.Sub(deadline), what)
+}
+
 // blockUntil stands in for a store call that hangs until its context ends, or
 // until release fires, returning its result.
 func blockUntil(ctx context.Context, release <-chan struct{}) error {
@@ -111,13 +136,13 @@ func TestLeaseKeeperBudgetHoldsAcrossASlowRenewal(t *testing.T) {
 			}}
 			_, reg, conn := newKeeperFixture(t, store, tc.gen)
 			budget := reg.ConfirmedAt.Add(testTTL - leaseMargin(testTTL))
-			select {
-			case <-conn.closed:
-				require.True(t, tc.closes, "a legacy host's tunnel must not be closed")
-				require.WithinDuration(t, budget, time.Now(), 50*time.Millisecond, "closed at the budget")
-			case <-time.After(2 * testTTL):
-				require.False(t, tc.closes, "a capable tunnel was held past its budget by a slow renewal")
+			at, closed := awaitClose(conn, budget)
+			if !tc.closes {
+				require.False(t, closed, "a legacy host's tunnel must not be closed")
+				return
 			}
+			require.True(t, closed, "a capable tunnel was held past its budget by a slow renewal")
+			requireClosedAt(t, at, budget, "the budget")
 		})
 	}
 }
@@ -125,12 +150,10 @@ func TestLeaseKeeperBudgetHoldsAcrossASlowRenewal(t *testing.T) {
 func TestLeaseKeeperClosesACapableTunnelWhenRenewalsKeepFailing(t *testing.T) {
 	store := &leaseStore{ttl: testTTL, renew: func(context.Context, *Registration) error { return errConsulDown }}
 	_, reg, conn := newKeeperFixture(t, store, 1)
-	select {
-	case <-conn.closed:
-		require.False(t, time.Now().Before(reg.ConfirmedAt.Add(testTTL-leaseMargin(testTTL))))
-	case <-time.After(2 * testTTL):
-		t.Fatal("left open past the budget")
-	}
+	budget := reg.ConfirmedAt.Add(testTTL - leaseMargin(testTTL))
+	at, closed := awaitClose(conn, budget)
+	require.True(t, closed, "left open past the budget")
+	requireClosedAt(t, at, budget, "the budget")
 }
 
 // gatedReleaseStore holds Release until opened, standing in for a cleanup
@@ -152,13 +175,17 @@ func (s *gatedReleaseStore) Release(ctx context.Context, reg *Registration) erro
 // 4. Once the gates open, the late registration is released after all.
 func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) {
 	registerGate, releaseGate := make(chan struct{}), make(chan struct{})
-	base := &leaseStore{ttl: testTTL, renew: func(context.Context, *Registration) error { return ErrLeaseLost }}
 	lostAt := make(chan time.Time, 1)
-	base.register = func(_ context.Context, s *Session) (*Registration, error) {
+	base := &leaseStore{ttl: testTTL, renew: func(context.Context, *Registration) error {
+		// The keeper learns of the loss after this, so its bound can't be
+		// earlier than this plus rebuildBound.
 		select {
 		case lostAt <- time.Now():
 		default:
 		}
+		return ErrLeaseLost
+	}}
+	base.register = func(_ context.Context, s *Session) (*Registration, error) {
 		<-registerGate // ignores ctx, as a stuck HTTP call would
 		return base.memorySessionStore.Register(context.Background(), s)
 	}
@@ -176,14 +203,10 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 	_, err = sessions.add(reg, conn)
 	require.NoError(t, err)
 
-	started := <-lostAt
-	select {
-	case <-conn.closed:
-		require.WithinDuration(t, started.Add(testLeaseTiming.rebuildBound), time.Now(), 50*time.Millisecond,
-			"closed at the rebuild bound")
-	case <-time.After(testLeaseTiming.rebuildBound + 200*time.Millisecond):
-		t.Fatal("the close waited on a store call")
-	}
+	bound := (<-lostAt).Add(testLeaseTiming.rebuildBound)
+	at, closed := awaitClose(conn, bound)
+	require.True(t, closed, "the close waited on a store call")
+	requireClosedAt(t, at, bound, "the rebuild bound")
 
 	close(registerGate) // the late success arrives
 	close(releaseGate)  // and its cleanup may proceed
@@ -201,7 +224,9 @@ func TestLeaseKeeperRebuildBoundSparesLegacyHosts(t *testing.T) {
 		register: func(context.Context, *Session) (*Registration, error) { return nil, errConsulDown },
 	}
 	_, _, conn := newKeeperFixture(t, store, 0)
-	time.Sleep(200*time.Millisecond + 3*testLeaseTiming.rebuildBound)
+	// Past where a capable registration's connection closes, with room for
+	// the renewal and the close both to wake late.
+	time.Sleep(testTTL/2 + testLeaseTiming.rebuildBound + 3*lateWake)
 	require.False(t, conn.isClosed())
 }
 
@@ -227,6 +252,20 @@ func TestLeaseKeeperRebuildsAKnownLossAndStopsWhenSuperseded(t *testing.T) {
 	case <-conn2.closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("superseded while rebuilding, but kept its connection")
+	}
+}
+
+// A legacy host is spared the lease deadlines, not supersession: once a newer
+// registration holds its ID, its connection is closed like any other.
+func TestLeaseKeeperClosesASupersededLegacyHost(t *testing.T) {
+	store := &leaseStore{ttl: testTTL,
+		renew:    func(context.Context, *Registration) error { return ErrLeaseLost },
+		register: func(context.Context, *Session) (*Registration, error) { return nil, ErrSuperseded }}
+	_, _, conn := newKeeperFixture(t, store, 0)
+	select {
+	case <-conn.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a legacy registration superseded while rebuilding kept its connection")
 	}
 }
 
@@ -322,9 +361,21 @@ func TestLeaseKeeperRebuiltEntryGoesWithItsRegistration(t *testing.T) {
 	// next renewal learns of the loss.
 	_, err = client.Session().Destroy(reg.lease, nil)
 	require.NoError(t, err)
+	// Wait for the slot, not just Consul: Consul shows the new holder before
+	// the keeper swaps its handle in, and an end in between leaves the keeper
+	// to release the rebuild itself, which would hide a missing release here.
+	slotLease := func() string {
+		sessions.mu.Lock()
+		defer sessions.mu.Unlock()
+		if cur, ok := sessions.regs[id]; ok {
+			return cur.reg.lease
+		}
+		return ""
+	}
 	require.Eventually(t, func() bool {
 		holder, exists, err := consulHolder(client, store, id)
-		return err == nil && exists && holder != "" && holder != reg.lease
+		lease := slotLease()
+		return err == nil && exists && lease != "" && lease != reg.lease && holder == lease
 	}, 10*time.Second, 50*time.Millisecond, "the lost lease was never rebuilt")
 	require.False(t, conn.isClosed())
 

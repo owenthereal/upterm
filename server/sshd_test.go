@@ -455,10 +455,18 @@ func Test_localSessions_SlowReleaseDoesNotBlockAdd(t *testing.T) {
 type closer struct {
 	once   sync.Once
 	closed chan struct{}
+	at     time.Time // when it was first closed; read it only once closed is
 }
 
-func newCloser() *closer       { return &closer{closed: make(chan struct{})} }
-func (c *closer) Close() error { c.once.Do(func() { close(c.closed) }); return nil }
+func newCloser() *closer { return &closer{closed: make(chan struct{})} }
+
+func (c *closer) Close() error {
+	c.once.Do(func() {
+		c.at = time.Now()
+		close(c.closed)
+	})
+	return nil
+}
 
 func (c *closer) isClosed() bool {
 	select {
