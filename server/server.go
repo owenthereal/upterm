@@ -383,20 +383,22 @@ var errSessionCleanupTimeout = errors.New("session cleanup did not finish within
 // serving to stop.
 //
 // Without it Shutdown had a floor but no ceiling: SessionManager.Shutdown lists
-// every session in the store, deletes this node's in serial 64-key Consul
+// every session in the store, deletes this node's in serial 32-key Consul
 // transactions and closes the store, none of which carries a deadline of its
 // own. A supervisor's grace period cannot be set against an unbounded shutdown,
 // and uptermd's is set against this one -- fly.toml's kill_timeout has to clear
 // serveStopDeadline + sessionCleanupDeadline.
 //
-// The in-flight store calls are not cancelled when this expires, because
-// SessionStore takes no context; threading one through it is the better fix and
-// the one to reach for if this becomes load-bearing. What expiry does revoke is
-// the cleanup's permission to delete: SessionManager.Shutdown re-checks the
-// context before the deletes, so a cleanup that unblocks later cannot act on a
-// listing that has gone stale. Without that it would delete by node address --
-// which names the node, not the process -- and empty the store under whichever
-// server took that address next.
+// The in-flight store calls are not cancelled when this expires, because List
+// and BatchDelete take no context; threading one through them is the better fix
+// and the one to reach for if this becomes load-bearing. What expiry does
+// revoke is the cleanup's permission to delete: SessionManager.Shutdown
+// re-checks the context before the deletes, so a cleanup that unblocks later
+// cannot act on a listing that has gone stale. Without that it would delete by
+// node address, which names the node, not the process. Consul's deletes are
+// conditional on this process's leases, so whichever server took that address
+// next keeps its sessions there; a store without that check would be emptied
+// under it.
 //
 // What is left is a goroutine outliving Shutdown until its call returns. In
 // production that is the exit path and it dies with the process moments later;
@@ -446,8 +448,9 @@ func (s *Server) Shutdown() error {
 	// revokes the abandoned cleanup's permission to delete anything: the defer
 	// cancels it the moment this returns, and SessionManager.Shutdown checks it
 	// before the deletes. Otherwise a cleanup that unblocked after a
-	// replacement server had taken this node address would delete that
-	// server's live sessions.
+	// replacement server had taken this node address would still delete, and
+	// only Consul's lease checks, which not every store has, would stand
+	// between it and that server's live sessions.
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), sessionCleanupDeadline)
 	defer cancelCleanup()
 

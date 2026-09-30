@@ -32,6 +32,15 @@ func (e *ErrSessionNotFound) Error() string {
 	return fmt.Sprintf("session %s not found", e.SessionID)
 }
 
+var (
+	// ErrSuperseded refuses a registration that doesn't supersede the one the
+	// store holds for its ID (I3).
+	ErrSuperseded = errors.New("superseded by a newer registration")
+	// ErrLeaseLost is the definite answer that a registration no longer holds
+	// its entry, as opposed to a renewal that merely failed (spec 6.4).
+	ErrLeaseLost = errors.New("session lease lost")
+)
+
 const (
 	DefaultSessionTTL    = 30 * time.Minute       // Default TTL for session data in Consul
 	DefaultConsulTimeout = 5 * time.Second        // Default timeout for Consul operations
@@ -44,8 +53,11 @@ const (
 
 // Session represents the complete session information
 type Session struct {
-	ID                   string
-	NodeAddr             string
+	ID       string
+	NodeAddr string
+	// Generation orders registrations of the same ID (I3). 0 is a legacy
+	// registration: a random ID with no proof behind it.
+	Generation           uint64
 	HostUser             string
 	HostPublicKeys       []ssh.PublicKey
 	ClientAuthorizedKeys []ssh.PublicKey
@@ -53,9 +65,12 @@ type Session struct {
 
 // MarshalJSON implements custom JSON marshaling for Session
 func (s *Session) MarshalJSON() ([]byte, error) {
+	// Generation is omitted when zero, so a legacy entry reads exactly as it
+	// did before generations existed.
 	type sessionJSON struct {
 		ID                   string
 		NodeAddr             string
+		Generation           uint64 `json:",omitempty"`
 		HostUser             string
 		HostPublicKeys       [][]byte
 		ClientAuthorizedKeys [][]byte
@@ -74,6 +89,7 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 	return json.Marshal(sessionJSON{
 		ID:                   s.ID,
 		NodeAddr:             s.NodeAddr,
+		Generation:           s.Generation,
 		HostUser:             s.HostUser,
 		HostPublicKeys:       hostKeys,
 		ClientAuthorizedKeys: clientKeys,
@@ -85,6 +101,7 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 	type sessionJSON struct {
 		ID                   string
 		NodeAddr             string
+		Generation           uint64 `json:",omitempty"`
 		HostUser             string
 		HostPublicKeys       [][]byte
 		ClientAuthorizedKeys [][]byte
@@ -97,6 +114,7 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 
 	s.ID = temp.ID
 	s.NodeAddr = temp.NodeAddr
+	s.Generation = temp.Generation
 	s.HostUser = temp.HostUser
 
 	// Parse host public keys
@@ -135,15 +153,75 @@ func (s *Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 	return false
 }
 
-// SessionStore defines the interface for session storage
+// Registration is one stored claim to a session ID. Whatever later renews,
+// releases or rebuilds the entry acts through the handle, so it can only touch
+// its own claim, never a successor's (I2, I4).
+type Registration struct {
+	Session *Session
+	// ConfirmedAt is the send time of the write that created the handle. The
+	// expiry budget counts from it, and a send time can only make it early
+	// (spec 6.4).
+	ConfirmedAt time.Time
+	lease       string // Consul lock session; "" in memory
+	index       uint64 // Consul ModifyIndex as written; 0 in memory
+}
+
+func (r *Registration) ID() string { return r.Session.ID }
+
+func (r *Registration) Generation() uint64 { return r.Session.Generation }
+
+// Capable reports whether the host proved its key, and so can reconnect. A
+// legacy registration keeps today's behaviour (I10).
+func (r *Registration) Capable() bool { return r.Session.Generation > 0 }
+
+// Same reports whether r and o are the same registration. A rebuild stores the
+// same registration again under a new lease, and its handle stands in for the
+// one it replaced, so this compares identity rather than handles.
+func (r *Registration) Same(o *Registration) bool {
+	return r != nil && o != nil && sameIdentity(r.Session, o.Session)
+}
+
+// sameIdentity reports whether a and b are the same registration. Only one
+// connection can hold an (ID, generation, node): a proof is bound to its
+// connection, and a legacy ID is random.
+func sameIdentity(a, b *Session) bool {
+	return a.ID == b.ID && a.Generation == b.Generation && a.NodeAddr == b.NodeAddr
+}
+
+// supersedes reports whether next may replace cur (I3). A higher generation
+// always may. The same generation may only from cur's own node, which is that
+// node rebuilding its registration: from anywhere else it is a stale or
+// foreign claim.
+func supersedes(next, cur *Session) bool {
+	return next.Generation > cur.Generation ||
+		(next.Generation == cur.Generation && next.NodeAddr == cur.NodeAddr)
+}
+
+func supersededError(next, cur *Session) error {
+	return fmt.Errorf("session %s: generation %d on %s can't replace generation %d on %s: %w",
+		next.ID, next.Generation, next.NodeAddr, cur.Generation, cur.NodeAddr, ErrSuperseded)
+}
+
+// SessionStore defines the interface for session storage.
+//
+// Registrations are ordered: a stored entry is replaced only by one that
+// supersedes it, and a handle's Release and Renew act only on its own entry.
 type SessionStore interface {
-	// Store complete session data
-	Store(session *Session) error
+	// Register stores s when its ID is absent or s supersedes the stored entry.
+	// Otherwise it returns an error wrapping ErrSuperseded and writes nothing.
+	Register(ctx context.Context, s *Session) (*Registration, error)
+	// Release removes reg's entry if reg still holds it.
+	Release(ctx context.Context, reg *Registration) error
+	// Renew keeps reg's entry alive. An error wrapping ErrLeaseLost means reg
+	// no longer holds it; any other error leaves that unknown.
+	Renew(ctx context.Context, reg *Registration) error
+	// LeaseTTL is how long an unrenewed entry lasts; 0 if it doesn't expire.
+	LeaseTTL() time.Duration
 	// Get complete session data
 	Get(sessionID string) (*Session, error)
-	// Delete session data
+	// Delete session data, only for an entry this instance holds
 	Delete(sessionID string) error
-	// BatchDelete multiple sessions efficiently
+	// BatchDelete multiple sessions efficiently, likewise
 	BatchDelete(sessionIDs []string) error
 	// List all sessions (for cleanup and management)
 	List() ([]*Session, error)
@@ -256,6 +334,11 @@ type consulSessionStore struct {
 	cache *sessionCache
 	// Watch management
 	watchPlan *watch.Plan
+	// held maps each session ID this instance registered to the lock session
+	// it registered it under. Delete and BatchDelete act only through it, so
+	// neither can remove an entry another node registered or took over.
+	held   map[string]string
+	heldMu sync.Mutex
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
@@ -298,6 +381,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
 		cache:     newSessionCache(logger),
+		held:      make(map[string]string),
 	}
 
 	// Register the node with Consul
@@ -313,13 +397,17 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 	return store, nil
 }
 
-// Store complete session data in Consul
-func (c *consulSessionStore) Store(session *Session) error {
+// Register stores session under a lock session of its own (spec 6.3). The
+// generation check and the move of the lock are one transaction, conditional on
+// the entry the decision was read from, so no other registration can land
+// between them: whichever commits second finds the entry changed, and reads and
+// decides again.
+func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*Registration, error) {
 	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+		return nil, fmt.Errorf("session cannot be nil")
 	}
 	if session.ID == "" {
-		return fmt.Errorf("session ID cannot be empty")
+		return nil, fmt.Errorf("session ID cannot be empty")
 	}
 
 	// Outside retry: deterministic operations
@@ -328,42 +416,155 @@ func (c *consulSessionStore) Store(session *Session) error {
 	// Serialize session data as JSON first to fail fast on marshaling errors
 	sessionData, err := json.Marshal(session)
 	if err != nil {
-		return fmt.Errorf("failed to marshal session data: %w", err)
+		return nil, fmt.Errorf("failed to marshal session data: %w", err)
 	}
 
-	// Create a Consul session for distributed locking and TTL management
-	consulLockSession := c.createConsulLockSession(session.ID)
+	wo := (&api.WriteOptions{}).WithContext(ctx)
+	qo := (&api.QueryOptions{}).WithContext(ctx)
 
-	// Inside retry: only network operations
+	var (
+		lease     string
+		index     uint64
+		confirmed time.Time
+	)
 	err = retry.Do(
 		func() error {
-			consulLockSessionID, _, err := c.client.Session().CreateNoChecks(consulLockSession, nil)
+			// One lock session for the call, however many attempts it takes.
+			if lease == "" {
+				id, _, err := c.client.Session().CreateNoChecks(c.createConsulLockSession(session.ID), wo)
+				if err != nil {
+					return fmt.Errorf("failed to create consul lock session: %w", err)
+				}
+				lease = id
+			}
+
+			pair, _, err := c.client.KV().Get(kvStoreKey, qo)
 			if err != nil {
-				return fmt.Errorf("failed to create consul lock session: %w", err)
+				return fmt.Errorf("failed to read session data: %w", err)
 			}
 
-			// Store the complete session data with distributed lock and TTL
-			kvPair := &api.KVPair{
-				Key:     kvStoreKey,
-				Value:   sessionData,
-				Session: consulLockSessionID,
+			var ops api.KVTxnOps
+			if pair == nil {
+				ops = api.KVTxnOps{
+					{Verb: api.KVCheckNotExists, Key: kvStoreKey},
+					{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease},
+				}
+			} else {
+				if cur := storedSession(pair.Value); !supersedes(session, cur) {
+					return retry.Unrecoverable(supersededError(session, cur))
+				}
+				ops = api.KVTxnOps{{Verb: api.KVCheckIndex, Key: kvStoreKey, Index: pair.ModifyIndex}}
+				if pair.Session != "" {
+					// Unlock writes its op's value too. Give it the new one, so
+					// no step of the move stores anything else.
+					ops = append(ops, &api.KVTxnOp{Verb: api.KVUnlock, Key: kvStoreKey, Value: sessionData, Session: pair.Session})
+				}
+				ops = append(ops, &api.KVTxnOp{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease})
 			}
 
-			lockAcquired, _, err := c.client.KV().Acquire(kvPair, nil)
+			sent := time.Now()
+			ok, resp, _, err := c.client.KV().Txn(ops, qo)
 			if err != nil {
 				return fmt.Errorf("failed to store session data: %w", err)
 			}
-			if !lockAcquired {
-				return fmt.Errorf("failed to acquire distributed lock for session %s", session.ID)
+			if !ok {
+				return fmt.Errorf("session %s changed while registering: %s", session.ID, describeTxnErrors(resp.Errors))
 			}
-
+			// The lock is the last operation, so its result is the last one.
+			if n := len(resp.Results); n > 0 {
+				index = resp.Results[n-1].ModifyIndex
+			}
+			confirmed = sent
 			return nil
 		},
+		retry.Context(ctx),
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.OnRetry(func(n uint, err error) {
-			c.logger.Debug("retrying consul store operation",
-				"operation", "store",
+			c.logger.Debug("retrying consul register operation",
+				"operation", "register",
+				"attempt", n+1,
+				"error", err,
+			)
+		}),
+	)
+
+	if err != nil {
+		if lease != "" {
+			c.destroyUnusedLease(lease)
+		}
+		return nil, err
+	}
+
+	// Immediately update local cache for strong consistency
+	c.heldMu.Lock()
+	c.held[session.ID] = lease
+	c.cache.Set(session.ID, session)
+	c.heldMu.Unlock()
+
+	c.logger.Debug("registered session in consul and cache",
+		"session", session.ID,
+		"node", session.NodeAddr,
+		"generation", session.Generation,
+		"key", kvStoreKey,
+	)
+
+	return &Registration{Session: session, ConfirmedAt: confirmed, lease: lease, index: index}, nil
+}
+
+// storedSession ranks a stored value for ordering. One that doesn't parse
+// ranks as generation 0 from no node: a proven registration may replace it,
+// and a legacy one may not.
+func storedSession(value []byte) *Session {
+	var s Session
+	if err := json.Unmarshal(value, &s); err != nil {
+		return &Session{}
+	}
+	return &s
+}
+
+func describeTxnErrors(errs api.TxnErrors) string {
+	whats := make([]string, 0, len(errs))
+	for _, e := range errs {
+		whats = append(whats, fmt.Sprintf("op %d: %s", e.OpIndex, e.What))
+	}
+	return strings.Join(whats, "; ")
+}
+
+// destroyUnusedLease destroys the lock session of a Register that failed. It
+// runs on a fresh context, because the caller's may be what failed it, and a
+// transaction whose reply was lost may have stored the entry under this lease.
+// It can therefore outlive the caller's deadline.
+func (c *consulSessionStore) destroyUnusedLease(lease string) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+	defer cancel()
+	if _, err := c.client.Session().Destroy(lease, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		c.logger.Warn("failed to destroy an unused consul lock session", "lease", lease, "error", err)
+	}
+}
+
+// Release destroys reg's lock session. Consul deletes the entry with it only
+// while that lock session still holds it, so a registration that was taken
+// over leaves its successor's entry in place (I4).
+func (c *consulSessionStore) Release(ctx context.Context, reg *Registration) error {
+	return c.release(ctx, reg.ID(), reg.lease)
+}
+
+func (c *consulSessionStore) release(ctx context.Context, sessionID, lease string) error {
+	wo := (&api.WriteOptions{}).WithContext(ctx)
+	err := retry.Do(
+		func() error {
+			if _, err := c.client.Session().Destroy(lease, wo); err != nil {
+				return fmt.Errorf("failed to destroy consul lock session: %w", err)
+			}
+			return nil
+		},
+		retry.Context(ctx),
+		retry.Attempts(DefaultMaxRetries),
+		retry.Delay(DefaultRetryDelay),
+		retry.OnRetry(func(n uint, err error) {
+			c.logger.Debug("retrying consul release operation",
+				"operation", "release",
 				"attempt", n+1,
 				"error", err,
 			)
@@ -374,16 +575,44 @@ func (c *consulSessionStore) Store(session *Session) error {
 		return err
 	}
 
-	// Immediately update local cache for strong consistency
-	c.cache.Set(session.ID, session)
+	c.forget(sessionID, lease)
 
-	c.logger.Debug("stored session data in consul and cache",
-		"session", session.ID,
-		"node", session.NodeAddr,
-		"key", kvStoreKey,
+	c.logger.Debug("released session lock in consul",
+		"session", sessionID,
+		"lease", lease,
 	)
 
 	return nil
+}
+
+// forget drops this instance's record of sessionID, and its cache entry, only
+// if lease is still the one it registered the ID under. After a rebuild the
+// new lease holds the entry, and the cache still describes it.
+func (c *consulSessionStore) forget(sessionID, lease string) {
+	c.heldMu.Lock()
+	defer c.heldMu.Unlock()
+	if held, ok := c.held[sessionID]; ok && held == lease {
+		delete(c.held, sessionID)
+		c.cache.Delete(sessionID)
+	}
+}
+
+// Renew renews reg's lock session. Consul answers one it no longer has with no
+// entry and no error, which is the definite loss of spec 6.4. A transport
+// error says nothing either way, and is returned as it came.
+func (c *consulSessionStore) Renew(ctx context.Context, reg *Registration) error {
+	entry, _, err := c.client.Session().Renew(reg.lease, (&api.WriteOptions{}).WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return fmt.Errorf("session %s: consul lock session %s: %w", reg.ID(), reg.lease, ErrLeaseLost)
+	}
+	return nil
+}
+
+func (c *consulSessionStore) LeaseTTL() time.Duration {
+	return c.ttl
 }
 
 // Get session data with hybrid read-through cache
@@ -459,108 +688,133 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	return session, nil
 }
 
-// Delete session data from Consul
+// Delete releases the lock session this instance registered sessionID under,
+// if any. An entry it doesn't hold is another registration's, or no one's, and
+// not this instance's to remove.
 func (c *consulSessionStore) Delete(sessionID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("session ID cannot be empty")
 	}
 
-	// Outside retry: deterministic operations
-	kvStoreKey := c.SessionKey(sessionID)
-
-	// Inside retry: only network operations
-	err := retry.Do(
-		func() error {
-			_, err := c.client.KV().Delete(kvStoreKey, nil)
-			if err != nil {
-				return fmt.Errorf("failed to delete session data: %w", err)
-			}
-			return nil
-		},
-		retry.Attempts(DefaultMaxRetries),
-		retry.Delay(DefaultRetryDelay),
-		retry.OnRetry(func(n uint, err error) {
-			c.logger.Debug("retrying consul delete operation",
-				"operation", "delete",
-				"attempt", n+1,
-				"error", err,
-			)
-		}),
-	)
-
-	if err != nil {
-		return err
-	}
-
-	// Immediately remove from local cache for strong consistency
-	c.cache.Delete(sessionID)
-
-	c.logger.Debug("deleted session data from consul and cache",
-		"session", sessionID,
-		"key", kvStoreKey,
-	)
-
-	return nil
-}
-
-// BatchDelete multiple sessions efficiently using Consul transactions
-func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
-	if len(sessionIDs) == 0 {
+	c.heldMu.Lock()
+	lease, ok := c.held[sessionID]
+	c.heldMu.Unlock()
+	if !ok {
+		c.logger.Debug("not deleting a session this instance doesn't hold", "session", sessionID)
 		return nil
 	}
 
-	// Consul's official transaction limit is 64 operations
+	return c.release(context.Background(), sessionID, lease)
+}
+
+// heldEntry is a session ID and the lock session this instance holds it under.
+type heldEntry struct {
+	id, lease string
+}
+
+// BatchDelete deletes those of sessionIDs this instance holds, each only while
+// its lock session still holds it. Shutdown cleanup deletes from a listing that
+// can be stale by then, and an entry another node took over since must survive
+// it.
+func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
+	c.heldMu.Lock()
+	var entries []heldEntry
+	for _, id := range sessionIDs {
+		if lease, ok := c.held[id]; ok {
+			entries = append(entries, heldEntry{id: id, lease: lease})
+		}
+	}
+	c.heldMu.Unlock()
+
+	// Consul's official transaction limit is 64 operations, and each entry
+	// takes two: the session check and the delete.
 	// Reference: https://developer.hashicorp.com/consul/api-docs/txn
-	const maxBatchSize = 64
+	const maxBatchSize = 32
 
-	for i := 0; i < len(sessionIDs); i += maxBatchSize {
-		end := min(i+maxBatchSize, len(sessionIDs))
+	deleted := 0
+	for i := 0; i < len(entries); i += maxBatchSize {
+		end := min(i+maxBatchSize, len(entries))
 
-		if err := c.deleteBatch(sessionIDs[i:end]); err != nil {
+		done, err := c.deleteBatch(entries[i:end])
+		for _, e := range done {
+			c.forget(e.id, e.lease)
+		}
+		deleted += len(done)
+		if err != nil {
 			return err
 		}
 	}
 
-	// Immediately remove from local cache for strong consistency
-	c.cache.BatchDelete(sessionIDs)
-
-	c.logger.Debug("batch deleted sessions from consul and cache", "count", len(sessionIDs))
+	c.logger.Debug("batch deleted sessions from consul and cache", "requested", len(sessionIDs), "deleted", deleted)
 	return nil
 }
 
-// deleteBatch deletes a batch of sessions using Consul transaction
-func (c *consulSessionStore) deleteBatch(sessionIDs []string) error {
-	ops := make([]*api.KVTxnOp, len(sessionIDs))
-	for i, sessionID := range sessionIDs {
-		kvStoreKey := c.SessionKey(sessionID)
-		ops[i] = &api.KVTxnOp{
-			Verb: api.KVDelete,
-			Key:  kvStoreKey,
-		}
-	}
-
-	return retry.Do(
-		func() error {
-			ok, response, _, err := c.client.KV().Txn(ops, nil)
-			if err != nil {
-				return fmt.Errorf("failed to execute batch delete transaction: %w", err)
-			}
-			if !ok {
-				return fmt.Errorf("batch delete transaction failed: %v", response.Errors)
-			}
-			return nil
-		},
-		retry.Attempts(DefaultMaxRetries),
-		retry.Delay(DefaultRetryDelay),
-		retry.OnRetry(func(n uint, err error) {
-			c.logger.Debug("retrying consul batch delete operation",
-				"operation", "batch_delete",
-				"attempt", n+1,
-				"count", len(sessionIDs),
-				"error", err,
+// deleteBatch deletes each entry its lock session still holds, and returns the
+// ones it deleted. A transaction that rolls back names the checks that failed:
+// those entries are held by another lock session, or gone, so they're dropped
+// and the rest are tried again.
+func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, error) {
+	for len(entries) > 0 {
+		ops := make(api.KVTxnOps, 0, 2*len(entries))
+		for _, e := range entries {
+			kvStoreKey := c.SessionKey(e.id)
+			ops = append(ops,
+				&api.KVTxnOp{Verb: api.KVCheckSession, Key: kvStoreKey, Session: e.lease},
+				&api.KVTxnOp{Verb: api.KVDelete, Key: kvStoreKey},
 			)
-		}),
-	)
+		}
+
+		var (
+			ok   bool
+			resp *api.KVTxnResponse
+		)
+		err := retry.Do(
+			func() error {
+				var err error
+				ok, resp, _, err = c.client.KV().Txn(ops, nil)
+				if err != nil {
+					return fmt.Errorf("failed to execute batch delete transaction: %w", err)
+				}
+				return nil
+			},
+			retry.Attempts(DefaultMaxRetries),
+			retry.Delay(DefaultRetryDelay),
+			retry.OnRetry(func(n uint, err error) {
+				c.logger.Debug("retrying consul batch delete operation",
+					"operation", "batch_delete",
+					"attempt", n+1,
+					"count", len(entries),
+					"error", err,
+				)
+			}),
+		)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return entries, nil
+		}
+
+		failed := make(map[int]bool, len(resp.Errors))
+		for _, e := range resp.Errors {
+			failed[e.OpIndex/2] = true
+		}
+		if len(failed) == 0 {
+			return nil, fmt.Errorf("batch delete transaction rolled back without naming an operation")
+		}
+		rest := make([]heldEntry, 0, len(entries)-len(failed))
+		for i, e := range entries {
+			if !failed[i] {
+				rest = append(rest, e)
+			}
+		}
+		c.logger.Debug("skipping sessions this instance no longer holds",
+			"count", len(entries)-len(rest),
+			"errors", describeTxnErrors(resp.Errors),
+		)
+		entries = rest
+	}
+	return nil, nil
 }
 
 // List all sessions from Consul
@@ -638,11 +892,15 @@ func (c *consulSessionStore) registerNode() error {
 // createConsulLockSession creates a Consul session for distributed locking
 func (c *consulSessionStore) createConsulLockSession(sessionID string) *api.SessionEntry {
 	return &api.SessionEntry{
-		Name:      sessionID,
-		Node:      c.NodeName(),
-		TTL:       c.ttl.String(),
-		Behavior:  api.SessionBehaviorDelete,
-		LockDelay: time.Second,
+		Name:     sessionID,
+		Node:     c.NodeName(),
+		TTL:      c.ttl.String(),
+		Behavior: api.SessionBehaviorDelete,
+		// For the lock-delay after a lock session ends, Consul refuses to lock
+		// the keys it held, which holds up registering its ID again after a
+		// lost lease or a release. 1 ms is the smallest delay the Go API sends:
+		// it drops a zero, and Consul then applies its default of 15 s.
+		LockDelay: time.Millisecond,
 	}
 }
 
@@ -741,16 +999,56 @@ func newMemorySessionStore(logger *slog.Logger) *memorySessionStore {
 	}
 }
 
-func (m *memorySessionStore) Store(session *Session) error {
+// Register stores session unless the entry it would replace outranks it (I3).
+func (m *memorySessionStore) Register(_ context.Context, session *Session) (*Registration, error) {
+	confirmed := time.Now()
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	if cur, ok := m.sessions[session.ID]; ok && !supersedes(session, cur) {
+		return nil, supersededError(session, cur)
+	}
 	m.sessions[session.ID] = session
 	m.logger.Debug("stored session data in memory",
 		"session", session.ID,
 		"node", session.NodeAddr,
+		"generation", session.Generation,
 	)
+	return &Registration{Session: session, ConfirmedAt: confirmed}, nil
+}
+
+// Release deletes reg's entry only while it is still reg's, so a superseded
+// registration's cleanup leaves its successor in place.
+func (m *memorySessionStore) Release(_ context.Context, reg *Registration) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if cur, ok := m.sessions[reg.ID()]; ok && sameIdentity(cur, reg.Session) {
+		delete(m.sessions, reg.ID())
+		m.logger.Debug("released session data from memory",
+			"session", reg.ID(),
+			"generation", reg.Generation(),
+		)
+	}
 	return nil
+}
+
+// Renew has no lease to extend in memory. It reports whether reg still holds
+// its entry.
+func (m *memorySessionStore) Renew(_ context.Context, reg *Registration) error {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	if cur, ok := m.sessions[reg.ID()]; ok && sameIdentity(cur, reg.Session) {
+		return nil
+	}
+	return fmt.Errorf("session %s: %w", reg.ID(), ErrLeaseLost)
+}
+
+// LeaseTTL is 0: an entry in memory lasts as long as the process.
+func (m *memorySessionStore) LeaseTTL() time.Duration {
+	return 0
 }
 
 func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
@@ -938,12 +1236,43 @@ func newConsulSessionManager(consulURL *url.URL, ttl time.Duration, logger *slog
 
 // CreateSession stores the session and returns the encoded SSH user identifier
 func (sm *SessionManager) CreateSession(session *Session) (string, error) {
-	if err := sm.store.Store(session); err != nil {
-		return "", err
+	_, sshUser, err := sm.Register(context.Background(), session)
+	return sshUser, err
+}
+
+// Register stores s under the ordering rule, and returns its handle and the
+// encoded SSH user identifier.
+func (sm *SessionManager) Register(ctx context.Context, s *Session) (*Registration, string, error) {
+	reg, err := sm.store.Register(ctx, s)
+	if err != nil {
+		return nil, "", err
 	}
 
 	// Encode the SSH user identifier using the encoder
-	return sm.encodeDecoder.Encode(session.ID, session.NodeAddr), nil
+	return reg, sm.encodeDecoder.Encode(s.ID, s.NodeAddr), nil
+}
+
+// Release removes reg's entry if reg still holds it.
+func (sm *SessionManager) Release(ctx context.Context, reg *Registration) error {
+	return sm.store.Release(ctx, reg)
+}
+
+// Renew keeps reg's entry alive; see SessionStore.Renew for its errors.
+func (sm *SessionManager) Renew(ctx context.Context, reg *Registration) error {
+	return sm.store.Renew(ctx, reg)
+}
+
+// Reregister rebuilds reg after a known loss: the same registration, stored
+// again under the ordering rule with a lease of its own (spec 6.4). The handle
+// it returns is Same as reg. reg's old lease, if it still exists, is the
+// caller's to Release.
+func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
+	return sm.store.Register(ctx, reg.Session)
+}
+
+// LeaseTTL is how long an unrenewed registration lasts; 0 if it doesn't expire.
+func (sm *SessionManager) LeaseTTL() time.Duration {
+	return sm.store.LeaseTTL()
 }
 
 // GetSession retrieves a session by ID
@@ -1009,14 +1338,16 @@ func (sm *SessionManager) GetStore() SessionStore {
 // Shutdown cleans up sessions created by this node during server shutdown
 // Shutdown deletes the sessions this node created and closes the store.
 //
-// ctx does not cancel the store calls -- SessionStore takes no context -- but
-// it does decide whether the deletes are still allowed to happen. A caller that
-// has stopped waiting cancels it, and the listing this was about to delete from
-// is then already stale: List reports whatever the store holds when it returns,
-// and the node address it filters on identifies the node, not the process. Left
-// unchecked, a cleanup abandoned by one server and unblocked after another had
-// taken the same address would delete the replacement's live sessions out of
-// the shared store.
+// ctx does not cancel the store calls -- List and BatchDelete take no context --
+// but it does decide whether the deletes are still allowed to happen. A caller
+// that has stopped waiting cancels it, and the listing this was about to delete
+// from is then already stale: List reports whatever the store holds when it
+// returns, and the node address it filters on identifies the node, not the
+// process. Left unchecked, a cleanup abandoned by one server and unblocked
+// after another had taken the same address would go on to delete the
+// replacement's live sessions. Consul's BatchDelete deletes only entries this
+// instance still holds, which spares them there; a store without that check
+// would not.
 func (sm *SessionManager) Shutdown(ctx context.Context, nodeAddr string) error {
 	// Get all sessions
 	sessions, err := sm.store.List()

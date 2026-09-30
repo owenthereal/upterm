@@ -49,7 +49,7 @@ func newHangingListStore(logger *slog.Logger) hangingListStore {
 
 // Session cleanup reaches Consul over the network and carries no deadline of
 // its own: List walks every session in the store, BatchDelete deletes this
-// node's in serial 64-key transactions, and Close stops the watches. Shutdown
+// node's in serial 32-key transactions, and Close stops the watches. Shutdown
 // therefore has to bound it. Until it did, the whole of Shutdown had a floor
 // but no ceiling, and a supervisor's grace period cannot be set against an
 // unbounded shutdown -- fly.toml's kill_timeout is set against this one.
@@ -93,9 +93,10 @@ func TestServerShutdownBoundsSessionCleanup(t *testing.T) {
 // up on it, and what it was about to do is delete every session carrying this
 // node's address. That listing is stale by then, and the address identifies the
 // node rather than the process: a server that took the same address after this
-// one gave up owns the sessions the abandoned cleanup would delete, in a store
-// both of them share. Giving up therefore has to revoke its permission to
-// delete, not merely stop waiting for it.
+// one gave up may own sessions that listing names. Consul's deletes are
+// conditional on this process's leases, which spares them there, but a store
+// without that check would delete them. Giving up therefore has to revoke its
+// permission to delete, not merely stop waiting for it.
 func TestAbandonedSessionCleanupDoesNotDelete(t *testing.T) {
 	restore := sessionCleanupDeadline
 	sessionCleanupDeadline = 50 * time.Millisecond

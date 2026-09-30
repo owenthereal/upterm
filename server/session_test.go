@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -261,11 +263,11 @@ func (suite *MemoryStoreTestSuite) TestStoreOperations() {
 	}
 
 	// Test Store
-	err := suite.store.Store(session)
+	_, err := suite.store.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Test Store duplicate (should succeed - overwrites)
-	err = suite.store.Store(session)
+	_, err = suite.store.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Test Get
@@ -274,9 +276,19 @@ func (suite *MemoryStoreTestSuite) TestStoreOperations() {
 	suite.Equal(session.ID, retrievedSession.ID)
 	suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
 
-	// Test Update (Store is used for both create and update)
-	session.NodeAddr = "192.168.1.100:2222"
-	err = suite.store.Store(session)
+	// Another node can't take over the same generation (I3): the entry stays.
+	moved := &Session{ID: sessionID, NodeAddr: "192.168.1.100:2222"}
+	_, err = suite.store.Register(context.Background(), moved)
+	suite.ErrorIs(err, ErrSuperseded)
+
+	retrievedSession, err = suite.store.Get(sessionID)
+	suite.NoError(err)
+	suite.Equal("127.0.0.1:2222", retrievedSession.NodeAddr)
+
+	// Once the entry is gone, the other node can register the ID.
+	err = suite.store.Delete(sessionID)
+	suite.NoError(err)
+	_, err = suite.store.Register(context.Background(), moved)
 	suite.NoError(err)
 
 	retrievedSession, err = suite.store.Get(sessionID)
@@ -305,7 +317,7 @@ func (suite *MemoryStoreTestSuite) TestBatchOperations() {
 
 	// Store all sessions
 	for _, session := range sessions {
-		err := suite.store.Store(session)
+		_, err := suite.store.Register(context.Background(), session)
 		suite.NoError(err)
 	}
 
@@ -330,6 +342,27 @@ func (suite *MemoryStoreTestSuite) TestClose() {
 	// Memory store Close is a no-op but should not error
 	err := suite.store.Close()
 	suite.NoError(err)
+}
+
+func (suite *MemoryStoreTestSuite) TestRegisterOrderingAndConditionalRelease() {
+	ctx := context.Background()
+	gen1, err := suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	gen2, err := suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	_, err = suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "a:22", Generation: 1})
+	suite.ErrorIs(err, ErrSuperseded)
+	_, err = suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "a:22", Generation: 2})
+	suite.ErrorIs(err, ErrSuperseded, "the same generation from another node")
+	_, err = suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "b:22", Generation: 2})
+	suite.NoError(err, "the owner rebuilding its own claim")
+	suite.ErrorIs(suite.store.Renew(ctx, gen1), ErrLeaseLost)
+	suite.NoError(suite.store.Release(ctx, gen1))
+	_, err = suite.store.Get("o")
+	suite.NoError(err, "a superseded release leaves its successor")
+	suite.NoError(suite.store.Release(ctx, gen2))
+	_, err = suite.store.Get("o")
+	suite.Error(err)
 }
 
 // ConsulStoreTestSuite tests the consul store implementation directly including replication
@@ -387,7 +420,7 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	}
 
 	// Test Store
-	err := suite.store1.Store(session)
+	_, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Test Get - should be immediately available (strong consistency)
@@ -397,7 +430,7 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	suite.Equal(session.NodeAddr, retrievedSession.NodeAddr)
 	suite.Equal(session.HostUser, retrievedSession.HostUser)
 
-	// Test Update (requires delete first due to Consul session locking mechanism)
+	// Test Update (requires delete first: the same generation from another node doesn't supersede it)
 	err = suite.store1.Delete(sessionID)
 	suite.NoError(err)
 
@@ -408,7 +441,7 @@ func (suite *ConsulStoreTestSuite) TestBasicStoreOperations() {
 	}, 2*time.Second, 50*time.Millisecond)
 
 	session.NodeAddr = "192.168.1.100:2222"
-	err = suite.store1.Store(session)
+	_, err = suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 
 	// Should be immediately available (strong consistency)
@@ -436,7 +469,7 @@ func (suite *ConsulStoreTestSuite) TestReplicationViaCacheAndWatch() {
 	}
 
 	// Store session in store1
-	err := suite.store1.Store(session)
+	_, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 	defer func() {
 		_ = suite.store1.Delete(sessionID)
@@ -466,7 +499,7 @@ func (suite *ConsulStoreTestSuite) TestReplicationHandlesDeletion() {
 	}
 
 	// Store session and wait for replication
-	err := suite.store1.Store(session)
+	_, err := suite.store1.Register(context.Background(), session)
 	suite.NoError(err)
 	suite.waitForSessionInCache(sessionID)
 
@@ -506,7 +539,7 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 
 	// Store all sessions in store1
 	for _, session := range sessions {
-		err := suite.store1.Store(session)
+		_, err := suite.store1.Register(context.Background(), session)
 		suite.NoError(err)
 	}
 	defer func() {
@@ -538,6 +571,112 @@ func (suite *ConsulStoreTestSuite) TestBatchOperations() {
 		_, err = suite.store1.Get(sessionID)
 		suite.Error(err)
 	}
+}
+
+// consulGet reads an entry past both caches.
+func (suite *ConsulStoreTestSuite) consulGet(id string) (*api.KVPair, *Session) {
+	pair, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+	suite.Require().NoError(err)
+	if pair == nil {
+		return nil, nil
+	}
+	var s Session
+	suite.Require().NoError(json.Unmarshal(pair.Value, &s))
+	return pair, &s
+}
+
+func (suite *ConsulStoreTestSuite) uniq(p string) string {
+	return fmt.Sprintf("%s-%d", p, time.Now().UnixNano())
+}
+
+func (suite *ConsulStoreTestSuite) TestTakeoverMovesTheLease() {
+	ctx, id := context.Background(), suite.uniq("takeover")
+	reg1, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store2.Release(ctx, reg2) }()
+	pair, _ := suite.consulGet(id)
+	suite.Equal(reg2.lease, pair.Session, "held by the new owner's lease (I4)")
+	suite.Equal(pair.ModifyIndex, reg2.index, "the handle records the index it wrote")
+	suite.Require().NoError(suite.store1.Release(ctx, reg1))
+	pair, s := suite.consulGet(id)
+	suite.Require().NotNil(pair, "the old lease's destroy must not delete the taken-over entry")
+	suite.Equal(uint64(2), s.Generation)
+	_, err = suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.ErrorIs(err, ErrSuperseded)
+}
+
+func (suite *ConsulStoreTestSuite) TestRenewOfALostLeaseAndLockDelay() {
+	ctx, id := context.Background(), suite.uniq("lost")
+	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	se, _, err := suite.client.Session().Info(reg.lease, nil)
+	suite.Require().NoError(err)
+	suite.Equal(time.Millisecond, se.LockDelay)
+	suite.NoError(suite.store1.Renew(ctx, reg))
+	_, err = suite.client.Session().Destroy(reg.lease, nil)
+	suite.Require().NoError(err)
+	suite.ErrorIs(suite.store1.Renew(ctx, reg), ErrLeaseLost)
+}
+
+// Review Focus 3.
+func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
+	ctx, id := context.Background(), suite.uniq("junk")
+	_, err := suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte("not json")}, nil)
+	suite.Require().NoError(err)
+	_, err = suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22"})
+	suite.ErrorIs(err, ErrSuperseded)
+	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	suite.NoError(suite.store1.Release(ctx, reg))
+}
+
+// Review Focus 5.
+func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesAnotherLeaseHolds() {
+	ctx, a, b := context.Background(), suite.uniq("batch-a"), suite.uniq("batch-b")
+	_, err := suite.store1.Register(ctx, &Session{ID: a, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	_, err = suite.store1.Register(ctx, &Session{ID: b, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	regB, err := suite.store2.Register(ctx, &Session{ID: b, NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store2.Release(ctx, regB) }()
+	suite.Require().NoError(suite.store1.BatchDelete([]string{a, b}))
+	pair, _ := suite.consulGet(a)
+	suite.Nil(pair)
+	pair, _ = suite.consulGet(b)
+	suite.NotNil(pair, "taken over after the listing: survives")
+}
+
+func (suite *ConsulStoreTestSuite) TestRegisterHonoursItsContext() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := suite.store1.Register(ctx, &Session{ID: suite.uniq("cancelled"), NodeAddr: "a:22", Generation: 1})
+	suite.ErrorIs(err, context.Canceled)
+}
+
+// The bug the spike confirmed. Consul's minimum TTL is 10 s, and it may take
+// twice that to expire.
+func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	short, err := newConsulSessionStore(consulURL, 10*time.Second, sessionTestLogger)
+	suite.Require().NoError(err)
+	defer func() { _ = short.Close() }()
+	ctx := context.Background()
+	unrenewed, err := short.Register(ctx, &Session{ID: suite.uniq("unrenewed"), NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	renewed, err := short.Register(ctx, &Session{ID: suite.uniq("renewed"), NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = short.Release(ctx, renewed) }()
+	for deadline := time.Now().Add(25 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
+		suite.Require().NoError(short.Renew(ctx, renewed))
+	}
+	pair, _ := suite.consulGet(unrenewed.ID())
+	suite.Nil(pair)
+	pair, _ = suite.consulGet(renewed.ID())
+	suite.NotNil(pair)
 }
 
 // Helper methods for replication testing
