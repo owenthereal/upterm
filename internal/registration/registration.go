@@ -13,16 +13,27 @@ import (
 )
 
 const (
-	SecretLen  = 16
+	// SecretLen is the length of a session secret. The secret keeps the ID
+	// from being computable by anyone who learns the public key, and the relay
+	// refuses any other length.
+	SecretLen = 16
+	// IDLen is the length of a derived session ID. It matches the shape of
+	// random IDs the relay issues today, so connect strings and tooling don't
+	// change.
 	IDLen      = 20 // the shape of uniuri.NewLen(uniuri.UUIDLen)
 	idAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 	idDomain    = "upterm-session-id-v1"
 	proofDomain = "upterm-session-v1"
 
-	// What the relay refuses a registration with; the host classifies by these.
+	// RefusedProof is what the relay sends when it refuses a registration.
+	// The host classifies this refusal by this exact text, so it is part of
+	// the wire contract.
 	RefusedProof = "upterm: session proof refused"
-	Superseded   = "upterm: superseded by a newer registration"
+	// Superseded is what the relay sends when a newer registration supersedes
+	// an older one. The host classifies this refusal by this exact text, so it
+	// is part of the wire contract.
+	Superseded = "upterm: superseded by a newer registration"
 )
 
 var (
@@ -31,15 +42,19 @@ var (
 	errSessionID  = errors.New("no SSH session ID to bind the proof to")
 )
 
-// NewSecret generates a cryptographically random 16-byte session secret.
+// NewSecret generates a new session secret for a host process. The secret is
+// kept in memory for the process's lifetime, and that stability keeps the
+// session ID constant across redials.
 func NewSecret() ([]byte, error) {
 	b := make([]byte, SecretLen)
 	_, err := rand.Read(b)
 	return b, err
 }
 
-// ID derives a 20-character session ID from the session key and secret.
-// The ID is deterministic and stable across versions for a given key and secret.
+// ID derives a deterministic session ID from the session key and secret.
+// Host and relay both compute it independently and may run different versions,
+// so the output is pinned by a golden test. It is domain-separated from the
+// proof so the two hashes can never be confused.
 func ID(sessionKey ssh.PublicKey, secret []byte) string {
 	sum := sha256.Sum256(ssh.Marshal(struct {
 		Domain      string
@@ -75,8 +90,9 @@ func check(sshSessionID, secret []byte, generation uint64) error {
 	return nil
 }
 
-// Sign generates a proof that the holder of the key owns the session,
-// binding it to a specific SSH connection ID and generation counter.
+// Sign generates a proof of key possession. It binds the proof to one SSH
+// connection (so a captured proof can't replay on another connection) and to
+// one generation (so a delayed older registration can't claim a newer one's place).
 func Sign(key ssh.Signer, sshSessionID, secret []byte, generation uint64) ([]byte, error) {
 	if err := check(sshSessionID, secret, generation); err != nil {
 		return nil, err
@@ -88,8 +104,9 @@ func Sign(key ssh.Signer, sshSessionID, secret []byte, generation uint64) ([]byt
 	return ssh.Marshal(sig), nil
 }
 
-// Verify checks that a proof is a valid signature of the session parameters
-// by the holder of the session key, proving possession of that key.
+// Verify is what the relay runs before accepting a derived ID. It checks the
+// inputs itself because a hostile host can sign any message it likes, including
+// generation 0, an empty session ID, or an invalid secret length.
 func Verify(sessionKey ssh.PublicKey, sshSessionID, secret []byte, generation uint64, proof []byte) error {
 	if err := check(sshSessionID, secret, generation); err != nil {
 		return err

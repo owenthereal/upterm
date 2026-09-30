@@ -69,3 +69,42 @@ func TestProofRoundTripAndRefusals(t *testing.T) {
 	_, err = Sign(key, []byte("conn-1"), secret[:8], 1)
 	require.Error(t, err)
 }
+
+func TestVerifyRefusesAProofOverBadInputs(t *testing.T) {
+	key := newKey(t)
+
+	// A hostile host can sign any message it likes, including invalid inputs.
+	// Verify must reject these even if they have a valid signature.
+	for name, test := range map[string]struct {
+		sshSessionID []byte
+		secret       []byte
+		generation   uint64
+	}{
+		"8-byte secret": {
+			sshSessionID: []byte("conn-1"),
+			secret:       bytes.Repeat([]byte{7}, 8),
+			generation:   3,
+		},
+		"generation 0": {
+			sshSessionID: []byte("conn-1"),
+			secret:       bytes.Repeat([]byte{7}, SecretLen),
+			generation:   0,
+		},
+		"empty session ID": {
+			sshSessionID: nil,
+			secret:       bytes.Repeat([]byte{7}, SecretLen),
+			generation:   3,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Sign the (bad) message directly, bypassing Sign's check.
+			msg := message(test.sshSessionID, test.secret, test.generation)
+			sig, err := key.Sign(nil, msg)
+			require.NoError(t, err)
+			proof := ssh.Marshal(sig)
+
+			// Verify must refuse this proof even though the signature is valid.
+			require.Error(t, Verify(key.PublicKey(), test.sshSessionID, test.secret, test.generation, proof))
+		})
+	}
+}
