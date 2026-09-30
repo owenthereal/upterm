@@ -107,7 +107,8 @@ type localSessions struct {
 
 // localRegistration is a registration this node adopted, and the host
 // connection it was made on, which a takeover closes. reg is the handle
-// its lease keeper last rebuilt, if the keeper rebuilt one.
+// its lease keeper last rebuilt, if the keeper rebuilt one; it changes only
+// under localSessions' lock, while the slot is in the map.
 type localRegistration struct {
 	reg  *Registration
 	conn io.Closer
@@ -185,7 +186,8 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 // replace makes next, a rebuilt handle, the one this node serves for its
 // registration, and reports whether it did. It doesn't once that registration
 // has ended or been replaced: the rebuild then belongs to no one, and the
-// keeper releases it.
+// keeper releases it. Only the handle changes; the slot and all else it
+// holds stay as they are.
 func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -193,7 +195,7 @@ func (l *localSessions) replace(next *Registration) bool {
 	if !ok || !cur.reg.Same(next) {
 		return false
 	}
-	l.regs[next.ID()] = &localRegistration{reg: next, conn: cur.conn, stopLease: cur.stopLease}
+	cur.reg = next
 	return true
 }
 

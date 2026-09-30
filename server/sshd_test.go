@@ -529,6 +529,27 @@ func Test_localSessions_OlderAdoptionIsRefused(t *testing.T) {
 	require.Equal(t, 1.0, gauge())
 }
 
+// A rebuild swaps the handle in the slot and nothing else: the slot keeps the
+// connection, the keeper's stop and whatever else it holds.
+func Test_localSessions_ReplaceKeepsTheSlot(t *testing.T) {
+	sessions, _, _ := newTestLocalSessions(t)
+	reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "lost"}
+	_, err := sessions.add(reg, newCloser())
+	require.NoError(t, err)
+	slot := func() *localRegistration {
+		sessions.mu.Lock()
+		defer sessions.mu.Unlock()
+		return sessions.regs["id"]
+	}
+	before := slot()
+	rebuilt := &Registration{Session: reg.Session, lease: "rebuilt"}
+	require.True(t, sessions.replace(rebuilt))
+	require.Same(t, before, slot())
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	require.Same(t, rebuilt, before.reg)
+}
+
 func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
 	sessions, sm, _ := newTestLocalSessions(t)
 	network := &MemoryProvider{}
