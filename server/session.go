@@ -249,8 +249,12 @@ type SessionStore interface {
 // replaces a later one.
 type sessionCache struct {
 	sessions map[string]cachedSession
-	mutex    sync.RWMutex
-	logger   *slog.Logger
+	// watched is the index of the last watch snapshot applied. That snapshot
+	// held every entry written at or before it that still stood, so one it
+	// left out had been removed or superseded by then.
+	watched uint64
+	mutex   sync.RWMutex
+	logger  *slog.Logger
 }
 
 // cachedSession is a session as the Consul write at index stored it.
@@ -287,12 +291,19 @@ func (c *sessionCache) Has(sessionID string) bool {
 
 // Set caches session as the write at index stored it, unless the cache already
 // describes that write or a later one: a reply can arrive after the watch, or
-// a later registration, has delivered something newer.
+// a later registration, has delivered something newer. With no entry cached,
+// a write the last watch snapshot already covered is dropped too: that
+// snapshot left it out, so it had been removed or superseded, and nothing
+// else would correct it before the next delivery.
 func (c *sessionCache) Set(sessionID string, session *Session, index uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if cur, ok := c.sessions[sessionID]; ok && cur.index >= index {
+	if cur, ok := c.sessions[sessionID]; ok {
+		if cur.index >= index {
+			return
+		}
+	} else if index <= c.watched {
 		return
 	}
 	c.sessions[sessionID] = cachedSession{session: session, index: index}
@@ -347,6 +358,7 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 
 	// Replace the entire session map atomically
 	c.sessions = snapshot
+	c.watched = index
 
 	if added > 0 || updated > 0 || deleted > 0 {
 		c.logger.Info("updated session cache", "total", len(snapshot), "added", added, "updated", updated, "deleted", deleted)

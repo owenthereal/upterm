@@ -948,6 +948,34 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	suite.Equal(reg2.lease, pair.Session)
 }
 
+// And when the newer registration has come and gone, and the watch has
+// delivered the removal: with no cached entry to compare against, a late reply
+// mustn't cache the older registration either. On a quiet relay the next watch
+// delivery could be a long way off, and guests would be routed to it until
+// then.
+func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
+	store, delay := suite.storeWithADelayedReply()
+	defer func() { _ = store.Close() }()
+	defer delay.release()
+	ctx, id := context.Background(), suite.uniq("late-reply-removed")
+
+	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	suite.Require().Eventually(func() bool { return cachedGeneration(store, id) == 2 },
+		2*time.Second, 10*time.Millisecond, "the watch never delivered generation 2")
+	suite.Require().NoError(suite.store2.Release(ctx, reg2))
+	suite.Require().Eventually(func() bool { return !store.HasInCache(id) },
+		2*time.Second, 10*time.Millisecond, "the watch never delivered the removal")
+	delay.release()
+	reg1 := suite.awaitRegistered(first)
+	defer func() { _ = store.Release(ctx, reg1) }()
+
+	suite.False(store.HasInCache(id), "the late reply cached a registration that was superseded and removed")
+	_, err = store.Get(id)
+	suite.Error(err, "a removed registration is still found")
+}
+
 // Without renewal, Consul expires an entry within twice its TTL, which is at
 // least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
@@ -1018,9 +1046,16 @@ func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	c.Delete("id", 25)
 	assert.Zero(t, gen())
 
-	c.Set("id", &Session{ID: "id", Generation: 3}, 25)
+	c.Set("id", &Session{ID: "id", Generation: 3}, 28)
 	c.ReplaceAll(30, map[string]cachedSession{})
 	assert.Zero(t, gen(), "a snapshot past the write kept an entry it no longer has")
+
+	// With nothing cached, a write the last snapshot covered and left out was
+	// removed or superseded by then; one past it is new.
+	c.Set("id", &Session{ID: "id", Generation: 3}, 30)
+	assert.Zero(t, gen(), "a write the watch saw removed came back")
+	c.Set("id", &Session{ID: "id", Generation: 4}, 31)
+	assert.Equal(t, uint64(4), gen(), "a write past the last snapshot was dropped")
 }
 
 //
