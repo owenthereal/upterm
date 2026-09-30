@@ -268,11 +268,14 @@ func (suite *MemoryStoreTestSuite) TestStoreOperations() {
 	}
 
 	// Test Store
-	_, err := suite.store.Register(context.Background(), session)
+	reg, err := suite.store.Register(context.Background(), session)
 	suite.NoError(err)
 
-	// Test Store duplicate (should succeed - overwrites)
+	// The same registration again is refused; only its owner's rebuild
+	// stores it again.
 	_, err = suite.store.Register(context.Background(), session)
+	suite.ErrorIs(err, ErrSuperseded)
+	_, err = suite.store.Reregister(context.Background(), reg)
 	suite.NoError(err)
 
 	// Test Get
@@ -360,6 +363,10 @@ func (suite *MemoryStoreTestSuite) TestRegisterOrderingAndConditionalRelease() {
 	_, err = suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "a:22", Generation: 2})
 	suite.ErrorIs(err, ErrSuperseded, "the same generation from another node")
 	_, err = suite.store.Register(ctx, &Session{ID: "o", NodeAddr: "b:22", Generation: 2})
+	suite.ErrorIs(err, ErrSuperseded, "the same generation afresh, from its own node")
+	_, err = suite.store.Reregister(ctx, &Registration{Session: &Session{ID: "o", NodeAddr: "a:22", Generation: 2}})
+	suite.ErrorIs(err, ErrSuperseded, "a rebuild of the same generation from another node")
+	_, err = suite.store.Reregister(ctx, gen2)
 	suite.NoError(err, "the owner rebuilding its own claim")
 	suite.ErrorIs(suite.store.Renew(ctx, gen1), ErrLeaseLost)
 	suite.NoError(suite.store.Release(ctx, gen1))
@@ -623,6 +630,32 @@ func (suite *ConsulStoreTestSuite) TestRenewOfALostLeaseAndLockDelay() {
 	_, err = suite.client.Session().Destroy(reg.lease, nil)
 	suite.Require().NoError(err)
 	suite.ErrorIs(suite.store1.Renew(ctx, reg), ErrLeaseLost)
+}
+
+// A fresh registration of the generation already stored is refused, even from
+// the node that stored it. Only the owner's rebuild of that same registration
+// takes the entry, under a lease of its own.
+func (suite *ConsulStoreTestSuite) TestOnlyTheOwnersRebuildRestoresTheSameGeneration() {
+	ctx, id := context.Background(), suite.uniq("same-generation")
+	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	_, err = suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.ErrorIs(err, ErrSuperseded)
+	pair, _ := suite.consulGet(id)
+	suite.Require().NotNil(pair)
+	suite.Equal(reg.lease, pair.Session, "the refused registration took the entry")
+
+	rebuilt, err := suite.store1.Reregister(ctx, reg)
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store1.Release(ctx, rebuilt) }()
+	suite.True(rebuilt.Same(reg))
+	suite.NotEqual(reg.lease, rebuilt.lease)
+	pair, _ = suite.consulGet(id)
+	suite.Require().NotNil(pair)
+	suite.Equal(rebuilt.lease, pair.Session, "the rebuild didn't take the entry")
+	suite.NoError(suite.store1.Release(ctx, reg))
+	pair, _ = suite.consulGet(id)
+	suite.NotNil(pair, "releasing the replaced lease deleted the rebuilt entry")
 }
 
 // An entry that doesn't parse ranks as generation 0: a proven registration

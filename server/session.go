@@ -184,18 +184,23 @@ func (r *Registration) Same(o *Registration) bool {
 
 // sameIdentity reports whether a and b are the same registration. Only one
 // connection can hold an (ID, generation, node): a proof is bound to its
-// connection, and a legacy ID is random.
+// connection, another connection needs a higher generation, and a legacy ID is
+// random.
 func sameIdentity(a, b *Session) bool {
 	return a.ID == b.ID && a.Generation == b.Generation && a.NodeAddr == b.NodeAddr
 }
 
-// supersedes reports whether next may replace cur. A higher generation
-// always may. The same generation may only from cur's own node, which is that
-// node rebuilding its registration: from anywhere else it is a stale or
-// foreign claim.
-func supersedes(next, cur *Session) bool {
-	return next.Generation > cur.Generation ||
-		(next.Generation == cur.Generation && next.NodeAddr == cur.NodeAddr)
+// mayRegister reports whether a fresh registration next may replace cur. Only
+// a higher generation may: the same one again would be the same registration,
+// which the first connection's cleanup ends, taking the second's with it.
+func mayRegister(next, cur *Session) bool {
+	return next.Generation > cur.Generation
+}
+
+// mayRebuild reports whether the owner's rebuild of next may replace cur. It
+// may also replace next's own registration, which is what it stores again.
+func mayRebuild(next, cur *Session) bool {
+	return mayRegister(next, cur) || sameIdentity(next, cur)
 }
 
 func supersededError(next, cur *Session) error {
@@ -205,14 +210,20 @@ func supersededError(next, cur *Session) error {
 
 // SessionStore defines the interface for session storage.
 //
-// Registrations are ordered: a stored entry is replaced only by one that
-// supersedes it, and a handle's Release and Renew act only on its own entry.
+// Registrations are ordered: a stored entry is replaced only by a higher
+// generation, or by its owner rebuilding it, and a handle's Release and Renew
+// act only on its own entry.
 type SessionStore interface {
-	// Register stores s when its ID is absent or s supersedes the stored entry.
-	// Otherwise it returns an error wrapping ErrSuperseded and writes nothing.
-	// A Register that fails may outlast ctx by up to DefaultConsulTimeout,
-	// while it destroys a lease it created.
+	// Register stores s when its ID is absent or s has a higher generation
+	// than the stored entry. Otherwise it returns an error wrapping
+	// ErrSuperseded and writes nothing. A Register that fails may outlast ctx
+	// by up to DefaultConsulTimeout, while it destroys a lease it created.
 	Register(ctx context.Context, s *Session) (*Registration, error)
+	// Reregister is the owner's rebuild of reg after a known loss: it stores
+	// reg's session again under a new lease, as Register does, and may also
+	// replace an entry of reg's own identity, which Register refuses. It
+	// orders, retries and cleans up as Register does.
+	Reregister(ctx context.Context, reg *Registration) (*Registration, error)
 	// Release removes reg's entry if reg still holds it.
 	Release(ctx context.Context, reg *Registration) error
 	// Renew keeps reg's entry alive. An error wrapping ErrLeaseLost means reg
@@ -425,12 +436,23 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 	return store, nil
 }
 
-// Register stores session under a lock session of its own. The
-// generation check and the move of the lock are one transaction, conditional on
-// the entry the decision was read from, so no other registration can land
-// between them: whichever commits second finds the entry changed, and reads and
-// decides again.
+// Register stores session as a fresh registration.
 func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*Registration, error) {
+	return c.register(ctx, session, mayRegister)
+}
+
+// Reregister stores reg's session again, taking the entry over from reg's own
+// lock session, or its earlier rebuild's, if one still holds it.
+func (c *consulSessionStore) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
+	return c.register(ctx, reg.Session, mayRebuild)
+}
+
+// register stores session under a lock session of its own, replacing a stored
+// entry only where may allows. The generation check and the move of the lock
+// are one transaction, conditional on the entry the decision was read from, so
+// no other registration can land between them: whichever commits second finds
+// the entry changed, and reads and decides again.
+func (c *consulSessionStore) register(ctx context.Context, session *Session, may func(next, cur *Session) bool) (*Registration, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session cannot be nil")
 	}
@@ -481,7 +503,7 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 					{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease},
 				}
 			} else {
-				if cur := storedSession(pair.Value); !supersedes(session, cur) {
+				if cur := storedSession(pair.Value); !may(session, cur) {
 					return retry.Unrecoverable(supersededError(session, cur))
 				}
 				ops = api.KVTxnOps{{Verb: api.KVCheckIndex, Key: kvStoreKey, Index: pair.ModifyIndex}}
@@ -1058,14 +1080,24 @@ func newMemorySessionStore(logger *slog.Logger) *memorySessionStore {
 	}
 }
 
-// Register stores session unless the entry it would replace outranks it.
+// Register stores session as a fresh registration.
 func (m *memorySessionStore) Register(_ context.Context, session *Session) (*Registration, error) {
+	return m.register(session, mayRegister)
+}
+
+// Reregister stores reg's session again, over its own entry too.
+func (m *memorySessionStore) Reregister(_ context.Context, reg *Registration) (*Registration, error) {
+	return m.register(reg.Session, mayRebuild)
+}
+
+// register stores session, replacing a stored entry only where may allows.
+func (m *memorySessionStore) register(session *Session, may func(next, cur *Session) bool) (*Registration, error) {
 	confirmed := time.Now()
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if cur, ok := m.sessions[session.ID]; ok && !supersedes(session, cur) {
+	if cur, ok := m.sessions[session.ID]; ok && !may(session, cur) {
 		return nil, supersededError(session, cur)
 	}
 	m.sessions[session.ID] = session
@@ -1299,7 +1331,8 @@ func (sm *SessionManager) CreateSession(session *Session) (string, error) {
 	return sshUser, err
 }
 
-// Register stores s under the ordering rule, and returns its handle and the
+// Register stores s as a fresh registration, which needs its ID absent or a
+// higher generation than the stored one, and returns its handle and the
 // encoded SSH user identifier. A Register that fails may outlast ctx by up to
 // DefaultConsulTimeout, while the store destroys a lease it created.
 func (sm *SessionManager) Register(ctx context.Context, s *Session) (*Registration, string, error) {
@@ -1323,12 +1356,13 @@ func (sm *SessionManager) Renew(ctx context.Context, reg *Registration) error {
 }
 
 // Reregister rebuilds reg after a known loss: the same registration, stored
-// again under the ordering rule with a lease of its own. The handle it returns
+// again with a lease of its own. Unlike Register it may replace an entry of
+// reg's own identity; only reg's lease keeper calls it. The handle it returns
 // is Same as reg. Release reg afterwards only if its lease is non-empty and
 // differs from the new handle's: a store without leases keeps one entry for
 // both handles, and releasing reg there would delete the entry just rebuilt.
 func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
-	return sm.store.Register(ctx, reg.Session)
+	return sm.store.Reregister(ctx, reg)
 }
 
 // LeaseTTL is how long an unrenewed registration lasts; 0 if it doesn't expire.

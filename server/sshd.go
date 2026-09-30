@@ -131,13 +131,14 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 }
 
 // add adopts reg for conn, and returns the registration it replaced.
-// ErrSuperseded: the one this node serves for the ID is not superseded by
-// reg; nothing changes.
+// ErrSuperseded: the one this node serves for the ID came from another
+// connection, and reg's generation isn't higher; nothing changes.
 //
 // The store already ordered reg against the entry it replaced, but two
-// registrations can commit in one order and adopt in the other. Checking again
-// here, under the lock, means a delayed older registration can never evict a
-// newer one.
+// registrations can commit in one order and adopt in the other, and the store
+// takes any generation once the entry is gone. Checking again here, under the
+// lock, means a delayed older registration can never evict a newer one, nor a
+// second connection claim the same generation as the first.
 //
 // reg's lease keeper starts only once reg is accepted, so a refused
 // registration is never renewed or rebuilt, and the one it replaced stops
@@ -147,7 +148,7 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 
 	l.mu.Lock()
 	cur, ok := l.regs[reg.ID()]
-	if ok && cur.conn != conn && !supersedes(reg.Session, cur.reg.Session) {
+	if ok && cur.conn != conn && !mayRegister(reg.Session, cur.reg.Session) {
 		l.mu.Unlock()
 		return nil, supersededError(reg.Session, cur.reg.Session)
 	}
@@ -436,14 +437,14 @@ func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
 }
 
 // adopt makes reg the registration this node serves for its ID, over conn. It
-// reports false with a registration.Superseded reply when a newer registration
-// holds the ID here, and false with no reply when conn closed while
-// registering.
+// reports false with a registration.Superseded reply when another connection's
+// registration of the same or a newer generation holds the ID here, and false
+// with no reply when conn closed while registering.
 func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
 	prev, err := s.sessions.add(reg, conn)
 	if err != nil {
-		// The store took reg, but a newer registration was adopted here first.
-		// The release is conditional, so it can't touch the newer entry.
+		// The store took reg, but the registration adopted here first outranks
+		// it. The release is conditional, so it can't touch that one's entry.
 		s.Logger.Warn("refused a superseded registration", "error", err, "session-id", reg.ID())
 		rctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
 		defer cancel()

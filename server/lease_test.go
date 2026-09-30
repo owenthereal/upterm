@@ -19,10 +19,10 @@ import (
 // leaseStore is a memory store with a lease lifetime and scripted calls.
 type leaseStore struct {
 	*memorySessionStore
-	ttl      time.Duration
-	renews   atomic.Int32
-	renew    func(ctx context.Context, reg *Registration) error
-	register func(ctx context.Context, s *Session) (*Registration, error)
+	ttl        time.Duration
+	renews     atomic.Int32
+	renew      func(ctx context.Context, reg *Registration) error
+	reregister func(ctx context.Context, reg *Registration) (*Registration, error)
 }
 
 func (s *leaseStore) LeaseTTL() time.Duration { return s.ttl }
@@ -35,11 +35,11 @@ func (s *leaseStore) Renew(ctx context.Context, reg *Registration) error {
 	return s.memorySessionStore.Renew(ctx, reg)
 }
 
-func (s *leaseStore) Register(ctx context.Context, sess *Session) (*Registration, error) {
-	if s.register != nil {
-		return s.register(ctx, sess)
+func (s *leaseStore) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
+	if s.reregister != nil {
+		return s.reregister(ctx, reg)
 	}
-	return s.memorySessionStore.Register(ctx, sess)
+	return s.memorySessionStore.Reregister(ctx, reg)
 }
 
 var errConsulDown = errors.New("consul unreachable")
@@ -95,7 +95,7 @@ func newKeeperFixture(t *testing.T, store *leaseStore, gen uint64) (*localSessio
 	mp, _ := newTestMetrics(t)
 	sessions := newLocalSessions(mp, sm, logger)
 	sessions.timing = testLeaseTiming
-	reg, err := store.memorySessionStore.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
+	reg, err := store.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
 	require.NoError(t, err)
 	conn := newCloser()
 	_, err = sessions.add(reg, conn)
@@ -173,12 +173,12 @@ func (s *gatedReleaseStore) Release(ctx context.Context, reg *Registration) erro
 }
 
 // A rebuild that is still running at its bound doesn't hold the close.
-// 1. The rebuild's Register hangs, ignoring its context, and then succeeds.
+// 1. The rebuild's Reregister hangs, ignoring its context, and then succeeds.
 // 2. The release of that late result is held too.
 // 3. The connection must close at the bound, before either gate opens.
 // 4. Once the gates open, the late registration is released after all.
 func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) {
-	registerGate, releaseGate := make(chan struct{}), make(chan struct{})
+	rebuildGate, releaseGate := make(chan struct{}), make(chan struct{})
 	lostAt := make(chan time.Time, 1)
 	base := &leaseStore{ttl: testTTL, renew: func(context.Context, *Registration) error {
 		// The keeper learns of the loss after this, so its bound can't be
@@ -189,9 +189,9 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 		}
 		return ErrLeaseLost
 	}}
-	base.register = func(_ context.Context, s *Session) (*Registration, error) {
-		<-registerGate // ignores ctx, as a stuck HTTP call would
-		return base.memorySessionStore.Register(context.Background(), s)
+	base.reregister = func(_ context.Context, reg *Registration) (*Registration, error) {
+		<-rebuildGate // ignores ctx, as a stuck HTTP call would
+		return base.memorySessionStore.Reregister(context.Background(), reg)
 	}
 	store := &gatedReleaseStore{leaseStore: base, gate: releaseGate}
 
@@ -201,7 +201,7 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 	mp, _ := newTestMetrics(t)
 	sessions := newLocalSessions(mp, sm, logger)
 	sessions.timing = testLeaseTiming
-	reg, err := base.memorySessionStore.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: 1})
+	reg, err := base.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: 1})
 	require.NoError(t, err)
 	conn := newCloser()
 	_, err = sessions.add(reg, conn)
@@ -212,8 +212,8 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 	require.True(t, closed, "the close waited on a store call")
 	requireClosedAt(t, at, bound, "the rebuild bound")
 
-	close(registerGate) // the late success arrives
-	close(releaseGate)  // and its cleanup may proceed
+	close(rebuildGate) // the late success arrives
+	close(releaseGate) // and its cleanup may proceed
 	require.Eventually(t, func() bool {
 		_, err := base.Get("id")
 		return err != nil
@@ -223,9 +223,9 @@ func TestLeaseKeeperClosesAtTheRebuildBoundWhateverCleanupIsDoing(t *testing.T) 
 
 func TestLeaseKeeperRebuildBoundSparesLegacyHosts(t *testing.T) {
 	store := &leaseStore{
-		ttl:      testTTL,
-		renew:    func(context.Context, *Registration) error { return ErrLeaseLost },
-		register: func(context.Context, *Session) (*Registration, error) { return nil, errConsulDown },
+		ttl:        testTTL,
+		renew:      func(context.Context, *Registration) error { return ErrLeaseLost },
+		reregister: func(context.Context, *Registration) (*Registration, error) { return nil, errConsulDown },
 	}
 	_, _, conn := newKeeperFixture(t, store, 0)
 	// Past where a capable registration's connection closes, with room for
@@ -251,8 +251,8 @@ func TestLeaseKeeperRebuildsAKnownLossAndStopsWhenSuperseded(t *testing.T) {
 	require.False(t, conn.isClosed())
 
 	store2 := &leaseStore{ttl: testTTL,
-		renew:    func(context.Context, *Registration) error { return ErrLeaseLost },
-		register: func(context.Context, *Session) (*Registration, error) { return nil, ErrSuperseded }}
+		renew:      func(context.Context, *Registration) error { return ErrLeaseLost },
+		reregister: func(context.Context, *Registration) (*Registration, error) { return nil, ErrSuperseded }}
 	_, _, conn2 := newKeeperFixture(t, store2, 1)
 	select {
 	case <-conn2.closed:
@@ -265,8 +265,8 @@ func TestLeaseKeeperRebuildsAKnownLossAndStopsWhenSuperseded(t *testing.T) {
 // registration holds its ID, its connection is closed like any other.
 func TestLeaseKeeperClosesASupersededLegacyHost(t *testing.T) {
 	store := &leaseStore{ttl: testTTL,
-		renew:    func(context.Context, *Registration) error { return ErrLeaseLost },
-		register: func(context.Context, *Session) (*Registration, error) { return nil, ErrSuperseded }}
+		renew:      func(context.Context, *Registration) error { return ErrLeaseLost },
+		reregister: func(context.Context, *Registration) (*Registration, error) { return nil, ErrSuperseded }}
 	_, _, conn := newKeeperFixture(t, store, 0)
 	select {
 	case <-conn.closed:
@@ -279,10 +279,10 @@ func TestLeaseKeeperClosesASupersededLegacyHost(t *testing.T) {
 func TestLeaseKeeperNeverResurrectsAnEndedRegistration(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	store := &leaseStore{ttl: testTTL, renew: func(context.Context, *Registration) error { return ErrLeaseLost }}
-	store.register = func(_ context.Context, s *Session) (*Registration, error) {
+	store.reregister = func(_ context.Context, reg *Registration) (*Registration, error) {
 		close(entered)
 		<-release
-		return store.memorySessionStore.Register(context.Background(), s)
+		return store.memorySessionStore.Reregister(context.Background(), reg)
 	}
 	sessions, reg, _ := newKeeperFixture(t, store, 1)
 	<-entered

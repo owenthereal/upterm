@@ -159,7 +159,7 @@ func (k *leaseKeeper) rebuild(ctx context.Context, reg *Registration, lostAt tim
 // call makes one store call under ctx. A capable registration's call runs on
 // a goroutine of its own, and call returns when ctx ends whether the call has
 // or not: a deadline has to hold against a call that ignores its context, as a
-// stuck HTTP request does, and against Register's own cleanup, which can
+// stuck HTTP request does, and against a rebuild's own cleanup, which can
 // outlast it. The abandoned call finishes in the background, and a
 // registration it returns then is released. A legacy registration has no
 // deadline to hold, so its calls are made inline.

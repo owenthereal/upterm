@@ -1000,6 +1000,81 @@ func Test_sshd_NewerRegistrationSupersedesTheOlder(t *testing.T) {
 	require.Equal(t, registration.Superseded, string(body))
 }
 
+// slot returns the registration this node serves for id, as its local
+// sessions hold it.
+func (s *testSSHD) slot(id string) *localRegistration {
+	s.sshd.mux.Lock()
+	sessions := s.sshd.sessions
+	s.sshd.mux.Unlock()
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return sessions.regs[id]
+}
+
+// A host that registers the same generation again over another connection,
+// say after losing the first reply, is refused: that is the same registration,
+// and the first connection's cleanup, which ends it, would take the second's
+// slot and entry along. The next generation takes over as usual.
+func Test_sshd_SameGenerationFromAnotherConnectionIsRefused(t *testing.T) {
+	s := newTestSSHD(t)
+	host := newProven(t)
+	first := s.dialAs(t, "conn-1")
+	incoming := first.HandleChannelOpen(forwardedStreamlocalChannelType)
+	ok, body := host.register(t, first, "conn-1", 1)
+	require.True(t, ok, string(body))
+	ok, reason := forwardRequest(t, first, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, reason)
+	before := s.slot(host.id())
+	require.NotNil(t, before)
+
+	second := s.dialAs(t, "conn-2")
+	ok, body = host.register(t, second, "conn-2", 1)
+	require.False(t, ok)
+	require.Equal(t, registration.Superseded, string(body))
+	require.Same(t, before, s.slot(host.id()), "the refused registration touched the first one's slot")
+	sess, err := s.sshd.SessionManager.GetSession(host.id())
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), sess.Generation)
+	// The first registration's listener still routes to its connection.
+	guest, err := s.network.Session().Dial(host.id())
+	require.NoError(t, err, "the first registration's listener was closed")
+	select {
+	case ch := <-incoming:
+		_ = ch.Reject(ssh.Prohibited, "test")
+	case <-time.After(2 * time.Second):
+		t.Fatal("a guest reaching the session socket never reached the first connection")
+	}
+	_ = guest.Close()
+
+	ok, body = host.register(t, second, "conn-2", 2)
+	require.True(t, ok, string(body))
+	waitClosed(t, first, "the superseded registration's connection")
+	sess, err = s.sshd.SessionManager.GetSession(host.id())
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), sess.Generation)
+}
+
+// At the node: another connection's registration of the generation this node
+// already serves is refused, even when the store took it, as it does once the
+// entry is gone; the connection that holds the slot may register again.
+func Test_localSessions_SameGenerationFromAnotherConnectionIsRefused(t *testing.T) {
+	sessions, _, gauge := newTestLocalSessions(t)
+	reg := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
+	conn := newCloser()
+	_, err := sessions.add(reg, conn)
+	require.NoError(t, err)
+	again := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}}
+	prev, err := sessions.add(again, newCloser())
+	require.ErrorIs(t, err, ErrSuperseded)
+	require.Nil(t, prev)
+	require.True(t, sessions.active(reg))
+	require.False(t, conn.isClosed())
+	prev, err = sessions.add(again, conn)
+	require.NoError(t, err, "the connection that holds the slot")
+	require.Same(t, reg, prev.reg)
+	require.Equal(t, 1.0, gauge())
+}
+
 // A host that goes while its registration is being stored leaves nothing
 // behind: the node releases the registration rather than holding the ID for
 // no one.
