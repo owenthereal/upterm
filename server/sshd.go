@@ -457,6 +457,15 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		// host connection, so its guests go with it.
 		s.forwardHandler.closeListener(prev.reg)
 		_ = prev.conn.Close()
+		// A lease the old registration's keeper rebuilt is known only to its
+		// slot. The old connection's cleanup releases the handle it was adopted
+		// with, and closeListener ends prev.reg only if it had bound a
+		// listener, so release it here. It holds nothing now the new
+		// registration holds the entry, and a store with no leases has nothing
+		// to release.
+		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
+			go s.releaseReplaced(prev.reg)
+		}
 	}
 
 	ownSession(ctx, reg)
@@ -475,6 +484,17 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		return false, nil
 	}
 	return true, nil
+}
+
+// releaseReplaced releases a registration a takeover on this node replaced.
+// The store releases only an entry reg still holds, so the new registration's
+// is left alone.
+func (s *sshd) releaseReplaced(reg *Registration) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+	defer cancel()
+	if err := s.SessionManager.Release(ctx, reg); err != nil {
+		s.Logger.Error("error releasing a replaced registration", "error", err, "session-id", reg.ID(), "lease", reg.lease)
+	}
 }
 
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -710,6 +711,62 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 	ownSession(conn2, gen2)
 	ok, body := forward(conn2)
 	require.True(t, ok, string(body))
+}
+
+// releaseRecordingStore records the lease of every handle it is asked to
+// release.
+type releaseRecordingStore struct {
+	SessionStore
+	mu     sync.Mutex
+	leases []string
+}
+
+func (s *releaseRecordingStore) Release(ctx context.Context, reg *Registration) error {
+	s.mu.Lock()
+	s.leases = append(s.leases, reg.lease)
+	s.mu.Unlock()
+	return s.SessionStore.Release(ctx, reg)
+}
+
+func (s *releaseRecordingStore) released(lease string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Contains(s.leases, lease)
+}
+
+// A takeover on this node releases the lease its keeper rebuilt for the old
+// registration, though no listener was bound for closeListener to end it
+// with: the old connection's cleanup only knows the handle it was adopted
+// with, and the rebuilt lease would otherwise linger until it expired.
+func Test_sshd_TakeoverReleasesARebuiltLease(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	store := &releaseRecordingStore{SessionStore: newMemorySessionStore(logger)}
+	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
+	mp, _ := newTestMetrics(t)
+	sessions := newLocalSessions(mp, sm, logger)
+	network := &MemoryProvider{}
+	require.NoError(t, network.SetOpts(nil))
+	s := &sshd{
+		SessionManager: sm,
+		Logger:         logger,
+		sessions:       sessions,
+		forwardHandler: newStreamlocalForwardHandler(sm, network.Session(), sessions, logger),
+	}
+
+	adopted := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 1}, lease: "adopted"}
+	oldConn := newCloser()
+	_, err := sessions.add(adopted, oldConn)
+	require.NoError(t, err)
+	require.True(t, sessions.replace(&Registration{Session: adopted.Session, lease: "rebuilt"}))
+
+	next := &Registration{Session: &Session{ID: "id", NodeAddr: "node", Generation: 2}, lease: "next"}
+	conn, _ := newTestConnContext(t)
+	ok, refusal := s.adopt(conn, next, nil)
+	require.True(t, ok, string(refusal))
+	require.True(t, oldConn.isClosed())
+	require.Eventually(t, func() bool { return store.released("rebuilt") }, 2*time.Second, 10*time.Millisecond,
+		"the rebuilt lease was left to expire")
+	require.False(t, store.released("next"), "the takeover released the new registration")
 }
 
 // Test_sshd_PublicKeyAuthority pins what the internal node door accepts. It has
