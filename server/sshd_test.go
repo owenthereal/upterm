@@ -587,6 +587,87 @@ func Test_forwards_OldRegistrationCannotCloseTheNew(t *testing.T) {
 	require.NoError(t, <-accepted)
 }
 
+// Takeovers on this node can overlap: generation 2 adopts, but before it
+// closes generation 1's listener, generation 3 adopts and closes generation
+// 2's, which never bound one. Generation 3's forward still binds: the listener
+// of a registration this node no longer serves is closed first, and ending
+// that registration leaves generation 3's entry and slot alone. Generation
+// 3's own listener is never closed that way.
+func Test_forwards_OverlappingTakeoversBindTheLatest(t *testing.T) {
+	sessions, sm, gauge := newTestLocalSessions(t)
+	network := &MemoryProvider{}
+	require.NoError(t, network.SetOpts(nil))
+	h := newStreamlocalForwardHandler(sm, network.Session(), sessions, slog.New(slog.DiscardHandler))
+	register := func(gen uint64) *Registration {
+		reg, _, err := sm.Register(context.Background(), &Session{ID: "id", NodeAddr: "node", Generation: gen})
+		require.NoError(t, err)
+		return reg
+	}
+
+	gen1 := register(1)
+	_, err := sessions.add(gen1, newCloser())
+	require.NoError(t, err)
+	ln1, err := h.bind(gen1)
+	require.NoError(t, err)
+
+	// Generation 2 adopts, and is held up before it closes generation 1's
+	// listener.
+	gen2 := register(2)
+	prev1, err := sessions.add(gen2, newCloser())
+	require.NoError(t, err)
+
+	// Generation 3 adopts in full, and its host forwards.
+	gen3 := register(3)
+	prev2, err := sessions.add(gen3, newCloser())
+	require.NoError(t, err)
+	h.closeListener(prev2.reg)
+	require.NoError(t, prev2.conn.Close())
+	ln3, err := h.bind(gen3)
+	require.NoError(t, err, "an older takeover's listener kept the socket from the latest registration")
+	defer h.closeListener(gen3)
+
+	accepted := make(chan error, 1)
+	go func() {
+		_, err := ln1.Accept()
+		accepted <- err
+	}()
+	select {
+	case err := <-accepted:
+		require.Error(t, err, "generation 1's listener accepted a connection")
+	case <-time.After(2 * time.Second):
+		t.Fatal("generation 1's listener is still open")
+	}
+	require.True(t, sessions.active(gen3))
+	require.Equal(t, 1.0, gauge())
+	sess, err := sm.GetSession("id")
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), sess.Generation, "ending generation 1 removed generation 3's entry")
+
+	// A second forward from the registration this node serves still fails,
+	// rather than closing its own listener.
+	_, err = h.bind(gen3)
+	require.Error(t, err)
+	require.True(t, sessions.active(gen3))
+
+	// Generation 2 resumes: generation 1's listener is gone already, and
+	// generation 3's stays.
+	h.closeListener(prev1.reg)
+	require.NoError(t, prev1.conn.Close())
+	go func() {
+		c, err := ln3.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+		accepted <- err
+	}()
+	dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := network.Session().DialContext(dctx, "id")
+	require.NoError(t, err, "generation 3's listener was closed")
+	_ = c.Close()
+	require.NoError(t, <-accepted)
+}
+
 // testConnContext stands in for a host connection's context, for tests that
 // drive the node's handlers without an SSH connection. It carries no
 // connection, so nothing may be dialed through it.

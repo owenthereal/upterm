@@ -284,17 +284,41 @@ var errForwardEnded = errors.New("session has ended")
 // binds before the old listener is closed, and is closed with it, or finds its
 // registration replaced. It can't bind after that close and take the socket's
 // name from the successor.
+//
+// A listener still held by a registration this node no longer serves is
+// closed first, under the same lock. Takeovers can overlap: when a later one
+// overtakes a takeover that hasn't yet closed the listener it replaced, that
+// listener would otherwise keep the socket's name from the registration this
+// node now serves. A listener of the registration this node serves is never
+// closed here, so a second forward from it still fails.
 func (h *streamlocalForwardHandler) bind(reg *Registration) (net.Listener, error) {
 	h.Lock()
-	defer h.Unlock()
 	if !h.sessions.active(reg) {
+		h.Unlock()
 		return nil, errForwardEnded
 	}
+	var evicted *Registration
+	if fwd, ok := h.forwards[reg.ID()]; ok && !h.sessions.active(fwd.reg) {
+		if err := fwd.ln.Close(); err != nil {
+			h.logger.Error("error closing a replaced registration's listener", "error", err, "session-id", reg.ID())
+		}
+		delete(h.forwards, reg.ID())
+		evicted = fwd.reg
+	}
 	ln, err := h.sessionDialListener.Listen(reg.ID())
+	if err == nil {
+		h.forwards[reg.ID()] = forward{reg: reg, ln: ln}
+	}
+	h.Unlock()
+
+	// Outside the lock: ending releases the store entry, and a Consul call can
+	// be slow. The release is conditional, so it leaves reg's entry alone.
+	if evicted != nil {
+		h.sessions.end(evicted)
+	}
 	if err != nil {
 		return nil, err
 	}
-	h.forwards[reg.ID()] = forward{reg: reg, ln: ln}
 	return ln, nil
 }
 
