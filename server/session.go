@@ -158,9 +158,10 @@ func (s *Session) IsClientKeyAllowed(key ssh.PublicKey) bool {
 // its own claim, never a successor's (I2, I4).
 type Registration struct {
 	Session *Session
-	// ConfirmedAt is the send time of the write that created the handle. The
-	// expiry budget counts from it, and a send time can only make it early
-	// (spec 6.4).
+	// ConfirmedAt is the send time of the lock-session creation this
+	// registration's lease came from (memory: taken before the write). The
+	// expiry budget counts from it, and the lease's TTL clock can't have
+	// started earlier, so the budget can only end early (spec 6.4).
 	ConfirmedAt time.Time
 	lease       string // Consul lock session; "" in memory
 	index       uint64 // Consul ModifyIndex as written; 0 in memory
@@ -423,19 +424,22 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 	qo := (&api.QueryOptions{}).WithContext(ctx)
 
 	var (
-		lease     string
-		index     uint64
-		confirmed time.Time
+		lease   string
+		created time.Time
+		index   uint64
 	)
 	err = retry.Do(
 		func() error {
 			// One lock session for the call, however many attempts it takes.
+			// Its TTL clock starts when Consul creates it, so the send time of
+			// the create is the earliest the expiry budget can safely start.
 			if lease == "" {
+				sent := time.Now()
 				id, _, err := c.client.Session().CreateNoChecks(c.createConsulLockSession(session.ID), wo)
 				if err != nil {
 					return fmt.Errorf("failed to create consul lock session: %w", err)
 				}
-				lease = id
+				lease, created = id, sent
 			}
 
 			pair, _, err := c.client.KV().Get(kvStoreKey, qo)
@@ -462,7 +466,6 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 				ops = append(ops, &api.KVTxnOp{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease})
 			}
 
-			sent := time.Now()
 			ok, resp, _, err := c.client.KV().Txn(ops, qo)
 			if err != nil {
 				return fmt.Errorf("failed to store session data: %w", err)
@@ -474,7 +477,6 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 			if n := len(resp.Results); n > 0 {
 				index = resp.Results[n-1].ModifyIndex
 			}
-			confirmed = sent
 			return nil
 		},
 		retry.Context(ctx),
@@ -509,7 +511,7 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 		"key", kvStoreKey,
 	)
 
-	return &Registration{Session: session, ConfirmedAt: confirmed, lease: lease, index: index}, nil
+	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index}, nil
 }
 
 // storedSession ranks a stored value for ordering. One that doesn't parse

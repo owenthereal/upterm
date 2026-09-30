@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -654,6 +656,51 @@ func (suite *ConsulStoreTestSuite) TestRegisterHonoursItsContext() {
 	cancel()
 	_, err := suite.store1.Register(ctx, &Session{ID: suite.uniq("cancelled"), NodeAddr: "a:22", Generation: 1})
 	suite.ErrorIs(err, context.Canceled)
+}
+
+// firstSend records when each Consul endpoint was first sent a request.
+type firstSend struct {
+	mu   sync.Mutex
+	at   map[string]time.Time
+	next http.RoundTripper
+}
+
+func (f *firstSend) RoundTrip(r *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	if _, ok := f.at[r.URL.Path]; !ok {
+		f.at[r.URL.Path] = time.Now()
+	}
+	f.mu.Unlock()
+	return f.next.RoundTrip(r)
+}
+
+// The lease's TTL clock starts when Consul creates its lock session, so the
+// expiry budget must start no later than that request was sent (spec 6.4).
+func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+	suite.Require().NoError(err)
+	defer func() { _ = store.Close() }()
+
+	sends := &firstSend{at: make(map[string]time.Time), next: http.DefaultTransport}
+	cfg := api.DefaultConfig()
+	cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
+	cfg.HttpClient = &http.Client{Transport: sends}
+	store.client, err = api.NewClient(cfg)
+	suite.Require().NoError(err)
+
+	ctx := context.Background()
+	reg, err := store.Register(ctx, &Session{ID: suite.uniq("confirmed"), NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = store.Release(ctx, reg) }()
+
+	sends.mu.Lock()
+	created, txn := sends.at["/v1/session/create"], sends.at["/v1/txn"]
+	sends.mu.Unlock()
+	suite.Require().False(created.IsZero(), "no lock session was created")
+	suite.Require().False(txn.IsZero(), "no transaction was sent")
+	suite.False(reg.ConfirmedAt.After(created), "the budget starts after the lease's TTL clock")
 }
 
 // The bug the spike confirmed. Consul's minimum TTL is 10 s, and it may take
