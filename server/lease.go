@@ -99,7 +99,7 @@ func (k *leaseKeeper) renew(ctx context.Context, reg *Registration, confirmed ti
 		}
 		k.logger.Warn("failed to renew the session lease", "error", err, "retry-in", delay)
 		if !sleep(bctx, delay) {
-			k.over(ctx, deadline, "the session lease's expiry budget ran out")
+			k.cutOff(ctx, reg, "the session lease's expiry budget ran out")
 			return sent, false, false
 		}
 	}
@@ -150,7 +150,7 @@ func (k *leaseKeeper) rebuild(ctx context.Context, reg *Registration, lostAt tim
 		}
 		k.logger.Warn("failed to rebuild the session lease", "error", err, "retry-in", delay)
 		if !sleep(bctx, delay) {
-			k.over(ctx, deadline, "the lost session lease wasn't rebuilt in time")
+			k.cutOff(ctx, reg, "the lost session lease wasn't rebuilt in time")
 			return nil, false
 		}
 	}
@@ -202,6 +202,19 @@ func (k *leaseKeeper) over(ctx context.Context, deadline time.Time, why string) 
 	k.logger.Warn("closing the host connection", "reason", why)
 	k.closeConn()
 	return true
+}
+
+// cutOff ends the keeper when a wait bounded by its deadline is cut short. The
+// bound ends only with ctx or at the deadline, so with ctx still live the
+// deadline has come, and a capable registration's connection is closed rather
+// than left with no one keeping its lease. A legacy registration has no
+// deadline, and its connection is never closed for its lease.
+func (k *leaseKeeper) cutOff(ctx context.Context, reg *Registration, why string) {
+	if ctx.Err() != nil || !reg.Capable() {
+		return
+	}
+	k.logger.Warn("closing the host connection", "reason", why)
+	k.closeConn()
 }
 
 // release gives up a handle the keeper won't keep. It runs on a fresh
