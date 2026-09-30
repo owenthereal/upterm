@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/internal/httpproxy"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/ws"
@@ -75,7 +76,17 @@ type ReverseTunnel struct {
 	// HostKey is the key the embedded sshd presents. Its public half is what
 	// the relay is told to expect on every guest's upstream hop; Signers
 	// authenticate this tunnel and are used for nothing else.
-	HostKey           ssh.Signer
+	HostKey ssh.Signer
+	// SessionSecret, when set, makes Establish prove to the relay that this
+	// host holds HostKey, so the session is registered under an ID derived
+	// from the key and this secret rather than a random one. Generation orders
+	// this registration against earlier ones under the same ID, and must be at
+	// least 1 alongside a secret.
+	//
+	// The relay treats a proven registration as one whose host can reconnect,
+	// and may close its tunnel on that basis: set it only for a host that does.
+	SessionSecret     []byte
+	Generation        uint64
 	AuthorizedKeys    []ssh.PublicKey
 	KeepAliveDuration time.Duration
 	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
@@ -89,6 +100,24 @@ type ReverseTunnel struct {
 
 	// stopKeepAlive ends the goroutine Establish starts. Nil until then.
 	stopKeepAlive context.CancelFunc
+
+	// What the relay did with the last successful Establish's proof.
+	reconnectSupported bool
+	sessionKeyRedial   bool
+}
+
+// ReconnectSupported reports whether the relay honoured the proof, by
+// registering the session under the ID derived from HostKey and SessionSecret.
+// A relay that predates proofs ignores one and issues a random ID, and a
+// tunnel that sent none never asked.
+func (c *ReverseTunnel) ReconnectSupported() bool {
+	return c.reconnectSupported
+}
+
+// SessionKeyRedial reports whether the relay also lets the session key alone
+// authenticate a redial. It is only ever true where ReconnectSupported is.
+func (c *ReverseTunnel) SessionKeyRedial() bool {
+	return c.sessionKeyRedial
 }
 
 // Close releases whatever Establish took, and works on a tunnel that never
@@ -186,9 +215,33 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
 	}
 
-	sessResp, err := c.createSession(user.Username, hostPublicKeys, authorizedKeys)
+	req := &server.CreateSessionRequest{
+		HostUser:             user.Username,
+		HostPublicKeys:       hostPublicKeys,
+		ClientAuthorizedKeys: authorizedKeys,
+	}
+	if c.SessionSecret != nil {
+		// Signed over this connection's SSH session ID, which the relay reads
+		// back from the certificate its proxy minted for this same connection,
+		// so a proof captured here is worthless on any other.
+		proof, err := registration.Sign(c.HostKey, c.SessionID(), c.SessionSecret, c.Generation)
+		if err != nil {
+			return nil, fmt.Errorf("error signing session proof: %w", err)
+		}
+		req.SessionSecret, req.Generation, req.HostKeyProof = c.SessionSecret, c.Generation, proof
+	}
+
+	sessResp, err := c.createSession(req)
 	if err != nil {
 		return nil, fmt.Errorf("error creating session: %w", err)
+	}
+
+	// Honoured only if the ID is the derived one: a relay without proofs
+	// ignores the fields and answers with a random ID, and says nothing else.
+	reconnectSupported := c.SessionSecret != nil &&
+		sessResp.SessionID == registration.ID(c.HostKey.PublicKey(), c.SessionSecret)
+	if c.SessionSecret != nil && !reconnectSupported {
+		baseLogger.Warn("relay did not honour the session proof, so this session cannot reconnect", "relay", c.Host.Host)
 	}
 
 	ln, err := c.Listen("unix", sessResp.SessionID)
@@ -261,6 +314,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		closeClient()
 	})
 
+	c.reconnectSupported = reconnectSupported
+	c.sessionKeyRedial = reconnectSupported && sessResp.SessionKeyRedial
+
 	return sessResp, nil
 }
 
@@ -279,12 +335,7 @@ func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientC
 	return ssh.NewClient(ncc, chans, reqs), nil
 }
 
-func (c *ReverseTunnel) createSession(user string, hostPublicKeys [][]byte, clientAuthorizedKeys [][]byte) (*server.CreateSessionResponse, error) {
-	req := &server.CreateSessionRequest{
-		HostUser:             user,
-		HostPublicKeys:       hostPublicKeys,
-		ClientAuthorizedKeys: clientAuthorizedKeys,
-	}
+func (c *ReverseTunnel) createSession(req *server.CreateSessionRequest) (*server.CreateSessionResponse, error) {
 	b, err := proto.Marshal(req)
 	if err != nil {
 		return nil, err
