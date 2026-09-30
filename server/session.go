@@ -754,9 +754,11 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 }
 
 // deleteBatch deletes each entry its lock session still holds, and returns the
-// ones it deleted. A transaction that rolls back names the checks that failed:
-// those entries are held by another lock session, or gone, so they're dropped
-// and the rest are tried again.
+// ones it deleted. A transaction that rolls back names the operations that
+// failed. A failed session check whose entry is gone, or held by another lock
+// session, is dropped and the rest are tried again. Any other failure, such as
+// a permission denial, is returned, as is a rollback that names nothing that
+// can be dropped: retrying it would loop.
 func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, error) {
 	for len(entries) > 0 {
 		ops := make(api.KVTxnOps, 0, 2*len(entries))
@@ -801,7 +803,12 @@ func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, erro
 
 		failed := make(map[int]bool, len(resp.Errors))
 		for _, e := range resp.Errors {
-			failed[e.OpIndex/2] = true
+			// Each entry is a session check followed by its delete.
+			i := e.OpIndex / 2
+			if e.OpIndex < 0 || e.OpIndex%2 != 0 || i >= len(entries) || !c.lostHold(entries[i]) {
+				return nil, fmt.Errorf("batch delete transaction failed: %s", describeTxnErrors(resp.Errors))
+			}
+			failed[i] = true
 		}
 		if len(failed) == 0 {
 			return nil, fmt.Errorf("batch delete transaction rolled back without naming an operation")
@@ -819,6 +826,16 @@ func (c *consulSessionStore) deleteBatch(entries []heldEntry) ([]heldEntry, erro
 		entries = rest
 	}
 	return nil, nil
+}
+
+// lostHold reports whether e's lock session no longer holds its entry: the
+// entry is gone, or another lock session holds it. That is the one reason a
+// session check fails that makes the entry not this instance's to delete. It
+// reads Consul rather than the failure's text, and a read that fails reports
+// false.
+func (c *consulSessionStore) lostHold(e heldEntry) bool {
+	pair, _, err := c.client.KV().Get(c.SessionKey(e.id), nil)
+	return err == nil && (pair == nil || pair.Session != e.lease)
 }
 
 // List all sessions from Consul

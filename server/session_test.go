@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -636,9 +638,9 @@ func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
 }
 
 // Shutdown cleanup from a stale listing leaves an entry another lease took
-// over.
-func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesAnotherLeaseHolds() {
-	ctx, a, b := context.Background(), suite.uniq("batch-a"), suite.uniq("batch-b")
+// over, and skips one that is already gone.
+func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesItNoLongerHolds() {
+	ctx, a, b, c := context.Background(), suite.uniq("batch-a"), suite.uniq("batch-b"), suite.uniq("batch-c")
 	_, err := suite.store1.Register(ctx, &Session{ID: a, NodeAddr: "a:22", Generation: 1})
 	suite.Require().NoError(err)
 	_, err = suite.store1.Register(ctx, &Session{ID: b, NodeAddr: "a:22", Generation: 1})
@@ -646,11 +648,76 @@ func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesAnotherLeaseHolds(
 	regB, err := suite.store2.Register(ctx, &Session{ID: b, NodeAddr: "b:22", Generation: 2})
 	suite.Require().NoError(err)
 	defer func() { _ = suite.store2.Release(ctx, regB) }()
-	suite.Require().NoError(suite.store1.BatchDelete([]string{a, b}))
+	regC, err := suite.store1.Register(ctx, &Session{ID: c, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	_, err = suite.client.Session().Destroy(regC.lease, nil) // the entry goes with its lease
+	suite.Require().NoError(err)
+	suite.Require().NoError(suite.store1.BatchDelete([]string{a, b, c}))
 	pair, _ := suite.consulGet(a)
 	suite.Nil(pair)
 	pair, _ = suite.consulGet(b)
 	suite.NotNil(pair, "taken over after the listing: survives")
+}
+
+// txnRollback answers every transaction with a rollback naming errs, and
+// passes all other requests to Consul.
+type txnRollback struct {
+	errs string // the JSON of the rollback's Errors
+	next http.RoundTripper
+}
+
+func (t txnRollback) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Path != "/v1/txn" {
+		return t.next.RoundTrip(r)
+	}
+	return &http.Response{
+		StatusCode: http.StatusConflict,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"Errors":` + t.errs + `}`)),
+		Request:    r,
+	}, nil
+}
+
+// Only a lost hold lets BatchDelete skip an entry. Any other failure, such as
+// a permission denial, is an error, and must never read as nothing left to
+// delete; nor may a rollback that names nothing it can drop be retried
+// forever.
+func (suite *ConsulStoreTestSuite) TestBatchDeleteReportsOtherFailures() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	for name, errs := range map[string]string{
+		"a denied delete":           `[{"OpIndex":1,"What":"Permission denied"}]`,
+		"a denied session check":    `[{"OpIndex":0,"What":"Permission denied"}]`,
+		"no operation named":        `[]`,
+		"an operation out of range": `[{"OpIndex":8,"What":"failed session check"}]`,
+	} {
+		suite.Run(name, func() {
+			store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+			suite.Require().NoError(err)
+			defer func() { _ = store.Close() }()
+			ctx := context.Background()
+			reg, err := store.Register(ctx, &Session{ID: suite.uniq("batch-fail"), NodeAddr: "a:22", Generation: 1})
+			suite.Require().NoError(err)
+			defer func() { _ = store.Release(ctx, reg) }()
+
+			cfg := api.DefaultConfig()
+			cfg.Address, cfg.Scheme = consulURL.Host, consulURL.Scheme
+			cfg.HttpClient = &http.Client{Timeout: DefaultConsulTimeout, Transport: txnRollback{errs: errs, next: http.DefaultTransport}}
+			store.client, err = api.NewClient(cfg)
+			suite.Require().NoError(err)
+
+			done := make(chan error, 1)
+			go func() { done <- store.BatchDelete([]string{reg.ID()}) }()
+			select {
+			case err := <-done:
+				suite.Error(err)
+			case <-time.After(5 * time.Second):
+				suite.Fail("BatchDelete kept retrying a rollback it can't make progress on")
+			}
+			pair, _ := suite.consulGet(reg.ID())
+			suite.NotNil(pair, "the entry is still held")
+		})
+	}
 }
 
 func (suite *ConsulStoreTestSuite) TestRegisterHonoursItsContext() {
