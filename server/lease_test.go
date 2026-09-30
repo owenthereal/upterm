@@ -46,7 +46,10 @@ var errConsulDown = errors.New("consul unreachable")
 
 var testLeaseTiming = leaseTiming{retryBase: 10 * time.Millisecond, retryMax: 40 * time.Millisecond, rebuildBound: 200 * time.Millisecond}
 
-const testTTL = 400 * time.Millisecond // renew at 200 ms; budget at 360 ms
+// testTTL leaves a capable keeper several lateWakes between a renewal falling
+// due and its budget running out, so a slow runner doesn't close a connection
+// that should stay open.
+const testTTL = time.Second // renew at 500 ms; budget at 900 ms
 
 // lateWake is how late a woken goroutine may run on a loaded CI runner under
 // -race; GitHub's Windows runners have woken them more than 100 ms late. A
@@ -104,7 +107,7 @@ func newKeeperFixture(t *testing.T, store *leaseStore, gen uint64) (*localSessio
 func TestLeaseKeeperRenewsAtHalfItsTTL(t *testing.T) {
 	store := &leaseStore{ttl: testTTL}
 	_, _, conn := newKeeperFixture(t, store, 1)
-	time.Sleep(time.Second)
+	time.Sleep(2 * testTTL) // renewals fall due at 0.5, 1 and 1.5 × testTTL
 	require.GreaterOrEqual(t, store.renews.Load(), int32(3))
 	require.False(t, conn.isClosed())
 }
@@ -240,7 +243,9 @@ func TestLeaseKeeperRebuildsAKnownLossAndStopsWhenSuperseded(t *testing.T) {
 		return nil
 	}}
 	sessions, reg, conn := newKeeperFixture(t, store, 1)
-	require.Eventually(t, func() bool { return store.renews.Load() >= 3 }, 2*time.Second, 10*time.Millisecond)
+	// The third renewal falls due at 1.5 × testTTL; the rest is room for late
+	// wakes.
+	require.Eventually(t, func() bool { return store.renews.Load() >= 3 }, 3*testTTL, 10*time.Millisecond)
 	require.True(t, sessions.active(reg))
 	require.False(t, conn.isClosed())
 
