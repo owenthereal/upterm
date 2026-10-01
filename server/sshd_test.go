@@ -1349,3 +1349,19 @@ func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(legacyID); return err != nil },
 		500*time.Millisecond, 20*time.Millisecond, "a legacy host is never pinged")
 }
+
+// A capable host that answers its pings keeps its connection, and with it its
+// registration, however many pings go by.
+func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
+	interval := 50 * time.Millisecond
+	s := newTestSSHD(t, func(d *sshd) {
+		d.liveness = hostLiveness{interval: interval, bound: 4 * interval}
+	})
+	host := newProven(t)
+	capable := s.dialAs(t, "capable")
+	ok, body := host.register(t, capable, "capable", 1)
+	require.True(t, ok, string(body))
+
+	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
+		12*interval, interval/5, "a capable host that answers is kept")
+}

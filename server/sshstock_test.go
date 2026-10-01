@@ -961,6 +961,76 @@ func TestStockSSHDoesNotRefreshAHostKeyMismatch(t *testing.T) {
 	require.Equal(t, int32(1), dialer.calls.Load())
 }
 
+// The second attempt is authorized against the snapshot it is planned from,
+// as the first is against its own read. The store has moved the session to
+// this node, where it admits only another key, so the guest isn't sent there.
+func TestStockSSHRefreshChecksTheGuestsKey(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	other, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	require.NoError(t, err)
+	here, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler))}
+	fresh := NewSession("session", "127.0.0.1:2222", "host",
+		[][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}, [][]byte{ssh.MarshalAuthorizedKey(other.PublicKey())})
+	fresh.Generation = 2
+	_, err = store.Register(context.Background(), fresh)
+	require.NoError(t, err)
+	store.stale = NewSession("session", "node-a:22", "host", nil, nil)
+	store.stale.Generation = 1
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22":      func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", here) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	_, err = client.NewSession()
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// Only a Consul-mode guest's route is refreshed. A host's upstream is this
+// node's sshd, and an embedded-mode guest's user names its node, so neither is
+// retried however the store has moved the session.
+func TestStockSSHRefreshesOnlyConsulGuests(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	// Only node C, where the store has the session, has a route; every other
+	// dial fails.
+	toNodeC := func() *routeDialer {
+		return &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+			"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+		}}
+	}
+
+	t.Run("a host", func(t *testing.T) {
+		dialer := toNodeC()
+		addr := consulModeProxy(t, movedSession(t, good), dialer)
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(good)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		ok, _, err := client.SendRequest("host-first-global", true, nil)
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Equal(t, int32(1), dialer.calls.Load())
+	})
+
+	t.Run("an embedded-mode guest", func(t *testing.T) {
+		dialer := toNodeC()
+		sm := newSessionManagerWithStore(movedSession(t, good), routing.NewEncodeDecoder(routing.ModeEmbedded))
+		_, addr, _, _ := stockTestProxy(t, 4*time.Second, dialer, func(p *sshProxy) { p.SessionManager = sm })
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: sm.GetEncodeDecoder().Encode("session", "node-a:22"), Auth: []ssh.AuthMethod{ssh.PublicKeys(good)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		_, err = client.NewSession()
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, err, &rejection)
+		require.Equal(t, int32(1), dialer.calls.Load())
+	})
+}
+
 type failingStore struct{ *memorySessionStore }
 
 func (failingStore) Get(string) (*Session, error) { return nil, errors.New("consul unreachable") }
