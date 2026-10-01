@@ -73,6 +73,10 @@ func (suite *EncodeDecoderTestSuite) TestConsulDecodeInvalidFormats() {
 	// Test empty session ID
 	_, _, err := decoder.Decode("")
 	suite.Error(err)
+
+	// An embedded-format user with nothing before the colon names no session
+	_, _, err = decoder.Decode(":x")
+	suite.ErrorIs(err, ErrInvalidSSHUser)
 }
 
 func (suite *EncodeDecoderTestSuite) TestConsulDecodeBackwardCompatibility() {
