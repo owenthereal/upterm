@@ -350,6 +350,36 @@ func TestLeaseKeeperKeepsAConsulEntryPastItsTTL(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond, "the entry outlived its registration")
 }
 
+// A capable registration taken over from another node is closed by its own
+// keeper. The takeover leaves its lock session alive, so only the entry can
+// tell the keeper it has lost the ID.
+func TestLeaseKeeperClosesARegistrationTakenOverFromAnotherNode(t *testing.T) {
+	sessions, _, _ := newConsulLeaseFixture(t)
+	ctx, id := context.Background(), fmt.Sprintf("lease-taken-over-%d", time.Now().UnixNano())
+	reg, _, err := sessions.sessionManager.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	require.NoError(t, err)
+	conn := newCloser()
+	_, err = sessions.add(reg, conn)
+	require.NoError(t, err)
+	t.Cleanup(func() { sessions.end(reg) })
+
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	require.NoError(t, err)
+	other, err := newConsulSessionStore(consulURL, 10*time.Second, logging.Must(logging.Console(), logging.Debug()).Logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Close() })
+	next, err := other.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Release(context.Background(), next) })
+
+	// The keeper renews at half the 10 s TTL.
+	select {
+	case <-conn.closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("a registration taken over by another node kept its connection")
+	}
+}
+
 // A rebuild stores the registration again under a new lease, but every path
 // that ends a registration holds the handle it was adopted with. Ending that
 // handle still removes the rebuilt entry, rather than leaving it to route

@@ -718,9 +718,14 @@ func (c *consulSessionStore) forget(sessionID, lease string) {
 	c.cache.Delete(sessionID, lease)
 }
 
-// Renew renews reg's lock session. Consul answers one it no longer has with no
-// entry and no error, which is a definite loss, unlike a failed renewal. A
-// transport error says nothing either way, and is returned as it came.
+// Renew renews reg's lock session, and checks that it still holds reg's
+// entry. Consul answers a lock session it no longer has with no entry and no
+// error, which is a definite loss, unlike a failed renewal. A takeover from
+// another node moves the entry to that node's lock session and leaves this
+// one alive, so a renewal that succeeds says nothing about the entry: an
+// entry that is gone, or held by another lock session, is a definite loss too.
+// A transport error, renewing or reading, says nothing either way, and is
+// returned as it came.
 func (c *consulSessionStore) Renew(ctx context.Context, reg *Registration) error {
 	entry, _, err := c.client.Session().Renew(reg.lease, (&api.WriteOptions{}).WithContext(ctx))
 	if err != nil {
@@ -728,6 +733,16 @@ func (c *consulSessionStore) Renew(ctx context.Context, reg *Registration) error
 	}
 	if entry == nil {
 		return fmt.Errorf("session %s: consul lock session %s: %w", reg.ID(), reg.lease, ErrLeaseLost)
+	}
+	pair, _, err := c.client.KV().Get(c.SessionKey(reg.ID()), (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	if pair == nil {
+		return fmt.Errorf("session %s: the entry is gone: %w", reg.ID(), ErrLeaseLost)
+	}
+	if pair.Session != reg.lease {
+		return fmt.Errorf("session %s: held by consul lock session %q, not %s: %w", reg.ID(), pair.Session, reg.lease, ErrLeaseLost)
 	}
 	return nil
 }

@@ -1014,6 +1014,32 @@ func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCache
 	suite.Equal(uint64(1), s.Generation)
 }
 
+// A takeover from another node moves the entry to that node's lock session
+// and leaves this one's alive, so a renewal that succeeds says nothing about
+// the entry. Renew reports the loss when the entry is held by another lock
+// session, or gone.
+func (suite *ConsulStoreTestSuite) TestRenewReportsAnEntryItNoLongerHolds() {
+	ctx, id := context.Background(), suite.uniq("renew-taken-over")
+	reg1, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store1.Release(ctx, reg1) }()
+	reg2, err := suite.store2.Register(ctx, &Session{ID: id, NodeAddr: "b:22", Generation: 2})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store2.Release(ctx, reg2) }()
+	se, _, err := suite.client.Session().Info(reg1.lease, nil)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(se, "the taken-over lock session is gone")
+	suite.ErrorIs(suite.store1.Renew(ctx, reg1), ErrLeaseLost, "taken over by another lock session")
+	suite.NoError(suite.store2.Renew(ctx, reg2))
+
+	gone, err := suite.store1.Register(ctx, &Session{ID: suite.uniq("renew-gone"), NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = suite.store1.Release(ctx, gone) }()
+	_, err = suite.client.KV().Delete(suite.store1.SessionKey(gone.ID()), nil)
+	suite.Require().NoError(err)
+	suite.ErrorIs(suite.store1.Renew(ctx, gone), ErrLeaseLost, "the entry is gone")
+}
+
 // lostTxnReply lets Consul apply every transaction, but loses the reply to the
 // first one, as a client timeout or a failure after the write would.
 type lostTxnReply struct {
