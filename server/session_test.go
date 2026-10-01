@@ -1435,6 +1435,64 @@ func TestARebuildAfterAnIndexDropStaysHeld(t *testing.T) {
 	assert.Nil(t, consul.entry(), "shutdown left the rebuilt registration in Consul")
 }
 
+// A guest whose cached route failed reads its session again with GetFresh,
+// which goes to Consul even though the cache holds an entry: the watch may not
+// have caught up with the host's move yet. What it reads then replaces the
+// stale entry, under the cache's usual rules.
+func TestConsulGetFreshReadsPastTheCache(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	store.cache.Set("id", cachedSession{session: &Session{ID: "id", NodeAddr: "a:22", Generation: 1}, index: 100}, store.cache.Epoch())
+	moved, err := json.Marshal(&Session{ID: "id", NodeAddr: "c:22", Generation: 2})
+	require.NoError(t, err)
+	consul.mu.Lock()
+	consul.pair = &api.KVPair{Key: store.SessionKey("id"), Value: moved, Session: "lease", ModifyIndex: 200}
+	consul.mu.Unlock()
+
+	cached, err := store.Get("id")
+	require.NoError(t, err)
+	require.Equal(t, "a:22", cached.NodeAddr)
+	fresh, err := store.GetFresh(context.Background(), "id")
+	require.NoError(t, err)
+	require.Equal(t, "c:22", fresh.NodeAddr)
+	require.Equal(t, uint64(2), fresh.Generation)
+	cached, err = store.Get("id")
+	require.NoError(t, err)
+	require.Equal(t, "c:22", cached.NodeAddr, "the fresh read didn't update the cache")
+}
+
+// stalledTransport holds every request until its context is done.
+type stalledTransport struct{}
+
+func (stalledTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+}
+
+// GetFresh runs inside a guest's upstream stage, so a Consul that doesn't
+// answer must not hold it past ctx, whatever attempts it has left.
+func TestConsulGetFreshHonoursItsContext(t *testing.T) {
+	store := newFakeConsulStore(t, newFakeConsul(t))
+	cfg := api.DefaultConfig()
+	cfg.HttpClient = &http.Client{Transport: stalledTransport{}}
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	store.client = client
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.GetFresh(ctx, "id")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetFresh outlived its context")
+	}
+}
+
 // An index from before a drop doesn't order against one after it. A local
 // write whose Consul call began before the cache saw the drop is dropped, and
 // the writes and snapshots after it decide.

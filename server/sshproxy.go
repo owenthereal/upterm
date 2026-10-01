@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/host/api"
+	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -172,17 +173,44 @@ func loadAuthorizedKeys(paths []string) (map[string]struct{}, error) {
 	return fps, nil
 }
 
-// authorize decides whether an offered key may proceed, and resolves the
-// session it maps to. Stock SSH calls this for unsigned public-key queries as
-// well, and a successful query does not count against MaxAuthTries, so it must
-// stay cheap: no certificate minting and no upstream connection.
-func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, *Session, error) {
+// preparedRoute is one upstream attempt's plan, taken from one snapshot of the
+// session: where to dial, which host key to expect there, and the route to
+// compare against if it fails. Taking all three from one read is what keeps the
+// dial target and the host key it must present from disagreeing.
+type preparedRoute struct {
+	id     *api.Identifier   // the dial target
+	route  Route             // node and generation, for the refresh comparison
+	config *ssh.ClientConfig // credentials, and the host-key policy for that target
+}
+
+// upstreamTarget is where one read of the session sends a connection, before
+// any credentials are attached.
+type upstreamTarget struct {
+	id    *api.Identifier
+	route Route
+	// local is the session when it lives on this node: its authorized keys
+	// decide who may join, and its host keys are the ones the upstream must
+	// present. A host's upstream, and a hop to another node, must present the
+	// relay's own; that node checks the guest itself.
+	local *Session
+}
+
+// admits reports whether key may join the session t leads to.
+func (t *upstreamTarget) admits(key ssh.PublicKey) bool {
+	return t.local == nil || t.local.IsClientKeyAllowed(key)
+}
+
+// authenticate decides who an offered key speaks for, without reading the
+// session store: the user's format, the authorized_keys gate on hosts, and the
+// identity a certificate this relay minted carries. The key it returns is the
+// one a session's authorized keys are checked against.
+func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, error) {
 	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
 		if conn.User() == "" {
-			return nil, nil, nil, fmt.Errorf("empty session ID for host connection")
+			return nil, nil, fmt.Errorf("empty session ID for host connection")
 		}
 	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
+		return nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
 	}
 	checker := UserCertChecker{
 		IsUserAuthority: a.isOwnAuthority,
@@ -193,21 +221,21 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 
 	// Gate registration based on authorized_keys before any cert/upstream work.
 	if err := a.checkAuthorizedKeys(conn, pk); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	auth, key, err := checker.Authenticate(conn.User(), pk)
 	// A certificate this relay did not mint is not a credential, it is just a
 	// key the peer holds: an ssh-agent's own CA certificate arrives this way.
 	// Authorizing cert.Key rather than refusing keeps who may join unchanged,
-	// and the authorized-key check below is what then decides. A malformed
+	// and the authorized-key check is what then decides. A malformed
 	// AuthRequest from a signer we do trust is a different matter and is not
 	// tolerated.
 	if errors.Is(err, errCertNotSignedByHost) || errors.Is(err, errCertUntrustedAuthority) {
 		err = nil
 	}
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("error checking user cert: %w", err)
+		return nil, nil, fmt.Errorf("error checking user cert: %w", err)
 	}
 
 	// Use the public-key if a key can't be parsed from cert
@@ -223,35 +251,79 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 		}
 	}
 
-	hostSess, err := a.hostSession(conn)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	// TODO: simplify auth key validation by moving it to host validation only
-	if hostSess != nil && !hostSess.IsClientKeyAllowed(key) {
-		return nil, nil, nil, fmt.Errorf("public key not allowed")
-	}
-
-	return auth, key, hostSess, nil
+	return auth, key, nil
 }
 
-// prepare mints upstream credentials for a key whose ownership the client has
-// already proven. It re-runs authorization so the decision and the credentials
-// it produces cannot disagree; that costs one extra session lookup, on success
-// only. It does not open a connection.
-func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.ClientConfig, error) {
-	auth, _, hostSess, err := a.authorize(conn, pk)
+// authorize decides whether an offered key may proceed, and resolves where its
+// upstream goes. Stock SSH calls this for unsigned public-key queries as well,
+// and a successful query does not count against MaxAuthTries, so it must stay
+// cheap: no certificate minting, no upstream connection, and at most one read
+// of the session.
+func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, error) {
+	auth, key, err := a.authenticate(conn, pk)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	signers, err := a.newUserCertSigners(conn, auth)
+	target, err := a.resolve(conn)
 	if err != nil {
-		return nil, fmt.Errorf("error creating cert signers: %w", err)
+		return nil, nil, err
+	}
+	// TODO: simplify auth key validation by moving it to host validation only
+	if !target.admits(key) {
+		return nil, nil, fmt.Errorf("public key not allowed")
 	}
 
+	return auth, target, nil
+}
+
+// resolve finds where conn's upstream goes, reading the session at most once.
+// A host's goes to this node's sshd. A guest's goes to the node its session is
+// on: in Consul mode the store says which, and the same read supplies the rest
+// of the route; in embedded mode the user names it, and only a session on this
+// node is read, from this node's own store.
+func (a proxyAuth) resolve(conn ssh.ConnMetadata) (*upstreamTarget, error) {
+	user := conn.User()
+	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
+		return &upstreamTarget{id: &api.Identifier{Id: user, Type: api.Identifier_HOST}}, nil
+	}
+
+	sessionID, nodeAddr, sess, err := a.SessionManager.lookupSSHUser(user)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
+	}
+	if sess != nil {
+		return a.targetOf(sess), nil
+	}
+
+	target := &upstreamTarget{
+		id:    &api.Identifier{Id: sessionID, NodeAddr: nodeAddr, Type: api.Identifier_CLIENT},
+		route: Route{NodeAddr: nodeAddr},
+	}
+	if nodeAddr == a.NodeAddr {
+		if target.local, err = a.SessionManager.GetSession(sessionID); err != nil {
+			return nil, err
+		}
+	}
+	return target, nil
+}
+
+// targetOf is where sess, one snapshot of a guest's session, sends the guest.
+func (a proxyAuth) targetOf(sess *Session) *upstreamTarget {
+	target := &upstreamTarget{
+		id:    &api.Identifier{Id: sess.ID, NodeAddr: sess.NodeAddr, Type: api.Identifier_CLIENT},
+		route: Route{NodeAddr: sess.NodeAddr, Generation: sess.Generation},
+	}
+	if sess.NodeAddr == a.NodeAddr {
+		target.local = sess
+	}
+	return target
+}
+
+// plan completes target into an attempt that presents creds.
+func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []ssh.AuthMethod) *preparedRoute {
 	hostKeyCb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if hostSess == nil {
+		if target.local == nil {
 			// check host keys for sideway connections
 			for _, s := range a.HostSigners {
 				if utils.KeysEqual(key, s.PublicKey()) {
@@ -259,7 +331,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 				}
 			}
 		} else {
-			for _, pk := range hostSess.HostPublicKeys {
+			for _, pk := range target.local.HostPublicKeys {
 				if utils.KeysEqual(key, pk) {
 					return nil
 				}
@@ -269,46 +341,90 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*ssh.Client
 		return errUpstreamHostKeyMismatch
 	}
 
-	return &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)}}, nil
+	return &preparedRoute{
+		id:     target.id,
+		route:  target.route,
+		config: &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: creds},
+	}
 }
 
-func (a *proxyAuth) dialUpstreamContext(ctx context.Context, conn ssh.ConnMetadata) (net.Conn, error) {
-	id, err := a.upstreamIdentifier(conn)
+// prepare mints upstream credentials for a key whose ownership the client has
+// already proven, and plans the first attempt with them. It re-runs
+// authorization so the decision and the attempt cannot disagree, and takes the
+// attempt's dial target, host-key policy and route from the one session read
+// that authorization made; that costs one extra session lookup, on success
+// only. It does not open a connection.
+func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRoute, error) {
+	auth, target, err := a.authorize(conn, pk)
 	if err != nil {
 		return nil, err
 	}
-	return a.ConnDialer.DialContext(ctx, id)
-}
 
-func (a *proxyAuth) upstreamIdentifier(conn ssh.ConnMetadata) (*api.Identifier, error) {
-	var (
-		user          = conn.User()
-		clientVersion = string(conn.ClientVersion())
-	)
-
-	// Determine connection type and create identifier accordingly
-	var id *api.Identifier
-	if clientVersion == upterm.HostSSHClientVersion {
-		// HOST connection: user is the session ID
-		id = &api.Identifier{
-			Id:   user,
-			Type: api.Identifier_HOST,
-		}
-	} else {
-		// CLIENT connection: decode the SSH user
-		sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
-		if err != nil {
-			return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
-		}
-
-		id = &api.Identifier{
-			Id:       sessionID,
-			NodeAddr: nodeAddr,
-			Type:     api.Identifier_CLIENT,
-		}
+	signers, err := a.newUserCertSigners(conn, auth)
+	if err != nil {
+		return nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
 
-	return id, nil
+	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), nil
+}
+
+// prepareFrom plans an attempt from sess, a snapshot of pk's session, with
+// creds, the credentials of an attempt prepare planned: the certificates in
+// them were minted as the client authenticated, and outlast the upstream
+// stage. It authorizes pk against sess as authorize does against its own read,
+// and reads nothing itself, so a watch that replaces or removes the cache entry
+// meanwhile changes nothing about the attempt.
+func (a proxyAuth) prepareFrom(conn ssh.ConnMetadata, pk ssh.PublicKey, sess *Session, creds []ssh.AuthMethod) (*preparedRoute, error) {
+	_, key, err := a.authenticate(conn, pk)
+	if err != nil {
+		return nil, err
+	}
+
+	target := a.targetOf(sess)
+	if !target.admits(key) {
+		return nil, fmt.Errorf("public key not allowed")
+	}
+
+	return a.plan(conn, target, creds), nil
+}
+
+// canRefresh reports whether conn's upstream may be retried on a refreshed
+// route: only a guest's, and only in Consul mode, where the store says which
+// node a session is on and the cache answering for it can trail a host's move.
+// A host's upstream is this node's sshd, and an embedded-mode user names its
+// node itself.
+func (a proxyAuth) canRefresh(conn ssh.ConnMetadata) bool {
+	return string(conn.ClientVersion()) != upterm.HostSSHClientVersion &&
+		a.SessionManager.GetRoutingMode() == routing.ModeConsul
+}
+
+// refresh reads pk's session again, skipping the cache, once an attempt on
+// attempted has failed, and plans one more attempt if the session has moved
+// since: a host can reconnect to another node, or register again, before the
+// watch tells this one. It reads under ctx, which is what is left of the
+// upstream stage.
+func (a proxyAuth) refresh(ctx context.Context, conn ssh.ConnMetadata, pk ssh.PublicKey, attempted *preparedRoute) (*preparedRoute, bool) {
+	logger := a.Logger.With("session", attempted.id.Id,
+		"attempted_node", attempted.route.NodeAddr, "attempted_generation", attempted.route.Generation)
+	fresh, moved, err := a.SessionManager.RefreshRoute(ctx, conn.User(), attempted.route)
+	if err != nil {
+		logger.Info("could not refresh the route", "error", err)
+		return nil, false
+	}
+
+	logger = logger.With("node", fresh.NodeAddr, "generation", fresh.Generation)
+	if !moved {
+		logger.Info("refreshed the route; it has not moved")
+		return nil, false
+	}
+	next, err := a.prepareFrom(conn, pk, fresh, attempted.config.Auth)
+	if err != nil {
+		logger.Info("refreshed the route; it no longer admits the key", "error", err)
+		return nil, false
+	}
+
+	logger.Info("refreshed the route; retrying on it")
+	return next, true
 }
 
 func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) ([]ssh.Signer, error) {
@@ -329,29 +445,4 @@ func (a proxyAuth) newUserCertSigners(conn ssh.ConnMetadata, auth *AuthRequest) 
 	}
 
 	return certSigners, nil
-}
-
-// hostSession returns a session if the routing is required to be done on client side and the current
-// is proxy node.
-func (a *proxyAuth) hostSession(conn ssh.ConnMetadata) (*Session, error) {
-	user := conn.User()
-	clientVersion := string(conn.ClientVersion())
-
-	// HOST connections don't validate authorized keys
-	if clientVersion == upterm.HostSSHClientVersion {
-		return nil, nil
-	}
-
-	// CLIENT connection: decode the SSH user to get session ID and node address
-	sessionID, nodeAddr, err := a.SessionManager.ResolveSSHUser(user)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding SSH user %s: %w", user, err)
-	}
-
-	// Don't validate authorized key if the node does not match the request that routing is needed
-	if a.NodeAddr != nodeAddr {
-		return nil, nil
-	}
-
-	return a.SessionManager.GetSession(sessionID)
 }

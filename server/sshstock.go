@@ -167,7 +167,10 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	defer func() { _ = raw.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
-	var clientConfig *ssh.ClientConfig
+	var (
+		first    *preparedRoute
+		verified ssh.PublicKey
+	)
 	cfg := &ssh.ServerConfig{
 		ServerVersion: version.ServerSSHVersion(),
 		// Authorization only. x/crypto invokes this for unsigned public-key
@@ -175,7 +178,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		// without incrementing authFailures, so MaxAuthTries does not bound it.
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if _, _, _, err := p.Auth.authorize(meta, key); err != nil {
+			if _, _, err := p.Auth.authorize(meta, key); err != nil {
 				return nil, err
 			}
 			return &ssh.Permissions{}, nil
@@ -185,11 +188,11 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		// the key. Running once, after verification, also removes any need to
 		// match credentials back to an offered key after the handshake.
 		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, permissions *ssh.Permissions, _ string) (*ssh.Permissions, error) {
-			upstream, err := p.Auth.prepare(meta, key)
+			planned, err := p.Auth.prepare(meta, key)
 			if err != nil {
 				return nil, err
 			}
-			clientConfig = upstream
+			first, verified = planned, key
 			return permissions, nil
 		},
 	}
@@ -208,51 +211,95 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	if err := raw.SetDeadline(time.Time{}); err != nil {
 		return err
 	}
-	if clientConfig == nil {
+	if first == nil {
 		return fmt.Errorf("missing authenticated upstream credentials")
 	}
 	peer := sshPeer{downstream, channels, requests}
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
-	// What the peer is told; see upstreamFailureReason. A dial failure has no
-	// recognized outcome of its own, so it stays generic.
-	reason := errUpstreamUnavailable
-	upstreamRaw, err := p.Auth.dialUpstreamContext(upstreamCtx, downstream)
-	if err == nil {
-		defer func() { _ = upstreamRaw.Close() }()
-		stopUpstream := context.AfterFunc(ctx, func() { _ = upstreamRaw.Close() })
-		defer stopUpstream()
-		deadline, _ := upstreamCtx.Deadline()
-		err = upstreamRaw.SetDeadline(deadline)
-		if err == nil {
-			var upstream ssh.Conn
-			var upstreamChannels <-chan ssh.NewChannel
-			var upstreamRequests <-chan *ssh.Request
-			upstream, upstreamChannels, upstreamRequests, err = ssh.NewClientConn(upstreamRaw, upstreamRaw.RemoteAddr().String(), clientConfig)
-			if err != nil {
-				reason = upstreamFailureReason(err)
-			} else {
-				defer func() { _ = upstream.Close() }()
-				if err = upstreamRaw.SetDeadline(time.Time{}); err == nil {
-					cancel()
-					clientVersion := string(downstream.ClientVersion())
-					if clientVersion == upterm.HostSSHClientVersion {
-						inst.authenticatedHost.Add(1)
-					} else {
-						inst.authenticatedClient.Add(1)
-					}
-					return forwardSSH(ctx, peer, sshPeer{upstream, upstreamChannels, upstreamRequests}, abortScopeFor(clientVersion), inst.stalledChannelAborts)
-				}
-			}
+	// A guest whose route the store decides was routed from a cache the watch
+	// keeps, which can trail a host's reconnect to another node. Its first
+	// attempt gets half the stage, keeping the rest for one more on a refreshed
+	// route. Everyone else gets one attempt and the whole stage.
+	refreshable := p.Auth.canRefresh(downstream)
+	firstCtx := upstreamCtx
+	if refreshable {
+		var cancelFirst context.CancelFunc
+		firstCtx, cancelFirst = context.WithTimeout(upstreamCtx, stage/2)
+		defer cancelFirst()
+	}
+	upstream, err := p.upstreamAttempt(firstCtx, ctx, first)
+	// A host-key mismatch is an upstream failing to prove who it is, not a
+	// stale route, and is never retried elsewhere.
+	if err != nil && refreshable && !errors.Is(err, errUpstreamHostKeyMismatch) && upstreamCtx.Err() == nil {
+		if next, ok := p.Auth.refresh(upstreamCtx, downstream, verified, first); ok {
+			upstream, err = p.upstreamAttempt(upstreamCtx, ctx, next)
 		}
+	}
+	if err == nil {
+		defer upstream.Close()
+		cancel()
+		clientVersion := string(downstream.ClientVersion())
+		if clientVersion == upterm.HostSSHClientVersion {
+			inst.authenticatedHost.Add(1)
+		} else {
+			inst.authenticatedClient.Add(1)
+		}
+		return forwardSSH(ctx, peer, upstream.sshPeer, abortScopeFor(clientVersion), inst.stalledChannelAborts)
 	}
 	// Report the failure on a fresh budget rather than upstreamCtx's: on a dial
 	// or handshake timeout — the most common way to get here — that budget is
 	// already spent, and the peer would be dropped without ever being told why.
 	// Deriving it from stage keeps a short configured timeout short overall.
 	// The helper also answers global requests, including hosts' first request.
+	// The peer learns why the last attempt failed only as far as
+	// upstreamFailureReason recognizes it; a dial failure is always generic.
 	rejectCtx, rejectCancel := context.WithTimeout(ctx, min(stage, maxSSHRejectTimeout))
 	defer rejectCancel()
-	_ = rejectSSHChannels(rejectCtx, peer, reason)
+	_ = rejectSSHChannels(rejectCtx, peer, upstreamFailureReason(err))
 	return err
+}
+
+// upstreamConn is an upstream whose handshake completed. Close releases it,
+// and stops the watcher that would otherwise close it on shutdown.
+type upstreamConn struct {
+	sshPeer
+	raw  net.Conn
+	stop func() bool
+}
+
+func (u *upstreamConn) Close() {
+	_ = u.conn.Close()
+	u.stop()
+	_ = u.raw.Close()
+}
+
+// upstreamAttempt dials pr's target, and nothing else, and completes the
+// handshake with pr's credentials and host-key policy, all within ctx. A
+// shutdown, which cancels parent, closes the transport at any point, as it
+// does the downstream's. A failed attempt leaves nothing open.
+func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRoute) (*upstreamConn, error) {
+	raw, err := p.Auth.ConnDialer.DialContext(ctx, pr.id)
+	if err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(parent, func() { _ = raw.Close() })
+	fail := func(err error) (*upstreamConn, error) {
+		stop()
+		_ = raw.Close()
+		return nil, err
+	}
+	deadline, _ := ctx.Deadline()
+	if err := raw.SetDeadline(deadline); err != nil {
+		return fail(err)
+	}
+	conn, channels, requests, err := ssh.NewClientConn(raw, raw.RemoteAddr().String(), pr.config)
+	if err != nil {
+		return fail(err)
+	}
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return fail(err)
+	}
+	return &upstreamConn{sshPeer: sshPeer{conn, channels, requests}, raw: raw, stop: stop}, nil
 }

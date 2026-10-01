@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -638,10 +639,10 @@ func TestStockSSHShutdownBeforeServe(t *testing.T) {
 
 // TestStockSSHGuestHostKeyMismatch pins the branch a guest's upstream hop is
 // checked on: the session's registered HostPublicKeys. The host-connection
-// cases in TestStockSSHUpstreamFailure identify as an upterm host, so
-// hostSession is nil there and the relay checks its own HostSigners instead;
+// cases in TestStockSSHUpstreamFailure identify as an upterm host, so their
+// route has no local session and the relay checks its own HostSigners instead;
 // this is the branch the session host key depends on. The session is created
-// on the proxy's own NodeAddr, which is what makes hostSession resolve it
+// on the proxy's own NodeAddr, which is what makes resolve treat it as local
 // rather than treat the hop as a sideways one to another relay node.
 func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
 	// A session key of its own. stockTestProxy installs TestPrivateKeyContent
@@ -689,4 +690,258 @@ func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
 			require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
 		})
 	}
+}
+
+// staleStore answers Get from a stale cache until something (the "watch", or
+// GetFresh) clears it.
+type staleStore struct {
+	*memorySessionStore
+	mu         sync.Mutex
+	stale      *Session
+	gone       bool                            // Get reports not found: the watch removed the entry
+	fresh      func(ctx context.Context) error // optional: stall or fail GetFresh
+	afterFresh func(s *staleStore)             // optional: a watch landing right after GetFresh
+}
+
+func (s *staleStore) Get(id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gone {
+		return nil, &ErrSessionNotFound{SessionID: id}
+	}
+	if s.stale != nil && s.stale.ID == id {
+		return s.stale, nil
+	}
+	return s.memorySessionStore.Get(id)
+}
+
+func (s *staleStore) watchDelivers() {
+	s.mu.Lock()
+	s.stale = nil
+	s.mu.Unlock()
+}
+
+func (s *staleStore) GetFresh(ctx context.Context, id string) (*Session, error) {
+	if s.fresh != nil {
+		if err := s.fresh(ctx); err != nil {
+			return nil, err
+		}
+	}
+	s.watchDelivers()
+	sess, err := s.memorySessionStore.Get(id)
+	if s.afterFresh != nil {
+		s.afterFresh(s)
+	}
+	return sess, err
+}
+
+type routeDialer struct {
+	routes map[string]func(ctx context.Context) (net.Conn, error)
+	calls  atomic.Int32
+}
+
+func (d *routeDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d *routeDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	d.calls.Add(1)
+	if r, ok := d.routes[id.NodeAddr]; ok {
+		return r(ctx)
+	}
+	return nil, fmt.Errorf("no route to %s", id.NodeAddr)
+}
+
+// stallingListener accepts TCP connections and never speaks on them.
+func stallingListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// movedSession: the store says node C at generation 2, the cache still says A
+// at 1.
+func movedSession(t *testing.T, good ssh.Signer) *staleStore {
+	logger := slog.New(slog.DiscardHandler)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(logger)}
+	keys := [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}
+	fresh := NewSession("session", "node-c:22", "host", keys, nil)
+	fresh.Generation = 2
+	_, err := store.Register(context.Background(), fresh)
+	require.NoError(t, err)
+	stale := NewSession("session", "node-a:22", "host", keys, nil)
+	stale.Generation = 1
+	store.stale = stale
+	return store
+}
+
+func consulModeProxy(t *testing.T, store SessionStore, dialer connDialer) string {
+	_, addr, _, _ := stockTestProxy(t, 4*time.Second, dialer, func(p *sshProxy) {
+		p.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+	})
+	return addr
+}
+
+func dialGuest(t *testing.T, addr string, key ssh.Signer) *ssh.Client {
+	c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", HostKeyCallback: ssh.InsecureIgnoreHostKey(), Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	refusing, _ := stockTestUpstream(t, true, TestPrivateKeyContent)
+	dial := func(a string) func(context.Context) (net.Conn, error) {
+		return func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", a) }
+	}
+	for name, routeA := range map[string]func(store *staleStore) func(context.Context) (net.Conn, error){
+		"unreachable": func(*staleStore) func(context.Context) (net.Conn, error) {
+			return func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") }
+		},
+		"no longer holds the session": func(*staleStore) func(context.Context) (net.Conn, error) { return dial(refusing) },
+		"stalls its handshake":        func(*staleStore) func(context.Context) (net.Conn, error) { return dial(stallingListener(t)) },
+		// The watch updates the cache to C while A's handshake stalls.
+		// Comparing with the cache would see no move; comparing with the
+		// attempted route does.
+		"watch lands mid-handshake": func(store *staleStore) func(context.Context) (net.Conn, error) {
+			stall := dial(stallingListener(t))
+			return func(ctx context.Context) (net.Conn, error) {
+				c, err := stall(ctx)
+				store.watchDelivers()
+				return c, err
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := movedSession(t, good)
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+				"node-a:22": routeA(store), "node-c:22": dial(nodeC),
+			}}
+			dialGuest(t, consulModeProxy(t, store, dialer), good)
+			select {
+			case <-peersC: // Dial succeeding proves nothing: the guest is authenticated first
+			case <-time.After(3 * time.Second):
+				t.Fatal("the refreshed route never reached node C")
+			}
+			require.Equal(t, int32(2), dialer.calls.Load())
+		})
+	}
+}
+
+// A watch that replaces or removes the cache entry between GetFresh and the
+// second attempt changes neither where that attempt goes nor which host key it
+// expects. It is prepared from the snapshot GetFresh returned.
+func TestStockSSHRefreshUsesOneSnapshot(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	for name, after := range map[string]func(s *staleStore){
+		"replaced": func(s *staleStore) {
+			d := NewSession("session", "node-d:22", "host", nil, nil)
+			d.Generation = 3
+			s.mu.Lock()
+			s.stale = d
+			s.mu.Unlock()
+		},
+		"removed": func(s *staleStore) {
+			s.mu.Lock()
+			s.gone = true
+			s.mu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := movedSession(t, good)
+			store.afterFresh = after
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+				"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+				"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+			}}
+			dialGuest(t, consulModeProxy(t, store, dialer), good)
+			select {
+			case <-peersC:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the second attempt left the snapshot GetFresh returned")
+			}
+			require.Equal(t, int32(2), dialer.calls.Load(), "node D is never dialed")
+		})
+	}
+}
+
+// A fresh lookup that stalls must not hold the guest past the stage. The
+// stage is 2 s here; the guest is rejected, not held.
+func TestStockSSHRefreshStaysInsideTheStage(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := movedSession(t, good)
+	store.fresh = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	start := time.Now()
+	// On a goroutine, so a lookup that outlives the stage fails this test
+	// instead of hanging the package.
+	opened := make(chan error, 1)
+	go func() {
+		_, err := client.NewSession()
+		opened <- err
+	}()
+	select {
+	case err = <-opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("held past the upstream stage")
+	}
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 3*time.Second, "held past the upstream stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// A host-key mismatch is not a stale route. The store has moved the session on
+// here, so a refresh would find somewhere else to go; the guest must not be
+// sent there.
+func TestStockSSHDoesNotRefreshAHostKeyMismatch(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	wrong, _ := stockTestUpstream(t, false, HostPrivateKeyContent)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	// This node, so the session's own host key is the one expected.
+	store.stale.NodeAddr = "127.0.0.1:2222"
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", wrong) },
+		"node-c:22":      func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	_, err = client.NewSession()
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
+	require.Equal(t, int32(1), dialer.calls.Load())
 }

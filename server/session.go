@@ -239,6 +239,10 @@ type SessionStore interface {
 	LeaseTTL() time.Duration
 	// Get complete session data
 	Get(sessionID string) (*Session, error)
+	// GetFresh reads sessionID from the store itself, skipping any cache, and
+	// caches what it finds as Get's read-through does. It gives up once ctx is
+	// done.
+	GetFresh(ctx context.Context, sessionID string) (*Session, error)
 	// Delete session data, only for an entry this instance holds
 	Delete(sessionID string) error
 	// BatchDelete multiple sessions efficiently, likewise
@@ -780,12 +784,22 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	}
 
 	// Cache miss - fetch from Consul for strong consistency
-	return c.getFromConsulAndCache(sessionID)
+	return c.getFromConsulAndCache(context.Background(), sessionID)
+}
+
+// GetFresh reads sessionID from Consul even when the cache has it, since the
+// watch can trail a registration that has moved to another node.
+func (c *consulSessionStore) GetFresh(ctx context.Context, sessionID string) (*Session, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID cannot be empty")
+	}
+	return c.getFromConsulAndCache(ctx, sessionID)
 }
 
 // getFromConsulAndCache fetches session from Consul and updates local cache
-func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, error) {
+func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionID string) (*Session, error) {
 	kvStoreKey := c.SessionKey(sessionID)
+	qo := (&api.QueryOptions{}).WithContext(ctx)
 
 	// Before the read, as for a registration's reply.
 	epoch := c.cache.Epoch()
@@ -797,7 +811,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	)
 	err := retry.Do(
 		func() error {
-			kvPair, _, err := c.client.KV().Get(kvStoreKey, nil)
+			kvPair, _, err := c.client.KV().Get(kvStoreKey, qo)
 			if err != nil {
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
@@ -813,6 +827,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 			session, index, lease = &s, kvPair.ModifyIndex, kvPair.Session
 			return nil
 		},
+		retry.Context(ctx),
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.RetryIf(func(err error) bool {
@@ -1292,6 +1307,11 @@ func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
 	return session, nil
 }
 
+// GetFresh is Get: a memory store has no cache to skip.
+func (m *memorySessionStore) GetFresh(_ context.Context, sessionID string) (*Session, error) {
+	return m.Get(sessionID)
+}
+
 func (m *memorySessionStore) Delete(sessionID string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -1549,23 +1569,55 @@ func (sm *SessionManager) shouldValidateSessionExistence() bool {
 // In embedded mode: only decodes (session may be on another node)
 // In consul mode: decodes and validates (shared store across all nodes)
 func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr string, err error) {
+	sessionID, nodeAddr, _, err = sm.lookupSSHUser(sshUser)
+	return sessionID, nodeAddr, err
+}
+
+// lookupSSHUser is ResolveSSHUser, also returning the session it read, so a
+// caller can take the node, the generation and the keys from that one read. It
+// is nil in embedded mode, which reads nothing.
+func (sm *SessionManager) lookupSSHUser(sshUser string) (sessionID, nodeAddr string, session *Session, err error) {
 	// Decode the SSH user using our encoder
 	sessionID, nodeAddr, err = sm.encodeDecoder.Decode(sshUser)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to decode SSH user: %w", err)
+		return "", "", nil, fmt.Errorf("failed to decode SSH user: %w", err)
 	}
 
 	// Validate session existence based on routing mode strategy
 	if sm.shouldValidateSessionExistence() {
-		session, err := sm.store.Get(sessionID)
+		session, err = sm.store.Get(sessionID)
 		if err != nil {
-			return "", "", fmt.Errorf("session %s not found: %w", sessionID, err)
+			return "", "", nil, fmt.Errorf("session %s not found: %w", sessionID, err)
 		}
 
-		return session.ID, session.NodeAddr, nil
+		return session.ID, session.NodeAddr, session, nil
 	}
 
-	return sessionID, nodeAddr, nil
+	return sessionID, nodeAddr, nil, nil
+}
+
+// Route is where a guest's upstream was sent: the node, and the registration
+// that was current when it was resolved.
+type Route struct {
+	NodeAddr   string
+	Generation uint64
+}
+
+// RefreshRoute reads sshUser's session from the store itself, skipping any
+// cache, and reports whether it has moved from attempted to another node or
+// another registration. It compares with the route an attempt was actually
+// sent on, never with the cache: the watch may have updated that while the
+// attempt was failing, and would then hide the move.
+func (sm *SessionManager) RefreshRoute(ctx context.Context, sshUser string, attempted Route) (fresh *Session, moved bool, err error) {
+	sessionID, _, err := sm.encodeDecoder.Decode(sshUser)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to decode SSH user: %w", err)
+	}
+	fresh, err = sm.store.GetFresh(ctx, sessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	return fresh, fresh.NodeAddr != attempted.NodeAddr || fresh.Generation != attempted.Generation, nil
 }
 
 // GetEncodeDecoder returns the EncodeDecoder used by this session manager
