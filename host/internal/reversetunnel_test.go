@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
@@ -150,14 +151,18 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 	}
 }
 
-// TestReverseTunnelRegistersTheHostKeyNotTheIdentity pins what the relay is
-// told to expect on a guest's upstream hop: the session host key, and never
-// the identity the tunnel authenticated with. Nothing may read HostPublicKeys
-// as who the host is.
-func TestReverseTunnelRegistersTheHostKeyNotTheIdentity(t *testing.T) {
+// testRelay is an in-process relay that admits any key, listening for both
+// ssh:// and ws:// hosts.
+type testRelay struct {
+	url      *url.URL
+	wsURL    *url.URL
+	identity []ssh.Signer
+	sessions *server.SessionManager
+}
+
+func startTestRelay(t *testing.T) testRelay {
+	t.Helper()
 	identity, err := utils.CreateSigners(nil)
-	require.NoError(t, err)
-	hostKey, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
 
 	sshln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -195,22 +200,109 @@ func TestReverseTunnelRegistersTheHostKeyNotTheIdentity(t *testing.T) {
 	defer readyCancel()
 	require.NoError(t, utils.WaitForServer(readyCtx, sshln.Addr().String()))
 
-	tunnel := &ReverseTunnel{
-		Host:              &url.URL{Scheme: "ssh", Host: sshln.Addr().String()},
-		Signers:           identity,
-		HostKey:           hostKey[0],
-		HostKeyCallback:   ssh.FixedHostKey(identity[0].PublicKey()),
+	return testRelay{
+		url:      &url.URL{Scheme: "ssh", Host: sshln.Addr().String()},
+		wsURL:    &url.URL{Scheme: "ws", Host: wsln.Addr().String()},
+		identity: identity,
+		sessions: sessions,
+	}
+}
+
+// tunnel is a host that authenticates with the relay's identity and registers
+// hostKey as its session key.
+func (r testRelay) tunnel(hostKey ssh.Signer, u *url.URL) *ReverseTunnel {
+	return &ReverseTunnel{
+		Host:              u,
+		Signers:           r.identity,
+		HostKey:           hostKey,
+		HostKeyCallback:   ssh.FixedHostKey(r.identity[0].PublicKey()),
 		KeepAliveDuration: time.Hour,
 	}
+}
+
+// TestReverseTunnelRegistersTheHostKeyNotTheIdentity pins what the relay is
+// told to expect on a guest's upstream hop: the session host key, and never
+// the identity the tunnel authenticated with. Nothing may read HostPublicKeys
+// as who the host is.
+func TestReverseTunnelRegistersTheHostKeyNotTheIdentity(t *testing.T) {
+	relay := startTestRelay(t)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+
+	tunnel := relay.tunnel(hostKey[0], relay.url)
 	response, err := tunnel.Establish(t.Context())
 	require.NoError(t, err)
 	t.Cleanup(tunnel.Close)
 
-	sess, err := sessions.GetSession(response.SessionID)
+	sess, err := relay.sessions.GetSession(response.SessionID)
 	require.NoError(t, err)
 	require.Len(t, sess.HostPublicKeys, 1)
 	require.Equal(t, hostKey[0].PublicKey().Marshal(), sess.HostPublicKeys[0].Marshal(), "the session key is registered")
-	require.NotEqual(t, identity[0].PublicKey().Marshal(), sess.HostPublicKeys[0].Marshal(), "the identity is not")
+	require.NotEqual(t, relay.identity[0].PublicKey().Marshal(), sess.HostPublicKeys[0].Marshal(), "the identity is not")
+}
+
+// Over ssh:// and ws://: the proxy mints the host↔proxy session ID into the
+// certificate, and the host signs over the same value.
+func TestReverseTunnelRegistersADerivedID(t *testing.T) {
+	relay := startTestRelay(t)
+	for _, u := range []*url.URL{relay.url, relay.wsURL} {
+		t.Run(u.Scheme, func(t *testing.T) {
+			hostKey, err := utils.CreateSigners(nil)
+			require.NoError(t, err)
+			secret, err := registration.NewSecret()
+			require.NoError(t, err)
+			tunnel := relay.tunnel(hostKey[0], u)
+			tunnel.SessionSecret, tunnel.Generation = secret, 1
+			response, err := tunnel.Establish(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(tunnel.Close)
+			require.Equal(t, registration.ID(hostKey[0].PublicKey(), secret), response.SessionID)
+			require.True(t, tunnel.ReconnectSupported())
+			require.True(t, tunnel.SessionKeyRedial())
+			sess, err := relay.sessions.GetSession(response.SessionID)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), sess.Generation)
+		})
+	}
+}
+
+// A secret that cannot be signed over fails the establish. Sending the request
+// without its proof would register the session under a random ID the host
+// believes is its own.
+func TestReverseTunnelWithAMalformedSecretDoesNotEstablish(t *testing.T) {
+	relay := startTestRelay(t)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := relay.tunnel(hostKey[0], relay.url)
+	secret := []byte("too short")
+	tunnel.SessionSecret, tunnel.Generation = secret, 1
+	t.Cleanup(tunnel.Close)
+	_, err = tunnel.Establish(t.Context())
+	require.ErrorContains(t, err, "error signing session proof")
+	require.ErrorContains(t, err, "session secret must be")
+	require.False(t, tunnel.ReconnectSupported())
+	require.Nil(t, tunnel.Listener())
+	// Nothing reached the relay: not the derived ID, nor a random one issued to
+	// a request sent without its proof.
+	_, err = relay.sessions.GetSession(registration.ID(hostKey[0].PublicKey(), secret))
+	require.Error(t, err)
+	sessions, err := relay.sessions.GetStore().List()
+	require.NoError(t, err)
+	require.Empty(t, sessions)
+}
+
+func TestReverseTunnelWithoutASecretGetsARandomID(t *testing.T) {
+	relay := startTestRelay(t)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := relay.tunnel(hostKey[0], relay.url)
+	response, err := tunnel.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(tunnel.Close)
+	require.False(t, tunnel.ReconnectSupported())
+	sess, err := relay.sessions.GetSession(response.SessionID)
+	require.NoError(t, err)
+	require.Zero(t, sess.Generation)
 }
 
 // TestReverseTunnelRequiresAHostKey: a tunnel with nothing to register must

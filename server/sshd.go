@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"charm.land/ssh"
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -38,10 +40,21 @@ type sshd struct {
 	SessionDialListener SessionDialListener
 	MetricsProvider     provider.Provider
 	Logger              *slog.Logger
+	// HostGateEnabled is set when the relay admits only the host keys in its
+	// --authorized-keys. Without the gate any key gets in, so a host can redial
+	// with its session key alone and never touch its agent.
+	HostGateEnabled bool
 
-	server   *ssh.Server
-	sessions *localSessions
-	mux      sync.Mutex
+	// onRegistered is a test hook, run after the store takes a registration and
+	// before this node adopts it: the window in which two registrations can
+	// commit in one order and adopt in the other, and in which the host can
+	// go. ctx is the host connection's.
+	onRegistered func(ctx context.Context, reg *Registration)
+
+	server         *ssh.Server
+	sessions       *localSessions
+	forwardHandler *streamlocalForwardHandler
+	mux            sync.Mutex
 	// stopped records a Shutdown that arrived before Serve. run.Group fires
 	// its interrupts once, when the first actor returns, so an actor still
 	// starting up misses its shutdown entirely and would then serve forever
@@ -73,19 +86,36 @@ func (l *closeOnceListener) Close() error {
 	return l.err
 }
 
-// localSessions tracks sessions created by this process. It drives
-// sessions_active_count and guarantees each session is deleted from the store
-// exactly once, whether the host cancels its forward or its connection ends
-// first. Sessions visible in a shared store but created on another node are
-// never touched. It is not persisted; a crash loses the count along with the
-// sessions.
+// localSessions tracks the registrations this process adopted, one per session
+// ID: a host that reconnects registers the same ID again, possibly while its
+// old connection lingers, so the ID alone can't say whose a resource is.
+// It drives sessions_active_count, which counts IDs, so a takeover on this node
+// leaves the count alone. Every registration's store entry is released when it
+// ends, whether the host cancels its forward or its connection ends first; the
+// store makes that conditional, so a replaced registration's cleanup leaves its
+// successor's entry in place. Sessions visible in a shared store but
+// registered on another node are never touched. It is not persisted; a crash
+// loses the count along with the sessions.
 type localSessions struct {
 	gauge          metrics.Gauge
 	sessionManager *SessionManager
 	logger         *slog.Logger
+	timing         leaseTiming
 
-	mu  sync.Mutex
-	ids map[string]struct{}
+	mu   sync.Mutex
+	regs map[string]*localRegistration // by session ID
+}
+
+// localRegistration is a registration this node adopted, and the host
+// connection it was made on, which a takeover closes. reg is the handle
+// its lease keeper last rebuilt, if the keeper rebuilt one; it changes only
+// under localSessions' lock, while the slot is in the map.
+type localRegistration struct {
+	reg  *Registration
+	conn io.Closer
+	// stopLease stops the lease keeper; nil when the store's entries don't
+	// expire.
+	stopLease context.CancelFunc
 }
 
 func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
@@ -95,70 +125,155 @@ func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logge
 		gauge:          gauge,
 		sessionManager: sessionManager,
 		logger:         logger,
-		ids:            make(map[string]struct{}),
+		timing:         defaultLeaseTiming,
+		regs:           make(map[string]*localRegistration),
 	}
 }
 
-func (l *localSessions) add(sessionID string) {
+// add adopts reg for conn, and returns the registration it replaced.
+// ErrSuperseded: the one this node serves for the ID came from another
+// connection, and reg's generation isn't higher; nothing changes.
+//
+// The store already ordered reg against the entry it replaced, but two
+// registrations can commit in one order and adopt in the other, and the store
+// takes any generation once the entry is gone. Checking again here, under the
+// lock, means a delayed older registration can never evict a newer one, nor a
+// second connection claim the same generation as the first.
+//
+// reg's lease keeper starts only once reg is accepted, so a refused
+// registration is never renewed or rebuilt, and the one it replaced stops
+// being kept at the moment it's replaced.
+func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistration, error) {
+	ttl := l.sessionManager.LeaseTTL()
+
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.ids[sessionID] = struct{}{}
-	l.gauge.Add(1)
+	cur, ok := l.regs[reg.ID()]
+	if ok && cur.conn != conn && !mayRegister(reg.Session, cur.reg.Session) {
+		l.mu.Unlock()
+		return nil, supersededError(reg.Session, cur.reg.Session)
+	}
+	lr := &localRegistration{reg: reg, conn: conn}
+	var (
+		keeper    *leaseKeeper
+		keeperCtx context.Context
+	)
+	if ttl > 0 {
+		keeperCtx, lr.stopLease = context.WithCancel(context.Background())
+		keeper = &leaseKeeper{
+			sm:        l.sessionManager,
+			ttl:       ttl,
+			timing:    l.timing,
+			closeConn: func() { _ = conn.Close() },
+			replace:   l.replace,
+			logger:    l.logger.With("session-id", reg.ID(), "generation", reg.Generation()),
+		}
+	}
+	l.regs[reg.ID()] = lr
+	if !ok {
+		l.gauge.Add(1)
+	} else if cur.stopLease != nil {
+		cur.stopLease()
+	}
+	l.mu.Unlock()
+
+	if keeper != nil {
+		go keeper.run(keeperCtx, reg)
+	}
+	if !ok {
+		return nil, nil
+	}
+	return cur, nil
 }
 
-// active reports whether sessionID was created by this process and has not
-// been ended.
-func (l *localSessions) active(sessionID string) bool {
+// replace makes next, a rebuilt handle, the one this node serves for its
+// registration, and reports whether it did. It doesn't once that registration
+// has ended or been replaced: the rebuild then belongs to no one, and the
+// keeper releases it. Only the handle changes; the slot and all else it
+// holds stay as they are.
+func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, ok := l.ids[sessionID]
-	return ok
+	cur, ok := l.regs[next.ID()]
+	if !ok || !cur.reg.Same(next) {
+		return false
+	}
+	cur.reg = next
+	return true
 }
 
-// end deletes sessionID from the store and releases its count. It is a no-op
-// for sessions this process did not create or has already ended. The count is
-// released even if the store delete fails: the host is gone either way.
-func (l *localSessions) end(sessionID string) {
+// active reports whether reg is the registration this node serves for its ID:
+// adopted, not ended, and not replaced.
+func (l *localSessions) active(reg *Registration) bool {
 	l.mu.Lock()
-	_, ok := l.ids[sessionID]
-	if ok {
-		delete(l.ids, sessionID)
+	defer l.mu.Unlock()
+	cur, ok := l.regs[reg.ID()]
+	return ok && cur.reg.Same(reg)
+}
+
+// end releases reg's store entry, and its slot, count and lease keeper while
+// reg is still the one this node serves. It releases every time, because a
+// replaced registration still holds a lease of its own; the store leaves an
+// entry reg no longer holds alone. The count is released even if the store
+// release fails: the host is gone either way.
+//
+// Every path that ends a registration holds the handle it was adopted with,
+// but a rebuild stores the registration under a new lease that only the slot
+// knows. So ending the one this node serves releases the slot's handle, and
+// reg's too if its lease differs; otherwise a rebuilt entry would outlive its
+// host until the lease expired.
+func (l *localSessions) end(reg *Registration) {
+	release := []*Registration{reg}
+	l.mu.Lock()
+	if cur, ok := l.regs[reg.ID()]; ok && cur.reg.Same(reg) {
+		delete(l.regs, reg.ID())
 		l.gauge.Add(-1)
+		// Stopped before the release below, so the keeper can't take that
+		// release for a lost lease and rebuild the entry.
+		if cur.stopLease != nil {
+			cur.stopLease()
+		}
+		release = []*Registration{cur.reg}
+		if cur.reg.lease != reg.lease {
+			release = append(release, reg)
+		}
 	}
-	// Release before touching the store: a Consul delete can be slow, and
+	// Release before touching the store: a Consul call can be slow, and
 	// holding the lock across it would stall unrelated session creation.
 	l.mu.Unlock()
-	if !ok {
-		return
-	}
 
-	if err := l.sessionManager.DeleteSession(sessionID); err != nil {
-		l.logger.Error("error deleting session", "error", err, "session-id", sessionID)
+	for _, r := range release {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+		if err := l.sessionManager.Release(ctx, r); err != nil {
+			l.logger.Error("error deleting session", "error", err, "session-id", r.ID())
+		}
+		cancel()
 	}
 }
 
-// contextKeyOwnedSessions holds, per SSH connection, the set of session IDs
-// created on that connection. Forward and cancel requests are only honoured
-// for sessions the requesting connection owns.
+// contextKeyOwnedSessions holds, per SSH connection, the registrations made on
+// that connection, by session ID. Forward and cancel requests act only on the
+// requesting connection's own registration, never on another connection's
+// registration of the same ID.
 type contextKeyOwnedSessions struct{}
 
-func ownSession(ctx ssh.Context, sessionID string) {
+func ownSession(ctx ssh.Context, reg *Registration) {
 	ctx.Lock()
 	defer ctx.Unlock()
-	owned, _ := ctx.Value(contextKeyOwnedSessions{}).(map[string]struct{})
+	owned, _ := ctx.Value(contextKeyOwnedSessions{}).(map[string]*Registration)
 	if owned == nil {
-		owned = make(map[string]struct{})
+		owned = make(map[string]*Registration)
 		ctx.SetValue(contextKeyOwnedSessions{}, owned)
 	}
-	owned[sessionID] = struct{}{}
+	owned[reg.ID()] = reg
 }
 
-func ownsSession(ctx ssh.Context, sessionID string) bool {
+// ownedRegistration returns the registration of sessionID made on this
+// connection, or nil if there is none.
+func ownedRegistration(ctx ssh.Context, sessionID string) *Registration {
 	ctx.Lock()
 	defer ctx.Unlock()
-	owned, _ := ctx.Value(contextKeyOwnedSessions{}).(map[string]struct{})
-	_, ok := owned[sessionID]
-	return ok
+	owned, _ := ctx.Value(contextKeyOwnedSessions{}).(map[string]*Registration)
+	return owned[sessionID]
 }
 
 func (s *sshd) Shutdown() error {
@@ -211,6 +326,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 		return ErrListnerClosed
 	}
 	s.sessions = sessions
+	s.forwardHandler = sh
 	s.ln = once
 	s.server = &ssh.Server{
 		HostSigners: signers,
@@ -268,7 +384,51 @@ func (s *sshd) handlePublicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 		return false
 	}
 
+	// The proxy minted the host's own SSH session ID into the certificate. It
+	// is the one value both ends of that connection share, and so what a
+	// session proof is bound to.
+	if cert, ok := key.(*gossh.Certificate); ok {
+		ctx.Lock()
+		ctx.SetValue(contextKeyDownstreamSessionID{}, []byte(cert.KeyId))
+		ctx.Unlock()
+	}
+
 	return true
+}
+
+// contextKeyDownstreamSessionID holds the SSH session ID of the host's
+// connection to the proxy, which this connection carries.
+type contextKeyDownstreamSessionID struct{}
+
+// sessionIdentity returns the session ID and generation req registers. A
+// request without a proof is an old host's, and gets a random ID as it always
+// has. One with a proof gets the ID derived from its host key, but only if the
+// proof verifies over the host's own connection, so neither the ID nor a proof
+// captured elsewhere is enough to claim it.
+func (s *sshd) sessionIdentity(ctx ssh.Context, req *CreateSessionRequest) (id string, generation uint64, err error) {
+	if len(req.HostKeyProof) == 0 {
+		return utils.GenerateSessionID(), 0, nil
+	}
+	// The ID derives from one key, and the proxy accepts the host's end of a
+	// guest's connection by these keys: a second key would be one whose holder
+	// proved nothing.
+	if n := len(req.HostPublicKeys); n != 1 {
+		return "", 0, fmt.Errorf("a proof needs exactly one host key, got %d", n)
+	}
+	key, _, _, _, err := gossh.ParseAuthorizedKey(req.HostPublicKeys[0])
+	if err != nil {
+		return "", 0, fmt.Errorf("parsing host key: %w", err)
+	}
+	ctx.Lock()
+	sshSessionID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+	ctx.Unlock()
+	if len(sshSessionID) == 0 {
+		return "", 0, errors.New("no host SSH session ID to verify the proof over")
+	}
+	if err := registration.Verify(key, sshSessionID, req.SessionSecret, req.Generation, req.HostKeyProof); err != nil {
+		return "", 0, err
+	}
+	return registration.ID(key, req.SessionSecret), req.Generation, nil
 }
 
 // isOwnAuthority reports whether key is one of this relay's signing keys.
@@ -276,13 +436,82 @@ func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
 	return signerAuthority(s.Signers, key)
 }
 
+// adopt makes reg the registration this node serves for its ID, over conn. It
+// reports false with a registration.Superseded reply when another connection's
+// registration of the same or a newer generation holds the ID here, and false
+// with no reply when conn closed while registering.
+func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
+	prev, err := s.sessions.add(reg, conn)
+	if err != nil {
+		// The store took reg, but the registration adopted here first outranks
+		// it. The release is conditional, so it can't touch that one's entry.
+		s.Logger.Warn("refused a superseded registration", "error", err, "session-id", reg.ID())
+		rctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+		defer cancel()
+		if err := s.SessionManager.Release(rctx, reg); err != nil {
+			s.Logger.Error("error deleting session", "error", err, "session-id", reg.ID())
+		}
+		return false, []byte(registration.Superseded)
+	}
+	if prev != nil && prev.conn != conn {
+		// A takeover on this node. The old listener goes first, so the new
+		// registration can bind the session socket's name, and then the old
+		// host connection, so its guests go with it.
+		s.forwardHandler.closeListener(prev.reg)
+		_ = prev.conn.Close()
+		// A lease the old registration's keeper rebuilt is known only to its
+		// slot. The old connection's cleanup releases the handle it was adopted
+		// with, and closeListener ends prev.reg only if it had bound a
+		// listener, so release it here. It holds nothing now the new
+		// registration holds the entry, and a store with no leases has nothing
+		// to release.
+		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
+			go s.releaseReplaced(prev.reg)
+		}
+	}
+
+	ownSession(ctx, reg)
+	// The tunnel handler ends the registration when the host cancels its
+	// forward. A host that disconnects before forwarding never reaches that
+	// path, so also end it when the owning connection does.
+	go func() {
+		<-ctx.Done()
+		s.sessions.end(reg)
+	}()
+
+	// The host may have gone while the store call ran. Its registration would
+	// then hold the ID for no one, so end it before replying.
+	if ctx.Err() != nil {
+		s.sessions.end(reg)
+		return false, nil
+	}
+	return true, nil
+}
+
+// releaseReplaced releases a registration a takeover on this node replaced.
+// The store releases only an entry reg still holds, so the new registration's
+// is left alone.
+func (s *sshd) releaseReplaced(reg *Registration) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+	defer cancel()
+	if err := s.SessionManager.Release(ctx, reg); err != nil {
+		s.Logger.Error("error releasing a replaced registration", "error", err, "session-id", reg.ID(), "lease", reg.lease)
+	}
+}
+
 func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
+	conn := ctx.Value(ssh.ContextKeyConn).(*gossh.ServerConn)
+
 	var sessReq CreateSessionRequest
 	if err := proto.Unmarshal(req.Payload, &sessReq); err != nil {
 		return false, []byte(err.Error())
 	}
 
-	sessionID := utils.GenerateSessionID()
+	sessionID, generation, err := s.sessionIdentity(ctx, &sessReq)
+	if err != nil {
+		s.Logger.Warn("refused a session proof", "error", err, "node", s.NodeAddr)
+		return false, []byte(registration.RefusedProof + ": " + err.Error())
+	}
 
 	// Store complete session data for routing and session management
 	session := NewSession(
@@ -292,8 +521,13 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		sessReq.HostPublicKeys,
 		sessReq.ClientAuthorizedKeys,
 	)
+	session.Generation = generation
 
-	sshUser, err := s.SessionManager.CreateSession(session)
+	reg, sshUser, err := s.SessionManager.Register(context.Background(), session)
+	if errors.Is(err, ErrSuperseded) {
+		s.Logger.Warn("refused a superseded registration", "error", err, "session-id", sessionID)
+		return false, []byte(registration.Superseded)
+	}
 	if err != nil {
 		s.Logger.Error("failed to create session",
 			"error", err,
@@ -302,20 +536,18 @@ func (s *sshd) createSessionHandler(ctx ssh.Context, srv *ssh.Server, req *gossh
 		)
 		return false, []byte(fmt.Sprintf("failed to create session: %v", err))
 	}
-	s.sessions.add(sessionID)
-	ownSession(ctx, sessionID)
-	// The tunnel handler ends the session when the host cancels its forward.
-	// A host that disconnects before forwarding never reaches that path, so
-	// also end it when the owning connection does.
-	go func() {
-		<-ctx.Done()
-		s.sessions.end(sessionID)
-	}()
+	if s.onRegistered != nil {
+		s.onRegistered(ctx, reg)
+	}
+	if ok, refusal := s.adopt(ctx, reg, conn); !ok {
+		return false, refusal
+	}
 
 	sessResp := &CreateSessionResponse{
-		SessionID: sessionID,
-		NodeAddr:  s.NodeAddr,
-		SshUser:   sshUser,
+		SessionID:        sessionID,
+		NodeAddr:         s.NodeAddr,
+		SshUser:          sshUser,
+		SessionKeyRedial: !s.HostGateEnabled,
 	}
 
 	b, err := proto.Marshal(sessResp)
