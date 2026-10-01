@@ -104,7 +104,7 @@ func (e *lookupError) Unwrap() error { return e.err }
 // or "" for none. Only a failed lookup of the guest's session earns one: the
 // session isn't stored (its host may be reconnecting, and about to store it
 // again) or the store couldn't say. Refusing the guest itself, a key the
-// session doesn't admit say, sends none, and neither does a host's connection.
+// session doesn't admit, say, sends none, and neither does a host's connection.
 // sessionID is the one meta's user names.
 func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
 	var lookup *lookupError

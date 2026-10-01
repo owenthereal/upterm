@@ -201,8 +201,10 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 // holds stay as they are.
 //
 // A loss reported until now was judged against the handle next replaces,
-// since reconcile reads the handle and reports under the same lock. The
-// rebuild has answered it, so it is discarded rather than rebuilt again.
+// since reconcile reads the handle and reports under the same lock, and is
+// discarded rather than rebuilt again. That includes one reported between
+// the rebuild's commit and now, which the rebuild didn't answer; the next
+// watch delivery, or the next renewal, catches it.
 func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

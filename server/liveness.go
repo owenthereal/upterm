@@ -11,8 +11,9 @@ import (
 // hostLiveness paces the pings that find a host connection which has gone
 // silent: one every interval, and the connection is closed when a ping goes
 // unanswered for bound. A host that vanishes without closing its connection
-// is otherwise noticed only by TCP, which can take hours, while its
-// registration keeps guests from reaching the session in the meantime.
+// is otherwise noticed only by TCP: minutes at best, and never while a proxy
+// or a stuck peer holds the connection open. Its registration keeps guests
+// from reaching the session in the meantime.
 type hostLiveness struct {
 	interval, bound time.Duration
 }
