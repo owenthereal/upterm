@@ -20,6 +20,7 @@ import (
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -887,11 +888,11 @@ func cachedGeneration(store *consulSessionStore, id string) uint64 {
 	return 0
 }
 
-// heldLease is the lock session store records itself holding id under.
-func heldLease(store *consulSessionStore, id string) string {
+// holdsLease reports whether store tracks lease as one it holds id under.
+func holdsLease(store *consulSessionStore, id, lease string) bool {
 	store.heldMu.Lock()
 	defer store.heldMu.Unlock()
-	return store.held[id].lease
+	return store.held[id].lease == lease
 }
 
 // A registration's reply can arrive after a later registration of the same ID
@@ -914,7 +915,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesTheNewerHoldInPlace() {
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the late reply replaced the newer registration in the cache")
 	// The node refuses the older registration when it adopts, and releases it.
 	suite.Require().NoError(store.Release(ctx, reg1))
-	suite.Equal(reg2.lease, heldLease(store, id), "the older registration's release forgot the newer one's hold")
+	suite.True(holdsLease(store, id, reg2.lease), "the older registration's release forgot the newer one's hold")
 	suite.Require().NoError(store.BatchDelete([]string{id}))
 	pair, _ := suite.consulGet(id)
 	suite.Nil(pair, "shutdown left the newer registration's entry behind")
@@ -943,10 +944,37 @@ func (suite *ConsulStoreTestSuite) TestALateReplyLeavesAnotherNodesNewerEntryCac
 	// The older registration ends.
 	suite.Require().NoError(store.Release(ctx, reg1))
 	suite.Equal(uint64(2), cachedGeneration(store, id), "the older registration's release dropped the newer entry from the cache")
-	suite.NotEqual(reg1.lease, heldLease(store, id), "the older registration is still recorded as held")
+	suite.False(holdsLease(store, id, reg1.lease), "the older registration is still recorded as held")
 	pair, _ := suite.consulGet(id)
 	suite.Require().NotNil(pair)
 	suite.Equal(reg2.lease, pair.Session)
+}
+
+// End to end: a registration whose reply arrives after the watch delivered an
+// index drop isn't cached, since its index doesn't order against the new
+// ones. Get still finds it, in Consul.
+func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCached() {
+	store, delay := suite.storeWithADelayedReply()
+	defer func() { _ = store.Close() }()
+	defer delay.release()
+	ctx, id := context.Background(), suite.uniq("late-reply-index-drop")
+
+	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	// Let the watch deliver the committed entry first, so the only thing that
+	// can cache it again is the late reply.
+	suite.Require().Eventually(func() bool { return store.HasInCache(id) },
+		2*time.Second, 10*time.Millisecond, "the watch never delivered the entry")
+	// The watch's index drops, as it does when the entry with the highest
+	// index goes, or after a restore.
+	store.updateSessionReplica(1, nil)
+	delay.release()
+	reg1 := suite.awaitRegistered(first)
+	defer func() { _ = store.Release(ctx, reg1) }()
+
+	suite.False(store.HasInCache(id), "a reply from before the index drop was cached")
+	s, err := store.Get(id)
+	suite.Require().NoError(err, "the entry Consul holds wasn't found")
+	suite.Equal(uint64(1), s.Generation)
 }
 
 // lostTxnReply lets Consul apply every transaction, but loses the reply to the
@@ -1065,7 +1093,7 @@ func (suite *ConsulStoreTestSuite) waitForSessionRemovedFromCache(sessionID stri
 // The cache takes writes in whatever order they reach it, and keeps the
 // latest. A watch snapshot older than a write made here leaves that write in
 // place, and one that has caught up with it decides, including by leaving it
-// out.
+// out. A release removes only an entry its own lease holds.
 func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	c := newSessionCache(sessionTestLogger)
 	gen := func() uint64 {
@@ -1074,12 +1102,16 @@ func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 		}
 		return 0
 	}
+	entry := func(gen, index uint64) cachedSession {
+		return cachedSession{session: &Session{ID: "id", Generation: gen}, index: index, lease: fmt.Sprintf("lease-%d", gen)}
+	}
+	set := func(gen, index uint64) { c.Set("id", entry(gen, index), c.Epoch()) }
 	snapshot := func(gen, index uint64) map[string]cachedSession {
-		return map[string]cachedSession{"id": {session: &Session{ID: "id", Generation: gen}, index: index}}
+		return map[string]cachedSession{"id": entry(gen, index)}
 	}
 
-	c.Set("id", &Session{ID: "id", Generation: 2}, 20)
-	c.Set("id", &Session{ID: "id", Generation: 1}, 10)
+	set(2, 20)
+	set(1, 10)
 	assert.Equal(t, uint64(2), gen(), "an earlier write replaced a later one")
 
 	c.ReplaceAll(15, snapshot(1, 10))
@@ -1089,27 +1121,27 @@ func TestSessionCacheKeepsTheLatestWrite(t *testing.T) {
 	c.ReplaceAll(25, snapshot(3, 25))
 	assert.Equal(t, uint64(3), gen(), "a snapshot past the write didn't replace it")
 
-	c.Delete("id", 20)
-	assert.Equal(t, uint64(3), gen(), "a release removed a later write")
-	c.Delete("id", 25)
+	c.Delete("id", "lease-2")
+	assert.Equal(t, uint64(3), gen(), "releasing a lease removed an entry another lease holds")
+	c.Delete("id", "lease-3")
 	assert.Zero(t, gen())
 
-	c.Set("id", &Session{ID: "id", Generation: 3}, 28)
+	set(3, 28)
 	c.ReplaceAll(30, map[string]cachedSession{})
 	assert.Zero(t, gen(), "a snapshot past the write kept an entry it no longer has")
 
 	// With nothing cached, a write the last snapshot covered and left out was
 	// removed or superseded by then; one past it is new.
-	c.Set("id", &Session{ID: "id", Generation: 3}, 30)
+	set(3, 30)
 	assert.Zero(t, gen(), "a write the watch saw removed came back")
-	c.Set("id", &Session{ID: "id", Generation: 4}, 31)
+	set(4, 31)
 	assert.Equal(t, uint64(4), gen(), "a write past the last snapshot was dropped")
 }
 
-// Consul's index goes backwards only when its data was reset. Nothing cached
-// from before the reset outranks the snapshot that shows it, and writes after
-// it are taken, for IDs cached before it too.
-func TestSessionCacheTakesTheSnapshotWholeAfterAReset(t *testing.T) {
+// When the watch's index drops, nothing cached from before the drop outranks
+// the snapshot that shows it, and writes begun after it are taken, for IDs
+// cached before it too.
+func TestSessionCacheTakesTheSnapshotWholeAfterAnIndexDrop(t *testing.T) {
 	c := newSessionCache(sessionTestLogger)
 	entry := func(gen, index uint64) cachedSession {
 		return cachedSession{session: &Session{Generation: gen}, index: index}
@@ -1122,16 +1154,34 @@ func TestSessionCacheTakesTheSnapshotWholeAfterAReset(t *testing.T) {
 	}
 
 	c.ReplaceAll(100, map[string]cachedSession{"old": entry(1, 90)})
-	c.Set("local", &Session{Generation: 1}, 101) // written past the last snapshot
+	c.Set("local", entry(1, 101), c.Epoch()) // written past the last snapshot
 	c.ReplaceAll(5, map[string]cachedSession{"new": entry(1, 4)})
-	assert.False(t, c.Has("old"), "an entry from before the reset survived it")
-	assert.False(t, c.Has("local"), "a write from before the reset survived it")
+	assert.False(t, c.Has("old"), "an entry from before the drop survived it")
+	assert.False(t, c.Has("local"), "a write from before the drop survived it")
 	assert.Equal(t, uint64(1), gen("new"))
 
-	c.Set("old", &Session{Generation: 2}, 6)
-	assert.Equal(t, uint64(2), gen("old"), "a write after the reset was refused")
-	c.Set("again", &Session{Generation: 1}, 5)
-	assert.Zero(t, gen("again"), "the reset snapshot's index isn't the floor")
+	c.Set("old", entry(2, 6), c.Epoch())
+	assert.Equal(t, uint64(2), gen("old"), "a write after the drop was refused")
+	c.Set("again", entry(1, 5), c.Epoch())
+	assert.Zero(t, gen("again"), "the dropped snapshot's index isn't the floor")
+}
+
+// An index from before a drop doesn't order against one after it. A local
+// write whose Consul call began before the cache saw the drop is dropped, and
+// the writes and snapshots after it decide.
+func TestSessionCacheDropsALocalWriteFromBeforeAnIndexDrop(t *testing.T) {
+	cache := newSessionCache(sessionTestLogger)
+	old := &Session{ID: "id", NodeAddr: "old-node", Generation: 1}
+	current := &Session{ID: "id", NodeAddr: "new-node", Generation: 2}
+	cache.ReplaceAll(100, map[string]cachedSession{"id": {session: old, index: 100, lease: "old"}})
+	before := cache.Epoch()                                                        // a call begins
+	cache.ReplaceAll(5, map[string]cachedSession{})                                // the index drops
+	cache.Set("id", cachedSession{session: old, index: 101, lease: "old"}, before) // and its reply arrives
+	cache.Set("id", cachedSession{session: current, index: 6, lease: "current"}, cache.Epoch())
+	cache.ReplaceAll(6, map[string]cachedSession{"id": {session: current, index: 6, lease: "current"}})
+	got, ok := cache.Get("id")
+	require.True(t, ok)
+	require.Equal(t, current.NodeAddr, got.NodeAddr, "a write from before the drop outranks what came after it")
 }
 
 //
