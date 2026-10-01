@@ -35,13 +35,24 @@ var (
 // upstream is unavailable, which is the safe direction to fail in.
 const sshAuthFailure = "unable to authenticate"
 
+// dialError marks an upstream that couldn't be reached at all. Its text can
+// echo the address dialed, which an embedded-mode guest names in its own user,
+// so none of it is ever matched to decide what the peer is told.
+type dialError struct{ err error }
+
+func (e *dialError) Error() string { return e.err.Error() }
+func (e *dialError) Unwrap() error { return e.err }
+
 // upstreamFailureReason maps an upstream failure onto what the peer is told.
 // It is an allowlist: only outcomes recognized here are named, and everything
 // else — most importantly any transport error, which carries the address of an
-// internal node or socket — becomes the generic reason. The detail stays in the
-// connection log either way.
+// internal node or socket — becomes the generic reason. A dial failure is
+// generic whatever its text. The detail stays in the connection log either way.
 func upstreamFailureReason(err error) error {
+	var dial *dialError
 	switch {
+	case errors.As(err, &dial):
+		return errUpstreamUnavailable
 	case errors.Is(err, errUpstreamHostKeyMismatch):
 		return errUpstreamHostKeyMismatch
 	case err != nil && strings.Contains(err.Error(), sshAuthFailure):
@@ -266,7 +277,8 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	// Deriving it from stage keeps a short configured timeout short overall.
 	// The helper also answers global requests, including hosts' first request.
 	// The peer learns why the last attempt failed only as far as
-	// upstreamFailureReason recognizes it; a dial failure is always generic.
+	// upstreamFailureReason recognizes it; a dial failure is always generic,
+	// whatever its text.
 	rejectCtx, rejectCancel := context.WithTimeout(ctx, min(stage, maxSSHRejectTimeout))
 	defer rejectCancel()
 	_ = rejectSSHChannels(rejectCtx, peer, upstreamFailureReason(err))
@@ -294,7 +306,7 @@ func (u *upstreamConn) Close() {
 func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRoute) (*upstreamConn, error) {
 	raw, err := p.Auth.ConnDialer.DialContext(ctx, pr.id)
 	if err != nil {
-		return nil, err
+		return nil, &dialError{err}
 	}
 	stop := context.AfterFunc(parent, func() { _ = raw.Close() })
 	fail := func(err error) (*upstreamConn, error) {

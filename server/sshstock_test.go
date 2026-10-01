@@ -290,6 +290,20 @@ func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
 			require.NotContains(t, string(body), ln.Addr().String())
 		})
 	})
+
+	// An embedded-mode guest's user names the node to dial, and the dialer's
+	// error can echo it. Whatever it reads, a dial failure stays generic.
+	t.Run("dial failure echoing the guest's node", func(t *testing.T) {
+		proxy, addr, _, signer := stockTestProxy(t, time.Second, sidewayConnDialer{})
+		user := proxy.SessionManager.GetEncodeDecoder().Encode("session", sshAuthFailure)
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		_, err = client.NewSession()
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, err, &rejection)
+		require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
+	})
 }
 
 func TestUpstreamFailureReasonAllowlist(t *testing.T) {
