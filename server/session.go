@@ -1587,7 +1587,7 @@ func (sm *SessionManager) lookupSSHUser(sshUser string) (sessionID, nodeAddr str
 	if sm.shouldValidateSessionExistence() {
 		session, err = sm.store.Get(sessionID)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("session %s not found: %w", sessionID, err)
+			return "", "", nil, fmt.Errorf("looking up session %s: %w", sessionID, err)
 		}
 
 		return session.ID, session.NodeAddr, session, nil
