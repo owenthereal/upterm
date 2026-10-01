@@ -622,6 +622,97 @@ func (suite *ConsulStoreTestSuite) TestTakeoverMovesTheLease() {
 	suite.ErrorIs(err, ErrSuperseded)
 }
 
+// txnEntry is an entry for a test that drives Consul's transactions itself:
+// its key, a value for each generation, and a lock session per holder, all
+// removed at cleanup.
+type txnEntry struct {
+	suite *ConsulStoreTestSuite
+	id    string
+	key   string
+}
+
+func (suite *ConsulStoreTestSuite) txnEntry(prefix string) txnEntry {
+	id := suite.uniq(prefix)
+	e := txnEntry{suite: suite, id: id, key: suite.store1.SessionKey(id)}
+	suite.T().Cleanup(func() { _, _ = suite.client.KV().Delete(e.key, nil) })
+	return e
+}
+
+func (e txnEntry) value(gen uint64) []byte {
+	b, err := json.Marshal(&Session{ID: e.id, NodeAddr: "a:22", Generation: gen})
+	e.suite.Require().NoError(err)
+	return b
+}
+
+func (e txnEntry) lockSession() string {
+	lease, _, err := e.suite.client.Session().CreateNoChecks(e.suite.store1.createConsulLockSession(e.id), nil)
+	e.suite.Require().NoError(err)
+	e.suite.T().Cleanup(func() { _, _ = e.suite.client.Session().Destroy(lease, nil) })
+	return lease
+}
+
+func (e txnEntry) get() *api.KVPair {
+	pair, _, err := e.suite.client.KV().Get(e.key, nil)
+	e.suite.Require().NoError(err)
+	e.suite.Require().NotNil(pair)
+	return pair
+}
+
+// A takeover is one transaction, conditional on the index its decision was
+// read at. Against an entry that has changed since, it fails as a whole: the
+// old holder's unlock doesn't apply without the new holder's lock, and the
+// entry keeps its value and its holder.
+func (suite *ConsulStoreTestSuite) TestATakeoverAgainstAStaleIndexChangesNothing() {
+	kv, e := suite.client.KV(), suite.txnEntry("stale-takeover")
+	old, next := e.lockSession(), e.lockSession()
+	ok, _, err := kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(1), Session: old}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	stale := e.get()
+	// The entry moves on, under the same holder.
+	ok, _, err = kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(2), Session: old}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	before := e.get()
+	suite.Require().Greater(before.ModifyIndex, stale.ModifyIndex)
+
+	ok, resp, _, err := kv.Txn(api.KVTxnOps{
+		{Verb: api.KVCheckIndex, Key: e.key, Index: stale.ModifyIndex},
+		{Verb: api.KVUnlock, Key: e.key, Value: e.value(3), Session: old},
+		{Verb: api.KVLock, Key: e.key, Value: e.value(3), Session: next},
+	}, nil)
+	suite.Require().NoError(err)
+	suite.False(ok, "a takeover against a stale index committed")
+	suite.NotEmpty(resp.Errors)
+	after := e.get()
+	suite.Equal(before.Value, after.Value)
+	suite.Equal(old, after.Session, "the entry changed holder")
+	suite.Equal(before.ModifyIndex, after.ModifyIndex)
+}
+
+// A registration of an absent ID creates the entry only if it's still absent.
+// Against an entry that exists, it fails and leaves the entry as it was.
+func (suite *ConsulStoreTestSuite) TestACreateAgainstAnExistingEntryChangesNothing() {
+	kv, e := suite.client.KV(), suite.txnEntry("create-existing")
+	holder, next := e.lockSession(), e.lockSession()
+	ok, _, err := kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(1), Session: holder}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	before := e.get()
+
+	ok, resp, _, err := kv.Txn(api.KVTxnOps{
+		{Verb: api.KVCheckNotExists, Key: e.key},
+		{Verb: api.KVLock, Key: e.key, Value: e.value(2), Session: next},
+	}, nil)
+	suite.Require().NoError(err)
+	suite.False(ok, "a create against an existing entry committed")
+	suite.NotEmpty(resp.Errors)
+	after := e.get()
+	suite.Equal(before.Value, after.Value)
+	suite.Equal(holder, after.Session, "the entry changed holder")
+	suite.Equal(before.ModifyIndex, after.ModifyIndex)
+}
+
 func (suite *ConsulStoreTestSuite) TestRenewOfALostLeaseAndLockDelay() {
 	ctx, id := context.Background(), suite.uniq("lost")
 	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})

@@ -116,6 +116,10 @@ type localRegistration struct {
 	// stopLease stops the lease keeper; nil when the store's entries don't
 	// expire.
 	stopLease context.CancelFunc
+	// lost tells the lease keeper that the store's watch shows reg's entry
+	// gone, or held by an older registration. It holds one report: a second
+	// adds nothing the keeper isn't already acting on.
+	lost chan struct{}
 }
 
 func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
@@ -152,7 +156,7 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 		l.mu.Unlock()
 		return nil, supersededError(reg.Session, cur.reg.Session)
 	}
-	lr := &localRegistration{reg: reg, conn: conn}
+	lr := &localRegistration{reg: reg, conn: conn, lost: make(chan struct{}, 1)}
 	var (
 		keeper    *leaseKeeper
 		keeperCtx context.Context
@@ -165,6 +169,7 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 			timing:    l.timing,
 			closeConn: func() { _ = conn.Close() },
 			replace:   l.replace,
+			lost:      lr.lost,
 			logger:    l.logger.With("session-id", reg.ID(), "generation", reg.Generation()),
 		}
 	}
@@ -190,6 +195,10 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 // has ended or been replaced: the rebuild then belongs to no one, and the
 // keeper releases it. Only the handle changes; the slot and all else it
 // holds stay as they are.
+//
+// A loss reported until now was judged against the handle next replaces,
+// since reconcile reads the handle and reports under the same lock. The
+// rebuild has answered it, so it is discarded rather than rebuilt again.
 func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -198,7 +207,122 @@ func (l *localSessions) replace(next *Registration) bool {
 		return false
 	}
 	cur.reg = next
+	select {
+	case <-cur.lost:
+	default:
+	}
 	return true
+}
+
+// reconcile checks the registrations this node serves against entries, the
+// store's view of every session as of index in epoch, which a watch delivers.
+// For each one:
+//   - an entry of its own identity: nothing to do;
+//   - another registration's entry with a generation at least its own: it is
+//     superseded. Its slot, count and lease keeper go, its connection is
+//     closed so its guests go with it, and the handle its slot held is
+//     released;
+//   - no entry, or an older registration's: its lease keeper is told of the
+//     loss, and re-asserts it.
+//
+// A registration whose write the view predates is skipped; the next delivery
+// includes it. Indexes order only within an epoch, so a registration from an
+// earlier epoch is reconciled whatever its index. When the index dropped while
+// the registration's own write was in flight, the view can predate that write,
+// and then tells its keeper of a loss that wasn't, which costs one rebuild.
+//
+// It runs on the watch's goroutine, so it makes no store calls, and the
+// releases and closes it causes happen after the lock is let go.
+func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Session) {
+	type superseded struct {
+		conn io.Closer
+		reg  *Registration
+		by   *Session
+	}
+	var ended []superseded
+	l.mu.Lock()
+	for id, lr := range l.regs {
+		reg := lr.reg
+		if reg.epoch == epoch && reg.index > index {
+			continue
+		}
+		cur, ok := entries[id]
+		switch {
+		case ok && sameIdentity(cur, reg.Session):
+		case ok && cur.Generation >= reg.Generation():
+			l.removeLocked(id, lr)
+			ended = append(ended, superseded{lr.conn, reg, cur})
+		case !ok || cur.Generation < reg.Generation():
+			select {
+			case lr.lost <- struct{}{}:
+			default:
+			}
+		}
+	}
+	l.mu.Unlock()
+
+	for _, s := range ended {
+		l.logger.Warn("closing a superseded registration's connection",
+			"session-id", s.reg.ID(), "generation", s.reg.Generation(),
+			"by-generation", s.by.Generation, "by-node", s.by.NodeAddr)
+		l.retire(s.conn, s.reg)
+	}
+}
+
+// confirm checks reg, which add has just accepted, against the store's view
+// of its entry. If that shows another registration with a generation at least
+// reg's, reg is superseded: it ends as reconcile would end it, and confirm
+// returns an error wrapping ErrSuperseded. The delivery showing that
+// registration can be processed before add, when there is no slot yet for
+// reconcile to find; the store's view is updated before reconcile runs, so
+// checking it after add covers that order. A lookup that fails leaves reg
+// adopted: the next delivery, or its keeper's next renewal, still finds it
+// out.
+func (l *localSessions) confirm(reg *Registration) error {
+	cur, err := l.sessionManager.GetSession(reg.ID())
+	if err != nil || sameIdentity(cur, reg.Session) || cur.Generation < reg.Generation() {
+		return nil
+	}
+	l.mu.Lock()
+	lr, ok := l.regs[reg.ID()]
+	var handle *Registration
+	if ok && lr.reg.Same(reg) {
+		handle = lr.reg
+		l.removeLocked(reg.ID(), lr)
+	}
+	l.mu.Unlock()
+	// Otherwise reconcile, or a takeover on this node, has already ended it.
+	if handle != nil {
+		l.retire(lr.conn, handle)
+	}
+	return supersededError(reg.Session, cur)
+}
+
+// removeLocked drops lr, the slot for id, which a newer registration has
+// superseded, and stops its keeper. The caller holds l.mu, and retires the
+// slot's connection and handle once it has let go.
+func (l *localSessions) removeLocked(id string, lr *localRegistration) {
+	delete(l.regs, id)
+	l.gauge.Add(-1)
+	if lr.stopLease != nil {
+		lr.stopLease()
+	}
+}
+
+// retire closes a superseded registration's connection, and releases reg, the
+// handle its slot last held, in the background. The connection's own cleanup
+// ends the handle it was adopted with and finds no slot, so a lease the keeper
+// rebuilt would otherwise last until it expired. The release is conditional,
+// and leaves the successor's entry alone.
+func (l *localSessions) retire(conn io.Closer, reg *Registration) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultConsulTimeout)
+		defer cancel()
+		if err := l.sessionManager.Release(ctx, reg); err != nil {
+			l.logger.Error("error releasing a superseded registration", "error", err, "session-id", reg.ID(), "lease", reg.lease)
+		}
+	}()
+	_ = conn.Close()
 }
 
 // active reports whether reg is the registration this node serves for its ID:
@@ -310,6 +434,7 @@ func (s *sshd) Serve(ln net.Listener) error {
 	}
 
 	sessions := newLocalSessions(s.MetricsProvider, s.SessionManager, s.Logger)
+	s.SessionManager.Observe(sessions.reconcile)
 	sh := newStreamlocalForwardHandler(
 		s.SessionManager,
 		s.SessionDialListener,
@@ -438,8 +563,10 @@ func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
 
 // adopt makes reg the registration this node serves for its ID, over conn. It
 // reports false with a registration.Superseded reply when another connection's
-// registration of the same or a newer generation holds the ID here, and false
-// with no reply when conn closed while registering.
+// registration of the same or a newer generation holds the ID here, or the
+// store already shows another registration with such a generation (conn is
+// then closed too), and false with no reply when conn closed while
+// registering.
 func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
 	prev, err := s.sessions.add(reg, conn)
 	if err != nil {
@@ -468,6 +595,12 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
 			go s.releaseReplaced(prev.reg)
 		}
+	}
+	// Another node's newer registration may have reached this node's view of
+	// the store before reg had a slot here to reconcile.
+	if err := s.sessions.confirm(reg); err != nil {
+		s.Logger.Warn("refused a registration the store already shows superseded", "error", err, "session-id", reg.ID())
+		return false, []byte(registration.Superseded)
 	}
 
 	ownSession(ctx, reg)

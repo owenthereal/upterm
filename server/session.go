@@ -167,6 +167,10 @@ type Registration struct {
 	ConfirmedAt time.Time
 	lease       string // Consul lock session; "" in memory
 	index       uint64 // Consul ModifyIndex as written; 0 in memory
+	// epoch is the store cache's epoch when the Consul call that wrote index
+	// began; 0 in memory. index orders against a watch delivery's only within
+	// that epoch.
+	epoch uint64
 }
 
 func (r *Registration) ID() string { return r.Session.ID }
@@ -241,6 +245,10 @@ type SessionStore interface {
 	BatchDelete(sessionIDs []string) error
 	// List all sessions (for cleanup and management)
 	List() ([]*Session, error)
+	// Observe has fn called with each view of every entry the store's watch
+	// delivers; see SessionManager.Observe. A store no other writer shares
+	// has nothing to watch, and never calls fn.
+	Observe(fn func(epoch, index uint64, entries map[string]*Session))
 	// Close cleans up resources and stops background processes
 	Close() error
 }
@@ -354,8 +362,9 @@ func (c *sessionCache) Delete(sessionID, lease string) {
 // stored stays: the watch hasn't caught up with that write, and the snapshot
 // that does will include it, or its removal. An index below the last
 // snapshot's starts a new epoch: no index from before the drop orders against
-// one after it, so the snapshot is then taken whole.
-func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (added, updated, deleted int) {
+// one after it, so the snapshot is then taken whole. It returns the epoch it
+// applied the snapshot in.
+func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -370,6 +379,7 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 	}
 
 	// Calculate changes for logging
+	var added, updated, deleted int
 	for sessionID, next := range snapshot {
 		if cur, exists := c.sessions[sessionID]; exists {
 			if !reflect.DeepEqual(cur, next) {
@@ -395,7 +405,7 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 		c.logger.Info("updated session cache", "total", len(snapshot), "added", added, "updated", updated, "deleted", deleted)
 	}
 
-	return added, updated, deleted
+	return c.epoch
 }
 
 // consulSessionStore implements SessionStore using Consul KV with hybrid read-through cache
@@ -416,6 +426,9 @@ type consulSessionStore struct {
 	// index can go backwards; each release drops only its own.
 	held   map[string]map[string]struct{}
 	heldMu sync.Mutex
+	// observers are called with each watch delivery, on the watch's goroutine.
+	observers   []func(epoch, index uint64, entries map[string]*Session)
+	observersMu sync.Mutex
 }
 
 // heldLeases returns the lock sessions this instance holds sessionID under.
@@ -625,7 +638,7 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 		"key", kvStoreKey,
 	)
 
-	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index}, nil
+	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index, epoch: epoch}, nil
 }
 
 // storedSession ranks a stored value for ordering. One that doesn't parse
@@ -1137,10 +1150,13 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 
 // updateSessionReplica updates the local session replica based on Consul
 // data: every session under the prefix as of index, which is no earlier than
-// any write it includes.
+// any write it includes. Then it hands the same view to the observers.
 func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPairs) {
 	// Create new session map from Consul data
 	newSessions := make(map[string]cachedSession)
+	// The observers get a map of their own. The cache takes newSessions over,
+	// and its writes go on changing it once ReplaceAll returns.
+	entries := make(map[string]*Session, len(kvPairs))
 
 	for _, kvPair := range kvPairs {
 		var session Session
@@ -1151,10 +1167,28 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 
 		// Use session.ID from the unmarshaled value directly
 		newSessions[session.ID] = cachedSession{session: &session, index: kvPair.ModifyIndex, lease: kvPair.Session}
+		entries[session.ID] = &session
 	}
 
-	// Atomically replace cache contents and get change statistics
-	c.cache.ReplaceAll(index, newSessions)
+	// Atomically replace cache contents. The cache takes the view before the
+	// observers see it, so a read of the cache made after an observer has
+	// acted on the view finds that view, or a later one.
+	epoch := c.cache.ReplaceAll(index, newSessions)
+
+	c.observersMu.Lock()
+	observers := slices.Clone(c.observers)
+	c.observersMu.Unlock()
+	for _, fn := range observers {
+		fn(epoch, index, entries)
+	}
+}
+
+// Observe has fn called with every watch delivery, after the cache has taken
+// it. See SessionManager.Observe.
+func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+	c.observersMu.Lock()
+	defer c.observersMu.Unlock()
+	c.observers = append(c.observers, fn)
 }
 
 // Close gracefully stops the session watch and cleans up resources
@@ -1295,6 +1329,9 @@ func (m *memorySessionStore) List() ([]*Session, error) {
 	m.logger.Debug("listed sessions from memory", "count", len(sessions))
 	return sessions, nil
 }
+
+// Observe does nothing: every write to a memory store is this process's own.
+func (m *memorySessionStore) Observe(func(epoch, index uint64, entries map[string]*Session)) {}
 
 // Close cleans up memory store resources (no-op for memory store)
 func (m *memorySessionStore) Close() error {
@@ -1468,6 +1505,17 @@ func (sm *SessionManager) Renew(ctx context.Context, reg *Registration) error {
 // both handles, and releasing reg there would delete the entry just rebuilt.
 func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
 	return sm.store.Reregister(ctx, reg)
+}
+
+// Observe has fn called with each view of every entry the store's watch
+// delivers: entries maps each session ID to its stored session, as of index in
+// epoch. Indexes order only within an epoch, which advances when the watch's
+// index goes backwards; a Registration records both. fn runs on the watch's
+// goroutine and holds up the next delivery, so it must not make store calls;
+// entries is shared with the other observers, and is theirs only to read. A
+// store no other writer shares never calls fn.
+func (sm *SessionManager) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+	sm.store.Observe(fn)
 }
 
 // LeaseTTL is how long an unrenewed registration lasts; 0 if it doesn't expire.
