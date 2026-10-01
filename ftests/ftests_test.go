@@ -207,8 +207,11 @@ func (suite *FtestSuite) TestBanner() {
 			join TestServer
 		}{{"singleNode", suite.ts1}, {"multiNodes", suite.ts2}} {
 			suite.T().Run(protocol+"/"+topo.name, func(t *testing.T) {
-				if suite.mode == routing.ModeEmbedded && topo.name == "multiNodes" {
-					t.Skip("embedded mode doesn't check a remote session at the entry node")
+				// A WebSocket entry node dials the node the user names, whose SSH
+				// proxy sends the banner. An SSH entry node doesn't check a remote
+				// session in embedded mode, so there is nothing to send.
+				if suite.mode == routing.ModeEmbedded && protocol == "ssh" && topo.name == "multiNodes" {
+					t.Skip("the SSH entry node doesn't check a remote session in embedded mode")
 				}
 				testClientBannerForMissingSession(t, suite.ts1.NodeAddr(), protocol+"://"+suite.getServerAddr(protocol, topo.join))
 			})
