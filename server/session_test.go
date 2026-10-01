@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -695,6 +696,41 @@ func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesItNoLongerHolds() 
 	suite.NotNil(pair, "taken over after the listing: survives")
 }
 
+// An ID this instance holds under two leases, as after a takeover on this
+// node whose old registration isn't released yet: shutdown tries both, the
+// one that holds the entry deletes it, and the other is no error, whichever
+// is tried first.
+func (suite *ConsulStoreTestSuite) TestBatchDeleteTriesEveryLeaseItHolds() {
+	ctx := context.Background()
+	var ids []string
+	holderFirst, holderSecond := false, false
+	for i := 0; i < 32 && (!holderFirst || !holderSecond); i++ {
+		id := suite.uniq("batch-two-leases")
+		reg1, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+		suite.Require().NoError(err)
+		defer func() { _ = suite.store1.Release(ctx, reg1) }()
+		reg2, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 2})
+		suite.Require().NoError(err)
+		defer func() { _ = suite.store1.Release(ctx, reg2) }()
+		suite.Require().True(holdsLease(suite.store1, id, reg1.lease))
+		suite.Require().True(holdsLease(suite.store1, id, reg2.lease))
+		// Leases are tried in sorted order; reg2's holds the entry.
+		if reg2.lease < reg1.lease {
+			holderFirst = true
+		} else {
+			holderSecond = true
+		}
+		ids = append(ids, id)
+	}
+	suite.Require().True(holderFirst && holderSecond, "never got both orders of the two leases")
+
+	suite.Require().NoError(suite.store1.BatchDelete(ids))
+	for _, id := range ids {
+		pair, _ := suite.consulGet(id)
+		suite.Nil(pair, "shutdown left an entry behind")
+	}
+}
+
 // txnRollback answers every transaction with a rollback naming errs, and
 // passes all other requests to Consul.
 type txnRollback struct {
@@ -892,7 +928,8 @@ func cachedGeneration(store *consulSessionStore, id string) uint64 {
 func holdsLease(store *consulSessionStore, id, lease string) bool {
 	store.heldMu.Lock()
 	defer store.heldMu.Unlock()
-	return store.held[id].lease == lease
+	_, ok := store.held[id][lease]
+	return ok
 }
 
 // A registration's reply can arrive after a later registration of the same ID
@@ -1164,6 +1201,118 @@ func TestSessionCacheTakesTheSnapshotWholeAfterAnIndexDrop(t *testing.T) {
 	assert.Equal(t, uint64(2), gen("old"), "a write after the drop was refused")
 	c.Set("again", entry(1, 5), c.Epoch())
 	assert.Zero(t, gen("again"), "the dropped snapshot's index isn't the floor")
+}
+
+// fakeConsul answers the calls a store makes for a single session entry. Its
+// first write is at index 100 and every later one at 6, as when Consul's index
+// goes backwards between them; reset loses the entry, as a restore can.
+type fakeConsul struct {
+	*httptest.Server
+	mu     sync.Mutex
+	pair   *api.KVPair
+	leases int
+	writes int
+}
+
+func newFakeConsul(t *testing.T) *fakeConsul {
+	f := &fakeConsul{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/session/create":
+			f.leases++
+			_ = json.NewEncoder(w).Encode(map[string]string{"ID": fmt.Sprintf("lease-%d", f.leases)})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/kv/"):
+			if f.pair == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.KVPairs{f.pair})
+		case r.URL.Path == "/v1/txn":
+			var ops api.TxnOps
+			if err := json.NewDecoder(r.Body).Decode(&ops); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			last := ops[len(ops)-1].KV
+			if last.Verb == api.KVDelete {
+				f.pair = nil
+				_ = json.NewEncoder(w).Encode(api.TxnResponse{})
+				return
+			}
+			f.writes++
+			index := uint64(100)
+			if f.writes > 1 {
+				index = 6
+			}
+			f.pair = &api.KVPair{Key: last.Key, Value: last.Value, Session: last.Session, ModifyIndex: index}
+			_ = json.NewEncoder(w).Encode(api.TxnResponse{Results: api.TxnResults{&api.TxnResult{KV: f.pair}}})
+		case strings.HasPrefix(r.URL.Path, "/v1/session/destroy/"):
+			if f.pair != nil && f.pair.Session == strings.TrimPrefix(r.URL.Path, "/v1/session/destroy/") {
+				f.pair = nil
+			}
+			_, _ = w.Write([]byte("true"))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *fakeConsul) entry() *api.KVPair {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pair
+}
+
+func (f *fakeConsul) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pair = nil
+}
+
+// newFakeConsulStore is a store on f with no watch running; tests deliver
+// what the watch would.
+func newFakeConsulStore(t *testing.T, f *fakeConsul) *consulSessionStore {
+	cfg := api.DefaultConfig()
+	cfg.Address = f.URL
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	logger := slog.New(slog.DiscardHandler)
+	return &consulSessionStore{client: client, logger: logger, ttl: time.Minute, keyPrefix: "fake",
+		cache: newSessionCache(logger), held: make(map[string]map[string]struct{})}
+}
+
+// Consul's index can go backwards, so what this instance holds can't be
+// ordered by it. A registration rebuilt after a drop commits at a lower index
+// than the one it replaces, and must still be tracked: retiring the old lease
+// leaves it, and its entry in the cache, and shutdown deletes it.
+func TestARebuildAfterAnIndexDropStaysHeld(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	ctx := context.Background()
+	original, err := store.Register(ctx, &Session{ID: "id", NodeAddr: "node", Generation: 1})
+	require.NoError(t, err)
+	store.updateSessionReplica(100, api.KVPairs{consul.entry()})
+	consul.reset() // the entry and its lock session are lost
+	store.updateSessionReplica(5, nil)
+	require.False(t, store.HasInCache("id"))
+
+	rebuilt, err := store.Reregister(ctx, original)
+	require.NoError(t, err)
+	require.Less(t, rebuilt.index, original.index)
+	assert.True(t, holdsLease(store, "id", rebuilt.lease), "the rebuilt lease isn't tracked")
+	// The lease keeper retires the old handle once the rebuild succeeds.
+	require.NoError(t, store.Release(ctx, original))
+	assert.True(t, holdsLease(store, "id", rebuilt.lease), "retiring the old lease dropped the rebuilt one's tracking")
+	assert.True(t, store.HasInCache("id"), "retiring the old lease dropped the rebuilt entry from the cache")
+	require.NoError(t, store.BatchDelete([]string{"id"}))
+	assert.Nil(t, consul.entry(), "shutdown left the rebuilt registration in Consul")
 }
 
 // An index from before a drop doesn't order against one after it. A local

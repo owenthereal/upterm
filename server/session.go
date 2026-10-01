@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"path"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -406,19 +408,20 @@ type consulSessionStore struct {
 	cache *sessionCache
 	// Watch management
 	watchPlan *watch.Plan
-	// held maps each session ID this instance registered to the lock session
-	// it registered it under. Delete and BatchDelete act only through it, so
-	// neither can remove an entry another node registered or took over.
-	held   map[string]hold
+	// held maps each session ID this instance registered to the lock sessions
+	// it registered it under and hasn't released: one, or more while a late
+	// reply or a rebuilt registration's old lease is outstanding. Delete and
+	// BatchDelete act only through it, so neither can remove an entry another
+	// node registered or took over. The leases aren't ordered, since Consul's
+	// index can go backwards; each release drops only its own.
+	held   map[string]map[string]struct{}
 	heldMu sync.Mutex
 }
 
-// hold is a lock session this instance registered an ID under, and the
-// ModifyIndex of the write that stored it. Replies can arrive out of commit
-// order, so only a later write replaces a hold.
-type hold struct {
-	lease string
-	index uint64
+// heldLeases returns the lock sessions this instance holds sessionID under.
+// The caller holds heldMu.
+func (c *consulSessionStore) heldLeases(sessionID string) []string {
+	return slices.Sorted(maps.Keys(c.held[sessionID]))
 }
 
 // newConsulSessionStore creates a new ConsulSessionStore
@@ -461,7 +464,7 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 		ttl:       ttl,
 		keyPrefix: keyPrefix,
 		cache:     newSessionCache(logger),
-		held:      make(map[string]hold),
+		held:      make(map[string]map[string]struct{}),
 	}
 
 	// Register the node with Consul
@@ -603,13 +606,15 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 
 	// Immediately update local cache for strong consistency. A reply can
 	// arrive after a later registration of the ID has committed and been
-	// recorded here, or delivered by the watch, so record this one only where
-	// nothing later is: otherwise its release would forget the later hold, and
-	// the cache would route guests to a superseded registration.
+	// recorded here, or delivered by the watch. Tracking this lease alongside
+	// the later one is harmless, since its release drops only its own; the
+	// cache takes it only where nothing later is, or guests would be routed to
+	// a superseded registration.
 	c.heldMu.Lock()
-	if cur, ok := c.held[session.ID]; !ok || index > cur.index {
-		c.held[session.ID] = hold{lease: lease, index: index}
+	if c.held[session.ID] == nil {
+		c.held[session.ID] = make(map[string]struct{})
 	}
+	c.held[session.ID][lease] = struct{}{}
 	c.cache.Set(session.ID, cachedSession{session: session, index: index, lease: lease}, epoch)
 	c.heldMu.Unlock()
 
@@ -696,16 +701,19 @@ func (c *consulSessionStore) release(ctx context.Context, sessionID, lease strin
 	return nil
 }
 
-// forget drops this instance's record of sessionID only if lease is still the
-// one it registered the ID under, and the cache entry only if lease holds it.
-// After a rebuild the new lease holds the entry, and the cache still
-// describes it; an entry another registration holds, such as another node's
+// forget drops lease from this instance's record of sessionID, and the cache
+// entry only if lease holds it. Any other lease it holds the ID under, such as
+// a rebuild's, stays tracked, and the cache still describes the entry it
+// holds; an entry another registration holds, such as another node's
 // takeover, stays too: the release didn't touch it.
 func (c *consulSessionStore) forget(sessionID, lease string) {
 	c.heldMu.Lock()
 	defer c.heldMu.Unlock()
-	if h, ok := c.held[sessionID]; ok && h.lease == lease {
-		delete(c.held, sessionID)
+	if leases, ok := c.held[sessionID]; ok {
+		delete(leases, lease)
+		if len(leases) == 0 {
+			delete(c.held, sessionID)
+		}
 	}
 	c.cache.Delete(sessionID, lease)
 }
@@ -808,26 +816,33 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	return session, nil
 }
 
-// Delete releases the lock session this instance registered sessionID under,
-// if any. An entry it doesn't hold is another registration's, or no one's, and
-// not this instance's to remove.
+// Delete releases every lock session this instance registered sessionID under,
+// if any; the one that holds the entry takes it with it. An entry it doesn't
+// hold is another registration's, or no one's, and not this instance's to
+// remove.
 func (c *consulSessionStore) Delete(sessionID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("session ID cannot be empty")
 	}
 
 	c.heldMu.Lock()
-	h, ok := c.held[sessionID]
+	leases := c.heldLeases(sessionID)
 	c.heldMu.Unlock()
-	if !ok {
+	if len(leases) == 0 {
 		c.logger.Debug("not deleting a session this instance doesn't hold", "session", sessionID)
 		return nil
 	}
 
-	return c.release(context.Background(), sessionID, h.lease)
+	var errs []error
+	for _, lease := range leases {
+		if err := c.release(context.Background(), sessionID, lease); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
-// heldEntry is a session ID and the lock session this instance holds it under.
+// heldEntry is a session ID and a lock session this instance holds it under.
 type heldEntry struct {
 	id, lease string
 }
@@ -835,13 +850,28 @@ type heldEntry struct {
 // BatchDelete deletes those of sessionIDs this instance holds, each only while
 // its lock session still holds it. Shutdown cleanup deletes from a listing that
 // can be stale by then, and an entry another node took over since must survive
-// it.
+// it. An ID held under several leases is tried under each: the one that holds
+// the entry deletes it, and the others are lost holds.
+//
+// A transaction holds at most one entry per ID. Consul goes on through a
+// transaction's operations after one fails, so a second pair for the same key
+// would find it deleted by the first, and that failure would look like the
+// lease losing its hold when it hadn't. Each ID's nth lease is therefore
+// tried in the nth round.
 func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 	c.heldMu.Lock()
-	var entries []heldEntry
+	var rounds [][]heldEntry
+	seen := make(map[string]bool, len(sessionIDs))
 	for _, id := range sessionIDs {
-		if h, ok := c.held[id]; ok {
-			entries = append(entries, heldEntry{id: id, lease: h.lease})
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		for n, lease := range c.heldLeases(id) {
+			if n == len(rounds) {
+				rounds = append(rounds, nil)
+			}
+			rounds[n] = append(rounds[n], heldEntry{id: id, lease: lease})
 		}
 	}
 	c.heldMu.Unlock()
@@ -852,16 +882,18 @@ func (c *consulSessionStore) BatchDelete(sessionIDs []string) error {
 	const maxBatchSize = 32
 
 	deleted := 0
-	for i := 0; i < len(entries); i += maxBatchSize {
-		end := min(i+maxBatchSize, len(entries))
+	for _, entries := range rounds {
+		for i := 0; i < len(entries); i += maxBatchSize {
+			end := min(i+maxBatchSize, len(entries))
 
-		done, err := c.deleteBatch(entries[i:end])
-		for _, e := range done {
-			c.forget(e.id, e.lease)
-		}
-		deleted += len(done)
-		if err != nil {
-			return err
+			done, err := c.deleteBatch(entries[i:end])
+			for _, e := range done {
+				c.forget(e.id, e.lease)
+			}
+			deleted += len(done)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
