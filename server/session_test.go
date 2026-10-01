@@ -997,10 +997,13 @@ func (suite *ConsulStoreTestSuite) TestALateReplyFromBeforeAnIndexDropIsNotCache
 	ctx, id := context.Background(), suite.uniq("late-reply-index-drop")
 
 	first := suite.registerDelayed(store, delay, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
-	// Let the watch deliver the committed entry first, so the only thing that
-	// can cache it again is the late reply.
+	// Let the watch deliver the committed entry, then stop it, so the only
+	// thing that can cache the entry again is the late reply: other tests,
+	// and other packages' tests, write under the same prefix, and any
+	// delivery would cache it legitimately.
 	suite.Require().Eventually(func() bool { return store.HasInCache(id) },
 		2*time.Second, 10*time.Millisecond, "the watch never delivered the entry")
+	store.watchPlan.Stop()
 	// The watch's index drops, as it does when the entry with the highest
 	// index goes, or after a restore.
 	store.updateSessionReplica(1, nil)
