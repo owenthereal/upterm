@@ -45,6 +45,10 @@ type sshd struct {
 	// with its session key alone and never touch its agent.
 	HostGateEnabled bool
 
+	// liveness paces the pings that find a reconnect-capable host which went
+	// silent; zero is defaultHostLiveness. Tests shorten it.
+	liveness hostLiveness
+
 	// onRegistered is a test hook, run after the store takes a registration and
 	// before this node adopts it: the window in which two registrations can
 	// commit in one order and adopt in the other, and in which the host can
@@ -566,7 +570,7 @@ func (s *sshd) isOwnAuthority(key gossh.PublicKey) bool {
 // registration of the same or a newer generation holds the ID here, or the
 // store already shows another registration with such a generation (conn is
 // then closed too), and false with no reply when conn closed while
-// registering.
+// registering. A capable registration that is kept also has conn pinged.
 func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) (ok bool, refusal []byte) {
 	prev, err := s.sessions.add(reg, conn)
 	if err != nil {
@@ -618,7 +622,28 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 		s.sessions.end(reg)
 		return false, nil
 	}
+	// Only a capable host's connection is pinged: it redials when the ping
+	// closes the connection, and a legacy host can't, so closing its
+	// connection would end its session for good.
+	if reg.Capable() {
+		s.pingOnce(ctx, reg, conn)
+	}
 	return true, nil
+}
+
+// contextKeyPinged marks a connection that is already being pinged.
+type contextKeyPinged struct{}
+
+// pingOnce starts pinging conn, once however many registrations it makes.
+func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) {
+	ctx.Lock()
+	pinged, _ := ctx.Value(contextKeyPinged{}).(bool)
+	ctx.SetValue(contextKeyPinged{}, true)
+	ctx.Unlock()
+	if pinged {
+		return
+	}
+	go pingHost(ctx, conn, s.liveness.orDefault(), s.Logger.With("session-id", reg.ID()))
 }
 
 // releaseReplaced releases a registration a takeover on this node replaced.
