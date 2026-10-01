@@ -656,10 +656,12 @@ func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (ne
 		d.Logger.With("host", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy sshd")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
-	// A guest with no node to go to is one whose session couldn't be resolved.
-	// This node's SSHProxy refuses it, telling it why.
+	// A guest with no node goes to this node's SSHProxy, which authorizes the
+	// guest's user itself. The WebSocket proxy sends one here when it can't
+	// resolve the user, so the refusal can say why, and in Consul mode when
+	// the resolved node won't take the dial, so the route can be refreshed.
 	if id.NodeAddr == "" {
-		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy to refuse an unresolved session")
+		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing this node's sshproxy for a guest with no node")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
 

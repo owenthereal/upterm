@@ -166,9 +166,10 @@ func Test_WebSocketProxy_UnresolvedGuestWithoutSSHProxy(t *testing.T) {
 	require.Zero(t, cd.calls.Load())
 }
 
-// Fronting the SSH proxy, the handler passes on a guest whose session it can't
-// resolve, so the SSH proxy can refuse it with the reason.
-func Test_WebSocketProxy_UnresolvedGuestGoesToSSHProxy(t *testing.T) {
+// standInSSHProxy listens as this node's SSH proxy would, and greets the first
+// connection it accepts.
+func standInSSHProxy(t *testing.T) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -180,13 +181,42 @@ func Test_WebSocketProxy_UnresolvedGuestGoesToSSHProxy(t *testing.T) {
 		defer func() { _ = conn.Close() }()
 		_, _ = conn.Write([]byte("from the SSH proxy"))
 	}()
+	return ln.Addr().String()
+}
 
+// Fronting the SSH proxy, the handler passes on a guest whose session it can't
+// resolve, so the SSH proxy can refuse it with the reason.
+func Test_WebSocketProxy_UnresolvedGuestGoesToSSHProxy(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	c := openGuestWS(t, &wsHandler{
-		ConnDialer:     sshProxyDialer{sshProxyAddr: ln.Addr().String(), Logger: logger},
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), Logger: logger},
 		SessionManager: newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul)),
 		Logger:         logger,
 	}, "nosuchsession")
+
+	_, msg, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "from the SSH proxy", string(msg))
+}
+
+// In Consul mode a guest's node comes from a cache that can trail its host's
+// reconnect to another node. Fronting the SSH proxy, the handler passes on a
+// guest whose node won't take the dial, so the SSH proxy can refresh the route.
+func Test_WebSocketProxy_UnreachableNodeGoesToSSHProxy(t *testing.T) {
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	unreachable := gone.Addr().String()
+	require.NoError(t, gone.Close())
+
+	logger := slog.New(slog.DiscardHandler)
+	sm := newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+	user, err := sm.CreateSession(NewSession("session", unreachable, "host", nil, nil))
+	require.NoError(t, err)
+	c := openGuestWS(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), Logger: logger},
+		SessionManager: sm,
+		Logger:         logger,
+	}, user)
 
 	_, msg, err := c.ReadMessage()
 	require.NoError(t, err)
