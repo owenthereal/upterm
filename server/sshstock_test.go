@@ -21,6 +21,7 @@ import (
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -944,4 +945,69 @@ func TestStockSSHDoesNotRefreshAHostKeyMismatch(t *testing.T) {
 	require.ErrorAs(t, err, &rejection)
 	require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
 	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+type failingStore struct{ *memorySessionStore }
+
+func (failingStore) Get(string) (*Session, error) { return nil, errors.New("consul unreachable") }
+
+func dialForBanners(t *testing.T, addr, user string, keys ...ssh.Signer) []string {
+	var banners []string
+	_, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(keys...)}, BannerCallback: func(m string) error { banners = append(banners, m); return nil }})
+	require.Error(t, err)
+	return banners
+}
+
+func TestStockSSHBanner(t *testing.T) {
+	k1, _ := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	k2, _ := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	k3, _ := utils.CreateSigners(nil)
+	dialer := &stockTestDialer{addr: "127.0.0.1:1"}
+
+	t.Run("missing, once however many keys", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		b := dialForBanners(t, addr, proxy.SessionManager.GetEncodeDecoder().Encode("missing", proxy.NodeAddr), k1, k2, k3[0])
+		require.Len(t, b, 1)
+		require.Contains(t, b[0], "no host is connected for session missing")
+	})
+	t.Run("store unreachable", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+			p.SessionManager = newSessionManagerWithStore(failingStore{newMemorySessionStore(logger)}, routing.NewEncodeDecoder(routing.ModeConsul))
+		})
+		b := dialForBanners(t, addr, "anything", k1)
+		require.Len(t, b, 1)
+		require.Contains(t, b[0], "can't look up sessions")
+		require.NotContains(t, b[0], "no host is connected")
+	})
+	t.Run("found, refusing the key", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		user, err := proxy.SessionManager.CreateSession(NewSession("found", proxy.NodeAddr, "host", nil, [][]byte{ssh.MarshalAuthorizedKey(k1.PublicKey())}))
+		require.NoError(t, err)
+		require.Empty(t, dialForBanners(t, addr, user, k2))
+	})
+}
+
+func TestBannerFor(t *testing.T) {
+	guest, host := &fakeConnMetadata{}, &fakeConnMetadata{clientVersion: upterm.HostSSHClientVersion}
+	notFound := &lookupError{fmt.Errorf("error resolving SSH user: %w", &ErrSessionNotFound{SessionID: "s"})}
+	unreachable := &lookupError{errors.New("consul unreachable")}
+	for _, tc := range []struct {
+		name string
+		meta ssh.ConnMetadata
+		err  error
+		want string
+	}{
+		{"no error", guest, nil, ""},
+		{"a refusal that is not a lookup", guest, errors.New("public key not allowed"), ""},
+		{"a session that is not stored", guest, notFound, fmt.Sprintf(bannerNoHost, "s")},
+		{"a session not stored, in a wrapped chain", guest, fmt.Errorf("refused: %w", notFound), fmt.Sprintf(bannerNoHost, "s")},
+		{"a store that fails", guest, unreachable, bannerLookupFailed},
+		{"a host connection", host, notFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, bannerFor(tc.meta, "s", tc.err))
+		})
+	}
 }

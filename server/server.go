@@ -656,6 +656,12 @@ func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (ne
 		d.Logger.With("host", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy sshd")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
+	// A guest with no node to go to is one whose session couldn't be resolved.
+	// This node's SSHProxy refuses it, telling it why.
+	if id.NodeAddr == "" {
+		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy to refuse an unresolved session")
+		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
+	}
 
 	d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr, "addr", id.NodeAddr).Info("dialing sshproxy session")
 	return dialer.DialContext(ctx, "tcp", id.NodeAddr)

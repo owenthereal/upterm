@@ -145,8 +145,17 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// CLIENT connection: decode the SSH user using SessionManager
 		sessionID, nodeAddr, err := h.SessionManager.ResolveSSHUser(sshUser)
 		if err != nil {
-			h.wsError(wsc, fmt.Errorf("error resolving SSH user %s: %w", sshUser, err), "error resolving SSH user")
-			return
+			err = fmt.Errorf("error resolving SSH user %s: %w", sshUser, err)
+			// Fronting the SSH proxy, hand over a guest this can't place, with no
+			// node to go to. The SSH proxy refuses it with a banner saying why,
+			// which a WebSocket close can't carry. It decodes the user itself, so
+			// sshUser only stands in for the session ID, in logs.
+			if _, ok := h.ConnDialer.(sshProxyDialer); !ok {
+				h.wsError(wsc, err, "error resolving SSH user")
+				return
+			}
+			h.Logger.Error("error resolving SSH user", "error", err)
+			sessionID, nodeAddr = sshUser, ""
 		}
 
 		id = &api.Identifier{

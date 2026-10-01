@@ -84,6 +84,40 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	return r.routing.Serve(ln)
 }
 
+// What a guest is told when the relay can't take it to a session, ahead of the
+// refusal itself, which says nothing more than that authentication failed.
+const (
+	bannerNoHost = "upterm: no host is connected for session %s right now. " +
+		"If it is reconnecting, this same ssh command will work again once it's back. " +
+		"Try again in a few seconds.\n"
+	bannerLookupFailed = "upterm: the relay can't look up sessions right now. Try again shortly.\n"
+)
+
+// lookupError marks a refusal that came from reading the guest's session, not
+// from judging the guest, so the guest can be told why it was turned away.
+type lookupError struct{ err error }
+
+func (e *lookupError) Error() string { return e.err.Error() }
+func (e *lookupError) Unwrap() error { return e.err }
+
+// bannerFor is the banner to send with err, the refusal of meta's connection,
+// or "" for none. Only a failed lookup of the guest's session earns one: the
+// session isn't stored (its host may be reconnecting, and about to store it
+// again) or the store couldn't say. Refusing the guest itself, a key the
+// session doesn't admit say, sends none, and neither does a host's connection.
+// sessionID is the one meta's user names.
+func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
+	var lookup *lookupError
+	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion || !errors.As(err, &lookup) {
+		return ""
+	}
+	var missing *ErrSessionNotFound
+	if errors.As(err, &missing) {
+		return fmt.Sprintf(bannerNoHost, sessionID)
+	}
+	return bannerLookupFailed
+}
+
 // errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
 // A sentinel rather than an ad-hoc error so the failure can be recognized after
 // x/crypto has wrapped it, and reported to the peer by identity, not by text.
@@ -290,7 +324,7 @@ func (a proxyAuth) resolve(conn ssh.ConnMetadata) (*upstreamTarget, error) {
 
 	sessionID, nodeAddr, sess, err := a.SessionManager.lookupSSHUser(user)
 	if err != nil {
-		return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
+		return nil, &lookupError{fmt.Errorf("error resolving SSH user %s: %w", user, err)}
 	}
 	if sess != nil {
 		return a.targetOf(sess), nil
@@ -302,7 +336,7 @@ func (a proxyAuth) resolve(conn ssh.ConnMetadata) (*upstreamTarget, error) {
 	}
 	if nodeAddr == a.NodeAddr {
 		if target.local, err = a.SessionManager.GetSession(sessionID); err != nil {
-			return nil, err
+			return nil, &lookupError{err}
 		}
 	}
 	return target, nil

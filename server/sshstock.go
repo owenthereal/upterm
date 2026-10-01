@@ -170,6 +170,11 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	var (
 		first    *preparedRoute
 		verified ssh.PublicKey
+		// bannerSent is set once a refusal has carried a banner. x/crypto sends
+		// the banner of every refusal that has one, and a guest offers each of
+		// its keys in turn, so without it the same message would arrive once per
+		// key.
+		bannerSent bool
 	)
 	cfg := &ssh.ServerConfig{
 		ServerVersion: version.ServerSSHVersion(),
@@ -179,6 +184,14 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if _, _, err := p.Auth.authorize(meta, key); err != nil {
+				if bannerSent {
+					return nil, err
+				}
+				sessionID, _, _ := p.Auth.SessionManager.GetEncodeDecoder().Decode(meta.User())
+				if msg := bannerFor(meta, sessionID, err); msg != "" {
+					bannerSent = true
+					return nil, &ssh.BannerError{Err: err, Message: msg}
+				}
 				return nil, err
 			}
 			return &ssh.Permissions{}, nil

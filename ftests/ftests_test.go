@@ -200,6 +200,22 @@ func (suite *FtestSuite) TestBackwardCompatibility() {
 	suite.runTestCategory(BackwardCompatibilityTestCases)
 }
 
+func (suite *FtestSuite) TestBanner() {
+	for _, protocol := range []string{"ssh", "ws"} {
+		for _, topo := range []struct {
+			name string
+			join TestServer
+		}{{"singleNode", suite.ts1}, {"multiNodes", suite.ts2}} {
+			suite.T().Run(protocol+"/"+topo.name, func(t *testing.T) {
+				if suite.mode == routing.ModeEmbedded && topo.name == "multiNodes" {
+					t.Skip("embedded mode doesn't check a remote session at the entry node")
+				}
+				testClientBannerForMissingSession(t, suite.ts1.NodeAddr(), protocol+"://"+suite.getServerAddr(protocol, topo.join))
+			})
+		}
+	}
+}
+
 func (suite *FtestSuite) runTestCategory(testCases []FtestCase) {
 	protocols := []string{"ssh", "ws"}
 
@@ -719,6 +735,9 @@ type Client struct {
 	// Signers, when non-empty, replaces the credentials built from
 	// PrivateKeys, so a test can offer a certificate of its own making.
 	Signers []ssh.Signer
+	// BannerCallback receives the banners the relay sends while the client
+	// authenticates, such as the one for a session with no host connected.
+	BannerCallback func(message string) error
 	// NoDrainStdout leaves the session's stdout unread, modelling a guest that
 	// has stopped draining its SSH channel. Its window fills, and the host's
 	// write to it blocks.
@@ -809,6 +828,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		User:            session.SshUser,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		BannerCallback:  c.BannerCallback,
 	}
 
 	u, err := url.Parse(clientJoinURL)
