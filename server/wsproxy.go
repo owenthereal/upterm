@@ -170,9 +170,12 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// In Consul mode a guest's node comes from a cache the store's watch keeps,
 	// which can trail its host's reconnect to another node. Fronting the SSH
 	// proxy, hand over a guest whose node won't take the dial: the SSH proxy's
-	// front door makes the attempt itself, and refreshes the route if it
-	// fails. An embedded-mode guest's node is its user's own choice, and
-	// there is nothing to refresh it from.
+	// front door makes the attempt itself, and if that fails, refreshes a
+	// route that can move, one whose host proved its key. A legacy session's
+	// route can't, and its hand-off buys only a second dial and a generic SSH
+	// rejection, which still keeps the dial error out of the close frame. An
+	// embedded-mode guest's node is its user's own choice, and there is
+	// nothing to refresh it from.
 	if err != nil && id.Type == api.Identifier_CLIENT && id.NodeAddr != "" &&
 		h.SessionManager.GetRoutingMode() == routing.ModeConsul {
 		if handOff := h.sshProxyHandOff(id.Id); handOff != nil {
