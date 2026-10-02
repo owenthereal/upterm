@@ -1127,6 +1127,28 @@ func TestStockSSHGivesALocalTargetTheWholeStage(t *testing.T) {
 	require.Equal(t, int32(1), dialer.calls.Load())
 }
 
+// What lets a local target have the whole stage: a stale route to this node
+// fails fast, since the host has left its slot here, and the refresh still
+// has the rest of the stage to reach the node the store now names.
+func TestStockSSHRefreshesAStaleRouteToThisNode(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	store.stale.NodeAddr = "127.0.0.1:2222" // this node
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"node-c:22":      func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+	select {
+	case <-peersC:
+	case <-time.After(refreshRoomWait):
+		t.Fatal("the refreshed route never reached node C")
+	}
+	require.Equal(t, int32(2), dialer.calls.Load())
+}
+
 type failingStore struct{ *memorySessionStore }
 
 func (failingStore) Get(string) (*Session, error) { return nil, errors.New("consul unreachable") }
