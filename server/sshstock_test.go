@@ -1048,6 +1048,66 @@ func TestStockSSHRefreshesOnlyConsulGuests(t *testing.T) {
 	})
 }
 
+// rejectedAfter opens a session on client, which the relay must reject, and
+// returns how long it took to.
+func rejectedAfter(t *testing.T, client *ssh.Client) time.Duration {
+	t.Helper()
+	start := time.Now()
+	// On a goroutine, so a guest held past the stage fails the test instead
+	// of hanging the package.
+	opened := make(chan error, 1)
+	go func() {
+		_, err := client.NewSession()
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		require.Error(t, err)
+		return time.Since(start)
+	case <-time.After(5 * time.Second):
+		t.Fatal("held past the upstream stage")
+		return 0
+	}
+}
+
+// A legacy route can't move: its host can't redial, and its lease keeper
+// rebuilds it on the same node at the same generation. It gets one attempt and
+// the whole stage, which is 2 s here, and no refresh, even when the store has
+// the session somewhere else.
+func TestStockSSHDoesNotRefreshALegacyRoute(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := movedSession(t, good)
+	store.stale.Generation = 0
+	stall := stallingListener(t)
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", stall) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	require.GreaterOrEqual(t, rejectedAfter(t, client), 1500*time.Millisecond, "the attempt was cut short of the stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// A refreshable route whose target is on this node gets the whole stage for
+// its first attempt: a local target that stalls is far more likely a slow host
+// than a stale route. The stage is 2 s here.
+func TestStockSSHGivesALocalTargetTheWholeStage(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler))}
+	here := NewSession("session", "127.0.0.1:2222", "host", [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}, nil)
+	here.Generation = 1
+	_, err = store.Register(context.Background(), here)
+	require.NoError(t, err)
+	stall := stallingListener(t)
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", stall) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	require.GreaterOrEqual(t, rejectedAfter(t, client), 1500*time.Millisecond, "the first attempt was cut short of the stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
 type failingStore struct{ *memorySessionStore }
 
 func (failingStore) Get(string) (*Session, error) { return nil, errors.New("consul unreachable") }

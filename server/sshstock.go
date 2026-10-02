@@ -250,12 +250,22 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
 	// A guest whose route the store decides was routed from a cache the watch
-	// keeps, which can trail a host's reconnect to another node. Its first
-	// attempt gets half the stage, keeping the rest for one more on a refreshed
-	// route. Everyone else gets one attempt and the whole stage.
-	refreshable := p.Auth.canRefresh(downstream)
+	// keeps, which can trail a host's reconnect to another node, so a failed
+	// attempt may be retried once on a refreshed route. Only a route with a
+	// generation above zero can move: a legacy host can't redial, and its lease
+	// keeper rebuilds it on the same node at the same generation. Everyone else
+	// gets one attempt and the whole stage.
+	//
+	// A refreshable route's first attempt gets half the stage, keeping the rest
+	// for the retry, only when it is a hop to another relay node: that
+	// handshake is quick, and a stale route most often points at another node.
+	// A target on this node gets the whole stage. One that stalls is far more
+	// likely a slow host than a stale route, and a stale slot here is closed
+	// within the watch's latency of its supersession, so an attempt on it fails
+	// soon enough to leave the refresh the rest of the stage.
+	refreshable := p.Auth.canRefresh(downstream) && first.route.Generation > 0
 	firstCtx := upstreamCtx
-	if refreshable {
+	if refreshable && first.route.NodeAddr != p.Auth.NodeAddr {
 		var cancelFirst context.CancelFunc
 		firstCtx, cancelFirst = context.WithTimeout(upstreamCtx, stage/2)
 		defer cancelFirst()
