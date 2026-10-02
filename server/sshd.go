@@ -124,6 +124,9 @@ type localRegistration struct {
 	// gone, or held by an older registration. It holds one report: a second
 	// adds nothing the keeper isn't already acting on.
 	lost chan struct{}
+	// lostEpoch and lostIndex are the watch delivery that last reported a
+	// loss, which replace weighs against the handle a rebuild installs.
+	lostEpoch, lostIndex uint64
 }
 
 func newLocalSessions(p provider.Provider, sessionManager *SessionManager, logger *slog.Logger) *localSessions {
@@ -201,10 +204,14 @@ func (l *localSessions) add(reg *Registration, conn io.Closer) (*localRegistrati
 // holds stay as they are.
 //
 // A loss reported until now was judged against the handle next replaces,
-// since reconcile reads the handle and reports under the same lock, and is
-// discarded rather than rebuilt again. That includes one reported between
-// the rebuild's commit and now, which the rebuild didn't answer; the next
-// watch delivery, or the next renewal, catches it.
+// since reconcile reads the handle and reports under the same lock. It is
+// discarded when the delivery that last reported it is from next's epoch and
+// no later than next's write: that delivery showed the entry from before the
+// rebuild, which the rebuild has answered. A later delivery can show a delete
+// that landed between the rebuild's commit and now, and one from another epoch
+// doesn't order against next's write, so either report is kept, at the cost of
+// at most one more rebuild. Discarding it could leave the loss unanswered until
+// the next renewal, since the store need not change again to report it anew.
 func (l *localSessions) replace(next *Registration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -213,9 +220,11 @@ func (l *localSessions) replace(next *Registration) bool {
 		return false
 	}
 	cur.reg = next
-	select {
-	case <-cur.lost:
-	default:
+	if cur.lostEpoch == next.epoch && cur.lostIndex <= next.index {
+		select {
+		case <-cur.lost:
+		default:
+		}
 	}
 	return true
 }
@@ -259,6 +268,7 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Sessi
 			l.removeLocked(id, lr)
 			ended = append(ended, superseded{lr.conn, reg, cur})
 		case !ok || cur.Generation < reg.Generation():
+			lr.lostEpoch, lr.lostIndex = epoch, index
 			select {
 			case lr.lost <- struct{}{}:
 			default:

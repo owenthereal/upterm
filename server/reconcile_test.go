@@ -440,3 +440,54 @@ func TestALossReportedDuringARebuildIsNotRebuiltAgain(t *testing.T) {
 		"a loss reported against the replaced handle was rebuilt again")
 	require.False(t, conn.isClosed())
 }
+
+// A loss the rebuild didn't answer outlasts the installation of its handle,
+// and is rebuilt again rather than left until the next renewal: one from a
+// delivery after the rebuild's write, which can show a delete landing before
+// the handle is installed, or from another epoch, which doesn't order against
+// that write.
+func TestALossTheRebuildDidNotAnswerIsRebuiltAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		epoch, index uint64
+	}{
+		{"a later delivery", 0, 6},
+		{"another epoch", 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var rebuilds atomic.Int32
+			// Legacy, so no rebuild bound closes the connection while the test
+			// holds the rebuild.
+			store := &leaseStore{ttl: time.Hour}
+			store.reregister = func(ctx context.Context, reg *Registration) (*Registration, error) {
+				if rebuilds.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+				next, err := store.memorySessionStore.Reregister(ctx, reg)
+				if next != nil {
+					next.index = 5 // where Consul would have written it
+				}
+				return next, err
+			}
+			sessions, _, conn := newKeeperFixture(t, store, 0)
+			absent := map[string]*Session{}
+
+			sessions.reconcile(0, 0, absent)
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the keeper never rebuilt the loss")
+			}
+			sessions.reconcile(tc.epoch, tc.index, absent)
+			close(release)
+
+			require.Eventually(t, func() bool { return rebuilds.Load() == 2 }, 5*time.Second, 10*time.Millisecond,
+				"a loss the rebuild didn't answer was discarded")
+			require.Never(t, func() bool { return rebuilds.Load() > 2 }, 300*time.Millisecond, 10*time.Millisecond,
+				"one loss was rebuilt more than once more")
+			require.False(t, conn.isClosed())
+		})
+	}
+}
