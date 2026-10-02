@@ -337,9 +337,11 @@ func (a proxyAuth) resolve(conn ssh.ConnMetadata) (*upstreamTarget, error) {
 		return &upstreamTarget{id: &api.Identifier{Id: user, Type: api.Identifier_HOST}}, nil
 	}
 
+	// A failed read of the store comes back as a lookupError already, and a
+	// user that doesn't decode isn't one.
 	sessionID, nodeAddr, sess, err := a.SessionManager.lookupSSHUser(user)
 	if err != nil {
-		return nil, &lookupError{fmt.Errorf("error resolving SSH user %s: %w", user, err)}
+		return nil, fmt.Errorf("error resolving SSH user %s: %w", user, err)
 	}
 	if sess != nil {
 		return a.targetOf(sess), nil

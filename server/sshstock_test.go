@@ -1161,6 +1161,14 @@ func TestStockSSHBanner(t *testing.T) {
 		require.Contains(t, b[0], "can't look up sessions")
 		require.NotContains(t, b[0], "no host is connected")
 	})
+	// A user that doesn't decode is refused for its format, which is no lookup.
+	t.Run("a user that doesn't decode", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+			p.SessionManager = newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+		})
+		require.Empty(t, dialForBanners(t, addr, ":x", k1))
+	})
 	t.Run("found, refusing the key", func(t *testing.T) {
 		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
 		user, err := proxy.SessionManager.CreateSession(NewSession("found", proxy.NodeAddr, "host", nil, [][]byte{ssh.MarshalAuthorizedKey(k1.PublicKey())}))
@@ -1235,6 +1243,37 @@ func TestBannerFor(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, bannerFor(tc.meta, "s", tc.err))
+		})
+	}
+}
+
+// Only reading the guest's session marks a refusal as a failed lookup, which
+// earns a banner. A user that doesn't decode is the guest's own mistake.
+// authenticate refuses such a user before resolve runs, so this pins the
+// marking itself.
+func TestResolveMarksOnlyAFailedReadAsALookup(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	here := routing.NewEncodeDecoder(routing.ModeEmbedded).Encode("missing", "here:22")
+	for _, tc := range []struct {
+		name   string
+		mode   routing.Mode
+		store  SessionStore
+		user   string
+		lookup bool
+	}{
+		{"a Consul-mode user that doesn't decode", routing.ModeConsul, newMemorySessionStore(logger), ":x", false},
+		{"an embedded-mode user that doesn't decode", routing.ModeEmbedded, newMemorySessionStore(logger), "x", false},
+		{"a session the store doesn't have", routing.ModeConsul, newMemorySessionStore(logger), "x", true},
+		{"a store that fails", routing.ModeConsul, failingStore{newMemorySessionStore(logger)}, "x", true},
+		{"an embedded-mode session this node doesn't have", routing.ModeEmbedded, newMemorySessionStore(logger), here, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sm := newSessionManagerWithStore(tc.store, routing.NewEncodeDecoder(tc.mode))
+			a := proxyAuth{NodeAddr: "here:22", SessionManager: sm, Logger: logger}
+			_, err := a.resolve(&fakeConnMetadata{user: tc.user})
+			require.Error(t, err)
+			var lookup *lookupError
+			require.Equal(t, tc.lookup, errors.As(err, &lookup), "%v", err)
 		})
 	}
 }

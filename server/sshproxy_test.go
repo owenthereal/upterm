@@ -200,13 +200,14 @@ func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {
 	return ssh.NewCertSigner(cert, signer)
 }
 
-// fakeConnMetadata is a minimal ssh.ConnMetadata stub for unit-testing
-// proxyAuth.checkAuthorizedKeys, which only consults ClientVersion.
+// fakeConnMetadata is a minimal ssh.ConnMetadata stub for unit tests that
+// consult only the user and the client version.
 type fakeConnMetadata struct {
+	user          string
 	clientVersion string
 }
 
-func (f *fakeConnMetadata) User() string          { return "" }
+func (f *fakeConnMetadata) User() string          { return f.user }
 func (f *fakeConnMetadata) SessionID() []byte     { return nil }
 func (f *fakeConnMetadata) ClientVersion() []byte { return []byte(f.clientVersion) }
 func (f *fakeConnMetadata) ServerVersion() []byte { return nil }

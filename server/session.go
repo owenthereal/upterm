@@ -1602,7 +1602,8 @@ func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr st
 
 // lookupSSHUser is ResolveSSHUser, also returning the session it read, so a
 // caller can take the node, the generation and the keys from that one read. It
-// is nil in embedded mode, which reads nothing.
+// is nil in embedded mode, which reads nothing. Only a failed read is a
+// lookupError: a user that doesn't decode is the guest's own mistake.
 func (sm *SessionManager) lookupSSHUser(sshUser string) (sessionID, nodeAddr string, session *Session, err error) {
 	// Decode the SSH user using our encoder
 	sessionID, nodeAddr, err = sm.encodeDecoder.Decode(sshUser)
@@ -1614,7 +1615,7 @@ func (sm *SessionManager) lookupSSHUser(sshUser string) (sessionID, nodeAddr str
 	if sm.shouldValidateSessionExistence() {
 		session, err = sm.store.Get(sessionID)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("looking up session %s: %w", sessionID, err)
+			return "", "", nil, &lookupError{fmt.Errorf("looking up session %s: %w", sessionID, err)}
 		}
 
 		return session.ID, session.NodeAddr, session, nil
