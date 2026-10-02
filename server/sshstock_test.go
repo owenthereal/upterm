@@ -815,7 +815,22 @@ func movedSession(t *testing.T, good ssh.Signer) *staleStore {
 }
 
 func consulModeProxy(t *testing.T, store SessionStore, dialer connDialer) string {
-	_, addr, _, _ := stockTestProxy(t, 4*time.Second, dialer, func(p *sshProxy) {
+	return consulModeProxyWithin(t, 4*time.Second, store, dialer)
+}
+
+// The tests that must reach node C after a stalled or failed first attempt use
+// refreshRoomTimeout. The upstream stage is half the handshake timeout and the
+// first attempt takes half of that, so the second attempt has about 2 s for its
+// SSH handshake: room for a starved -race runner, where the 1 s a 4 s timeout
+// leaves can run out. refreshRoomWait is how long they wait for node C, which
+// is longer than the whole stage.
+const (
+	refreshRoomTimeout = 8 * time.Second
+	refreshRoomWait    = 6 * time.Second
+)
+
+func consulModeProxyWithin(t *testing.T, timeout time.Duration, store SessionStore, dialer connDialer) string {
+	_, addr, _, _ := stockTestProxy(t, timeout, dialer, func(p *sshProxy) {
 		p.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
 	})
 	return addr
@@ -859,10 +874,10 @@ func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
 			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
 				"node-a:22": routeA(store), "node-c:22": dial(nodeC),
 			}}
-			dialGuest(t, consulModeProxy(t, store, dialer), good)
+			dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
 			select {
 			case <-peersC: // Dial succeeding proves nothing: the guest is authenticated first
-			case <-time.After(3 * time.Second):
+			case <-time.After(refreshRoomWait):
 				t.Fatal("the refreshed route never reached node C")
 			}
 			require.Equal(t, int32(2), dialer.calls.Load())
@@ -898,10 +913,10 @@ func TestStockSSHRefreshUsesOneSnapshot(t *testing.T) {
 				"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
 				"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
 			}}
-			dialGuest(t, consulModeProxy(t, store, dialer), good)
+			dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
 			select {
 			case <-peersC:
-			case <-time.After(3 * time.Second):
+			case <-time.After(refreshRoomWait):
 				t.Fatal("the second attempt left the snapshot GetFresh returned")
 			}
 			require.Equal(t, int32(2), dialer.calls.Load(), "node D is never dialed")
