@@ -35,10 +35,10 @@ const (
 	// and authentication over a network. The downstream and upstream stages
 	// each get half the budget and must each cover a full handshake, so
 	// anything below this fails every connection, and the misconfiguration
-	// then looks like a total outage with no stated cause. The one attempt
-	// that gets less is a refreshable guest's first on a hop to another relay
-	// node: half the upstream stage, for a handshake between nodes of one
-	// cluster, keeping the rest for one retry.
+	// then looks like a total outage with no stated cause. Only a refreshable
+	// guest's attempts get less. Its first on a hop to another relay node gets
+	// half the upstream stage, for a handshake between nodes of one cluster,
+	// and its retry gets what that attempt and the store read leave.
 	// Only Opt applies it: operator config is held to a stricter standard than
 	// the library API, which tests drive directly with much shorter budgets.
 	minHandshakeTimeout = 1 * time.Second
