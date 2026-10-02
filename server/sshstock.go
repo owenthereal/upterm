@@ -187,6 +187,22 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		// key.
 		bannerSent bool
 	)
+	// refuse is err, the refusal of meta's connection, carrying the banner it
+	// earns unless one has already been sent. Both key callbacks refuse through
+	// it: x/crypto sends the banner of either's refusal, and the session can
+	// go, or the store fail, between the key being offered and its signature
+	// being verified.
+	refuse := func(meta ssh.ConnMetadata, err error) error {
+		if bannerSent {
+			return err
+		}
+		sessionID, _, _ := p.Auth.SessionManager.GetEncodeDecoder().Decode(meta.User())
+		if msg := bannerFor(meta, sessionID, err); msg != "" {
+			bannerSent = true
+			return &ssh.BannerError{Err: err, Message: msg}
+		}
+		return err
+	}
 	cfg := &ssh.ServerConfig{
 		ServerVersion: version.ServerSSHVersion(),
 		// Authorization only. x/crypto invokes this for unsigned public-key
@@ -195,15 +211,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		// Anything expensive here is reachable before any signature is verified.
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if _, _, err := p.Auth.authorize(meta, key); err != nil {
-				if bannerSent {
-					return nil, err
-				}
-				sessionID, _, _ := p.Auth.SessionManager.GetEncodeDecoder().Decode(meta.User())
-				if msg := bannerFor(meta, sessionID, err); msg != "" {
-					bannerSent = true
-					return nil, &ssh.BannerError{Err: err, Message: msg}
-				}
-				return nil, err
+				return nil, refuse(meta, err)
 			}
 			return &ssh.Permissions{}, nil
 		},
@@ -214,7 +222,7 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, permissions *ssh.Permissions, _ string) (*ssh.Permissions, error) {
 			planned, err := p.Auth.prepare(meta, key)
 			if err != nil {
-				return nil, err
+				return nil, refuse(meta, err)
 			}
 			first, verified = planned, key
 			return permissions, nil

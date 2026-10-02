@@ -1086,6 +1086,42 @@ func TestStockSSHBanner(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, dialForBanners(t, addr, user, k2))
 	})
+	// The session can go, or the store fail, between the key being offered and
+	// its signature being verified; the second lookup is the one that fails.
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"missing once the key is verified":     {&ErrSessionNotFound{SessionID: "session"}, "no host is connected for session session"},
+		"unreachable once the key is verified": {errors.New("consul unreachable"), "can't look up sessions"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &fickleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler)), err: tc.err}
+			_, err := store.Register(context.Background(), NewSession("session", "node-a:22", "host", nil, nil))
+			require.NoError(t, err)
+			_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+				p.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+			})
+			b := dialForBanners(t, addr, "session", k1)
+			require.Greater(t, store.gets.Load(), int32(1), "the key was never verified")
+			require.Len(t, b, 1)
+			require.Contains(t, b[0], tc.want)
+		})
+	}
+}
+
+// fickleStore answers the first lookup, and fails every one after it with err.
+type fickleStore struct {
+	*memorySessionStore
+	gets atomic.Int32
+	err  error
+}
+
+func (s *fickleStore) Get(id string) (*Session, error) {
+	if s.gets.Add(1) > 1 {
+		return nil, s.err
+	}
+	return s.memorySessionStore.Get(id)
 }
 
 func TestBannerFor(t *testing.T) {
