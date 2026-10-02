@@ -1088,6 +1088,25 @@ func TestStockSSHDoesNotRefreshALegacyRoute(t *testing.T) {
 	require.Equal(t, int32(1), dialer.calls.Load())
 }
 
+// The stalled attempt above spends the whole stage, which refuses a refresh on
+// its own, so it can't show that the generation is what does. Here the legacy
+// host's node refuses at once, with the stage left and the store holding the
+// session on node C, where a refreshed route would be accepted.
+func TestStockSSHDoesNotRefreshALegacyRouteThatFailsFast(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	store.stale.Generation = 0
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	client := dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+	rejectedAfter(t, client)
+	require.Equal(t, int32(1), dialer.calls.Load(), "the guest was sent to another node")
+}
+
 // A refreshable route whose target is on this node gets the whole stage for
 // its first attempt: a local target that stalls is far more likely a slow host
 // than a stale route. The stage is 2 s here.
