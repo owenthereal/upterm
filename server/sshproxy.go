@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,9 +114,23 @@ func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
 	}
 	var missing *ErrSessionNotFound
 	if errors.As(err, &missing) {
-		return fmt.Sprintf(bannerNoHost, sessionID)
+		return fmt.Sprintf(bannerNoHost, bannerSessionID(sessionID))
 	}
 	return bannerLookupFailed
+}
+
+// bannerSessionID is how a banner names sessionID, which is whatever the
+// guest's user carries, control characters included, and which the banner
+// prints on the guest's own terminal: as is when it has a session ID's shape,
+// and quoted, with anything unprintable escaped, otherwise.
+func bannerSessionID(sessionID string) string {
+	odd := func(r rune) bool {
+		return (r < '0' || r > '9') && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z')
+	}
+	if len(sessionID) == 0 || len(sessionID) > 64 || strings.ContainsFunc(sessionID, odd) {
+		return fmt.Sprintf("%q", sessionID)
+	}
+	return sessionID
 }
 
 // errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.

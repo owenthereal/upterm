@@ -12,11 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
@@ -1086,6 +1088,17 @@ func TestStockSSHBanner(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, dialForBanners(t, addr, user, k2))
 	})
+	// The banner goes to the guest's own terminal, and names the session its
+	// user carries.
+	t.Run("missing, with a control sequence in the user", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		b := dialForBanners(t, addr, proxy.SessionManager.GetEncodeDecoder().Encode("mis\x1b[2Jsing", proxy.NodeAddr), k1)
+		require.Len(t, b, 1)
+		body, ok := strings.CutSuffix(b[0], "\n")
+		require.True(t, ok, "%q", b[0])
+		require.False(t, strings.ContainsFunc(body, unicode.IsControl), "%q", b[0])
+		require.Contains(t, b[0], `no host is connected for session "mis\x1b[2Jsing"`)
+	})
 	// The session can go, or the store fail, between the key being offered and
 	// its signature being verified; the second lookup is the one that fails.
 	for name, tc := range map[string]struct {
@@ -1144,5 +1157,23 @@ func TestBannerFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, bannerFor(tc.meta, "s", tc.err))
 		})
+	}
+}
+
+// The session ID is whatever the guest's user carries, so a banner prints it
+// as is only when it has an ID's shape, and quoted otherwise.
+func TestBannerForQuotesAnOddSessionID(t *testing.T) {
+	notFound := &lookupError{&ErrSessionNotFound{SessionID: "s"}}
+	long := strings.Repeat("a", 64)
+	for id, want := range map[string]string{
+		"Ab3":       "Ab3",
+		long:        long,
+		long + "a":  `"` + long + `a"`,
+		"":          `""`,
+		"a-b":       `"a-b"`,
+		"a\x1b[2Jb": `"a\x1b[2Jb"`,
+		"a\u202eb":  `"a\u202eb"`,
+	} {
+		require.Equal(t, fmt.Sprintf(bannerNoHost, want), bannerFor(&fakeConnMetadata{}, id, notFound), "%q", id)
 	}
 }
