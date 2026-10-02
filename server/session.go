@@ -240,8 +240,8 @@ type SessionStore interface {
 	// Get complete session data
 	Get(sessionID string) (*Session, error)
 	// GetFresh reads sessionID from the store itself, skipping any cache, and
-	// caches what it finds as Get's read-through does. It gives up once ctx is
-	// done.
+	// updates the cache with what it finds, the entry or its absence, as Get's
+	// read-through does. It gives up once ctx is done.
 	GetFresh(ctx context.Context, sessionID string) (*Session, error)
 	// Delete session data, only for an entry this instance holds
 	Delete(sessionID string) error
@@ -359,6 +359,24 @@ func (c *sessionCache) Delete(sessionID, lease string) {
 	}
 	delete(c.sessions, sessionID)
 	c.logger.Debug("removed session from cache", "session", sessionID)
+}
+
+// Evict removes sessionID's entry, which a read of Consul at index, begun in
+// epoch, found gone. It orders as Set does: across an epoch change the read's
+// index means nothing, and an entry written after index is one the read didn't
+// see, so either stays.
+func (c *sessionCache) Evict(sessionID string, index, epoch uint64) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if epoch != c.epoch {
+		return
+	}
+	if cur, ok := c.sessions[sessionID]; !ok || cur.index > index {
+		return
+	}
+	delete(c.sessions, sessionID)
+	c.logger.Debug("evicted a session the store no longer has", "session", sessionID)
 }
 
 // ReplaceAll replaces the cache with snapshot, the watch's view of every
@@ -808,14 +826,16 @@ func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionI
 		session *Session
 		index   uint64
 		lease   string
+		goneAt  uint64 // the index of a read that found no entry
 	)
 	err := retry.Do(
 		func() error {
-			kvPair, _, err := c.client.KV().Get(kvStoreKey, qo)
+			kvPair, meta, err := c.client.KV().Get(kvStoreKey, qo)
 			if err != nil {
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
 			if kvPair == nil {
+				goneAt = meta.LastIndex
 				return &ErrSessionNotFound{SessionID: sessionID}
 			}
 
@@ -845,6 +865,13 @@ func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionI
 	)
 
 	if err != nil {
+		// A cached entry the read found gone would otherwise go on routing
+		// guests to a host that has left until the watch delivers the removal,
+		// which on a quiet relay can be a long way off.
+		var notFound *ErrSessionNotFound
+		if errors.As(err, &notFound) {
+			c.cache.Evict(sessionID, goneAt, epoch)
+		}
 		return nil, err
 	}
 

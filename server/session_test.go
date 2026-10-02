@@ -1209,6 +1209,33 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	suite.Error(err, "a removed registration is still found")
 }
 
+// A guest whose cached route failed reads its session again with GetFresh. If
+// the entry is gone from Consul by then, the cached one goes too: on a quiet
+// relay the next watch delivery could be a long way off, and until then later
+// guests would be routed to a host that has left, and not told it has.
+func (suite *ConsulStoreTestSuite) TestAFreshReadThatFindsTheEntryGoneUncachesIt() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+	suite.Require().NoError(err)
+	defer func() { _ = store.Close() }()
+	ctx, id := context.Background(), suite.uniq("fresh-read-gone")
+
+	reg, err := store.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = store.Release(ctx, reg) }()
+	// Stop the watch, so only the fresh read can learn of the removal.
+	store.watchPlan.Stop()
+	suite.Require().True(store.HasInCache(id))
+	_, err = suite.client.KV().Delete(store.SessionKey(id), nil)
+	suite.Require().NoError(err)
+
+	_, err = store.GetFresh(ctx, id)
+	var missing *ErrSessionNotFound
+	suite.Require().ErrorAs(err, &missing)
+	suite.False(store.HasInCache(id), "the entry the fresh read found gone is still cached")
+}
+
 // Without renewal, Consul expires an entry within twice its TTL, which is at
 // least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
@@ -1509,6 +1536,27 @@ func TestSessionCacheDropsALocalWriteFromBeforeAnIndexDrop(t *testing.T) {
 	got, ok := cache.Get("id")
 	require.True(t, ok)
 	require.Equal(t, current.NodeAddr, got.NodeAddr, "a write from before the drop outranks what came after it")
+}
+
+// A read that finds an entry gone evicts the cached one only if it saw that
+// entry's write: within the read's epoch, and at or past the write's index.
+func TestSessionCacheEvictsOnlyWhatTheReadSawGone(t *testing.T) {
+	c := newSessionCache(sessionTestLogger)
+	entry := func(index uint64) cachedSession {
+		return cachedSession{session: &Session{ID: "id", Generation: 1}, index: index}
+	}
+
+	c.Set("id", entry(20), c.Epoch())
+	c.Evict("id", 15, c.Epoch())
+	assert.True(t, c.Has("id"), "a read from before the write evicted it")
+	c.Evict("id", 20, c.Epoch())
+	assert.False(t, c.Has("id"), "a read that saw the write left it")
+
+	c.ReplaceAll(30, map[string]cachedSession{"id": entry(30)})
+	before := c.Epoch()                                       // a read begins
+	c.ReplaceAll(5, map[string]cachedSession{"id": entry(4)}) // the index drops
+	c.Evict("id", 40, before)                                 // and the read finds the entry gone
+	assert.True(t, c.Has("id"), "a read from before an index drop evicted an entry from after it")
 }
 
 //
