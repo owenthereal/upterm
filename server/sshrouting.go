@@ -32,9 +32,13 @@ const (
 	// would have uptermd's own sshd reject uptermd's own freshly minted cert.
 	maxHandshakeTimeout = 2 * certClockSkewTolerance
 	// minHandshakeTimeout rejects budgets too small to complete a key exchange
-	// and authentication over a network. Each half of the budget must cover a
-	// full handshake, so anything below this fails every connection, and the
-	// misconfiguration then looks like a total outage with no stated cause.
+	// and authentication over a network. The downstream and upstream stages
+	// each get half the budget and must each cover a full handshake, so
+	// anything below this fails every connection, and the misconfiguration
+	// then looks like a total outage with no stated cause. Only a refreshable
+	// guest's attempts get less. Its first on a hop to another relay node gets
+	// half the upstream stage, for a handshake between nodes of one cluster,
+	// and its retry gets what that attempt and the store read leave.
 	// Only Opt applies it: operator config is held to a stricter standard than
 	// the library API, which tests drive directly with much shorter budgets.
 	minHandshakeTimeout = 1 * time.Second

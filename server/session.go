@@ -167,6 +167,10 @@ type Registration struct {
 	ConfirmedAt time.Time
 	lease       string // Consul lock session; "" in memory
 	index       uint64 // Consul ModifyIndex as written; 0 in memory
+	// epoch is the store cache's epoch when the Consul call that wrote index
+	// began; 0 in memory. index orders against a watch delivery's only within
+	// that epoch.
+	epoch uint64
 }
 
 func (r *Registration) ID() string { return r.Session.ID }
@@ -235,12 +239,20 @@ type SessionStore interface {
 	LeaseTTL() time.Duration
 	// Get complete session data
 	Get(sessionID string) (*Session, error)
+	// GetFresh reads sessionID from the store itself, skipping any cache, and
+	// updates the cache with what it finds, the entry or its absence, as Get's
+	// read-through does. It gives up once ctx is done.
+	GetFresh(ctx context.Context, sessionID string) (*Session, error)
 	// Delete session data, only for an entry this instance holds
 	Delete(sessionID string) error
 	// BatchDelete multiple sessions efficiently, likewise
 	BatchDelete(sessionIDs []string) error
 	// List all sessions (for cleanup and management)
 	List() ([]*Session, error)
+	// Observe has fn called with each view of every entry the store's watch
+	// delivers; see SessionManager.Observe. A store no other writer shares
+	// has nothing to watch, and never calls fn.
+	Observe(fn func(epoch, index uint64, entries map[string]*Session))
 	// Close cleans up resources and stops background processes
 	Close() error
 }
@@ -349,13 +361,32 @@ func (c *sessionCache) Delete(sessionID, lease string) {
 	c.logger.Debug("removed session from cache", "session", sessionID)
 }
 
+// Evict removes sessionID's entry, which a read of Consul at index, begun in
+// epoch, found gone. It orders as Set does: across an epoch change the read's
+// index means nothing, and an entry written after index is one the read didn't
+// see, so either stays.
+func (c *sessionCache) Evict(sessionID string, index, epoch uint64) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if epoch != c.epoch {
+		return
+	}
+	if cur, ok := c.sessions[sessionID]; !ok || cur.index > index {
+		return
+	}
+	delete(c.sessions, sessionID)
+	c.logger.Debug("evicted a session the store no longer has", "session", sessionID)
+}
+
 // ReplaceAll replaces the cache with snapshot, the watch's view of every
 // session as of index, and takes ownership of snapshot. An entry a later write
 // stored stays: the watch hasn't caught up with that write, and the snapshot
 // that does will include it, or its removal. An index below the last
 // snapshot's starts a new epoch: no index from before the drop orders against
-// one after it, so the snapshot is then taken whole.
-func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (added, updated, deleted int) {
+// one after it, so the snapshot is then taken whole. It returns the epoch it
+// applied the snapshot in.
+func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSession) (epoch uint64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -370,6 +401,7 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 	}
 
 	// Calculate changes for logging
+	var added, updated, deleted int
 	for sessionID, next := range snapshot {
 		if cur, exists := c.sessions[sessionID]; exists {
 			if !reflect.DeepEqual(cur, next) {
@@ -395,7 +427,7 @@ func (c *sessionCache) ReplaceAll(index uint64, snapshot map[string]cachedSessio
 		c.logger.Info("updated session cache", "total", len(snapshot), "added", added, "updated", updated, "deleted", deleted)
 	}
 
-	return added, updated, deleted
+	return c.epoch
 }
 
 // consulSessionStore implements SessionStore using Consul KV with hybrid read-through cache
@@ -416,6 +448,9 @@ type consulSessionStore struct {
 	// index can go backwards; each release drops only its own.
 	held   map[string]map[string]struct{}
 	heldMu sync.Mutex
+	// observers are called with each watch delivery, on the watch's goroutine.
+	observers   []func(epoch, index uint64, entries map[string]*Session)
+	observersMu sync.Mutex
 }
 
 // heldLeases returns the lock sessions this instance holds sessionID under.
@@ -625,7 +660,7 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 		"key", kvStoreKey,
 	)
 
-	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index}, nil
+	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index, epoch: epoch}, nil
 }
 
 // storedSession ranks a stored value for ordering. One that doesn't parse
@@ -767,12 +802,22 @@ func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
 	}
 
 	// Cache miss - fetch from Consul for strong consistency
-	return c.getFromConsulAndCache(sessionID)
+	return c.getFromConsulAndCache(context.Background(), sessionID)
+}
+
+// GetFresh reads sessionID from Consul even when the cache has it, since the
+// watch can trail a registration that has moved to another node.
+func (c *consulSessionStore) GetFresh(ctx context.Context, sessionID string) (*Session, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID cannot be empty")
+	}
+	return c.getFromConsulAndCache(ctx, sessionID)
 }
 
 // getFromConsulAndCache fetches session from Consul and updates local cache
-func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, error) {
+func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionID string) (*Session, error) {
 	kvStoreKey := c.SessionKey(sessionID)
+	qo := (&api.QueryOptions{}).WithContext(ctx)
 
 	// Before the read, as for a registration's reply.
 	epoch := c.cache.Epoch()
@@ -781,14 +826,16 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 		session *Session
 		index   uint64
 		lease   string
+		goneAt  uint64 // the index of a read that found no entry
 	)
 	err := retry.Do(
 		func() error {
-			kvPair, _, err := c.client.KV().Get(kvStoreKey, nil)
+			kvPair, meta, err := c.client.KV().Get(kvStoreKey, qo)
 			if err != nil {
 				return fmt.Errorf("failed to get session data: %w", err)
 			}
 			if kvPair == nil {
+				goneAt = meta.LastIndex
 				return &ErrSessionNotFound{SessionID: sessionID}
 			}
 
@@ -800,6 +847,7 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 			session, index, lease = &s, kvPair.ModifyIndex, kvPair.Session
 			return nil
 		},
+		retry.Context(ctx),
 		retry.Attempts(DefaultMaxRetries),
 		retry.Delay(DefaultRetryDelay),
 		retry.RetryIf(func(err error) bool {
@@ -817,6 +865,13 @@ func (c *consulSessionStore) getFromConsulAndCache(sessionID string) (*Session, 
 	)
 
 	if err != nil {
+		// A cached entry the read found gone would otherwise go on routing
+		// guests to a host that has left until the watch delivers the removal,
+		// which on a quiet relay can be a long way off.
+		var notFound *ErrSessionNotFound
+		if errors.As(err, &notFound) {
+			c.cache.Evict(sessionID, goneAt, epoch)
+		}
 		return nil, err
 	}
 
@@ -1137,10 +1192,13 @@ func (c *consulSessionStore) startSessionWatch(cfg *api.Config) error {
 
 // updateSessionReplica updates the local session replica based on Consul
 // data: every session under the prefix as of index, which is no earlier than
-// any write it includes.
+// any write it includes. Then it hands the same view to the observers.
 func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPairs) {
 	// Create new session map from Consul data
 	newSessions := make(map[string]cachedSession)
+	// The observers get a map of their own. The cache takes newSessions over,
+	// and its writes go on changing it once ReplaceAll returns.
+	entries := make(map[string]*Session, len(kvPairs))
 
 	for _, kvPair := range kvPairs {
 		var session Session
@@ -1151,10 +1209,28 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 
 		// Use session.ID from the unmarshaled value directly
 		newSessions[session.ID] = cachedSession{session: &session, index: kvPair.ModifyIndex, lease: kvPair.Session}
+		entries[session.ID] = &session
 	}
 
-	// Atomically replace cache contents and get change statistics
-	c.cache.ReplaceAll(index, newSessions)
+	// Atomically replace cache contents. The cache takes the view before the
+	// observers see it, so a read of the cache made after an observer has
+	// acted on the view finds that view, or a later one.
+	epoch := c.cache.ReplaceAll(index, newSessions)
+
+	c.observersMu.Lock()
+	observers := slices.Clone(c.observers)
+	c.observersMu.Unlock()
+	for _, fn := range observers {
+		fn(epoch, index, entries)
+	}
+}
+
+// Observe has fn called with every watch delivery, after the cache has taken
+// it. See SessionManager.Observe.
+func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+	c.observersMu.Lock()
+	defer c.observersMu.Unlock()
+	c.observers = append(c.observers, fn)
 }
 
 // Close gracefully stops the session watch and cleans up resources
@@ -1258,6 +1334,11 @@ func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
 	return session, nil
 }
 
+// GetFresh is Get: a memory store has no cache to skip.
+func (m *memorySessionStore) GetFresh(_ context.Context, sessionID string) (*Session, error) {
+	return m.Get(sessionID)
+}
+
 func (m *memorySessionStore) Delete(sessionID string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -1295,6 +1376,9 @@ func (m *memorySessionStore) List() ([]*Session, error) {
 	m.logger.Debug("listed sessions from memory", "count", len(sessions))
 	return sessions, nil
 }
+
+// Observe does nothing: every write to a memory store is this process's own.
+func (m *memorySessionStore) Observe(func(epoch, index uint64, entries map[string]*Session)) {}
 
 // Close cleans up memory store resources (no-op for memory store)
 func (m *memorySessionStore) Close() error {
@@ -1470,6 +1554,17 @@ func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*R
 	return sm.store.Reregister(ctx, reg)
 }
 
+// Observe has fn called with each view of every entry the store's watch
+// delivers: entries maps each session ID to its stored session, as of index in
+// epoch. Indexes order only within an epoch, which advances when the watch's
+// index goes backwards; a Registration records both. fn runs on the watch's
+// goroutine and holds up the next delivery, so it must not make store calls;
+// entries is shared with the other observers, and is theirs only to read. A
+// store no other writer shares never calls fn.
+func (sm *SessionManager) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+	sm.store.Observe(fn)
+}
+
 // LeaseTTL is how long an unrenewed registration lasts; 0 if it doesn't expire.
 func (sm *SessionManager) LeaseTTL() time.Duration {
 	return sm.store.LeaseTTL()
@@ -1501,23 +1596,56 @@ func (sm *SessionManager) shouldValidateSessionExistence() bool {
 // In embedded mode: only decodes (session may be on another node)
 // In consul mode: decodes and validates (shared store across all nodes)
 func (sm *SessionManager) ResolveSSHUser(sshUser string) (sessionID, nodeAddr string, err error) {
+	sessionID, nodeAddr, _, err = sm.lookupSSHUser(sshUser)
+	return sessionID, nodeAddr, err
+}
+
+// lookupSSHUser is ResolveSSHUser, also returning the session it read, so a
+// caller can take the node, the generation and the keys from that one read. It
+// is nil in embedded mode, which reads nothing. Only a failed read is a
+// lookupError: a user that doesn't decode is the guest's own mistake.
+func (sm *SessionManager) lookupSSHUser(sshUser string) (sessionID, nodeAddr string, session *Session, err error) {
 	// Decode the SSH user using our encoder
 	sessionID, nodeAddr, err = sm.encodeDecoder.Decode(sshUser)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to decode SSH user: %w", err)
+		return "", "", nil, fmt.Errorf("failed to decode SSH user: %w", err)
 	}
 
 	// Validate session existence based on routing mode strategy
 	if sm.shouldValidateSessionExistence() {
-		session, err := sm.store.Get(sessionID)
+		session, err = sm.store.Get(sessionID)
 		if err != nil {
-			return "", "", fmt.Errorf("session %s not found: %w", sessionID, err)
+			return "", "", nil, &lookupError{fmt.Errorf("looking up session %s: %w", sessionID, err)}
 		}
 
-		return session.ID, session.NodeAddr, nil
+		return session.ID, session.NodeAddr, session, nil
 	}
 
-	return sessionID, nodeAddr, nil
+	return sessionID, nodeAddr, nil, nil
+}
+
+// Route is where a guest's upstream was sent: the node, and the registration
+// that was current when it was resolved.
+type Route struct {
+	NodeAddr   string
+	Generation uint64
+}
+
+// RefreshRoute reads sshUser's session from the store itself, skipping any
+// cache, and reports whether it has moved from attempted to another node or
+// another registration. It compares with the route an attempt was actually
+// sent on, never with the cache: the watch may have updated that while the
+// attempt was failing, and would then hide the move.
+func (sm *SessionManager) RefreshRoute(ctx context.Context, sshUser string, attempted Route) (fresh *Session, moved bool, err error) {
+	sessionID, _, err := sm.encodeDecoder.Decode(sshUser)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to decode SSH user: %w", err)
+	}
+	fresh, err = sm.store.GetFresh(ctx, sessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	return fresh, fresh.NodeAddr != attempted.NodeAddr || fresh.Generation != attempted.Generation, nil
 }
 
 // GetEncodeDecoder returns the EncodeDecoder used by this session manager

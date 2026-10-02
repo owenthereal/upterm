@@ -170,6 +170,16 @@ func (s *testSSHD) dial(t *testing.T) *ssh.Client {
 // KeyId, and a proof is bound to it.
 func (s *testSSHD) dialAs(t *testing.T, keyID string) *ssh.Client {
 	t.Helper()
+	client, err := ssh.Dial("tcp", s.addr, s.proxyConfig(t, keyID))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// proxyConfig is the client configuration of a connection made as the proxy
+// does on behalf of a host whose own connection has the SSH session ID keyID.
+func (s *testSSHD) proxyConfig(t *testing.T, keyID string) *ssh.ClientConfig {
+	t.Helper()
 	cs := UserCertSigner{
 		SessionID: keyID,
 		User:      "owen",
@@ -181,15 +191,47 @@ func (s *testSSHD) dialAs(t *testing.T, keyID string) *ssh.Client {
 	}
 	certSigner, err := cs.SignCert(s.signer)
 	require.NoError(t, err)
-
-	client, err := ssh.Dial("tcp", s.addr, &ssh.ClientConfig{
+	return &ssh.ClientConfig{
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
 		User:            "owen",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	})
+	}
+}
+
+// freezableConn is a client's end of a connection that can go silent: once
+// frozen it delivers nothing more to the client, as a peer whose network has
+// gone away does, until thawed.
+type freezableConn struct {
+	net.Conn
+	frozen, thawed chan struct{}
+}
+
+func (c *freezableConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	// Checked after the read, so that bytes already on their way when the conn
+	// froze are held back too.
+	select {
+	case <-c.frozen:
+		<-c.thawed
+	default:
+	}
+	return n, err
+}
+
+// dialFreezable is dialAs over a connection that freeze silences. The test's
+// cleanup thaws it, so the client's read loop can end.
+func (s *testSSHD) dialFreezable(t *testing.T, keyID string) (*ssh.Client, func()) {
+	t.Helper()
+	raw, err := net.Dial("tcp", s.addr)
 	require.NoError(t, err)
+	conn := &freezableConn{Conn: raw, frozen: make(chan struct{}), thawed: make(chan struct{})}
+	t.Cleanup(func() { close(conn.thawed) })
+	c, chans, reqs, err := ssh.NewClientConn(conn, s.addr, s.proxyConfig(t, keyID))
+	require.NoError(t, err)
+	client := ssh.NewClient(c, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
-	return client
+	var once sync.Once
+	return client, func() { once.Do(func() { close(conn.frozen) }) }
 }
 
 // waitClosed fails with what unless client's connection ends within 5 s.
@@ -1283,4 +1325,43 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a guest reaching the session socket never reached generation 2")
 	}
+}
+
+// A reconnect-capable host's connection is pinged, and closed when it stops
+// answering, so its registration doesn't outlive a host that went without a
+// word. A legacy host can't redial, so its connection is left alone however
+// quiet.
+func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
+	s := newTestSSHD(t, func(d *sshd) {
+		d.liveness = hostLiveness{interval: 50 * time.Millisecond, bound: 50 * time.Millisecond}
+	})
+	legacy, freezeLegacy := s.dialFreezable(t, "legacy")
+	legacyID := s.createSession(t, legacy)
+	host := newProven(t)
+	capable, freezeCapable := s.dialFreezable(t, "capable")
+	ok, body := host.register(t, capable, "capable", 1)
+	require.True(t, ok, string(body))
+
+	freezeLegacy()
+	freezeCapable()
+	require.Eventually(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
+		2*time.Second, 10*time.Millisecond, "a silent capable host is closed")
+	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(legacyID); return err != nil },
+		500*time.Millisecond, 20*time.Millisecond, "a legacy host is never pinged")
+}
+
+// A capable host that answers its pings keeps its connection, and with it its
+// registration, however many pings go by.
+func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
+	interval := 50 * time.Millisecond
+	s := newTestSSHD(t, func(d *sshd) {
+		d.liveness = hostLiveness{interval: interval, bound: 4 * interval}
+	})
+	host := newProven(t)
+	capable := s.dialAs(t, "capable")
+	ok, body := host.register(t, capable, "capable", 1)
+	require.True(t, ok, string(body))
+
+	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
+		12*interval, interval/5, "a capable host that answers is kept")
 }

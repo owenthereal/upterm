@@ -29,7 +29,9 @@ func leaseMargin(ttl time.Duration) time.Duration {
 
 // leaseKeeper keeps one adopted registration's entry alive for as long as its
 // connection lives. It renews the lease at half its TTL, retrying failures,
-// and rebuilds it under a new lease once the store says it's lost.
+// and rebuilds it under a new lease once the store says it's lost: a renewal
+// answers that the lease no longer holds the entry, or the store's watch shows
+// the entry gone or held by an older registration.
 //
 // A capable registration's host can redial, so when its lease can't be kept in
 // time the keeper closes the connection and the host registers afresh: when
@@ -44,7 +46,14 @@ type leaseKeeper struct {
 	timing    leaseTiming
 	closeConn func()
 	replace   func(next *Registration) bool // false: the registration has ended
-	logger    *slog.Logger
+	// lost receives when the store's watch shows the registration's entry
+	// gone, or held by an older registration. It is a known loss, as
+	// ErrLeaseLost from a renewal is, and is taken wherever the keeper waits:
+	// renewals that keep failing say nothing either way, and waiting out
+	// their retries, or the next renewal, would leave guests unable to find
+	// the session until then.
+	lost   <-chan struct{}
+	logger *slog.Logger
 }
 
 // run keeps reg's lease until ctx ends, the registration is superseded, or a
@@ -52,21 +61,40 @@ type leaseKeeper struct {
 func (k *leaseKeeper) run(ctx context.Context, reg *Registration) {
 	confirmed := reg.ConfirmedAt
 	for {
-		if !sleep(ctx, time.Until(confirmed.Add(k.ttl/2))) {
-			return
-		}
-		sent, lost, ok := k.renew(ctx, reg, confirmed)
+		lost, ok := k.wait(ctx, time.Until(confirmed.Add(k.ttl/2)))
 		if !ok {
 			return
 		}
 		if !lost {
-			confirmed = sent
-			continue
+			var sent time.Time
+			if sent, lost, ok = k.renew(ctx, reg, confirmed); !ok {
+				return
+			}
+			if !lost {
+				confirmed = sent
+				continue
+			}
 		}
 		if reg, ok = k.rebuild(ctx, reg, time.Now()); !ok {
 			return
 		}
 		confirmed = reg.ConfirmedAt
+	}
+}
+
+// wait waits for d, and returns early with lost when the store's watch reports
+// the entry lost. ok false: ctx ended first.
+func (k *leaseKeeper) wait(ctx context.Context, d time.Duration) (lost, ok bool) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return false, true
+	case <-k.lost:
+		k.logger.Warn("the store's watch shows the session lease lost")
+		return true, true
+	case <-ctx.Done():
+		return false, false
 	}
 }
 
@@ -98,9 +126,18 @@ func (k *leaseKeeper) renew(ctx context.Context, reg *Registration, confirmed ti
 			return sent, true, true
 		}
 		k.logger.Warn("failed to renew the session lease", "error", err, "retry-in", delay)
-		if !sleep(bctx, delay) {
+		lost, ok := k.wait(bctx, delay)
+		if !ok {
 			k.cutOff(ctx, reg, "the session lease's expiry budget ran out")
 			return sent, false, false
+		}
+		if lost {
+			// As for a renewal answered ErrLeaseLost: the budget still closes
+			// the connection once it has run out.
+			if k.over(ctx, deadline, "the session lease's expiry budget ran out") {
+				return sent, false, false
+			}
+			return sent, true, true
 		}
 	}
 }

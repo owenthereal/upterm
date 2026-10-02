@@ -622,6 +622,97 @@ func (suite *ConsulStoreTestSuite) TestTakeoverMovesTheLease() {
 	suite.ErrorIs(err, ErrSuperseded)
 }
 
+// txnEntry is an entry for a test that drives Consul's transactions itself:
+// its key, a value for each generation, and a lock session per holder, all
+// removed at cleanup.
+type txnEntry struct {
+	suite *ConsulStoreTestSuite
+	id    string
+	key   string
+}
+
+func (suite *ConsulStoreTestSuite) txnEntry(prefix string) txnEntry {
+	id := suite.uniq(prefix)
+	e := txnEntry{suite: suite, id: id, key: suite.store1.SessionKey(id)}
+	suite.T().Cleanup(func() { _, _ = suite.client.KV().Delete(e.key, nil) })
+	return e
+}
+
+func (e txnEntry) value(gen uint64) []byte {
+	b, err := json.Marshal(&Session{ID: e.id, NodeAddr: "a:22", Generation: gen})
+	e.suite.Require().NoError(err)
+	return b
+}
+
+func (e txnEntry) lockSession() string {
+	lease, _, err := e.suite.client.Session().CreateNoChecks(e.suite.store1.createConsulLockSession(e.id), nil)
+	e.suite.Require().NoError(err)
+	e.suite.T().Cleanup(func() { _, _ = e.suite.client.Session().Destroy(lease, nil) })
+	return lease
+}
+
+func (e txnEntry) get() *api.KVPair {
+	pair, _, err := e.suite.client.KV().Get(e.key, nil)
+	e.suite.Require().NoError(err)
+	e.suite.Require().NotNil(pair)
+	return pair
+}
+
+// A takeover is one transaction, conditional on the index its decision was
+// read at. Against an entry that has changed since, it fails as a whole: the
+// old holder's unlock doesn't apply without the new holder's lock, and the
+// entry keeps its value and its holder.
+func (suite *ConsulStoreTestSuite) TestATakeoverAgainstAStaleIndexChangesNothing() {
+	kv, e := suite.client.KV(), suite.txnEntry("stale-takeover")
+	old, next := e.lockSession(), e.lockSession()
+	ok, _, err := kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(1), Session: old}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	stale := e.get()
+	// The entry moves on, under the same holder.
+	ok, _, err = kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(2), Session: old}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	before := e.get()
+	suite.Require().Greater(before.ModifyIndex, stale.ModifyIndex)
+
+	ok, resp, _, err := kv.Txn(api.KVTxnOps{
+		{Verb: api.KVCheckIndex, Key: e.key, Index: stale.ModifyIndex},
+		{Verb: api.KVUnlock, Key: e.key, Value: e.value(3), Session: old},
+		{Verb: api.KVLock, Key: e.key, Value: e.value(3), Session: next},
+	}, nil)
+	suite.Require().NoError(err)
+	suite.False(ok, "a takeover against a stale index committed")
+	suite.NotEmpty(resp.Errors)
+	after := e.get()
+	suite.Equal(before.Value, after.Value)
+	suite.Equal(old, after.Session, "the entry changed holder")
+	suite.Equal(before.ModifyIndex, after.ModifyIndex)
+}
+
+// A registration of an absent ID creates the entry only if it's still absent.
+// Against an entry that exists, it fails and leaves the entry as it was.
+func (suite *ConsulStoreTestSuite) TestACreateAgainstAnExistingEntryChangesNothing() {
+	kv, e := suite.client.KV(), suite.txnEntry("create-existing")
+	holder, next := e.lockSession(), e.lockSession()
+	ok, _, err := kv.Acquire(&api.KVPair{Key: e.key, Value: e.value(1), Session: holder}, nil)
+	suite.Require().NoError(err)
+	suite.Require().True(ok)
+	before := e.get()
+
+	ok, resp, _, err := kv.Txn(api.KVTxnOps{
+		{Verb: api.KVCheckNotExists, Key: e.key},
+		{Verb: api.KVLock, Key: e.key, Value: e.value(2), Session: next},
+	}, nil)
+	suite.Require().NoError(err)
+	suite.False(ok, "a create against an existing entry committed")
+	suite.NotEmpty(resp.Errors)
+	after := e.get()
+	suite.Equal(before.Value, after.Value)
+	suite.Equal(holder, after.Session, "the entry changed holder")
+	suite.Equal(before.ModifyIndex, after.ModifyIndex)
+}
+
 func (suite *ConsulStoreTestSuite) TestRenewOfALostLeaseAndLockDelay() {
 	ctx, id := context.Background(), suite.uniq("lost")
 	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
@@ -1118,6 +1209,33 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 	suite.Error(err, "a removed registration is still found")
 }
 
+// A guest whose cached route failed reads its session again with GetFresh. If
+// the entry is gone from Consul by then, the cached one goes too: on a quiet
+// relay the next watch delivery could be a long way off, and until then later
+// guests would be routed to a host that has left, and not told it has.
+func (suite *ConsulStoreTestSuite) TestAFreshReadThatFindsTheEntryGoneUncachesIt() {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	suite.Require().NoError(err)
+	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
+	suite.Require().NoError(err)
+	defer func() { _ = store.Close() }()
+	ctx, id := context.Background(), suite.uniq("fresh-read-gone")
+
+	reg, err := store.Register(ctx, &Session{ID: id, NodeAddr: "a:22", Generation: 1})
+	suite.Require().NoError(err)
+	defer func() { _ = store.Release(ctx, reg) }()
+	// Stop the watch, so only the fresh read can learn of the removal.
+	store.watchPlan.Stop()
+	suite.Require().True(store.HasInCache(id))
+	_, err = suite.client.KV().Delete(store.SessionKey(id), nil)
+	suite.Require().NoError(err)
+
+	_, err = store.GetFresh(ctx, id)
+	var missing *ErrSessionNotFound
+	suite.Require().ErrorAs(err, &missing)
+	suite.False(store.HasInCache(id), "the entry the fresh read found gone is still cached")
+}
+
 // Without renewal, Consul expires an entry within twice its TTL, which is at
 // least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
@@ -1344,6 +1462,64 @@ func TestARebuildAfterAnIndexDropStaysHeld(t *testing.T) {
 	assert.Nil(t, consul.entry(), "shutdown left the rebuilt registration in Consul")
 }
 
+// A guest whose cached route failed reads its session again with GetFresh,
+// which goes to Consul even though the cache holds an entry: the watch may not
+// have caught up with the host's move yet. What it reads then replaces the
+// stale entry, under the cache's usual rules.
+func TestConsulGetFreshReadsPastTheCache(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	store.cache.Set("id", cachedSession{session: &Session{ID: "id", NodeAddr: "a:22", Generation: 1}, index: 100}, store.cache.Epoch())
+	moved, err := json.Marshal(&Session{ID: "id", NodeAddr: "c:22", Generation: 2})
+	require.NoError(t, err)
+	consul.mu.Lock()
+	consul.pair = &api.KVPair{Key: store.SessionKey("id"), Value: moved, Session: "lease", ModifyIndex: 200}
+	consul.mu.Unlock()
+
+	cached, err := store.Get("id")
+	require.NoError(t, err)
+	require.Equal(t, "a:22", cached.NodeAddr)
+	fresh, err := store.GetFresh(context.Background(), "id")
+	require.NoError(t, err)
+	require.Equal(t, "c:22", fresh.NodeAddr)
+	require.Equal(t, uint64(2), fresh.Generation)
+	cached, err = store.Get("id")
+	require.NoError(t, err)
+	require.Equal(t, "c:22", cached.NodeAddr, "the fresh read didn't update the cache")
+}
+
+// stalledTransport holds every request until its context is done.
+type stalledTransport struct{}
+
+func (stalledTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+}
+
+// GetFresh runs inside a guest's upstream stage, so a Consul that doesn't
+// answer must not hold it past ctx, whatever attempts it has left.
+func TestConsulGetFreshHonoursItsContext(t *testing.T) {
+	store := newFakeConsulStore(t, newFakeConsul(t))
+	cfg := api.DefaultConfig()
+	cfg.HttpClient = &http.Client{Transport: stalledTransport{}}
+	client, err := api.NewClient(cfg)
+	require.NoError(t, err)
+	store.client = client
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.GetFresh(ctx, "id")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetFresh outlived its context")
+	}
+}
+
 // An index from before a drop doesn't order against one after it. A local
 // write whose Consul call began before the cache saw the drop is dropped, and
 // the writes and snapshots after it decide.
@@ -1360,6 +1536,27 @@ func TestSessionCacheDropsALocalWriteFromBeforeAnIndexDrop(t *testing.T) {
 	got, ok := cache.Get("id")
 	require.True(t, ok)
 	require.Equal(t, current.NodeAddr, got.NodeAddr, "a write from before the drop outranks what came after it")
+}
+
+// A read that finds an entry gone evicts the cached one only if it saw that
+// entry's write: within the read's epoch, and at or past the write's index.
+func TestSessionCacheEvictsOnlyWhatTheReadSawGone(t *testing.T) {
+	c := newSessionCache(sessionTestLogger)
+	entry := func(index uint64) cachedSession {
+		return cachedSession{session: &Session{ID: "id", Generation: 1}, index: index}
+	}
+
+	c.Set("id", entry(20), c.Epoch())
+	c.Evict("id", 15, c.Epoch())
+	assert.True(t, c.Has("id"), "a read from before the write evicted it")
+	c.Evict("id", 20, c.Epoch())
+	assert.False(t, c.Has("id"), "a read that saw the write left it")
+
+	c.ReplaceAll(30, map[string]cachedSession{"id": entry(30)})
+	before := c.Epoch()                                       // a read begins
+	c.ReplaceAll(5, map[string]cachedSession{"id": entry(4)}) // the index drops
+	c.Evict("id", 40, before)                                 // and the read finds the entry gone
+	assert.True(t, c.Has("id"), "a read from before an index drop evicted an entry from after it")
 }
 
 //

@@ -12,14 +12,18 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
+	"github.com/owenthereal/upterm/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -287,6 +291,20 @@ func TestStockSSHUpstreamFailureReportsReason(t *testing.T) {
 			require.Equal(t, errUpstreamUnavailable.Error(), string(body))
 			require.NotContains(t, string(body), ln.Addr().String())
 		})
+	})
+
+	// An embedded-mode guest's user names the node to dial, and the dialer's
+	// error can echo it. Whatever it reads, a dial failure stays generic.
+	t.Run("dial failure echoing the guest's node", func(t *testing.T) {
+		proxy, addr, _, signer := stockTestProxy(t, time.Second, sidewayConnDialer{})
+		user := proxy.SessionManager.GetEncodeDecoder().Encode("session", sshAuthFailure)
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		_, err = client.NewSession()
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, err, &rejection)
+		require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
 	})
 }
 
@@ -638,10 +656,10 @@ func TestStockSSHShutdownBeforeServe(t *testing.T) {
 
 // TestStockSSHGuestHostKeyMismatch pins the branch a guest's upstream hop is
 // checked on: the session's registered HostPublicKeys. The host-connection
-// cases in TestStockSSHUpstreamFailure identify as an upterm host, so
-// hostSession is nil there and the relay checks its own HostSigners instead;
+// cases in TestStockSSHUpstreamFailure identify as an upterm host, so their
+// route has no local session and the relay checks its own HostSigners instead;
 // this is the branch the session host key depends on. The session is created
-// on the proxy's own NodeAddr, which is what makes hostSession resolve it
+// on the proxy's own NodeAddr, which is what makes resolve treat it as local
 // rather than treat the hop as a sideways one to another relay node.
 func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
 	// A session key of its own. stockTestProxy installs TestPrivateKeyContent
@@ -688,5 +706,614 @@ func TestStockSSHGuestHostKeyMismatch(t *testing.T) {
 			require.ErrorAs(t, err, &rejection)
 			require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
 		})
+	}
+}
+
+// staleStore answers Get from a stale cache until something (the "watch", or
+// GetFresh) clears it.
+type staleStore struct {
+	*memorySessionStore
+	mu         sync.Mutex
+	stale      *Session
+	gone       bool                            // Get reports not found: the watch removed the entry
+	fresh      func(ctx context.Context) error // optional: stall or fail GetFresh
+	afterFresh func(s *staleStore)             // optional: a watch landing right after GetFresh
+}
+
+func (s *staleStore) Get(id string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gone {
+		return nil, &ErrSessionNotFound{SessionID: id}
+	}
+	if s.stale != nil && s.stale.ID == id {
+		return s.stale, nil
+	}
+	return s.memorySessionStore.Get(id)
+}
+
+func (s *staleStore) watchDelivers() {
+	s.mu.Lock()
+	s.stale = nil
+	s.mu.Unlock()
+}
+
+func (s *staleStore) GetFresh(ctx context.Context, id string) (*Session, error) {
+	if s.fresh != nil {
+		if err := s.fresh(ctx); err != nil {
+			return nil, err
+		}
+	}
+	s.watchDelivers()
+	sess, err := s.memorySessionStore.Get(id)
+	if s.afterFresh != nil {
+		s.afterFresh(s)
+	}
+	return sess, err
+}
+
+type routeDialer struct {
+	routes map[string]func(ctx context.Context) (net.Conn, error)
+	calls  atomic.Int32
+}
+
+func (d *routeDialer) Dial(id *api.Identifier) (net.Conn, error) {
+	return d.DialContext(context.Background(), id)
+}
+
+func (d *routeDialer) DialContext(ctx context.Context, id *api.Identifier) (net.Conn, error) {
+	d.calls.Add(1)
+	if r, ok := d.routes[id.NodeAddr]; ok {
+		return r(ctx)
+	}
+	return nil, fmt.Errorf("no route to %s", id.NodeAddr)
+}
+
+// stallingListener accepts TCP connections and never speaks on them.
+func stallingListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// movedSession: the store says node C at generation 2, the cache still says A
+// at 1.
+func movedSession(t *testing.T, good ssh.Signer) *staleStore {
+	logger := slog.New(slog.DiscardHandler)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(logger)}
+	keys := [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}
+	fresh := NewSession("session", "node-c:22", "host", keys, nil)
+	fresh.Generation = 2
+	_, err := store.Register(context.Background(), fresh)
+	require.NoError(t, err)
+	stale := NewSession("session", "node-a:22", "host", keys, nil)
+	stale.Generation = 1
+	store.stale = stale
+	return store
+}
+
+func consulModeProxy(t *testing.T, store SessionStore, dialer connDialer) string {
+	return consulModeProxyWithin(t, 4*time.Second, store, dialer)
+}
+
+// The tests that must reach node C after a stalled or failed first attempt use
+// refreshRoomTimeout. The upstream stage is half the handshake timeout and the
+// first attempt takes half of that, so the second attempt has about 2 s for its
+// SSH handshake: room for a starved -race runner, where the 1 s a 4 s timeout
+// leaves can run out. refreshRoomWait is how long they wait for node C, which
+// is longer than the whole stage.
+const (
+	refreshRoomTimeout = 8 * time.Second
+	refreshRoomWait    = 6 * time.Second
+)
+
+func consulModeProxyWithin(t *testing.T, timeout time.Duration, store SessionStore, dialer connDialer) string {
+	_, addr, _, _ := stockTestProxy(t, timeout, dialer, func(p *sshProxy) {
+		p.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+	})
+	return addr
+}
+
+func dialGuest(t *testing.T, addr string, key ssh.Signer) *ssh.Client {
+	c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", HostKeyCallback: ssh.InsecureIgnoreHostKey(), Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	refusing, _ := stockTestUpstream(t, true, TestPrivateKeyContent)
+	dial := func(a string) func(context.Context) (net.Conn, error) {
+		return func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", a) }
+	}
+	for name, routeA := range map[string]func(store *staleStore) func(context.Context) (net.Conn, error){
+		"unreachable": func(*staleStore) func(context.Context) (net.Conn, error) {
+			return func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") }
+		},
+		"no longer holds the session": func(*staleStore) func(context.Context) (net.Conn, error) { return dial(refusing) },
+		"stalls its handshake":        func(*staleStore) func(context.Context) (net.Conn, error) { return dial(stallingListener(t)) },
+		// The watch updates the cache to C while A's handshake stalls.
+		// Comparing with the cache would see no move; comparing with the
+		// attempted route does.
+		"watch lands mid-handshake": func(store *staleStore) func(context.Context) (net.Conn, error) {
+			stall := dial(stallingListener(t))
+			return func(ctx context.Context) (net.Conn, error) {
+				c, err := stall(ctx)
+				store.watchDelivers()
+				return c, err
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := movedSession(t, good)
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+				"node-a:22": routeA(store), "node-c:22": dial(nodeC),
+			}}
+			dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+			select {
+			case <-peersC: // Dial succeeding proves nothing: the guest is authenticated first
+			case <-time.After(refreshRoomWait):
+				t.Fatal("the refreshed route never reached node C")
+			}
+			require.Equal(t, int32(2), dialer.calls.Load())
+		})
+	}
+}
+
+// A watch that replaces or removes the cache entry between GetFresh and the
+// second attempt changes neither where that attempt goes nor which host key it
+// expects. It is prepared from the snapshot GetFresh returned.
+func TestStockSSHRefreshUsesOneSnapshot(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	for name, after := range map[string]func(s *staleStore){
+		"replaced": func(s *staleStore) {
+			d := NewSession("session", "node-d:22", "host", nil, nil)
+			d.Generation = 3
+			s.mu.Lock()
+			s.stale = d
+			s.mu.Unlock()
+		},
+		"removed": func(s *staleStore) {
+			s.mu.Lock()
+			s.gone = true
+			s.mu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := movedSession(t, good)
+			store.afterFresh = after
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+				"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+				"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+			}}
+			dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+			select {
+			case <-peersC:
+			case <-time.After(refreshRoomWait):
+				t.Fatal("the second attempt left the snapshot GetFresh returned")
+			}
+			require.Equal(t, int32(2), dialer.calls.Load(), "node D is never dialed")
+		})
+	}
+}
+
+// A fresh lookup that stalls must not hold the guest past the stage. The
+// stage is 2 s here; the guest is rejected, not held.
+func TestStockSSHRefreshStaysInsideTheStage(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := movedSession(t, good)
+	store.fresh = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	start := time.Now()
+	// On a goroutine, so a lookup that outlives the stage fails this test
+	// instead of hanging the package.
+	opened := make(chan error, 1)
+	go func() {
+		_, err := client.NewSession()
+		opened <- err
+	}()
+	select {
+	case err = <-opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("held past the upstream stage")
+	}
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 3*time.Second, "held past the upstream stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// A host-key mismatch is not a stale route. The store has moved the session on
+// here, so a refresh would find somewhere else to go; the guest must not be
+// sent there.
+func TestStockSSHDoesNotRefreshAHostKeyMismatch(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	wrong, _ := stockTestUpstream(t, false, HostPrivateKeyContent)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	// This node, so the session's own host key is the one expected.
+	store.stale.NodeAddr = "127.0.0.1:2222"
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", wrong) },
+		"node-c:22":      func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	_, err = client.NewSession()
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, errUpstreamHostKeyMismatch.Error(), rejection.Message)
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// The second attempt is authorized against the snapshot it is planned from,
+// as the first is against its own read. The store has moved the session to
+// this node, where it admits only another key, so the guest isn't sent there.
+func TestStockSSHRefreshChecksTheGuestsKey(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	other, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	require.NoError(t, err)
+	here, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler))}
+	fresh := NewSession("session", "127.0.0.1:2222", "host",
+		[][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}, [][]byte{ssh.MarshalAuthorizedKey(other.PublicKey())})
+	fresh.Generation = 2
+	_, err = store.Register(context.Background(), fresh)
+	require.NoError(t, err)
+	store.stale = NewSession("session", "node-a:22", "host", nil, nil)
+	store.stale.Generation = 1
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22":      func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", here) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	_, err = client.NewSession()
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, errUpstreamUnavailable.Error(), rejection.Message)
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// Only a Consul-mode guest's route is refreshed. A host's upstream is this
+// node's sshd, and an embedded-mode guest's user names its node, so neither is
+// retried however the store has moved the session.
+func TestStockSSHRefreshesOnlyConsulGuests(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	// Only node C, where the store has the session, has a route; every other
+	// dial fails.
+	toNodeC := func() *routeDialer {
+		return &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+			"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+		}}
+	}
+
+	t.Run("a host", func(t *testing.T) {
+		dialer := toNodeC()
+		addr := consulModeProxy(t, movedSession(t, good), dialer)
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "session", ClientVersion: upterm.HostSSHClientVersion, Auth: []ssh.AuthMethod{ssh.PublicKeys(good)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		ok, _, err := client.SendRequest("host-first-global", true, nil)
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Equal(t, int32(1), dialer.calls.Load())
+	})
+
+	t.Run("an embedded-mode guest", func(t *testing.T) {
+		dialer := toNodeC()
+		sm := newSessionManagerWithStore(movedSession(t, good), routing.NewEncodeDecoder(routing.ModeEmbedded))
+		_, addr, _, _ := stockTestProxy(t, 4*time.Second, dialer, func(p *sshProxy) { p.SessionManager = sm })
+		client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: sm.GetEncodeDecoder().Encode("session", "node-a:22"), Auth: []ssh.AuthMethod{ssh.PublicKeys(good)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		require.NoError(t, err)
+		defer func() { _ = client.Close() }()
+		_, err = client.NewSession()
+		var rejection *ssh.OpenChannelError
+		require.ErrorAs(t, err, &rejection)
+		require.Equal(t, int32(1), dialer.calls.Load())
+	})
+}
+
+// rejectedAfter opens a session on client, which the relay must reject, and
+// returns how long it took to.
+func rejectedAfter(t *testing.T, client *ssh.Client) time.Duration {
+	t.Helper()
+	start := time.Now()
+	// On a goroutine, so a guest held past the stage fails the test instead
+	// of hanging the package.
+	opened := make(chan error, 1)
+	go func() {
+		_, err := client.NewSession()
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		require.Error(t, err)
+		return time.Since(start)
+	case <-time.After(5 * time.Second):
+		t.Fatal("held past the upstream stage")
+		return 0
+	}
+}
+
+// A legacy route can't move: its host can't redial, and its lease keeper
+// rebuilds it on the same node at the same generation. It gets one attempt and
+// the whole stage, which is 2 s here, and no refresh, even when the store has
+// the session somewhere else.
+func TestStockSSHDoesNotRefreshALegacyRoute(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := movedSession(t, good)
+	store.stale.Generation = 0
+	stall := stallingListener(t)
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", stall) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	require.GreaterOrEqual(t, rejectedAfter(t, client), 1500*time.Millisecond, "the attempt was cut short of the stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// The stalled attempt above spends the whole stage, which refuses a refresh on
+// its own, so it can't show that the generation is what does. Here the legacy
+// host's node refuses at once, with the stage left and the store holding the
+// session on node C, where a refreshed route would be accepted.
+func TestStockSSHDoesNotRefreshALegacyRouteThatFailsFast(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, _ := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	store.stale.Generation = 0
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"node-a:22": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"node-c:22": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	client := dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+	rejectedAfter(t, client)
+	require.Equal(t, int32(1), dialer.calls.Load(), "the guest was sent to another node")
+}
+
+// A refreshable route whose target is on this node gets the whole stage for
+// its first attempt: a local target that stalls is far more likely a slow host
+// than a stale route. The stage is 2 s here.
+func TestStockSSHGivesALocalTargetTheWholeStage(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler))}
+	here := NewSession("session", "127.0.0.1:2222", "host", [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}, nil)
+	here.Generation = 1
+	_, err = store.Register(context.Background(), here)
+	require.NoError(t, err)
+	stall := stallingListener(t)
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", stall) },
+	}}
+	client := dialGuest(t, consulModeProxy(t, store, dialer), good)
+	require.GreaterOrEqual(t, rejectedAfter(t, client), 1500*time.Millisecond, "the first attempt was cut short of the stage")
+	require.Equal(t, int32(1), dialer.calls.Load())
+}
+
+// What lets a local target have the whole stage: a stale route to this node
+// fails fast, since the host has left its slot here, and the refresh still
+// has the rest of the stage to reach the node the store now names.
+func TestStockSSHRefreshesAStaleRouteToThisNode(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
+	store := movedSession(t, good)
+	store.stale.NodeAddr = "127.0.0.1:2222" // this node
+	dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
+		"127.0.0.1:2222": func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") },
+		"node-c:22":      func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", nodeC) },
+	}}
+	dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+	select {
+	case <-peersC:
+	case <-time.After(refreshRoomWait):
+		t.Fatal("the refreshed route never reached node C")
+	}
+	require.Equal(t, int32(2), dialer.calls.Load())
+}
+
+type failingStore struct{ *memorySessionStore }
+
+func (failingStore) Get(string) (*Session, error) { return nil, errors.New("consul unreachable") }
+
+func dialForBanners(t *testing.T, addr, user string, keys ...ssh.Signer) []string {
+	var banners []string
+	_, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: user, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(keys...)}, BannerCallback: func(m string) error { banners = append(banners, m); return nil }})
+	require.Error(t, err)
+	return banners
+}
+
+func TestStockSSHBanner(t *testing.T) {
+	k1, _ := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	k2, _ := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	k3, _ := utils.CreateSigners(nil)
+	dialer := &stockTestDialer{addr: "127.0.0.1:1"}
+
+	t.Run("missing, once however many keys", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		b := dialForBanners(t, addr, proxy.SessionManager.GetEncodeDecoder().Encode("missing", proxy.NodeAddr), k1, k2, k3[0])
+		require.Len(t, b, 1)
+		require.Contains(t, b[0], "no host is connected for session missing")
+	})
+	t.Run("store unreachable", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+			p.SessionManager = newSessionManagerWithStore(failingStore{newMemorySessionStore(logger)}, routing.NewEncodeDecoder(routing.ModeConsul))
+		})
+		b := dialForBanners(t, addr, "anything", k1)
+		require.Len(t, b, 1)
+		require.Contains(t, b[0], "can't look up sessions")
+		require.NotContains(t, b[0], "no host is connected")
+	})
+	// A user that doesn't decode is refused for its format, which is no lookup.
+	t.Run("a user that doesn't decode", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+			p.SessionManager = newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
+		})
+		require.Empty(t, dialForBanners(t, addr, ":x", k1))
+	})
+	t.Run("found, refusing the key", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		user, err := proxy.SessionManager.CreateSession(NewSession("found", proxy.NodeAddr, "host", nil, [][]byte{ssh.MarshalAuthorizedKey(k1.PublicKey())}))
+		require.NoError(t, err)
+		require.Empty(t, dialForBanners(t, addr, user, k2))
+	})
+	// The banner goes to the guest's own terminal, and names the session its
+	// user carries.
+	t.Run("missing, with a control sequence in the user", func(t *testing.T) {
+		proxy, addr, _, _ := stockTestProxy(t, time.Second, dialer)
+		b := dialForBanners(t, addr, proxy.SessionManager.GetEncodeDecoder().Encode("mis\x1b[2Jsing", proxy.NodeAddr), k1)
+		require.Len(t, b, 1)
+		body, ok := strings.CutSuffix(b[0], "\n")
+		require.True(t, ok, "%q", b[0])
+		require.False(t, strings.ContainsFunc(body, unicode.IsControl), "%q", b[0])
+		require.Contains(t, b[0], `no host is connected for session "mis\x1b[2Jsing"`)
+	})
+	// The session can go, or the store fail, between the key being offered and
+	// its signature being verified; the second lookup is the one that fails.
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"missing once the key is verified":     {&ErrSessionNotFound{SessionID: "session"}, "no host is connected for session session"},
+		"unreachable once the key is verified": {errors.New("consul unreachable"), "can't look up sessions"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := &fickleStore{memorySessionStore: newMemorySessionStore(slog.New(slog.DiscardHandler)), err: tc.err}
+			_, err := store.Register(context.Background(), NewSession("session", "node-a:22", "host", nil, nil))
+			require.NoError(t, err)
+			_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
+				p.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+			})
+			b := dialForBanners(t, addr, "session", k1)
+			require.Greater(t, store.gets.Load(), int32(1), "the key was never verified")
+			require.Len(t, b, 1)
+			require.Contains(t, b[0], tc.want)
+		})
+	}
+}
+
+// fickleStore answers the first lookup, and fails every one after it with err.
+type fickleStore struct {
+	*memorySessionStore
+	gets atomic.Int32
+	err  error
+}
+
+func (s *fickleStore) Get(id string) (*Session, error) {
+	if s.gets.Add(1) > 1 {
+		return nil, s.err
+	}
+	return s.memorySessionStore.Get(id)
+}
+
+func TestBannerFor(t *testing.T) {
+	guest, host := &fakeConnMetadata{}, &fakeConnMetadata{clientVersion: upterm.HostSSHClientVersion}
+	notFound := &lookupError{fmt.Errorf("error resolving SSH user: %w", &ErrSessionNotFound{SessionID: "s"})}
+	unreachable := &lookupError{errors.New("consul unreachable")}
+	for _, tc := range []struct {
+		name string
+		meta ssh.ConnMetadata
+		err  error
+		want string
+	}{
+		{"no error", guest, nil, ""},
+		{"a refusal that is not a lookup", guest, errors.New("public key not allowed"), ""},
+		{"a session that is not stored", guest, notFound, fmt.Sprintf(bannerNoHost, "s")},
+		{"a session not stored, in a wrapped chain", guest, fmt.Errorf("refused: %w", notFound), fmt.Sprintf(bannerNoHost, "s")},
+		{"a store that fails", guest, unreachable, bannerLookupFailed},
+		{"a host connection", host, notFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, bannerFor(tc.meta, "s", tc.err))
+		})
+	}
+}
+
+// Only reading the guest's session marks a refusal as a failed lookup, which
+// earns a banner. A user that doesn't decode is the guest's own mistake.
+// authenticate refuses such a user before resolve runs, so this pins the
+// marking itself.
+func TestResolveMarksOnlyAFailedReadAsALookup(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	here := routing.NewEncodeDecoder(routing.ModeEmbedded).Encode("missing", "here:22")
+	for _, tc := range []struct {
+		name   string
+		mode   routing.Mode
+		store  SessionStore
+		user   string
+		lookup bool
+	}{
+		{"a Consul-mode user that doesn't decode", routing.ModeConsul, newMemorySessionStore(logger), ":x", false},
+		{"an embedded-mode user that doesn't decode", routing.ModeEmbedded, newMemorySessionStore(logger), "x", false},
+		{"a session the store doesn't have", routing.ModeConsul, newMemorySessionStore(logger), "x", true},
+		{"a store that fails", routing.ModeConsul, failingStore{newMemorySessionStore(logger)}, "x", true},
+		{"an embedded-mode session this node doesn't have", routing.ModeEmbedded, newMemorySessionStore(logger), here, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sm := newSessionManagerWithStore(tc.store, routing.NewEncodeDecoder(tc.mode))
+			a := proxyAuth{NodeAddr: "here:22", SessionManager: sm, Logger: logger}
+			_, err := a.resolve(&fakeConnMetadata{user: tc.user})
+			require.Error(t, err)
+			var lookup *lookupError
+			require.Equal(t, tc.lookup, errors.As(err, &lookup), "%v", err)
+		})
+	}
+}
+
+// The session ID is whatever the guest's user carries, so a banner prints it
+// as is only when it has an ID's shape, and quoted otherwise.
+func TestBannerForQuotesAnOddSessionID(t *testing.T) {
+	notFound := &lookupError{&ErrSessionNotFound{SessionID: "s"}}
+	long := strings.Repeat("a", 64)
+	for id, want := range map[string]string{
+		"Ab3":       "Ab3",
+		long:        long,
+		long + "a":  `"` + long + `a"`,
+		"":          `""`,
+		"a-b":       `"a-b"`,
+		"a\x1b[2Jb": `"a\x1b[2Jb"`,
+		"a\u202eb":  `"a\u202eb"`,
+	} {
+		require.Equal(t, fmt.Sprintf(bannerNoHost, want), bannerFor(&fakeConnMetadata{}, id, notFound), "%q", id)
 	}
 }

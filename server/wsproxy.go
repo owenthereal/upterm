@@ -145,18 +145,44 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// CLIENT connection: decode the SSH user using SessionManager
 		sessionID, nodeAddr, err := h.SessionManager.ResolveSSHUser(sshUser)
 		if err != nil {
-			h.wsError(wsc, fmt.Errorf("error resolving SSH user %s: %w", sshUser, err), "error resolving SSH user")
-			return
-		}
-
-		id = &api.Identifier{
-			Id:       sessionID,
-			NodeAddr: nodeAddr,
-			Type:     api.Identifier_CLIENT,
+			err = fmt.Errorf("error resolving SSH user %s: %w", sshUser, err)
+			// Fronting the SSH proxy, hand over a guest this can't place. A
+			// banner saying why reaches the guest's ssh client, which a
+			// WebSocket close frame doesn't. In embedded mode a resolve failure
+			// is a decode failure, which the SSH proxy refuses without one. It
+			// decodes the user itself, so sshUser only stands in for the
+			// session ID, in logs.
+			if id = h.sshProxyHandOff(sshUser); id == nil {
+				h.wsError(wsc, err, "error resolving SSH user")
+				return
+			}
+			h.Logger.Error("error resolving SSH user", "error", err)
+		} else {
+			id = &api.Identifier{
+				Id:       sessionID,
+				NodeAddr: nodeAddr,
+				Type:     api.Identifier_CLIENT,
+			}
 		}
 	}
 
 	conn, err := h.ConnDialer.Dial(id)
+	// In Consul mode a guest's node comes from a cache the store's watch keeps,
+	// which can trail its host's reconnect to another node. Fronting the SSH
+	// proxy, hand over a guest whose node won't take the dial: the SSH proxy's
+	// front door makes the attempt itself, and if that fails, refreshes a
+	// route that can move, one whose host proved its key. A legacy session's
+	// route can't, and its hand-off buys only a second dial and a generic SSH
+	// rejection, which still keeps the dial error out of the close frame. An
+	// embedded-mode guest's node is its user's own choice, and there is
+	// nothing to refresh it from.
+	if err != nil && id.Type == api.Identifier_CLIENT && id.NodeAddr != "" &&
+		h.SessionManager.GetRoutingMode() == routing.ModeConsul {
+		if handOff := h.sshProxyHandOff(id.Id); handOff != nil {
+			h.Logger.Error("error dialing the session's node", "error", err, "node", id.NodeAddr)
+			conn, err = h.ConnDialer.Dial(handOff)
+		}
+	}
 	if err != nil {
 		h.wsError(wsc, err, "error dialing")
 		return
@@ -189,6 +215,16 @@ func (h *wsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := g.Run(); err != nil {
 		h.wsError(wsc, err, "error piping")
 	}
+}
+
+// sshProxyHandOff is the identifier that sends a guest of sessionID to this
+// node's SSH proxy, which authorizes the guest's user itself, or nil when the
+// handler doesn't front one.
+func (h *wsHandler) sshProxyHandOff(sessionID string) *api.Identifier {
+	if _, ok := h.ConnDialer.(sshProxyDialer); !ok {
+		return nil
+	}
+	return &api.Identifier{Id: sessionID, Type: api.Identifier_CLIENT}
 }
 
 func (h *wsHandler) httpError(w http.ResponseWriter, err error) {

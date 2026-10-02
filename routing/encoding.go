@@ -90,10 +90,6 @@ func (c *ConsulEncodeDecoder) Encode(sessionID, nodeAddr string) string {
 }
 
 func (c *ConsulEncodeDecoder) Decode(sshUser string) (sessionID, nodeAddr string, err error) {
-	if sshUser == "" {
-		return "", "", ErrInvalidSSHUser
-	}
-
 	// In Consul mode, the SSH user is just the session ID
 	// Handle mixed-mode scenarios: if SSH user contains ":" (embedded format),
 	// extract only the session ID part (before the colon) for compatibility
@@ -101,6 +97,9 @@ func (c *ConsulEncodeDecoder) Decode(sshUser string) (sessionID, nodeAddr string
 		sessionID = sshUser[:colonIndex]
 	} else {
 		sessionID = sshUser
+	}
+	if sessionID == "" {
+		return "", "", ErrInvalidSSHUser
 	}
 
 	return sessionID, "", nil
