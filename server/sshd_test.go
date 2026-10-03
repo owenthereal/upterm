@@ -15,6 +15,7 @@ import (
 
 	gliderssh "charm.land/ssh"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/routing"
@@ -232,6 +233,38 @@ func (s *testSSHD) dialFreezable(t *testing.T, keyID string) (*ssh.Client, func(
 	t.Cleanup(func() { _ = client.Close() })
 	var once sync.Once
 	return client, func() { once.Do(func() { close(conn.frozen) }) }
+}
+
+// dialMute is dialAs over a connection whose client never answers the relay's
+// global requests, as a host does whose replies sit behind queued output,
+// and which sends bytes of its own every 10 ms until stop is called.
+func (s *testSSHD) dialMute(t *testing.T, keyID string) (*ssh.Client, func()) {
+	t.Helper()
+	raw, err := net.Dial("tcp", s.addr)
+	require.NoError(t, err)
+	c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, keyID))
+	require.NoError(t, err)
+	go func() { // taken, never answered
+		for range reqs {
+		}
+	}()
+	none := make(chan *ssh.Request) // NewClient answers nothing from here
+	t.Cleanup(func() { close(none) })
+	client := ssh.NewClient(c, chans, none)
+	t.Cleanup(func() { _ = client.Close() })
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+				_, _, _ = client.SendRequest("keepalive@openssh.com", false, nil)
+			}
+		}
+	}()
+	var once sync.Once
+	return client, func() { once.Do(func() { close(stop) }) }
 }
 
 // waitClosed fails with what unless client's connection ends within 5 s.
@@ -1333,7 +1366,7 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 // quiet.
 func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 	s := newTestSSHD(t, func(d *sshd) {
-		d.liveness = hostLiveness{interval: 50 * time.Millisecond, bound: 50 * time.Millisecond}
+		d.liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
 	})
 	legacy, freezeLegacy := s.dialFreezable(t, "legacy")
 	legacyID := s.createSession(t, legacy)
@@ -1350,12 +1383,30 @@ func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 		500*time.Millisecond, 20*time.Millisecond, "a legacy host is never pinged")
 }
 
+// A capable host whose replies queue behind its own output is alive for as long
+// as that output arrives: the relay closes it for silence, not for a reply that
+// hadn't come.
+func Test_sshd_KeepsACapableHostWhoseRepliesQueueBehindData(t *testing.T) {
+	timing := liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
+	s := newTestSSHD(t, func(d *sshd) { d.liveness = timing })
+	host := newProven(t)
+	client, stopSending := s.dialMute(t, "mute")
+	ok, body := host.register(t, client, "mute", 1)
+	require.True(t, ok, string(body))
+	gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
+
+	require.Never(t, gone, 500*time.Millisecond, 10*time.Millisecond,
+		"a host whose bytes kept arriving was closed for a reply that hadn't come")
+	stopSending()
+	require.Eventually(t, gone, 2*time.Second, 10*time.Millisecond, "a silent host was kept")
+}
+
 // A capable host that answers its pings keeps its connection, and with it its
 // registration, however many pings go by.
 func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
 	interval := 50 * time.Millisecond
 	s := newTestSSHD(t, func(d *sshd) {
-		d.liveness = hostLiveness{interval: interval, bound: 4 * interval}
+		d.liveness = liveness.Timing{Interval: interval, Bound: 4 * interval}
 	})
 	host := newProven(t)
 	capable := s.dialAs(t, "capable")

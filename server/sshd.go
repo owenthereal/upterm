@@ -12,6 +12,7 @@ import (
 	"charm.land/ssh"
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
@@ -45,9 +46,10 @@ type sshd struct {
 	// with its session key alone and never touch its agent.
 	HostGateEnabled bool
 
-	// liveness paces the pings that find a reconnect-capable host which went
-	// silent; zero is defaultHostLiveness. Tests shorten it.
-	liveness hostLiveness
+	// liveness is how long a reconnect-capable host's connection may be silent
+	// before it is pinged and then closed; zero is liveness.DefaultTiming. Tests
+	// shorten it.
+	liveness liveness.Timing
 
 	// onRegistered is a test hook, run after the store takes a registration and
 	// before this node adopts it: the window in which two registrations can
@@ -477,6 +479,15 @@ func (s *sshd) Serve(ln net.Listener) error {
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
 			s.Logger.Error("connection failed", "error", err)
 		},
+		// Before the handshake, so that every byte the SSH transport reads, the
+		// handshake's too, is recorded for the pings to judge the host by.
+		ConnCallback: func(ctx ssh.Context, conn net.Conn) net.Conn {
+			activity := liveness.NewConn(conn)
+			ctx.Lock()
+			ctx.SetValue(contextKeyActivity{}, activity)
+			ctx.Unlock()
+			return activity
+		},
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			config := &gossh.ServerConfig{
 				ServerVersion: version.ServerSSHVersion(),
@@ -643,6 +654,10 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	return true, nil
 }
 
+// contextKeyActivity holds the connection's *liveness.Conn, which records when
+// bytes last arrived on it.
+type contextKeyActivity struct{}
+
 // contextKeyPinged marks a connection that is already being pinged.
 type contextKeyPinged struct{}
 
@@ -650,12 +665,22 @@ type contextKeyPinged struct{}
 func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) {
 	ctx.Lock()
 	pinged, _ := ctx.Value(contextKeyPinged{}).(bool)
-	ctx.SetValue(contextKeyPinged{}, true)
+	activity, _ := ctx.Value(contextKeyActivity{}).(*liveness.Conn)
+	if !pinged && activity != nil {
+		ctx.SetValue(contextKeyPinged{}, true)
+	}
 	ctx.Unlock()
 	if pinged {
 		return
 	}
-	go pingHost(ctx, conn, s.liveness.orDefault(), s.Logger.With("session-id", reg.ID()))
+	// Pinging with a clock that never advances would close every capable host
+	// at the end of its first silence, so a connection nothing records the
+	// reads of is left alone. Serve wraps every connection, so this is a bug.
+	if activity == nil {
+		s.Logger.Error("not pinging a host connection that has no record of its reads", "session-id", reg.ID())
+		return
+	}
+	go pingHost(ctx, conn, activity.LastRead, s.liveness, s.Logger.With("session-id", reg.ID()))
 }
 
 // releaseReplaced releases a registration a takeover on this node replaced.
