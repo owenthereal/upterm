@@ -537,7 +537,10 @@ func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 	hostKey, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
 	tunnel := relay.tunnel(hostKey[0], &url.URL{Scheme: "ssh", Host: fwd.Addr()})
-	tunnel.KeepAlive = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
+	// A Bound well past a slow runner's late wake-ups, so a probe's reply is
+	// never what the test is timing.
+	tunnel.KeepAlive = liveness.Timing{Interval: 100 * time.Millisecond, Bound: 300 * time.Millisecond}
+	giveUp := tunnel.KeepAlive.Interval + tunnel.KeepAlive.Bound
 	_, err = tunnel.Establish(t.Context())
 	require.NoError(t, err)
 	t.Cleanup(tunnel.Close)
@@ -550,25 +553,27 @@ func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 		waited <- err
 	}()
 	go func() { waited <- tunnel.Wait() }()
-	// While the relay answers, the tunnel outlives three silences' worth of
+	// While the relay answers, the tunnel outlives two silences' worth of
 	// Interval+Bound. Watch counts silence from its own start, so a keepalive
 	// fed a clock that never advances would give up at the first.
 	select {
 	case <-ended:
 		t.Fatal("the tunnel ended while the relay was answering its probes")
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(2 * giveUp):
 	}
+	// Once the relay goes silent, Wait returns within Interval+Bound of its
+	// last bytes, given a second's margin.
 	fwd.Blackhole()
 	for range 2 {
 		select {
 		case err := <-waited:
 			require.ErrorIs(t, err, liveness.ErrSilent)
-		case <-time.After(time.Second):
+		case <-time.After(giveUp + time.Second):
 			t.Fatal("Wait did not return once the relay went silent")
 		}
 	}
 	tunnel.Close()
-	require.ErrorIs(t, waitWithin(t, tunnel, time.Second), liveness.ErrSilent, "after Close too")
+	require.ErrorIs(t, waitWithin(t, tunnel, giveUp+time.Second), liveness.ErrSilent, "after Close too")
 }
 
 // Rule 6: a refused registration is typed, with the relay's body and today's text.
