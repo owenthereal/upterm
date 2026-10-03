@@ -1449,3 +1449,58 @@ func Test_sshd_KeepsACapableHostThatAnswers(t *testing.T) {
 	require.Never(t, func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil },
 		12*interval, interval/5, "a capable host that answers is kept")
 }
+
+// heldReleaseStore holds every Release until open is closed, and counts the
+// ones that went through.
+type heldReleaseStore struct {
+	SessionStore
+	open chan struct{}
+	done atomic.Int32
+}
+
+func (s *heldReleaseStore) Release(ctx context.Context, reg *Registration) error {
+	select {
+	case <-s.open:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer s.done.Add(1)
+	return s.SessionStore.Release(ctx, reg)
+}
+
+// A takeover on this node ends the registration it replaced in the background:
+// neither the reply to the new registration nor the old connection's close,
+// which takes its guests with it, waits on the store's release.
+func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
+	logger := logging.Must(logging.Console(), logging.Debug()).Logger
+	store := &heldReleaseStore{SessionStore: newMemorySessionStore(logger), open: make(chan struct{})}
+	s := newTestSSHD(t, func(d *sshd) {
+		d.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
+	})
+	host := newProven(t)
+	first := s.dialAs(t, "conn-1")
+	ok, body := host.register(t, first, "conn-1", 1)
+	require.True(t, ok, string(body))
+	ok, reason := forwardRequest(t, first, streamlocalForwardChannelType, host.id())
+	require.True(t, ok, reason)
+	firstClosed := make(chan struct{})
+	go func() { _ = first.Wait(); close(firstClosed) }()
+
+	start := time.Now()
+	ok, body = host.register(t, s.dialAs(t, "conn-2"), "conn-2", 2)
+	require.True(t, ok, string(body))
+	require.Less(t, time.Since(start), time.Second, "the new registration's reply waited on the old one's release")
+	select {
+	case <-firstClosed:
+	case <-time.After(time.Second):
+		t.Fatal("the superseded connection waited on the store")
+	}
+
+	close(store.open)
+	require.Eventually(t, func() bool { return store.done.Load() >= 1 }, 5*time.Second, 10*time.Millisecond,
+		"generation 1's release went through")
+	require.Never(t, func() bool {
+		sess, err := s.sshd.SessionManager.GetSession(host.id())
+		return err != nil || sess.Generation != 2
+	}, 300*time.Millisecond, 10*time.Millisecond, "the old registration's releases left the new entry")
+}

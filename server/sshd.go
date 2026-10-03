@@ -610,15 +610,17 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	if prev != nil && prev.conn != conn {
 		// A takeover on this node. The old listener goes first, so the new
 		// registration can bind the session socket's name, and then the old
-		// host connection, so its guests go with it.
-		s.forwardHandler.closeListener(prev.reg)
+		// host connection, so its guests go with it. Neither waits on the
+		// store: evict ends prev.reg in the background, so a slow release
+		// holds up neither the old connection's close nor the reply that
+		// tells the host its new registration is in.
+		s.forwardHandler.evict(prev.reg)
 		_ = prev.conn.Close()
 		// A lease the old registration's keeper rebuilt is known only to its
 		// slot. The old connection's cleanup releases the handle it was adopted
-		// with, and closeListener ends prev.reg only if it had bound a
-		// listener, so release it here. It holds nothing now the new
-		// registration holds the entry, and a store with no leases has nothing
-		// to release.
+		// with, and evict ends prev.reg only if it had bound a listener, so
+		// release it here. It holds nothing now the new registration holds the
+		// entry, and a store with no leases has nothing to release.
 		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
 			go s.releaseReplaced(prev.reg)
 		}
