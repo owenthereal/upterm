@@ -100,10 +100,19 @@ var ErrSilent = errors.New("no bytes from the peer")
 // up on it once it has been silent for t.Interval+t.Bound. It returns when ctx
 // ends or after calling onDead, which it calls at most once.
 //
-// Silence is measured from lastRead, and the next wake is worked out from it
-// each time rather than taken from a ticker: bytes that arrive while Watch
-// sleeps push the deadline out, and a ticker would wake for nothing on a
-// connection that never needs a probe.
+// Silence is measured from the later of lastRead and the moment Watch started,
+// and the next wake is worked out from it each time rather than taken from a
+// ticker: bytes that arrive while Watch sleeps push the deadline out, and a
+// ticker would wake for nothing on a connection that never needs a probe.
+//
+// Starting counts as activity because a peer cannot be blamed for a silence
+// nobody was watching. A caller may begin to watch long after the last byte,
+// the relay once its registration has finished, the host once its prompt has
+// been answered, and a peer that has been waiting on that caller all the while
+// must still be probed, and given the whole Bound to reply, rather than be
+// given up on in the first pass. So a new Watch probes no earlier than Interval
+// after it starts, and gives up no earlier than Interval+Bound after it starts,
+// however old lastRead is.
 //
 // At most one probe is in flight. x/crypto would serialise a second behind the
 // first anyway, so a probe that is slow to be answered is not piled on, and it
@@ -128,6 +137,11 @@ func Watch(ctx context.Context, t Timing, lastRead func() time.Time, probe func(
 	// as it lasted.
 	t = t.OrDefault()
 
+	// started is the earliest a silence is counted from. It carries a monotonic
+	// reading, like everything lastRead returns, so the comparison below is
+	// between two readings of the same clock.
+	started := time.Now()
+
 	// inFlight is nil while no probe is running, and a receive from a nil
 	// channel blocks, which is what keeps that case out of the select below.
 	var inFlight chan error
@@ -138,7 +152,11 @@ func Watch(ctx context.Context, t Timing, lastRead func() time.Time, probe func(
 			return
 		}
 
-		silence := time.Since(lastRead())
+		last := lastRead()
+		if last.Before(started) {
+			last = started
+		}
+		silence := time.Since(last)
 		if silence >= t.Interval+t.Bound {
 			onDead(fmt.Errorf("%w for %s", ErrSilent, silence.Round(time.Millisecond)))
 			return

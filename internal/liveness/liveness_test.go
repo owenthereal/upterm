@@ -102,6 +102,48 @@ func TestWatchGivesUpAtTheDeadlineNotTheNextWake(t *testing.T) {
 	}
 }
 
+// A watcher that starts late has not been neglecting anything. On the relay a
+// connection's lastRead is set at accept, but the first probe waits behind a
+// registration that can take longer than Interval+Bound; the peer has been
+// waiting for its reply the whole time, so it must still get the probe it was
+// promised, and the full Bound to answer it, from when Watch starts. Its
+// lastRead is an hour old here, and the probe never gets an answer.
+func TestWatchGivesANewWatcherItsFullBudget(t *testing.T) {
+	timing := Timing{Interval: 100 * time.Millisecond, Bound: 200 * time.Millisecond}
+	hourAgo := time.Now().Add(-time.Hour)
+	never := make(chan struct{})
+	t.Cleanup(func() { close(never) })
+	probed := make(chan time.Time, 2)
+	dead := make(chan error, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now()
+	go Watch(ctx, timing, func() time.Time { return hourAgo },
+		func() error { probed <- time.Now(); <-never; return nil },
+		func(err error) { dead <- err })
+
+	select {
+	case at := <-probed:
+		silence := at.Sub(started)
+		require.GreaterOrEqual(t, silence, timing.Interval, "probed before Interval had passed since Watch started")
+		require.LessOrEqual(t, silence, timing.Interval+lateWake, "probed long after Interval since Watch started")
+	case err := <-dead:
+		t.Fatalf("gave up %s after Watch started, without the probe it was due: %v", time.Since(started), err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe never started")
+	}
+
+	select {
+	case err := <-dead:
+		late := time.Since(started.Add(timing.Interval + timing.Bound))
+		require.ErrorIs(t, err, ErrSilent)
+		require.GreaterOrEqual(t, late, time.Duration(0), "closed before Interval+Bound had passed since Watch started")
+		require.LessOrEqual(t, late, lateWake, "closed long after Interval+Bound since Watch started")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a silent connection was never given up on")
+	}
+}
+
 // The port of Test_KeepAlive_DoesNotReportADeadRelayWhenStopped.
 func TestWatchReportsNothingWhenStopped(t *testing.T) {
 	var c clock
