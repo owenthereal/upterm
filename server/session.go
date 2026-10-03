@@ -517,13 +517,18 @@ func newConsulSessionStore(consulURL *url.URL, ttl time.Duration, logger *slog.L
 
 // Register stores session as a fresh registration.
 func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*Registration, error) {
-	return c.register(ctx, session, mayRegister)
+	return c.register(ctx, session, mayRegister, "")
 }
 
 // Reregister stores reg's session again, taking the entry over from reg's own
 // lock session, or its earlier rebuild's, if one still holds it.
+//
+// It also restores a value that doesn't parse while reg's own lock session
+// holds it. That is a foreign write into a held key: a plain write keeps the
+// lock session, so the entry is still reg's, and refusing it would have the
+// keeper close a host that nothing newer has replaced.
 func (c *consulSessionStore) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
-	return c.register(ctx, reg.Session, mayRebuild)
+	return c.register(ctx, reg.Session, mayRebuild, reg.lease)
 }
 
 // register stores session under a lock session of its own, replacing a stored
@@ -531,7 +536,11 @@ func (c *consulSessionStore) Reregister(ctx context.Context, reg *Registration) 
 // are one transaction, conditional on the entry the decision was read from, so
 // no other registration can land between them: whichever commits second finds
 // the entry changed, and reads and decides again.
-func (c *consulSessionStore) register(ctx context.Context, session *Session, may func(next, cur *Session) bool) (*Registration, error) {
+//
+// own is the lock session of the registration being rebuilt, or "" for a fresh
+// one. A value that doesn't parse and that own holds is restored whatever may
+// says.
+func (c *consulSessionStore) register(ctx context.Context, session *Session, may func(next, cur *Session) bool, own string) (*Registration, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session cannot be nil")
 	}
@@ -595,7 +604,9 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 					{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease},
 				}
 			} else {
-				if cur := storedSession(pair.Value); !may(session, cur) {
+				cur, readable := storedSession(pair.Value)
+				ownUnreadable := !readable && own != "" && pair.Session == own
+				if !may(session, cur) && !ownUnreadable {
 					return retry.Unrecoverable(supersededError(session, cur))
 				}
 				ops = api.KVTxnOps{{Verb: api.KVCheckIndex, Key: kvStoreKey, Index: pair.ModifyIndex}}
@@ -663,15 +674,15 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index, epoch: epoch}, nil
 }
 
-// storedSession ranks a stored value for ordering. One that doesn't parse
-// ranks as generation 0 from no node: a proven registration may replace it,
-// and a legacy one may not.
-func storedSession(value []byte) *Session {
+// storedSession ranks a stored value for ordering, and reports whether it
+// parsed. One that doesn't ranks as generation 0 from no node: a proven
+// registration may replace it, and a legacy one may not.
+func storedSession(value []byte) (*Session, bool) {
 	var s Session
 	if err := json.Unmarshal(value, &s); err != nil {
-		return &Session{}
+		return &Session{}, false
 	}
-	return &s
+	return &s, true
 }
 
 func describeTxnErrors(errs api.TxnErrors) string {

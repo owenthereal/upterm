@@ -765,6 +765,38 @@ func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
 	suite.NoError(suite.store1.Release(ctx, reg))
 }
 
+// A plain write over a held key keeps its lock: the premise is asserted, not
+// assumed, so a Consul version that behaves otherwise fails here rather than
+// silently making the case unreachable.
+func (suite *ConsulStoreTestSuite) TestReregisterRestoresAnUnreadableValueItsLeaseHolds() {
+	ctx, id := context.Background(), suite.uniq("unreadable")
+	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22"}) // legacy
+	suite.Require().NoError(err)
+	_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte("not json")}, nil)
+	suite.Require().NoError(err)
+	pair, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+	suite.Require().NoError(err)
+	suite.Require().Equal(reg.lease, pair.Session, "a plain write kept the lock")
+
+	next, err := suite.store1.Reregister(ctx, reg)
+	suite.Require().NoError(err, "the registration's own lease holds the key")
+	defer func() { _ = suite.store1.Release(ctx, next) }()
+	_, s := suite.consulGet(id)
+	suite.Require().NotNil(s)
+	suite.Equal("a:22", s.NodeAddr)
+
+	// Unreadable, and held by no lock: still refused for a legacy rebuild.
+	other := suite.uniq("unreadable-unlocked")
+	reg2, err := suite.store1.Register(ctx, &Session{ID: other, NodeAddr: "a:22"})
+	suite.Require().NoError(err)
+	_, err = suite.client.Session().Destroy(reg2.lease, nil)
+	suite.Require().NoError(err)
+	_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(other), Value: []byte("not json")}, nil)
+	suite.Require().NoError(err)
+	_, err = suite.store1.Reregister(ctx, reg2)
+	suite.ErrorIs(err, ErrSuperseded)
+}
+
 // Shutdown cleanup from a stale listing leaves an entry another lease took
 // over, and skips one that is already gone.
 func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesItNoLongerHolds() {
