@@ -227,8 +227,9 @@ type SessionStore interface {
 	Register(ctx context.Context, s *Session) (*Registration, error)
 	// Reregister is the owner's rebuild of reg after a known loss: it stores
 	// reg's session again under a new lease, as Register does, and may also
-	// replace an entry of reg's own identity, which Register refuses. It
-	// orders, retries and cleans up as Register does.
+	// replace an entry of reg's own identity, which Register refuses. A store
+	// with leases also replaces a value reg's own lease holds, whatever was
+	// written into it. It orders, retries and cleans up as Register does.
 	Reregister(ctx context.Context, reg *Registration) (*Registration, error)
 	// Release removes reg's entry if reg still holds it.
 	Release(ctx context.Context, reg *Registration) error
@@ -523,10 +524,13 @@ func (c *consulSessionStore) Register(ctx context.Context, session *Session) (*R
 // Reregister stores reg's session again, taking the entry over from reg's own
 // lock session, or its earlier rebuild's, if one still holds it.
 //
-// It also restores a value that doesn't parse while reg's own lock session
-// holds it. That is a foreign write into a held key: a plain write keeps the
-// lock session, so the entry is still reg's, and refusing it would have the
-// keeper close a host that nothing newer has replaced.
+// It also restores a value reg's own lock session holds, whatever was written
+// into it. That is a foreign write into a held key: a plain write keeps the
+// lock session, so the key is still reg's entry, whether the value no longer
+// parses or parses as something that is no registration. Refusing it would
+// have the keeper close a host that nothing newer has replaced. No upterm path
+// writes a session key without acquiring it, and every registration moves the
+// lock to its own lease, so a key reg's lease holds is reg's entry.
 func (c *consulSessionStore) Reregister(ctx context.Context, reg *Registration) (*Registration, error) {
 	return c.register(ctx, reg.Session, mayRebuild, reg.lease)
 }
@@ -538,8 +542,8 @@ func (c *consulSessionStore) Reregister(ctx context.Context, reg *Registration) 
 // the entry changed, and reads and decides again.
 //
 // own is the lock session of the registration being rebuilt, or "" for a fresh
-// one. A value that doesn't parse and that own holds is restored whatever may
-// says.
+// one. A value own holds is restored whatever was written into it, and whatever
+// may says.
 func (c *consulSessionStore) register(ctx context.Context, session *Session, may func(next, cur *Session) bool, own string) (*Registration, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session cannot be nil")
@@ -604,9 +608,10 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 					{Verb: api.KVLock, Key: kvStoreKey, Value: sessionData, Session: lease},
 				}
 			} else {
-				cur, readable := storedSession(pair.Value)
-				ownUnreadable := !readable && own != "" && pair.Session == own
-				if !may(session, cur) && !ownUnreadable {
+				// own is "" for a fresh registration, and an unlocked entry's
+				// lock session is "" too, so the guard keeps the two apart.
+				heldByOwn := own != "" && pair.Session == own
+				if cur := storedSession(pair.Value); !heldByOwn && !may(session, cur) {
 					return retry.Unrecoverable(supersededError(session, cur))
 				}
 				ops = api.KVTxnOps{{Verb: api.KVCheckIndex, Key: kvStoreKey, Index: pair.ModifyIndex}}
@@ -674,15 +679,15 @@ func (c *consulSessionStore) register(ctx context.Context, session *Session, may
 	return &Registration{Session: session, ConfirmedAt: created, lease: lease, index: index, epoch: epoch}, nil
 }
 
-// storedSession ranks a stored value for ordering, and reports whether it
-// parsed. One that doesn't ranks as generation 0 from no node: a proven
-// registration may replace it, and a legacy one may not.
-func storedSession(value []byte) (*Session, bool) {
+// storedSession ranks a stored value for ordering. One that doesn't parse
+// ranks as generation 0 from no node: a proven registration may replace it,
+// and a legacy one may not.
+func storedSession(value []byte) *Session {
 	var s Session
 	if err := json.Unmarshal(value, &s); err != nil {
-		return &Session{}, false
+		return &Session{}
 	}
-	return &s, true
+	return &s
 }
 
 func describeTxnErrors(errs api.TxnErrors) string {
