@@ -543,8 +543,20 @@ func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 	t.Cleanup(tunnel.Close)
 
 	waited := make(chan error, 2)
-	for range 2 {
-		go func() { waited <- tunnel.Wait() }()
+	ended := make(chan struct{})
+	go func() {
+		err := tunnel.Wait()
+		close(ended)
+		waited <- err
+	}()
+	go func() { waited <- tunnel.Wait() }()
+	// While the relay answers, the tunnel outlives three silences' worth of
+	// Interval+Bound. Watch counts silence from its own start, so a keepalive
+	// fed a clock that never advances would give up at the first.
+	select {
+	case <-ended:
+		t.Fatal("the tunnel ended while the relay was answering its probes")
+	case <-time.After(300 * time.Millisecond):
 	}
 	fwd.Blackhole()
 	for range 2 {
