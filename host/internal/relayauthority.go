@@ -142,8 +142,8 @@ func (r *RelayAuthority) Pinned() ssh.HostKeyCallback {
 			return nil
 		}
 
-		// A certificate signed by the recorded authority and refused anyway is
-		// not a changed key, and RelayKeyChangedError says so.
+		// A certificate that names the recorded authority and is refused anyway
+		// is not a changed key, and RelayKeyChangedError says so.
 		cert, isCert := key.(*ssh.Certificate)
 		return &RelayKeyChangedError{
 			Hostname:      hostname,
@@ -169,18 +169,22 @@ func (r *RelayAuthority) CheckRedial(hostname string) error {
 // RelayKeyChangedError is a redial shown a relay key other than the one this
 // session started with. Key is what the relay showed, and nil when nothing was.
 //
-// One refusal is not a different key: a certificate signed by the authority this
-// session started with, refused for what it says rather than for who signed it
-// (another hostname, expired, not a host certificate). That is where Rule 5's
-// known consequence shows up, and it reads as what happened, with Err as the
-// reason, instead of calling the recorded authority's own key a changed one.
+// One refusal is not a different key: a certificate that names the authority
+// this session started with as its signer, refused anyway (another hostname,
+// expired, not a host certificate). That is where Rule 5's known consequence
+// shows up, and it reads as what happened, with Err as the reason, instead of
+// calling the recorded authority's own key a changed one. It says the
+// certificate names the authority, not that the authority signed it: the
+// checker verifies the signature last, so a refusal for the principals or the
+// validity says nothing of it.
 type RelayKeyChangedError struct {
 	Hostname string
 	Key      ssh.PublicKey
 	Err      error
 
 	// fromAuthority is set by Pinned for that certificate: Key's SignatureKey
-	// is exactly the recorded key.
+	// is exactly the recorded key, whether or not its signature was ever
+	// verified.
 	fromAuthority bool
 }
 
@@ -188,7 +192,7 @@ func (e *RelayKeyChangedError) Error() string {
 	fingerprint := e.fingerprint()
 	if e.fromAuthority && e.Err != nil && fingerprint != "" {
 		return "the relay presented a certificate" + e.forHost() +
-			" from the authority this session started with (" + fingerprint +
+			" that names the authority this session started with (" + fingerprint +
 			"), but it was not accepted: " + e.Err.Error()
 	}
 
@@ -209,8 +213,8 @@ func (e *RelayKeyChangedError) forHost() string {
 	return " for " + e.Hostname
 }
 
-// fingerprint names Key, or its signer when Key is a certificate, as the host
-// key prompt does: a certificate's own digest is not one anyone can compare. It
+// fingerprint names Key, or the signer a certificate names when Key is one, as
+// the host key prompt does: a certificate's own digest is not one anyone can compare. It
 // is empty when there is no key to name.
 func (e *RelayKeyChangedError) fingerprint() string {
 	key := e.Key

@@ -284,8 +284,8 @@ func TestRelayKeyChangedErrorReads(t *testing.T) {
 	require.NoError(t, (&RelayKeyChangedError{}).Unwrap())
 }
 
-// Each refusal says what happened. Only a certificate from the authority this
-// session started with, refused for what it says, has its own text: calling the
+// Each refusal says what happened. Only a certificate that names the authority
+// this session started with, refused anyway, has its own text: calling the
 // recorded key a changed one there would contradict the fingerprint beside it.
 func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 	relay, other, hostKey := testSigner(t), testSigner(t), testSigner(t)
@@ -302,7 +302,7 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 		return "the relay's key for " + host + " (" + utils.FingerprintSHA256(signer.PublicKey()) + ") is not the one this session started with"
 	}
 	notAccepted := func(reason error) string {
-		return "the relay presented a certificate for " + host + " from the authority this session started with (" +
+		return "the relay presented a certificate for " + host + " that names the authority this session started with (" +
 			utils.FingerprintSHA256(relay.PublicKey()) + "), but it was not accepted: " + reason.Error()
 	}
 
@@ -319,8 +319,8 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 			hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, 1), notAccepted,
 		},
 		"a user cert": {userCert, notAccepted},
-		// Not from the authority, so it is a changed key, and it is named by
-		// the key that signed it: other, not the recorded one.
+		// Not naming the authority, so it is a changed key, and it is named by
+		// the key it names as its signer: other, not the recorded one.
 		"another authority's cert": {
 			hostCert(t, other, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity),
 			func(error) string { return changedKey(other) },
@@ -346,6 +346,31 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 		require.ErrorContains(t, changed.Err, "expired")
 	})
 
+	// The text says the certificate names the authority, not that the authority
+	// signed it: this one only claims to. The checker looks at the principals
+	// before the signature, so the reason given for it may be the principals'.
+	t.Run("a forged certificate naming the authority", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			principals []string
+			reason     string
+		}{
+			"refused for its principals first": {[]string{"elsewhere.example"}, "not in the set of valid principals"},
+			"refused for its signature":        {[]string{"relay.example"}, "signature does not verify"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				forged := hostCert(t, other, hostKey.PublicKey(), tc.principals, ssh.CertTimeInfinity)
+				forged.SignatureKey = relay.PublicKey()
+
+				var changed *RelayKeyChangedError
+				require.ErrorAs(t, pinned(host, nil, forged), &changed)
+				require.ErrorContains(t, changed.Err, tc.reason)
+				require.Equal(t, notAccepted(changed.Err), changed.Error())
+				require.Contains(t, changed.Error(), "that names the authority")
+				require.NotContains(t, changed.Error(), "from the authority")
+			})
+		}
+	})
+
 	// What PR C shows in session info: the first connection auto-accepted a
 	// certificate that does not name the hostname, and every redial is refused.
 	t.Run("CheckRedial says it the same way", func(t *testing.T) {
@@ -358,7 +383,7 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 		require.Equal(t, notAccepted(changed.Err), changed.Error())
 	})
 
-	t.Run("a certificate nothing recorded signed has no authority to be from", func(t *testing.T) {
+	t.Run("a certificate has no recorded authority to name when nothing is recorded", func(t *testing.T) {
 		var none RelayAuthority
 		var changed *RelayKeyChangedError
 		require.ErrorAs(t, none.Pinned()(host, nil, hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity)), &changed)
@@ -386,7 +411,7 @@ func TestRelayKeyChangedErrorSurvivesWhatItIsGivenToPrint(t *testing.T) {
 
 	// And with no hostname the text still reads.
 	err = &RelayKeyChangedError{Key: cert, Err: errors.New("no"), fromAuthority: true}
-	require.Equal(t, "the relay presented a certificate from the authority this session started with ("+fingerprint+"), but it was not accepted: no", err.Error())
+	require.Equal(t, "the relay presented a certificate that names the authority this session started with ("+fingerprint+"), but it was not accepted: no", err.Error())
 
 	// The marker alone, on a zero value.
 	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{fromAuthority: true}).Error())
