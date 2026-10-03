@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -28,6 +29,9 @@ import (
 type RelayAuthority struct {
 	mu  sync.Mutex
 	key ssh.PublicKey
+	// presented is the key as the relay showed it, a certificate included,
+	// where key is what that reduces to. CheckRedial asks Pinned about it.
+	presented ssh.PublicKey
 }
 
 // errNoHostKeyCallback fails closed for a caller that wrapped nothing. A nil
@@ -42,7 +46,8 @@ var errNoHostKeyCallback = errors.New("relay authority: no host key callback")
 // algorithms, which ReverseTunnel does, so the key recorded is the
 // certificate's SignatureKey -- the same key the relay signs guest
 // certificates with, and the same key the prompt and known_hosts already
-// reduce a host certificate to.
+// reduce a host certificate to. The key as presented is kept too, for
+// CheckRedial.
 func (r *RelayAuthority) Wrap(cb ssh.HostKeyCallback) ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if cb == nil {
@@ -52,12 +57,14 @@ func (r *RelayAuthority) Wrap(cb ssh.HostKeyCallback) ssh.HostKeyCallback {
 			return err
 		}
 
+		presented := key
 		if cert, ok := key.(*ssh.Certificate); ok {
 			key = cert.SignatureKey
 		}
 
 		r.mu.Lock()
 		r.key = key
+		r.presented = presented
 		r.mu.Unlock()
 
 		return nil
@@ -89,3 +96,89 @@ func (r *RelayAuthority) IsUserAuthority(key ssh.PublicKey) bool {
 
 	return bytes.Equal(recorded.Marshal(), key.Marshal())
 }
+
+// errNotTheRecordedKey is the plain-key verdict of Pinned: whatever was
+// recorded, this is not it, and an authority that recorded nothing is no
+// exception.
+var errNotTheRecordedKey = errors.New("ssh: host key is not the relay key this session started with")
+
+// Pinned returns the host key callback for a redial: it accepts the relay
+// authority the first connection recorded, and nothing else. It never prompts
+// and never reads known_hosts, so a redial cannot be talked into trusting
+// anything the first connection did not.
+//
+// It accepts exactly two things: the recorded key itself, and a host
+// certificate signed by it that verifies, is within its validity and names the
+// dialled hostname (its port dropped) or names none. Every refusal is a
+// *RelayKeyChangedError wrapping the checker's reason, including a certificate
+// that merely certifies the recorded key: the comparison is IsUserAuthority's,
+// exact on the marshalled key, because utils.KeysEqual would unwrap it.
+//
+// What is recorded is read when the callback runs, not when Pinned is called,
+// and is never changed by it.
+//
+// A first connection under --skip-host-key-check accepts a certificate without
+// checking its principals (host.autoAcceptHostKey). If that certificate does not
+// name the hostname dialled, as when the public relay is dialled by IP, every
+// redial is refused here. That is the verdict known_hosts gives the same host on
+// the next run, so it is kept; CheckRedial lets the host say so at start rather
+// than at the first drop.
+func (r *RelayAuthority) Pinned() ssh.HostKeyCallback {
+	checker := &ssh.CertChecker{
+		// A relay authority is one key, which is the one IsUserAuthority already
+		// compares exactly.
+		IsHostAuthority: func(auth ssh.PublicKey, _ string) bool { return r.IsUserAuthority(auth) },
+		HostKeyFallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			if !r.IsUserAuthority(key) {
+				return errNotTheRecordedKey
+			}
+			return nil
+		},
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err := checker.CheckHostKey(hostname, remote, key); err != nil {
+			return &RelayKeyChangedError{Hostname: hostname, Key: key, Err: err}
+		}
+		return nil
+	}
+}
+
+// CheckRedial reports whether the key the first connection was shown would pass
+// Pinned for hostname, given as host:port as the callback is. It is how a host
+// learns at start that its redials will be refused, instead of at the first
+// drop. It records nothing, and a connection that recorded nothing fails it.
+func (r *RelayAuthority) CheckRedial(hostname string) error {
+	r.mu.Lock()
+	presented := r.presented
+	r.mu.Unlock()
+
+	return r.Pinned()(hostname, nil, presented)
+}
+
+// RelayKeyChangedError is a redial shown a relay key other than the one this
+// session started with. Key is what the relay showed, and nil when nothing was.
+type RelayKeyChangedError struct {
+	Hostname string
+	Key      ssh.PublicKey
+	Err      error
+}
+
+func (e *RelayKeyChangedError) Error() string {
+	msg := "the relay's key"
+	if e.Hostname != "" {
+		msg += " for " + e.Hostname
+	}
+	if key := e.Key; key != nil {
+		// A certificate is named by its signer, as the host key prompt does.
+		if cert, ok := key.(*ssh.Certificate); ok {
+			key = cert.SignatureKey
+		}
+		if key != nil {
+			msg += " (" + utils.FingerprintSHA256(key) + ")"
+		}
+	}
+	return msg + " is not the one this session started with"
+}
+
+func (e *RelayKeyChangedError) Unwrap() error { return e.Err }
