@@ -884,7 +884,7 @@ func Test_forwards_ATakeoverRefusesAnOldForwardInFlight(t *testing.T) {
 	require.NoError(t, err)
 	prev, err := sessions.add(gen2, newCloser())
 	require.NoError(t, err)
-	h.closeListener(prev.reg)
+	h.evict(prev.reg)
 	closeConn1()
 
 	close(store.release)
@@ -933,9 +933,9 @@ func (s *releaseRecordingStore) released(lease string) bool {
 }
 
 // A takeover on this node releases the lease its keeper rebuilt for the old
-// registration, though no listener was bound for closeListener to end it
-// with: the old connection's cleanup only knows the handle it was adopted
-// with, and the rebuilt lease would otherwise linger until it expired.
+// registration, though no listener was bound for evict to end it with: the
+// old connection's cleanup only knows the handle it was adopted with, and the
+// rebuilt lease would otherwise linger until it expired.
 func Test_sshd_TakeoverReleasesARebuiltLease(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	store := &releaseRecordingStore{SessionStore: newMemorySessionStore(logger)}
@@ -1486,8 +1486,11 @@ func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
 	firstClosed := make(chan struct{})
 	go func() { _ = first.Wait(); close(firstClosed) }()
 
+	// Dialed before the clock starts: the budget below times the reply, not
+	// the handshake, which under -race is slow enough to matter.
+	second := s.dialAs(t, "conn-2")
 	start := time.Now()
-	ok, body = host.register(t, s.dialAs(t, "conn-2"), "conn-2", 2)
+	ok, body = host.register(t, second, "conn-2", 2)
 	require.True(t, ok, string(body))
 	require.Less(t, time.Since(start), time.Second, "the new registration's reply waited on the old one's release")
 	select {
@@ -1497,8 +1500,12 @@ func Test_sshd_TakeoverDoesNotWaitOnTheStore(t *testing.T) {
 	}
 
 	close(store.open)
-	require.Eventually(t, func() bool { return store.done.Load() >= 1 }, 5*time.Second, 10*time.Millisecond,
-		"generation 1's release went through")
+	// Two releases of generation 1 happen: evict's, and the old connection's
+	// own when its context ends. The memory store has no lease, so nothing
+	// else releases it. Waiting for both means the check below runs after
+	// every release of the old registration, not after the first.
+	require.Eventually(t, func() bool { return store.done.Load() >= 2 }, 5*time.Second, 10*time.Millisecond,
+		"both of generation 1's releases went through")
 	require.Never(t, func() bool {
 		sess, err := s.sshd.SessionManager.GetSession(host.id())
 		return err != nil || sess.Generation != 2
