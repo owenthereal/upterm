@@ -37,7 +37,7 @@ func pingHost(ctx context.Context, conn gossh.Conn, lastRead func() time.Time, t
 			// Only silence is worth a log line: a failed probe is a connection
 			// that has already gone, and closing it is only to be sure.
 			if errors.Is(err, liveness.ErrSilent) {
-				logger.Warn("closing a host connection that went silent", "silence", time.Since(lastRead()).Round(time.Millisecond))
+				logger.Warn("closing a host connection that went silent", "error", err)
 			}
 			_ = conn.Close()
 		})

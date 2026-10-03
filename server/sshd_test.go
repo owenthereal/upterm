@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,35 +237,54 @@ func (s *testSSHD) dialFreezable(t *testing.T, keyID string) (*ssh.Client, func(
 }
 
 // dialMute is dialAs over a connection whose client never answers the relay's
-// global requests, as a host does whose replies sit behind queued output,
-// and which sends bytes of its own every 10 ms until stop is called.
-func (s *testSSHD) dialMute(t *testing.T, keyID string) (*ssh.Client, func()) {
+// global requests, as a host does whose replies sit behind queued output, and
+// which sends bytes of its own every `every` until stop is called.
+//
+// pings counts the keepalives the relay has sent it. stop ends the sending,
+// waits for it to end, and returns when the last send began: before the write,
+// so that the relay can't have read those bytes any earlier.
+func (s *testSSHD) dialMute(t *testing.T, keyID string, every time.Duration) (*ssh.Client, *atomic.Int64, func() time.Time) {
 	t.Helper()
 	raw, err := net.Dial("tcp", s.addr)
 	require.NoError(t, err)
 	c, chans, reqs, err := ssh.NewClientConn(raw, s.addr, s.proxyConfig(t, keyID))
 	require.NoError(t, err)
-	go func() { // taken, never answered
-		for range reqs {
+	pings := new(atomic.Int64)
+	go func() { // taken and counted, never answered
+		for req := range reqs {
+			if req.Type == "keepalive@openssh.com" {
+				pings.Add(1)
+			}
 		}
 	}()
 	none := make(chan *ssh.Request) // NewClient answers nothing from here
 	t.Cleanup(func() { close(none) })
 	client := ssh.NewClient(c, chans, none)
 	t.Cleanup(func() { _ = client.Close() })
-	stop := make(chan struct{})
+	quit, ended := make(chan struct{}), make(chan struct{})
+	var lastSent time.Time // the sender's, to be read once it has ended
 	go func() {
+		defer close(ended)
 		for {
 			select {
-			case <-stop:
+			case <-quit:
 				return
-			case <-time.After(10 * time.Millisecond):
-				_, _, _ = client.SendRequest("keepalive@openssh.com", false, nil)
+			case <-time.After(every):
+				sent := time.Now()
+				if _, _, err := client.SendRequest("keepalive@openssh.com", false, nil); err == nil {
+					lastSent = sent
+				}
 			}
 		}
 	}()
 	var once sync.Once
-	return client, func() { once.Do(func() { close(stop) }) }
+	stop := func() time.Time {
+		once.Do(func() { close(quit) })
+		<-ended
+		return lastSent
+	}
+	t.Cleanup(func() { stop() }) // so a test that fails early doesn't leave it sending
+	return client, pings, stop
 }
 
 // waitClosed fails with what unless client's connection ends within 5 s.
@@ -1360,8 +1380,8 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	}
 }
 
-// A reconnect-capable host's connection is pinged, and closed when it stops
-// answering, so its registration doesn't outlive a host that went without a
+// A reconnect-capable host's connection is pinged, and closed when it goes
+// silent, so its registration doesn't outlive a host that went without a
 // word. A legacy host can't redial, so its connection is left alone however
 // quiet.
 func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
@@ -1384,21 +1404,34 @@ func Test_sshd_PingsOnlyCapableHosts(t *testing.T) {
 }
 
 // A capable host whose replies queue behind its own output is alive for as long
-// as that output arrives: the relay closes it for silence, not for a reply that
-// hadn't come.
+// as that output arrives: the relay pings it, and closes it for the silence
+// that follows its last byte, not for a reply that hadn't come.
 func Test_sshd_KeepsACapableHostWhoseRepliesQueueBehindData(t *testing.T) {
-	timing := liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
+	// The mute client's bytes come every 100 ms, twice Interval, so the relay
+	// has to ping it between them, and no reply ever comes. Bound is long
+	// enough that the 2*Bound window below outlasts a deadline on that reply
+	// but never a silence, which each byte resets.
+	timing := liveness.Timing{Interval: 50 * time.Millisecond, Bound: 300 * time.Millisecond}
 	s := newTestSSHD(t, func(d *sshd) { d.liveness = timing })
 	host := newProven(t)
-	client, stopSending := s.dialMute(t, "mute")
+	client, pings, stopSending := s.dialMute(t, "mute", 100*time.Millisecond)
 	ok, body := host.register(t, client, "mute", 1)
 	require.True(t, ok, string(body))
 	gone := func() bool { _, err := s.sshd.SessionManager.GetSession(host.id()); return err != nil }
 
-	require.Never(t, gone, 500*time.Millisecond, 10*time.Millisecond,
+	require.Never(t, gone, 2*timing.Bound, 10*time.Millisecond,
 		"a host whose bytes kept arriving was closed for a reply that hadn't come")
-	stopSending()
-	require.Eventually(t, gone, 2*time.Second, 10*time.Millisecond, "a silent host was kept")
+	require.Positive(t, pings.Load(), "the relay never pinged: nothing here was left waiting for a reply")
+
+	lastSent := stopSending()
+	require.False(t, lastSent.IsZero(), "the client never sent a byte")
+	silent := lastSent.Add(timing.Interval + timing.Bound)
+	limit := silent.Add(2 * lateWake)
+	for !gone() {
+		require.True(t, time.Now().Before(limit), "a silent host was kept")
+		time.Sleep(2 * time.Millisecond)
+	}
+	requireClosedAt(t, time.Now(), silent, "its last byte plus Interval+Bound")
 }
 
 // A capable host that answers its pings keeps its connection, and with it its
