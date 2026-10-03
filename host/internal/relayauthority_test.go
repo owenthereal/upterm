@@ -137,6 +137,12 @@ func TestPinnedRelayAuthority(t *testing.T) {
 	require.True(t, a.IsUserAuthority(relay.PublicKey()))
 	require.False(t, a.IsUserAuthority(other.PublicKey()))
 	require.NoError(t, a.CheckRedial("relay.example:22"))
+	// What the first connection was shown is the plain key, so a redial asked
+	// about another hostname still passes. It would not if Pinned had replaced
+	// that with a certificate it accepted for relay.example, which is done here
+	// last, not left to the order the table above ran in.
+	require.NoError(t, pinned("relay.example:22", nil, hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)))
+	require.NoError(t, a.CheckRedial("elsewhere.example:22"))
 
 	var none RelayAuthority
 	var changed *RelayKeyChangedError
@@ -276,4 +282,112 @@ func TestRelayKeyChangedErrorReads(t *testing.T) {
 		(&RelayKeyChangedError{Hostname: "relay.example:22"}).Error())
 	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{}).Error())
 	require.NoError(t, (&RelayKeyChangedError{}).Unwrap())
+}
+
+// Each refusal says what happened. Only a certificate from the authority this
+// session started with, refused for what it says, has its own text: calling the
+// recorded key a changed one there would contradict the fingerprint beside it.
+func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
+	relay, other, hostKey := testSigner(t), testSigner(t), testSigner(t)
+	const host = "relay.example:22"
+	var a RelayAuthority
+	require.NoError(t, a.Wrap(ssh.InsecureIgnoreHostKey())(host, nil, relay.PublicKey()))
+	pinned := a.Pinned()
+
+	userCert := hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity)
+	userCert.CertType = ssh.UserCert
+	require.NoError(t, userCert.SignCert(rand.Reader, relay))
+
+	changedKey := func(signer ssh.Signer) string {
+		return "the relay's key for " + host + " (" + utils.FingerprintSHA256(signer.PublicKey()) + ") is not the one this session started with"
+	}
+	notAccepted := func(reason error) string {
+		return "the relay presented a certificate for " + host + " from the authority this session started with (" +
+			utils.FingerprintSHA256(relay.PublicKey()) + "), but it was not accepted: " + reason.Error()
+	}
+
+	for name, tc := range map[string]struct {
+		key ssh.PublicKey
+		// want is the full message, given the checker's reason.
+		want func(reason error) string
+	}{
+		"another key": {other.PublicKey(), func(error) string { return changedKey(other) }},
+		"a cert for another host": {
+			hostCert(t, relay, hostKey.PublicKey(), []string{"elsewhere.example"}, ssh.CertTimeInfinity), notAccepted,
+		},
+		"an expired cert": {
+			hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, 1), notAccepted,
+		},
+		"a user cert": {userCert, notAccepted},
+		// Not from the authority, so it is a changed key, and it is named by
+		// the key that signed it: other, not the recorded one.
+		"another authority's cert": {
+			hostCert(t, other, hostKey.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity),
+			func(error) string { return changedKey(other) },
+		},
+		"another authority certifying ours": {
+			hostCert(t, other, relay.PublicKey(), []string{"relay.example"}, ssh.CertTimeInfinity),
+			func(error) string { return changedKey(other) },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var changed *RelayKeyChangedError
+			require.ErrorAs(t, pinned(host, nil, tc.key), &changed)
+			require.Equal(t, tc.want(changed.Err), changed.Error())
+		})
+	}
+
+	t.Run("the reasons", func(t *testing.T) {
+		var changed *RelayKeyChangedError
+		require.ErrorAs(t, pinned(host, nil, hostCert(t, relay, hostKey.PublicKey(), []string{"elsewhere.example"}, ssh.CertTimeInfinity)), &changed)
+		require.ErrorContains(t, changed.Err, `principal "relay.example" not in the set of valid principals`)
+
+		require.ErrorAs(t, pinned(host, nil, hostCert(t, relay, hostKey.PublicKey(), []string{"relay.example"}, 1)), &changed)
+		require.ErrorContains(t, changed.Err, "expired")
+	})
+
+	// What PR C shows in session info: the first connection auto-accepted a
+	// certificate that does not name the hostname, and every redial is refused.
+	t.Run("CheckRedial says it the same way", func(t *testing.T) {
+		var first RelayAuthority
+		cert := hostCert(t, relay, hostKey.PublicKey(), []string{"203.0.113.7"}, ssh.CertTimeInfinity)
+		require.NoError(t, first.Wrap(ssh.InsecureIgnoreHostKey())(host, nil, cert))
+
+		var changed *RelayKeyChangedError
+		require.ErrorAs(t, first.CheckRedial(host), &changed)
+		require.Equal(t, notAccepted(changed.Err), changed.Error())
+	})
+
+	t.Run("a certificate nothing recorded signed has no authority to be from", func(t *testing.T) {
+		var none RelayAuthority
+		var changed *RelayKeyChangedError
+		require.ErrorAs(t, none.Pinned()(host, nil, hostCert(t, relay, hostKey.PublicKey(), nil, ssh.CertTimeInfinity)), &changed)
+		require.Equal(t, changedKey(relay), changed.Error())
+	})
+}
+
+func TestRelayKeyChangedErrorSurvivesWhatItIsGivenToPrint(t *testing.T) {
+	const want = "the relay's key for relay.example:22 is not the one this session started with"
+
+	// A typed nil is not a nil interface, and is not a certificate to read.
+	var none *ssh.Certificate
+	require.Equal(t, want, (&RelayKeyChangedError{Hostname: "relay.example:22", Key: none}).Error())
+
+	// A certificate with nothing to name it by.
+	require.Equal(t, want, (&RelayKeyChangedError{Hostname: "relay.example:22", Key: &ssh.Certificate{}}).Error())
+
+	// The authority's text needs a reason to give. Without one the message is
+	// the other, not a half-sentence.
+	ca := testSigner(t)
+	cert := hostCert(t, ca, testSigner(t).PublicKey(), nil, ssh.CertTimeInfinity)
+	fingerprint := utils.FingerprintSHA256(ca.PublicKey())
+	err := &RelayKeyChangedError{Hostname: "relay.example:22", Key: cert, fromAuthority: true}
+	require.Equal(t, "the relay's key for relay.example:22 ("+fingerprint+") is not the one this session started with", err.Error())
+
+	// And with no hostname the text still reads.
+	err = &RelayKeyChangedError{Key: cert, Err: errors.New("no"), fromAuthority: true}
+	require.Equal(t, "the relay presented a certificate from the authority this session started with ("+fingerprint+"), but it was not accepted: no", err.Error())
+
+	// The marker alone, on a zero value.
+	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{fromAuthority: true}).Error())
 }
