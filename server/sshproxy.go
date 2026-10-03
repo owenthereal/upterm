@@ -30,6 +30,11 @@ type sshProxy struct {
 	Logger              *slog.Logger
 	MetricsProvider     provider.Provider
 
+	// hostActivity is where hosts' connections to this proxy are recorded for
+	// the node's sshd to judge them by, shared by Server. Nil when there is no
+	// sshd to ask.
+	hostActivity *hostActivity
+
 	routing *SSHRouting
 	mux     sync.Mutex
 	// stopped records a Shutdown that arrived before Serve; see sshd.stopped.
@@ -79,6 +84,7 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 		},
 		MetricsProvider: r.MetricsProvider,
 		Logger:          r.Logger,
+		hostActivity:    r.hostActivity,
 	}
 	r.mux.Unlock()
 

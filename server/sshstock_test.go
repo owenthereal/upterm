@@ -166,6 +166,71 @@ func TestStockSSHSuccess(t *testing.T) {
 	require.Equal(t, int32(2), dialer.calls.Load())
 }
 
+// The sshd judges a host by the proxy's own connection from it, so the proxy
+// has to say which that is, for as long as the host is connected. A guest's
+// connection is never one the sshd has a reason to ask about.
+func TestStockSSHTracksHostConnections(t *testing.T) {
+	upstream, peers := stockTestUpstream(t, false, TestPrivateKeyContent)
+	activity := newHostActivity()
+	_, addr, _, signer := stockTestProxy(t, 2*time.Second, &stockTestDialer{addr: upstream}, func(p *sshProxy) {
+		p.hostActivity = activity
+	})
+	tracked := func() int {
+		activity.mu.Lock()
+		defer activity.mu.Unlock()
+		return len(activity.conns)
+	}
+	// Both are read once the upstream has been authenticated, which the proxy
+	// does only after it has decided whether to track the connection.
+	authenticated := func() {
+		t.Helper()
+		select {
+		case <-peers:
+		case <-time.After(time.Second):
+			t.Fatal("upstream did not authenticate")
+		}
+	}
+
+	guest, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            routing.NewEncodeDecoder(routing.ModeEmbedded).Encode("session", "127.0.0.1:3333"),
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         time.Second,
+	})
+	require.NoError(t, err)
+	defer func() { _ = guest.Close() }()
+	authenticated()
+	require.Zero(t, tracked(), "a guest's connection was tracked")
+
+	host, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "session",
+		ClientVersion:   upterm.HostSSHClientVersion,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         time.Second,
+	})
+	require.NoError(t, err)
+	defer func() { _ = host.Close() }()
+	authenticated()
+	require.Equal(t, 1, tracked(), "a connected host is tracked, and nothing else is")
+	require.Nil(t, activity.lookup(guest.SessionID()), "a guest's connection was tracked")
+	conn := activity.lookup(host.SessionID())
+	require.NotNil(t, conn, "the host's connection is tracked under its own SSH session ID")
+
+	// It is the connection the proxy reads the host's bytes from, from the
+	// handshake on, not some other one.
+	before := conn.LastRead()
+	ok, _, err := host.SendRequest("opaque-global", true, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, conn.LastRead().After(before), "the tracked connection did not record the host's request")
+
+	require.NoError(t, host.Close())
+	require.Eventually(t, func() bool { return tracked() == 0 }, 2*time.Second, time.Millisecond,
+		"a host's connection stayed tracked after it disconnected")
+	require.Nil(t, activity.lookup(host.SessionID()))
+}
+
 func TestStockSSHUnsignedQueryDoesNotDial(t *testing.T) {
 	dialer := &stockTestDialer{addr: "127.0.0.1:1"}
 	_, addr, reg, signer := stockTestProxy(t, time.Second, dialer)

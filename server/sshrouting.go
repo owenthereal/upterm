@@ -53,6 +53,10 @@ type SSHRouting struct {
 	Logger           *slog.Logger
 	MetricsProvider  provider.Provider
 
+	// hostActivity records each host's connection to this proxy, for as long as
+	// the host is connected. Nil records nothing.
+	hostActivity *hostActivity
+
 	cancel   context.CancelFunc
 	workers  sync.WaitGroup
 	listener net.Listener

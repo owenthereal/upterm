@@ -51,6 +51,11 @@ type sshd struct {
 	// shorten it.
 	liveness liveness.Timing
 
+	// hostActivity is where this node's SSH proxy records its connections from
+	// hosts, shared with the proxy by Server. Nil when there is no proxy, which
+	// leaves a host's connection to this sshd as the only one to judge it by.
+	hostActivity *hostActivity
+
 	// onRegistered is a test hook, run after the store takes a registration and
 	// before this node adopts it: the window in which two registrations can
 	// commit in one order and adopt in the other, and in which the host can
@@ -664,10 +669,24 @@ type contextKeyActivity struct{}
 type contextKeyPinged struct{}
 
 // pingOnce starts pinging conn, once however many registrations it makes.
+//
+// The host's silence is that of the proxy's own connection from the host when
+// this node's proxy has recorded one, and that of conn otherwise. conn runs from
+// the proxy to this sshd, and the proxy writes to it on its own account (see
+// hostActivity), so its reads would keep a host that has gone silent looking
+// alive for as long as its guests keep trying. With no entry, conn is the host's
+// own connection: a WebSocket-only relay hands the host straight to this sshd.
+// The entry is taken once, here: it is the proxy's connection from this host for
+// as long as the host is connected, so there is nothing to look up again.
 func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) {
 	ctx.Lock()
 	pinged, _ := ctx.Value(contextKeyPinged{}).(bool)
-	activity, _ := ctx.Value(contextKeyActivity{}).(*liveness.Conn)
+	nodeConn, _ := ctx.Value(contextKeyActivity{}).(*liveness.Conn)
+	downstreamSessionID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+	activity, source := s.hostActivity.lookup(downstreamSessionID), "host-facing"
+	if activity == nil {
+		activity, source = nodeConn, "node"
+	}
 	if !pinged && activity != nil {
 		ctx.SetValue(contextKeyPinged{}, true)
 	}
@@ -682,7 +701,9 @@ func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerCo
 		s.Logger.Error("not pinging a host connection that has no record of its reads", "session-id", reg.ID())
 		return
 	}
-	go pingHost(ctx, conn, activity.LastRead, s.liveness, s.Logger.With("session-id", reg.ID()))
+	logger := s.Logger.With("session-id", reg.ID())
+	logger.Debug("judging a host's silence by the reads of a connection", "connection", source)
+	go pingHost(ctx, conn, activity.LastRead, s.liveness, logger)
 }
 
 // releaseReplaced releases a registration a takeover on this node replaced.
