@@ -52,8 +52,10 @@ type sshd struct {
 	liveness liveness.Timing
 
 	// hostActivity is where this node's SSH proxy records its connections from
-	// hosts, shared with the proxy by Server. Nil when there is no proxy, which
-	// leaves a host's connection to this sshd as the only one to judge it by.
+	// hosts. Server always builds one and shares it with the proxy, and it stays
+	// empty in a WebSocket-only relay, where there is no proxy to fill it. A host
+	// with no entry is judged by its connection to this sshd, which is its own
+	// there. Nil only where a test builds the sshd alone.
 	hostActivity *hostActivity
 
 	// onRegistered is a test hook, run after the store takes a registration and

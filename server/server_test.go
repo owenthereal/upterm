@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	gliderssh "charm.land/ssh"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -82,6 +84,47 @@ func requireServing(t *testing.T, addr string) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "OK", string(body))
+}
+
+// A capable host's silence is judged by the proxy's connection from it only if
+// the proxy and the sshd were handed the same hostActivity, and each is built
+// alone everywhere else, where a nil one is valid and the sshd falls back to the
+// node connection without a word: the original defect, with every other test
+// green. So this goes through a real Server, which is the only place that wires
+// the two together.
+//
+// The registry is built and handed over inside ServeWithContext, so the test
+// can't hold it. It reads what the sshd made of it instead: pingOnce logs which
+// connection it judged the host by, and "host-facing" is the sshd finding the
+// entry the proxy recorded under the host's SSH session ID. A proxy that
+// recorded nowhere, or an sshd that looked nowhere, would log "node".
+func TestServerSharesHostActivityBetweenProxyAndSSHD(t *testing.T) {
+	logs := &syncBuffer{}
+	ts := newServingTestServer(t,
+		slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+
+	client, err := ssh.Dial("tcp", ts.sshAddr, &ssh.ClientConfig{
+		User:            "session",
+		ClientVersion:   upterm.HostSSHClientVersion,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	// A proof is bound to the host's own SSH session ID, which is the one the
+	// proxy records its connection under.
+	host := newProven(t)
+	ok, body := host.register(t, client, string(client.SessionID()), 1)
+	require.True(t, ok, string(body))
+
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), `"connection":"host-facing"`) },
+		5*time.Second, time.Millisecond,
+		"the sshd did not find the proxy's connection from the host, so it would judge the host by the proxy's own traffic")
+	require.NotContains(t, logs.String(), `"connection":"node"`)
 }
 
 func requireRefused(t *testing.T, addr string) {

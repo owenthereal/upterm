@@ -30,9 +30,9 @@ type sshProxy struct {
 	Logger              *slog.Logger
 	MetricsProvider     provider.Provider
 
-	// hostActivity is where hosts' connections to this proxy are recorded for
-	// the node's sshd to judge them by, shared by Server. Nil when there is no
-	// sshd to ask.
+	// hostActivity is where hosts' connections to this proxy are recorded, for
+	// the node's sshd to judge them by. Server always builds one and shares it
+	// with the sshd. Nil only where a test builds the proxy alone.
 	hostActivity *hostActivity
 
 	routing *SSHRouting
