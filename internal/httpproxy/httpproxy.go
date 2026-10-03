@@ -31,8 +31,8 @@ const dialTimeout = 30 * time.Second
 var maxResponseHeaderBytes int64 = 10 << 20
 
 // Dial opens a TCP tunnel to addr through the HTTP proxy at proxyURL. The
-// context's deadline bounds the dial and the CONNECT exchange, not the
-// lifetime of the returned connection.
+// context bounds the dial and the CONNECT exchange, not the lifetime of the
+// returned connection: its deadline, and a cancel too.
 func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -67,8 +67,13 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
+	// The deadline reaches the socket, but a plain cancel doesn't: closing the
+	// connection is the only thing that fails a read already waiting on a
+	// proxy that never answers. Stopped before Dial returns on every path.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 
 	if err := req.Write(conn); err != nil {
+		stop()
 		_ = conn.Close()
 		return nil, fmt.Errorf("error sending CONNECT to proxy %s: %w", proxyAddr, err)
 	}
@@ -79,8 +84,15 @@ func Dial(ctx context.Context, proxyURL *url.URL, addr string) (net.Conn, error)
 	br := bufio.NewReader(lr)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
+		stop()
 		_ = conn.Close()
 		return nil, fmt.Errorf("error reading CONNECT response from proxy %s: %w", proxyAddr, err)
+	}
+	// A stop that finds the close already started lost the race to ctx: the
+	// connection is closing under the answer, so there is no tunnel to return.
+	if !stop() {
+		_ = conn.Close()
+		return nil, fmt.Errorf("error reading CONNECT response from proxy %s: %w", proxyAddr, ctx.Err())
 	}
 
 	// resp.Body deliberately goes unclosed: it reads through br, which is

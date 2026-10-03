@@ -12,9 +12,11 @@ import (
 	"os/user"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/httpproxy"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
@@ -85,10 +87,19 @@ type ReverseTunnel struct {
 	//
 	// The relay treats a proven registration as one whose host can reconnect,
 	// and may close its tunnel on that basis: set it only for a host that does.
-	SessionSecret     []byte
-	Generation        uint64
-	AuthorizedKeys    []ssh.PublicKey
-	KeepAliveDuration time.Duration
+	SessionSecret  []byte
+	Generation     uint64
+	AuthorizedKeys []ssh.PublicKey
+	// KeepAlive is how long the relay may be silent: probed after Interval,
+	// given up on after Interval+Bound. A field left zero takes
+	// liveness.DefaultTiming's.
+	KeepAlive liveness.Timing
+	// RequireDerivedID makes Establish a redial's: a relay that answers a
+	// proven registration with an ID not derived from HostKey fails it with
+	// ErrRelayUnsupported, before a listener is requested for an ID no guest
+	// knows. Without it, that answer is a first connection's, which goes on
+	// with ReconnectSupported false.
+	RequireDerivedID bool
 	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
 	ProxyURL        *url.URL
 	HostKeyCallback ssh.HostKeyCallback
@@ -98,12 +109,74 @@ type ReverseTunnel struct {
 	// listenerCloseGrace rather than by the relay's willingness to answer.
 	ln net.Listener
 
+	// conn is the connection the last dial produced, which Wait reports on.
+	// Nil until a handshake succeeds.
+	conn *connection
+
 	// stopKeepAlive ends the goroutine Establish starts. Nil until then.
 	stopKeepAlive context.CancelFunc
 
 	// What the relay did with the last successful Establish's proof.
 	reconnectSupported bool
 	sessionKeyRedial   bool
+}
+
+// ErrRelayUnsupported is a redial answered as a relay without proofs answers:
+// with a random ID, under which no guest could find the session.
+var ErrRelayUnsupported = errors.New("the relay answered with a session ID not derived from this host's key")
+
+// errNeverConnected is what Wait says of a tunnel whose dial or handshake
+// never produced a connection.
+var errNeverConnected = errors.New("reverse tunnel: never connected")
+
+// CreateSessionRefusedError is the relay refusing the registration, with the
+// reason it gave: a refused proof, a newer registration, a store that failed.
+type CreateSessionRefusedError struct{ Body string }
+
+func (e *CreateSessionRefusedError) Error() string {
+	return "could not initialize session: " + e.Body
+}
+
+// ForwardRefusedError is the relay registering the session but refusing the
+// listener its guests would be forwarded to.
+type ForwardRefusedError struct{ Err error }
+
+func (e *ForwardRefusedError) Error() string {
+	if e.Err == nil {
+		return "unable to create reverse tunnel"
+	}
+	return "unable to create reverse tunnel: " + e.Err.Error()
+}
+
+func (e *ForwardRefusedError) Unwrap() error { return e.Err }
+
+// connection is one dial's SSH client, and why it ended if liveness ended it.
+type connection struct {
+	client *ssh.Client
+	// livenessErr is the keepalive's reason for giving up, recorded before it
+	// closes client, so that Wait can report the silence rather than the EOF
+	// its own close produced.
+	livenessErr atomic.Pointer[error]
+}
+
+func (c *connection) wait() error {
+	err := c.client.Wait()
+	if lost := c.livenessErr.Load(); lost != nil {
+		return *lost
+	}
+	return err
+}
+
+// Wait blocks until the tunnel's connection has ended, and says why: the
+// keepalive's error, wrapping liveness.ErrSilent, if the relay went silent and
+// the keepalive closed it; otherwise what ended the SSH connection. A tunnel
+// that never connected says so at once. It is safe from several goroutines,
+// and after Close.
+func (c *ReverseTunnel) Wait() error {
+	if c.conn == nil {
+		return errNeverConnected
+	}
+	return c.conn.wait()
 }
 
 // ReconnectSupported reports whether the relay honoured the proof, by
@@ -129,8 +202,9 @@ func (c *ReverseTunnel) SessionKeyRedial() bool {
 // It is bounded: closing ln goes through the wrapper, which gives the relay
 // listenerCloseGrace and then closes the client itself.
 func (c *ReverseTunnel) Close() {
-	// Stopped before the client is closed, so the ticker cannot start a ping
-	// into a connection that is going away.
+	// Stopped before the client is closed, so the keepalive cannot start a
+	// probe into a connection that is going away, nor report its close as a
+	// relay gone silent.
 	if c.stopKeepAlive != nil {
 		c.stopKeepAlive()
 	}
@@ -149,7 +223,15 @@ func (c *ReverseTunnel) Listener() net.Listener {
 	return c.ln
 }
 
+// Establish is one bounded attempt: ctx bounds everything until it returns —
+// the dial, the handshake, signing, the session request and the listen — and
+// nothing after. The tunnel it returns outlives ctx, and on any failure it
+// leaves no connection open.
 func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionResponse, error) {
+	// What the relay did with a previous Establish's proof says nothing about
+	// this one, and a failure must not go on reporting it.
+	c.reconnectSupported, c.sessionKeyRedial = false, false
+
 	if c.HostKey == nil {
 		return nil, errors.New("reverse tunnel: HostKey is required")
 	}
@@ -198,21 +280,42 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		HostKeyCallback: c.HostKeyCallback,
 	}
 
-	if isWSScheme(c.Host.Scheme) {
-		u, _ := url.Parse(c.Host.String()) // clone
-		u.User = url.UserPassword(user.Username, "")
-		c.Client, err = ws.NewSSHClient(u, config, false, c.ProxyURL)
-	} else if c.ProxyURL != nil {
-		c.Client, err = c.dialSSHViaProxy(ctx, config)
-	} else {
-		c.Client, err = ssh.Dial("tcp", c.Host.Host, config)
-	}
-
+	raw, addr, err := c.dial(ctx, user.Username)
 	if err != nil {
 		// The signers, not the auths built from them: auths holds one
 		// publickey method however many keys went into it, and it is the keys
 		// a refusal has to be reported in terms of.
 		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
+	}
+
+	// ctx's end closes the connection until Establish returns. Nothing past
+	// the dial takes a context — the handshake, a signer, a request already on
+	// the wire — and closing the connection is what fails each of them.
+	stopDeadline := context.AfterFunc(ctx, func() { _ = raw.Close() })
+
+	// Wrapped beneath the SSH transport, so that every byte the relay sends
+	// is what the keepalive judges it by.
+	lc := liveness.NewConn(raw)
+	ncc, chans, reqs, err := ssh.NewClientConn(lc, addr, config)
+	if err != nil {
+		stopDeadline()
+		// NewClientConn has closed it already; this says so here.
+		_ = raw.Close()
+		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
+	}
+	// The client this listener and this keepalive belong to, kept apart from
+	// the field. A second Establish replaces the field, and either of them
+	// acting on the replacement would close a connection that is not the one
+	// it is nursing.
+	client := ssh.NewClient(ncc, chans, reqs)
+	conn := &connection{client: client}
+	c.Client, c.conn = client, conn
+
+	// fail ends this attempt's connection along with it.
+	fail := func(err error) (*server.CreateSessionResponse, error) {
+		stopDeadline()
+		_ = client.Close()
+		return nil, err
 	}
 
 	req := &server.CreateSessionRequest{
@@ -224,43 +327,46 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		// Signed over this connection's SSH session ID, which the relay reads
 		// back from the certificate its proxy minted for this same connection,
 		// so a proof captured here is worthless on any other.
-		proof, err := registration.Sign(c.HostKey, c.SessionID(), c.SessionSecret, c.Generation)
+		proof, err := registration.Sign(c.HostKey, client.SessionID(), c.SessionSecret, c.Generation)
 		if err != nil {
-			return nil, fmt.Errorf("error signing session proof: %w", err)
+			return fail(fmt.Errorf("error signing session proof: %w", err))
 		}
 		req.SessionSecret, req.Generation, req.HostKeyProof = c.SessionSecret, c.Generation, proof
 	}
 
-	sessResp, err := c.createSession(req)
+	sessResp, err := createSession(client, req)
 	if err != nil {
-		return nil, fmt.Errorf("error creating session: %w", err)
+		return fail(fmt.Errorf("error creating session: %w", err))
 	}
 
 	// Honoured only if the ID is the derived one: a relay without proofs
 	// ignores the fields and answers with a random ID, and says nothing else.
 	reconnectSupported := c.SessionSecret != nil &&
 		sessResp.SessionID == registration.ID(c.HostKey.PublicKey(), c.SessionSecret)
-	if c.SessionSecret != nil && !reconnectSupported {
-		baseLogger.Warn("relay did not honour the session proof, so this session cannot reconnect", "relay", c.Host.Host)
+	if c.SessionSecret != nil && !reconnectSupported && c.RequireDerivedID {
+		// Before the listen: closing the connection cancels a registration
+		// under an ID no guest knows, and no forward is ever requested for it.
+		return fail(fmt.Errorf("error creating session: %w", ErrRelayUnsupported))
 	}
 
-	ln, err := c.Listen("unix", sessResp.SessionID)
+	ln, err := client.Listen("unix", sessResp.SessionID)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create reverse tunnel: %w", err)
+		return fail(&ForwardRefusedError{Err: err})
 	}
 
-	// The client this listener and this keepalive belong to, read once. A
-	// second Establish replaces the field, and either of them acting on the
-	// replacement would close a connection that is not the one it is nursing.
-	client := c.Client
+	// The attempt is over, and the tunnel outlives its context. A stop that
+	// finds the close already started lost the race to ctx: the connection is
+	// closing under the tunnel, which is a failure, not a tunnel to return.
+	if !stopDeadline() {
+		_ = client.Close()
+		return nil, ctx.Err()
+	}
 
 	// This generation's keepalive, built before the listener that has to be
 	// able to stop it.
 	//
-	// On the tunnel's own lifetime, not the caller's. ctx belongs to the
-	// session, which outlives a tunnel that is closed before it ends, and
-	// Close had no way to stop this: the ticker went on pinging a closed
-	// client and logging an error every interval for the rest of the session.
+	// On the tunnel's own lifetime, not the attempt's: ctx ends with the
+	// attempt, and the tunnel goes on. Close and closeClient are what stop it.
 	//
 	// A second Establish on the same tunnel replaces the first keepalive
 	// rather than orphaning it: overwriting the cancel would leave the
@@ -269,19 +375,17 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	if c.stopKeepAlive != nil {
 		c.stopKeepAlive()
 	}
-	keepAliveCtx, stopKeepAlive := context.WithCancel(ctx)
+	keepAliveCtx, stopKeepAlive := context.WithCancel(context.WithoutCancel(ctx))
 	c.stopKeepAlive = stopKeepAlive
 
 	// Closing the client is how both the listener and the keepalive give up on
 	// the relay: it is the only thing that fails a request already on the
-	// wire. Nil-safe on the client, since every teardown path here has to
-	// survive a tunnel that never finished establishing.
+	// wire.
 	//
 	// The keepalive is stopped first so its ctx ends before the client does:
-	// a ping already in flight then fails because ctx was cancelled, not
-	// because the relay went quiet, and keepAlive's own check for that keeps
-	// it from reporting a relay that was merely slow to answer
-	// cancel-streamlocal-forward as dead.
+	// a probe already in flight then fails because ctx was cancelled, not
+	// because the relay went quiet, and Watch does not report it as a dead
+	// relay.
 	//
 	// Both the cancel and the client are this generation's, read here rather
 	// than off the tunnel when the closure runs. Reading the field instead
@@ -290,22 +394,23 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	// closing a connection that is no longer the one it was nursing.
 	closeClient := func() {
 		stopKeepAlive()
-		if client != nil {
-			_ = client.Close()
-		}
+		_ = client.Close()
 	}
 	c.ln = newBoundedListener(ln, listenerCloseGrace, closeClient)
 
-	// make sure connection is alive
-	go keepAlive(keepAliveCtx, c.KeepAliveDuration, func() error {
-		// TODO: ping with session ID
+	// The relay is alive while its bytes arrive, whatever they are; a probe
+	// only prompts a relay that has gone quiet.
+	go liveness.Watch(keepAliveCtx, c.KeepAlive.OrDefault(), lc.LastRead, func() error {
 		_, _, err := client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		return err
 	}, func(err error) {
+		// Recorded before the close, so that Wait reports the silence and
+		// not the EOF the close is about to produce.
+		conn.livenessErr.Store(&err)
 		// Once, at the point of giving up. Logging every interval said the
 		// same thing about the same dead connection until the session ended,
 		// which buried whatever else the host had to say.
-		baseLogger.Error("relay stopped answering keepalives, closing the tunnel", "error", err)
+		baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
 		// The guest server is parked in Accept on a tunnel that no longer
 		// carries anything. Closing the client is what makes Serve return, so
 		// OnGuestServerStopped runs and the session is published as
@@ -320,33 +425,40 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	return sessResp, nil
 }
 
-// dialSSHViaProxy connects to an ssh:// server through c.ProxyURL.
-func (c *ReverseTunnel) dialSSHViaProxy(ctx context.Context, config *ssh.ClientConfig) (*ssh.Client, error) {
-	conn, err := httpproxy.Dial(ctx, c.ProxyURL, c.Host.Host)
-	if err != nil {
-		return nil, err
+// dial opens the connection the SSH transport runs over, under ctx, and returns
+// the address the host-key callback is shown for it: Host's host:port for
+// ssh://, and the same for ws://, whose port `upterm host` appends to portless
+// server URLs — known_hosts checking requires host:port and keys the entry as
+// [host]:443. Only the dial URL inside ws drops it.
+func (c *ReverseTunnel) dial(ctx context.Context, username string) (net.Conn, string, error) {
+	switch {
+	case isWSScheme(c.Host.Scheme):
+		u, _ := url.Parse(c.Host.String()) // clone
+		u.User = url.UserPassword(username, "")
+		conn, err := ws.NewWSConnContext(ctx, u, false, c.ProxyURL)
+		return conn, u.Host, err
+	case c.ProxyURL != nil:
+		conn, err := httpproxy.Dial(ctx, c.ProxyURL, c.Host.Host)
+		return conn, c.Host.Host, err
+	default:
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "tcp", c.Host.Host)
+		return conn, c.Host.Host, err
 	}
-	// No Close on the error path: NewClientConn closes conn itself on each of
-	// them, and ws.NewSSHClient already relies on that.
-	ncc, chans, reqs, err := ssh.NewClientConn(conn, c.Host.Host, config)
-	if err != nil {
-		return nil, err
-	}
-	return ssh.NewClient(ncc, chans, reqs), nil
 }
 
-func (c *ReverseTunnel) createSession(req *server.CreateSessionRequest) (*server.CreateSessionResponse, error) {
+func createSession(client *ssh.Client, req *server.CreateSessionRequest) (*server.CreateSessionResponse, error) {
 	b, err := proto.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 
-	ok, body, err := c.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
+	ok, body, err := client.SendRequest(upterm.ServerCreateSessionRequestType, true, b)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing session: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("could not initialize session: %s", body)
+		return nil, &CreateSessionRefusedError{Body: string(body)}
 	}
 
 	var resp server.CreateSessionResponse
@@ -405,62 +517,6 @@ func (l *boundedListener) Close() error {
 	case <-time.After(l.grace):
 		// The goroutine is abandoned holding the listener, and nothing else.
 		return fmt.Errorf("ssh: forwarded listener still open %s after its transport was closed", l.grace)
-	}
-}
-
-// keepAlive pings the relay every d until ctx ends or the tunnel is gone.
-//
-// Each ping is bounded by d, because a ping is a global request whose reply
-// comes from the relay's mux loop: a relay that has stopped serving that loop
-// leaves SendRequest waiting on a channel nothing will write to, and an
-// unbounded wait there is both a goroutine parked for the rest of the session
-// and — since the next tick would queue behind it — a tunnel whose death
-// nothing notices.
-//
-// onDead is called at most once, and only for a tunnel that actually failed. A
-// ctx that ends is this host's own teardown and says nothing about the relay.
-func keepAlive(ctx context.Context, d time.Duration, ping func() error, onDead func(error)) {
-	ticker := time.NewTicker(d)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		err := pingWithin(ctx, d, ping)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			onDead(err)
-			return
-		}
-	}
-}
-
-// pingWithin runs one ping and waits at most d for its result.
-//
-// On a timeout the goroutine is abandoned rather than waited for: it is parked
-// in exactly the place this bound exists to escape, and it ends when the
-// caller tears the transport down, which is what onDead does. Its channel is
-// buffered so that send cannot be what keeps it alive.
-func pingWithin(ctx context.Context, d time.Duration, ping func() error) error {
-	result := make(chan error, 1)
-	go func() { result <- ping() }()
-
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case err := <-result:
-		return err
-	case <-timer.C:
-		return fmt.Errorf("no reply to keepalive within %s", d)
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
