@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -150,28 +151,36 @@ func (e *ForwardRefusedError) Error() string {
 
 func (e *ForwardRefusedError) Unwrap() error { return e.Err }
 
-// connection is one dial's SSH client, and why it ended if liveness ended it.
+// connection is one dial's SSH client, and why it ended.
 type connection struct {
 	client *ssh.Client
-	// livenessErr is the keepalive's reason for giving up, recorded before it
-	// closes client, so that Wait can report the silence rather than the EOF
-	// its own close produced.
-	livenessErr atomic.Pointer[error]
+	// silenced is the keepalive's verdict on a relay that went silent,
+	// recorded before it closes client, so that Wait reports the silence
+	// rather than the EOF its own close produced. It is the one case in which
+	// liveness, not the connection, ended it.
+	silenced atomic.Pointer[error]
+
+	// why is the verdict, worked out once by the first wait and handed to
+	// every later one, so that they all give the same answer.
+	once sync.Once
+	why  error
 }
 
 func (c *connection) wait() error {
-	err := c.client.Wait()
-	if lost := c.livenessErr.Load(); lost != nil {
-		return *lost
-	}
-	return err
+	c.once.Do(func() {
+		c.why = c.client.Wait()
+		if silenced := c.silenced.Load(); silenced != nil {
+			c.why = *silenced
+		}
+	})
+	return c.why
 }
 
 // Wait blocks until the tunnel's connection has ended, and says why: the
 // keepalive's error, wrapping liveness.ErrSilent, if the relay went silent and
-// the keepalive closed it; otherwise what ended the SSH connection. A tunnel
-// that never connected says so at once. It is safe from several goroutines,
-// and after Close.
+// the keepalive closed it; otherwise what ended the SSH connection. Every call
+// gives the same answer, and a tunnel that never connected says so at once. It
+// is safe from several goroutines, and after Close.
 func (c *ReverseTunnel) Wait() error {
 	if c.conn == nil {
 		return errNeverConnected
@@ -404,9 +413,13 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		_, _, err := client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
 		return err
 	}, func(err error) {
-		// Recorded before the close, so that Wait reports the silence and
-		// not the EOF the close is about to produce.
-		conn.livenessErr.Store(&err)
+		// Only silence is liveness's own verdict. A probe fails only on a
+		// connection that has already ended, and Wait reports that in the
+		// connection's words. Recorded before the close, so that Wait
+		// reports the silence and not the EOF the close is about to produce.
+		if errors.Is(err, liveness.ErrSilent) {
+			conn.silenced.Store(&err)
+		}
 		// Once, at the point of giving up. Logging every interval said the
 		// same thing about the same dead connection until the session ended,
 		// which buried whatever else the host had to say.
