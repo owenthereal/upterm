@@ -79,13 +79,14 @@ type Timing struct {
 // probed it after 15 s.
 var DefaultTiming = Timing{Interval: 15 * time.Second, Bound: 15 * time.Second}
 
-// OrDefault fills in whichever field was left zero, so that a caller can
-// override one and inherit the other.
+// OrDefault fills in whichever field was left zero or negative, so that a
+// caller can override one and inherit the other. A negative duration is as
+// much "not set" as zero: neither is a silence anyone can wait for.
 func (t Timing) OrDefault() Timing {
-	if t.Interval == 0 {
+	if t.Interval <= 0 {
 		t.Interval = DefaultTiming.Interval
 	}
-	if t.Bound == 0 {
+	if t.Bound <= 0 {
 		t.Bound = DefaultTiming.Bound
 	}
 	return t
@@ -110,6 +111,12 @@ var ErrSilent = errors.New("no bytes from the peer")
 // a probe that stays unanswered is no reason to give up while other bytes keep
 // arriving.
 //
+// A probe also never starts within Interval of the previous one. A reply moves
+// lastRead, so that is normally already true; it is what stops a probe that
+// returns nil without any bytes having arrived, which is a caller whose
+// lastRead is not fed by the connection the probe goes over, from being run
+// again on every pass for as long as the silence lasts.
+//
 // A probe that returns an error is a connection that has gone. One that
 // returns nil needs nothing more here.
 //
@@ -117,12 +124,15 @@ var ErrSilent = errors.New("no bytes from the peer")
 // is the caller's own teardown and says nothing about the peer, even if that
 // teardown is what made a probe in flight fail.
 func Watch(ctx context.Context, t Timing, lastRead func() time.Time, probe func() error, onDead func(error)) {
-	// A zero Interval would wake at once, every time, for as long as it lasted.
+	// A zero or negative Interval would wake at once, every time, for as long
+	// as it lasted.
 	t = t.OrDefault()
 
 	// inFlight is nil while no probe is running, and a receive from a nil
 	// channel blocks, which is what keeps that case out of the select below.
 	var inFlight chan error
+	// probed is when the last probe started, zero before the first.
+	var probed time.Time
 	for {
 		if ctx.Err() != nil {
 			return
@@ -136,10 +146,15 @@ func Watch(ctx context.Context, t Timing, lastRead func() time.Time, probe func(
 
 		wake := t.Interval + t.Bound - silence
 		if inFlight == nil {
-			if silence >= t.Interval {
+			wait := t.Interval - silence
+			if !probed.IsZero() {
+				wait = max(wait, t.Interval-time.Since(probed))
+			}
+			if wait <= 0 {
 				inFlight = startProbe(probe)
+				probed = time.Now()
 			} else {
-				wake = t.Interval - silence
+				wake = min(wake, wait)
 			}
 		}
 
