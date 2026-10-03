@@ -765,6 +765,101 @@ func (suite *ConsulStoreTestSuite) TestUnreadableEntryRanksAsGenerationZero() {
 	suite.NoError(suite.store1.Release(ctx, reg))
 }
 
+// A plain write over a held key keeps its lock: the premise is asserted, not
+// assumed, so a Consul version that behaves otherwise fails here rather than
+// silently making the case unreachable.
+func (suite *ConsulStoreTestSuite) TestReregisterRestoresAnUnreadableValueItsLeaseHolds() {
+	ctx, id := context.Background(), suite.uniq("unreadable")
+	reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22"}) // legacy
+	suite.Require().NoError(err)
+	_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte("not json")}, nil)
+	suite.Require().NoError(err)
+	pair, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+	suite.Require().NoError(err)
+	suite.Require().Equal(reg.lease, pair.Session, "a plain write kept the lock")
+
+	next, err := suite.store1.Reregister(ctx, reg)
+	suite.Require().NoError(err, "the registration's own lease holds the key")
+	defer func() { _ = suite.store1.Release(ctx, next) }()
+	pair, s := suite.consulGet(id)
+	suite.Require().NotNil(s)
+	suite.Equal("a:22", s.NodeAddr)
+	suite.Equal(next.lease, pair.Session, "the rebuild moved the lock to its new lease")
+
+	// Unreadable, and held by no lock: still refused for a legacy rebuild.
+	other := suite.uniq("unreadable-unlocked")
+	reg2, err := suite.store1.Register(ctx, &Session{ID: other, NodeAddr: "a:22"})
+	suite.Require().NoError(err)
+	_, err = suite.client.Session().Destroy(reg2.lease, nil)
+	suite.Require().NoError(err)
+	_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(other), Value: []byte("not json")}, nil)
+	suite.Require().NoError(err)
+	_, err = suite.store1.Reregister(ctx, reg2)
+	suite.ErrorIs(err, ErrSuperseded)
+}
+
+// The lease that holds a key makes its value the registration's own, whatever
+// was written into it: a value that parses as something that is no registration
+// is restored too. Such a value reaches the watch as a session with no ID, so
+// the registration's own ID goes missing from the replica and the keeper
+// rebuilds.
+func (suite *ConsulStoreTestSuite) TestReregisterRestoresAValueNoRegistrationItsLeaseHolds() {
+	ctx := context.Background()
+	for _, value := range []string{`{}`, `null`, `{"unrelated":true}`} {
+		id := suite.uniq("no-registration")
+		reg, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22"}) // legacy
+		suite.Require().NoError(err)
+		_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte(value)}, nil)
+		suite.Require().NoError(err)
+		var parsed Session
+		suite.Require().NoError(json.Unmarshal([]byte(value), &parsed), "%s parses, as no registration", value)
+		pair, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+		suite.Require().NoError(err)
+		suite.Require().Equal(reg.lease, pair.Session, "a plain write of %s kept the lock", value)
+
+		next, err := suite.store1.Reregister(ctx, reg)
+		suite.Require().NoError(err, "the registration's own lease holds %s", value)
+		pair, s := suite.consulGet(id)
+		suite.Require().NotNil(s)
+		suite.Equal(id, s.ID)
+		suite.Equal("a:22", s.NodeAddr)
+		suite.Equal(next.lease, pair.Session, "the rebuild moved the lock to its new lease")
+		suite.NoError(suite.store1.Release(ctx, next))
+	}
+}
+
+// A rebuild from a handle whose lease no longer holds the key is refused,
+// however unreadable the value: the key is another registration's entry, and
+// a foreign write into it doesn't make it the stale handle's.
+func (suite *ConsulStoreTestSuite) TestReregisterRefusesAValueAnotherLeaseHolds() {
+	ctx := context.Background()
+	for _, value := range []string{"not json", `{}`} {
+		id := suite.uniq("another-lease")
+		stale, err := suite.store1.Register(ctx, &Session{ID: id, NodeAddr: "a:22"}) // legacy
+		suite.Require().NoError(err)
+		next, err := suite.store1.Reregister(ctx, stale)
+		suite.Require().NoError(err)
+		_, err = suite.client.KV().Put(&api.KVPair{Key: suite.store1.SessionKey(id), Value: []byte(value)}, nil)
+		suite.Require().NoError(err)
+		before, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+		suite.Require().NoError(err)
+		suite.Require().Equal(next.lease, before.Session, "a plain write of %s kept the successor's lock", value)
+		suite.Require().NotEqual(stale.lease, before.Session)
+
+		_, err = suite.store1.Reregister(ctx, stale)
+		suite.ErrorIs(err, ErrSuperseded, "%s held by another lease", value)
+		after, _, err := suite.client.KV().Get(suite.store1.SessionKey(id), nil)
+		suite.Require().NoError(err)
+		suite.Equal(before.ModifyIndex, after.ModifyIndex, "a refused rebuild writes nothing")
+		suite.Equal(next.lease, after.Session)
+
+		// The holder's own rebuild restores it.
+		restored, err := suite.store1.Reregister(ctx, next)
+		suite.Require().NoError(err)
+		suite.NoError(suite.store1.Release(ctx, restored))
+	}
+}
+
 // Shutdown cleanup from a stale listing leaves an entry another lease took
 // over, and skips one that is already gone.
 func (suite *ConsulStoreTestSuite) TestBatchDeleteSkipsEntriesItNoLongerHolds() {

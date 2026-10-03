@@ -279,11 +279,11 @@ var errForwardEnded = errors.New("session has ended")
 
 // bind listens on reg's session socket and records the listener as reg's,
 // provided reg is still the registration this node serves. The check, the bind
-// and the record all happen under the handler lock, which a takeover's
-// closeListener takes too: a forward that began before the takeover either
-// binds before the old listener is closed, and is closed with it, or finds its
-// registration replaced. It can't bind after that close and take the socket's
-// name from the successor.
+// and the record all happen under the handler lock, which a takeover's evict
+// takes too: a forward that began before the takeover either binds before the
+// old listener is closed, and is closed with it, or finds its registration
+// replaced. It can't bind after that close and take the socket's name from the
+// successor.
 //
 // A listener still held by a registration this node no longer serves is
 // closed first, under the same lock. Takeovers can overlap: when a later one
@@ -330,28 +330,47 @@ func (h *streamlocalForwardHandler) trackListener(reg *Registration, ln net.List
 	h.forwards[reg.ID()] = forward{reg: reg, ln: ln}
 }
 
-// closeListener closes reg's listener and ends reg. A listener for reg's ID
-// that another registration bound is left alone, so a replaced registration's
-// late cleanup can't close its successor's socket.
-func (h *streamlocalForwardHandler) closeListener(reg *Registration) {
-	logger := h.logger.With("session-id", reg.ID())
-
+// untrack closes reg's listener and stops tracking it, and reports whether reg
+// had one. A listener for reg's ID that another registration bound is left
+// alone, so a replaced registration's late cleanup can't close its successor's
+// socket.
+func (h *streamlocalForwardHandler) untrack(reg *Registration) bool {
 	h.Lock()
+	defer h.Unlock()
+
 	fwd, ok := h.forwards[reg.ID()]
 	if !ok || !fwd.reg.Same(reg) {
 		// Already closed, or not reg's
-		h.Unlock()
-		return
+		return false
 	}
+	logger := h.logger.With("session-id", reg.ID())
 	if err := fwd.ln.Close(); err != nil {
 		logger.Error("error closing listener", "error", err)
 	} else {
 		logger.Debug("closed listener")
 	}
 	delete(h.forwards, reg.ID())
-	h.Unlock()
+	return true
+}
 
-	// Outside the lock: ending releases the store entry, and a Consul call
-	// can be slow.
-	h.sessions.end(reg)
+// closeListener closes reg's listener and ends reg, before it returns: a
+// host's cancel is answered only once its registration is released.
+func (h *streamlocalForwardHandler) closeListener(reg *Registration) {
+	if h.untrack(reg) {
+		// Outside the lock: ending releases the store entry, and a Consul call
+		// can be slow.
+		h.sessions.end(reg)
+	}
+}
+
+// evict closes reg's listener, as closeListener does, but ends reg in the
+// background. A takeover evicts the registration it replaced: ending releases
+// the store entry, and a slow Consul call mustn't hold up the new
+// registration's reply or the close of the old connection, which takes its
+// guests with it. The release is conditional, so it leaves the successor's
+// entry alone.
+func (h *streamlocalForwardHandler) evict(reg *Registration) {
+	if h.untrack(reg) {
+		go h.sessions.end(reg)
+	}
 }

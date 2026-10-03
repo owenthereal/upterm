@@ -25,6 +25,14 @@ import (
 // These endpoints use only the stock connection API, including reverse opens.
 func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig *ssh.ClientConfig) (sshPeer, sshPeer) {
 	t.Helper()
+	return forwardTestPairWrapped(t, serverConfig, clientConfig, nil)
+}
+
+// forwardTestPairWrapped is forwardTestPair with the server's end of the
+// connection passed through wrap before the handshake, so that a test can
+// record what the server side reads, as the proxy does of a host.
+func forwardTestPairWrapped(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig *ssh.ClientConfig, wrap func(net.Conn) net.Conn) (sshPeer, sshPeer) {
+	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +63,9 @@ func forwardTestPair(t *testing.T, serverConfig *ssh.ServerConfig, clientConfig 
 		if err != nil {
 			accepted <- result{err: err}
 			return
+		}
+		if wrap != nil {
+			conn = wrap(conn)
 		}
 		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 		sc, channels, requests, err := ssh.NewServerConn(conn, serverConfig)

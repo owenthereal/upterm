@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
 	"golang.org/x/crypto/ssh"
@@ -174,7 +175,10 @@ func (p *SSHRouting) serveStock(ln net.Listener) error {
 	}
 }
 
-func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *routingInstruments) error {
+func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, inst *routingInstruments) error {
+	// raw records its reads from the first byte, the handshake's included, for
+	// the node's sshd to judge a host's silence by. See hostActivity.
+	raw := liveness.NewConn(accepted)
 	defer func() { _ = raw.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
@@ -246,6 +250,13 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	if first == nil {
 		return fmt.Errorf("missing authenticated upstream credentials")
 	}
+	clientVersion := string(downstream.ClientVersion())
+	// Tracked before the upstream attempt, so that the sshd finds the entry from
+	// the host's first request on. Only a host's silence is ever judged, so a
+	// guest's connection is not recorded.
+	if clientVersion == upterm.HostSSHClientVersion {
+		defer p.hostActivity.track(downstream.SessionID(), raw)()
+	}
 	peer := sshPeer{downstream, channels, requests}
 	upstreamCtx, cancel := context.WithTimeout(ctx, stage)
 	defer cancel()
@@ -281,7 +292,6 @@ func (p *SSHRouting) stockConnection(ctx context.Context, raw net.Conn, inst *ro
 	if err == nil {
 		defer upstream.Close()
 		cancel()
-		clientVersion := string(downstream.ClientVersion())
 		if clientVersion == upterm.HostSSHClientVersion {
 			inst.authenticatedHost.Add(1)
 		} else {

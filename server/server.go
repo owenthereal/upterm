@@ -489,6 +489,9 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 
 	sshdDialListener := s.NetworkProvider.SSHD()
 	sessionDialListener := s.NetworkProvider.Session()
+	// The proxy's connections from hosts, which the sshd pings by. They are
+	// one process's: the proxy routes a host to this node's own sshd.
+	activity := newHostActivity()
 
 	var g run.Group
 	{
@@ -518,6 +521,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				SessionManager:      s.SessionManager,
 				Logger:              s.Logger.With("component", "ssh-proxy"),
 				MetricsProvider:     s.MetricsProvider,
+				hostActivity:        activity,
 			}
 			g.Add(func() error {
 				return sp.Serve(sshln)
@@ -581,6 +585,7 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 			MetricsProvider:     s.MetricsProvider,
 			Logger:              s.Logger.With("component", "sshd"),
 			HostGateEnabled:     len(s.AuthorizedKeysFiles) > 0,
+			hostActivity:        activity,
 		}
 		g.Add(func() error {
 			return sshd.Serve(ln)

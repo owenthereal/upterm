@@ -12,6 +12,7 @@ import (
 	"charm.land/ssh"
 	"github.com/go-kit/kit/metrics"
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
@@ -45,9 +46,17 @@ type sshd struct {
 	// with its session key alone and never touch its agent.
 	HostGateEnabled bool
 
-	// liveness paces the pings that find a reconnect-capable host which went
-	// silent; zero is defaultHostLiveness. Tests shorten it.
-	liveness hostLiveness
+	// liveness is how long a reconnect-capable host's connection may be silent
+	// before it is pinged and then closed; zero is liveness.DefaultTiming. Tests
+	// shorten it.
+	liveness liveness.Timing
+
+	// hostActivity is where this node's SSH proxy records its connections from
+	// hosts. Server always builds one and shares it with the proxy, and it stays
+	// empty in a WebSocket-only relay, where there is no proxy to fill it. A host
+	// with no entry is judged by its connection to this sshd, which is its own
+	// there. Nil only where a test builds the sshd alone.
+	hostActivity *hostActivity
 
 	// onRegistered is a test hook, run after the store takes a registration and
 	// before this node adopts it: the window in which two registrations can
@@ -477,6 +486,15 @@ func (s *sshd) Serve(ln net.Listener) error {
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
 			s.Logger.Error("connection failed", "error", err)
 		},
+		// Before the handshake, so that every byte the SSH transport reads, the
+		// handshake's too, is recorded for the pings to judge the host by.
+		ConnCallback: func(ctx ssh.Context, conn net.Conn) net.Conn {
+			activity := liveness.NewConn(conn)
+			ctx.Lock()
+			ctx.SetValue(contextKeyActivity{}, activity)
+			ctx.Unlock()
+			return activity
+		},
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			config := &gossh.ServerConfig{
 				ServerVersion: version.ServerSSHVersion(),
@@ -599,15 +617,17 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	if prev != nil && prev.conn != conn {
 		// A takeover on this node. The old listener goes first, so the new
 		// registration can bind the session socket's name, and then the old
-		// host connection, so its guests go with it.
-		s.forwardHandler.closeListener(prev.reg)
+		// host connection, so its guests go with it. Neither waits on the
+		// store: evict ends prev.reg in the background, so a slow release
+		// holds up neither the old connection's close nor the reply that
+		// tells the host its new registration is in.
+		s.forwardHandler.evict(prev.reg)
 		_ = prev.conn.Close()
 		// A lease the old registration's keeper rebuilt is known only to its
 		// slot. The old connection's cleanup releases the handle it was adopted
-		// with, and closeListener ends prev.reg only if it had bound a
-		// listener, so release it here. It holds nothing now the new
-		// registration holds the entry, and a store with no leases has nothing
-		// to release.
+		// with, and evict ends prev.reg only if it had bound a listener, so
+		// release it here. It holds nothing now the new registration holds the
+		// entry, and a store with no leases has nothing to release.
 		if prev.reg.lease != "" && prev.reg.lease != reg.lease {
 			go s.releaseReplaced(prev.reg)
 		}
@@ -643,19 +663,49 @@ func (s *sshd) adopt(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn)
 	return true, nil
 }
 
+// contextKeyActivity holds the connection's *liveness.Conn, which records when
+// bytes last arrived on it.
+type contextKeyActivity struct{}
+
 // contextKeyPinged marks a connection that is already being pinged.
 type contextKeyPinged struct{}
 
 // pingOnce starts pinging conn, once however many registrations it makes.
+//
+// The host's silence is that of the proxy's own connection from the host when
+// this node's proxy has recorded one, and that of conn otherwise. conn runs from
+// the proxy to this sshd, and the proxy writes to it on its own account (see
+// hostActivity), so its reads would keep a host that has gone silent looking
+// alive for as long as its guests keep trying. With no entry, conn is the host's
+// own connection: a WebSocket-only relay hands the host straight to this sshd.
+// The entry is taken once, here: it is the proxy's connection from this host for
+// as long as the host is connected, so there is nothing to look up again.
 func (s *sshd) pingOnce(ctx ssh.Context, reg *Registration, conn *gossh.ServerConn) {
 	ctx.Lock()
 	pinged, _ := ctx.Value(contextKeyPinged{}).(bool)
-	ctx.SetValue(contextKeyPinged{}, true)
+	nodeConn, _ := ctx.Value(contextKeyActivity{}).(*liveness.Conn)
+	downstreamSessionID, _ := ctx.Value(contextKeyDownstreamSessionID{}).([]byte)
+	activity, source := s.hostActivity.lookup(downstreamSessionID), "host-facing"
+	if activity == nil {
+		activity, source = nodeConn, "node"
+	}
+	if !pinged && activity != nil {
+		ctx.SetValue(contextKeyPinged{}, true)
+	}
 	ctx.Unlock()
 	if pinged {
 		return
 	}
-	go pingHost(ctx, conn, s.liveness.orDefault(), s.Logger.With("session-id", reg.ID()))
+	// Pinging with a clock that never advances would close every capable host
+	// at the end of its first silence, so a connection nothing records the
+	// reads of is left alone. Serve wraps every connection, so this is a bug.
+	if activity == nil {
+		s.Logger.Error("not pinging a host connection that has no record of its reads", "session-id", reg.ID())
+		return
+	}
+	logger := s.Logger.With("session-id", reg.ID())
+	logger.Debug("judging a host's silence by the reads of a connection", "connection", source)
+	go pingHost(ctx, conn, activity.LastRead, s.liveness, logger)
 }
 
 // releaseReplaced releases a registration a takeover on this node replaced.
