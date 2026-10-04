@@ -1195,6 +1195,23 @@ func TestParentCancellationImmediatelyAfterClaim(t *testing.T) {
 	require.Equal(t, sessiondir.ReasonCanceled, f.record(t).Reason)
 }
 
+// Status is "" only when Run isn't running: a caller polling for that to learn
+// Run has ended must not mistake the name claim for the end.
+func TestStatusIsStartingFromTheNameClaimUntilRunReturns(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.Empty(t, f.h.Status(), "before Run")
+	var claimed string
+	f.h.SessionClaimedCallback = func(*sessiondir.Dir) {
+		claimed = f.h.Status()
+		cancel()
+	}
+	require.ErrorIs(t, f.h.Run(ctx), context.Canceled)
+	require.Equal(t, sessiondir.StatusStarting, claimed)
+	require.Empty(t, f.h.Status(), "after Run")
+}
+
 func TestLateParentCancellationDoesNotReplaceCommandWinner(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = 30 * time.Millisecond

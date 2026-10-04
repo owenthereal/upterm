@@ -613,6 +613,15 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	defer cancelRun(nil)
 	requestStop := func() { cancelRun(errSessionStopped) }
 
+	// The session's two facts, and every status the record carries is derived
+	// from them. On the Host for Status from Run's entry, so that a caller
+	// polling for "" to learn Run has ended doesn't mistake the name claim for
+	// the end. Registered ahead of the final record write, which reads it, so
+	// it is cleared after that write.
+	state := &sessionState{}
+	c.state.Store(state)
+	defer c.state.Store(nil)
+
 	u, err := url.Parse(c.Host)
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)
@@ -697,15 +706,6 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		runSignal       string
 		runSignalNumber *int
 	)
-
-	// The session's two facts, and every status the record carries is derived
-	// from them. Declared before the final write is registered, which reads
-	// it.
-	state := &sessionState{}
-	// On the Host for Status, before any actor starts, and cleared after the
-	// final write, which this is registered ahead of.
-	c.state.Store(state)
-	defer c.state.Store(nil)
 
 	joins := newJoinState(c.JoinTimeout)
 	// On the Host for JoinState, before anything that could ask runs. Cleared
@@ -1463,9 +1463,10 @@ func (c *Host) JoinState() *api.JoinState {
 	return apiJoinState(c.joins.snapshot())
 }
 
-// Status reports the session's status as its record would; "" when Run isn't
-// running. It may be called from any goroutine, and is how an embedder with no
-// record learns that the tunnel is down and being redialled.
+// Status reports the session's status as its record would, from Run's entry
+// until it returns; "" when Run isn't running. It may be called from any
+// goroutine, and is how an embedder with no record learns that the tunnel is
+// down and being redialled.
 func (c *Host) Status() string {
 	s := c.state.Load()
 	if s == nil {
