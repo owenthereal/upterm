@@ -419,8 +419,10 @@ func TestSupervisorStopsPromptly(t *testing.T) {
 		// same way, so a poll that missed one slow wait finds the next.
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			readAt := time.Now()
 			rec := f.record(t)
+			// After the read: Record can wait on the lock an Update holds across
+			// a write, so a stamp taken before it would overstate what remains.
+			readAt := time.Now()
 			if rec.TunnelReason == sessiondir.TunnelReasonRelayKeyChanged &&
 				rec.NextAttemptAt.Sub(readAt) >= supervisorTiming.SlowWait-50*time.Millisecond {
 				break

@@ -66,8 +66,10 @@ func TestStatusIsStartingFromTheNameClaimUntilRunReturns(t *testing.T) {
 	release := holdSessionsRegistry(t)
 
 	var claimed string
+	claimedSignal := make(chan struct{})
 	f.h.SessionClaimedCallback = func(*sessiondir.Dir) {
 		claimed = f.h.Status()
+		close(claimedSignal)
 		cancel()
 	}
 	done := make(chan error, 1)
@@ -81,6 +83,11 @@ func TestStatusIsStartingFromTheNameClaimUntilRunReturns(t *testing.T) {
 	select {
 	case err := <-done:
 		t.Fatalf("Run returned while the registry was held: %v", err)
+	default:
+	}
+	select {
+	case <-claimedSignal:
+		t.Fatal("the name was claimed while the registry was held")
 	default:
 	}
 

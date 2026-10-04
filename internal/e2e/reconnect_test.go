@@ -30,6 +30,7 @@ type reconnectSessionInfo struct {
 	SessionID    string `json:"sessionId"`
 	SSHCommand   string `json:"sshCommand"`
 	TunnelReason string `json:"tunnelReason"`
+	LogPath      string `json:"logPath"`
 }
 
 // testRelay is an uptermd built for one test. It listens on one loopback port
@@ -124,8 +125,15 @@ func (r *testRelay) kill() {
 	r.cmd = nil
 }
 
-func (r *testRelay) logTail() string {
-	data, err := os.ReadFile(r.logFile)
+func (r *testRelay) logTail() string { return fileTail(r.logFile) }
+
+// fileTail is the last 40 lines of the file at path, or why they can't be
+// shown: a failure log must never fail the cleanup that prints it.
+func fileTail(path string) string {
+	if path == "" {
+		return "(no log path to read)"
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err.Error()
 	}
@@ -197,6 +205,14 @@ func (p *infoPoller) last() string {
 	return p.raw
 }
 
+// hostLogPath is the host daemon's log, from the last answer that parsed. It
+// is where the redial attempts and their reasons are written.
+func (p *infoPoller) hostLogPath() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.info.LogPath
+}
+
 // A detached session whose relay is killed redials it, and when uptermd comes
 // back on the same address it is registered again under the same session ID:
 // the connect string it printed at the start keeps working for a guest. Every
@@ -216,6 +232,7 @@ func TestReconnectAfterTheRelayIsKilled(t *testing.T) {
 		if t.Failed() {
 			t.Logf("uptermd log (tail):\n%s", relay.logTail())
 			t.Logf("last session info:\n%s", poll.last())
+			t.Logf("host log (tail):\n%s", fileTail(poll.hostLogPath()))
 		}
 	})
 
