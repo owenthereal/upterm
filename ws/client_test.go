@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
@@ -52,6 +53,62 @@ func handshakeHost(t *testing.T, rawURL string) string {
 	_ = client.Close() // unblock the reader if the dial never wrote
 
 	return <-hostCh
+}
+
+// TestNewWSConnFallsBackToNetDial verifies that an embedder who hooks only
+// websocket.DefaultDialer.NetDial, leaving NetDialContext nil, still has its
+// dial honoured, as gorilla does. Without the fallback NewWSConn would reach
+// for the real network instead.
+//
+// The host is under .invalid, which never resolves: should the hook be
+// bypassed, the dial fails at DNS rather than reaching a real server.
+func TestNewWSConnFallsBackToNetDial(t *testing.T) {
+	client, server := net.Pipe()
+	d := websocket.DefaultDialer
+	origDial, origDialContext, origProxy := d.NetDial, d.NetDialContext, d.Proxy
+	dialedCh := make(chan string, 1)
+	d.NetDial = func(_, addr string) (net.Conn, error) {
+		select {
+		case dialedCh <- addr:
+		default:
+		}
+		return client, nil
+	}
+	d.NetDialContext = nil
+	d.Proxy = nil // an HTTP(S)_PROXY in the environment would send a CONNECT first
+	t.Cleanup(func() {
+		d.NetDial, d.NetDialContext, d.Proxy = origDial, origDialContext, origProxy
+	})
+
+	hostCh := make(chan string, 1)
+	go func() {
+		defer func() { _ = server.Close() }()
+		req, err := http.ReadRequest(bufio.NewReader(server))
+		if err != nil {
+			hostCh <- "read error: " + err.Error()
+			return
+		}
+		hostCh <- req.Host
+	}()
+
+	u, err := url.Parse("ws://sid:addr@example.invalid:8080")
+	require.NoError(t, err)
+	_, _ = NewWSConn(u, true, nil)
+	_ = client.Close() // unblock the reader if the dial never wrote
+
+	// Bounded: a bypassed hook must fail the test rather than hang it.
+	select {
+	case host := <-hostCh:
+		assert.Equal(t, "example.invalid:8080", host)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upgrade request never reached the NetDial hook")
+	}
+	select {
+	case addr := <-dialedCh:
+		assert.Equal(t, "example.invalid:8080", addr)
+	default:
+		t.Error("NetDial was never called")
+	}
 }
 
 func TestNewWSConnHostHeaderOmitsDefaultPort(t *testing.T) {

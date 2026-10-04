@@ -65,9 +65,19 @@ func NewWSConnContext(ctx context.Context, u *url.URL, isUptermClient bool, prox
 	// package-level default, and taking the copy here still picks up whatever
 	// the process configured on it.
 	dialer := *websocket.DefaultDialer
+	// The base dial is chosen in gorilla's own order: NetDialContext, then
+	// NetDial, then a plain net.Dialer. The wrapper below replaces
+	// NetDialContext, so a hook the process configured on the default dialer
+	// must be picked up here or it would be silently bypassed.
 	dial := dialer.NetDialContext
 	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
+		if netDial := dialer.NetDial; netDial != nil {
+			dial = func(_ context.Context, network, addr string) (net.Conn, error) {
+				return netDial(network, addr)
+			}
+		} else {
+			dial = (&net.Dialer{}).DialContext
+		}
 	}
 	if proxyURL != nil {
 		// Open the tunnel with upterm's own dialer instead of gorilla's.
