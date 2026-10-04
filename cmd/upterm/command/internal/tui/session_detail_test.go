@@ -246,8 +246,9 @@ func clock(t time.Time) string { return t.Local().Format("15:04:05") }
 // row is one labelled line of the detail view, label padded to its column.
 func row(label, value string) string { return fmt.Sprintf("%-18s%s\n", label, value) }
 
-// Hints are quoted from the contract in full: the wording is what a user acts
-// on, so a reworded hint is a change to review, not a refactor.
+// Every hint is quoted here in full, so rewording one fails a test: the wording
+// is what a user acts on, so a reworded hint is a change to review, not a
+// refactor.
 var wantHints = []struct{ reason, hint string }{
 	{"network", "upterm can't reach the relay; it keeps retrying."},
 	{"relay_error", "the relay was reached but couldn't register the session; upterm keeps retrying."},
