@@ -236,6 +236,8 @@ next. Nothing on the host stops: the command, its terminal and a local
 `upterm attach` carry on. The ID lasts as long as the `upterm host` process,
 not across a restart.
 
+(On a self-hosted relay with several nodes and no Consul, a host that comes back on another node gets a new connect string; `upterm session info` shows it.)
+
 Guests connected at the drop are disconnected, and rejoin with the same
 command; one who tries during the gap is told `no host is connected for session
 … right now`. To rejoin an interactive session automatically, and leave the
