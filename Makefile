@@ -64,9 +64,9 @@ GO_TEST_FLAGS ?= ""
 # go test -timeout bounds that binary as a whole. On master's CI (655960a) the
 # ftests package took 221.5s on the Ubuntu + Consul job, and 144s on macOS and
 # 137s on Windows, which run without Consul. That was before the scenarios of
-# a host redialling its relay were added; with them it took 238s locally under
-# -race with Consul, which leaves the old 300s with less headroom than
-# runner-to-runner variance.
+# a host redialling its relay were added; with them, this branch's CI took
+# 250.5s on the Ubuntu + Consul job (160s on macOS, 133s on Windows), which
+# leaves the old 300s with less headroom than runner-to-runner variance.
 .PHONY: test
 test:
 	go test $$(go list ./... | grep -v /e2e) -timeout=600s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
