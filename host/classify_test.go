@@ -45,8 +45,7 @@ func runClassifyCases(t *testing.T, cases []classifyCase) {
 	}
 }
 
-// classifyTunnel is a redial's tunnel as the supervisor builds one, to a relay
-// at host. Its host key is the one the relay would be told to expect, and
+// classifyTunnel is a redial's tunnel to a relay at host. Its host key is the one the relay would be told to expect, and
 // nothing here reaches that far.
 func classifyTunnel(t *testing.T, host *url.URL, signers []ssh.Signer, hostKeyCallback ssh.HostKeyCallback) *internal.ReverseTunnel {
 	t.Helper()
@@ -123,7 +122,7 @@ func startRefusingServer(t *testing.T, maxTries int) *url.URL {
 	return &url.URL{Scheme: "ssh", Host: ln.Addr().String()}
 }
 
-// The reasons are a contract (reconnect spec 5.3), so they are spelled out
+// The reasons are a stable contract for integrations, so they are spelled out
 // here, not read back from the constants under test.
 func TestClassifyReasonsAreTheDocumentedStrings(t *testing.T) {
 	require.Equal(t, "reconnecting", sessiondir.StatusReconnecting)
@@ -181,8 +180,8 @@ func TestClassify(t *testing.T) {
 			reason: sessiondir.TunnelReasonAuthRefused, class: blocked,
 		},
 		{
-			// Review Focus 2: x/crypto's disconnect is an unexported type, so
-			// only its text says it. A host with more keys than the relay's
+			// x/crypto's disconnect is an unexported type, so only its text
+			// says it. A host with more keys than the relay's
 			// MaxAuthTries gets this rather than "unable to authenticate".
 			name: "a relay that disconnects a host that has offered too many keys",
 			err: func(t *testing.T) error {
@@ -234,7 +233,8 @@ func TestClassify(t *testing.T) {
 		},
 		{
 			// A signing failure is never an authentication refusal, whatever
-			// text it carries: Rule 2 is checked before Rule 7.
+			// text it carries: the agent's errors are matched before any
+			// authentication text.
 			name: "an agent failure that reads as too many authentication failures",
 			err: failure(&AgentRefusedError{
 				Key: "SHA256:x",

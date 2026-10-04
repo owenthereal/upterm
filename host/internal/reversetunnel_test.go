@@ -487,7 +487,9 @@ func TestReverseTunnelOutlivesItsAttemptContext(t *testing.T) {
 	require.NoError(t, err, "an established tunnel died with its attempt's context")
 }
 
-// The non-honoured branch (relay Task 6's gap), on a first connection and on a redial.
+// A relay that ignores the proof and answers with a random ID: a first
+// connection carries on without reconnect, and a redial is refused before it
+// binds a listener.
 func TestReverseTunnelAgainstARelayWithoutProofs(t *testing.T) {
 	relayKey, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
@@ -551,7 +553,7 @@ func TestReverseTunnelOnAGatedRelay(t *testing.T) {
 	require.False(t, tunnel.SessionKeyRedial())
 }
 
-// Rule 4: a failed Establish never reports a previous one's flags.
+// A failed Establish never reports a previous one's flags.
 func TestReverseTunnelFlagsResetOnAFailedEstablish(t *testing.T) {
 	relay := startTestRelay(t)
 	hostKey, err := utils.CreateSigners(nil)
@@ -576,7 +578,7 @@ func TestReverseTunnelFlagsResetOnAFailedEstablish(t *testing.T) {
 	require.False(t, tunnel.SessionKeyRedial())
 }
 
-// Rule 7: a tunnel liveness closed says so, to every waiter, and after Close.
+// A tunnel liveness closed says so, to every waiter, and after Close.
 func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 	relay := startTestRelay(t)
 	fwd := testhelpers.NewForwarder(t, relay.url.Host)
@@ -622,7 +624,7 @@ func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 	require.ErrorIs(t, waitWithin(t, tunnel, giveUp+time.Second), liveness.ErrSilent, "after Close too")
 }
 
-// Rule 6: a refused registration is typed, with the relay's body and today's text.
+// A refused registration is typed, with the relay's body and the text it always had.
 func TestReverseTunnelRefusalsAreTyped(t *testing.T) {
 	relayKey, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
@@ -644,11 +646,11 @@ func TestReverseTunnelRefusalsAreTyped(t *testing.T) {
 			require.Zero(t, fake.Forwards())
 		})
 	}
-	// Later tasks build zero values in tables, and may print them.
+	// A zero value is printable, as a table of expected errors builds one.
 	require.Equal(t, "unable to create reverse tunnel", (&ForwardRefusedError{}).Error())
 }
 
-// Rule 12: a test relay can present a host certificate for 127.0.0.1, which a
+// A test relay can present a host certificate for 127.0.0.1, which a
 // certificate checker accepts on the hostname each transport dials it by.
 func TestReverseTunnelAgainstARelayWithAHostCert(t *testing.T) {
 	relay := startTestRelay(t, withHostCert)

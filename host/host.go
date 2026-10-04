@@ -739,9 +739,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		HostKey:         hostKey,
 		HostKeyCallback: relayAuthority.Wrap(c.HostKeyCallback),
 		AuthorizedKeys:  aks,
-		// Today's interval, under the silence rule: the relay is probed after
-		// it with no bytes, and given up on after twice it, so a reply queued
-		// behind guest output no longer counts against it.
+		// The relay is probed after KeepAliveDuration with no bytes from it,
+		// and given up on after twice that: any bytes count, so a reply
+		// queued behind guest output never counts against it.
 		KeepAlive: liveness.Timing{Interval: c.KeepAliveDuration, Bound: c.KeepAliveDuration},
 		ProxyURL:  c.ProxyURL,
 		Logger:    logger.With("component", "reverse-tunnel"),

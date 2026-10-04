@@ -140,9 +140,9 @@ func sign(t *testing.T, s ssh.Signer, algorithm string) (*ssh.Signature, error) 
 	return as.SignWithAlgorithm(rand.Reader, []byte("authenticate"), algorithm)
 }
 
-// Spec §5.6's question, answered: an RSA agent key is offered with no agent
-// contact, and the one signature asks the agent for the same RSA-SHA2
-// algorithm its own signer is asked for.
+// An RSA agent key is offered with no agent contact, and the one signature
+// asks the agent for the same RSA-SHA2 algorithm its own signer is asked for:
+// a lazy signer negotiates exactly what the agent's own would.
 func TestRedialOffersRecordedAgentKeysWithoutContactingTheAgent(t *testing.T) {
 	edPub, edPriv := newEd25519(t)
 	rsaPub, rsaPriv := newRSA(t)
@@ -352,8 +352,8 @@ func TestRedialAgentFailures(t *testing.T) {
 		require.Zero(t, ag.signatures.Load())
 	})
 
-	// Review Focus 3: a redial offers only the recorded identities, whatever
-	// the agent holds now.
+	// A redial offers only the recorded identities, whatever the agent holds
+	// now.
 	t.Run("an agent restarted without the recorded key", func(t *testing.T) {
 		edPub, edPriv := newEd25519(t)
 		rsaPub, rsaPriv := newRSA(t)
@@ -386,9 +386,9 @@ func TestRedialAgentFailures(t *testing.T) {
 	})
 }
 
-// Spec §10's deadline test, and §5.5's approval prompt: an agent that lists
-// its keys but never answers the signature is released at the attempt's
-// deadline as AgentRefusedError, and the next attempt dials afresh.
+// An agent that lists its keys but never answers the signature, as one waiting
+// on an approval prompt does, is released at the attempt's deadline as
+// AgentRefusedError, and the next attempt dials afresh.
 //
 // The 200 ms deadline is armed only once the agent holds the signature. The
 // key exchange and the public-key query before it are CPU-bound under -race,

@@ -19,12 +19,12 @@ const (
 	StatusEnding       = "ending"
 )
 
-// StatusReconnecting: running, the tunnel is down, and the host is retrying on
-// its own (reconnect spec, section 8).
+// StatusReconnecting: running, the tunnel is down, and the host is redialling
+// the relay on its own.
 const StatusReconnecting = "reconnecting"
 
-// Tunnel reasons, published in the record and by `session info -o json`: a
-// stable contract for integrations (reconnect spec 5.3).
+// Tunnel reasons say why a session's tunnel went down, or why a redial of it
+// failed. The values are a stable contract for integrations that read them.
 const (
 	TunnelReasonNetwork              = "network"
 	TunnelReasonRelayError           = "relay_error"

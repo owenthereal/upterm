@@ -121,8 +121,8 @@ var errNotTheRecordedKey = errors.New("ssh: host key is not the relay key this s
 // checking its principals (host.autoAcceptHostKey). If that certificate does not
 // name the hostname dialled, as when the public relay is dialled by IP, every
 // redial is refused here. That is the verdict known_hosts gives the same host on
-// the next run, so it is kept; CheckRedial lets the host say so at start rather
-// than at the first drop.
+// the next run, so it is kept; CheckRedial reports it as soon as the first
+// connection is up, for a caller that wants to say so before any redial.
 func (r *RelayAuthority) Pinned() ssh.HostKeyCallback {
 	checker := &ssh.CertChecker{
 		// A relay authority is one key, which is the one IsUserAuthority already
@@ -155,9 +155,11 @@ func (r *RelayAuthority) Pinned() ssh.HostKeyCallback {
 }
 
 // CheckRedial reports whether the key the first connection was shown would pass
-// Pinned for hostname, given as host:port as the callback is. It is how a host
-// learns at start that its redials will be refused, instead of at the first
-// drop. It records nothing, and a connection that recorded nothing fails it.
+// Pinned for hostname, given as host:port as the callback is: nil if a redial
+// to the same relay would be accepted, and otherwise the *RelayKeyChangedError
+// Pinned would refuse it with. A caller can ask as soon as the first connection
+// is up, rather than learn it from a failed redial. It records nothing, and a
+// connection that recorded nothing fails it.
 func (r *RelayAuthority) CheckRedial(hostname string) error {
 	r.mu.Lock()
 	presented := r.presented
@@ -171,9 +173,10 @@ func (r *RelayAuthority) CheckRedial(hostname string) error {
 //
 // One refusal is not a different key: a certificate that names the authority
 // this session started with as its signer, refused anyway (another hostname,
-// expired, not a host certificate). That is where Rule 5's known consequence
-// shows up, and it reads as what happened, with Err as the reason, instead of
-// calling the recorded authority's own key a changed one. It says the
+// expired, not a host certificate). That is how a first connection that
+// auto-accepted a certificate for another hostname shows up (see Pinned), and
+// it reads as what happened, with Err as the reason, instead of calling the
+// recorded authority's own key a changed one. It says the
 // certificate names the authority, not that the authority signed it: the
 // checker verifies the signature last, so a refusal for the principals or the
 // validity says nothing of it.

@@ -9,20 +9,20 @@ import (
 	"github.com/owenthereal/upterm/internal/registration"
 )
 
-// retryClass says which schedule a failed redial is retried on (reconnect
-// spec 5.3).
+// retryClass says how a caller that retries a failed redial should pace the
+// next attempt.
 type retryClass int
 
 const (
 	// transient is a failure that waiting is likely to clear: the network, a
-	// relay that is down or busy, an agent that is not running yet. It is
-	// retried on the fast schedule.
+	// relay that is down or busy, an agent that is not running yet. A caller
+	// may retry it promptly.
 	transient retryClass = iota
 	// blocked is a refusal that waiting out the network does not clear, and
 	// that something else has to: an operator authorizing the key, a user
-	// approving the signature, a relay that is upgraded. Retrying it at the
-	// fast pace would only hammer the relay or the agent, so it is retried on
-	// the slow schedule.
+	// approving the signature, a relay that is upgraded. Retrying it promptly
+	// would only hammer the relay or the agent, so a caller should retry it at
+	// a slow pace.
 	blocked
 )
 
@@ -34,17 +34,17 @@ const (
 // authentication failures"`.
 const tooManyAuthFailures = "too many authentication failures"
 
-// classify says why a redial failed, as the reason the session record
-// publishes, and which schedule to retry it on.
+// classify says why a redial failed, as one of sessiondir's TunnelReason
+// constants, and how a caller should pace the next attempt.
 //
 // The first rule that matches wins, so the order matters. Every blocked case is
 // recognised by what it is, not by what remains once the transient ones are
 // ruled out: an error nothing here has seen is a network failure, retried
 // quickly, and never a reason to stop trying.
 //
-// The session ending locally isn't classified. The supervisor checks its own
-// context first: an attempt cut short because the host is shutting down is not
-// a failure of the relay.
+// The session ending locally isn't classified: a caller checks its own context
+// before it calls this, since an attempt cut short because the host is shutting
+// down is not a failure of the relay.
 func classify(err error) (reason string, class retryClass) {
 	var (
 		agentUnavailable *AgentUnavailableError

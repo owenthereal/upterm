@@ -133,7 +133,7 @@ func TestPinnedRelayAuthority(t *testing.T) {
 		})
 	}
 
-	// Rule 4: a refusal, or an acceptance, records nothing.
+	// Neither a refusal nor an acceptance changes what is recorded.
 	require.True(t, a.IsUserAuthority(relay.PublicKey()))
 	require.False(t, a.IsUserAuthority(other.PublicKey()))
 	require.NoError(t, a.CheckRedial("relay.example:22"))
@@ -277,7 +277,7 @@ func TestRelayKeyChangedErrorReads(t *testing.T) {
 	require.Contains(t, (&RelayKeyChangedError{Hostname: "relay.example:22", Key: cert}).Error(),
 		"("+utils.FingerprintSHA256(ca.PublicKey())+")")
 
-	// Later tasks build zero values to match on and to print.
+	// A zero value is printable, as a table of expected errors builds one.
 	require.Equal(t, "the relay's key for relay.example:22 is not the one this session started with",
 		(&RelayKeyChangedError{Hostname: "relay.example:22"}).Error())
 	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{}).Error())
@@ -371,8 +371,9 @@ func TestPinnedRelayAuthorityRefusalsReadAsWhatHappened(t *testing.T) {
 		}
 	})
 
-	// What PR C shows in session info: the first connection auto-accepted a
-	// certificate that does not name the hostname, and every redial is refused.
+	// The first connection auto-accepted a certificate that does not name the
+	// hostname, so every redial would be refused, and CheckRedial says so in
+	// the same words as the refusal.
 	t.Run("CheckRedial says it the same way", func(t *testing.T) {
 		var first RelayAuthority
 		cert := hostCert(t, relay, hostKey.PublicKey(), []string{"203.0.113.7"}, ssh.CertTimeInfinity)
