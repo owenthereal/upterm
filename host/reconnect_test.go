@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -187,6 +188,9 @@ type reconnectHost struct {
 	done chan error
 	// logs is the host's log, printed when the test fails.
 	logs *lockedBuffer
+	// hostKeyChecks counts the calls to the host's own HostKeyCallback, the
+	// one that may prompt: the first connection's, and never a redial's.
+	hostKeyChecks atomic.Int32
 }
 
 // reconnectOption changes the fixture before the host runs.
@@ -261,6 +265,12 @@ func newReconnectHost(t *testing.T, scheme string, opts ...reconnectOption) *rec
 	}
 	for _, opt := range opts {
 		opt(f)
+	}
+	if cb := f.h.HostKeyCallback; cb != nil {
+		f.h.HostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			f.hostKeyChecks.Add(1)
+			return cb(hostname, remote, key)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -635,6 +645,29 @@ func TestReconnectComesBackUnderTheSameID(t *testing.T) {
 			f.joinAsGuest(t, f.created.SshUser) // the original connect string
 		})
 	}
+}
+
+// A relay gone silent, with both ends of the connection still open, is
+// noticed by the tunnel's own pings, at Reconnect's pace: PingInterval of
+// silence, and PingBound for an answer. KeepAliveDuration paces the guests'
+// keepalive and has no say in it, so an hour of it doesn't leave the host
+// waiting on a dead tunnel.
+func TestReconnectNoticesASilentRelayAtItsOwnPingPace(t *testing.T) {
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) { f.h.KeepAliveDuration = time.Hour })
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+
+	f.fwd.Redirect(closedAddr(t)) // hold the gap open
+	silenced := time.Now()
+	f.fwd.Blackhole()
+	// The handshake is long over, so the margin is the scheduler's alone.
+	rec := f.awaitStatus(t, sessiondir.StatusReconnecting, reconnectTiming.PingInterval+reconnectTiming.PingBound+time.Second)
+	require.Equal(t, sessiondir.TunnelReasonNetwork, rec.TunnelReason)
+	require.False(t, rec.TunnelLostAt.Before(silenced), "the loss was noticed before the relay went silent")
+
+	f.fwd.Redirect(f.relay.addr("ssh"))
+	rec = f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+	require.Zero(t, rec.TunnelReason)
+	require.Zero(t, rec.NextAttemptAt)
 }
 
 // An embedder that supplies its own admin socket has no record, and its
