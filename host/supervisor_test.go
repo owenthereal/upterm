@@ -391,21 +391,48 @@ func TestSupervisorDropsTheSessionKeyAfterAuthRefused(t *testing.T) {
 	require.Equal(t, []bool{true, false}, f.script.keyFirst, "the session key isn't offered again")
 }
 
-func TestSupervisorStopsPromptly(t *testing.T) {
-	stopsPromptly := func(t *testing.T, f *supervisorFixture) {
-		t.Helper()
-		start := time.Now()
-		f.cancel()
-		f.awaitReturn(t)
-		require.Less(t, time.Since(start), 200*time.Millisecond)
-	}
+// supervisorStopBound is how long a stopped supervisor may take to return.
+// It is shorter than the slow wait, so a supervisor that sat the wait out
+// before noticing the stop overruns it.
+const supervisorStopBound = 200 * time.Millisecond
 
+// requireStopsPromptly runs stop, which ends f's supervisor, and requires that
+// run returns within supervisorStopBound of it.
+func requireStopsPromptly(t *testing.T, f *supervisorFixture, stop func()) {
+	t.Helper()
+	start := time.Now()
+	stop()
+	f.awaitReturn(t)
+	require.Less(t, time.Since(start), supervisorStopBound)
+}
+
+func TestSupervisorStopsPromptly(t *testing.T) {
 	t.Run("waiting slowly", func(t *testing.T) {
 		f := newSupervisorFixture(t, true)
 		f.script.repeat(func(context.Context) (tunnel, error) { return nil, &internal.RelayKeyChangedError{} })
 		f.first.drop(io.EOF)
-		time.Sleep(200 * time.Millisecond)
-		stopsPromptly(t, f)
+		// The first blocked error is retried on the fast schedule and the
+		// second starts the slow wait, so stop only once the record shows a
+		// wait that long with nearly all of it still to run. Anything less
+		// could be a fast wait, or a slow one the stop would outlast by too
+		// little to tell from a prompt return. The script goes on failing the
+		// same way, so a poll that missed one slow wait finds the next.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			rec := f.record(t)
+			// After the read: Record can wait on the lock an Update holds across
+			// a write, so a stamp taken before it would overstate what remains.
+			readAt := time.Now()
+			if rec.TunnelReason == sessiondir.TunnelReasonRelayKeyChanged &&
+				rec.NextAttemptAt.Sub(readAt) >= supervisorTiming.SlowWait-50*time.Millisecond {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the supervisor never began a slow wait: %+v", rec)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		requireStopsPromptly(t, f, f.cancel)
 	})
 
 	t.Run("mid-attempt", func(t *testing.T) {
@@ -423,7 +450,7 @@ func TestSupervisorStopsPromptly(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("no attempt was made")
 		}
-		stopsPromptly(t, f)
+		requireStopsPromptly(t, f, f.cancel)
 	})
 }
 
@@ -739,9 +766,10 @@ func TestSupervisorClosesATunnelAnAttemptReturnsAsTheStopLands(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no attempt was made")
 	}
-	f.cancel()
-	close(stopped)
-	f.awaitReturn(t)
+	requireStopsPromptly(t, f, func() {
+		f.cancel()
+		close(stopped)
+	})
 
 	require.True(t, late.closed.Load(), "a tunnel the supervisor didn't install is closed")
 	select {

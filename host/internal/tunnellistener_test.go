@@ -26,10 +26,10 @@ func tunnelTestListen(t *testing.T) net.Listener {
 	return l
 }
 
-// countedListener stands in for a forwarded listener. Closing it ends its
+// tunnelTestCountedListener stands in for a forwarded listener. Closing it ends its
 // Accept before anything else, as x/crypto's does, and the rest of Close —
 // the request to the relay — can then be held open by release.
-type countedListener struct {
+type tunnelTestCountedListener struct {
 	net.Listener
 
 	closes atomic.Int32
@@ -43,15 +43,15 @@ type countedListener struct {
 	release <-chan struct{}
 }
 
-func newCountedListener(l net.Listener) *countedListener {
-	return &countedListener{
+func tunnelTestNewCountedListener(l net.Listener) *tunnelTestCountedListener {
+	return &tunnelTestCountedListener{
 		Listener:  l,
 		accepting: make(chan struct{}, 1),
 		closing:   make(chan struct{}),
 	}
 }
 
-func (c *countedListener) Accept() (net.Conn, error) {
+func (c *tunnelTestCountedListener) Accept() (net.Conn, error) {
 	select {
 	case c.accepting <- struct{}{}:
 	default:
@@ -59,7 +59,7 @@ func (c *countedListener) Accept() (net.Conn, error) {
 	return c.Listener.Accept()
 }
 
-func (c *countedListener) Close() error {
+func (c *tunnelTestCountedListener) Close() error {
 	c.closes.Add(1)
 	err := c.Listener.Close()
 	c.closingOnce.Do(func() { close(c.closing) })
@@ -71,39 +71,39 @@ func (c *countedListener) Close() error {
 
 // lose ends the listener the way a dead tunnel does: its Accept fails, and
 // nobody has called Close.
-func (c *countedListener) lose() { _ = c.Listener.Close() }
+func (c *tunnelTestCountedListener) lose() { _ = c.Listener.Close() }
 
-type acceptResult struct {
+type tunnelTestAcceptResult struct {
 	conn net.Conn
 	err  error
 }
 
-func acceptAsync(l net.Listener) <-chan acceptResult {
-	ch := make(chan acceptResult, 1)
+func tunnelTestAcceptAsync(l net.Listener) <-chan tunnelTestAcceptResult {
+	ch := make(chan tunnelTestAcceptResult, 1)
 	go func() {
 		c, err := l.Accept()
-		ch <- acceptResult{conn: c, err: err}
+		ch <- tunnelTestAcceptResult{conn: c, err: err}
 	}()
 	return ch
 }
 
-func receiveAccept(t *testing.T, ch <-chan acceptResult) acceptResult {
+func tunnelTestReceiveAccept(t *testing.T, ch <-chan tunnelTestAcceptResult) tunnelTestAcceptResult {
 	t.Helper()
 	select {
 	case r := <-ch:
 		return r
 	case <-time.After(tunnelListenerHangGuard):
 		t.Fatal("Accept did not return")
-		return acceptResult{}
+		return tunnelTestAcceptResult{}
 	}
 }
 
-// parkedListener is a forwarded listener that lives entirely on channels, so
+// tunnelTestParkedListener is a forwarded listener that lives entirely on channels, so
 // that inside a synctest bubble an Accept parked on it — or on the
 // TunnelListener in front of it — is durably blocked, and synctest.Wait
 // returns only once every such Accept is. It delivers only the connections a
 // test sends on conns.
-type parkedListener struct {
+type tunnelTestParkedListener struct {
 	// gone is closed when the tunnel ends, by lose or by Close.
 	gone     chan struct{}
 	goneOnce sync.Once
@@ -124,15 +124,15 @@ type parkedListener struct {
 	release <-chan struct{}
 }
 
-func newParkedListener() *parkedListener {
-	return &parkedListener{
+func tunnelTestNewParkedListener() *tunnelTestParkedListener {
+	return &tunnelTestParkedListener{
 		gone:    make(chan struct{}),
 		conns:   make(chan net.Conn),
 		closing: make(chan struct{}),
 	}
 }
 
-func (p *parkedListener) Accept() (net.Conn, error) {
+func (p *tunnelTestParkedListener) Accept() (net.Conn, error) {
 	select {
 	case c := <-p.conns:
 		if p.hold != nil {
@@ -146,7 +146,7 @@ func (p *parkedListener) Accept() (net.Conn, error) {
 
 // Close ends Accept before anything else, as x/crypto's forwarded listener
 // does, and says it is closed if the tunnel had already ended.
-func (p *parkedListener) Close() error {
+func (p *tunnelTestParkedListener) Close() error {
 	p.closes.Add(1)
 	err := net.ErrClosed
 	p.goneOnce.Do(func() {
@@ -162,16 +162,16 @@ func (p *parkedListener) Close() error {
 
 // lose ends the listener the way a dead tunnel does: its Accept fails, and
 // nobody has called Close.
-func (p *parkedListener) lose() { p.goneOnce.Do(func() { close(p.gone) }) }
+func (p *tunnelTestParkedListener) lose() { p.goneOnce.Do(func() { close(p.gone) }) }
 
-func (p *parkedListener) Addr() net.Addr {
+func (p *tunnelTestParkedListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
 }
 
-// requireAcceptParked fails if an Accept has returned. Inside a bubble, after
+// tunnelTestRequireAcceptParked fails if an Accept has returned. Inside a bubble, after
 // synctest.Wait, it proves the Accept is blocked rather than merely not
 // finished yet.
-func requireAcceptParked(t *testing.T, ch <-chan acceptResult) {
+func tunnelTestRequireAcceptParked(t *testing.T, ch <-chan tunnelTestAcceptResult) {
 	t.Helper()
 	select {
 	case r := <-ch:
@@ -180,17 +180,17 @@ func requireAcceptParked(t *testing.T, ch <-chan acceptResult) {
 	}
 }
 
-// acceptReturned is what a finished Accept returned, failing at once if it is
+// tunnelTestAcceptReturned is what a finished Accept returned, failing at once if it is
 // still blocked. Inside a bubble, after synctest.Wait, nothing that could
 // still wake it is left running.
-func acceptReturned(t *testing.T, ch <-chan acceptResult) acceptResult {
+func tunnelTestAcceptReturned(t *testing.T, ch <-chan tunnelTestAcceptResult) tunnelTestAcceptResult {
 	t.Helper()
 	select {
 	case r := <-ch:
 		return r
 	default:
 		t.Fatal("Accept is still blocked")
-		return acceptResult{}
+		return tunnelTestAcceptResult{}
 	}
 }
 
@@ -239,11 +239,11 @@ func TestTunnelListenerServesWhicheverListenerIsCurrent(t *testing.T) {
 
 	through := func(l net.Listener) {
 		t.Helper()
-		got := acceptAsync(tl)
+		got := tunnelTestAcceptAsync(tl)
 		c, err := net.Dial("tcp", l.Addr().String())
 		require.NoError(t, err)
 		defer func() { _ = c.Close() }()
-		r := receiveAccept(t, got)
+		r := tunnelTestReceiveAccept(t, got)
 		require.NoError(t, r.err)
 		defer func() { _ = r.conn.Close() }()
 		require.Equal(t, c.LocalAddr().String(), r.conn.RemoteAddr().String())
@@ -262,18 +262,18 @@ func TestTunnelListenerServesWhicheverListenerIsCurrent(t *testing.T) {
 func TestTunnelListenerFailWakesAParkedAccept(t *testing.T) {
 	errLost := errors.New("relay gone for good")
 	synctest.Test(t, func(t *testing.T) {
-		inner := newParkedListener()
+		inner := tunnelTestNewParkedListener()
 		tl := NewTunnelListener(inner)
 		t.Cleanup(func() { _ = tl.Close() })
 
-		got := acceptAsync(tl)
+		got := tunnelTestAcceptAsync(tl)
 		synctest.Wait()
-		requireAcceptParked(t, got)
+		tunnelTestRequireAcceptParked(t, got)
 
 		tl.Fail(errLost)
 		synctest.Wait()
 
-		r := acceptReturned(t, got)
+		r := tunnelTestAcceptReturned(t, got)
 		require.ErrorIs(t, r.err, errLost)
 		require.NotErrorIs(t, r.err, net.ErrClosed)
 		require.Nil(t, r.conn)
@@ -287,25 +287,25 @@ func TestTunnelListenerFailWakesAParkedAccept(t *testing.T) {
 func TestTunnelListenerFailWakesAnAcceptParkedAfterTheTunnelWasLost(t *testing.T) {
 	errLost := errors.New("relay gone for good")
 	synctest.Test(t, func(t *testing.T) {
-		inner := newParkedListener()
+		inner := tunnelTestNewParkedListener()
 		tl := NewTunnelListener(inner)
 		t.Cleanup(func() { _ = tl.Close() })
 
 		inner.lose()
-		got := acceptAsync(tl)
+		got := tunnelTestAcceptAsync(tl)
 		synctest.Wait()
-		requireAcceptParked(t, got)
+		tunnelTestRequireAcceptParked(t, got)
 
 		tl.Fail(errLost)
 		synctest.Wait()
 
-		require.ErrorIs(t, acceptReturned(t, got).err, errLost)
+		require.ErrorIs(t, tunnelTestAcceptReturned(t, got).err, errLost)
 	})
 }
 
 func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		inner := newParkedListener()
+		inner := tunnelTestNewParkedListener()
 		release := make(chan struct{})
 		inner.release = release
 		tl := NewTunnelListener(inner)
@@ -313,9 +313,9 @@ func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *t
 		t.Cleanup(func() { unblock.Do(func() { close(release) }) })
 
 		inner.lose()
-		got := acceptAsync(tl)
+		got := tunnelTestAcceptAsync(tl)
 		synctest.Wait()
-		requireAcceptParked(t, got)
+		tunnelTestRequireAcceptParked(t, got)
 
 		closed := make(chan error, 1)
 		go func() { closed <- tl.Close() }()
@@ -324,7 +324,7 @@ func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *t
 		// Close is still held inside the inner listener's Close, which the
 		// Accept must not have waited behind.
 		<-inner.closing
-		require.ErrorIs(t, acceptReturned(t, got).err, net.ErrClosed)
+		require.ErrorIs(t, tunnelTestAcceptReturned(t, got).err, net.ErrClosed)
 		select {
 		case <-closed:
 			t.Fatal("Close returned before the inner listener's Close did")
@@ -338,10 +338,10 @@ func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *t
 	})
 }
 
-// requirePipeClosed fails if the other end of a net.Pipe has not been closed.
+// tunnelTestRequirePipeClosed fails if the other end of a net.Pipe has not been closed.
 // Inside a bubble the read deadline runs on the bubble's clock, so an open
 // connection costs no real time.
-func requirePipeClosed(t *testing.T, peer net.Conn) {
+func tunnelTestRequirePipeClosed(t *testing.T, peer net.Conn) {
 	t.Helper()
 	// A pipe whose far end is closed refuses the deadline itself.
 	err := peer.SetReadDeadline(time.Now().Add(time.Second))
@@ -358,7 +358,7 @@ func requirePipeClosed(t *testing.T, peer net.Conn) {
 func TestTunnelListenerClosesAHeldConnectionWhenItsTunnelIsReplaced(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		for range 50 {
-			first := newParkedListener()
+			first := tunnelTestNewParkedListener()
 			tl := NewTunnelListener(first)
 			t.Cleanup(func() { _ = tl.Close() })
 
@@ -366,7 +366,7 @@ func TestTunnelListenerClosesAHeldConnectionWhenItsTunnelIsReplaced(t *testing.T
 			first.conns <- old
 			synctest.Wait() // the old tunnel's goroutine holds old, and nothing accepts
 
-			second := newParkedListener()
+			second := tunnelTestNewParkedListener()
 			require.True(t, tl.Swap(second))
 			fresh, freshPeer := net.Pipe()
 			second.conns <- fresh
@@ -374,7 +374,7 @@ func TestTunnelListenerClosesAHeldConnectionWhenItsTunnelIsReplaced(t *testing.T
 			c, err := tl.Accept()
 			require.NoError(t, err)
 			require.True(t, c == fresh, "Accept returned a connection from the replaced tunnel")
-			requirePipeClosed(t, oldPeer)
+			tunnelTestRequirePipeClosed(t, oldPeer)
 			_, _ = c.Close(), freshPeer.Close()
 		}
 	})
@@ -388,32 +388,32 @@ func TestTunnelListenerNeverReturnsAConnectionFromAReplacedTunnel(t *testing.T) 
 	synctest.Test(t, func(t *testing.T) {
 		for range 50 {
 			hold := make(chan struct{})
-			first := newParkedListener()
+			first := tunnelTestNewParkedListener()
 			first.hold = hold
 			tl := NewTunnelListener(first)
 			t.Cleanup(func() { _ = tl.Close() })
 
-			got := acceptAsync(tl)
+			got := tunnelTestAcceptAsync(tl)
 			synctest.Wait()
-			requireAcceptParked(t, got)
+			tunnelTestRequireAcceptParked(t, got)
 
 			// The old tunnel's listener has taken a connection and not yet
 			// returned it to the pump; the tunnel is replaced meanwhile.
 			old, oldPeer := net.Pipe()
 			first.conns <- old
 			synctest.Wait()
-			second := newParkedListener()
+			second := tunnelTestNewParkedListener()
 			require.True(t, tl.Swap(second))
 			close(hold)
 			synctest.Wait()
 
-			requireAcceptParked(t, got) // the old connection is not what Accept returns
-			requirePipeClosed(t, oldPeer)
+			tunnelTestRequireAcceptParked(t, got) // the old connection is not what Accept returns
+			tunnelTestRequirePipeClosed(t, oldPeer)
 
 			fresh, freshPeer := net.Pipe()
 			second.conns <- fresh
 			synctest.Wait()
-			r := acceptReturned(t, got)
+			r := tunnelTestAcceptReturned(t, got)
 			require.NoError(t, r.err)
 			require.True(t, r.conn == fresh, "Accept returned a connection from the replaced tunnel")
 			_, _ = r.conn.Close(), freshPeer.Close()
@@ -425,7 +425,7 @@ func TestTunnelListenerFailsOnlyWhenLostOrClosed(t *testing.T) {
 	errLost := errors.New("relay gone for good")
 
 	t.Run("fail before any Accept", func(t *testing.T) {
-		inner := newCountedListener(tunnelTestListen(t))
+		inner := tunnelTestNewCountedListener(tunnelTestListen(t))
 		tl := NewTunnelListener(inner)
 		t.Cleanup(func() { _ = tl.Close() })
 
@@ -437,7 +437,7 @@ func TestTunnelListenerFailsOnlyWhenLostOrClosed(t *testing.T) {
 	})
 
 	t.Run("close on a fresh listener", func(t *testing.T) {
-		inner := newCountedListener(tunnelTestListen(t))
+		inner := tunnelTestNewCountedListener(tunnelTestListen(t))
 		tl := NewTunnelListener(inner)
 
 		require.NoError(t, tl.Close())
@@ -452,7 +452,7 @@ func TestTunnelListenerFirstOfFailAndCloseWins(t *testing.T) {
 	errLost := errors.New("relay gone for good")
 
 	t.Run("fail then close", func(t *testing.T) {
-		inner := newCountedListener(tunnelTestListen(t))
+		inner := tunnelTestNewCountedListener(tunnelTestListen(t))
 		tl := NewTunnelListener(inner)
 
 		tl.Fail(errLost)
@@ -467,7 +467,7 @@ func TestTunnelListenerFirstOfFailAndCloseWins(t *testing.T) {
 	})
 
 	t.Run("close then fail", func(t *testing.T) {
-		inner := newCountedListener(tunnelTestListen(t))
+		inner := tunnelTestNewCountedListener(tunnelTestListen(t))
 		tl := NewTunnelListener(inner)
 
 		require.NoError(t, tl.Close())
@@ -480,7 +480,7 @@ func TestTunnelListenerFirstOfFailAndCloseWins(t *testing.T) {
 	})
 
 	t.Run("concurrent closes close the inner listener once and agree on the result", func(t *testing.T) {
-		inner := newCountedListener(tunnelTestListen(t))
+		inner := tunnelTestNewCountedListener(tunnelTestListen(t))
 		release := make(chan struct{})
 		inner.release = release
 		tl := NewTunnelListener(inner)
@@ -505,8 +505,8 @@ func TestTunnelListenerFirstOfFailAndCloseWins(t *testing.T) {
 }
 
 func TestTunnelListenerSwapAfterClose(t *testing.T) {
-	first := newCountedListener(tunnelTestListen(t))
-	next := newCountedListener(tunnelTestListen(t))
+	first := tunnelTestNewCountedListener(tunnelTestListen(t))
+	next := tunnelTestNewCountedListener(tunnelTestListen(t))
 	tl := NewTunnelListener(first)
 	require.NoError(t, tl.Close())
 
@@ -525,8 +525,8 @@ func TestTunnelListenerSwapAfterClose(t *testing.T) {
 }
 
 func TestTunnelListenerSwapAfterFail(t *testing.T) {
-	first := newCountedListener(tunnelTestListen(t))
-	next := newCountedListener(tunnelTestListen(t))
+	first := tunnelTestNewCountedListener(tunnelTestListen(t))
+	next := tunnelTestNewCountedListener(tunnelTestListen(t))
 	tl := NewTunnelListener(first)
 	t.Cleanup(func() { _ = tl.Close() })
 	errLost := errors.New("relay gone for good")
@@ -541,9 +541,9 @@ func TestTunnelListenerSwapAfterFail(t *testing.T) {
 }
 
 func TestTunnelListenerSwapClosesThePreviousListener(t *testing.T) {
-	first := newCountedListener(tunnelTestListen(t))
-	second := newCountedListener(tunnelTestListen(t))
-	third := newCountedListener(tunnelTestListen(t))
+	first := tunnelTestNewCountedListener(tunnelTestListen(t))
+	second := tunnelTestNewCountedListener(tunnelTestListen(t))
+	third := tunnelTestNewCountedListener(tunnelTestListen(t))
 	tl := NewTunnelListener(first)
 
 	require.True(t, tl.Swap(second))
@@ -561,7 +561,7 @@ func TestTunnelListenerSwapClosesThePreviousListener(t *testing.T) {
 }
 
 func TestTunnelListenerSwapDoesNotBlockBehindASlowClose(t *testing.T) {
-	old := newCountedListener(tunnelTestListen(t))
+	old := tunnelTestNewCountedListener(tunnelTestListen(t))
 	release := make(chan struct{})
 	old.release = release
 	next := tunnelTestListen(t)
@@ -577,11 +577,11 @@ func TestTunnelListenerSwapDoesNotBlockBehindASlowClose(t *testing.T) {
 	go func() { swapped <- tl.Swap(next) }()
 	tunnelTestAwait(t, old.closing, "Swap never closed the old listener")
 
-	got := acceptAsync(tl)
+	got := tunnelTestAcceptAsync(tl)
 	c, err := net.Dial("tcp", next.Addr().String())
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
-	r := receiveAccept(t, got)
+	r := tunnelTestReceiveAccept(t, got)
 	require.NoError(t, r.err, "Accept moved on to the new listener while the old one was still closing")
 	_ = r.conn.Close()
 
@@ -626,10 +626,10 @@ func TestTunnelListenerUnderRace(t *testing.T) {
 
 	var (
 		mu        sync.Mutex
-		installed []*countedListener
+		installed []*tunnelTestCountedListener
 	)
-	newInner := func() *countedListener {
-		l := newCountedListener(tunnelTestListen(t))
+	newInner := func() *tunnelTestCountedListener {
+		l := tunnelTestNewCountedListener(tunnelTestListen(t))
 		mu.Lock()
 		installed = append(installed, l)
 		mu.Unlock()

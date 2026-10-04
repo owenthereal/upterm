@@ -438,18 +438,18 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}, func(err error) {
 		// Only silence is liveness's own verdict. A probe fails only on a
 		// connection that has already ended, and Wait reports that in the
-		// connection's words. Recorded before the close, so that Wait
-		// reports the silence and not the EOF the close is about to produce.
-		if errors.Is(err, liveness.ErrSilent) {
-			conn.silenced.Store(&err)
-		}
-		// Once, at the point of giving up. Logging every interval said the
-		// same thing about the same dead connection until the session ended,
-		// which buried whatever else the host had to say. Only silence is
-		// the relay's fault to report as an error: a probe into a connection
+		// connection's words. So only silence is recorded, and only silence
+		// is the relay's fault to log as an error: a probe into a connection
 		// that had already ended is that connection's loss, which whoever
 		// watches the tunnel reports in its own words.
+		//
+		// The verdict is recorded before the close, so that Wait reports the
+		// silence and not the EOF the close is about to produce. The log is
+		// once, at the point of giving up: logging every interval said the
+		// same thing about the same dead connection until the session ended,
+		// which buried whatever else the host had to say.
 		if errors.Is(err, liveness.ErrSilent) {
+			conn.silenced.Store(&err)
 			baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
 		} else {
 			baseLogger.Debug("relay connection already ended; closing the tunnel", "error", err)

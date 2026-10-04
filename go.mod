@@ -55,6 +55,7 @@ require (
 	github.com/google/go-github/v48 v48.2.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/muesli/reflow v0.3.0
+	github.com/muesli/termenv v0.16.0
 	github.com/ncruces/zenity v0.10.15
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
 	github.com/pires/go-proxyproto v0.15.0
@@ -121,7 +122,6 @@ require (
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect

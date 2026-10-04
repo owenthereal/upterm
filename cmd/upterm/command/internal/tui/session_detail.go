@@ -4,25 +4,42 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"golang.org/x/term"
+)
+
+// stdoutIsTerminal and getTermWidth read stdout. They are variables so the
+// package's tests can pin them: what a test sees must not depend on whether
+// `go test` was run from a terminal.
+var (
+	stdoutIsTerminal = func() bool {
+		return term.IsTerminal(int(os.Stdout.Fd()))
+	}
+
+	// getTermWidth returns the terminal width, defaulting to 80 if unavailable
+	getTermWidth = func() int {
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			return 80
+		}
+		return width
+	}
 )
 
 // IsTTY returns whether stdout is a terminal
 func IsTTY() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
+	return stdoutIsTerminal()
 }
 
-// getTermWidth returns the terminal width, defaulting to 80 if unavailable
-func getTermWidth() int {
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return 80
-	}
-	return width
+// TermWidth returns the terminal width, defaulting to 80 if unavailable
+func TermWidth() int {
+	return getTermWidth()
 }
 
 // RunModel runs a bubbletea model with automatic TTY detection.
@@ -54,6 +71,98 @@ type SessionDetail struct {
 	SCPDownload      string // SCP download example
 	AuthorizedKeys   string
 	ConnectedClients []string
+
+	// Reconnect is "supported" or "unsupported" once the first connection has
+	// shown whether the relay lets a dropped session come back under the same
+	// connect string. The tunnel fields describe the latest outage: why the
+	// latest attempt failed (one of sessiondir's TunnelReason values), when
+	// the outage began, and when the next attempt is due. A live session
+	// clears them when its tunnel comes back; only an ended session's record
+	// keeps its last outage. They are zero when there has been none or the
+	// caller has no record to read them from.
+	Reconnect     string
+	TunnelReason  string
+	TunnelLostAt  time.Time
+	NextAttemptAt time.Time
+}
+
+// now is the clock the status text compares a next attempt against. A variable
+// so a test can pin it instead of sleeping.
+var now = time.Now
+
+// tunnelHints say what to do, or what to expect, for each reason a tunnel
+// went down. The values of sessiondir's TunnelReason are a stable contract, so
+// a reason this version doesn't know has no entry and gets no hint rather than
+// a guess.
+var tunnelHints = map[string]string{
+	sessiondir.TunnelReasonNetwork:              "upterm can't reach the relay; it keeps retrying.",
+	sessiondir.TunnelReasonRelayError:           "the relay was reached but couldn't register the session; upterm keeps retrying.",
+	sessiondir.TunnelReasonAgentUnavailable:     "the SSH agent can't be reached (not running, or restarting); upterm keeps retrying.",
+	sessiondir.TunnelReasonAgentRefused:         "the SSH agent didn't sign: approve or unlock it, or restart the session with a key file (--private-key).",
+	sessiondir.TunnelReasonAuthRefused:          "the relay refused every identity offered; if its --authorized-keys changed, add your key back.",
+	sessiondir.TunnelReasonRelayKeyChanged:      "the relay's key differs from the one this session started with; not accepted. If the change is legitimate, restart the session.",
+	sessiondir.TunnelReasonRelayUnsupported:     "the relay node reached doesn't support reconnecting (as during a rollback); upterm keeps retrying.",
+	sessiondir.TunnelReasonProofRefused:         "the relay refused this session's proof of its key; upterm keeps retrying.",
+	sessiondir.TunnelReasonReconnectUnsupported: "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.",
+}
+
+// StatusText is the status row's value. A reconnecting session says why it is
+// down, since when, and when it tries next; every other status is its plain
+// word. A disconnected session's hint row says why, and the outage an ended
+// session's record keeps is not something to act on. Times are local, to the
+// second.
+//
+// Each piece is left out when it isn't known. A next attempt that is not
+// ahead of the clock is left out too: it is stamped as each wait starts, so
+// it is already past during every attempt and after a sleeping machine wakes
+// mid-wait, and printing it would promise a retry that has already happened.
+func StatusText(detail SessionDetail) string {
+	if detail.Status != sessiondir.StatusReconnecting {
+		return detail.Status
+	}
+
+	var parts []string
+	if detail.TunnelReason != "" {
+		parts = append(parts, detail.TunnelReason)
+	}
+	if !detail.TunnelLostAt.IsZero() {
+		parts = append(parts, "since "+clockTime(detail.TunnelLostAt))
+	}
+	text := strings.Join(parts, " ")
+	if detail.NextAttemptAt.After(now()) {
+		if text != "" {
+			text += ", "
+		}
+		text += "next attempt " + clockTime(detail.NextAttemptAt)
+	}
+	if text == "" {
+		return detail.Status
+	}
+	return detail.Status + " — " + text
+}
+
+func clockTime(t time.Time) string { return t.Local().Format("15:04:05") }
+
+// StatusHint is what the user can do about the outage, for the statuses that
+// have one: a reconnecting session, and a disconnected one, whose reason says
+// why it will not come back. Empty for every other status and for a reason
+// without a hint.
+func StatusHint(detail SessionDetail) string {
+	switch detail.Status {
+	case sessiondir.StatusReconnecting, sessiondir.StatusDisconnected:
+		return tunnelHints[detail.TunnelReason]
+	}
+	return ""
+}
+
+// ReconnectNote says the relay can't bring a dropped session back, from the
+// first connection on and at every status, since it stays true until the
+// session ends. Empty when the relay can, or isn't known to yet.
+func ReconnectNote(detail SessionDetail) string {
+	if detail.Reconnect == sessiondir.ReconnectUnsupported {
+		return "unsupported by this relay"
+	}
+	return ""
 }
 
 // FormatSessionDetail renders a SessionDetail to a string using terminal width
@@ -80,10 +189,55 @@ func wrapLines(text string, width int) []string {
 	return strings.Split(wrapped, "\n")
 }
 
+// wordWrapLines wraps prose to width at spaces and returns lines. A hyphen is
+// not a place to break, so a flag like --authorized-keys stays whole. A single
+// word longer than width is still cut at width, so no line exceeds it.
+// Embedded newlines are kept. It does not look at the terminal; wrapProseLines
+// decides whether to call it.
+func wordWrapLines(text string, width int) []string {
+	width = max(width, 10)
+	// reflow's default breakpoint is '-', which it writes without counting it
+	// toward the line, so a hyphenated word can be cut mid-word.
+	w := wordwrap.NewWriter(width)
+	w.Breakpoints = []rune{}
+	_, _ = w.Write([]byte(text))
+	_ = w.Close()
+	return strings.Split(wrap.String(string(w.Bytes()), width), "\n")
+}
+
+// wrapProseLines is wrapLines for sentences (the status detail and the hint),
+// which break at spaces instead of mid-word. Like wrapLines it leaves the text
+// alone when stdout isn't a terminal.
+func wrapProseLines(text string, width int) []string {
+	if text == "" {
+		return []string{}
+	}
+	if !IsTTY() {
+		return strings.Split(text, "\n")
+	}
+	return wordWrapLines(text, width)
+}
+
+// WrapProse wraps a sentence to width at spaces, as the detail view does for
+// its status and hint rows. Unlike the view it does not look at the terminal:
+// the caller decides whether to wrap at all. Empty text comes back as one empty
+// line, so a row with no value still has a line to print.
+func WrapProse(text string, width int) []string {
+	return wordWrapLines(text, width)
+}
+
 // renderWrappedRow renders a label: value row with wrapping, continuation lines indented
 func renderWrappedRow(b *strings.Builder, label string, value string, labelWidth int, valueWidth int, style lipgloss.Style) {
+	renderRow(b, label, wrapLines(value, valueWidth), labelWidth, style)
+}
+
+// renderProseRow is renderWrappedRow for a sentence: it breaks at spaces.
+func renderProseRow(b *strings.Builder, label string, value string, labelWidth int, valueWidth int, style lipgloss.Style) {
+	renderRow(b, label, wrapProseLines(value, valueWidth), labelWidth, style)
+}
+
+func renderRow(b *strings.Builder, label string, lines []string, labelWidth int, style lipgloss.Style) {
 	l := LabelStyle.Width(labelWidth).Render(label)
-	lines := wrapLines(value, valueWidth)
 	if len(lines) == 0 {
 		b.WriteString(l + "\n")
 		return
@@ -130,7 +284,13 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	// blank, and it is what distinguishes a session still starting, or running
 	// under another XDG_RUNTIME_DIR, from one that is broken.
 	if detail.Status != "" {
-		renderWrappedRow(&b, "Status:", detail.Status, labelWidth, valueWidth, ValueStyle)
+		renderProseRow(&b, "Status:", StatusText(detail), labelWidth, valueWidth, ValueStyle)
+	}
+	if hint := StatusHint(detail); hint != "" {
+		renderProseRow(&b, "Hint:", hint, labelWidth, valueWidth, ValueStyle)
+	}
+	if note := ReconnectNote(detail); note != "" {
+		renderWrappedRow(&b, "Reconnect:", note, labelWidth, valueWidth, ValueStyle)
 	}
 
 	// Basic fields (skip empty fields to reduce noise)

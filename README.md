@@ -125,11 +125,17 @@ for that host are used.
 
 ### SSH agents and hardware keys
 
-`upterm host` authenticates to the server with your SSH identity once, when
-the tunnel is established, the same as `ssh` would. Everything after that —
-guest joins, `upterm attach`, key renegotiation — uses a key generated for
-the session, so an agent that confirms each signature (gpg-agent with a
-smartcard, 1Password, a FIDO key) asks once, at start.
+`upterm host` authenticates to the server with your SSH identity when the
+tunnel is established, the same as `ssh` would, and again whenever it
+reconnects. Everything else — guest joins, `upterm attach`, key renegotiation —
+uses a key generated for the session, so an agent that confirms each signature
+(gpg-agent with a smartcard, 1Password, a FIDO key) asks at start. On a server
+that accepts any host, as uptermd.upterm.dev does, a reconnect uses the
+session's own key and doesn't ask the agent, unless `--private-key` names the
+identities: those are then the only ones offered, on every reconnect too. On a
+server with `--authorized-keys`, such an agent asks on every reconnect. For a
+long-lived session that will reconnect, use a key file or an agent without
+per-use confirmation.
 
 To keep such an agent out of it entirely, name a plain key. A supplied
 `--private-key` is the whole set, like OpenSSH's `IdentitiesOnly`:
@@ -188,7 +194,7 @@ Look the session up by name while it runs and after it ends. The record outlives
 upterm session info build-shell -o json
 ```
 
-The `status` field is `starting`, `ready`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled` (with `signal` and originating `signalNumber`), `stopped` (explicit admin stop), `canceled` (parent cancellation), `join_timeout`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`.
+The `status` field is `starting`, `ready`, `reconnecting`, `disconnected` or `ending` while the session still holds its name, and `ended` once nobody does; `reason` is `exited` (with `exitCode`), `signaled` (with `signal` and originating `signalNumber`), `stopped` (explicit admin stop), `canceled` (parent cancellation), `join_timeout`, `startup_failed`, `startup_abandoned` (declined at the confirmation prompt) or `unknown`. While it is `reconnecting`, `tunnelReason` says why (`network`, `relay_error`, `agent_unavailable`, `agent_refused`, `auth_refused`, `relay_key_changed`, `relay_unsupported` or `proof_refused`), with `tunnelLostAt`, `tunnelError` and `nextAttemptAt`; a `disconnected` session's `tunnelReason` is `reconnect_unsupported`. `reconnect` is `supported` or `unsupported` once the first connection has shown which.
 
 `upterm session wait NAME` returns the command's exit code, 0 for explicit stop or join timeout, 128 plus the originating signal number for host or command signals, and 125 for cancellation or unavailable outcomes. Lookup, read and replacement failures, and cancellation of the waiter's context, return 125 with a diagnostic; interrupting the observer leaves the session alive. Legacy stopped records remain successful; legacy signal records without a valid numeric signal return 125. The on-disk record calls the numeric field `signal_number`.
 
@@ -219,6 +225,51 @@ upterm attach build-shell
 ```
 
 Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host` and guests as `guest`. In its JSON, `guestCount` counts currently connected guests (including forwarding, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
+
+### Reconnecting
+
+If the host's connection to the server drops — a Wi-Fi switch, a laptop
+waking up, a server deploy — `upterm host` reconnects on its own and keeps the
+same session ID, so the same `ssh` command works again once it's back. While it
+retries, `upterm session info` shows `reconnecting`, why, and when it tries
+next. Nothing on the host stops: the command, its terminal and a local
+`upterm attach` carry on. The ID lasts as long as the `upterm host` process,
+not across a restart.
+
+(On a self-hosted relay with several nodes and no Consul, a host that comes back on another node gets a new connect string; `upterm session info` shows it.)
+
+Guests connected at the drop are disconnected, and rejoin with the same
+command; one who tries during the gap is told `no host is connected for session
+… right now`. To rejoin an interactive session automatically, and leave the
+terminal usable after a drop, save this as `upterm-rejoin` and run it in place
+of `ssh`, with the same arguments:
+
+```bash
+#!/usr/bin/env bash
+# upterm-rejoin: rejoin an interactive upterm session when the connection drops.
+# Retries only when ssh itself fails (exit 255). Any other exit status is the
+# remote side ending — your shell's own `exit 1` included — and stops.
+reset_modes() { printf '\030\0337\033[?1049l\033[?1047l\033[?47l\033[r\0338\033[?1l\033[?7h\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?2004l\033[<u\033[>4m\033(B'; }
+trap reset_modes EXIT   # also runs on Ctrl-C
+while :; do
+  ssh -t "$@"; rc=$?
+  reset_modes
+  [ "$rc" -eq 255 ] || exit "$rc"
+  echo "upterm-rejoin: connection lost; rejoining in 3 s (Ctrl-C to stop)" >&2
+  sleep 3 || exit 130
+done
+```
+
+- To stop, press Ctrl-C during the pause. While connected, Ctrl-C goes to the
+  session.
+- ssh's `~.` also exits 255, and so reconnects; follow it with Ctrl-C.
+- A remote command that exits 255 is retried too, which is why the script is
+  for interactive sessions only.
+
+Reconnecting needs a server that supports it: uptermd 0.34.0 or later, which
+uptermd.upterm.dev runs. With an older one, `upterm session info` says
+`Reconnect: unsupported by this relay`, and a lost connection leaves the
+session `disconnected`, as before.
 
 ### File Transfer (SFTP/SCP)
 
