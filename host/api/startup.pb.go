@@ -593,10 +593,11 @@ type Started struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// status is what the record said at the moment readiness was published --
-	// ready, or disconnected if the tunnel was lost between the command
-	// starting and that write, which leaves the earlier status standing. The
-	// parent reports this rather than assuming ready, so that what it prints
-	// and what `upterm session info` answers cannot disagree.
+	// ready, or reconnecting if the tunnel was lost between the command
+	// starting and that write (disconnected, on a relay that can't reconnect),
+	// which leaves the earlier status standing. The parent reports this rather
+	// than assuming ready, so that what it prints and what `upterm session
+	// info` answers cannot disagree.
 	Status string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
 	// join_state is the join timeout as the daemon holds it at the moment
 	// readiness is reported, so that `--detach -o json` shows what `upterm

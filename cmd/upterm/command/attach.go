@@ -112,8 +112,9 @@ func resolveAttachName(ctx context.Context, explicit string) (string, error) {
 }
 
 // attachTarget resolves a name to the socket to dial and the keys to pin it
-// with, and to the status the record had when it did. Starting, ready and
-// disconnected are all attachable — the command is alive and the socket is
+// with, and to the status the record had when it did. Starting, ready,
+// reconnecting and disconnected (which a relay that can't reconnect leaves a
+// session in) are all attachable — the command is alive and the socket is
 // local, whatever the tunnel is doing — and a name nobody holds is not.
 //
 // The status comes back because it is what explains a failed dial: see

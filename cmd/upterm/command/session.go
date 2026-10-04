@@ -925,8 +925,9 @@ func joinable(status string) bool {
 // sameLaunch reports whether sess answered for the run rec describes: between
 // Inspect and the query the session could have ended and a replacement
 // claimed the name. A daemon that publishes its launch is checked by launch;
-// one from before that field by session ID, which only a ready record
-// carries, as lookup always did.
+// one from before that field by session ID, which a record carries from the
+// moment readiness is published, whatever the tunnel is doing then or later
+// (ready, reconnecting or disconnected), and not before, as lookup always did.
 func sameLaunch(rec *sessiondir.Record, sess *api.GetSessionResponse) bool {
 	if id := sess.GetLaunchId(); id != "" {
 		return id == rec.LaunchID

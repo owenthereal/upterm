@@ -60,10 +60,12 @@ type SessionDetail struct {
 
 	// Reconnect is "supported" or "unsupported" once the first connection has
 	// shown whether the relay lets a dropped session come back under the same
-	// connect string. The tunnel fields describe the current outage: why the
+	// connect string. The tunnel fields describe the latest outage: why the
 	// latest attempt failed (one of sessiondir's TunnelReason values), when
-	// the outage began, and when the next attempt is due. They are zero when
-	// the tunnel is up or the caller has no record to read them from.
+	// the outage began, and when the next attempt is due. They are the last
+	// outage's even after the tunnel is back or the session has ended, and
+	// zero when there has been none or the caller has no record to read them
+	// from.
 	Reconnect     string
 	TunnelReason  string
 	TunnelLostAt  time.Time
