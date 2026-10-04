@@ -292,3 +292,37 @@ func TestApplyTakesOneSnapshotWhileTheTunnelChanges(t *testing.T) {
 
 	require.Zero(t, torn, "records carried a status and an outage that disagree")
 }
+
+// The callback carries what the record says, not what the ready actor asked
+// for. A tunnel that is down by the time of the ready write makes the record
+// say reconnecting, and a callback that announced ready for it would be the
+// disagreement the callback exists to rule out. The tunnel is taken down from
+// the barrier that runs just before the write, so the ordering is made rather
+// than raced.
+func TestReadyCallbackReportsTheDerivedStatus(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	lostAt := time.Now().UTC()
+	f.h.beforeReadyPublish = func(s *sessionState) {
+		s.tunnelReconnecting(lostAt, sessiondir.TunnelReasonNetwork, "EOF", lostAt.Add(time.Minute))
+	}
+	called := make(chan string, 1)
+	f.h.SessionReadyCallback = func(status string) { called <- status }
+	f.start(t)
+
+	var status string
+	select {
+	case status = <-called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the readiness callback was not called")
+	}
+
+	rec := f.record(t)
+	require.Equal(t, sessiondir.StatusReconnecting, status)
+	require.Equal(t, sessiondir.StatusReconnecting, rec.Status,
+		"the record a reader would consult says what the callback was given")
+	require.NotEmpty(t, rec.SessionID, "published by the same write")
+	require.Equal(t, sessiondir.TunnelReasonNetwork, rec.TunnelReason)
+	require.Equal(t, "EOF", rec.TunnelError)
+	require.True(t, rec.TunnelLostAt.Equal(lostAt))
+	require.True(t, rec.NextAttemptAt.Equal(lostAt.Add(time.Minute)))
+}

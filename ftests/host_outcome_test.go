@@ -734,8 +734,8 @@ func Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce(t *testing.T) {
 	}
 
 	// The outcome is still the command's own, which this must not have
-	// disturbed: the readiness write lands before the final one, and a status
-	// never moves backwards.
+	// disturbed: the readiness write lands before the final one, and the phase
+	// only moves forward, so a late readiness write cannot undo ending.
 	rec := run.record(t)
 	require.Equal(t, sessiondir.StatusEnding, rec.Status)
 	require.Equal(t, sessiondir.ReasonExited, rec.Reason)
