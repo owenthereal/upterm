@@ -72,17 +72,19 @@ func Test_wordWrapLines(t *testing.T) {
 	}
 
 	// The no-split check holds only where the width can hold every word: a
-	// token wider than the width, like a path or a URL, is cut by design. Count
-	// the widths each text was checked at, so the check can't pass by never
-	// running.
-	checked := map[string]int{}
+	// token wider than the width, like a path or a URL, is cut by design. The
+	// widest width must hold each text's longest word, so the check runs for
+	// every text at least there, whatever subtest filter is in force.
+	widths := []int{30, 40, 60, 80, 100}
 	for name, text := range texts {
 		longest := 0
 		for _, word := range strings.Fields(text) {
 			longest = max(longest, utf8.RuneCountInString(word))
 		}
+		require.LessOrEqual(t, longest, widths[len(widths)-1],
+			"%s: no width holds its longest word, so the word-split check would never run", name)
 
-		for _, w := range []int{30, 40, 60, 80, 100} {
+		for _, w := range widths {
 			t.Run(fmt.Sprintf("%s at width %d breaks only at spaces", name, w), func(t *testing.T) {
 				lines := wordWrapLines(text, w)
 
@@ -94,15 +96,11 @@ func Test_wordWrapLines(t *testing.T) {
 				}
 
 				if longest <= w {
-					checked[name]++
 					assert.Equal(t, strings.Fields(text), strings.Fields(strings.Join(lines, " ")),
 						"%s at width %d: a word was split; lines: %q", name, w, lines)
 				}
 			})
 		}
-	}
-	for name := range texts {
-		assert.Positive(t, checked[name], "%s: no width held every word, so no word-split check ran", name)
 	}
 
 	t.Run("a word longer than the width is cut at it", func(t *testing.T) {

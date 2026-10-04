@@ -94,9 +94,9 @@ var tunnelHints = map[string]string{
 
 // StatusText is the status row's value. A reconnecting session says why it is
 // down, since when, and when it tries next; every other status is its plain
-// word. A disconnected session's reason is still shown, by StatusHint, and the
-// outage an ended session's record keeps is not something to act on. Times are
-// local, to the second.
+// word. A disconnected session's hint row says why, and the outage an ended
+// session's record keeps is not something to act on. Times are local, to the
+// second.
 //
 // Each piece is left out when it isn't known. A next attempt that is not
 // ahead of the clock is left out too: it is stamped as each wait starts, so
