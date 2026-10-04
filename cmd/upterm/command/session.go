@@ -1182,33 +1182,68 @@ func infoRunE(c *cobra.Command, args []string) error {
 	return nil
 }
 
+// summaryLabelWidth is the width of the summary's label column, which the
+// longest label ("Reconnect:") and a space fill.
+const summaryLabelWidth = 11
+
 // printSessionSummary prints what the record knows, for a session whose admin
 // socket is gone. Answering only while the process is alive would make
 // `session info` useless for the question people ask it afterwards, which is
 // how the thing ended.
 func printSessionSummary(info sessionInfo) {
+	// On a terminal the sentences wrap to what is left of the line after the
+	// label. Elsewhere the output may be piped to other tools, so each row
+	// stays one line.
+	valueWidth := 0
+	if tui.IsTTY() {
+		valueWidth = tui.TermWidth() - summaryLabelWidth
+	}
+	writeSessionSummary(os.Stdout, info, valueWidth)
+	printJoinTimeout(info)
+}
+
+// writeSessionSummary writes the summary's rows to w. The status and hint are
+// sentences, so they wrap to valueWidth at spaces, with continuation lines
+// indented under the value; a valueWidth of 0 leaves them on one line.
+func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	// The status, hint and relay note are the detail view's, so the two never
 	// word the same outage differently.
 	detail := withTunnelState(tui.SessionDetail{Status: info.Status}, info)
 
-	fmt.Printf("Name:      %s\n", info.Name)
-	fmt.Printf("Status:    %s\n", tui.StatusText(detail))
+	_, _ = fmt.Fprintf(w, "Name:      %s\n", info.Name)
+	writeSummaryRow(w, "Status:", tui.StatusText(detail), valueWidth)
 	if hint := tui.StatusHint(detail); hint != "" {
-		fmt.Printf("Hint:      %s\n", hint)
+		writeSummaryRow(w, "Hint:", hint, valueWidth)
 	}
 	if note := tui.ReconnectNote(detail); note != "" {
-		fmt.Printf("Reconnect: %s\n", note)
+		_, _ = fmt.Fprintf(w, "Reconnect: %s\n", note)
 	}
 	if info.Reason != "" {
-		fmt.Printf("Reason:    %s\n", info.Reason)
+		_, _ = fmt.Fprintf(w, "Reason:    %s\n", info.Reason)
 	}
 	if info.ExitCode != nil {
-		fmt.Printf("Exit code: %d\n", *info.ExitCode)
+		_, _ = fmt.Fprintf(w, "Exit code: %d\n", *info.ExitCode)
 	}
 	if info.Signal != "" {
-		fmt.Printf("Signal:    %s\n", info.Signal)
+		_, _ = fmt.Fprintf(w, "Signal:    %s\n", info.Signal)
 	}
-	printJoinTimeout(info)
+}
+
+// writeSummaryRow writes a label and a sentence, wrapped to valueWidth with
+// continuation lines indented to the label column. A valueWidth of 0 writes
+// the sentence as it is.
+func writeSummaryRow(w io.Writer, label, value string, valueWidth int) {
+	lines := []string{value}
+	if valueWidth > 0 {
+		lines = tui.WrapProse(value, valueWidth)
+	}
+	for i, line := range lines {
+		if i == 0 {
+			_, _ = fmt.Fprintf(w, "%-*s%s\n", summaryLabelWidth, label, line)
+		} else {
+			_, _ = fmt.Fprintf(w, "%*s%s\n", summaryLabelWidth, "", line)
+		}
+	}
 }
 
 // withTunnelState gives detail the record's account of the tunnel, which a

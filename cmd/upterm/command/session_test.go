@@ -2200,6 +2200,67 @@ func Test_printSessionSummary_PastNextAttempt(t *testing.T) {
 	require.Contains(t, string(raw), "nextAttemptAt")
 }
 
+// Test_writeSessionSummary_WrapsStatusAndHint: the status and hint rows wrap at
+// spaces to the width left after the label, with continuation lines under the
+// value; a width of 0, which is what a pipe gets, keeps each on one line. The
+// width is passed in, so none of this depends on stdout being a terminal.
+func Test_writeSessionSummary_WrapsStatusAndHint(t *testing.T) {
+	const indent = "           " // the summary's 11-column label
+
+	disconnected := sessionInfo{
+		Name: "n", Status: sessiondir.StatusDisconnected, Reconnect: sessiondir.ReconnectUnsupported,
+		TunnelReason: sessiondir.TunnelReasonReconnectUnsupported,
+	}
+
+	t.Run("the hint wraps under its value", func(t *testing.T) {
+		var b strings.Builder
+		writeSessionSummary(&b, disconnected, 40)
+
+		require.Equal(t, "Name:      n\n"+
+			"Status:    disconnected\n"+
+			"Hint:      this relay doesn't support reconnecting,\n"+
+			indent+"so guests can't reach this session\n"+
+			indent+"again. Restart it for a new connect\n"+
+			indent+"string.\n"+
+			"Reconnect: unsupported by this relay\n", b.String())
+	})
+
+	t.Run("the status wraps under its value", func(t *testing.T) {
+		lost := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+		next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		reconnecting := sessionInfo{
+			Name: "n", Status: sessiondir.StatusReconnecting, Reconnect: sessiondir.ReconnectSupported,
+			TunnelReason: sessiondir.TunnelReasonNetwork, TunnelLostAt: lost, NextAttemptAt: next,
+		}
+		var b strings.Builder
+		writeSessionSummary(&b, reconnecting, 30)
+
+		require.Equal(t, "Name:      n\n"+
+			"Status:    reconnecting — network since\n"+
+			indent+localClock(lost)+", next attempt\n"+
+			indent+localClock(next)+"\n"+
+			"Hint:      upterm can't reach the relay;\n"+
+			indent+"it keeps retrying.\n", b.String())
+	})
+
+	t.Run("a width of 0 keeps each row on one line", func(t *testing.T) {
+		var b strings.Builder
+		writeSessionSummary(&b, disconnected, 0)
+
+		require.Equal(t, "Name:      n\n"+
+			"Status:    disconnected\n"+
+			"Hint:      this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.\n"+
+			"Reconnect: unsupported by this relay\n", b.String())
+	})
+
+	t.Run("an empty status still gets its row", func(t *testing.T) {
+		var b strings.Builder
+		writeSessionSummary(&b, sessionInfo{Name: "n"}, 40)
+
+		require.Equal(t, "Name:      n\nStatus:    \n", b.String())
+	})
+}
+
 // Test_infoRunE_EndedWhileReconnecting: the final record keeps its outage for
 // -o json, but an ended session has no outage to explain on a terminal, and a
 // relay that supports reconnecting has no limit to report.

@@ -37,6 +37,11 @@ func IsTTY() bool {
 	return stdoutIsTerminal()
 }
 
+// TermWidth returns the terminal width, defaulting to 80 if unavailable
+func TermWidth() int {
+	return getTermWidth()
+}
+
 // RunModel runs a bubbletea model with automatic TTY detection.
 // For non-TTY environments, just prints View() once and returns.
 func RunModel(model tea.Model) (tea.Model, error) {
@@ -210,6 +215,14 @@ func wrapProseLines(text string, width int) []string {
 	if !IsTTY() {
 		return strings.Split(text, "\n")
 	}
+	return wordWrapLines(text, width)
+}
+
+// WrapProse wraps a sentence to width at spaces, as the detail view does for
+// its status and hint rows. Unlike the view it does not look at the terminal:
+// the caller decides whether to wrap at all. Empty text comes back as one empty
+// line, so a row with no value still has a line to print.
+func WrapProse(text string, width int) []string {
 	return wordWrapLines(text, width)
 }
 
