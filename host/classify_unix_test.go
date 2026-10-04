@@ -53,10 +53,10 @@ func TestClassifyAgentFailures(t *testing.T) {
 				held := ag.holdSignatures(t)
 				relay := sshServer(t, admitting(pub))
 
-				// The attempt's own context: its end releases the signature
-				// the agent is sitting on. The
-				// deadline starts once the signature is pending, not before
-				// the handshake that gets it there, which is CPU-bound.
+				// The attempt's own context: its end releases the signature the
+				// agent is sitting on. The deadline starts once the signature
+				// is pending, not before the handshake that gets it there,
+				// which is CPU-bound.
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				signers, closeAgent := redialIdentities(ctx, recorded, nil, false)

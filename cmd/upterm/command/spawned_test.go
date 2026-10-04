@@ -212,9 +212,9 @@ func TestSpawnedSessionDetachPrintsJoinTimeout(t *testing.T) {
 // TestSpawnedSessionDetachPrintsTheStatusItWasGiven: the JSON's status is the
 // daemon's report, not this process's assumption. The record is written by the
 // daemon and can say something other than ready by the time readiness is
-// published -- a tunnel lost in that moment leaves "disconnected" standing,
-// since a status never moves backwards -- and `upterm session info` would then
-// answer disconnected for the launch this JSON describes.
+// published -- a tunnel down by then gives reconnecting, or disconnected on a
+// relay that cannot reconnect -- and `upterm session info` would then answer
+// that for the launch this JSON describes.
 func TestSpawnedSessionDetachPrintsTheStatusItWasGiven(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer

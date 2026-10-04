@@ -99,7 +99,8 @@ type ReverseTunnel struct {
 	// proven registration with an ID not derived from HostKey fails it with
 	// ErrRelayUnsupported, before a listener is requested for an ID no guest
 	// knows. Without it, that answer is a first connection's, which goes on
-	// with ReconnectSupported false.
+	// with ReconnectSupported false. It needs a SessionSecret: without one,
+	// Establish fails at once.
 	RequireDerivedID bool
 	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
 	ProxyURL        *url.URL
@@ -444,12 +445,19 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		}
 		// Once, at the point of giving up. Logging every interval said the
 		// same thing about the same dead connection until the session ended,
-		// which buried whatever else the host had to say.
-		baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
-		// The guest server is parked in Accept on a tunnel that no longer
-		// carries anything. Closing the client is what makes Serve return, so
-		// OnGuestServerStopped runs and the session is published as
-		// disconnected instead of sitting at ready with nobody able to reach
+		// which buried whatever else the host had to say. Only silence is
+		// the relay's fault to report as an error: a probe into a connection
+		// that had already ended is that connection's loss, which whoever
+		// watches the tunnel reports in its own words.
+		if errors.Is(err, liveness.ErrSilent) {
+			baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
+		} else {
+			baseLogger.Debug("relay connection already ended; closing the tunnel", "error", err)
+		}
+		// The guest door is parked in Accept on a tunnel that no longer
+		// carries anything. Closing the client is what ends the connection,
+		// so Wait returns and whoever watches the tunnel learns it is lost,
+		// instead of the session sitting at ready with nobody able to reach
 		// it.
 		closeClient()
 	})

@@ -373,6 +373,25 @@ func Test_AdminServer_SetJoinTimeoutWithoutAHandlerIsUnimplemented(t *testing.T)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
 
+func TestGetSessionReadsTheRouteWhenSet(t *testing.T) {
+	session := &api.GetSessionResponse{SessionId: "session-1", NodeAddr: "node-1:22", SshUser: "user-1"}
+	s := &adminServiceServer{Session: session, ClientRepo: NewClientRepo()}
+	resp, err := s.GetSession(context.Background(), &api.GetSessionRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "node-1:22", resp.GetNodeAddr(), "without a route, the session's own")
+	require.Equal(t, "user-1", resp.GetSshUser())
+
+	s.Route = &SessionRoute{}
+	for _, route := range [][2]string{{"node-2:22", "user-2"}, {"node-3:22", "user-3"}} {
+		s.Route.Set(route[0], route[1])
+		resp, err := s.GetSession(context.Background(), &api.GetSessionRequest{})
+		require.NoError(t, err)
+		require.Equal(t, route[0], resp.GetNodeAddr(), "the latest registration's node")
+		require.Equal(t, route[1], resp.GetSshUser())
+		require.Equal(t, "session-1", resp.GetSessionId(), "the session ID never changes")
+	}
+}
+
 func TestGetSessionReportsTheJoinStateAndLaunch(t *testing.T) {
 	want := &api.JoinState{TimeoutNanos: int64(time.Minute), DeadlineUnixNano: 42}
 	s := &adminServiceServer{Session: &api.GetSessionResponse{}, ClientRepo: NewClientRepo(), LaunchID: "launch-1",

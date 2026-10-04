@@ -19,11 +19,6 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// lateWake is how late a woken goroutine may run on a loaded CI runner under
-// -race (server/lease_test.go). A close is asserted never to come before its
-// deadline, and at most this long after it.
-const lateWake = 150 * time.Millisecond
-
 func newRSA(t *testing.T) (ssh.PublicKey, *rsa.PrivateKey) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)

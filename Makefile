@@ -60,12 +60,16 @@ docker_build:
 
 GO_TEST_FLAGS ?= ""
 # The bound is a guard against a hung test, not a performance budget. ftests is
-# what sets it: on the Consul job it runs both suites in one binary and had
-# grown to 126s of the old 180s before this timeout was last touched, leaving
-# less headroom than runner-to-runner variance.
+# what sets it: on the Consul job it runs both suites in one binary, and a
+# go test -timeout bounds that binary as a whole. On master's CI (655960a) the
+# ftests package took 221.5s on the Ubuntu + Consul job, and 144s on macOS and
+# 137s on Windows, which run without Consul. That was before the scenarios of
+# a host redialling its relay were added; with them, this branch's CI took
+# 250.5s on the Ubuntu + Consul job (160s on macOS, 133s on Windows), which
+# leaves the old 300s with less headroom than runner-to-runner variance.
 .PHONY: test
 test:
-	go test $$(go list ./... | grep -v /e2e) -timeout=300s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
+	go test $$(go list ./... | grep -v /e2e) -timeout=600s -coverprofile=c.out -covermode=atomic -count=1 -race -v $(GO_TEST_FLAGS)
 
 # E2E tests require tmux and UPTERM_E2E_SERVER env var
 # Example: UPTERM_E2E_SERVER=ssh://uptermd.upterm.dev:22 make test-e2e

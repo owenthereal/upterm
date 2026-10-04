@@ -303,26 +303,27 @@ type TestServer interface {
 }
 
 func NewServerWithOptions(hostKey string, mode routing.Mode, opts ...func(*Server)) (TestServer, error) {
-	sshln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SSH listener: %w", err)
-	}
-
-	wsln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = sshln.Close()
-		return nil, fmt.Errorf("failed to create WebSocket listener: %w", err)
-	}
-
 	s := &Server{
 		hostKeyContent: hostKey,
-		sshln:          sshln,
-		wsln:           wsln,
 		mode:           mode,
+		sshListenAddr:  "127.0.0.1:0",
+		wsListenAddr:   "127.0.0.1:0",
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	sshln, err := listenRebinding(s.sshListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH listener: %w", err)
+	}
+
+	wsln, err := listenRebinding(s.wsListenAddr)
+	if err != nil {
+		_ = sshln.Close()
+		return nil, fmt.Errorf("failed to create WebSocket listener: %w", err)
+	}
+	s.sshln, s.wsln = sshln, wsln
 
 	// Start server in background
 	startErrCh := make(chan error, 1)
@@ -365,8 +366,38 @@ func NewServerWithMode(hostKey string, mode routing.Mode) (TestServer, error) {
 	return NewServerWithOptions(hostKey, mode)
 }
 
+// listenOn has the relay listen on sshAddr and wsAddr rather than on a free
+// port each: a relay restarted where its hosts already dial it.
+func listenOn(sshAddr, wsAddr string) func(*Server) {
+	return func(s *Server) { s.sshListenAddr, s.wsListenAddr = sshAddr, wsAddr }
+}
+
+// rebindTimeout bounds the retries of a listen that failed.
+const rebindTimeout = 2 * time.Second
+
+// listenRebinding listens on addr, retrying a bind that fails until
+// rebindTimeout. The address may be one a stopped relay has only just let go
+// of. Go sets SO_REUSEADDR on Unix listeners, and Windows reuses a recently
+// used address by default, so the bind normally succeeds at once; a socket of
+// the old relay's still closing could hold the address a moment longer,
+// though.
+func listenRebinding(addr string) (net.Listener, error) {
+	deadline := time.Now().Add(rebindTimeout)
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil || time.Now().After(deadline) {
+			return ln, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 type Server struct {
 	Server *server.Server
+
+	// sshListenAddr and wsListenAddr are where the relay listens, a free port
+	// each unless listenOn says otherwise.
+	sshListenAddr, wsListenAddr string
 
 	sshln          net.Listener
 	wsln           net.Listener
@@ -508,6 +539,9 @@ type Host struct {
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
+	// Reconnect paces the tunnel's liveness and its redials; a field left
+	// zero takes host.ReconnectTiming's default.
+	Reconnect host.ReconnectTiming
 
 	// AttachSocketFile is where the fixture's own client attaches. Optional:
 	// derived beside AdminSocketFile when empty.
@@ -620,6 +654,7 @@ func (c *Host) Share(url string) error {
 		ClientJoinedCallback:    c.ClientJoinedCallback,
 		ClientLeftCallback:      c.ClientLeftCallback,
 		KeepAliveDuration:       keepAliveDuration,
+		Reconnect:               c.Reconnect,
 		Logger:                  logger,
 		HostKeyCallback:         ssh.InsecureIgnoreHostKey(),
 		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,

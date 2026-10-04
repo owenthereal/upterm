@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/ws"
 	"github.com/stretchr/testify/assert"
@@ -723,12 +724,17 @@ func testProxyConcurrentGuests(t *testing.T, hostShareURL, hostNodeAddr, clientJ
 // testProxyIdleKeepalive leaves a session idle across several keepalive
 // intervals.
 //
-// The host sends keepalive@openssh.com as a channel request with WantReply
-// true every KeepAliveDuration, and its reverse tunnel sends the global-request
-// form to the relay. Any reply, success or failure, satisfies OpenSSH; no reply
-// tears the connection down. This is the case that catches a forwarder which
-// stops servicing a request queue once a channel goes quiet, because in
-// x/crypto an unread request channel blocks the whole connection's mux loop.
+// The host sends keepalive@openssh.com to each guest as a channel request with
+// WantReply true every KeepAliveDuration. Its reverse tunnel sends the
+// global-request form to the relay as a probe once Reconnect.PingInterval has
+// passed with no bytes from the relay. The guests' replies arrive every
+// KeepAliveDuration, so the interval is set to half of it here: a quiet stretch
+// between two replies is long enough for a probe, and probes cross the relay
+// throughout the idle period. Any reply, success or failure, satisfies
+// OpenSSH; no reply tears the connection down. This is the case that catches a
+// forwarder which stops servicing a request queue once a channel goes quiet,
+// because in x/crypto an unread request channel blocks the whole connection's
+// mux loop.
 func testProxyIdleKeepalive(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
 	adminSocketFile := setupAdminSocket(t)
 	h := &Host{
@@ -736,6 +742,7 @@ func testProxyIdleKeepalive(t *testing.T, hostShareURL, hostNodeAddr, clientJoin
 		PrivateKeys:              []string{HostPrivateKey},
 		AdminSocketFile:          adminSocketFile,
 		PermittedClientPublicKey: ClientPublicKeyContent,
+		Reconnect:                host.ReconnectTiming{PingInterval: keepAliveDuration / 2, PingBound: keepAliveDuration},
 	}
 	session := shareHost(t, h, hostShareURL, hostNodeAddr)
 

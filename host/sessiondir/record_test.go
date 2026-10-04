@@ -486,3 +486,33 @@ func TestRecordOriginatingSignalRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "signal_number")
 }
+
+// The tunnel fields are a contract for integrations that read the record, so
+// their names are pinned, and they are absent from a record that never lost
+// its tunnel rather than present with an empty or zero value.
+func TestRecordJSONNames(t *testing.T) {
+	at := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	raw, err := json.Marshal(Record{
+		Reconnect:     ReconnectSupported,
+		TunnelLostAt:  at,
+		TunnelReason:  TunnelReasonNetwork,
+		TunnelError:   "EOF",
+		NextAttemptAt: at.Add(time.Second),
+	})
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Equal(t, "supported", fields["reconnect"])
+	require.Equal(t, "2026-10-03T12:00:00Z", fields["tunnel_lost_at"])
+	require.Equal(t, "network", fields["tunnel_reason"])
+	require.Equal(t, "EOF", fields["tunnel_error"])
+	require.Equal(t, "2026-10-03T12:00:01Z", fields["next_attempt_at"])
+
+	raw, err = json.Marshal(Record{})
+	require.NoError(t, err)
+	fields = nil
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	for _, name := range []string{"reconnect", "tunnel_lost_at", "tunnel_reason", "tunnel_error", "next_attempt_at"} {
+		require.NotContains(t, fields, name)
+	}
+}
