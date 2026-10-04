@@ -349,6 +349,23 @@ func TestReverseTunnelRequiresAHostKey(t *testing.T) {
 	require.Error(t, waitWithin(t, tunnel, 2*time.Second), "a tunnel that never connected says so at once")
 }
 
+// A redial that requires a derived ID but sends no secret is a caller's
+// mistake, and Establish says so before it dials: the port is closed, so a
+// dial would fail differently.
+func TestReverseTunnelRequireDerivedIDNeedsASecret(t *testing.T) {
+	key, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := &ReverseTunnel{
+		Host:             &url.URL{Scheme: "ssh", Host: "127.0.0.1:1"},
+		Signers:          key,
+		HostKey:          key[0],
+		HostKeyCallback:  ssh.InsecureIgnoreHostKey(),
+		RequireDerivedID: true,
+	}
+	_, err = tunnel.Establish(t.Context())
+	require.EqualError(t, err, "reverse tunnel: RequireDerivedID needs a SessionSecret")
+}
+
 // waitWithin is rt.Wait, failing the test if it hasn't returned within d.
 func waitWithin(t *testing.T, rt *ReverseTunnel, d time.Duration) error {
 	t.Helper()

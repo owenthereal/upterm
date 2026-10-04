@@ -232,10 +232,15 @@ func (c *ReverseTunnel) Listener() net.Listener {
 	return c.ln
 }
 
-// Establish is one bounded attempt: ctx bounds everything until it returns —
-// the dial, the handshake, signing, the session request and the listen — and
-// nothing after. The tunnel it returns outlives ctx, and on any failure it
-// leaves no connection open.
+// Establish is one bounded attempt: ctx bounds the dial, the handshake, the
+// session request and the listen, and nothing after. The tunnel it returns
+// outlives ctx, and on any failure it leaves no connection open.
+//
+// A signature is bounded only as far as ctx releases the signer. Closing the
+// connection fails the handshake's own reads and writes, not a signer waiting
+// on something else: an agent connection the caller closes when ctx ends is
+// released with it, while an agent waiting on an approval prompt, over a
+// connection nothing closes, holds Establish past a cancel.
 func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionResponse, error) {
 	// What the relay did with a previous Establish's proof says nothing about
 	// this one, and a failure must not go on reporting it.
@@ -243,6 +248,11 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 
 	if c.HostKey == nil {
 		return nil, errors.New("reverse tunnel: HostKey is required")
+	}
+	// Without a secret there is no derived ID to require, and the check after
+	// the session request would pass whatever the relay answered.
+	if c.RequireDerivedID && c.SessionSecret == nil {
+		return nil, errors.New("reverse tunnel: RequireDerivedID needs a SessionSecret")
 	}
 
 	user, err := user.Current()
@@ -298,8 +308,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	}
 
 	// ctx's end closes the connection until Establish returns. Nothing past
-	// the dial takes a context — the handshake, a signer, a request already on
-	// the wire — and closing the connection is what fails each of them.
+	// the dial takes a context — the handshake, a request already on the wire
+	// — and closing the connection is what fails each of them. A signer it
+	// fails only if the signer waits on this connection (see Establish).
 	stopDeadline := context.AfterFunc(ctx, func() { _ = raw.Close() })
 
 	// Wrapped beneath the SSH transport, so that every byte the relay sends
