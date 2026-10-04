@@ -19,6 +19,30 @@ const (
 	StatusEnding       = "ending"
 )
 
+// StatusReconnecting: running, the tunnel is down, and the host is redialling
+// the relay on its own.
+const StatusReconnecting = "reconnecting"
+
+// Tunnel reasons say why a session's tunnel went down, or why a redial of it
+// failed. The values are a stable contract for integrations that read them.
+const (
+	TunnelReasonNetwork              = "network"
+	TunnelReasonRelayError           = "relay_error"
+	TunnelReasonAgentUnavailable     = "agent_unavailable"
+	TunnelReasonAgentRefused         = "agent_refused"
+	TunnelReasonAuthRefused          = "auth_refused"
+	TunnelReasonRelayKeyChanged      = "relay_key_changed"
+	TunnelReasonRelayUnsupported     = "relay_unsupported"
+	TunnelReasonProofRefused         = "proof_refused"
+	TunnelReasonReconnectUnsupported = "reconnect_unsupported"
+)
+
+// Whether the relay derives session IDs, known after the first connection.
+const (
+	ReconnectSupported   = "supported"
+	ReconnectUnsupported = "unsupported"
+)
+
 // Outcome reasons, published in the single session record.
 //
 // ReasonUnknown is both the value written when a name is claimed and the value

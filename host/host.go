@@ -23,6 +23,7 @@ import (
 	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
@@ -733,19 +734,21 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// verifying, read by the guest door below.
 	relayAuthority := &internal.RelayAuthority{}
 	rt := internal.ReverseTunnel{
-		Host:              u,
-		Signers:           c.Signers,
-		HostKey:           hostKey,
-		HostKeyCallback:   relayAuthority.Wrap(c.HostKeyCallback),
-		AuthorizedKeys:    aks,
-		KeepAliveDuration: c.KeepAliveDuration,
-		ProxyURL:          c.ProxyURL,
-		Logger:            logger.With("component", "reverse-tunnel"),
+		Host:            u,
+		Signers:         c.Signers,
+		HostKey:         hostKey,
+		HostKeyCallback: relayAuthority.Wrap(c.HostKeyCallback),
+		AuthorizedKeys:  aks,
+		// The relay is probed after KeepAliveDuration with no bytes from it,
+		// and given up on after twice that: any bytes count, so a reply
+		// queued behind guest output never counts against it.
+		KeepAlive: liveness.Timing{Interval: c.KeepAliveDuration, Bound: c.KeepAliveDuration},
+		ProxyURL:  c.ProxyURL,
+		Logger:    logger.With("component", "reverse-tunnel"),
 	}
-	// Deferred before Establish, not after: Close is nil-safe on a partially
-	// established tunnel, and a dial that succeeds but then fails inside
-	// Establish -- at createSession or Listen -- must still close the SSH
-	// client rather than leak it.
+	// Deferred before Establish, not after: Close is nil-safe on a tunnel that
+	// never established, and Establish closes whatever a failed attempt
+	// opened, so this is what closes the tunnel that did establish.
 	defer rt.Close()
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {

@@ -10,9 +10,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,11 +27,28 @@ import (
 // testAgent is a fake ssh-agent on a unix socket that counts the connections
 // it accepts and the signatures it makes. The two counters are the point:
 // "never dialled" and "never asked to sign" are the guarantees under test.
+// It can be stopped and restarted at the same socket, as a real agent can.
 type testAgent struct {
 	socket     string
 	keyring    agent.ExtendedAgent
 	accepts    atomic.Int32
 	signatures atomic.Int32
+	// flags are the last signature request's: SignatureFlagRsaSha256 or
+	// SignatureFlagRsaSha512 says which RSA-SHA2 algorithm was asked for.
+	flags atomic.Uint32
+	// ended counts the connections the agent has seen close; ending is
+	// signalled whenever it grows.
+	ended  atomic.Int32
+	ending chan struct{}
+
+	mu    sync.Mutex
+	ln    net.Listener // nil while stopped
+	conns map[net.Conn]struct{}
+	wg    sync.WaitGroup
+	// gate, once holdSignatures sets it, holds every signature request until
+	// it closes; held is signalled as each one reaches it.
+	gate chan struct{}
+	held chan struct{}
 }
 
 // countingAgent wraps the keyring so both signing entry points are counted.
@@ -43,11 +62,14 @@ type countingAgent struct {
 
 func (c *countingAgent) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
 	c.ta.signatures.Add(1)
+	c.ta.awaitGate()
 	return c.ExtendedAgent.Sign(key, data)
 }
 
 func (c *countingAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.SignatureFlags) (*ssh.Signature, error) {
 	c.ta.signatures.Add(1)
+	c.ta.flags.Store(uint32(flags))
+	c.ta.awaitGate()
 	return c.ExtendedAgent.SignWithFlags(key, data, flags)
 }
 
@@ -55,37 +77,146 @@ func (c *countingAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags agen
 func startTestAgent(t *testing.T, keys ...interface{}) *testAgent {
 	t.Helper()
 
+	// Keep the socket path below macOS's Unix socket path limit.
+	dir, err := os.MkdirTemp("", "agent-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	ta := &testAgent{socket: filepath.Join(dir, "sock"), ending: make(chan struct{}, 1)}
+	t.Cleanup(ta.stop)
+	ta.restart(t, keys...)
+	return ta
+}
+
+// restart serves keys at the agent's socket again, after stop, as an agent
+// restarted at the same SSH_AUTH_SOCK does.
+func (ta *testAgent) restart(t *testing.T, keys ...interface{}) {
+	t.Helper()
 	keyring, ok := agent.NewKeyring().(agent.ExtendedAgent)
 	require.True(t, ok, "x/crypto's keyring implements ExtendedAgent")
 	for _, k := range keys {
 		require.NoError(t, keyring.Add(agent.AddedKey{PrivateKey: k}))
 	}
+	ta.keyring = keyring
+	counted := &countingAgent{ExtendedAgent: keyring, ta: ta}
+	ta.listen(t, func(conn net.Conn) {
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = agent.ServeAgent(counted, conn)
+	})
+}
 
-	// Keep the socket path below macOS's Unix socket path limit.
-	dir, err := os.MkdirTemp("", "agent-")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	ta := &testAgent{socket: filepath.Join(dir, "sock"), keyring: keyring}
+// restartSilent listens at the agent's socket again, after stop, and accepts
+// connections it never answers: an agent that hangs.
+func (ta *testAgent) restartSilent(t *testing.T) {
+	t.Helper()
+	ta.listen(t, func(conn net.Conn) { _, _ = io.Copy(io.Discard, conn) })
+}
 
+func (ta *testAgent) listen(t *testing.T, serve func(net.Conn)) {
+	t.Helper()
 	ln, err := net.Listen("unix", ta.socket)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	counted := &countingAgent{ExtendedAgent: keyring, ta: ta}
+	ta.mu.Lock()
+	ta.ln = ln
+	ta.conns = make(map[net.Conn]struct{})
+	ta.wg.Add(1)
+	ta.mu.Unlock()
 	go func() {
+		defer ta.wg.Done()
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			ta.mu.Lock()
+			if ta.ln != ln { // stopped since Accept returned
+				ta.mu.Unlock()
+				_ = conn.Close()
+				return
+			}
 			ta.accepts.Add(1)
+			ta.conns[conn] = struct{}{}
+			ta.wg.Add(1)
+			ta.mu.Unlock()
 			go func() {
-				defer func() { _ = conn.Close() }()
-				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-				_ = agent.ServeAgent(counted, conn)
+				defer ta.wg.Done()
+				serve(conn)
+				_ = conn.Close()
+				ta.mu.Lock()
+				delete(ta.conns, conn)
+				ta.mu.Unlock()
+				ta.ended.Add(1)
+				select {
+				case ta.ending <- struct{}{}:
+				default:
+				}
 			}()
 		}
 	}()
-	return ta
+}
+
+// stop closes the socket, which removes it, and every connection, as an agent
+// that exits does. When it returns, the agent's counters are settled.
+func (ta *testAgent) stop() {
+	ta.mu.Lock()
+	ln, conns := ta.ln, ta.conns
+	ta.ln, ta.conns = nil, nil
+	ta.mu.Unlock()
+	if ln == nil {
+		return
+	}
+	_ = ln.Close()
+	for c := range conns {
+		_ = c.Close()
+	}
+	ta.wg.Wait()
+}
+
+// holdSignatures makes the agent, from now until the test ends, list its keys
+// as before but answer no signature request: an agent waiting on an approval
+// prompt. Each request is still counted, and the returned channel receives as
+// each one is held.
+func (ta *testAgent) holdSignatures(t *testing.T) <-chan struct{} {
+	t.Helper()
+	gate, held := make(chan struct{}), make(chan struct{}, 16)
+	ta.mu.Lock()
+	ta.gate, ta.held = gate, held
+	ta.mu.Unlock()
+	t.Cleanup(func() { close(gate) }) // before stop, which waits on the handlers
+	return held
+}
+
+func (ta *testAgent) awaitGate() {
+	ta.mu.Lock()
+	gate, held := ta.gate, ta.held
+	ta.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	select {
+	case held <- struct{}{}:
+	default:
+	}
+	<-gate
+}
+
+// open is how many connections the agent holds open.
+func (ta *testAgent) open() int {
+	ta.mu.Lock()
+	defer ta.mu.Unlock()
+	return len(ta.conns)
+}
+
+// awaitEnded waits until the agent has seen n connections close in all.
+func (ta *testAgent) awaitEnded(t *testing.T, n int32) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for ta.ended.Load() < n {
+		select {
+		case <-ta.ending:
+		case <-timeout:
+			t.Fatalf("the agent saw %d connections close, not %d", ta.ended.Load(), n)
+		}
+	}
 }
 
 func newEd25519(t *testing.T) (ssh.PublicKey, ed25519.PrivateKey) {

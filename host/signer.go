@@ -328,12 +328,10 @@ func (a *lazyAgent) dial() {
 	a.client = agent.NewClient(conn)
 }
 
-// signerFor returns the agent's signer for pub, or an error naming the key
-// when no agent holds it. An exact match wins. Failing that, a raw key also
-// selects a certificate entry carrying that key, as OpenSSH's IdentityFile
-// does, while a selector that is itself a certificate matches only that
-// certificate. The agent's listing does return every key it holds; only the
-// one asked for is ever returned to a caller.
+// signerFor returns the agent's signer for pub, as an *agentIdentity, or an
+// error naming the key when no agent holds it. The agent's listing does
+// return every key it holds; only the one asked for is ever returned to a
+// caller.
 func (a *lazyAgent) signerFor(pub ssh.PublicKey) (ssh.Signer, error) {
 	a.once.Do(a.dial)
 	fingerprint := utils.FingerprintSHA256(pub)
@@ -344,10 +342,21 @@ func (a *lazyAgent) signerFor(pub ssh.PublicKey) (ssh.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing SSH agent keys: %w", err)
 	}
+	if s := agentSignerFor(signers, pub); s != nil {
+		return newAgentIdentity(s, a.socket), nil
+	}
+	return nil, fmt.Errorf("the SSH agent does not hold %s", fingerprint)
+}
+
+// agentSignerFor picks pub's signer from an agent's listing, or nil. An exact
+// match wins. Failing that, a raw key also selects a certificate entry
+// carrying that key, as OpenSSH's IdentityFile does, while a selector that is
+// itself a certificate matches only that certificate.
+func agentSignerFor(signers []ssh.Signer, pub ssh.PublicKey) ssh.Signer {
 	want := pub.Marshal()
 	for _, s := range signers {
 		if bytes.Equal(s.PublicKey().Marshal(), want) {
-			return s, nil
+			return s
 		}
 	}
 	if _, isCert := pub.(*ssh.Certificate); !isCert {
@@ -361,11 +370,11 @@ func (a *lazyAgent) signerFor(pub ssh.PublicKey) (ssh.Signer, error) {
 				continue
 			}
 			if cert, ok := parsed.(*ssh.Certificate); ok && bytes.Equal(cert.Key.Marshal(), want) {
-				return s, nil
+				return s
 			}
 		}
 	}
-	return nil, fmt.Errorf("the SSH agent does not hold %s", fingerprint)
+	return nil
 }
 
 func (a *lazyAgent) close() {
@@ -413,6 +422,9 @@ func signersFromSSHAgent(socket string) ([]ssh.Signer, func(), error) {
 
 	client := agent.NewClient(conn)
 	signers, err := client.Signers()
+	for i, s := range signers {
+		signers[i] = newAgentIdentity(s, socket)
+	}
 
 	return signers, cleanup, err
 }

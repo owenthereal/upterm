@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,13 +19,18 @@ import (
 
 	"github.com/go-kit/kit/metrics/provider"
 	"github.com/owenthereal/upterm/internal/httpproxy/httpproxytest"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
+	"github.com/owenthereal/upterm/internal/testhelpers"
+	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestReverseTunnelAuthentication(t *testing.T) {
@@ -103,12 +109,12 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 			for _, tc := range authCases {
 				t.Run(tc.name, func(t *testing.T) {
 					tunnel := &ReverseTunnel{
-						Host:              endpoint.host,
-						ProxyURL:          endpoint.proxy,
-						Signers:           tc.signers,
-						HostKey:           good[0],
-						HostKeyCallback:   ssh.FixedHostKey(good[0].PublicKey()),
-						KeepAliveDuration: time.Hour,
+						Host:            endpoint.host,
+						ProxyURL:        endpoint.proxy,
+						Signers:         tc.signers,
+						HostKey:         good[0],
+						HostKeyCallback: ssh.FixedHostKey(good[0].PublicKey()),
+						KeepAlive:       liveness.Timing{Interval: time.Hour, Bound: time.Hour},
 					}
 					// Counted per subtest rather than totalled at the end: a
 					// total makes every nested -run filter fail, because the
@@ -160,7 +166,26 @@ type testRelay struct {
 	sessions *server.SessionManager
 }
 
-func startTestRelay(t *testing.T) testRelay {
+// withHostCert makes the relay present a host certificate for 127.0.0.1 in
+// place of each plain key, signed by the key it certifies, as ftests' relays
+// do. Without one, the hostname form a redial checks is never exercised.
+func withHostCert(s *server.Server) {
+	certified := make([]ssh.Signer, 0, len(s.HostSigners))
+	for _, key := range s.HostSigners {
+		cs := server.HostCertSigner{Hostnames: []string{"127.0.0.1"}}
+		cert, err := cs.SignCert(key)
+		if err != nil {
+			// An option has no t to fail; signing with a fresh key does not
+			// fail short of the system's randomness doing so.
+			panic(fmt.Sprintf("withHostCert: %v", err))
+		}
+		certified = append(certified, cert)
+	}
+	s.HostSigners = certified
+}
+
+// startTestRelay starts the relay, with opts applied to it before it serves.
+func startTestRelay(t *testing.T, opts ...func(*server.Server)) testRelay {
 	t.Helper()
 	identity, err := utils.CreateSigners(nil)
 	require.NoError(t, err)
@@ -184,6 +209,9 @@ func startTestRelay(t *testing.T) testRelay {
 		MetricsProvider: provider.NewDiscardProvider(),
 		SessionManager:  sessions,
 		Logger:          logger,
+	}
+	for _, opt := range opts {
+		opt(srv)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -212,11 +240,11 @@ func startTestRelay(t *testing.T) testRelay {
 // hostKey as its session key.
 func (r testRelay) tunnel(hostKey ssh.Signer, u *url.URL) *ReverseTunnel {
 	return &ReverseTunnel{
-		Host:              u,
-		Signers:           r.identity,
-		HostKey:           hostKey,
-		HostKeyCallback:   ssh.FixedHostKey(r.identity[0].PublicKey()),
-		KeepAliveDuration: time.Hour,
+		Host:            u,
+		Signers:         r.identity,
+		HostKey:         hostKey,
+		HostKeyCallback: ssh.FixedHostKey(r.identity[0].PublicKey()),
+		KeepAlive:       liveness.Timing{Interval: time.Hour, Bound: time.Hour},
 	}
 }
 
@@ -318,6 +346,345 @@ func TestReverseTunnelRequiresAHostKey(t *testing.T) {
 	}
 	_, err = tunnel.Establish(t.Context())
 	require.ErrorContains(t, err, "HostKey is required")
+	require.Error(t, waitWithin(t, tunnel, 2*time.Second), "a tunnel that never connected says so at once")
+}
+
+// A redial that requires a derived ID but sends no secret is a caller's
+// mistake, and Establish says so before it dials: the port is closed, so a
+// dial would fail differently.
+func TestReverseTunnelRequireDerivedIDNeedsASecret(t *testing.T) {
+	key, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := &ReverseTunnel{
+		Host:             &url.URL{Scheme: "ssh", Host: "127.0.0.1:1"},
+		Signers:          key,
+		HostKey:          key[0],
+		HostKeyCallback:  ssh.InsecureIgnoreHostKey(),
+		RequireDerivedID: true,
+	}
+	_, err = tunnel.Establish(t.Context())
+	require.EqualError(t, err, "reverse tunnel: RequireDerivedID needs a SessionSecret")
+}
+
+// waitWithin is rt.Wait, failing the test if it hasn't returned within d.
+func waitWithin(t *testing.T, rt *ReverseTunnel, d time.Duration) error {
+	t.Helper()
+	waited := make(chan error, 1)
+	go func() { waited <- rt.Wait() }()
+	select {
+	case err := <-waited:
+		return err
+	case <-time.After(d):
+		t.Fatalf("Wait did not return within %s", d)
+		return nil
+	}
+}
+
+// silentListener accepts TCP connections and never says a word on them.
+func silentListener(t *testing.T) (string, <-chan net.Conn) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			accepted <- c
+		}
+	}()
+	return ln.Addr().String(), accepted
+}
+
+// Nothing an attempt starts outlives its deadline or a cancel, over each
+// transport: Establish returns ctx's error, and the connection it opened is
+// closed by Establish itself, before anyone calls Close.
+func TestReverseTunnelAttemptHonoursItsDeadline(t *testing.T) {
+	silent, accepted := silentListener(t)
+	proxy := httpproxytest.Start(t, http.StatusOK)
+	key, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	silentProxy, proxyAccepted := silentListener(t) // a proxy that never answers CONNECT
+	for name, tc := range map[string]struct {
+		u, proxy *url.URL
+		far      <-chan net.Conn
+	}{
+		"ssh":            {u: &url.URL{Scheme: "ssh", Host: silent}, far: accepted},
+		"ws":             {u: &url.URL{Scheme: "ws", Host: silent}, far: accepted},
+		"ssh via proxy":  {u: &url.URL{Scheme: "ssh", Host: silent}, proxy: proxy.URL, far: accepted},
+		"ws via proxy":   {u: &url.URL{Scheme: "ws", Host: silent}, proxy: proxy.URL, far: accepted},
+		"a silent proxy": {u: &url.URL{Scheme: "ssh", Host: silent}, proxy: &url.URL{Scheme: "http", Host: silentProxy}, far: proxyAccepted},
+	} {
+		// A deadline, and a plain cancel such as session stop's, which gorilla
+		// and the CONNECT exchange don't see on their own.
+		for _, how := range []string{"deadline", "cancel"} {
+			t.Run(name+"/"+how, func(t *testing.T) {
+				rt := &ReverseTunnel{Host: tc.u, ProxyURL: tc.proxy, HostKey: key[0], Signers: key,
+					HostKeyCallback: ssh.InsecureIgnoreHostKey()}
+				ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+				cause := context.DeadlineExceeded
+				if how == "cancel" {
+					ctx, cancel = context.WithCancel(t.Context())
+					time.AfterFunc(200*time.Millisecond, cancel)
+					cause = context.Canceled
+				}
+				defer cancel()
+				start := time.Now()
+				_, err := rt.Establish(ctx)
+				require.ErrorIs(t, err, cause, "the attempt's failure names its cause")
+				require.Less(t, time.Since(start), 2*time.Second, "the attempt outlived its deadline")
+				var far net.Conn
+				select {
+				case far = <-tc.far:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the attempt never reached the far end")
+				}
+				require.NoError(t, far.SetReadDeadline(time.Now().Add(2*time.Second)))
+				_, err = io.Copy(io.Discard, far)
+				require.NoError(t, err, "the attempt's connection was left open")
+				rt.Close()
+			})
+		}
+	}
+}
+
+// A cancel that lands while the session request waits on the relay fails the
+// attempt with the cancel as its cause, not with the EOF the close produced.
+func TestReverseTunnelAttemptCancelledMidRequestSaysSo(t *testing.T) {
+	relayKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	asked := make(chan struct{})
+	release := make(chan struct{})
+	fake := fakerelay.Start(t, relayKey[0], func(*server.CreateSessionRequest) (bool, []byte) {
+		close(asked)
+		<-release
+		return false, nil
+	})
+	// Registered after Start, so it runs first and frees the relay's handler
+	// before the relay waits for it to stop.
+	t.Cleanup(func() { close(release) })
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	rt := &ReverseTunnel{Host: &url.URL{Scheme: "ssh", Host: fake.Addr}, HostKey: hostKey[0], Signers: hostKey,
+		HostKeyCallback: ssh.FixedHostKey(relayKey[0].PublicKey())}
+	t.Cleanup(rt.Close)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-asked:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	_, err = rt.Establish(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "error creating session", "the step the cancel interrupted")
+	require.Zero(t, fake.Forwards())
+}
+
+// The deadline is the attempt's, not the tunnel's: an established tunnel
+// outlives the context it was established under.
+func TestReverseTunnelOutlivesItsAttemptContext(t *testing.T) {
+	relay := startTestRelay(t)
+	key, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	rt := relay.tunnel(key[0], relay.url)
+	ctx, cancel := context.WithCancel(t.Context())
+	_, err = rt.Establish(ctx)
+	require.NoError(t, err)
+	t.Cleanup(rt.Close)
+	cancel() // the attempt is over; its context ends
+	time.Sleep(200 * time.Millisecond)
+	_, _, err = rt.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+	require.NoError(t, err, "an established tunnel died with its attempt's context")
+}
+
+// A relay that ignores the proof and answers with a random ID: a first
+// connection carries on without reconnect, and a redial is refused before it
+// binds a listener.
+func TestReverseTunnelAgainstARelayWithoutProofs(t *testing.T) {
+	relayKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	fake := fakerelay.Start(t, relayKey[0], func(*server.CreateSessionRequest) (bool, []byte) {
+		b, _ := proto.Marshal(&server.CreateSessionResponse{SessionID: "aRandomSessionID1234", SessionKeyRedial: true})
+		return true, b
+	})
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	secret, err := registration.NewSecret()
+	require.NoError(t, err)
+	tunnel := func(redial bool) *ReverseTunnel {
+		return &ReverseTunnel{Host: &url.URL{Scheme: "ssh", Host: fake.Addr}, HostKey: hostKey[0], Signers: hostKey,
+			HostKeyCallback: ssh.FixedHostKey(relayKey[0].PublicKey()), SessionSecret: secret, Generation: 1,
+			RequireDerivedID: redial}
+	}
+
+	first := tunnel(false)
+	_, err = first.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(first.Close)
+	require.False(t, first.ReconnectSupported())
+	require.False(t, first.SessionKeyRedial(), "only ever true where ReconnectSupported is")
+	require.Equal(t, 1, fake.Forwards())
+
+	redial := tunnel(true)
+	_, err = redial.Establish(t.Context())
+	require.ErrorIs(t, err, ErrRelayUnsupported)
+	require.Equal(t, 1, fake.Forwards(), "a redial bound a listener for a registration it was discarding")
+	waited := make(chan error, 1)
+	go func() { waited <- redial.Wait() }()
+	select {
+	case err := <-waited:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the redial's connection was left open")
+	}
+}
+
+// A relay with --authorized-keys honours the proof, but a redial must still
+// present an identity it lists: the session key alone won't do.
+func TestReverseTunnelOnAGatedRelay(t *testing.T) {
+	gated := func(s *server.Server) {
+		// Signers is the identity startTestRelay's tunnels authenticate with.
+		file := filepath.Join(t.TempDir(), "authorized_keys")
+		require.NoError(t, os.WriteFile(file, ssh.MarshalAuthorizedKey(s.Signers[0].PublicKey()), 0600))
+		s.AuthorizedKeysFiles = []string{file}
+	}
+	relay := startTestRelay(t, gated)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	secret, err := registration.NewSecret()
+	require.NoError(t, err)
+	tunnel := relay.tunnel(hostKey[0], relay.url)
+	tunnel.SessionSecret, tunnel.Generation = secret, 1
+	response, err := tunnel.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(tunnel.Close)
+	require.Equal(t, registration.ID(hostKey[0].PublicKey(), secret), response.SessionID)
+	require.True(t, tunnel.ReconnectSupported())
+	require.False(t, tunnel.SessionKeyRedial())
+}
+
+// A failed Establish never reports a previous one's flags.
+func TestReverseTunnelFlagsResetOnAFailedEstablish(t *testing.T) {
+	relay := startTestRelay(t)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	secret, err := registration.NewSecret()
+	require.NoError(t, err)
+	tunnel := relay.tunnel(hostKey[0], relay.url)
+	tunnel.SessionSecret, tunnel.Generation = secret, 1
+	_, err = tunnel.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(tunnel.Close)
+	require.True(t, tunnel.ReconnectSupported())
+	require.True(t, tunnel.SessionKeyRedial())
+
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+	tunnel.Host = &url.URL{Scheme: "ssh", Host: closed.Addr().String()}
+	_, err = tunnel.Establish(t.Context())
+	require.Error(t, err)
+	require.False(t, tunnel.ReconnectSupported())
+	require.False(t, tunnel.SessionKeyRedial())
+}
+
+// A tunnel liveness closed says so, to every waiter, and after Close.
+func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
+	relay := startTestRelay(t)
+	fwd := testhelpers.NewForwarder(t, relay.url.Host)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	tunnel := relay.tunnel(hostKey[0], &url.URL{Scheme: "ssh", Host: fwd.Addr()})
+	// A Bound well past a slow runner's late wake-ups, so a probe's reply is
+	// never what the test is timing.
+	tunnel.KeepAlive = liveness.Timing{Interval: 100 * time.Millisecond, Bound: 300 * time.Millisecond}
+	giveUp := tunnel.KeepAlive.Interval + tunnel.KeepAlive.Bound
+	_, err = tunnel.Establish(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(tunnel.Close)
+
+	waited := make(chan error, 2)
+	ended := make(chan struct{})
+	go func() {
+		err := tunnel.Wait()
+		close(ended)
+		waited <- err
+	}()
+	go func() { waited <- tunnel.Wait() }()
+	// While the relay answers, the tunnel outlives two silences' worth of
+	// Interval+Bound. Watch counts silence from its own start, so a keepalive
+	// fed a clock that never advances would give up at the first.
+	select {
+	case <-ended:
+		t.Fatal("the tunnel ended while the relay was answering its probes")
+	case <-time.After(2 * giveUp):
+	}
+	// Once the relay goes silent, Wait returns within Interval+Bound of its
+	// last bytes, given a second's margin.
+	fwd.Blackhole()
+	for range 2 {
+		select {
+		case err := <-waited:
+			require.ErrorIs(t, err, liveness.ErrSilent)
+		case <-time.After(giveUp + time.Second):
+			t.Fatal("Wait did not return once the relay went silent")
+		}
+	}
+	tunnel.Close()
+	require.ErrorIs(t, waitWithin(t, tunnel, giveUp+time.Second), liveness.ErrSilent, "after Close too")
+}
+
+// A refused registration is typed, with the relay's body and the text it always had.
+func TestReverseTunnelRefusalsAreTyped(t *testing.T) {
+	relayKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	for _, body := range []string{registration.RefusedProof + ": x", registration.Superseded, "failed to create session: x"} {
+		t.Run(body, func(t *testing.T) {
+			fake := fakerelay.Start(t, relayKey[0], func(*server.CreateSessionRequest) (bool, []byte) {
+				return false, []byte(body)
+			})
+			tunnel := &ReverseTunnel{Host: &url.URL{Scheme: "ssh", Host: fake.Addr}, HostKey: hostKey[0], Signers: hostKey,
+				HostKeyCallback: ssh.FixedHostKey(relayKey[0].PublicKey())}
+			t.Cleanup(tunnel.Close)
+			_, err := tunnel.Establish(t.Context())
+			var refused *CreateSessionRefusedError
+			require.ErrorAs(t, err, &refused)
+			require.Equal(t, body, refused.Body)
+			require.EqualError(t, err, "error creating session: could not initialize session: "+body)
+			require.Zero(t, fake.Forwards())
+		})
+	}
+	// A zero value is printable, as a table of expected errors builds one.
+	require.Equal(t, "unable to create reverse tunnel", (&ForwardRefusedError{}).Error())
+}
+
+// A test relay can present a host certificate for 127.0.0.1, which a
+// certificate checker accepts on the hostname each transport dials it by.
+func TestReverseTunnelAgainstARelayWithAHostCert(t *testing.T) {
+	relay := startTestRelay(t, withHostCert)
+	checker := &ssh.CertChecker{IsHostAuthority: func(auth ssh.PublicKey, _ string) bool {
+		return bytes.Equal(auth.Marshal(), relay.identity[0].PublicKey().Marshal())
+	}}
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	for _, u := range []*url.URL{relay.url, relay.wsURL} {
+		t.Run(u.Scheme, func(t *testing.T) {
+			tunnel := relay.tunnel(hostKey[0], u)
+			tunnel.HostKeyCallback = checker.CheckHostKey
+			_, err := tunnel.Establish(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(tunnel.Close)
+		})
+	}
 }
 
 // blockingListener stands in for the SSH forwarded listener, whose Close sends
@@ -409,130 +776,6 @@ func Test_BoundedListener_CloseForcesTheTransportAfterGrace(t *testing.T) {
 		require.NoError(t, ln.Close())
 		require.False(t, forced.Load(), "a listener that closes on its own must not cost the session its transport")
 	})
-}
-
-func Test_KeepAlive_GivesUpOnAnUnansweredPing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// The relay took the request and will never reply: the ping returns only
-	// once the transport is torn down, which is what closing release stands in
-	// for. Closed on cleanup so the abandoned goroutine ends with the test.
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-
-	var pings atomic.Int32
-	dead := make(chan error, 2)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		keepAlive(ctx, 20*time.Millisecond, func() error {
-			pings.Add(1)
-			<-release
-			return nil
-		}, func(err error) { dead <- err })
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("keepAlive went on pinging a relay that never answered")
-	}
-
-	require.Equal(t, int32(1), pings.Load(), "an unanswered ping must not be piled on by the next tick")
-	select {
-	case err := <-dead:
-		require.Error(t, err, "the tunnel is reported dead with the reason it died of")
-	default:
-		t.Fatal("keepAlive gave up without saying so")
-	}
-	require.Empty(t, dead, "a tunnel dies once")
-}
-
-func Test_KeepAlive_StopsAfterAFailedPing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	wantErr := errors.New("ssh: write: broken pipe")
-	var pings atomic.Int32
-	dead := make(chan error, 2)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		keepAlive(ctx, 20*time.Millisecond, func() error {
-			pings.Add(1)
-			return wantErr
-		}, func(err error) { dead <- err })
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("keepAlive went on pinging a connection that had already failed")
-	}
-
-	require.Equal(t, int32(1), pings.Load(), "a connection that failed a ping will fail the next one too")
-	select {
-	case err := <-dead:
-		require.ErrorIs(t, err, wantErr, "the give-up callback gets the error that killed the tunnel")
-	default:
-		t.Fatal("keepAlive gave up without saying so")
-	}
-	require.Empty(t, dead, "a tunnel dies once")
-}
-
-// A force close cancels the keepalive before it closes the client (see
-// Establish's closeClient), so a ping already in flight fails because ctx
-// ended rather than because the relay went quiet. keepAlive has to tell the
-// two apart: only the second is a dead relay.
-func Test_KeepAlive_DoesNotReportADeadRelayWhenStopped(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// The interval is also pingWithin's own timeout, and a ping that times out
-	// is a dead relay -- which is what this test must not produce by accident.
-	// A whole second between the ping announcing itself and that timeout is
-	// the margin that makes the ordering below a fact rather than a race the
-	// test usually wins: with a 20ms interval, a scheduler hiccup between the
-	// two lines after started turned this green test red.
-	const interval = time.Second
-
-	// Sent from inside the ping, so the cancel below lands on a ping that is
-	// provably in flight rather than on one that may not have begun.
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	wantErr := errors.New("ssh: EOF")
-
-	dead := make(chan error, 2)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		keepAlive(ctx, interval, func() error {
-			started <- struct{}{}
-			<-release
-			return wantErr
-		}, func(err error) { dead <- err })
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the ping never started")
-	}
-
-	// Cancel while the ping is still in flight, the way the force close's
-	// stopKeepAlive runs before it closes the client that would fail this
-	// same ping. Only then does the ping resolve, and it resolves with an
-	// error -- the one closing the client would produce.
-	cancel()
-	close(release)
-
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("keepAlive did not return once its context ended")
-	}
-
-	require.Empty(t, dead, "a ping that failed only because ctx ended must not be reported as a dead relay")
 }
 
 // A direct ssh:// dial that fails on a machine which defines a proxy is the

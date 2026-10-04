@@ -3,11 +3,16 @@ package ws
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	chshare "github.com/jpillora/chisel/share"
@@ -42,6 +47,13 @@ func NewSSHClient(u *url.URL, config *ssh.ClientConfig, isUptermClient bool, pro
 // proxyURL, when non-nil, is the HTTP proxy to dial through; when nil, the
 // proxy comes from the environment (HTTPS_PROXY, HTTP_PROXY, NO_PROXY).
 func NewWSConn(u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, error) {
+	return NewWSConnContext(context.Background(), u, isUptermClient, proxyURL)
+}
+
+// NewWSConnContext is NewWSConn bounded by ctx: its deadline and a cancel both
+// end the dial, any proxy's CONNECT, the TLS handshake and the upgrade. The
+// returned connection outlives ctx.
+func NewWSConnContext(ctx context.Context, u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, error) {
 	u, _ = url.Parse(u.String()) // clone
 	user := u.User
 	u.User = nil // ws spec doesn't support basic auth
@@ -53,6 +65,20 @@ func NewWSConn(u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, er
 	// package-level default, and taking the copy here still picks up whatever
 	// the process configured on it.
 	dialer := *websocket.DefaultDialer
+	// The base dial is chosen in gorilla's own order: NetDialContext, then
+	// NetDial, then a plain net.Dialer. The wrapper below replaces
+	// NetDialContext, so a hook the process configured on the default dialer
+	// must be picked up here or it would be silently bypassed.
+	dial := dialer.NetDialContext
+	if dial == nil {
+		if netDial := dialer.NetDial; netDial != nil {
+			dial = func(_ context.Context, network, addr string) (net.Conn, error) {
+				return netDial(network, addr)
+			}
+		} else {
+			dial = (&net.Dialer{}).DialContext
+		}
+	}
 	if proxyURL != nil {
 		// Open the tunnel with upterm's own dialer instead of gorilla's.
 		// gorilla throws away the reader it buffered the CONNECT response
@@ -69,16 +95,81 @@ func NewWSConn(u *url.URL, isUptermClient bool, proxyURL *url.URL) (net.Conn, er
 		// with gorilla, which also understands socks5:// in HTTPS_PROXY and
 		// honours NO_PROXY; neither is something this dialer does.
 		dialer.Proxy = nil
-		dialer.NetDialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		dial = func(ctx context.Context, _, addr string) (net.Conn, error) {
 			return httpproxy.Dial(ctx, proxyURL, addr)
 		}
 	}
-	wsc, _, err := dialer.Dial(u.String(), header)
+
+	// gorilla turns only ctx's deadline into a socket deadline, so a plain
+	// cancel would leave a read waiting on a silent server or proxy. Every TCP
+	// connection the dial opens is therefore closed when ctx ends, until the
+	// dial returns. gorilla's environment proxy dials through this same
+	// function, so its CONNECT is covered too.
+	//
+	// The close watches ctx itself, not the context gorilla passes in: gorilla
+	// derives that one with its HandshakeTimeout and cancels it as DialContext
+	// returns, so a close armed on it would end every connection that
+	// succeeded.
+	var (
+		mu    sync.Mutex
+		stops []func() bool
+	)
+	dialer.NetDialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(dialCtx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		mu.Lock()
+		stops = append(stops, stop)
+		mu.Unlock()
+		return conn, nil
+	}
+	wsc, _, err := dialer.DialContext(ctx, u.String(), header)
+
+	// Every stop runs, so none outlives the dial. One that finds its close
+	// already started lost the race to ctx: that connection is closing.
+	mu.Lock()
+	closing := false
+	for _, stop := range stops {
+		if !stop() {
+			closing = true
+		}
+	}
+	mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, withCause(ctx, closing, err)
+	}
+	if closing {
+		// The close is about to fail the connection the dial returned.
+		_ = wsc.Close()
+		return nil, ctx.Err()
 	}
 
 	return WrapWSConn(wsc), nil
+}
+
+// withCause wraps err in ctx's error when ctx is what failed the dial: closed
+// says its close-on-cancel ran, and a socket timeout once ctx's deadline has
+// passed is the deadline gorilla copied from ctx onto the socket. A failure ctx
+// had no part in keeps its own error, so a cancel that merely coincides with
+// it cannot hide it.
+func withCause(ctx context.Context, closed bool, err error) error {
+	cause := ctx.Err()
+	if !closed {
+		deadline, ok := ctx.Deadline()
+		if !ok || !errors.Is(err, os.ErrDeadlineExceeded) || time.Now().Before(deadline) {
+			return err
+		}
+		if cause == nil {
+			// The socket's timer can fire before ctx's own does.
+			cause = context.DeadlineExceeded
+		}
+	}
+	if errors.Is(err, cause) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", cause, err)
 }
 
 func WrapWSConn(ws *websocket.Conn) net.Conn {
