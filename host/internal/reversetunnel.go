@@ -99,7 +99,8 @@ type ReverseTunnel struct {
 	// proven registration with an ID not derived from HostKey fails it with
 	// ErrRelayUnsupported, before a listener is requested for an ID no guest
 	// knows. Without it, that answer is a first connection's, which goes on
-	// with ReconnectSupported false.
+	// with ReconnectSupported false. It needs a SessionSecret: without one,
+	// Establish fails at once.
 	RequireDerivedID bool
 	// ProxyURL, when non-nil, is the HTTP proxy to connect to Host through.
 	ProxyURL        *url.URL

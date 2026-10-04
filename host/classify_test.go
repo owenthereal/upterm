@@ -46,8 +46,8 @@ func runClassifyCases(t *testing.T, cases []classifyCase) {
 	}
 }
 
-// classifyTunnel is a redial's tunnel to a relay at host. Its host key is the one the relay would be told to expect, and
-// nothing here reaches that far.
+// classifyTunnel is a redial's tunnel to a relay at host. Its host key is the
+// one the relay would be told to expect, and nothing here reaches that far.
 func classifyTunnel(t *testing.T, host *url.URL, signers []ssh.Signer, hostKeyCallback ssh.HostKeyCallback) *internal.ReverseTunnel {
 	t.Helper()
 	sessionKey, err := NewHostKey()
@@ -182,8 +182,8 @@ func TestClassify(t *testing.T) {
 		},
 		{
 			// x/crypto's disconnect is an unexported type, so only its text
-			// says it. A host with more keys than the relay's
-			// MaxAuthTries gets this rather than "unable to authenticate".
+			// says it. A host with more keys than the relay's MaxAuthTries gets
+			// this rather than "unable to authenticate".
 			name: "a relay that disconnects a host that has offered too many keys",
 			err: func(t *testing.T) error {
 				err := establishFails(t, classifyTunnel(t,

@@ -3,16 +3,12 @@ package ws
 import (
 	"context"
 	"encoding/base64"
-	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 	chshare "github.com/jpillora/chisel/share"
@@ -138,7 +134,7 @@ func NewWSConnContext(ctx context.Context, u *url.URL, isUptermClient bool, prox
 	}
 	mu.Unlock()
 	if err != nil {
-		return nil, withCause(ctx, closing, err)
+		return nil, httpproxy.WithCause(ctx, closing, err)
 	}
 	if closing {
 		// The close is about to fail the connection the dial returned.
@@ -147,29 +143,6 @@ func NewWSConnContext(ctx context.Context, u *url.URL, isUptermClient bool, prox
 	}
 
 	return WrapWSConn(wsc), nil
-}
-
-// withCause wraps err in ctx's error when ctx is what failed the dial: closed
-// says its close-on-cancel ran, and a socket timeout once ctx's deadline has
-// passed is the deadline gorilla copied from ctx onto the socket. A failure ctx
-// had no part in keeps its own error, so a cancel that merely coincides with
-// it cannot hide it.
-func withCause(ctx context.Context, closed bool, err error) error {
-	cause := ctx.Err()
-	if !closed {
-		deadline, ok := ctx.Deadline()
-		if !ok || !errors.Is(err, os.ErrDeadlineExceeded) || time.Now().Before(deadline) {
-			return err
-		}
-		if cause == nil {
-			// The socket's timer can fire before ctx's own does.
-			cause = context.DeadlineExceeded
-		}
-	}
-	if errors.Is(err, cause) {
-		return err
-	}
-	return fmt.Errorf("%w: %w", cause, err)
 }
 
 func WrapWSConn(ws *websocket.Conn) net.Conn {
