@@ -22,7 +22,9 @@ func TestREADMERejoinScriptResetsEveryTrackedMode(t *testing.T) {
 		n, _ := strconv.Atoi(string(m[1]))
 		set[n] = string(m[2]) == "h"
 	}
-	for _, n := range restorableModes() {
+	modes := restorableModes()
+	require.NotEmpty(t, modes, "the tracker restores no modes, so there is nothing to check the README against")
+	for _, n := range modes {
 		on, ok := set[n]
 		require.True(t, ok, "mode %d is tracked but not reset", n)
 		require.Equal(t, restorable[n], on, "mode %d is reset away from its default", n)

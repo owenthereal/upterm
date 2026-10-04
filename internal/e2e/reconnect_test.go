@@ -171,7 +171,7 @@ type infoPoller struct {
 func (p *infoPoller) read() (reconnectSessionInfo, error) {
 	stdout, stderr, err := uptermOutput(p.ctx, 5*time.Second, "session", "info", p.name, "-o", "json")
 	p.mu.Lock()
-	p.raw = string(stdout) + string(stderr)
+	p.raw = string(stdout) + "\nstderr:\n" + string(stderr)
 	p.mu.Unlock()
 	var info reconnectSessionInfo
 	if err == nil {

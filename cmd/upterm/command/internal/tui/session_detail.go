@@ -62,10 +62,10 @@ type SessionDetail struct {
 	// shown whether the relay lets a dropped session come back under the same
 	// connect string. The tunnel fields describe the latest outage: why the
 	// latest attempt failed (one of sessiondir's TunnelReason values), when
-	// the outage began, and when the next attempt is due. They are the last
-	// outage's even after the tunnel is back or the session has ended, and
-	// zero when there has been none or the caller has no record to read them
-	// from.
+	// the outage began, and when the next attempt is due. A live session
+	// clears them when its tunnel comes back; only an ended session's record
+	// keeps its last outage. They are zero when there has been none or the
+	// caller has no record to read them from.
 	Reconnect     string
 	TunnelReason  string
 	TunnelLostAt  time.Time
@@ -94,9 +94,8 @@ var tunnelHints = map[string]string{
 
 // StatusText is the status row's value. A reconnecting session says why it is
 // down, since when, and when it tries next; every other status is its plain
-// word, because the outage a record keeps after the tunnel is back, or after
-// the session has ended, is not something to act on. Times are local, to the
-// second.
+// word, because the outage an ended session's record keeps is not something to
+// act on. Times are local, to the second.
 //
 // Each piece is left out when it isn't known. A next attempt that is not
 // ahead of the clock is left out too: it is stamped as each wait starts, so
@@ -175,13 +174,20 @@ func wrapLines(text string, width int) []string {
 	return strings.Split(wrapped, "\n")
 }
 
-// wordWrapLines wraps prose to width at spaces and returns lines. A single
+// wordWrapLines wraps prose to width at spaces and returns lines. A hyphen is
+// not a place to break, so a flag like --authorized-keys stays whole. A single
 // word longer than width is still cut at width, so no line exceeds it.
 // Embedded newlines are kept. It does not look at the terminal; wrapProseLines
 // decides whether to call it.
 func wordWrapLines(text string, width int) []string {
 	width = max(width, 10)
-	return strings.Split(wrap.String(wordwrap.String(text, width), width), "\n")
+	// reflow's default breakpoint is '-', which it writes without counting it
+	// toward the line, so a hyphenated word can be cut mid-word.
+	w := wordwrap.NewWriter(width)
+	w.Breakpoints = []rune{}
+	_, _ = w.Write([]byte(text))
+	_ = w.Close()
+	return strings.Split(wrap.String(string(w.Bytes()), width), "\n")
 }
 
 // wrapProseLines is wrapLines for sentences (the status detail and the hint),

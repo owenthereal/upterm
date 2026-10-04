@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,35 +55,44 @@ func Test_wrapLines(t *testing.T) {
 }
 
 // Test_wordWrapLines: a sentence breaks at spaces, never inside a word it can
-// keep whole, and the status detail and the longest hint are the sentences it
-// is for. A word longer than the width has nowhere to break, so it is cut. It
-// is tested directly because the terminal check keeps wrapProseLines from
-// wrapping under go test.
+// keep whole, and the status row and every hint are the sentences it is for.
+// A hyphen is not a place to break: a hint names flags like --authorized-keys,
+// which reflow would otherwise cut after a hyphen. A word longer than the
+// width has nowhere to break, so it is cut. It is tested directly because the
+// terminal check keeps wrapProseLines from wrapping under go test.
 func Test_wordWrapLines(t *testing.T) {
 	const width = 60
 
-	t.Run("a hint breaks only at spaces", func(t *testing.T) {
-		hint := tunnelHints["relay_key_changed"]
-		require.Greater(t, len(hint), width, "the case needs a hint that has to wrap")
+	texts := map[string]string{
+		"status row": "reconnecting — relay_key_changed since 12:03:04, next attempt 12:08:10",
+	}
+	require.NotEmpty(t, tunnelHints)
+	for reason, hint := range tunnelHints {
+		texts["hint "+reason] = hint
+	}
 
-		lines := wordWrapLines(hint, width)
+	for name, text := range texts {
+		for _, w := range []int{30, 40, 60, 80, 100} {
+			t.Run(fmt.Sprintf("%s at width %d breaks only at spaces", name, w), func(t *testing.T) {
+				lines := wordWrapLines(text, w)
 
-		require.Greater(t, len(lines), 1)
-		for _, line := range lines {
-			assert.LessOrEqual(t, len(line), width, line)
+				for _, line := range lines {
+					assert.LessOrEqual(t, utf8.RuneCountInString(line), w, "%s at width %d: line too long: %q", name, w, line)
+				}
+				if utf8.RuneCountInString(text) > w {
+					assert.Greater(t, len(lines), 1, "%s at width %d should wrap", name, w)
+				}
+
+				longest := 0
+				for _, word := range strings.Fields(text) {
+					longest = max(longest, utf8.RuneCountInString(word))
+				}
+				require.LessOrEqual(t, longest, w, "the case needs a width that holds every word")
+				assert.Equal(t, strings.Fields(text), strings.Fields(strings.Join(lines, " ")),
+					"%s at width %d: a word was split; lines: %q", name, w, lines)
+			})
 		}
-		assert.Equal(t, strings.Fields(hint), strings.Fields(strings.Join(lines, " ")),
-			"every word comes out whole and in order")
-	})
-
-	t.Run("the status detail breaks only at spaces", func(t *testing.T) {
-		text := "reconnecting — network since 12:03:04, next attempt 12:08:10, and a few more words to wrap"
-
-		lines := wordWrapLines(text, 40)
-
-		require.Greater(t, len(lines), 1)
-		assert.Equal(t, strings.Fields(text), strings.Fields(strings.Join(lines, " ")))
-	})
+	}
 
 	t.Run("a word longer than the width is cut at it", func(t *testing.T) {
 		word := strings.Repeat("x", 70)
