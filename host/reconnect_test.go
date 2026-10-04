@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -13,15 +14,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-kit/kit/metrics/provider"
+	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/internal/testhelpers"
+	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/utils"
@@ -70,6 +76,13 @@ func (r *reconnectRelay) addr(scheme string) string {
 // say, to admit as hosts only the identities they name, as uptermd's
 // --authorized-keys does.
 type relayOption func(*server.Server)
+
+// withAuthorizedKeysFiles admits as hosts only the identities files name. A
+// relay that gates its hosts doesn't let the session key alone in on a
+// redial, so a redial signs with the identities the host started with.
+func withAuthorizedKeysFiles(files ...string) relayOption {
+	return func(s *server.Server) { s.AuthorizedKeysFiles = files }
+}
 
 // startRelay starts a relay whose key is key, with opts applied, until the
 // test ends.
@@ -153,9 +166,10 @@ func (b *lockedBuffer) String() string {
 // in-process relay that it reaches through a forwarder, so a test can cut the
 // tunnel, hold the gap open, and send the redial somewhere else.
 type reconnectHost struct {
-	h     *Host
-	fwd   *testhelpers.Forwarder
-	relay *reconnectRelay
+	h      *Host
+	fwd    *testhelpers.Forwarder
+	relay  *reconnectRelay
+	scheme string
 	// created is what SessionCreatedCallback was given. Set before
 	// newReconnectHost returns.
 	created *api.GetSessionResponse
@@ -184,6 +198,14 @@ func withoutRecord(f *reconnectHost) {
 	f.h.AdminSocketFile = filepath.Join(f.root, "admin.sock")
 }
 
+// withRelay sends the host to relay, in place of the fixture's own.
+func withRelay(relay *reconnectRelay) reconnectOption {
+	return func(f *reconnectHost) {
+		f.relay = relay
+		f.fwd.Redirect(relay.addr(f.scheme))
+	}
+}
+
 // newReconnectHost starts a relay, a forwarder to its scheme listener, and a
 // host dialling scheme://<forwarder>, and returns once the session has been
 // created. opts run before the host does.
@@ -204,6 +226,7 @@ func newReconnectHost(t *testing.T, scheme string, opts ...reconnectOption) *rec
 	f := &reconnectHost{
 		fwd:       testhelpers.NewForwarder(t, relay.addr(scheme)),
 		relay:     relay,
+		scheme:    scheme,
 		root:      root,
 		stateRoot: utils.UptermStateDir(),
 		ready:     make(chan string, 1),
@@ -297,8 +320,17 @@ func (f *reconnectHost) awaitStatus(t *testing.T, want string, within time.Durat
 // record.
 func (f *reconnectHost) awaitLiveStatus(t *testing.T, want string, within time.Duration) {
 	t.Helper()
-	require.Eventually(t, func() bool { return f.h.Status() == want }, within, 10*time.Millisecond,
-		"the host never reported %s; it reports %q", want, f.h.Status())
+	deadline := time.Now().Add(within)
+	for {
+		got := f.h.Status()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the host never reported %s within %s; it reports %q", want, within, got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // awaitReady returns the status SessionReadyCallback was given.
@@ -322,6 +354,92 @@ func (f *reconnectHost) admin(t *testing.T) api.AdminServiceClient {
 	return api.NewAdminServiceClient(conn)
 }
 
+// stop asks the session to stop over its admin socket, naming this run.
+func (f *reconnectHost) stop(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := f.admin(t).StopSession(ctx, &api.StopSessionRequest{LaunchId: f.record(t).LaunchID})
+	require.NoError(t, err)
+}
+
+// awaitRun returns Run's error, failing the test if Run is still running
+// within.
+func (f *reconnectHost) awaitRun(t *testing.T, within time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-f.done:
+		return err
+	case <-time.After(within):
+		t.Fatalf("Host.Run did not return within %s", within)
+		return nil
+	}
+}
+
+// tickLine is one whole line of the fixture's command's output. A line still
+// arriving isn't one: "tick 1" may yet become "tick 12".
+var tickLine = regexp.MustCompile(reconnectTick + ` (\d+)\r?\n`)
+
+// ticks is the counter values in out, in the order they arrived.
+func ticks(out string) []int {
+	var ns []int
+	for _, m := range tickLine.FindAllStringSubmatch(out, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err == nil {
+			ns = append(ns, n)
+		}
+	}
+	return ns
+}
+
+// lastTick is the latest counter value in out, or 0 before the first.
+func lastTick(out string) int {
+	ns := ticks(out)
+	if len(ns) == 0 {
+		return 0
+	}
+	return ns[len(ns)-1]
+}
+
+// localClient is the host's own terminal, attached at the session's attach
+// socket.
+type localClient struct {
+	out *lockedBuffer
+	// ended is closed once the attachment has ended and out holds all it
+	// received; result is how it ended.
+	ended  chan struct{}
+	result attach.Result
+}
+
+// attachLocally attaches the host's own terminal, as `upterm attach` does,
+// and returns once it is receiving the command's output. It stays attached
+// until the session ends or the test does.
+func (f *reconnectHost) attachLocally(t *testing.T) *localClient {
+	t.Helper()
+	rec := f.record(t)
+	require.NotEmpty(t, rec.HostKeys)
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(rec.HostKeys[0]))
+	require.NoError(t, err)
+	c := &localClient{out: &lockedBuffer{}, ended: make(chan struct{})}
+	client := &attach.Client{Socket: rec.AttachSocket, HostKeys: []ssh.PublicKey{key}, Stdout: c.out, Pty: &attach.Pty{Term: "xterm"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer close(c.ended)
+		c.result, _ = client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-c.ended:
+		case <-time.After(5 * time.Second):
+			t.Error("the local client did not detach")
+		}
+	})
+	require.Eventually(t, func() bool { return lastTick(c.out.String()) > 0 }, 5*time.Second, 10*time.Millisecond,
+		"the local client never received the command's output")
+	return c
+}
+
 // reconnectGuest is a guest joined to the session with a pty.
 type reconnectGuest struct {
 	client *ssh.Client
@@ -329,16 +447,47 @@ type reconnectGuest struct {
 	out    *lockedBuffer
 	// exited receives what the guest's session ended with.
 	exited chan error
+	// drained is closed once out holds everything the session sent the guest.
+	drained chan struct{}
 }
 
 // sees reports whether the guest has received s.
 func (g *reconnectGuest) sees(s string) bool { return strings.Contains(g.out.String(), s) }
 
-// joinAsGuest joins the session as a guest would, at the relay's ssh listener
-// with sshUser and a key of its own, and returns once the guest is receiving
-// the command's output. The join is bounded: a guest door that no longer
-// serves fails it rather than hanging it.
+// awaitEnd returns what the guest's session ended with, once out holds
+// everything the session sent before it ended.
+func (g *reconnectGuest) awaitEnd(t *testing.T, within time.Duration) error {
+	t.Helper()
+	var err error
+	select {
+	case err = <-g.exited:
+	case <-time.After(within):
+		t.Fatalf("the guest's session did not end within %s", within)
+	}
+	select {
+	case <-g.drained:
+	case <-time.After(within):
+		t.Fatalf("the guest's output did not end within %s", within)
+	}
+	return err
+}
+
+// joinAsGuest joins the session as a guest would, and returns once the guest
+// is receiving the command's output.
 func (f *reconnectHost) joinAsGuest(t *testing.T, sshUser string) *reconnectGuest {
+	t.Helper()
+	g := f.joinGuest(t, sshUser)
+	require.Eventually(t, func() bool { return g.sees(reconnectTick) }, 5*time.Second, 10*time.Millisecond,
+		"the guest never received the command's output")
+	return g
+}
+
+// joinGuest joins the session as a guest would, at the relay's ssh listener
+// with sshUser and a key of its own, and returns once its shell has been
+// granted. The join is bounded: a guest door that no longer serves fails it
+// rather than hanging it. The guest's input stays open, as a terminal's does:
+// a guest whose input ends leaves.
+func (f *reconnectHost) joinGuest(t *testing.T, sshUser string) *reconnectGuest {
 	t.Helper()
 	key, err := NewHostKey()
 	require.NoError(t, err)
@@ -349,20 +498,25 @@ func (f *reconnectHost) joinAsGuest(t *testing.T, sshUser string) *reconnectGues
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, f.relay.sshAddr, &ssh.ClientConfig{User: sshUser,
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 	require.NoError(t, err, "the guest's handshake through the relay")
-	g := &reconnectGuest{client: ssh.NewClient(sshConn, chans, reqs), out: &lockedBuffer{}, exited: make(chan error, 1)}
+	g := &reconnectGuest{client: ssh.NewClient(sshConn, chans, reqs), out: &lockedBuffer{},
+		exited: make(chan error, 1), drained: make(chan struct{})}
 	t.Cleanup(func() { _ = g.client.Close() })
 
 	g.sess, err = g.client.NewSession()
 	require.NoError(t, err)
 	require.NoError(t, g.sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	stdin, err := g.sess.StdinPipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stdin.Close() })
 	stdout, err := g.sess.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, g.sess.Shell())
-	go func() { _, _ = io.Copy(g.out, stdout) }()
+	go func() {
+		defer close(g.drained)
+		_, _ = io.Copy(g.out, stdout)
+	}()
 	go func() { g.exited <- g.sess.Wait() }()
 
-	require.Eventually(t, func() bool { return g.sees(reconnectTick) }, 5*time.Second, 10*time.Millisecond,
-		"the guest never received the command's output")
 	// Joined: from here the connection lives as long as the session does.
 	require.NoError(t, conn.SetDeadline(time.Time{}))
 	return g
@@ -551,4 +705,281 @@ func TestRunWarnsAtStartWhenARedialWouldBeRefused(t *testing.T) {
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 	want := "the relay's certificate isn't valid for localhost, so a reconnect would be refused; use the relay's own hostname in --server"
 	require.Equal(t, 1, strings.Count(f.logs.String(), want), f.logs.String())
+}
+
+// A relay that registers sessions under IDs of its own can't take a session
+// back, so the host says so as soon as it is up, records the loss as final
+// when the tunnel drops, and never redials.
+func TestReconnectOnAnUnsupportedRelay(t *testing.T) {
+	key, err := NewHostKey()
+	require.NoError(t, err)
+	fake := fakerelay.Start(t, key, fakerelay.RandomID)
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) { f.fwd.Redirect(fake.Addr) })
+
+	rec := f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+	require.Equal(t, sessiondir.ReconnectUnsupported, rec.Reconnect)
+	warning := "this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted"
+	require.Equal(t, 1, strings.Count(f.logs.String(), warning), "said once, at the start")
+	require.Equal(t, 1, fake.Connections())
+
+	f.fwd.Cut()
+	rec = f.awaitStatus(t, sessiondir.StatusDisconnected, 5*time.Second)
+	require.Equal(t, sessiondir.TunnelReasonReconnectUnsupported, rec.TunnelReason)
+	require.False(t, rec.TunnelLostAt.IsZero())
+	require.Zero(t, rec.NextAttemptAt, "there is no next attempt")
+	require.Never(t, func() bool { return fake.Connections() != 1 }, time.Second, 10*time.Millisecond,
+		"the host redialled a relay that can't take the session back")
+	require.Equal(t, sessiondir.StatusDisconnected, f.record(t).Status)
+}
+
+// A dropped tunnel takes the guests with it and nothing else. The command
+// runs on, the local terminal goes on receiving it, and a guest who joins once
+// the tunnel is back sees the same command. A guest's forced command is that
+// guest's, and goes with it.
+func TestGuestsAtTheDrop(t *testing.T) {
+	t.Run("the shared command", func(t *testing.T) {
+		f := newReconnectHost(t, "ssh")
+		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+		guest := f.joinAsGuest(t, f.created.SshUser)
+		local := f.attachLocally(t)
+
+		f.fwd.Redirect(closedAddr(t)) // hold the gap open
+		atCut := lastTick(local.out.String())
+		f.fwd.Cut()
+		f.awaitStatus(t, sessiondir.StatusReconnecting, 5*time.Second)
+		_ = guest.awaitEnd(t, 5*time.Second) // however it ends: the connection it was on is gone
+
+		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= atCut+3 }, 5*time.Second, 10*time.Millisecond,
+			"the local client stopped receiving the command when the tunnel dropped")
+		require.Equal(t, sessiondir.StatusReconnecting, f.record(t).Status, "still in the gap")
+
+		f.fwd.Redirect(f.relay.addr("ssh"))
+		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+		rejoined := f.joinAsGuest(t, f.created.SshUser)
+		require.Eventually(t, func() bool { return lastTick(rejoined.out.String()) > atCut }, 5*time.Second, 10*time.Millisecond,
+			"the guest who rejoined doesn't see the command that ran through the gap")
+
+		seen := ticks(local.out.String())
+		for i := 1; i < len(seen); i++ {
+			require.Greater(t, seen[i], seen[i-1], "the command started over: %v", seen)
+		}
+	})
+
+	t.Run("a forced command", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+			f.h.ForceCommand = []string{"sh", "-c", `echo $$ > "$1"; exec sleep 600`, "sh", pidFile}
+		})
+		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+		local := f.attachLocally(t)
+		guest := f.joinGuest(t, f.created.SshUser)
+		var pid int
+		require.Eventually(t, func() bool {
+			b, err := os.ReadFile(pidFile)
+			if err != nil {
+				return false
+			}
+			pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+			return err == nil && pid > 0
+		}, 5*time.Second, 10*time.Millisecond, "the guest's forced command never started")
+		require.NoError(t, syscall.Kill(pid, 0), "the guest's forced command is running")
+
+		f.fwd.Redirect(closedAddr(t)) // hold the gap open
+		atCut := lastTick(local.out.String())
+		f.fwd.Cut()
+		_ = guest.awaitEnd(t, 5*time.Second) // however it ends: the connection it was on is gone
+		require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, 5*time.Second, 10*time.Millisecond,
+			"the guest's forced command outlived the guest")
+
+		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= atCut+3 }, 5*time.Second, 10*time.Millisecond,
+			"the host's own command stopped when the tunnel dropped")
+		require.Equal(t, sessiondir.StatusReconnecting, f.record(t).Status, "still in the gap")
+	})
+}
+
+// A stopped session's guests are told how it ended, as they would be had the
+// tunnel never dropped: the command's output up to its last line, then the
+// exit status. The tunnel they reach the session through is the one a redial
+// installed, and it stays up until the guest door has drained.
+func TestAStoppedSessionsGuestsStillGetTheirExitStatus(t *testing.T) {
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		// The fixture's counter, taking a moment to go once it is hung up,
+		// as a shell hanging up its jobs does, and then going by the hangup.
+		// A tunnel closed as soon as the session began ending would be gone
+		// well before the guest is told how it ended.
+		f.h.Command = []string{"sh", "-c", `trap 'sleep 0.5; trap - HUP; kill -HUP $$' HUP; ` +
+			`i=0; while :; do i=$((i+1)); echo "` + reconnectTick + ` $i"; sleep 0.05; done`}
+	})
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+	f.fwd.Redirect(closedAddr(t)) // hold the gap open
+	f.fwd.Cut()
+	f.awaitStatus(t, sessiondir.StatusReconnecting, 5*time.Second)
+	f.fwd.Redirect(f.relay.addr("ssh"))
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+	guest := f.joinAsGuest(t, f.created.SshUser)
+	// The local terminal is fed by the same output, over no tunnel: where
+	// its output ends is where the command's did.
+	local := f.attachLocally(t)
+
+	f.stop(t)
+	err := guest.awaitEnd(t, 5*time.Second)
+	var missing *ssh.ExitMissingError
+	require.NotErrorAs(t, err, &missing, "the guest's connection was dropped before its exit status")
+	var exit *ssh.ExitError
+	require.ErrorAs(t, err, &exit, "the guest's session ended without an exit status: %v", err)
+	// The command is hung up, so it has no exit status of its own to give.
+	require.Equal(t, 1, exit.ExitStatus())
+
+	select {
+	case <-local.ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the local client was not released")
+	}
+	require.Equal(t, attach.Exited, local.result.Reason)
+	last := lastTick(local.out.String())
+	require.Positive(t, last)
+	require.Equal(t, last, lastTick(guest.out.String()), "the guest's output was cut short:\n%s", guest.out.String())
+
+	require.ErrorIs(t, f.awaitRun(t, 5*time.Second), context.Canceled)
+	require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
+}
+
+// A session stopped while its tunnel is down stops at once, however the
+// redial is placed: waiting out the slow schedule, or waiting on the agent to
+// sign.
+func TestSessionStopWhileReconnecting(t *testing.T) {
+	t.Run("in the slow wait after the relay's key changed", func(t *testing.T) {
+		f := newReconnectHost(t, "ssh")
+		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+
+		otherKey, err := NewHostKey()
+		require.NoError(t, err)
+		f.fwd.Redirect(startRelay(t, otherKey).addr("ssh"))
+		f.fwd.Cut()
+		// A wait no fast one could be is the slow wait, which comes only once
+		// the relay's key has been refused twice in a row.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			rec, err := sessiondir.ReadRecord(f.stateRoot, f.h.Name)
+			readAt := time.Now()
+			require.NoError(t, err)
+			if rec.TunnelReason == sessiondir.TunnelReasonRelayKeyChanged && rec.NextAttemptAt.Sub(readAt) > reconnectTiming.FastCap {
+				require.Equal(t, sessiondir.StatusReconnecting, rec.Status)
+				break
+			}
+			if readAt.After(deadline) {
+				t.Fatalf("the host never settled into the slow wait; the record says %s (reason %q, next attempt %s)",
+					rec.Status, rec.TunnelReason, rec.NextAttemptAt)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		stopped := time.Now()
+		f.stop(t)
+		require.ErrorIs(t, f.awaitRun(t, 5*time.Second-time.Since(stopped)), context.Canceled)
+		rec := f.record(t)
+		require.Equal(t, sessiondir.StatusEnding, rec.Status)
+		require.Equal(t, sessiondir.ReasonStopped, rec.Reason)
+		require.Equal(t, sessiondir.TunnelReasonRelayKeyChanged, rec.TunnelReason, "it ended while reconnecting")
+	})
+
+	t.Run("in an attempt waiting on the agent", func(t *testing.T) {
+		agentPub, agentPriv := newEd25519(t)
+		ag := startTestAgent(t, agentPriv)
+		t.Setenv("SSH_AUTH_SOCK", ag.socket)
+		signers, closeStart, err := SignersWith(SignerOptions{})
+		require.NoError(t, err)
+		t.Cleanup(closeStart)
+		requireAgentIdentities(t, signers, ag.socket, agentPub)
+
+		relayKey, err := NewHostKey()
+		require.NoError(t, err)
+		authorized := writeTestFile(t, t.TempDir(), "authorized_keys", ssh.MarshalAuthorizedKey(agentPub))
+		gated := startRelay(t, relayKey, withAuthorizedKeysFiles(authorized))
+		f := newReconnectHost(t, "ssh", withRelay(gated), func(f *reconnectHost) { f.h.Signers = signers })
+		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+		require.NotZero(t, ag.signatures.Load(), "the first connection signed through the agent")
+
+		// From here the agent takes a connection and never answers on it.
+		ag.stop()
+		ag.restartSilent(t)
+		accepted := ag.accepts.Load()
+		f.fwd.Cut()
+		// The redial reaches the agent only to sign.
+		require.Eventually(t, func() bool { return ag.accepts.Load() > accepted && ag.open() == 1 }, 5*time.Second, 10*time.Millisecond,
+			"the redial never asked the agent to sign")
+		require.Equal(t, sessiondir.StatusReconnecting, f.record(t).Status)
+		ended := ag.ended.Load()
+
+		stopped := time.Now()
+		f.stop(t)
+		require.ErrorIs(t, f.awaitRun(t, 5*time.Second-time.Since(stopped)), context.Canceled)
+		ag.awaitEnded(t, ended+1)
+		require.Zero(t, ag.open(), "the attempt's agent connection was left open")
+		rec := f.record(t)
+		require.Equal(t, sessiondir.StatusEnding, rec.Status)
+		require.Equal(t, sessiondir.ReasonStopped, rec.Reason)
+	})
+}
+
+// A tunnel lost while the session waits on SessionCreatedCallback -- the
+// operator reading the confirmation prompt -- is redialled once the session
+// is under way. The record goes from starting to ready, reconnecting at most
+// in between, and never says the session is disconnected.
+func TestALossDuringTheConfirmationPrompt(t *testing.T) {
+	var (
+		statuses []string
+		first    = make(chan struct{})
+		polled   = make(chan struct{})
+	)
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		f.onCreated = func() error {
+			// The record is polled from before the loss to after the redial.
+			go func() {
+				defer close(polled)
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					// Read first: ready seen after a later registration is
+					// the redial's ready, not one written before the loss
+					// was noticed.
+					sess, err := f.relay.sessions.GetSession(f.created.SessionId)
+					redialled := err == nil && sess.Generation >= 2
+					rec, err := sessiondir.ReadRecord(f.stateRoot, f.h.Name)
+					if err == nil && (len(statuses) == 0 || statuses[len(statuses)-1] != rec.Status) {
+						statuses = append(statuses, rec.Status)
+						if len(statuses) == 1 {
+							close(first)
+						}
+					}
+					if err == nil && redialled && rec.Status == sessiondir.StatusReady {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}()
+			select {
+			case <-first:
+			case <-time.After(5 * time.Second):
+				return errors.New("the record was never read")
+			}
+			f.fwd.Cut()
+			return nil
+		}
+	})
+
+	select {
+	case <-polled:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the poll never finished")
+	}
+	require.NotEmpty(t, statuses)
+	require.Equal(t, sessiondir.StatusStarting, statuses[0], "%v", statuses)
+	require.Equal(t, sessiondir.StatusReady, statuses[len(statuses)-1], "the session never came back: %v", statuses)
+	require.NotContains(t, statuses, sessiondir.StatusDisconnected)
+	for _, s := range statuses[1 : len(statuses)-1] {
+		require.Contains(t, []string{sessiondir.StatusReconnecting, sessiondir.StatusReady}, s, "%v", statuses)
+	}
+	sess, err := f.relay.sessions.GetSession(f.created.SessionId)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, sess.Generation, uint64(2), "registered again, under a later generation")
 }
