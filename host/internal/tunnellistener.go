@@ -17,17 +17,20 @@ import (
 // for Swap to install the next tunnel's listener, and only Fail and Close end
 // it.
 //
-// Every inner listener is accepted from on a goroutine of its own, so Accept,
-// Swap, Fail and Close never wait on one another or on an inner listener. A
-// forwarded listener's Close is a request to the relay, and an unresponsive
-// relay holds it for seconds.
+// Every inner listener is accepted from on a goroutine of its own, so Accept
+// never waits on an inner listener, and no lock is held across an inner Close.
+// A forwarded listener's Close is a request to the relay, and an unresponsive
+// relay holds it for seconds: Swap and Close, which make that call, wait for
+// it, and Accept and Fail never do.
 type TunnelListener struct {
 	// addr is the first listener's, taken once so Addr needs no lock and
 	// stays the same across swaps.
 	addr net.Addr
 	// conns hands a connection from the current listener's goroutine to
-	// Accept. It is unbuffered: nothing is accepted from a tunnel until
-	// Accept is ready for it.
+	// Accept. It is unbuffered, but that goroutine accepts from its tunnel
+	// ahead of Accept and holds the one connection it has until Accept takes
+	// it. If the tunnel is replaced or the listener ends first, it closes
+	// that connection instead.
 	conns chan net.Conn
 	// done is closed by the first of Fail and Close.
 	done chan struct{}
