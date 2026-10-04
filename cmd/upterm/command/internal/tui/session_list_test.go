@@ -2,6 +2,7 @@ package tui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,4 +52,38 @@ func Test_SessionListModel_FitsAnEightyColumnTerminal(t *testing.T) {
 
 	require.LessOrEqual(t, lipgloss.Width(resized.(SessionListModel).table.View()), 80,
 		"the rendered table must fit the width it was sized for")
+}
+
+// Test_NewSessionListModel_ReconnectingRowIsTheWordOnly: the table says that a
+// session is reconnecting and leaves why and when to the detail view, so the
+// column holds the word and nothing the tunnel fields add.
+func Test_NewSessionListModel_ReconnectingRowIsTheWordOnly(t *testing.T) {
+	m := NewSessionListModel([]SessionDetail{{
+		Name: "demo", Status: "reconnecting", SessionID: "sid-1", Command: "bash", Host: "ssh://example.com:22",
+		Reconnect: "supported", TunnelReason: "network",
+		TunnelLostAt: time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC), NextAttemptAt: time.Date(2026, 10, 4, 10, 0, 30, 0, time.UTC),
+	}})
+
+	require.Equal(t, []table.Row{
+		{"", "demo", "reconnecting", "sid-1", "bash", "ssh://example.com:22"},
+	}, m.table.Rows())
+	require.GreaterOrEqual(t, calculateColumns(80)[2].Width, len("reconnecting"),
+		"the word fits the column whole")
+}
+
+// Test_SessionListModel_DetailViewShowsWhyAndWhen: entering a row shows the
+// same status detail and hint `session info` prints for that session.
+func Test_SessionListModel_DetailViewShowsWhyAndWhen(t *testing.T) {
+	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	pinClock(t, lost.Add(time.Second))
+
+	m := NewSessionListModel([]SessionDetail{{
+		Name: "demo", Status: "reconnecting", SessionID: "sid-1", Command: "bash",
+		Reconnect: "supported", TunnelReason: "network", TunnelLostAt: lost,
+	}})
+	entered, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	view := entered.(SessionListModel).View()
+	require.Contains(t, view, "reconnecting — network since "+clock(lost))
+	require.Contains(t, view, "upterm can't reach the relay; it keeps retrying.")
 }

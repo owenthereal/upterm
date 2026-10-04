@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wrap"
+	"github.com/owenthereal/upterm/host/sessiondir"
 	"golang.org/x/term"
 )
 
@@ -54,6 +56,96 @@ type SessionDetail struct {
 	SCPDownload      string // SCP download example
 	AuthorizedKeys   string
 	ConnectedClients []string
+
+	// Reconnect is "supported" or "unsupported" once the first connection has
+	// shown whether the relay lets a dropped session come back under the same
+	// connect string. The tunnel fields describe the current outage: why the
+	// latest attempt failed (one of sessiondir's TunnelReason values), when
+	// the outage began, and when the next attempt is due. They are zero when
+	// the tunnel is up or the caller has no record to read them from.
+	Reconnect     string
+	TunnelReason  string
+	TunnelLostAt  time.Time
+	NextAttemptAt time.Time
+}
+
+// now is the clock the status text compares a next attempt against. A variable
+// so a test can pin it instead of sleeping.
+var now = time.Now
+
+// tunnelHints say what to do, or what to expect, for each reason a tunnel
+// went down. The values of sessiondir's TunnelReason are a stable contract, so
+// a reason this version doesn't know has no entry and gets no hint rather than
+// a guess.
+var tunnelHints = map[string]string{
+	sessiondir.TunnelReasonNetwork:              "upterm can't reach the relay; it keeps retrying.",
+	sessiondir.TunnelReasonRelayError:           "the relay was reached but couldn't register the session; upterm keeps retrying.",
+	sessiondir.TunnelReasonAgentUnavailable:     "the SSH agent can't be reached (not running, or restarting); upterm keeps retrying.",
+	sessiondir.TunnelReasonAgentRefused:         "the SSH agent didn't sign: approve or unlock it, or restart the session with a key file (--private-key).",
+	sessiondir.TunnelReasonAuthRefused:          "the relay refused every identity offered; if its --authorized-keys changed, add your key back.",
+	sessiondir.TunnelReasonRelayKeyChanged:      "the relay's key differs from the one this session started with; not accepted. If the change is legitimate, restart the session.",
+	sessiondir.TunnelReasonRelayUnsupported:     "the relay node reached doesn't support reconnecting (as during a rollback); upterm keeps retrying.",
+	sessiondir.TunnelReasonProofRefused:         "the relay refused this session's proof of its key; upterm keeps retrying.",
+	sessiondir.TunnelReasonReconnectUnsupported: "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.",
+}
+
+// StatusText is the status row's value. A reconnecting session says why it is
+// down, since when, and when it tries next; every other status is its plain
+// word, because the outage a record keeps after the tunnel is back, or after
+// the session has ended, is not something to act on. Times are local, to the
+// second.
+//
+// Each piece is left out when it isn't known. A next attempt that is not
+// ahead of the clock is left out too: it is stamped as each wait starts, so
+// it is already past during every attempt and after a sleeping machine wakes
+// mid-wait, and printing it would promise a retry that has already happened.
+func StatusText(detail SessionDetail) string {
+	if detail.Status != sessiondir.StatusReconnecting {
+		return detail.Status
+	}
+
+	var parts []string
+	if detail.TunnelReason != "" {
+		parts = append(parts, detail.TunnelReason)
+	}
+	if !detail.TunnelLostAt.IsZero() {
+		parts = append(parts, "since "+clockTime(detail.TunnelLostAt))
+	}
+	text := strings.Join(parts, " ")
+	if detail.NextAttemptAt.After(now()) {
+		if text != "" {
+			text += ", "
+		}
+		text += "next attempt " + clockTime(detail.NextAttemptAt)
+	}
+	if text == "" {
+		return detail.Status
+	}
+	return detail.Status + " — " + text
+}
+
+func clockTime(t time.Time) string { return t.Local().Format("15:04:05") }
+
+// StatusHint is what the user can do about the outage, for the statuses that
+// have one: a reconnecting session, and a disconnected one, whose reason says
+// why it will not come back. Empty for every other status and for a reason
+// without a hint.
+func StatusHint(detail SessionDetail) string {
+	switch detail.Status {
+	case sessiondir.StatusReconnecting, sessiondir.StatusDisconnected:
+		return tunnelHints[detail.TunnelReason]
+	}
+	return ""
+}
+
+// ReconnectNote says the relay can't bring a dropped session back, from the
+// first connection on and at every status, since it stays true until the
+// session ends. Empty when the relay can, or isn't known to yet.
+func ReconnectNote(detail SessionDetail) string {
+	if detail.Reconnect == sessiondir.ReconnectUnsupported {
+		return "unsupported by this relay"
+	}
+	return ""
 }
 
 // FormatSessionDetail renders a SessionDetail to a string using terminal width
@@ -130,7 +222,13 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	// blank, and it is what distinguishes a session still starting, or running
 	// under another XDG_RUNTIME_DIR, from one that is broken.
 	if detail.Status != "" {
-		renderWrappedRow(&b, "Status:", detail.Status, labelWidth, valueWidth, ValueStyle)
+		renderWrappedRow(&b, "Status:", StatusText(detail), labelWidth, valueWidth, ValueStyle)
+	}
+	if hint := StatusHint(detail); hint != "" {
+		renderWrappedRow(&b, "Hint:", hint, labelWidth, valueWidth, ValueStyle)
+	}
+	if note := ReconnectNote(detail); note != "" {
+		renderWrappedRow(&b, "Reconnect:", note, labelWidth, valueWidth, ValueStyle)
 	}
 
 	// Basic fields (skip empty fields to reduce noise)

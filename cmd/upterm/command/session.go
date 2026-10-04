@@ -804,6 +804,17 @@ type sessionInfo struct {
 	// it, "no timeout, confirmed" and "a timeout whose write failed, from a
 	// daemon that is not answering" would look the same.
 	JoinStateSource string `json:"joinStateSource,omitempty"`
+	// Reconnect is "supported" or "unsupported", once the first connection
+	// has shown which: whether the relay lets a dropped session come back
+	// under the same connect string. The tunnel fields describe the current
+	// outage, or the last one a session that ended was in: when it began, why
+	// the latest attempt failed (a stable code), that attempt's raw error, and
+	// when the next attempt is due. They are absent while the tunnel is up.
+	Reconnect     string    `json:"reconnect,omitempty"`
+	TunnelLostAt  time.Time `json:"tunnelLostAt,omitzero"`
+	TunnelReason  string    `json:"tunnelReason,omitempty"`
+	TunnelError   string    `json:"tunnelError,omitempty"`
+	NextAttemptAt time.Time `json:"nextAttemptAt,omitzero"`
 	// joinCaveat is why a held session's join fields came from the record,
 	// for the human line; not part of the JSON.
 	joinCaveat string
@@ -838,10 +849,10 @@ const (
 // name is ignored rather than trusted.
 //
 // The response is the one this lookup validated, and is nil unless the record
-// says ready and the admin socket answered for this launch. Handing it back is
-// what stops a caller that wants the full live detail from asking again: a
-// second query returns whatever holds the name at that instant, which need
-// not be the session the first one confirmed.
+// says ready or reconnecting and the admin socket answered for this launch.
+// Handing it back is what stops a caller that wants the full live detail from
+// asking again: a second query returns whatever holds the name at that
+// instant, which need not be the session the first one confirmed.
 func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
@@ -863,7 +874,7 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	}
 
 	// Held: the recorded status is current and refines liveness — starting,
-	// ready or disconnected.
+	// ready, reconnecting or disconnected.
 	info := infoFromRecord(rec, rec.Status)
 
 	// Where the session answers, published for the caller and used for the
@@ -881,10 +892,10 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	info.AttachSocket = rec.AttachSocket
 
 	// Ask the daemon about any held session whose socket answers -- starting
-	// once the socket is up, ready, disconnected -- so the join timeout shown
-	// is the one the daemon enforces, not the last record write. A socket
-	// that does not answer, or answers for another launch, leaves the
-	// record's view, which JoinStateSource says.
+	// once the socket is up, ready, reconnecting, disconnected -- so the join
+	// timeout shown is the one the daemon enforces, not the last record
+	// write. A socket that does not answer, or answers for another launch,
+	// leaves the record's view, which JoinStateSource says.
 	sess, err := session(ctx, adminSocket)
 	if err != nil || !sameLaunch(rec, sess) {
 		info.joinCaveat = caveatUnanswered
@@ -892,14 +903,23 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	}
 	info = withLiveJoinState(info, sess)
 
-	// Only ready says the connect string is one anyone can act on. After a
-	// tunnel loss the host keeps its admin server running with a connect
-	// string that cannot connect, so a disconnected session gets its join
-	// state from the daemon and nothing that would advertise it as joinable.
-	if rec.Status != sessiondir.StatusReady {
+	// Only ready and reconnecting say the connect string is one anyone can
+	// act on: a reconnecting session comes back under the same one. After a
+	// tunnel loss the relay can't recover from, the host keeps its admin
+	// server running with a connect string that cannot connect, so a
+	// disconnected session gets its join state from the daemon and nothing
+	// that would advertise it as joinable.
+	if !joinable(rec.Status) {
 		return info, nil, nil
 	}
 	return withLiveDetail(info, sess), sess, nil
+}
+
+// joinable reports whether a session with this status has a connect string
+// worth showing: the tunnel is up, or is being redialled and will carry guests
+// again under the same one.
+func joinable(status string) bool {
+	return status == sessiondir.StatusReady || status == sessiondir.StatusReconnecting
 }
 
 // sameLaunch reports whether sess answered for the run rec describes: between
@@ -957,6 +977,11 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		Signal:             rec.Signal,
 		SignalNumber:       rec.SignalNumber,
 		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
+		Reconnect:          rec.Reconnect,
+		TunnelLostAt:       rec.TunnelLostAt,
+		TunnelReason:       rec.TunnelReason,
+		TunnelError:        rec.TunnelError,
+		NextAttemptAt:      rec.NextAttemptAt,
 	}
 	if rec.JoinTimeout > 0 {
 		info.JoinTimeout = shortDuration(rec.JoinTimeout)
@@ -1144,6 +1169,8 @@ func infoRunE(c *cobra.Command, args []string) error {
 			// again here it would come out under this process's runtime root
 			// and disagree with the socket that just answered.
 			detail.AdminSocket = info.AdminSocket
+			// And the tunnel's state, which is the record's too.
+			detail = withTunnelState(detail, info)
 			tui.PrintSessionDetail(detail)
 			printJoinTimeout(info)
 			return nil
@@ -1159,8 +1186,18 @@ func infoRunE(c *cobra.Command, args []string) error {
 // `session info` useless for the question people ask it afterwards, which is
 // how the thing ended.
 func printSessionSummary(info sessionInfo) {
+	// The status, hint and relay note are the detail view's, so the two never
+	// word the same outage differently.
+	detail := withTunnelState(tui.SessionDetail{Status: info.Status}, info)
+
 	fmt.Printf("Name:      %s\n", info.Name)
-	fmt.Printf("Status:    %s\n", info.Status)
+	fmt.Printf("Status:    %s\n", tui.StatusText(detail))
+	if hint := tui.StatusHint(detail); hint != "" {
+		fmt.Printf("Hint:      %s\n", hint)
+	}
+	if note := tui.ReconnectNote(detail); note != "" {
+		fmt.Printf("Reconnect: %s\n", note)
+	}
 	if info.Reason != "" {
 		fmt.Printf("Reason:    %s\n", info.Reason)
 	}
@@ -1171,6 +1208,16 @@ func printSessionSummary(info sessionInfo) {
 		fmt.Printf("Signal:    %s\n", info.Signal)
 	}
 	printJoinTimeout(info)
+}
+
+// withTunnelState gives detail the record's account of the tunnel, which a
+// socket's answer does not carry, as the lookup read it.
+func withTunnelState(detail tui.SessionDetail, info sessionInfo) tui.SessionDetail {
+	detail.Reconnect = info.Reconnect
+	detail.TunnelReason = info.TunnelReason
+	detail.TunnelLostAt = info.TunnelLostAt
+	detail.NextAttemptAt = info.NextAttemptAt
+	return detail
 }
 
 func currentRunE(c *cobra.Command, args []string) error {
@@ -1292,6 +1339,14 @@ func listSessions(ctx context.Context, runtimeRoot, stateRoot string) ([]tui.Ses
 			detail = live
 		}
 
+		// The tunnel is the record's to describe, in the row built from the
+		// record alone and in the one a socket refined alike, so the detail
+		// view of either says why a session is down.
+		detail.Reconnect = rec.Reconnect
+		detail.TunnelReason = rec.TunnelReason
+		detail.TunnelLostAt = rec.TunnelLostAt
+		detail.NextAttemptAt = rec.NextAttemptAt
+
 		result = append(result, detail)
 	}
 
@@ -1313,11 +1368,11 @@ func liveDetail(ctx context.Context, runtimeRoot string, rec sessiondir.Record) 
 		return tui.SessionDetail{}, false
 	}
 
-	// And a session that has one but is not ready is not joinable, whatever
-	// its socket says: the tunnel-loss path keeps the admin server up, so a
-	// disconnected session answers with a connect string nobody can use. The
-	// same gate `session info` keeps in front of its dial.
-	if rec.Status != sessiondir.StatusReady {
+	// And a session that has one but is neither ready nor reconnecting is not
+	// joinable, whatever its socket says: the tunnel-loss path keeps the admin
+	// server up, so a disconnected session answers with a connect string
+	// nobody can use. The same gate `session info` keeps in front of its dial.
+	if !joinable(rec.Status) {
 		return tui.SessionDetail{}, false
 	}
 

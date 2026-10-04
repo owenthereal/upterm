@@ -302,8 +302,9 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 		LaunchID: claimed.LaunchId,
 		// What the record said when the daemon published it, not an
 		// assumption made here: a tunnel lost in the moment before that
-		// write leaves "disconnected" standing, and a session info run a
-		// second later would answer that.
+		// write leaves "reconnecting" standing, or "disconnected" on a
+		// relay that can't reconnect, and a session info run a second later
+		// would answer that.
 		Status:       st.Status,
 		SessionID:    st.SessionId,
 		AdminSocket:  claimed.AdminSocket,

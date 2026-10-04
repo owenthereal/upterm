@@ -28,9 +28,10 @@ func calculateColumns(width int) []table.Column {
 	// Fixed columns
 	const markerWidth = 2
 	const nameWidth = 18
-	// Wide enough for "disconnected", the longest status a session publishes.
-	// A status cut to "disconnec…" would be the one column a session with no
-	// other detail to show is read from.
+	// Wide enough for "disconnected" and "reconnecting", the longest statuses
+	// a session publishes. A status cut to "disconnec…" would be the one column
+	// a session with no other detail to show is read from. The column holds the
+	// word only: why and when a session is reconnecting is the detail view's.
 	const statusWidth = 12
 	// bubbles pads a cell by one on each side, so six columns cost twelve;
 	// the rest is slack for the borders and spacing around them. The

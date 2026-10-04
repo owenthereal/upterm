@@ -22,6 +22,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
@@ -247,6 +248,102 @@ func buildDisconnected(t *testing.T, name string) {
 		Host:      "ssh://127.0.0.1:2222",
 		NodeAddr:  "127.0.0.1:2222",
 		Command:   []string{"bash"},
+	})
+}
+
+// tunnelOutage is the outage buildReconnecting publishes: lost a minute ago,
+// the next attempt an hour off, so the status row still has it ahead whatever
+// the clock does while a test runs.
+type tunnelOutage struct{ lostAt, nextAt time.Time }
+
+// buildReconnecting: claimed, published reconnecting by the supervisor with a
+// network outage, and, when answers is set, an admin socket that still
+// answers — the host keeps its admin server up while it redials.
+func buildReconnecting(t *testing.T, name string, answers bool) tunnelOutage {
+	t.Helper()
+
+	out := tunnelOutage{
+		lostAt: time.Now().Add(-time.Minute).UTC().Truncate(time.Second),
+		nextAt: time.Now().Add(time.Hour).UTC().Truncate(time.Second),
+	}
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReconnecting
+		r.SessionID = "sid-3"
+		r.HostKeys = []string{testHostKeyLine(t)}
+		r.Reconnect = sessiondir.ReconnectSupported
+		r.TunnelLostAt = out.lostAt
+		r.TunnelReason = sessiondir.TunnelReasonNetwork
+		r.TunnelError = "dial tcp 127.0.0.1:2222: connect: connection refused"
+		r.NextAttemptAt = out.nextAt
+	}))
+	if answers {
+		serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+			SessionId: "sid-3",
+			SshUser:   "sid-3",
+			Host:      "ssh://127.0.0.1:2222",
+			NodeAddr:  "127.0.0.1:2222",
+			Command:   []string{"bash"},
+		})
+	}
+	return out
+}
+
+// buildDisconnectedByRelay: what the host publishes when the relay can't
+// reconnect a session, so the tunnel is down for good, with its socket still
+// answering.
+func buildDisconnectedByRelay(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusDisconnected
+		r.SessionID = "sid-4"
+		r.HostKeys = []string{testHostKeyLine(t)}
+		r.Reconnect = sessiondir.ReconnectUnsupported
+		r.TunnelLostAt = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+		r.TunnelReason = sessiondir.TunnelReasonReconnectUnsupported
+		r.TunnelError = "tunnel closed"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-4",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+}
+
+// buildEndedWhileReconnecting: a session that ended during an outage. Its
+// record keeps the outage on purpose, so it still says how it ended.
+func buildEndedWhileReconnecting(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusEnding
+		r.Reason = sessiondir.ReasonExited
+		r.Reconnect = sessiondir.ReconnectUnsupported
+		r.TunnelLostAt = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+		r.TunnelReason = sessiondir.TunnelReasonNetwork
+		r.TunnelError = "dial tcp: connection refused"
+		r.NextAttemptAt = time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	}))
+	require.NoError(t, d.Release(context.Background()))
+}
+
+// localClock is a time as the status row prints it: local, to the second.
+func localClock(at time.Time) string { return at.Local().Format("15:04:05") }
+
+// runInfo is `session info NAME` as a user runs it, and what it printed.
+func runInfo(t *testing.T, name string) string {
+	t.Helper()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	return captureStdout(t, func() {
+		require.NoError(t, infoRunE(cmd, []string{name}))
 	})
 }
 
@@ -1860,4 +1957,271 @@ func TestShortDurationDropsZeroUnits(t *testing.T) {
 	} {
 		require.Equal(t, want, shortDuration(d), "%v", d)
 	}
+}
+
+// Test_infoFromRecord_CarriesTheTunnelFields: the five fields a reconnecting
+// record publishes reach the answer unchanged, and a record with none leaves
+// them out of the JSON rather than printing zero values.
+func Test_infoFromRecord_CarriesTheTunnelFields(t *testing.T) {
+	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	next := lost.Add(30 * time.Second)
+
+	info := infoFromRecord(&sessiondir.Record{
+		Name:          "n",
+		Reconnect:     sessiondir.ReconnectSupported,
+		TunnelLostAt:  lost,
+		TunnelReason:  sessiondir.TunnelReasonRelayError,
+		TunnelError:   "relay said no",
+		NextAttemptAt: next,
+	}, sessiondir.StatusReconnecting)
+	require.Equal(t, "supported", info.Reconnect)
+	require.True(t, info.TunnelLostAt.Equal(lost))
+	require.Equal(t, "relay_error", info.TunnelReason)
+	require.Equal(t, "relay said no", info.TunnelError)
+	require.True(t, info.NextAttemptAt.Equal(next))
+
+	raw, err := json.Marshal(infoFromRecord(&sessiondir.Record{Name: "n"}, sessiondir.StatusReady))
+	require.NoError(t, err)
+	for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
+		require.NotContains(t, string(raw), key, "an untouched session has no outage to report")
+	}
+}
+
+// Test_sessionInfo_JSONNamesTheTunnelFields pins the keys integrations read.
+func Test_sessionInfo_JSONNamesTheTunnelFields(t *testing.T) {
+	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	next := lost.Add(30 * time.Second)
+
+	raw, err := json.Marshal(sessionInfo{
+		Name:          "n",
+		Status:        sessiondir.StatusReconnecting,
+		Reconnect:     "supported",
+		TunnelLostAt:  lost,
+		TunnelReason:  "network",
+		TunnelError:   "connection refused",
+		NextAttemptAt: next,
+	})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, "supported", got["reconnect"])
+	require.Equal(t, "2026-10-04T10:00:00Z", got["tunnelLostAt"])
+	require.Equal(t, "network", got["tunnelReason"])
+	require.Equal(t, "connection refused", got["tunnelError"])
+	require.Equal(t, "2026-10-04T10:00:30Z", got["nextAttemptAt"])
+}
+
+// Test_lookup_Reconnecting: a reconnecting session comes back under the same
+// connect string, so it is the one status besides ready whose socket answer
+// is shown, together with the outage the record describes.
+func Test_lookup_Reconnecting(t *testing.T) {
+	setupSessionRoots(t)
+	out := buildReconnecting(t, "reconnecting", true)
+
+	info, live, err := lookup(context.Background(), "reconnecting")
+	require.NoError(t, err)
+	require.Equal(t, sessiondir.StatusReconnecting, info.Status)
+	require.NotEmpty(t, info.SSHCommand, "guests use the same connect string once the tunnel is back")
+	require.NotNil(t, live, "the validated response is handed back for the detail view")
+
+	require.Equal(t, sessiondir.ReconnectSupported, info.Reconnect)
+	require.True(t, info.TunnelLostAt.Equal(out.lostAt))
+	require.Equal(t, sessiondir.TunnelReasonNetwork, info.TunnelReason)
+	require.Equal(t, "dial tcp 127.0.0.1:2222: connect: connection refused", info.TunnelError)
+	require.True(t, info.NextAttemptAt.Equal(out.nextAt))
+
+	got := lookupJSON(t, "reconnecting")
+	require.NotEmpty(t, got["sshCommand"])
+	for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
+		require.Contains(t, got, key)
+	}
+}
+
+// Test_lookup_ReconnectingWithSocketAnsweringForAnotherSession keeps the
+// generation check the connect string is behind: widening the gate to
+// reconnecting must not let another launch's answer through.
+func Test_lookup_ReconnectingWithSocketAnsweringForAnotherSession(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "mismatched")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReconnecting
+		r.SessionID = "sid-recorded"
+	}))
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid-other",
+		Host:      "ssh://127.0.0.1:2222",
+		NodeAddr:  "127.0.0.1:2222",
+		Command:   []string{"bash"},
+	})
+
+	info, live, err := lookup(context.Background(), "mismatched")
+	require.NoError(t, err)
+	require.Nil(t, live)
+	require.Empty(t, info.SSHCommand)
+}
+
+// Test_lookup_DisconnectedByRelay: a session the relay can't reconnect gets no
+// connect string, since nothing can reach it, but its record says why.
+func Test_lookup_DisconnectedByRelay(t *testing.T) {
+	setupSessionRoots(t)
+	buildDisconnectedByRelay(t, "unsupported")
+
+	info, live, err := lookup(context.Background(), "unsupported")
+	require.NoError(t, err)
+	require.Equal(t, sessiondir.StatusDisconnected, info.Status)
+	require.Empty(t, info.SSHCommand, "a disconnected session gets no connect string")
+	require.Nil(t, live)
+	require.Equal(t, sessiondir.ReconnectUnsupported, info.Reconnect)
+	require.Equal(t, sessiondir.TunnelReasonReconnectUnsupported, info.TunnelReason)
+	require.False(t, info.TunnelLostAt.IsZero())
+	require.True(t, info.NextAttemptAt.IsZero(), "and no next attempt")
+}
+
+// Test_infoRunE_Reconnecting is the full detail a user gets for a reconnecting
+// session whose socket answers: the connect string and the outage.
+func Test_infoRunE_Reconnecting(t *testing.T) {
+	setupSessionRoots(t)
+	outage := buildReconnecting(t, "reconnecting", true)
+
+	out := runInfo(t, "reconnecting")
+
+	require.Contains(t, out, "reconnecting — network since "+localClock(outage.lostAt)+", next attempt "+localClock(outage.nextAt))
+	require.Contains(t, out, "Hint:")
+	require.Contains(t, out, "upterm can't reach the relay; it keeps retrying.")
+	require.Contains(t, out, "ssh sid-3@127.0.0.1 -p 2222", "the connect string stays")
+	require.NotContains(t, out, "Reconnect:", "a relay that supports reconnecting has nothing to add")
+	require.NotContains(t, out, "connection refused", "the raw error is for JSON")
+}
+
+// Test_infoRunE_ReadyPrintsNeitherRow: a healthy session has no outage and no
+// hint to show.
+func Test_infoRunE_ReadyPrintsNeitherRow(t *testing.T) {
+	setupSessionRoots(t)
+	buildReady(t, "ready")
+
+	out := runInfo(t, "ready")
+
+	require.Regexp(t, `Status:\s+ready\n`, out)
+	require.NotContains(t, out, "Hint:")
+	require.NotContains(t, out, "Reconnect:")
+}
+
+// Test_infoRunE_ReconnectingSocketSilent: with no answer from the socket the
+// summary still says why the session is down and when it tries next.
+func Test_infoRunE_ReconnectingSocketSilent(t *testing.T) {
+	setupSessionRoots(t)
+	outage := buildReconnecting(t, "silent", false)
+
+	out := runInfo(t, "silent")
+
+	require.Contains(t, out, "Status:    reconnecting — network since "+localClock(outage.lostAt)+", next attempt "+localClock(outage.nextAt)+"\n")
+	require.Contains(t, out, "Hint:      upterm can't reach the relay; it keeps retrying.\n")
+	require.NotContains(t, out, "ssh ", "no socket answered, so no connect string")
+	require.NotContains(t, out, "connection refused", "the raw error is for JSON")
+}
+
+// Test_infoRunE_DisconnectedByRelay: the plain status word, the hint, and the
+// reason it will not come back.
+func Test_infoRunE_DisconnectedByRelay(t *testing.T) {
+	setupSessionRoots(t)
+	buildDisconnectedByRelay(t, "unsupported")
+
+	out := runInfo(t, "unsupported")
+
+	require.Contains(t, out, "Status:    disconnected\n")
+	require.Contains(t, out, "Hint:      this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.\n")
+	require.Contains(t, out, "Reconnect: unsupported by this relay\n")
+	require.NotContains(t, out, "ssh ", "nothing can reach a disconnected session")
+}
+
+// Test_printSessionSummary_PastNextAttempt: a next attempt behind the clock is
+// not promised, but the raw value stays in the JSON.
+func Test_printSessionSummary_PastNextAttempt(t *testing.T) {
+	lost := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	info := sessionInfo{
+		Name: "n", Status: sessiondir.StatusReconnecting, Reconnect: sessiondir.ReconnectSupported,
+		TunnelReason: sessiondir.TunnelReasonNetwork, TunnelLostAt: lost,
+		NextAttemptAt: time.Now().Add(-time.Minute).UTC().Truncate(time.Second),
+	}
+
+	out := captureStdout(t, func() { printSessionSummary(info) })
+	require.Contains(t, out, "Status:    reconnecting — network since "+localClock(lost)+"\n")
+	require.NotContains(t, out, "next attempt")
+
+	raw, err := json.Marshal(info)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "nextAttemptAt")
+}
+
+// Test_infoRunE_EndedKeepsOnlyTheRelayLimit: the final record keeps its
+// outage for -o json, but an ended session has no outage to explain on a
+// terminal. What the relay can't do stays true, so it stays on the page.
+func Test_infoRunE_EndedKeepsOnlyTheRelayLimit(t *testing.T) {
+	setupSessionRoots(t)
+	buildEndedWhileReconnecting(t, "ended")
+
+	out := runInfo(t, "ended")
+	require.Contains(t, out, "Status:    ended\n")
+	require.Contains(t, out, "Reconnect: unsupported by this relay\n")
+	require.NotContains(t, out, "Hint:")
+	require.NotContains(t, out, "since")
+
+	got := lookupJSON(t, "ended")
+	require.Equal(t, "network", got["tunnelReason"], "the record's fields are still in the JSON")
+	require.Equal(t, "dial tcp: connection refused", got["tunnelError"])
+	require.Contains(t, got, "tunnelLostAt")
+	require.Contains(t, got, "nextAttemptAt")
+}
+
+// Test_listSessions_ReconnectingRowIsJoinable: the listing gates the live
+// answer the way `session info` does, and carries the outage into the detail
+// view.
+func Test_listSessions_ReconnectingRowIsJoinable(t *testing.T) {
+	setupSessionRoots(t)
+	outage := buildReconnecting(t, "reconnecting", true)
+
+	sessions, err := listSessions(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	row := sessions[0]
+	require.Equal(t, sessiondir.StatusReconnecting, row.Status)
+	require.NotEmpty(t, row.SSHCommand, "the same connect string works once the tunnel is back")
+	require.NotEmpty(t, row.Host)
+
+	require.Equal(t, sessiondir.ReconnectSupported, row.Reconnect)
+	require.Equal(t, sessiondir.TunnelReasonNetwork, row.TunnelReason)
+	require.True(t, row.TunnelLostAt.Equal(outage.lostAt))
+	require.True(t, row.NextAttemptAt.Equal(outage.nextAt))
+}
+
+// Test_listSessions_RecordOnlyRowsCarryTheOutage: a row built from the record
+// alone says what the record knows about the tunnel, so the detail view of a
+// session no socket answered for still says why it is down.
+func Test_listSessions_RecordOnlyRowsCarryTheOutage(t *testing.T) {
+	setupSessionRoots(t)
+	outage := buildReconnecting(t, "silent", false)
+	buildDisconnectedByRelay(t, "unsupported")
+
+	sessions, err := listSessions(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, sessions, 2)
+	byName := map[string]tui.SessionDetail{}
+	for _, s := range sessions {
+		byName[s.Name] = s
+	}
+
+	silent := byName["silent"]
+	require.Empty(t, silent.SSHCommand)
+	require.Equal(t, sessiondir.TunnelReasonNetwork, silent.TunnelReason)
+	require.Equal(t, sessiondir.ReconnectSupported, silent.Reconnect)
+	require.True(t, silent.TunnelLostAt.Equal(outage.lostAt))
+	require.True(t, silent.NextAttemptAt.Equal(outage.nextAt))
+
+	unsupported := byName["unsupported"]
+	require.Empty(t, unsupported.SSHCommand, "and a disconnected row is still no way to join")
+	require.Equal(t, sessiondir.ReconnectUnsupported, unsupported.Reconnect)
+	require.Equal(t, sessiondir.TunnelReasonReconnectUnsupported, unsupported.TunnelReason)
 }
