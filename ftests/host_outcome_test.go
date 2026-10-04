@@ -783,8 +783,9 @@ func Test_Host_GivesTheCommandTheSessionName(t *testing.T) {
 // Test_Host_LostTunnelIsAStateNotAnOutcome is the Host-level counterpart to
 // the internal tunnel tests: the relay is taken away under a live session, and
 // the command has to survive it. A lost tunnel drops the guests and publishes
-// "disconnected"; the session still ends for the reason it is eventually
-// stopped for, not for the network.
+// "reconnecting" while the host redials a relay that is gone; the session
+// still ends for the reason it is eventually stopped for, not for the
+// network.
 func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 	// A marker a second, so that "still running" can be shown by what the
 	// command produces rather than only by what the record says. ping prints
@@ -833,9 +834,9 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
-		return err == nil && rec != nil && rec.Status == sessiondir.StatusDisconnected
+		return err == nil && rec != nil && rec.Status == sessiondir.StatusReconnecting
 	}, 20*time.Second, outcomePollInterval,
-		"a host that lost its tunnel must publish disconnected, and must not have exited")
+		"a host that lost its tunnel must publish reconnecting, and must not have exited")
 
 	// Two more markers, not one: a single one could have been in flight when
 	// the relay went away, and what is being shown is output produced after
@@ -844,13 +845,13 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 	require.Eventually(t, func() bool { return ticks.Load() > before+1 }, 20*time.Second, 50*time.Millisecond,
 		"the command kept running, and the local client kept receiving it, after the tunnel was lost")
 
-	// And it stays disconnected while the session runs on. Nothing may talk
-	// the record back into "ready" once the tunnel that ready describes is
-	// gone: a reader of `upterm session list` would be offered a session
-	// nobody can reach.
+	// And it stays reconnecting while the session runs on and the relay stays
+	// gone. Nothing may talk the record back into "ready" once the tunnel that
+	// ready describes is gone: a reader of `upterm session list` would be
+	// offered a session nobody can reach.
 	require.Never(t, func() bool {
 		rec, err := sessiondir.ReadRecord(run.stateRoot, run.name)
-		return err != nil || rec == nil || rec.Status != sessiondir.StatusDisconnected
+		return err != nil || rec == nil || rec.Status != sessiondir.StatusReconnecting
 	}, time.Second, outcomePollInterval,
 		"a session whose tunnel is gone must not be published as ready again")
 

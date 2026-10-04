@@ -86,9 +86,10 @@ type Server struct {
 	OnCommandStarted func()
 
 	// OnGuestServerStopped is called when the guest listener stops serving,
-	// which in practice means the reverse tunnel is gone. The session does not
-	// end: the command keeps running and keeps its pty. Reporting it is the
-	// caller's job, because internal must not know about on-disk state.
+	// which behind a TunnelListener means the tunnel is lost for good. The
+	// session does not end: the command keeps running and keeps its pty.
+	// Reporting it is the caller's job, because internal must not know about
+	// on-disk state.
 	OnGuestServerStopped func(error)
 
 	// SFTP configuration
@@ -347,8 +348,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// Close makes it return a use-of-closed-network-connection error
 			// instead. Both are the session ending rather than the tunnel
 			// going away, and the second is only distinguishable by asking
-			// whether the session is still live: published as a tunnel loss it
-			// would write "disconnected" over a record that is merely ending.
+			// whether the session is still live: reported as a tunnel loss, it
+			// would say the tunnel was gone from a session that is merely
+			// ending.
 			if s.OnGuestServerStopped != nil && sessCtx.Err() == nil && !errors.Is(err, gssh.ErrServerClosed) {
 				s.OnGuestServerStopped(err)
 			}

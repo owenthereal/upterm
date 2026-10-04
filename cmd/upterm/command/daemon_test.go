@@ -2,7 +2,11 @@ package command
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -499,6 +503,44 @@ func TestJoinTimeoutReachesTheDaemonHost(t *testing.T) {
 	h, err := buildDaemonHost(context.Background(), "n", opts, child, discardLogger())
 	require.NoError(t, err)
 	require.Equal(t, 7*time.Minute, h.JoinTimeout)
+}
+
+// TestBuildDaemonHostSetsIdentitiesOnlyFromPrivateKey pins that a session
+// whose identities were named with --private-key tells its Host so: those
+// identities are the whole set, and a redial must not offer the session key
+// ahead of them. The same key list that merely defaulted leaves it off.
+func TestBuildDaemonHostSetsIdentitiesOnlyFromPrivateKey(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		t.Run(fmt.Sprintf("named=%t", named), func(t *testing.T) {
+			hostCmd()
+			daemonTestRoots(t)
+			// No agent, so the key below is what both cases resolve: with
+			// one, the unnamed case would take the agent's keys instead.
+			t.Setenv("SSH_AUTH_SOCK", "")
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
+			require.NoError(t, err)
+			block, err := ssh.MarshalPrivateKey(priv, "")
+			require.NoError(t, err)
+			key := filepath.Join(t.TempDir(), "id_ed25519")
+			require.NoError(t, os.WriteFile(key, pem.EncodeToMemory(block), 0o600))
+			orig := flagPrivateKeys
+			flagPrivateKeys = []string{key}
+			t.Cleanup(func() { flagPrivateKeys = orig })
+			if named {
+				// As cobra records a flag given from any origin;
+				// daemonTestRoots restores the map.
+				suppliedFlags["private-key"] = true
+			}
+
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+			child := bootstrap.NewChild(a, nil)
+			t.Cleanup(func() { _ = child.Close() })
+			h, err := buildDaemonHost(context.Background(), "ids", testHostOptions(), child, discardLogger())
+			require.NoError(t, err)
+			require.Equal(t, named, h.IdentitiesOnly)
+		})
+	}
 }
 
 func TestJoinTimeoutFlagDefaultsToOff(t *testing.T) {

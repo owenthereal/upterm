@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,8 +25,10 @@ import (
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/host/sftp"
 	"github.com/owenthereal/upterm/internal/liveness"
+	"github.com/owenthereal/upterm/internal/registration"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/internal/version"
+	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
@@ -225,11 +228,19 @@ func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.P
 }
 
 type Host struct {
-	Host              string
+	Host string
+	// KeepAliveDuration paces the guest sshd's keepalive to each guest. The
+	// tunnel's own liveness is Reconnect's.
 	KeepAliveDuration time.Duration
 	Command           []string
 	ForceCommand      []string
 	Signers           []ssh.Signer
+	// IdentitiesOnly says Signers is the whole identity set, as --private-key
+	// makes it: a redial never offers the session key ahead of it.
+	IdentitiesOnly bool
+	// Reconnect paces the tunnel's liveness and its redials. A field left zero
+	// takes its default.
+	Reconnect ReconnectTiming
 	// HostKey is the key the embedded sshd presents on both its doors and
 	// the key the relay is told to expect from this host. A session's key,
 	// not the operator's: Signers authenticate the tunnel and are used for
@@ -353,6 +364,11 @@ type Host struct {
 	// before any actor starts and cleared on its way out, so a callback Run
 	// makes reads it without a lock of its own.
 	joins *joinState
+	// state is the running session's facts, for Status. Set by Run before
+	// any actor starts and cleared on its way out. Atomic, unlike joins,
+	// because Status is asked from any goroutine, not only from Run's
+	// callbacks.
+	state atomic.Pointer[sessionState]
 
 	// SFTP configuration
 	SFTPDisabled          bool                   // Disable SFTP subsystem entirely (--no-sftp)
@@ -601,6 +617,19 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("error parsing host url: %s", err)
 	}
+	// A ws:// or wss:// URL without a port gets its scheme's, as `upterm
+	// host` gives it. Whatever checks the relay's key is handed host:port --
+	// the host key callback, and the check a redial is pinned with, which
+	// refuses a bare hostname -- and so is the session's Host. ws drops a
+	// default port from the URL it dials, so nothing on the wire changes.
+	if u.Port() == "" {
+		switch u.Scheme {
+		case "ws":
+			u.Host += ":80"
+		case "wss":
+			u.Host += ":443"
+		}
+	}
 
 	// This run's key. Never written back: a Host is reusable, and a key
 	// that survived into a second run would make "per run" false.
@@ -611,6 +640,13 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			return fmt.Errorf("error generating host key: %w", err)
 		}
 		hostKey = key
+	}
+	// This run's secret, which with the key proves to the relay that a redial
+	// is this session's. Like the key, it lives in memory only, and only for
+	// this run.
+	secret, err := registration.NewSecret()
+	if err != nil {
+		return fmt.Errorf("error generating the session secret: %w", err)
 	}
 
 	var aks []ssh.PublicKey
@@ -666,6 +702,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// from them. Declared before the final write is registered, which reads
 	// it.
 	state := &sessionState{}
+	// On the Host for Status, before any actor starts, and cleared after the
+	// final write, which this is registered ahead of.
+	c.state.Store(state)
+	defer c.state.Store(nil)
 
 	joins := newJoinState(c.JoinTimeout)
 	// On the Host for JoinState, before anything that could ask runs. Cleared
@@ -742,23 +782,43 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// certificates it will be shown. Recorded by the callback that does the
 	// verifying, read by the guest door below.
 	relayAuthority := &internal.RelayAuthority{}
-	rt := internal.ReverseTunnel{
+	// The relay is probed after PingInterval with no bytes from it, and given
+	// up on after PingBound more: any bytes count, so a reply queued behind
+	// guest output never counts against it. The same on every tunnel.
+	timing := c.Reconnect.orDefault()
+	keepAlive := liveness.Timing{Interval: timing.PingInterval, Bound: timing.PingBound}
+	// The first connection. It runs on Run's own context with no deadline of
+	// its own: it fails fast, and it may be waiting on the operator, at the
+	// host key prompt or an agent's approval.
+	rt := &internal.ReverseTunnel{
 		Host:            u,
 		Signers:         c.Signers,
 		HostKey:         hostKey,
 		HostKeyCallback: relayAuthority.Wrap(c.HostKeyCallback),
 		AuthorizedKeys:  aks,
-		// The relay is probed after KeepAliveDuration with no bytes from it,
-		// and given up on after twice that: any bytes count, so a reply
-		// queued behind guest output never counts against it.
-		KeepAlive: liveness.Timing{Interval: c.KeepAliveDuration, Bound: c.KeepAliveDuration},
-		ProxyURL:  c.ProxyURL,
-		Logger:    logger.With("component", "reverse-tunnel"),
+		SessionSecret:   secret,
+		Generation:      1,
+		KeepAlive:       keepAlive,
+		ProxyURL:        c.ProxyURL,
+		Logger:          logger.With("component", "reverse-tunnel"),
 	}
-	// Deferred before Establish, not after: Close is nil-safe on a tunnel that
-	// never established, and Establish closes whatever a failed attempt
-	// opened, so this is what closes the tunnel that did establish.
-	defer rt.Close()
+	// The tunnel Run closes on its way out. Until the supervisor exists that
+	// is the first one, and Close is nil-safe on a tunnel that never
+	// established: Establish closes whatever a failed attempt opened. Once
+	// the supervisor has started, it closes every tunnel it replaces, and the
+	// one it ended on is Run's to close, after g.Run has returned and the
+	// guest door served on it has drained, so that a stopped session's guests
+	// still get the command's last output and their exit status.
+	var sup *supervisor
+	defer func() {
+		var live tunnel = rt
+		if sup != nil {
+			if cur := sup.current(); cur != nil {
+				live = cur
+			}
+		}
+		live.Close()
+	}()
 	sessResp, err := rt.Establish(ctx)
 	if err != nil {
 		// Log the error before returning to ensure it's captured in logs
@@ -766,6 +826,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		logger.Error("Failed to establish reverse tunnel", "error", err)
 		return err
 	}
+	state.setReconnect(rt.ReconnectSupported())
 
 	// Check server version compatibility after establishing connection
 	serverVersion := string(rt.ServerVersion())
@@ -784,6 +845,20 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 
 	logger = logger.With("session", sessResp.SessionID)
 	logger.Info("Established reverse tunnel")
+
+	// Said now, once, rather than at the first drop, where all there would
+	// be to say is that a redial failed.
+	if !rt.ReconnectSupported() {
+		logger.Warn("this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted")
+	} else if err := relayAuthority.CheckRedial(u.Host); err != nil {
+		logger.Warn(fmt.Sprintf("the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", u.Hostname()),
+			"error", err)
+	}
+
+	// Where guests reach the session now. A redial may register it on
+	// another node, and GetSession reads this rather than the first answer.
+	route := &internal.SessionRoute{}
+	route.Set(sessResp.NodeAddr, sessResp.SshUser)
 
 	// The ID, but not readiness: the session is registered and nothing more.
 	// Nothing has accepted it, the admin socket is unbound and the command
@@ -884,6 +959,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	// first is not something readiness should depend on.
 	adminServer := internal.AdminServer{
 		Session:     session,
+		Route:       route,
 		ClientRepo:  clientRepo,
 		LaunchID:    launchID,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
@@ -937,6 +1013,64 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		if c.AttachListeningCallback != nil {
 			c.AttachListeningCallback(c.AttachSocketFile)
 		}
+	}
+
+	// The guest door's one listener for the whole session: the first
+	// tunnel's until the supervisor swaps in the next. The guest door closes
+	// it, and with it whichever tunnel listener is current.
+	guestDoor := internal.NewTunnelListener(rt.Listener())
+	// What every redial offers is fixed here, at the start: the identities
+	// the first connection was given, and the session key ahead of them only
+	// where the relay lets it alone in and the operator didn't name the whole
+	// set.
+	recorded := c.Signers
+	pinned := relayAuthority.Pinned()
+	recordDir := c.SessionDir
+	sup = &supervisor{
+		timing: timing,
+		attempt: func(ctx context.Context, generation uint64, signers []ssh.Signer) (tunnel, *server.CreateSessionResponse, error) {
+			t := &internal.ReverseTunnel{
+				Host:             u,
+				Signers:          signers,
+				HostKey:          hostKey,
+				HostKeyCallback:  pinned,
+				AuthorizedKeys:   aks,
+				SessionSecret:    secret,
+				Generation:       generation,
+				RequireDerivedID: true,
+				KeepAlive:        keepAlive,
+				ProxyURL:         c.ProxyURL,
+				Logger:           logger.With("component", "reverse-tunnel", "generation", generation),
+			}
+			resp, err := t.Establish(ctx)
+			if err != nil {
+				// No tunnel, not a nil *ReverseTunnel: one in the interface
+				// would not be nil, and the supervisor would close it.
+				return nil, nil, err
+			}
+			return t, resp, nil
+		},
+		identities: func(ctx context.Context, sessionKeyFirst bool) ([]ssh.Signer, func()) {
+			return redialIdentities(ctx, recorded, hostKey, sessionKeyFirst)
+		},
+		listener: guestDoor,
+		route:    route,
+		state:    state,
+		publish: func() {
+			// An embedder with no record learns the tunnel's state from
+			// Status, which reads it from state.
+			if recordDir == nil {
+				return
+			}
+			if err := recordDir.Update(state.apply); err != nil {
+				logger.Warn("failed to publish the tunnel's state", "error", err)
+			}
+		},
+		sessionID:       sessResp.SessionID,
+		generation:      1,
+		supported:       rt.ReconnectSupported(),
+		sessionKeyFirst: rt.SessionKeyRedial() && !c.IdentitiesOnly,
+		logger:          logger,
 	}
 
 	var g run.Group
@@ -1002,23 +1136,34 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					c.CommandStartedCallback()
 				}
 			},
+			// The door stops serving only once the tunnel is lost for good,
+			// on a relay that can't take the session back, and the supervisor
+			// has published that already: it is the only writer of the
+			// tunnel's state, so this only says so in the log.
 			OnGuestServerStopped: func(err error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
-				lostErr := ""
-				if err != nil {
-					lostErr = err.Error()
-				}
-				state.tunnelLost(time.Now(), lostErr)
-				if c.SessionDir != nil {
-					_ = c.SessionDir.Update(state.apply)
-				}
 			},
 		}
 		g.Add(func() error {
-			return sshServer.ServeWithContext(ctx, rt.Listener(), attachLn)
+			return sshServer.ServeWithContext(ctx, guestDoor, attachLn)
 		}, func(err error) {
 			// Only the winning group error reaches attached clients.
 			cancel(err)
+		})
+	}
+	{
+		// The tunnel's supervisor, after the guest door it swaps tunnels
+		// behind. Its context is the group's to cancel, as the ssh server's
+		// is: an actor that returned the moment a `session stop` cancelled
+		// ctx could be the group's first, and the run would be recorded as
+		// whatever that return said rather than as stopped. It returns only
+		// after its interrupt.
+		supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		g.Add(func() error {
+			sup.run(supCtx, rt)
+			return nil
+		}, func(error) {
+			cancel()
 		})
 	}
 	{
@@ -1316,6 +1461,17 @@ func (c *Host) JoinState() *api.JoinState {
 		return nil
 	}
 	return apiJoinState(c.joins.snapshot())
+}
+
+// Status reports the session's status as its record would; "" when Run isn't
+// running. It may be called from any goroutine, and is how an embedder with no
+// record learns that the tunnel is down and being redialled.
+func (c *Host) Status() string {
+	s := c.state.Load()
+	if s == nil {
+		return ""
+	}
+	return s.status()
 }
 
 func keyType(t string) string {
