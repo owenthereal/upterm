@@ -386,6 +386,38 @@ func TestRedialAgentFailures(t *testing.T) {
 	})
 }
 
+// Spec §10's deadline test, and §5.5's approval prompt: an agent that lists
+// its keys but never answers the signature is released at the attempt's
+// deadline as AgentRefusedError, and the next attempt dials afresh.
+func TestRedialSignatureThatNeverComesIsAgentRefused(t *testing.T) {
+	edPub, edPriv := newEd25519(t)
+	ag := startTestAgent(t, edPriv)
+	recorded := agentIdentities(t, ag, edPub)
+	held := ag.holdSignatures(t)
+	relay := sshServer(t, admitting(edPub))
+
+	for attempt := int32(1); attempt <= 2; attempt++ {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		deadline, _ := ctx.Deadline()
+		signers, closeAgent := redialIdentities(ctx, recorded, nil, false)
+		disarm := context.AfterFunc(ctx, closeAgent)
+
+		err := handshake(t, relay, signers)
+		returned := time.Now()
+		var refused *AgentRefusedError
+		require.ErrorAs(t, err, &refused, "a signature that never comes is the agent's refusal")
+		require.Equal(t, utils.FingerprintSHA256(edPub), refused.Key)
+		require.False(t, returned.Before(deadline), "released before the deadline")
+		require.LessOrEqual(t, returned.Sub(deadline), lateWake, "released long after the deadline")
+
+		receive(t, held, "the agent was never asked to sign")
+		require.Equal(t, attempt, ag.signatures.Load(), "one signature request per attempt")
+		require.Equal(t, 1+attempt, ag.accepts.Load(), "each attempt opens a new connection")
+		disarm()
+		cancel()
+	}
+}
+
 func TestRedialSessionKeyFirst(t *testing.T) {
 	agentPub, agentPriv := newEd25519(t)
 	ag := startTestAgent(t, agentPriv)

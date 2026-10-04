@@ -45,6 +45,10 @@ type testAgent struct {
 	ln    net.Listener // nil while stopped
 	conns map[net.Conn]struct{}
 	wg    sync.WaitGroup
+	// gate, once holdSignatures sets it, holds every signature request until
+	// it closes; held is signalled as each one reaches it.
+	gate chan struct{}
+	held chan struct{}
 }
 
 // countingAgent wraps the keyring so both signing entry points are counted.
@@ -58,12 +62,14 @@ type countingAgent struct {
 
 func (c *countingAgent) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
 	c.ta.signatures.Add(1)
+	c.ta.awaitGate()
 	return c.ExtendedAgent.Sign(key, data)
 }
 
 func (c *countingAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.SignatureFlags) (*ssh.Signature, error) {
 	c.ta.signatures.Add(1)
 	c.ta.flags.Store(uint32(flags))
+	c.ta.awaitGate()
 	return c.ExtendedAgent.SignWithFlags(key, data, flags)
 }
 
@@ -163,6 +169,34 @@ func (ta *testAgent) stop() {
 		_ = c.Close()
 	}
 	ta.wg.Wait()
+}
+
+// holdSignatures makes the agent, from now until the test ends, list its keys
+// as before but answer no signature request: an agent waiting on an approval
+// prompt. Each request is still counted, and the returned channel receives as
+// each one is held.
+func (ta *testAgent) holdSignatures(t *testing.T) <-chan struct{} {
+	t.Helper()
+	gate, held := make(chan struct{}), make(chan struct{}, 16)
+	ta.mu.Lock()
+	ta.gate, ta.held = gate, held
+	ta.mu.Unlock()
+	t.Cleanup(func() { close(gate) }) // before stop, which waits on the handlers
+	return held
+}
+
+func (ta *testAgent) awaitGate() {
+	ta.mu.Lock()
+	gate, held := ta.gate, ta.held
+	ta.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	select {
+	case held <- struct{}{}:
+	default:
+	}
+	<-gate
 }
 
 // open is how many connections the agent holds open.
