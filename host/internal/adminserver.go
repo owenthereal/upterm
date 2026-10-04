@@ -13,9 +13,38 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// SessionRoute is where guests reach the session now: the latest
+// registration's node and SSH user. The session ID never changes, so it isn't
+// here. It is safe for concurrent use; the zero value is an empty route.
+type SessionRoute struct {
+	mu       sync.Mutex
+	nodeAddr string
+	sshUser  string
+}
+
+// Set records a registration's node and SSH user.
+func (r *SessionRoute) Set(nodeAddr, sshUser string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nodeAddr, r.sshUser = nodeAddr, sshUser
+}
+
+// Get returns the node and SSH user Set last recorded.
+func (r *SessionRoute) Get() (nodeAddr, sshUser string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nodeAddr, r.sshUser
+}
+
 type AdminServer struct {
 	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
+
+	// Route, when set, is where GetSession says guests reach the session,
+	// in place of Session's NodeAddr and SshUser: a reconnect can register
+	// the session on another node. Session's SessionId is reported either
+	// way, since it never changes.
+	Route *SessionRoute
 
 	// LaunchID is the launch this server speaks for, from the record the
 	// session claimed. StopSession refuses a request that names any other
@@ -88,6 +117,7 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 	s.srv = grpc.NewServer()
 	api.RegisterAdminServiceServer(s.srv, &adminServiceServer{
 		Session:          s.Session,
+		Route:            s.Route,
 		ClientRepo:       s.ClientRepo,
 		LaunchID:         s.LaunchID,
 		OnStop:           s.OnStop,
@@ -131,6 +161,7 @@ func (s *AdminServer) Shutdown(ctx context.Context) error {
 
 type adminServiceServer struct {
 	Session          *api.GetSessionResponse
+	Route            *SessionRoute
 	ClientRepo       *ClientRepo
 	LaunchID         string
 	OnStop           func()
@@ -139,11 +170,15 @@ type adminServiceServer struct {
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
+	nodeAddr, sshUser := s.Session.NodeAddr, s.Session.SshUser
+	if s.Route != nil {
+		nodeAddr, sshUser = s.Route.Get()
+	}
 	return &api.GetSessionResponse{
 		SessionId:        s.Session.SessionId,
 		Host:             s.Session.Host,
-		NodeAddr:         s.Session.NodeAddr,
-		SshUser:          s.Session.SshUser,
+		NodeAddr:         nodeAddr,
+		SshUser:          sshUser,
 		Command:          s.Session.Command,
 		ForceCommand:     s.Session.ForceCommand,
 		AuthorizedKeys:   s.Session.AuthorizedKeys,

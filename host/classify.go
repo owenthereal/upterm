@@ -26,6 +26,14 @@ const (
 	blocked
 )
 
+// String names the class, for logs.
+func (c retryClass) String() string {
+	if c == blocked {
+		return "blocked"
+	}
+	return "transient"
+}
+
 // tooManyAuthFailures is the text of x/crypto's disconnect from a server whose
 // MaxAuthTries the client exceeded (v0.57.0, ssh/server.go): the relay refused
 // every key the host offered and stopped listening. The disconnect is an
