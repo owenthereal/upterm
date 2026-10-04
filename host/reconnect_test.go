@@ -411,6 +411,16 @@ type localClient struct {
 	result attach.Result
 }
 
+// requireAttached fails the test if the attachment has already ended.
+func (c *localClient) requireAttached(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.ended:
+		t.Fatalf("the local client is no longer attached: %v", c.result.Reason)
+	default:
+	}
+}
+
 // attachLocally attaches the host's own terminal, as `upterm attach` does,
 // and returns once it is receiving the command's output. It stays attached
 // until the session ends or the test does.
@@ -453,6 +463,16 @@ type reconnectGuest struct {
 
 // sees reports whether the guest has received s.
 func (g *reconnectGuest) sees(s string) bool { return strings.Contains(g.out.String(), s) }
+
+// requireJoined fails the test if the guest's session has already ended.
+func (g *reconnectGuest) requireJoined(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-g.exited:
+		t.Fatalf("the guest had already left: %v", err)
+	default:
+	}
+}
 
 // awaitEnd returns what the guest's session ended with, once out holds
 // everything the session sent before it ended.
@@ -718,8 +738,8 @@ func TestReconnectOnAnUnsupportedRelay(t *testing.T) {
 
 	rec := f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 	require.Equal(t, sessiondir.ReconnectUnsupported, rec.Reconnect)
-	warning := "this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted"
-	require.Equal(t, 1, strings.Count(f.logs.String(), warning), "said once, at the start")
+	warning := `level=WARN msg="this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted"`
+	require.Equal(t, 1, strings.Count(f.logs.String(), warning), "warned once, at the start:\n%s", f.logs.String())
 	require.Equal(t, 1, fake.Connections())
 
 	f.fwd.Cut()
@@ -744,20 +764,23 @@ func TestGuestsAtTheDrop(t *testing.T) {
 		local := f.attachLocally(t)
 
 		f.fwd.Redirect(closedAddr(t)) // hold the gap open
-		atCut := lastTick(local.out.String())
+		guest.requireJoined(t)
 		f.fwd.Cut()
 		f.awaitStatus(t, sessiondir.StatusReconnecting, 5*time.Second)
 		_ = guest.awaitEnd(t, 5*time.Second) // however it ends: the connection it was on is gone
 
-		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= atCut+3 }, 5*time.Second, 10*time.Millisecond,
+		afterDrop := lastTick(local.out.String())
+		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= afterDrop+3 }, 5*time.Second, 10*time.Millisecond,
 			"the local client stopped receiving the command when the tunnel dropped")
 		require.Equal(t, sessiondir.StatusReconnecting, f.record(t).Status, "still in the gap")
 
 		f.fwd.Redirect(f.relay.addr("ssh"))
 		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+		atReady := lastTick(local.out.String())
 		rejoined := f.joinAsGuest(t, f.created.SshUser)
-		require.Eventually(t, func() bool { return lastTick(rejoined.out.String()) > atCut }, 5*time.Second, 10*time.Millisecond,
+		require.Eventually(t, func() bool { return lastTick(rejoined.out.String()) > atReady }, 5*time.Second, 10*time.Millisecond,
 			"the guest who rejoined doesn't see the command that ran through the gap")
+		local.requireAttached(t)
 
 		seen := ticks(local.out.String())
 		for i := 1; i < len(seen); i++ {
@@ -773,40 +796,55 @@ func TestGuestsAtTheDrop(t *testing.T) {
 		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 		local := f.attachLocally(t)
 		guest := f.joinGuest(t, f.created.SshUser)
-		var pid int
-		require.Eventually(t, func() bool {
+		readPID := func() int {
 			b, err := os.ReadFile(pidFile)
 			if err != nil {
-				return false
+				return 0
 			}
-			pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
-			return err == nil && pid > 0
-		}, 5*time.Second, 10*time.Millisecond, "the guest's forced command never started")
+			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+			if err != nil {
+				return 0
+			}
+			return pid
+		}
+		require.Eventually(t, func() bool { return readPID() > 0 }, 5*time.Second, 10*time.Millisecond,
+			"the guest's forced command never started")
+		pid := readPID()
+		// A forced command that outlived its guest is not left running after
+		// the test. One seen gone is not signalled: its PID may be another's.
+		var gone bool
+		t.Cleanup(func() {
+			if pid > 0 && !gone {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		})
 		require.NoError(t, syscall.Kill(pid, 0), "the guest's forced command is running")
 
 		f.fwd.Redirect(closedAddr(t)) // hold the gap open
-		atCut := lastTick(local.out.String())
+		guest.requireJoined(t)
 		f.fwd.Cut()
 		_ = guest.awaitEnd(t, 5*time.Second) // however it ends: the connection it was on is gone
 		require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, 5*time.Second, 10*time.Millisecond,
 			"the guest's forced command outlived the guest")
+		gone = true
 
-		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= atCut+3 }, 5*time.Second, 10*time.Millisecond,
+		afterDrop := lastTick(local.out.String())
+		require.Eventually(t, func() bool { return lastTick(local.out.String()) >= afterDrop+3 }, 5*time.Second, 10*time.Millisecond,
 			"the host's own command stopped when the tunnel dropped")
 		require.Equal(t, sessiondir.StatusReconnecting, f.record(t).Status, "still in the gap")
 	})
 }
 
 // A stopped session's guests are told how it ended, as they would be had the
-// tunnel never dropped: the command's output up to its last line, then the
-// exit status. The tunnel they reach the session through is the one a redial
-// installed, and it stays up until the guest door has drained.
+// tunnel never dropped: a real exit status, not a dropped connection, and none
+// of their output cut off. The tunnel they reach the session through is the
+// one a redial installed, and it stays up until the guest door has drained.
 func TestAStoppedSessionsGuestsStillGetTheirExitStatus(t *testing.T) {
 	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
 		// The fixture's counter, taking a moment to go once it is hung up,
 		// as a shell hanging up its jobs does, and then going by the hangup.
 		// A tunnel closed as soon as the session began ending would be gone
-		// well before the guest is told how it ended.
+		// well before the guest's exit status is sent.
 		f.h.Command = []string{"sh", "-c", `trap 'sleep 0.5; trap - HUP; kill -HUP $$' HUP; ` +
 			`i=0; while :; do i=$((i+1)); echo "` + reconnectTick + ` $i"; sleep 0.05; done`}
 	})
@@ -817,8 +855,8 @@ func TestAStoppedSessionsGuestsStillGetTheirExitStatus(t *testing.T) {
 	f.fwd.Redirect(f.relay.addr("ssh"))
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 	guest := f.joinAsGuest(t, f.created.SshUser)
-	// The local terminal is fed by the same output, over no tunnel: where
-	// its output ends is where the command's did.
+	// The local terminal is fed by the same output, over no tunnel: the
+	// guest's output, untruncated, ends where the local terminal's does.
 	local := f.attachLocally(t)
 
 	f.stop(t)
@@ -838,7 +876,7 @@ func TestAStoppedSessionsGuestsStillGetTheirExitStatus(t *testing.T) {
 	require.Equal(t, attach.Exited, local.result.Reason)
 	last := lastTick(local.out.String())
 	require.Positive(t, last)
-	require.Equal(t, last, lastTick(guest.out.String()), "the guest's output was cut short:\n%s", guest.out.String())
+	require.Equal(t, last, lastTick(guest.out.String()), "the guest's output was truncated:\n%s", guest.out.String())
 
 	require.ErrorIs(t, f.awaitRun(t, 5*time.Second), context.Canceled)
 	require.Equal(t, sessiondir.ReasonStopped, f.record(t).Reason)
@@ -849,7 +887,9 @@ func TestAStoppedSessionsGuestsStillGetTheirExitStatus(t *testing.T) {
 // sign.
 func TestSessionStopWhileReconnecting(t *testing.T) {
 	t.Run("in the slow wait after the relay's key changed", func(t *testing.T) {
-		f := newReconnectHost(t, "ssh")
+		// A slow wait far longer than the stop is given, so a stop that
+		// waited it out would be caught.
+		f := newReconnectHost(t, "ssh", func(f *reconnectHost) { f.h.Reconnect.SlowWait = time.Minute })
 		f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 
 		otherKey, err := NewHostKey()
@@ -979,6 +1019,9 @@ func TestALossDuringTheConfirmationPrompt(t *testing.T) {
 	for _, s := range statuses[1 : len(statuses)-1] {
 		require.Contains(t, []string{sessiondir.StatusReconnecting, sessiondir.StatusReady}, s, "%v", statuses)
 	}
+	// The ready write itself, which a poll might have missed: the status the
+	// record was published with as the session became ready.
+	require.NotEqual(t, sessiondir.StatusDisconnected, f.awaitReady(t))
 	sess, err := f.relay.sessions.GetSession(f.created.SessionId)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, sess.Generation, uint64(2), "registered again, under a later generation")
