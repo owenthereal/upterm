@@ -2,6 +2,7 @@ package internal
 
 import (
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -100,11 +101,19 @@ func receiveAccept(t *testing.T, ch <-chan acceptResult) acceptResult {
 // parkedListener is a forwarded listener that lives entirely on channels, so
 // that inside a synctest bubble an Accept parked on it — or on the
 // TunnelListener in front of it — is durably blocked, and synctest.Wait
-// returns only once every such Accept is. It never delivers a connection.
+// returns only once every such Accept is. It delivers only the connections a
+// test sends on conns.
 type parkedListener struct {
 	// gone is closed when the tunnel ends, by lose or by Close.
 	gone     chan struct{}
 	goneOnce sync.Once
+
+	// conns is where a test hands the listener a connection to accept.
+	conns chan net.Conn
+	// hold, when non-nil, keeps an Accept that has taken a connection from
+	// returning it until hold is closed: the connection is accepted from the
+	// tunnel's side, and the caller has not yet been told.
+	hold <-chan struct{}
 
 	closes atomic.Int32
 	// closing is closed once Close has ended Accept and is on its way to
@@ -116,12 +125,23 @@ type parkedListener struct {
 }
 
 func newParkedListener() *parkedListener {
-	return &parkedListener{gone: make(chan struct{}), closing: make(chan struct{})}
+	return &parkedListener{
+		gone:    make(chan struct{}),
+		conns:   make(chan net.Conn),
+		closing: make(chan struct{}),
+	}
 }
 
 func (p *parkedListener) Accept() (net.Conn, error) {
-	<-p.gone
-	return nil, net.ErrClosed
+	select {
+	case c := <-p.conns:
+		if p.hold != nil {
+			<-p.hold
+		}
+		return c, nil
+	case <-p.gone:
+		return nil, net.ErrClosed
+	}
 }
 
 // Close ends Accept before anything else, as x/crypto's forwarded listener
@@ -315,6 +335,89 @@ func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *t
 		// The tunnel was already lost, so its listener says it is closed:
 		// Close passes on what the inner Close returned.
 		require.ErrorIs(t, <-closed, net.ErrClosed)
+	})
+}
+
+// requirePipeClosed fails if the other end of a net.Pipe has not been closed.
+// Inside a bubble the read deadline runs on the bubble's clock, so an open
+// connection costs no real time.
+func requirePipeClosed(t *testing.T, peer net.Conn) {
+	t.Helper()
+	// A pipe whose far end is closed refuses the deadline itself.
+	err := peer.SetReadDeadline(time.Now().Add(time.Second))
+	if err == nil {
+		_, err = peer.Read(make([]byte, 1))
+	}
+	require.True(t, errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe),
+		"a connection from the replaced tunnel was left open: %v", err)
+}
+
+// A connection the old tunnel's goroutine holds, waiting for an Accept, when
+// the tunnel is replaced is closed, and the Accept that follows serves the new
+// tunnel.
+func TestTunnelListenerClosesAHeldConnectionWhenItsTunnelIsReplaced(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for range 50 {
+			first := newParkedListener()
+			tl := NewTunnelListener(first)
+			t.Cleanup(func() { _ = tl.Close() })
+
+			old, oldPeer := net.Pipe()
+			first.conns <- old
+			synctest.Wait() // the old tunnel's goroutine holds old, and nothing accepts
+
+			second := newParkedListener()
+			require.True(t, tl.Swap(second))
+			fresh, freshPeer := net.Pipe()
+			second.conns <- fresh
+
+			c, err := tl.Accept()
+			require.NoError(t, err)
+			require.True(t, c == fresh, "Accept returned a connection from the replaced tunnel")
+			requirePipeClosed(t, oldPeer)
+			_, _ = c.Close(), freshPeer.Close()
+		}
+	})
+}
+
+// A connection that reaches the pump's hand-off after its tunnel was replaced
+// is never returned by an Accept that is already waiting for one: the select
+// that hands it over has the send and the replacement both ready, and left to
+// chance it would pick either. Each iteration is that coin flip.
+func TestTunnelListenerNeverReturnsAConnectionFromAReplacedTunnel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for range 50 {
+			hold := make(chan struct{})
+			first := newParkedListener()
+			first.hold = hold
+			tl := NewTunnelListener(first)
+			t.Cleanup(func() { _ = tl.Close() })
+
+			got := acceptAsync(tl)
+			synctest.Wait()
+			requireAcceptParked(t, got)
+
+			// The old tunnel's listener has taken a connection and not yet
+			// returned it to the pump; the tunnel is replaced meanwhile.
+			old, oldPeer := net.Pipe()
+			first.conns <- old
+			synctest.Wait()
+			second := newParkedListener()
+			require.True(t, tl.Swap(second))
+			close(hold)
+			synctest.Wait()
+
+			requireAcceptParked(t, got) // the old connection is not what Accept returns
+			requirePipeClosed(t, oldPeer)
+
+			fresh, freshPeer := net.Pipe()
+			second.conns <- fresh
+			synctest.Wait()
+			r := acceptReturned(t, got)
+			require.NoError(t, r.err)
+			require.True(t, r.conn == fresh, "Accept returned a connection from the replaced tunnel")
+			_, _ = r.conn.Close(), freshPeer.Close()
+		}
 	})
 }
 

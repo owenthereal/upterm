@@ -26,12 +26,14 @@ type TunnelListener struct {
 	// addr is the first listener's, taken once so Addr needs no lock and
 	// stays the same across swaps.
 	addr net.Addr
-	// conns hands a connection from the current listener's goroutine to
-	// Accept. It is unbuffered, but that goroutine accepts from its tunnel
-	// ahead of Accept and holds the one connection it has until Accept takes
-	// it. If the tunnel is replaced or the listener ends first, it closes
-	// that connection instead.
-	conns chan net.Conn
+	// conns hands a connection from a tunnel's goroutine to Accept. It is
+	// unbuffered, but that goroutine accepts from its tunnel ahead of Accept
+	// and holds the one connection it has until Accept takes it. If the
+	// tunnel is replaced or the listener ends first, the goroutine closes
+	// that connection instead. Each connection travels with its tunnel's
+	// retired channel, so a connection that is handed over just as its tunnel
+	// is replaced is still recognised, and closed, by Accept.
+	conns chan sourcedConn
 	// done is closed by the first of Fail and Close.
 	done chan struct{}
 
@@ -53,12 +55,19 @@ type tunnelSource struct {
 	retired chan struct{}
 }
 
+// sourcedConn is a connection and the signal that the tunnel it came through
+// has since been replaced.
+type sourcedConn struct {
+	conn    net.Conn
+	retired <-chan struct{}
+}
+
 // NewTunnelListener serves from first until Swap replaces it. From here on
 // first is the TunnelListener's to close, in Swap or in Close.
 func NewTunnelListener(first net.Listener) *TunnelListener {
 	l := &TunnelListener{
 		addr:  first.Addr(),
-		conns: make(chan net.Conn),
+		conns: make(chan sourcedConn),
 		done:  make(chan struct{}),
 		cur:   tunnelSource{ln: first, retired: make(chan struct{})},
 	}
@@ -77,10 +86,13 @@ func (l *TunnelListener) pump(src tunnelSource) {
 			return
 		}
 		select {
-		case l.conns <- c:
+		case l.conns <- sourcedConn{conn: c, retired: src.retired}:
 		case <-src.retired:
 			// This tunnel was replaced while the connection was in hand:
-			// the guest that made it will redial through the new one.
+			// the guest that made it will redial through the new one. When
+			// an Accept is already waiting, this case and the send above can
+			// both be ready and the select picks either, so Accept checks
+			// again.
 			_ = c.Close()
 			return
 		case <-l.done:
@@ -90,30 +102,43 @@ func (l *TunnelListener) pump(src tunnelSource) {
 	}
 }
 
-// Accept returns a connection from the current tunnel. It blocks across a
-// Swap, and fails only once Fail or Close has been called: with an error
-// wrapping Fail's, or with net.ErrClosed.
+// Accept returns a connection from the current tunnel: never one from a
+// tunnel that Swap had already replaced when Accept received it, which is
+// closed instead. It blocks across a Swap, and fails only once Fail or Close
+// has been called: with an error wrapping Fail's, or with net.ErrClosed.
 func (l *TunnelListener) Accept() (net.Conn, error) {
-	// A select picks at random among its ready cases, so a listener that
-	// has ended must not be left to chance against a connection that is
-	// also ready.
-	select {
-	case <-l.done:
-		return nil, l.err
-	default:
-	}
-
-	select {
-	case c := <-l.conns:
+	for {
+		// A select picks at random among its ready cases, so a listener
+		// that has ended must not be left to chance against a connection
+		// that is also ready.
 		select {
 		case <-l.done:
-			_ = c.Close()
 			return nil, l.err
 		default:
 		}
-		return c, nil
-	case <-l.done:
-		return nil, l.err
+
+		select {
+		case sc := <-l.conns:
+			select {
+			case <-l.done:
+				_ = sc.conn.Close()
+				return nil, l.err
+			default:
+			}
+			// The same goes for a connection and its tunnel's replacement:
+			// the pump's hand-off can pick the send over the replacement
+			// when both are ready. A connection from a replaced tunnel is
+			// dropped, and Accept goes back to waiting; it is not an error.
+			select {
+			case <-sc.retired:
+				_ = sc.conn.Close()
+				continue
+			default:
+			}
+			return sc.conn, nil
+		case <-l.done:
+			return nil, l.err
+		}
 	}
 }
 
