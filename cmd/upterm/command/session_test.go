@@ -213,6 +213,14 @@ func buildStarting(t *testing.T, name string) {
 // buildReady: claimed, published ready, and an admin socket that answers.
 func buildReady(t *testing.T, name string) {
 	t.Helper()
+	buildReadyOnRelay(t, name, "")
+}
+
+// buildReadyOnRelay is buildReady for a relay that has said whether it
+// supports reconnecting ("supported" or "unsupported"); empty is a relay that
+// has not said yet.
+func buildReadyOnRelay(t *testing.T, name, reconnect string) {
+	t.Helper()
 
 	d := claimSession(t, name)
 	releaseAtEnd(t, d)
@@ -220,6 +228,7 @@ func buildReady(t *testing.T, name string) {
 		r.Status = sessiondir.StatusReady
 		r.SessionID = "sid-1"
 		r.HostKeys = []string{testHostKeyLine(t)}
+		r.Reconnect = reconnect
 	}))
 	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
 		SessionId: "sid-1",
@@ -315,9 +324,30 @@ func buildDisconnectedByRelay(t *testing.T, name string) {
 	})
 }
 
-// buildEndedWhileReconnecting: a session that ended during an outage. Its
-// record keeps the outage on purpose, so it still says how it ended.
+// buildEndedWhileReconnecting: a session that ended during an outage on a relay
+// that supports reconnecting, as the host publishes it: the tunnel was down
+// and being redialled, so the record keeps the outage and the next attempt it
+// was waiting for.
 func buildEndedWhileReconnecting(t *testing.T, name string) {
+	t.Helper()
+
+	d := claimSession(t, name)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusEnding
+		r.Reason = sessiondir.ReasonExited
+		r.Reconnect = sessiondir.ReconnectSupported
+		r.TunnelLostAt = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+		r.TunnelReason = sessiondir.TunnelReasonNetwork
+		r.TunnelError = "dial tcp: connection refused"
+		r.NextAttemptAt = time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	}))
+	require.NoError(t, d.Release(context.Background()))
+}
+
+// buildEndedAfterDisconnected: a session that ended after the relay told it
+// reconnecting is unsupported. The tunnel was down for good, so the record has
+// the outage and no next attempt.
+func buildEndedAfterDisconnected(t *testing.T, name string) {
 	t.Helper()
 
 	d := claimSession(t, name)
@@ -326,9 +356,8 @@ func buildEndedWhileReconnecting(t *testing.T, name string) {
 		r.Reason = sessiondir.ReasonExited
 		r.Reconnect = sessiondir.ReconnectUnsupported
 		r.TunnelLostAt = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
-		r.TunnelReason = sessiondir.TunnelReasonNetwork
-		r.TunnelError = "dial tcp: connection refused"
-		r.NextAttemptAt = time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		r.TunnelReason = sessiondir.TunnelReasonReconnectUnsupported
+		r.TunnelError = "tunnel closed"
 	}))
 	require.NoError(t, d.Release(context.Background()))
 }
@@ -2100,13 +2129,28 @@ func Test_infoRunE_Reconnecting(t *testing.T) {
 // hint to show.
 func Test_infoRunE_ReadyPrintsNeitherRow(t *testing.T) {
 	setupSessionRoots(t)
-	buildReady(t, "ready")
+	buildReadyOnRelay(t, "ready", sessiondir.ReconnectSupported)
 
 	out := runInfo(t, "ready")
 
 	require.Regexp(t, `Status:\s+ready\n`, out)
 	require.NotContains(t, out, "Hint:")
 	require.NotContains(t, out, "Reconnect:")
+}
+
+// Test_infoRunE_ReadyOnAnUnsupportedRelay: a relay that can't bring a dropped
+// session back says so from the first connection on, while the tunnel is up
+// and there is no outage for a hint to explain.
+func Test_infoRunE_ReadyOnAnUnsupportedRelay(t *testing.T) {
+	setupSessionRoots(t)
+	buildReadyOnRelay(t, "older", sessiondir.ReconnectUnsupported)
+
+	out := runInfo(t, "older")
+
+	require.Regexp(t, `Status:\s+ready\n`, out)
+	require.Contains(t, out, "➤ SSH:", "the live answer was read: only it has a connect string")
+	require.Regexp(t, `Reconnect:\s+unsupported by this relay\n`, out)
+	require.NotContains(t, out, "Hint:")
 }
 
 // Test_infoRunE_ReconnectingSocketSilent: with no answer from the socket the
@@ -2156,12 +2200,34 @@ func Test_printSessionSummary_PastNextAttempt(t *testing.T) {
 	require.Contains(t, string(raw), "nextAttemptAt")
 }
 
-// Test_infoRunE_EndedKeepsOnlyTheRelayLimit: the final record keeps its
-// outage for -o json, but an ended session has no outage to explain on a
-// terminal. What the relay can't do stays true, so it stays on the page.
-func Test_infoRunE_EndedKeepsOnlyTheRelayLimit(t *testing.T) {
+// Test_infoRunE_EndedWhileReconnecting: the final record keeps its outage for
+// -o json, but an ended session has no outage to explain on a terminal, and a
+// relay that supports reconnecting has no limit to report.
+func Test_infoRunE_EndedWhileReconnecting(t *testing.T) {
 	setupSessionRoots(t)
 	buildEndedWhileReconnecting(t, "ended")
+
+	out := runInfo(t, "ended")
+	require.Contains(t, out, "Status:    ended\n")
+	require.NotContains(t, out, "Hint:")
+	require.NotContains(t, out, "Reconnect:")
+	require.NotContains(t, out, "since")
+	require.NotContains(t, out, "next attempt")
+
+	got := lookupJSON(t, "ended")
+	require.Equal(t, "supported", got["reconnect"])
+	require.Equal(t, "network", got["tunnelReason"], "the record's fields are still in the JSON")
+	require.Equal(t, "dial tcp: connection refused", got["tunnelError"])
+	require.Contains(t, got, "tunnelLostAt")
+	require.Contains(t, got, "nextAttemptAt")
+}
+
+// Test_infoRunE_EndedAfterDisconnected: the final record keeps its outage for
+// -o json, and an ended session has no hint to act on. What the relay can't do
+// stays true, so it stays on the page.
+func Test_infoRunE_EndedAfterDisconnected(t *testing.T) {
+	setupSessionRoots(t)
+	buildEndedAfterDisconnected(t, "ended")
 
 	out := runInfo(t, "ended")
 	require.Contains(t, out, "Status:    ended\n")
@@ -2170,10 +2236,11 @@ func Test_infoRunE_EndedKeepsOnlyTheRelayLimit(t *testing.T) {
 	require.NotContains(t, out, "since")
 
 	got := lookupJSON(t, "ended")
-	require.Equal(t, "network", got["tunnelReason"], "the record's fields are still in the JSON")
-	require.Equal(t, "dial tcp: connection refused", got["tunnelError"])
+	require.Equal(t, "unsupported", got["reconnect"])
+	require.Equal(t, "reconnect_unsupported", got["tunnelReason"], "the record's fields are still in the JSON")
+	require.Equal(t, "tunnel closed", got["tunnelError"])
 	require.Contains(t, got, "tunnelLostAt")
-	require.Contains(t, got, "nextAttemptAt")
+	require.NotContains(t, got, "nextAttemptAt", "a relay that can't reconnect never schedules one")
 }
 
 // Test_listSessions_ReconnectingRowIsJoinable: the listing gates the live

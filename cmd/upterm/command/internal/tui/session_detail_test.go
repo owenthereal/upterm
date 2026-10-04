@@ -243,6 +243,9 @@ var wantHints = []struct{ reason, hint string }{
 // Test_renderSessionDetail_Reconnecting is the whole view of a session whose
 // tunnel is down and being redialled: the connect string stays, because the
 // session comes back under it, and the status row says why and when.
+//
+// The exact output assumes stdout is not a terminal, as when go test runs a
+// package: under a terminal lipgloss colours the rows and wrapLines wraps them.
 func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	next := lost.Add(30 * time.Second)
@@ -274,6 +277,9 @@ func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 // Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay: the status is the
 // plain word, and what a user needs instead of a countdown is the hint and the
 // reason the relay can't help.
+//
+// The exact output assumes stdout is not a terminal, as when go test runs a
+// package: under a terminal lipgloss colours the rows and wrapLines wraps them.
 func Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	pinClock(t, lost.Add(time.Minute))
@@ -383,9 +389,9 @@ func Test_ReconnectNote(t *testing.T) {
 	assert.Empty(t, ReconnectNote(SessionDetail{Status: "ready"}), "unknown until the first connection shows it")
 }
 
-// Test_FormatSessionDetail_RowsByStatus: which of the two extra rows each
+// Test_renderSessionDetail_RowsByStatus: which of the two extra rows each
 // status prints, in a view that has everything else a live session has.
-func Test_FormatSessionDetail_RowsByStatus(t *testing.T) {
+func Test_renderSessionDetail_RowsByStatus(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	pinClock(t, lost.Add(time.Second))
 

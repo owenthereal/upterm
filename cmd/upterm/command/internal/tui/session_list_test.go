@@ -73,6 +73,9 @@ func Test_NewSessionListModel_ReconnectingRowIsTheWordOnly(t *testing.T) {
 
 // Test_SessionListModel_DetailViewShowsWhyAndWhen: entering a row shows the
 // same status detail and hint `session info` prints for that session.
+//
+// It assumes stdout is not a terminal, as when go test runs a package: under a
+// terminal lipgloss colours the rows and the detail view wraps them.
 func Test_SessionListModel_DetailViewShowsWhyAndWhen(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	pinClock(t, lost.Add(time.Second))
