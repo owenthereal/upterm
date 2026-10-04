@@ -61,10 +61,11 @@ docker_build:
 GO_TEST_FLAGS ?= ""
 # The bound is a guard against a hung test, not a performance budget. ftests is
 # what sets it: on the Consul job it runs both suites in one binary, and a
-# go test -timeout bounds that binary as a whole. It took 221.5s of the old
-# 300s there on master at 655960a (macOS 144s, Windows 137s), before the
-# scenarios of a host redialling its relay were added; with them, the package
-# took 234s locally (-race, with Consul), leaving less headroom than
+# go test -timeout bounds that binary as a whole. On master's CI (655960a) the
+# ftests package took 221.5s on the Ubuntu + Consul job, and 144s on macOS and
+# 137s on Windows, which run without Consul. That was before the scenarios of
+# a host redialling its relay were added; with them it took 238s locally under
+# -race with Consul, which leaves the old 300s with less headroom than
 # runner-to-runner variance.
 .PHONY: test
 test:
