@@ -53,6 +53,48 @@ func Test_wrapLines(t *testing.T) {
 	}
 }
 
+// Test_wordWrapLines: a sentence breaks at spaces, never inside a word it can
+// keep whole, and the status detail and the longest hint are the sentences it
+// is for. A word longer than the width has nowhere to break, so it is cut. It
+// is tested directly because the terminal check keeps wrapProseLines from
+// wrapping under go test.
+func Test_wordWrapLines(t *testing.T) {
+	const width = 60
+
+	t.Run("a hint breaks only at spaces", func(t *testing.T) {
+		hint := tunnelHints["relay_key_changed"]
+		require.Greater(t, len(hint), width, "the case needs a hint that has to wrap")
+
+		lines := wordWrapLines(hint, width)
+
+		require.Greater(t, len(lines), 1)
+		for _, line := range lines {
+			assert.LessOrEqual(t, len(line), width, line)
+		}
+		assert.Equal(t, strings.Fields(hint), strings.Fields(strings.Join(lines, " ")),
+			"every word comes out whole and in order")
+	})
+
+	t.Run("the status detail breaks only at spaces", func(t *testing.T) {
+		text := "reconnecting — network since 12:03:04, next attempt 12:08:10, and a few more words to wrap"
+
+		lines := wordWrapLines(text, 40)
+
+		require.Greater(t, len(lines), 1)
+		assert.Equal(t, strings.Fields(text), strings.Fields(strings.Join(lines, " ")))
+	})
+
+	t.Run("a word longer than the width is cut at it", func(t *testing.T) {
+		word := strings.Repeat("x", 70)
+
+		assert.Equal(t, []string{strings.Repeat("x", 60), strings.Repeat("x", 10)}, wordWrapLines(word, width))
+	})
+
+	t.Run("a short line is left alone", func(t *testing.T) {
+		assert.Equal(t, []string{"reconnecting"}, wordWrapLines("reconnecting", width))
+	})
+}
+
 func Test_renderWrappedRow_multiline(t *testing.T) {
 	// Test that multi-line values have continuation lines properly indented
 	var b strings.Builder

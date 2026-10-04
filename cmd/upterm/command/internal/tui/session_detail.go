@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"golang.org/x/term"
@@ -172,10 +173,40 @@ func wrapLines(text string, width int) []string {
 	return strings.Split(wrapped, "\n")
 }
 
+// wordWrapLines wraps prose to width at spaces and returns lines. A single
+// word longer than width is still cut at width, so no line exceeds it.
+// Embedded newlines are kept. It does not look at the terminal; wrapProseLines
+// decides whether to call it.
+func wordWrapLines(text string, width int) []string {
+	width = max(width, 10)
+	return strings.Split(wrap.String(wordwrap.String(text, width), width), "\n")
+}
+
+// wrapProseLines is wrapLines for sentences (the status detail and the hint),
+// which break at spaces instead of mid-word. Like wrapLines it leaves the text
+// alone when stdout isn't a terminal.
+func wrapProseLines(text string, width int) []string {
+	if text == "" {
+		return []string{}
+	}
+	if !IsTTY() {
+		return strings.Split(text, "\n")
+	}
+	return wordWrapLines(text, width)
+}
+
 // renderWrappedRow renders a label: value row with wrapping, continuation lines indented
 func renderWrappedRow(b *strings.Builder, label string, value string, labelWidth int, valueWidth int, style lipgloss.Style) {
+	renderRow(b, label, wrapLines(value, valueWidth), labelWidth, style)
+}
+
+// renderProseRow is renderWrappedRow for a sentence: it breaks at spaces.
+func renderProseRow(b *strings.Builder, label string, value string, labelWidth int, valueWidth int, style lipgloss.Style) {
+	renderRow(b, label, wrapProseLines(value, valueWidth), labelWidth, style)
+}
+
+func renderRow(b *strings.Builder, label string, lines []string, labelWidth int, style lipgloss.Style) {
 	l := LabelStyle.Width(labelWidth).Render(label)
-	lines := wrapLines(value, valueWidth)
 	if len(lines) == 0 {
 		b.WriteString(l + "\n")
 		return
@@ -222,10 +253,10 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	// blank, and it is what distinguishes a session still starting, or running
 	// under another XDG_RUNTIME_DIR, from one that is broken.
 	if detail.Status != "" {
-		renderWrappedRow(&b, "Status:", StatusText(detail), labelWidth, valueWidth, ValueStyle)
+		renderProseRow(&b, "Status:", StatusText(detail), labelWidth, valueWidth, ValueStyle)
 	}
 	if hint := StatusHint(detail); hint != "" {
-		renderWrappedRow(&b, "Hint:", hint, labelWidth, valueWidth, ValueStyle)
+		renderProseRow(&b, "Hint:", hint, labelWidth, valueWidth, ValueStyle)
 	}
 	if note := ReconnectNote(detail); note != "" {
 		renderWrappedRow(&b, "Reconnect:", note, labelWidth, valueWidth, ValueStyle)
