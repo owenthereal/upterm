@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -639,6 +640,78 @@ func TestReverseTunnelWaitSaysWhyItEnded(t *testing.T) {
 	}
 	tunnel.Close()
 	require.ErrorIs(t, waitWithin(t, tunnel, giveUp+time.Second), liveness.ErrSilent, "after Close too")
+}
+
+// recordHandler hands every record it is given to records, dropping any that
+// would block.
+type recordHandler struct{ records chan slog.Record }
+
+func (h recordHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h recordHandler) Handle(_ context.Context, r slog.Record) error {
+	select {
+	case h.records <- r:
+	default:
+	}
+	return nil
+}
+func (h recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordHandler) WithGroup(string) slog.Handler      { return h }
+
+// Only silence is the relay's own failure to report as an error. A probe into
+// a connection that had already ended is that connection's loss, which Wait
+// reports in the connection's words.
+func TestReverseTunnelKeepAliveLogsOnlySilenceAsAnError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		timing  liveness.Timing
+		cut     func(*testhelpers.Forwarder)
+		level   slog.Level
+		message string
+	}{
+		"silence": {
+			timing:  liveness.Timing{Interval: 100 * time.Millisecond, Bound: 300 * time.Millisecond},
+			cut:     (*testhelpers.Forwarder).Blackhole,
+			level:   slog.LevelError,
+			message: "relay stopped responding, closing the tunnel",
+		},
+		"a connection that had already ended": {
+			// A Bound the probe's failure always beats, so that the silence
+			// is never what ends the tunnel.
+			timing:  liveness.Timing{Interval: 100 * time.Millisecond, Bound: 30 * time.Second},
+			cut:     (*testhelpers.Forwarder).Cut,
+			level:   slog.LevelDebug,
+			message: "relay connection already ended; closing the tunnel",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			relay := startTestRelay(t)
+			fwd := testhelpers.NewForwarder(t, relay.url.Host)
+			hostKey, err := utils.CreateSigners(nil)
+			require.NoError(t, err)
+			records := make(chan slog.Record, 64)
+			tunnel := relay.tunnel(hostKey[0], &url.URL{Scheme: "ssh", Host: fwd.Addr()})
+			tunnel.Logger = slog.New(recordHandler{records: records})
+			tunnel.KeepAlive = tc.timing
+			_, err = tunnel.Establish(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(tunnel.Close)
+
+			tc.cut(fwd)
+			giveUp := time.After(10 * time.Second)
+			for {
+				select {
+				case r := <-records:
+					if !strings.Contains(r.Message, "closing the tunnel") {
+						continue
+					}
+					require.Equal(t, tc.message, r.Message)
+					require.Equal(t, tc.level, r.Level)
+					return
+				case <-giveUp:
+					t.Fatal("the keepalive never gave up on the tunnel")
+				}
+			}
+		})
+	}
 }
 
 // A refused registration is typed, with the relay's body and the text it always had.

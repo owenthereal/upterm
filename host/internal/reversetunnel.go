@@ -445,8 +445,15 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		}
 		// Once, at the point of giving up. Logging every interval said the
 		// same thing about the same dead connection until the session ended,
-		// which buried whatever else the host had to say.
-		baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
+		// which buried whatever else the host had to say. Only silence is
+		// the relay's fault to report as an error: a probe into a connection
+		// that had already ended is that connection's loss, which whoever
+		// watches the tunnel reports in its own words.
+		if errors.Is(err, liveness.ErrSilent) {
+			baseLogger.Error("relay stopped responding, closing the tunnel", "error", err)
+		} else {
+			baseLogger.Debug("relay connection already ended; closing the tunnel", "error", err)
+		}
 		// The guest door is parked in Accept on a tunnel that no longer
 		// carries anything. Closing the client is what ends the connection,
 		// so Wait returns and whoever watches the tunnel learns it is lost,
