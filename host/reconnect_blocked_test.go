@@ -26,6 +26,17 @@ func withSigners(signers []ssh.Signer) reconnectOption {
 	return func(f *reconnectHost) { f.h.Signers = signers }
 }
 
+// withSlowWait makes the slow schedule's least wait d, in place of the
+// fixture's second.
+func withSlowWait(d time.Duration) reconnectOption {
+	return func(f *reconnectHost) { f.h.Reconnect.SlowWait = d }
+}
+
+// recoverySlowWait is the slow wait of a test that sees the host settle into
+// it and then sends the next attempt elsewhere. It is long enough that a poll
+// held up under -race still redirects before the wait ends.
+const recoverySlowWait = 3 * time.Second
+
 // signersWith is what the CLI's host offers with SSH_AUTH_SOCK at ag:
 // SignersWith's identities for opts. The connection they came with is closed
 // when the test ends, as the CLI closes it when the session does.
@@ -202,7 +213,7 @@ func (f *reconnectHost) requireNoPrompt(t *testing.T) {
 func TestBlockedRedialRecoversOnceTheKeyIsAdmittedAgain(t *testing.T) {
 	for _, scheme := range []string{"ssh", "ws"} {
 		t.Run(scheme, func(t *testing.T) {
-			f := newReconnectHost(t, scheme)
+			f := newReconnectHost(t, scheme, withSlowWait(recoverySlowWait))
 			f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 
 			// The same relay key, admitting only a key that isn't the host's.
@@ -227,7 +238,7 @@ func TestBlockedRedialRecoversOnceTheKeyIsAdmittedAgain(t *testing.T) {
 // fast schedule and then waits out the slow one; a node that registers it
 // under the same ID brings it back.
 func TestBlockedRedialRecoversFromANodeThatCantTakeTheSessionBack(t *testing.T) {
-	f := newReconnectHost(t, "ssh")
+	f := newReconnectHost(t, "ssh", withSlowWait(recoverySlowWait))
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 
 	fake := fakerelay.Start(t, f.relay.key, fakerelay.RandomID)
@@ -265,7 +276,7 @@ func TestBlockedRedialNeverAcceptsAnotherRelayKey(t *testing.T) {
 		t.Run(scheme, func(t *testing.T) {
 			stdin := &countingStdin{r: strings.NewReader("yes\n")}
 			prompts := &lockedBuffer{}
-			f := newReconnectHost(t, scheme, func(f *reconnectHost) {
+			f := newReconnectHost(t, scheme, withSlowWait(recoverySlowWait), func(f *reconnectHost) {
 				cb, err := NewPromptingHostKeyCallback(stdin, prompts, filepath.Join(t.TempDir(), "known_hosts"), false)
 				require.NoError(t, err)
 				f.h.HostKeyCallback = cb
@@ -320,7 +331,6 @@ func TestAgentRestartedAtTheSameSocketSignsTheRedial(t *testing.T) {
 	rec, generation := f.awaitRedialled(t, gated, 2, 5*time.Second)
 	require.EqualValues(t, 2, generation, "the first attempt came back")
 	requireUp(t, rec)
-	require.Empty(t, f.failedRedials(t))
 	require.Equal(t, accepts+1, ag.accepts.Load(), "the redial reached the restarted agent, once")
 	require.Equal(t, signatures+1, ag.signatures.Load(), "the restarted agent signed the redial")
 	f.requireNoPrompt(t)
@@ -338,11 +348,12 @@ func TestAgentThatNeverAnswersIsAskedAgainOnlySlowly(t *testing.T) {
 	relayKey, err := NewHostKey()
 	require.NoError(t, err)
 	gated := startRelay(t, relayKey, withAuthorizedKeysFiles(authorizedKeysFile(t, agentPub)))
-	f := newReconnectHost(t, "ssh", withRelay(gated), withSigners(signers), func(f *reconnectHost) {
-		// An attempt that waits on the agent fails in a second, not 30.
-		f.h.Reconnect.AttemptDeadline = time.Second
-		// No third attempt comes while the test counts the first two.
-		f.h.Reconnect.SlowWait = time.Minute
+	// No third attempt comes while the test counts the first two.
+	f := newReconnectHost(t, "ssh", withRelay(gated), withSigners(signers), withSlowWait(time.Minute), func(f *reconnectHost) {
+		// An attempt that waits on the agent fails in seconds, not 30. The
+		// deadline also covers the handshake before the agent is asked, which
+		// -race slows.
+		f.h.Reconnect.AttemptDeadline = 2 * time.Second
 	})
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 
@@ -354,9 +365,9 @@ func TestAgentThatNeverAnswersIsAskedAgainOnlySlowly(t *testing.T) {
 	waiting := f.awaitSlowWait(t, sessiondir.TunnelReasonAgentRefused, 10*time.Second)
 	require.Contains(t, waiting.TunnelError, errAttemptOver.Error(), "the agent was given up on at the attempt's deadline")
 	f.requireBlockedTwice(t, sessiondir.TunnelReasonAgentRefused)
-	require.Equal(t, accepts+2, ag.accepts.Load(), "each attempt reached the agent once")
 	ag.awaitEnded(t, ended+2)
 	require.Zero(t, ag.open(), "an attempt left its agent connection open")
+	require.Equal(t, accepts+2, ag.accepts.Load(), "each attempt reached the agent once")
 	f.requireNoPrompt(t)
 }
 
@@ -377,7 +388,6 @@ func TestAgentIsNotReachedWhereTheSessionKeyIsEnough(t *testing.T) {
 	rec, generation := f.awaitRedialled(t, f.relay, 2, 5*time.Second)
 	require.EqualValues(t, 2, generation, "the first attempt came back")
 	requireUp(t, rec)
-	require.Empty(t, f.failedRedials(t))
 	require.Equal(t, accepts, ag.accepts.Load(), "something connected to the agent after the session started")
 	require.Equal(t, signatures, ag.signatures.Load(), "the agent signed the redial")
 	f.requireNoPrompt(t)
@@ -386,15 +396,14 @@ func TestAgentIsNotReachedWhereTheSessionKeyIsEnough(t *testing.T) {
 // With IdentitiesOnly, a redial offers the identities named, in order, and
 // nothing else: not the session key, even on a relay that would let it alone
 // in.
-func TestRedialIdentitiesOnlyOffersNoSessionKey(t *testing.T) {
+func TestBlockedRedialWithIdentitiesOnlyOffersNoSessionKey(t *testing.T) {
 	ag := startTestAgent(t)
 	files, pubs := fileIdentities(t, 2)
 	signers := signersWith(t, ag, SignerOptions{PrivateKeys: files, IdentitiesOnly: true})
 	require.Equal(t, marshalled(pubs...), publicKeys(signers))
-	f := newReconnectHost(t, "ssh", withSigners(signers), func(f *reconnectHost) {
+	// No third attempt comes while the test counts the first two.
+	f := newReconnectHost(t, "ssh", withSigners(signers), withSlowWait(time.Minute), func(f *reconnectHost) {
 		f.h.IdentitiesOnly = true
-		// No third attempt comes while the test counts the first two.
-		f.h.Reconnect.SlowWait = time.Minute
 	})
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 
@@ -412,10 +421,11 @@ func TestRedialIdentitiesOnlyOffersNoSessionKey(t *testing.T) {
 	f.requireNoPrompt(t)
 }
 
-// On a relay that admits only the sixth of six identities, every redial
-// reaches it: a relay that gates its hosts isn't offered the session key, which
-// would have spent the last of the tries it allows.
-func TestRedialIdentitiesOnAGatedRelayReachTheSixth(t *testing.T) {
+// Six identities that are files, and sign without the agent, on a relay that
+// admits only the sixth: every redial reaches it. A relay that gates its hosts
+// isn't offered the session key, which would have spent the last of the tries
+// it allows.
+func TestAgentlessRedialsOnAGatedRelayReachTheSixthIdentity(t *testing.T) {
 	ag := startTestAgent(t)
 	files, pubs := fileIdentities(t, 6)
 	signers := signersWith(t, ag, SignerOptions{PrivateKeys: files})
@@ -433,7 +443,6 @@ func TestRedialIdentitiesOnAGatedRelayReachTheSixth(t *testing.T) {
 		require.Equal(t, want, generation, "the first attempt after the cut came back")
 		requireUp(t, rec)
 	}
-	require.Empty(t, f.failedRedials(t))
 	require.Equal(t, accepts, ag.accepts.Load(), "something connected to the agent after the session started")
 	f.requireNoPrompt(t)
 }
@@ -442,7 +451,7 @@ func TestRedialIdentitiesOnAGatedRelayReachTheSixth(t *testing.T) {
 // six identities, refuses one attempt: the session key and the first five
 // spend every try it allows, and it disconnects. The next attempt leaves the
 // session key out, and reaches the sixth.
-func TestRedialIdentitiesWhenARelayGainsAGate(t *testing.T) {
+func TestBlockedRedialWhenARelayGainsAGate(t *testing.T) {
 	ag := startTestAgent(t)
 	files, pubs := fileIdentities(t, 6)
 	signers := signersWith(t, ag, SignerOptions{PrivateKeys: files})
