@@ -407,13 +407,13 @@ func TestRelayKeyChangedErrorSurvivesWhatItIsGivenToPrint(t *testing.T) {
 	ca := testSigner(t)
 	cert := hostCert(t, ca, testSigner(t).PublicKey(), nil, ssh.CertTimeInfinity)
 	fingerprint := utils.FingerprintSHA256(ca.PublicKey())
-	err := &RelayKeyChangedError{Hostname: "relay.example:22", Key: cert, fromAuthority: true}
+	err := &RelayKeyChangedError{Hostname: "relay.example:22", Key: cert, namesAuthority: true}
 	require.Equal(t, "the relay's key for relay.example:22 ("+fingerprint+") is not the one this session started with", err.Error())
 
 	// And with no hostname the text still reads.
-	err = &RelayKeyChangedError{Key: cert, Err: errors.New("no"), fromAuthority: true}
+	err = &RelayKeyChangedError{Key: cert, Err: errors.New("no"), namesAuthority: true}
 	require.Equal(t, "the relay presented a certificate that names the authority this session started with ("+fingerprint+"), but it was not accepted: no", err.Error())
 
 	// The marker alone, on a zero value.
-	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{fromAuthority: true}).Error())
+	require.Equal(t, "the relay's key is not the one this session started with", (&RelayKeyChangedError{namesAuthority: true}).Error())
 }

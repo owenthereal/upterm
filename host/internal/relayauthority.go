@@ -146,10 +146,10 @@ func (r *RelayAuthority) Pinned() ssh.HostKeyCallback {
 		// is not a changed key, and RelayKeyChangedError says so.
 		cert, isCert := key.(*ssh.Certificate)
 		return &RelayKeyChangedError{
-			Hostname:      hostname,
-			Key:           key,
-			Err:           err,
-			fromAuthority: isCert && cert != nil && r.IsUserAuthority(cert.SignatureKey),
+			Hostname:       hostname,
+			Key:            key,
+			Err:            err,
+			namesAuthority: isCert && cert != nil && r.IsUserAuthority(cert.SignatureKey),
 		}
 	}
 }
@@ -185,15 +185,15 @@ type RelayKeyChangedError struct {
 	Key      ssh.PublicKey
 	Err      error
 
-	// fromAuthority is set by Pinned for that certificate: Key's SignatureKey
+	// namesAuthority is set by Pinned for that certificate: Key's SignatureKey
 	// is exactly the recorded key, whether or not its signature was ever
 	// verified.
-	fromAuthority bool
+	namesAuthority bool
 }
 
 func (e *RelayKeyChangedError) Error() string {
 	fingerprint := e.fingerprint()
-	if e.fromAuthority && e.Err != nil && fingerprint != "" {
+	if e.namesAuthority && e.Err != nil && fingerprint != "" {
 		return "the relay presented a certificate" + e.forHost() +
 			" that names the authority this session started with (" + fingerprint +
 			"), but it was not accepted: " + e.Err.Error()
@@ -217,8 +217,8 @@ func (e *RelayKeyChangedError) forHost() string {
 }
 
 // fingerprint names Key, or the signer a certificate names when Key is one, as
-// the host key prompt does: a certificate's own digest is not one anyone can compare. It
-// is empty when there is no key to name.
+// the host key prompt does: a certificate's own digest is not one anyone can
+// compare. It is empty when there is no key to name.
 func (e *RelayKeyChangedError) fingerprint() string {
 	key := e.Key
 	if cert, ok := key.(*ssh.Certificate); ok {

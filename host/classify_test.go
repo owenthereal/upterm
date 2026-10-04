@@ -30,7 +30,8 @@ type classifyCase struct {
 	class  retryClass
 }
 
-func failure(err error) func(*testing.T) error { return func(*testing.T) error { return err } }
+// fixedErr is a case whose error needs nothing built.
+func fixedErr(err error) func(*testing.T) error { return func(*testing.T) error { return err } }
 
 func runClassifyCases(t *testing.T, cases []classifyCase) {
 	t.Helper()
@@ -223,12 +224,12 @@ func TestClassify(t *testing.T) {
 		// Errors the rest of the host produces.
 		{
 			name:   "an agent that cannot be reached",
-			err:    failure(fmt.Errorf("ssh dial error: %w", &AgentUnavailableError{Socket: "/run/agent", Err: errors.New("connection refused")})),
+			err:    fixedErr(fmt.Errorf("ssh dial error: %w", &AgentUnavailableError{Socket: "/run/agent", Err: errors.New("connection refused")})),
 			reason: sessiondir.TunnelReasonAgentUnavailable, class: transient,
 		},
 		{
 			name:   "an agent that did not sign",
-			err:    failure(fmt.Errorf("ssh dial error: %w", &AgentRefusedError{Key: "SHA256:x", Err: errNoLongerHeld})),
+			err:    fixedErr(fmt.Errorf("ssh dial error: %w", &AgentRefusedError{Key: "SHA256:x", Err: errNoLongerHeld})),
 			reason: sessiondir.TunnelReasonAgentRefused, class: blocked,
 		},
 		{
@@ -236,7 +237,7 @@ func TestClassify(t *testing.T) {
 			// text it carries: the agent's errors are matched before any
 			// authentication text.
 			name: "an agent failure that reads as too many authentication failures",
-			err: failure(&AgentRefusedError{
+			err: fixedErr(&AgentRefusedError{
 				Key: "SHA256:x",
 				Err: errors.New(`ssh: disconnect, reason 2: "too many authentication failures"`),
 			}),
@@ -244,53 +245,53 @@ func TestClassify(t *testing.T) {
 		},
 		{
 			name:   "a proof the relay refused",
-			err:    failure(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: registration.RefusedProof + ": bad"})),
+			err:    fixedErr(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: registration.RefusedProof + ": bad"})),
 			reason: sessiondir.TunnelReasonProofRefused, class: blocked,
 		},
 		{
 			name:   "a registration that lost a race",
-			err:    failure(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: registration.Superseded})),
+			err:    fixedErr(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: registration.Superseded})),
 			reason: sessiondir.TunnelReasonRelayError, class: transient,
 		},
 		{
 			name:   "a relay whose store is down",
-			err:    failure(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: "failed to create session: consul down"})),
+			err:    fixedErr(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: "failed to create session: consul down"})),
 			reason: sessiondir.TunnelReasonRelayError, class: transient,
 		},
 		{
 			name:   "a refusal nothing here has seen",
-			err:    failure(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: "something new"})),
+			err:    fixedErr(fmt.Errorf("error creating session: %w", &internal.CreateSessionRefusedError{Body: "something new"})),
 			reason: sessiondir.TunnelReasonRelayError, class: transient,
 		},
 		{
 			// Only a body that starts with the refusal is one.
 			name:   "a body that merely mentions the proof refusal",
-			err:    failure(&internal.CreateSessionRefusedError{Body: "failed to create session: " + registration.RefusedProof}),
+			err:    fixedErr(&internal.CreateSessionRefusedError{Body: "failed to create session: " + registration.RefusedProof}),
 			reason: sessiondir.TunnelReasonRelayError, class: transient,
 		},
 		{
 			name:   "a listener the relay refused",
-			err:    failure(&internal.ForwardRefusedError{}),
+			err:    fixedErr(&internal.ForwardRefusedError{}),
 			reason: sessiondir.TunnelReasonRelayError, class: transient,
 		},
 		{
 			name:   "a relay without proofs",
-			err:    failure(fmt.Errorf("x: %w", internal.ErrRelayUnsupported)),
+			err:    fixedErr(fmt.Errorf("x: %w", internal.ErrRelayUnsupported)),
 			reason: sessiondir.TunnelReasonRelayUnsupported, class: blocked,
 		},
 		{
 			name:   "an attempt that ran out of time",
-			err:    failure(context.DeadlineExceeded),
+			err:    fixedErr(context.DeadlineExceeded),
 			reason: sessiondir.TunnelReasonNetwork, class: transient,
 		},
 		{
 			name:   "a connection cut off",
-			err:    failure(io.EOF),
+			err:    fixedErr(io.EOF),
 			reason: sessiondir.TunnelReasonNetwork, class: transient,
 		},
 		{
 			name:   "an error nothing here has seen",
-			err:    failure(errors.New("something new")),
+			err:    fixedErr(errors.New("something new")),
 			reason: sessiondir.TunnelReasonNetwork, class: transient,
 		},
 	})
