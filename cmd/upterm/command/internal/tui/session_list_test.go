@@ -39,8 +39,7 @@ func Test_NewSessionListModel_RowsCarryStatus(t *testing.T) {
 func Test_SessionListModel_FitsAnEightyColumnTerminal(t *testing.T) {
 	// Measured, not modelled: how far bubbles pads a cell is bubbles' business,
 	// and a change to it is exactly what this is here to catch. The width is
-	// delivered as a resize because the one NewSessionListModel starts from is
-	// whatever terminal the test happens to run under.
+	// delivered as a resize so the test names the width it checks.
 	m := NewSessionListModel([]SessionDetail{{
 		Name:      "build-shell",
 		Status:    "disconnected",
@@ -73,9 +72,6 @@ func Test_NewSessionListModel_ReconnectingRowIsTheWordOnly(t *testing.T) {
 
 // Test_SessionListModel_DetailViewShowsWhyAndWhen: entering a row shows the
 // same status detail and hint `session info` prints for that session.
-//
-// It assumes stdout is not a terminal, as when go test runs a package: under a
-// terminal lipgloss colours the rows and the detail view wraps them.
 func Test_SessionListModel_DetailViewShowsWhyAndWhen(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	pinClock(t, lost.Add(time.Second))

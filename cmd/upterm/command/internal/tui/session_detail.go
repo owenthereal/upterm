@@ -14,18 +14,27 @@ import (
 	"golang.org/x/term"
 )
 
+// stdoutIsTerminal and getTermWidth read stdout. They are variables so the
+// package's tests can pin them: what a test sees must not depend on whether
+// `go test` was run from a terminal.
+var (
+	stdoutIsTerminal = func() bool {
+		return term.IsTerminal(int(os.Stdout.Fd()))
+	}
+
+	// getTermWidth returns the terminal width, defaulting to 80 if unavailable
+	getTermWidth = func() int {
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			return 80
+		}
+		return width
+	}
+)
+
 // IsTTY returns whether stdout is a terminal
 func IsTTY() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
-}
-
-// getTermWidth returns the terminal width, defaulting to 80 if unavailable
-func getTermWidth() int {
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return 80
-	}
-	return width
+	return stdoutIsTerminal()
 }
 
 // RunModel runs a bubbletea model with automatic TTY detection.

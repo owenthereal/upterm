@@ -46,8 +46,8 @@ func Test_wrapLines(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// wrapLines behavior depends on IsTTY(), but in test environment
-			// it should be non-TTY, so we test the non-TTY path
+			// wrapLines depends on IsTTY(), which TestMain pins to false, so
+			// this is the non-TTY path.
 			got := wrapLines(c.text, c.width)
 			assert.Equal(t, c.want, got)
 		})
@@ -59,7 +59,8 @@ func Test_wrapLines(t *testing.T) {
 // A hyphen is not a place to break: a hint names flags like --authorized-keys,
 // which reflow would otherwise cut after a hyphen. A word longer than the
 // width has nowhere to break, so it is cut. It is tested directly because the
-// terminal check keeps wrapProseLines from wrapping under go test.
+// terminal check in front of wrapProseLines leaves text alone, and the tests
+// pin stdout to not being a terminal.
 func Test_wordWrapLines(t *testing.T) {
 	const width = 60
 
@@ -262,9 +263,6 @@ var wantHints = []struct{ reason, hint string }{
 // Test_renderSessionDetail_Reconnecting is the whole view of a session whose
 // tunnel is down and being redialled: the connect string stays, because the
 // session comes back under it, and the status row says why and when.
-//
-// The exact output assumes stdout is not a terminal, as when go test runs a
-// package: under a terminal lipgloss colours the rows and wrapLines wraps them.
 func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	next := lost.Add(30 * time.Second)
@@ -296,9 +294,6 @@ func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 // Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay: the status is the
 // plain word, and what a user needs instead of a countdown is the hint and the
 // reason the relay can't help.
-//
-// The exact output assumes stdout is not a terminal, as when go test runs a
-// package: under a terminal lipgloss colours the rows and wrapLines wraps them.
 func Test_renderSessionDetail_DisconnectedByAnUnsupportedRelay(t *testing.T) {
 	lost := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	pinClock(t, lost.Add(time.Minute))
