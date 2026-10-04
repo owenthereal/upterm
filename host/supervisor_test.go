@@ -392,21 +392,39 @@ func TestSupervisorDropsTheSessionKeyAfterAuthRefused(t *testing.T) {
 }
 
 func TestSupervisorStopsPromptly(t *testing.T) {
-	for name, step := range map[string]func(ctx context.Context) (tunnel, error){
-		"waiting slowly": func(context.Context) (tunnel, error) { return nil, &internal.RelayKeyChangedError{} },
-		"mid-attempt":    func(ctx context.Context) (tunnel, error) { <-ctx.Done(); return nil, ctx.Err() },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newSupervisorFixture(t, true)
-			f.script.repeat(step)
-			f.first.drop(io.EOF)
-			time.Sleep(200 * time.Millisecond)
-			start := time.Now()
-			f.cancel()
-			f.awaitReturn(t)
-			require.Less(t, time.Since(start), 200*time.Millisecond)
-		})
+	stopsPromptly := func(t *testing.T, f *supervisorFixture) {
+		t.Helper()
+		start := time.Now()
+		f.cancel()
+		f.awaitReturn(t)
+		require.Less(t, time.Since(start), 200*time.Millisecond)
 	}
+
+	t.Run("waiting slowly", func(t *testing.T) {
+		f := newSupervisorFixture(t, true)
+		f.script.repeat(func(context.Context) (tunnel, error) { return nil, &internal.RelayKeyChangedError{} })
+		f.first.drop(io.EOF)
+		time.Sleep(200 * time.Millisecond)
+		stopsPromptly(t, f)
+	})
+
+	t.Run("mid-attempt", func(t *testing.T) {
+		f := newSupervisorFixture(t, true)
+		entered := make(chan struct{})
+		var once sync.Once
+		f.script.repeat(func(ctx context.Context) (tunnel, error) {
+			once.Do(func() { close(entered) })
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		f.first.drop(io.EOF)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no attempt was made")
+		}
+		stopsPromptly(t, f)
+	})
 }
 
 // The live tunnel outlives the supervisor: Run closes it after the guest door
@@ -452,7 +470,10 @@ func TestSupervisorBlockedThenRecovered(t *testing.T) {
 	require.Less(t, began[1].Sub(ended[0]), timing.SlowWait, "the first blocked error gets one more fast wait")
 	slow := began[2].Sub(ended[1])
 	require.GreaterOrEqual(t, slow, timing.SlowWait+timing.SlowJitter, "the second waits slowly, never less")
-	require.LessOrEqual(t, slow, timing.SlowWait+timing.SlowJitter+lateWake)
+	// ended[1] is taken before the record write that publishes the slow wait,
+	// so the span holds a temp-file write and a rename as well as the timer's
+	// wake.
+	require.LessOrEqual(t, slow, timing.SlowWait+timing.SlowJitter+2*lateWake)
 
 	require.Equal(t, sessiondir.StatusReconnecting, waiting.Status)
 	require.Equal(t, sessiondir.TunnelReasonRelayKeyChanged, waiting.TunnelReason)
@@ -692,4 +713,84 @@ func TestSupervisorDoesNotRecordAnAttemptTheStopCutShort(t *testing.T) {
 	require.Equal(t, sessiondir.TunnelReasonNetwork, rec.TunnelReason, "the stop isn't the relay's failure")
 	require.Equal(t, io.EOF.Error(), rec.TunnelError, "the record still says why the tunnel was lost")
 	require.NotZero(t, f.agent(0).closes.Load(), "the attempt's agent connection outlived it")
+}
+
+// An attempt can succeed in the moment the stop lands. The tunnel it returns
+// has nothing to serve, and is the supervisor's to close: nobody else knows it
+// exists.
+func TestSupervisorClosesATunnelAnAttemptReturnsAsTheStopLands(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	late := newFakeTunnel(t, true)
+	entered, stopped := make(chan struct{}), make(chan struct{})
+	f.script.steps = []func(context.Context) (tunnel, error){
+		func(ctx context.Context) (tunnel, error) {
+			close(entered)
+			<-ctx.Done()
+			// Whatever ended the attempt's context, answer only once the stop
+			// has been requested: the attempt succeeds into a session that is
+			// ending, never into one that is merely out of time.
+			<-stopped
+			return late, nil
+		},
+	}
+	f.first.drop(io.EOF)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no attempt was made")
+	}
+	f.cancel()
+	close(stopped)
+	f.awaitReturn(t)
+
+	require.True(t, late.closed.Load(), "a tunnel the supervisor didn't install is closed")
+	select {
+	case <-late.watched:
+		t.Fatal("a tunnel from an attempt the stop cut short was watched as the current one")
+	default:
+	}
+	require.Same(t, f.first, f.sup.current(), "the tunnel the guest door is served on is unchanged")
+	require.False(t, f.first.closed.Load(), "nothing replaced the lost tunnel")
+	nodeAddr, sshUser := f.route.Get()
+	require.Equal(t, "node-1:22", nodeAddr, "the route is unchanged")
+	require.Equal(t, "user-1", sshUser)
+}
+
+// A guest door that has already closed can't be swapped onto a new tunnel. The
+// supervisor closes the tunnel, and has nothing more to do but wait for the
+// stop.
+func TestSupervisorClosesATunnelWhenTheGuestDoorHasClosed(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	next := newFakeTunnel(t, true)
+	f.script.steps = []func(context.Context) (tunnel, error){
+		func(context.Context) (tunnel, error) { return next, nil },
+	}
+	require.NoError(t, f.listener.Close())
+	f.first.drop(io.EOF)
+
+	// Closing a fakeTunnel ends its connection, which is what releases lost.
+	select {
+	case <-next.lost:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attempt's tunnel was never closed")
+	}
+	require.True(t, next.closed.Load(), "a tunnel that can't serve the guest door is closed")
+
+	// It doesn't return, and it doesn't redial. A redial would come within
+	// FastCap of the attempt; the window is ten of them.
+	select {
+	case <-f.done:
+		t.Fatal("run returned before its context ended")
+	case <-time.After(10 * supervisorTiming.FastCap):
+	}
+	require.Equal(t, []uint64{2}, f.script.generations(), "no second attempt is made")
+	require.Same(t, f.first, f.sup.current(), "the tunnel the guest door is served on is unchanged")
+	select {
+	case <-next.watched:
+		t.Fatal("the closed tunnel was watched as the current one")
+	default:
+	}
+
+	f.cancel()
+	f.awaitReturn(t)
 }

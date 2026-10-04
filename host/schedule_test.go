@@ -197,8 +197,8 @@ func TestSleepCtxIsInterruptible(t *testing.T) {
 	select {
 	case slept := <-done:
 		require.False(t, slept, "a sleep that the context cut short reports it")
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("sleepCtx did not return within 50 ms of the context ending")
+	case <-time.After(lateWake):
+		t.Fatalf("sleepCtx did not return within %s of the context ending", lateWake)
 	}
 }
 
