@@ -1,6 +1,7 @@
 package io
 
 import (
+	"bytes"
 	"os"
 	"regexp"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 func TestREADMERejoinScriptResetsEveryTrackedMode(t *testing.T) {
 	raw, err := os.ReadFile("../README.md")
 	require.NoError(t, err)
+	// Windows checkouts convert line endings, and `$` below won't match before a `\r`.
+	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	line := regexp.MustCompile(`(?m)^reset_modes\(\) \{ printf '([^']*)'; \}$`).FindSubmatch(raw)
 	require.NotNil(t, line, "the README's reset_modes line")
 	set := map[int]bool{}
