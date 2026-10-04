@@ -134,9 +134,20 @@ type Record struct {
 	JoinDeadline time.Time     `json:"join_deadline,omitzero"`
 	Status       string        `json:"status"`
 	Reason       string        `json:"reason"`
-	ExitCode     *int          `json:"exit_code,omitempty"`
-	Signal       string        `json:"signal,omitempty"`
-	SignalNumber *int          `json:"signal_number,omitempty"`
+	// Reconnect is "supported" or "unsupported" once the first connection has
+	// shown whether this relay derives session IDs; empty before.
+	Reconnect string `json:"reconnect,omitempty"`
+	// The current tunnel outage: when it began, why the latest attempt failed
+	// (a TunnelReason), that attempt's raw error, and when the next attempt is
+	// due. Cleared when the tunnel is up again; left as they were when the
+	// session ends, so an ended record still says it ended while reconnecting.
+	TunnelLostAt  time.Time `json:"tunnel_lost_at,omitzero"`
+	TunnelReason  string    `json:"tunnel_reason,omitempty"`
+	TunnelError   string    `json:"tunnel_error,omitempty"`
+	NextAttemptAt time.Time `json:"next_attempt_at,omitzero"`
+	ExitCode      *int      `json:"exit_code,omitempty"`
+	Signal        string    `json:"signal,omitempty"`
+	SignalNumber  *int      `json:"signal_number,omitempty"`
 	// Pid is the process that claimed the name. Set by Claim and never by a
 	// caller: the claimer is the owner by definition, and a reader who finds
 	// the name held but its socket silent needs a process to name.

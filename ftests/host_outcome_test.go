@@ -691,67 +691,6 @@ func reportReady(ch chan<- readyReport) func(*outcomeRun, string) {
 	}
 }
 
-// Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn is the other half of
-// the guarantee above: not "the record says ready" but "the record says what
-// the callback says".
-//
-// A status never moves backwards (advanceStatus), and disconnected ranks above
-// ready. So a tunnel lost between the command starting and the readiness write
-// — the guest server stops serving, the command carries on, and the record is
-// published as disconnected — makes the ready write a no-op that still returns
-// nil. A callback that announced "ready" there would have the parent print
-// "status": "ready" and exit 0 while `upterm session info` answered
-// disconnected for the same launch, which is the disagreement this callback
-// exists to rule out.
-//
-// The race is made deterministic rather than provoked: the disconnected write
-// happens from the claim callback, on Run's own goroutine before the group
-// exists, so the readiness actor cannot run before it. What is under test is
-// what the actor does with a record it cannot move, not how the record got
-// that way.
-func Test_Host_ReadyCallbackReportsTheStatusTheRecordEndedOn(t *testing.T) {
-	fired := make(chan readyReport, 1)
-
-	run := newOutcomeRun(t, shellCommand(t,
-		[]string{"sh", "-c", "echo READY; sleep 300"},
-		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}),
-		withSessionClaimedCallback(func(d *sessiondir.Dir) {
-			// What OnGuestServerStopped publishes, and all that matters
-			// here: a status the ready write cannot move.
-			require.NoError(t, d.Update(func(r *sessiondir.Record) {
-				r.Status = sessiondir.StatusDisconnected
-			}))
-		}),
-		withSessionReadyCallback(reportReady(fired)))
-
-	ctx, cancel := context.WithTimeout(context.Background(), outcomeTimeout)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- run.host.Run(ctx) }()
-
-	select {
-	case got := <-fired:
-		require.NotNil(t, got.rec)
-		require.Equal(t, sessiondir.StatusDisconnected, got.rec.Status,
-			"the ready write cannot move a status backwards, so the record still says disconnected")
-		require.Equal(t, sessiondir.StatusDisconnected, got.status,
-			"and the callback carries what the record says, not what the actor asked for")
-		require.NotEmpty(t, got.rec.SessionID,
-			"the session ID is published by that write either way")
-	case <-time.After(outcomeTimeout):
-		t.Fatal("the readiness actor never reported")
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		t.Logf("host run returned: %v", err)
-	case <-time.After(outcomeTimeout):
-		t.Fatalf("host did not return within %s of cancellation", outcomeTimeout)
-	}
-}
-
 // Test_Host_ReadyCallbackFiresForACommandThatExitsAtOnce is the wiring for a
 // session that is over almost before it began: the callback fires, the
 // session is published, and the command's own outcome is still what the

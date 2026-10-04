@@ -286,18 +286,17 @@ type Host struct {
 	// the instant it is told "ready" would otherwise be told "starting" by
 	// the record.
 	//
-	// The status is what the record ended on, which is not always ready:
-	// advanceStatus refuses to move a status backwards, so a tunnel lost
-	// between the command starting and this write leaves "disconnected"
-	// standing and the ready write is a no-op. The caller is told what the
-	// record says rather than what this actor asked for, because the two
-	// agreeing is the whole point of the callback.
+	// The status is the one the record was written with, which is ready
+	// unless the tunnel is down by then: reconnecting while the host redials
+	// it, or disconnected on a relay that cannot take the session back. The
+	// caller is told what the record says rather than assuming ready, because
+	// the two agreeing is the whole point of the callback.
 	//
 	// Not called when the record could not be published: the run fails
 	// instead, so that nobody is told about a record that was never written.
 	// With no session directory — an embedder that supplied its own admin
-	// socket — there is no record, the two facts alone are it, and the
-	// status is ready.
+	// socket — there is no record, and the status is the one the session's
+	// facts give.
 	//
 	// Called once, on the readiness actor's own goroutine, after the write;
 	// it must not block.
@@ -346,6 +345,10 @@ type Host struct {
 	// onReadyPublish is a per-Host test barrier run before the ready record
 	// write: an error skips it as a failed write.
 	onReadyPublish func() error
+	// beforeReadyPublish is a per-Host test barrier run before the ready
+	// record write, with the run's state: a test that needs the tunnel down
+	// by the time of that write takes it down here.
+	beforeReadyPublish func(*sessionState)
 	// joins is the running session's join state, for JoinState. Set by Run
 	// before any actor starts and cleared on its way out, so a callback Run
 	// makes reads it without a lock of its own.
@@ -659,6 +662,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		runSignalNumber *int
 	)
 
+	// The session's two facts, and every status the record carries is derived
+	// from them. Declared before the final write is registered, which reads
+	// it.
+	state := &sessionState{}
+
 	joins := newJoinState(c.JoinTimeout)
 	// On the Host for JoinState, before anything that could ask runs. Cleared
 	// on the way out for SessionDir's reason: a Host between runs has no
@@ -696,10 +704,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 				}
 			}
 
+			state.setPhase(phaseEnding)
 			if err := dir.Update(func(r *sessiondir.Record) {
 				r.SessionID = sessionID
 				r.FinishedAt = time.Now().UTC()
-				advanceStatus(r, sessiondir.StatusEnding)
+				state.apply(r)
 				r.Reason = runReason
 				r.ExitCode = runExitCode
 				r.Signal = runSignal
@@ -995,10 +1004,13 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			},
 			OnGuestServerStopped: func(err error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
+				lostErr := ""
+				if err != nil {
+					lostErr = err.Error()
+				}
+				state.tunnelLost(time.Now(), lostErr)
 				if c.SessionDir != nil {
-					_ = c.SessionDir.Update(func(r *sessiondir.Record) {
-						advanceStatus(r, sessiondir.StatusDisconnected)
-					})
+					_ = c.SessionDir.Update(state.apply)
 				}
 			},
 		}
@@ -1112,25 +1124,30 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			// "ready" true: the session is registered, the user accepted it,
 			// the admin socket is bound, and the command is running.
 			//
-			// publishedStatus is what the record ends up saying, which is
-			// not always what is asked for here: advanceStatus will not move
-			// a status backwards, so a tunnel lost in the moment between the
-			// command starting and this write leaves "disconnected" standing
-			// and makes the ready write a no-op. Reported as it is, because
-			// a callback that announced "ready" for a record saying
-			// otherwise would be the disagreement this callback exists to
-			// rule out. Captured inside the closure, which Update runs
-			// synchronously under its own lock, once.
-			publishedStatus := sessiondir.StatusReady
+			// publishedStatus is what the record is written with, which is
+			// not always ready: the status is derived from the session's
+			// facts, and a tunnel down by the time of this write gives
+			// reconnecting, or disconnected on a relay that cannot take the
+			// session back. Reported as it is, because a callback that
+			// announced "ready" for a record saying otherwise would be the
+			// disagreement this callback exists to rule out. Captured inside
+			// the closure, which Update runs synchronously under its own
+			// lock, so it is the status of the record that was written; with
+			// no session directory there is no record, and the facts give it.
+			state.setPhase(phaseRunning)
+			publishedStatus := state.status()
 			if c.SessionDir != nil {
 				var err error
+				if c.beforeReadyPublish != nil {
+					c.beforeReadyPublish(state)
+				}
 				if c.onReadyPublish != nil {
 					err = c.onReadyPublish()
 				}
 				if err == nil {
 					err = c.SessionDir.Update(func(r *sessiondir.Record) {
 						r.SessionID = sessionID
-						advanceStatus(r, sessiondir.StatusReady)
+						state.apply(r)
 						publishedStatus = r.Status
 					})
 				}
