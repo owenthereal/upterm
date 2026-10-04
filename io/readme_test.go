@@ -5,14 +5,18 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// The README's rejoin script resets every mode the tracker restores, to the
-// tracker's default, so a mode tracked later fails here until the README
-// resets it too.
+// The README's rejoin script resets what the tracker's Restore restores: the
+// modes at their defaults, the alternate screen, the scroll region and the
+// charset, plus the kitty keyboard protocol and modifyOtherKeys. A mode
+// tracked later fails here until the README resets it too. The alternate
+// screen and scroll region resets sit between a cursor save and restore,
+// because on the normal screen they would otherwise move the cursor.
 func TestREADMERejoinScriptResetsEveryTrackedMode(t *testing.T) {
 	raw, err := os.ReadFile("../README.md")
 	require.NoError(t, err)
@@ -34,4 +38,21 @@ func TestREADMERejoinScriptResetsEveryTrackedMode(t *testing.T) {
 	}
 	require.Contains(t, string(line[1]), `\033[<u`, "the kitty keyboard protocol")
 	require.Contains(t, string(line[1]), `\033[>4m`, "modifyOtherKeys")
+
+	reset := string(line[1])
+	require.Contains(t, reset, `\030`, "CAN, to abort a half-received sequence")
+	require.Contains(t, reset, `\033[r`, "the scroll region")
+	require.Contains(t, reset, `\033(B`, "US ASCII into G0")
+	save := strings.Index(reset, `\0337`)
+	altOff := strings.Index(reset, `\033[?1049l`)
+	region := strings.Index(reset, `\033[r`)
+	restore := strings.Index(reset, `\0338`)
+	charset := strings.Index(reset, `\033(B`)
+	require.GreaterOrEqual(t, save, 0, "DECSC, which saves the cursor")
+	require.GreaterOrEqual(t, restore, 0, "DECRC, which puts the cursor back")
+	require.Less(t, save, altOff, "the cursor is saved before the alternate screen is left")
+	require.Less(t, altOff, restore, "the cursor is put back after the alternate screen is left")
+	require.Less(t, save, region, "the cursor is saved before the scroll region is reset")
+	require.Less(t, region, restore, "the cursor is put back after the scroll region is reset")
+	require.Less(t, restore, charset, "the charset is set after DECRC, which restores the saved one")
 }

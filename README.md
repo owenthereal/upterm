@@ -247,7 +247,7 @@ of `ssh`, with the same arguments:
 # upterm-rejoin: rejoin an interactive upterm session when the connection drops.
 # Retries only when ssh itself fails (exit 255). Any other exit status is the
 # remote side ending — your shell's own `exit 1` included — and stops.
-reset_modes() { printf '\033[?1049l\033[?1047l\033[?47l\033[?1l\033[?7h\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?2004l\033[<u\033[>4m'; }
+reset_modes() { printf '\030\0337\033[?1049l\033[?1047l\033[?47l\033[r\0338\033[?1l\033[?7h\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?2004l\033[<u\033[>4m\033(B'; }
 trap reset_modes EXIT   # also runs on Ctrl-C
 while :; do
   ssh -t "$@"; rc=$?
