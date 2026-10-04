@@ -382,7 +382,9 @@ func silentListener(t *testing.T) (string, <-chan net.Conn) {
 	return ln.Addr().String(), accepted
 }
 
-// I8: nothing an attempt starts outlives its deadline, over each transport.
+// Nothing an attempt starts outlives its deadline or a cancel, over each
+// transport: Establish returns ctx's error, and the connection it opened is
+// closed by Establish itself, before anyone calls Close.
 func TestReverseTunnelAttemptHonoursItsDeadline(t *testing.T) {
 	silent, accepted := silentListener(t)
 	proxy := httpproxytest.Start(t, http.StatusOK)
@@ -406,26 +408,70 @@ func TestReverseTunnelAttemptHonoursItsDeadline(t *testing.T) {
 				rt := &ReverseTunnel{Host: tc.u, ProxyURL: tc.proxy, HostKey: key[0], Signers: key,
 					HostKeyCallback: ssh.InsecureIgnoreHostKey()}
 				ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+				cause := context.DeadlineExceeded
 				if how == "cancel" {
 					ctx, cancel = context.WithCancel(t.Context())
 					time.AfterFunc(200*time.Millisecond, cancel)
+					cause = context.Canceled
 				}
 				defer cancel()
 				start := time.Now()
 				_, err := rt.Establish(ctx)
-				require.Error(t, err)
+				require.ErrorIs(t, err, cause, "the attempt's failure names its cause")
 				require.Less(t, time.Since(start), 2*time.Second, "the attempt outlived its deadline")
-				rt.Close()
-				far := <-tc.far
+				var far net.Conn
+				select {
+				case far = <-tc.far:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the attempt never reached the far end")
+				}
 				require.NoError(t, far.SetReadDeadline(time.Now().Add(2*time.Second)))
 				_, err = io.Copy(io.Discard, far)
 				require.NoError(t, err, "the attempt's connection was left open")
+				rt.Close()
 			})
 		}
 	}
 }
 
-// Rule 2: the deadline is the attempt's, not the tunnel's.
+// A cancel that lands while the session request waits on the relay fails the
+// attempt with the cancel as its cause, not with the EOF the close produced.
+func TestReverseTunnelAttemptCancelledMidRequestSaysSo(t *testing.T) {
+	relayKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	asked := make(chan struct{})
+	release := make(chan struct{})
+	fake := fakerelay.Start(t, relayKey[0], func(*server.CreateSessionRequest) (bool, []byte) {
+		close(asked)
+		<-release
+		return false, nil
+	})
+	// Registered after Start, so it runs first and frees the relay's handler
+	// before the relay waits for it to stop.
+	t.Cleanup(func() { close(release) })
+	hostKey, err := utils.CreateSigners(nil)
+	require.NoError(t, err)
+	rt := &ReverseTunnel{Host: &url.URL{Scheme: "ssh", Host: fake.Addr}, HostKey: hostKey[0], Signers: hostKey,
+		HostKeyCallback: ssh.FixedHostKey(relayKey[0].PublicKey())}
+	t.Cleanup(rt.Close)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-asked:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	_, err = rt.Establish(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "error creating session", "the step the cancel interrupted")
+	require.Zero(t, fake.Forwards())
+}
+
+// The deadline is the attempt's, not the tunnel's: an established tunnel
+// outlives the context it was established under.
 func TestReverseTunnelOutlivesItsAttemptContext(t *testing.T) {
 	relay := startTestRelay(t)
 	key, err := utils.CreateSigners(nil)

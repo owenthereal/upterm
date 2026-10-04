@@ -307,9 +307,14 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	lc := liveness.NewConn(raw)
 	ncc, chans, reqs, err := ssh.NewClientConn(lc, addr, config)
 	if err != nil {
-		stopDeadline()
+		cancelled := !stopDeadline()
 		// NewClientConn has closed it already; this says so here.
 		_ = raw.Close()
+		if cancelled {
+			// ctx's close is what failed the handshake: the cause is the
+			// cancel or the deadline, and no network advice applies.
+			return nil, fmt.Errorf("%w: %w", ctx.Err(), err)
+		}
 		return nil, sshDialError(c.Host, c.ProxyURL, len(c.Signers), err)
 	}
 	// The client this listener and this keepalive belong to, kept apart from
@@ -320,10 +325,16 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	conn := &connection{client: client}
 	c.Client, c.conn = client, conn
 
-	// fail ends this attempt's connection along with it.
+	// fail ends this attempt's connection along with it. When ctx's close
+	// already ran, that close is what failed the step, and the error says so.
+	// Only then: a cancel that merely coincides with a failure of its own
+	// must not hide it.
 	fail := func(err error) (*server.CreateSessionResponse, error) {
-		stopDeadline()
+		cancelled := !stopDeadline()
 		_ = client.Close()
+		if cancelled {
+			err = fmt.Errorf("%w: %w", ctx.Err(), err)
+		}
 		return nil, err
 	}
 

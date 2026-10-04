@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1103,6 +1104,45 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
 			"cancelled with the abandonment cause inside the group, before the command started")
 		require.Nil(t, rec.ExitCode)
+	})
+
+	t.Run("while Establish waits", func(t *testing.T) {
+		run := newOutcomeRun(t,
+			shellCommand(t, []string{"sh", "-c", "exit 0"}, []string{"cmd", "/c", "exit", "0"}))
+		// A relay that accepts the connection and never says a word, so the
+		// handshake waits on it for as long as the context lasts.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ln.Close() })
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			if c, err := ln.Accept(); err == nil {
+				accepted <- c
+			}
+		}()
+		run.host.Host = "ssh://" + ln.Addr().String()
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		done := make(chan error, 1)
+		go func() { done <- run.host.Run(ctx) }()
+		select {
+		case c := <-accepted:
+			t.Cleanup(func() { _ = c.Close() })
+		case <-time.After(outcomeTimeout):
+			t.Fatal("the host never connected to the relay")
+		}
+		cancel(host.ErrSessionAbandoned)
+		var runErr error
+		select {
+		case runErr = <-done:
+		case <-time.After(outcomeTimeout):
+			t.Fatal("host did not return after cancellation")
+		}
+		rec := run.record(t)
+		require.Equal(t, sessiondir.ReasonStartupAbandoned, rec.Reason,
+			"the parent went away while the tunnel was being established: abandoned, not a startup failure")
+		require.Nil(t, rec.ExitCode)
+		require.ErrorIs(t, runErr, context.Canceled, "Establish gives the cancellation back")
 	})
 
 	t.Run("a plain cancellation is canceled", func(t *testing.T) {
