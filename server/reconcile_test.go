@@ -356,6 +356,27 @@ func TestReconcileAcrossAnIndexDrop(t *testing.T) {
 	require.False(t, sessions.active(reg))
 }
 
+// writeOver writes s into reg's key as a plain PUT does, without acquiring
+// it: the lock session stays reg's, and the index moves on. It returns the
+// entry for a test to deliver as the watch would.
+func writeOver(t *testing.T, consul *fakeConsul, reg *Registration, s *Session) *api.KVPair {
+	t.Helper()
+	value, err := json.Marshal(s)
+	require.NoError(t, err)
+	consul.mu.Lock()
+	defer consul.mu.Unlock()
+	consul.pair = &api.KVPair{Key: consul.pair.Key, Value: value, Session: reg.lease, ModifyIndex: reg.index + 1}
+	return consul.pair
+}
+
+// restored reports whether consul's entry is own again, under a lease other
+// than reg's.
+func restored(consul *fakeConsul, reg *Registration, own *Session) bool {
+	e := consul.entry()
+	var s Session
+	return e != nil && e.Session != reg.lease && json.Unmarshal(e.Value, &s) == nil && sameIdentity(&s, own)
+}
+
 // A plain write into a held key keeps its lock session, and every
 // registration moves the lock to its own lease, so a key a registration's own
 // lease holds is still its entry, whatever was written into it. Another
@@ -386,27 +407,49 @@ func TestAForeignValueInAKeyItsOwnLeaseHoldsIsALoss(t *testing.T) {
 			_, err = sessions.add(reg, conn)
 			require.NoError(t, err)
 
-			// A higher generation from another node, written into the key
-			// without acquiring it: reg's lease still holds it.
-			forged, err := json.Marshal(&Session{ID: "id", NodeAddr: "node-b:22", Generation: tc.forgedAt})
-			require.NoError(t, err)
-			consul.mu.Lock()
-			consul.pair = &api.KVPair{Key: consul.pair.Key, Value: forged, Session: reg.lease, ModifyIndex: reg.index + 1}
-			consul.mu.Unlock()
-			store.updateSessionReplica(reg.index+1, api.KVPairs{consul.entry()})
+			// A higher generation from another node.
+			pair := writeOver(t, consul, reg, &Session{ID: "id", NodeAddr: "node-b:22", Generation: tc.forgedAt})
+			store.updateSessionReplica(pair.ModifyIndex, api.KVPairs{pair})
 
 			require.False(t, conn.isClosed(), "a foreign value in the key its own lease holds closed the host")
-			require.Eventually(t, func() bool {
-				e := consul.entry()
-				var s Session
-				return e != nil && e.Session != reg.lease && json.Unmarshal(e.Value, &s) == nil && sameIdentity(&s, own)
-			}, 5*time.Second, 10*time.Millisecond, "the keeper never restored the entry under a new lease")
+			require.Eventually(t, func() bool { return restored(consul, reg, own) },
+				5*time.Second, 10*time.Millisecond, "the keeper never restored the entry under a new lease")
 			require.False(t, conn.isClosed())
 			require.True(t, sessions.active(reg))
 			v, _ := gatherValue(t, metrics, "test_server_sessions_active_count", nil)
 			require.Equal(t, 1.0, v)
 		})
 	}
+}
+
+// The delivery showing a foreign value in the key can be processed before
+// this node adopts the registration, when there is no slot yet to reconcile.
+// Adoption checks the store's view again, and takes a value its own lease
+// holds as reconcile does: the host is adopted, and its keeper is told of the
+// loss, since the delivery that showed it has already gone by.
+func TestAdoptionTakesAForeignValueItsOwnLeaseHoldsAsALoss(t *testing.T) {
+	consul := newFakeConsul(t)
+	store := newFakeConsulStore(t, consul)
+	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+	mp, _ := newTestMetrics(t)
+	sessions := newLocalSessions(mp, sm, slog.New(slog.DiscardHandler))
+	sm.Observe(sessions.reconcile)
+
+	own := &Session{ID: "id", NodeAddr: "node-a:22"} // legacy
+	reg, _, err := sm.Register(context.Background(), own)
+	require.NoError(t, err)
+	t.Cleanup(func() { sessions.end(reg) })
+	pair := writeOver(t, consul, reg, &Session{ID: "id", NodeAddr: "node-b:22", Generation: 1})
+	store.updateSessionReplica(pair.ModifyIndex, api.KVPairs{pair})
+
+	conn := newCloser()
+	_, err = sessions.add(reg, conn)
+	require.NoError(t, err)
+	require.NoError(t, sessions.confirm(reg), "adoption took a foreign value in the key its own lease holds as a supersession")
+	require.False(t, conn.isClosed())
+	require.Eventually(t, func() bool { return restored(consul, reg, own) },
+		5*time.Second, 10*time.Millisecond, "the keeper never restored the entry under a new lease")
+	require.True(t, sessions.active(reg))
 }
 
 // End to end on Consul: another registration's value written into a legacy

@@ -240,6 +240,9 @@ type SessionStore interface {
 	LeaseTTL() time.Duration
 	// Get complete session data
 	Get(sessionID string) (*Session, error)
+	// Entry is Get with the lock session that holds the entry, "" in a store
+	// without leases.
+	Entry(sessionID string) (StoreEntry, error)
 	// GetFresh reads sessionID from the store itself, skipping any cache, and
 	// updates the cache with what it finds, the entry or its absence, as Get's
 	// read-through does. It gives up once ctx is done.
@@ -309,6 +312,15 @@ func (c *sessionCache) Get(sessionID string) (*Session, bool) {
 
 	entry, exists := c.sessions[sessionID]
 	return entry.session, exists
+}
+
+// lookup is Get, with the lock session that holds the entry.
+func (c *sessionCache) lookup(sessionID string) (cachedSession, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	entry, exists := c.sessions[sessionID]
+	return entry, exists
 }
 
 // Has checks if a session exists in cache without retrieving it (useful for testing)
@@ -811,17 +823,23 @@ func (c *consulSessionStore) LeaseTTL() time.Duration {
 
 // Get session data with hybrid read-through cache
 func (c *consulSessionStore) Get(sessionID string) (*Session, error) {
+	e, err := c.Entry(sessionID)
+	return e.Session, err
+}
+
+// Entry is Get, with the lock session that holds the entry.
+func (c *consulSessionStore) Entry(sessionID string) (StoreEntry, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("session ID cannot be empty")
+		return StoreEntry{}, fmt.Errorf("session ID cannot be empty")
 	}
 
 	// Try local cache first for instant lookup
-	if session, exists := c.cache.Get(sessionID); exists {
+	if cached, exists := c.cache.lookup(sessionID); exists {
 		c.logger.Debug("retrieved session data from cache",
 			"session", sessionID,
-			"node", session.NodeAddr,
+			"node", cached.session.NodeAddr,
 		)
-		return session, nil
+		return StoreEntry{Session: cached.session, Lease: cached.lease}, nil
 	}
 
 	// Cache miss - fetch from Consul for strong consistency
@@ -834,11 +852,12 @@ func (c *consulSessionStore) GetFresh(ctx context.Context, sessionID string) (*S
 	if sessionID == "" {
 		return nil, fmt.Errorf("session ID cannot be empty")
 	}
-	return c.getFromConsulAndCache(ctx, sessionID)
+	e, err := c.getFromConsulAndCache(ctx, sessionID)
+	return e.Session, err
 }
 
 // getFromConsulAndCache fetches session from Consul and updates local cache
-func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionID string) (*Session, error) {
+func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionID string) (StoreEntry, error) {
 	kvStoreKey := c.SessionKey(sessionID)
 	qo := (&api.QueryOptions{}).WithContext(ctx)
 
@@ -895,7 +914,7 @@ func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionI
 		if errors.As(err, &notFound) {
 			c.cache.Evict(sessionID, goneAt, epoch)
 		}
-		return nil, err
+		return StoreEntry{}, err
 	}
 
 	// Update local cache with fetched data
@@ -906,7 +925,7 @@ func (c *consulSessionStore) getFromConsulAndCache(ctx context.Context, sessionI
 		"node", session.NodeAddr,
 	)
 
-	return session, nil
+	return StoreEntry{Session: session, Lease: lease}, nil
 }
 
 // Delete releases every lock session this instance registered sessionID under,
@@ -1363,6 +1382,12 @@ func (m *memorySessionStore) Get(sessionID string) (*Session, error) {
 	return session, nil
 }
 
+// Entry is Get: a memory store has no leases.
+func (m *memorySessionStore) Entry(sessionID string) (StoreEntry, error) {
+	session, err := m.Get(sessionID)
+	return StoreEntry{Session: session}, err
+}
+
 // GetFresh is Get: a memory store has no cache to skip.
 func (m *memorySessionStore) GetFresh(_ context.Context, sessionID string) (*Session, error) {
 	return m.Get(sessionID)
@@ -1603,6 +1628,11 @@ func (sm *SessionManager) LeaseTTL() time.Duration {
 // GetSession retrieves a session by ID
 func (sm *SessionManager) GetSession(sessionID string) (*Session, error) {
 	return sm.store.Get(sessionID)
+}
+
+// GetEntry is GetSession, with the lock session that holds the entry.
+func (sm *SessionManager) GetEntry(sessionID string) (StoreEntry, error) {
+	return sm.store.Entry(sessionID)
 }
 
 // DeleteSession removes a session by ID
