@@ -1222,6 +1222,12 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 			c.logger.Warn("failed to unmarshal session data", "error", err, "key", kvPair.Key)
 			continue
 		}
+		// A value that parses but names no session, such as `{}` or `null`,
+		// is no registration, and would otherwise be keyed under "".
+		if session.ID == "" {
+			c.logger.Warn("skipping session data that names no session", "key", kvPair.Key)
+			continue
+		}
 
 		// Use session.ID from the unmarshaled value directly
 		newSessions[session.ID] = cachedSession{session: &session, index: kvPair.ModifyIndex, lease: kvPair.Session}
