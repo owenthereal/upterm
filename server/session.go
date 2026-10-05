@@ -253,7 +253,7 @@ type SessionStore interface {
 	// Observe has fn called with each view of every entry the store's watch
 	// delivers; see SessionManager.Observe. A store no other writer shares
 	// has nothing to watch, and never calls fn.
-	Observe(fn func(epoch, index uint64, entries map[string]*Session))
+	Observe(fn func(epoch, index uint64, entries map[string]StoreEntry))
 	// Close cleans up resources and stops background processes
 	Close() error
 }
@@ -277,6 +277,13 @@ type sessionCache struct {
 	epoch  uint64
 	mutex  sync.RWMutex
 	logger *slog.Logger
+}
+
+// StoreEntry is one session as the store's watch delivered it: the value
+// stored for its ID, and the lock session that holds its key, "" if none does.
+type StoreEntry struct {
+	Session *Session
+	Lease   string
 }
 
 // cachedSession is a session as the Consul write at index stored it, and the
@@ -450,7 +457,7 @@ type consulSessionStore struct {
 	held   map[string]map[string]struct{}
 	heldMu sync.Mutex
 	// observers are called with each watch delivery, on the watch's goroutine.
-	observers   []func(epoch, index uint64, entries map[string]*Session)
+	observers   []func(epoch, index uint64, entries map[string]StoreEntry)
 	observersMu sync.Mutex
 }
 
@@ -1214,7 +1221,7 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 	newSessions := make(map[string]cachedSession)
 	// The observers get a map of their own. The cache takes newSessions over,
 	// and its writes go on changing it once ReplaceAll returns.
-	entries := make(map[string]*Session, len(kvPairs))
+	entries := make(map[string]StoreEntry, len(kvPairs))
 
 	for _, kvPair := range kvPairs {
 		var session Session
@@ -1231,7 +1238,7 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 
 		// Use session.ID from the unmarshaled value directly
 		newSessions[session.ID] = cachedSession{session: &session, index: kvPair.ModifyIndex, lease: kvPair.Session}
-		entries[session.ID] = &session
+		entries[session.ID] = StoreEntry{Session: &session, Lease: kvPair.Session}
 	}
 
 	// Atomically replace cache contents. The cache takes the view before the
@@ -1249,7 +1256,7 @@ func (c *consulSessionStore) updateSessionReplica(index uint64, kvPairs api.KVPa
 
 // Observe has fn called with every watch delivery, after the cache has taken
 // it. See SessionManager.Observe.
-func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+func (c *consulSessionStore) Observe(fn func(epoch, index uint64, entries map[string]StoreEntry)) {
 	c.observersMu.Lock()
 	defer c.observersMu.Unlock()
 	c.observers = append(c.observers, fn)
@@ -1400,7 +1407,7 @@ func (m *memorySessionStore) List() ([]*Session, error) {
 }
 
 // Observe does nothing: every write to a memory store is this process's own.
-func (m *memorySessionStore) Observe(func(epoch, index uint64, entries map[string]*Session)) {}
+func (m *memorySessionStore) Observe(func(epoch, index uint64, entries map[string]StoreEntry)) {}
 
 // Close cleans up memory store resources (no-op for memory store)
 func (m *memorySessionStore) Close() error {
@@ -1577,13 +1584,14 @@ func (sm *SessionManager) Reregister(ctx context.Context, reg *Registration) (*R
 }
 
 // Observe has fn called with each view of every entry the store's watch
-// delivers: entries maps each session ID to its stored session, as of index in
-// epoch. Indexes order only within an epoch, which advances when the watch's
-// index goes backwards; a Registration records both. fn runs on the watch's
-// goroutine and holds up the next delivery, so it must not make store calls;
+// delivers: entries maps each session ID to its stored session and the lock
+// session holding it, as of index in epoch. Indexes order only within an
+// epoch, which advances when the watch's index goes backwards; a Registration
+// records both. fn runs on the watch's goroutine and holds up the next
+// delivery, so it must not make store calls;
 // entries is shared with the other observers, and is theirs only to read. A
 // store no other writer shares never calls fn.
-func (sm *SessionManager) Observe(fn func(epoch, index uint64, entries map[string]*Session)) {
+func (sm *SessionManager) Observe(fn func(epoch, index uint64, entries map[string]StoreEntry)) {
 	sm.store.Observe(fn)
 }
 

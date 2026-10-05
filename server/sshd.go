@@ -242,12 +242,15 @@ func (l *localSessions) replace(next *Registration) bool {
 // store's view of every session as of index in epoch, which a watch delivers.
 // For each one:
 //   - an entry of its own identity: nothing to do;
-//   - another registration's entry with a generation at least its own: it is
-//     superseded. Its slot, count and lease keeper go, its connection is
-//     closed so its guests go with it, and the handle its slot held is
-//     released;
-//   - no entry, or an older registration's: its lease keeper is told of the
-//     loss, and re-asserts it.
+//   - another registration's entry with a generation at least its own, held
+//     by another lease: it is superseded. Its slot, count and lease keeper go,
+//     its connection is closed so its guests go with it, and the handle its
+//     slot held is released;
+//   - no entry, an older registration's, or anything its own lease holds: its
+//     lease keeper is told of the loss, and re-asserts it. Every registration
+//     moves the lock to its own lease, and a plain write keeps the lock, so a
+//     key its own lease holds is still its entry, whatever was written into it
+//     (see Reregister).
 //
 // A registration whose write the view predates is skipped; the next delivery
 // includes it. Indexes order only within an epoch, so a registration from an
@@ -257,7 +260,7 @@ func (l *localSessions) replace(next *Registration) bool {
 //
 // It runs on the watch's goroutine, so it makes no store calls, and the
 // releases and closes it causes happen after the lock is let go.
-func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Session) {
+func (l *localSessions) reconcile(epoch, index uint64, entries map[string]StoreEntry) {
 	type superseded struct {
 		conn io.Closer
 		reg  *Registration
@@ -271,12 +274,14 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Sessi
 			continue
 		}
 		cur, ok := entries[id]
+		// reg.lease is "" without leases, and so is an unlocked entry's.
+		heldByOwn := ok && reg.lease != "" && cur.Lease == reg.lease
 		switch {
-		case ok && sameIdentity(cur, reg.Session):
-		case ok && cur.Generation >= reg.Generation():
+		case ok && sameIdentity(cur.Session, reg.Session):
+		case ok && !heldByOwn && cur.Session.Generation >= reg.Generation():
 			l.removeLocked(id, lr)
-			ended = append(ended, superseded{lr.conn, reg, cur})
-		case !ok || cur.Generation < reg.Generation():
+			ended = append(ended, superseded{lr.conn, reg, cur.Session})
+		default:
 			lr.lostEpoch, lr.lostIndex = epoch, index
 			select {
 			case lr.lost <- struct{}{}:

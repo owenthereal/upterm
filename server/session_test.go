@@ -1563,8 +1563,8 @@ func TestARebuildAfterAnIndexDropStaysHeld(t *testing.T) {
 // empty ID.
 func TestTheWatchLeavesOutAValueThatNamesNoSession(t *testing.T) {
 	store := newFakeConsulStore(t, newFakeConsul(t))
-	var seen map[string]*Session
-	store.Observe(func(_, _ uint64, entries map[string]*Session) { seen = entries })
+	var seen map[string]StoreEntry
+	store.Observe(func(_, _ uint64, entries map[string]StoreEntry) { seen = entries })
 	stored, err := json.Marshal(&Session{ID: "id", NodeAddr: "node", Generation: 1})
 	require.NoError(t, err)
 
