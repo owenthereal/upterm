@@ -389,13 +389,15 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 // definition. A sink that has already failed flushes to nil, because a guest
 // that is already gone is not a shutdown error.
 //
-// Before the flush, each member is sent what puts its terminal back where it
-// started -- the modes the session left set, undone -- behind everything else
-// it was sent. A session can end with its command still holding the terminal,
-// killed on the alternate screen with the mouse on, and a guest's terminal is
-// not one anything else will put back: a plain ssh client restores termios on
-// the way out and nothing more. It goes under writeMu, as a Write would, so it
-// lands after the command's last output and before any flush.
+// Then each member that wants one (ResetTarget) is sent what puts its terminal
+// back where it started -- the modes the session left set, undone -- and
+// flushed again. A session can end with its command still holding the
+// terminal, killed on the alternate screen with the mouse on, and a guest's
+// terminal is not one anything else will put back. The reset waits for the
+// first flush: queued behind a tail, it could take a sink that was going to
+// drain past its bound, and a sink that overflows is a guest dropped. So it
+// goes only to the members that drained in time; one still behind loses the
+// reset with its tail, as it would have lost the tail anyway.
 func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
 	first := !t.closed
@@ -404,15 +406,44 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	writers := make([]io.Writer, len(t.writers))
 	copy(writers, t.writers)
 	t.membersMu.Unlock()
+	var restore []byte
 	if first {
-		if restore := t.restore(); len(restore) > 0 {
-			for _, w := range writers {
-				_, _ = w.Write(restore)
+		restore = t.restore()
+	}
+	t.writeMu.Unlock()
+
+	errs := flush(ctx, writers)
+	if len(restore) == 0 {
+		return errors.Join(errs...)
+	}
+
+	var targets []io.Writer
+	t.writeMu.Lock()
+	for i, w := range writers {
+		if r, ok := w.(ResetTarget); ok && r.WantsReset() && errs[i] == nil {
+			if _, err := w.Write(restore); err == nil {
+				targets = append(targets, w)
 			}
 		}
 	}
 	t.writeMu.Unlock()
+	return errors.Join(append(errs, flush(ctx, targets)...)...)
+}
 
+// ResetTarget is implemented by an attached writer that wants the session's
+// reset when the fan-out shuts down: one whose far end is a terminal nothing
+// else will put back. A guest's is the one -- behind a plain ssh client, which
+// restores termios on the way out and nothing more. Every other member is sent
+// none: a viewer capturing the output to a file gets what the command wrote,
+// and a local client puts its own terminal back. Its Write must not block, as
+// an AsyncWriter's does not: Shutdown writes the reset with writeMu held.
+type ResetTarget interface {
+	WantsReset() bool
+}
+
+// flush flushes every member that buffers, at once, and reports each one's
+// error by index.
+func flush(ctx context.Context, writers []io.Writer) []error {
 	var (
 		wg   sync.WaitGroup
 		errs = make([]error, len(writers))
@@ -429,8 +460,7 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
-
-	return errors.Join(errs...)
+	return errs
 }
 
 // restore is what puts a terminal that watched the whole stream back where it

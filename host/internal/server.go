@@ -1324,19 +1324,28 @@ func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 // exposure. Without a pacer it attaches directly.
 func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter) error {
 	if h.pacer == nil {
-		return attachGuestOutput(h.writers, sink)
+		return attachGuestOutput(h.writers, guestSink{sink})
 	}
-	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, sink) })
+	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, guestSink{sink}) })
 }
 
 // detachGuest takes a guest's sink out of the fan-out, then out of the
 // pacer's order. The caller closes it.
 func (h *sessionHandler) detachGuest(sink *uio.AsyncWriter) {
-	h.writers.Remove(sink)
+	h.writers.Remove(guestSink{sink})
 	if h.pacer != nil {
 		h.pacer.remove(sink)
 	}
 }
+
+// guestSink is a guest's sink as the fan-out holds it: one that wants the
+// session's reset when the session ends (uio.ResetTarget). A guest always has
+// a terminal, and behind a plain ssh client nothing else puts it back. Two
+// guestSinks of the same AsyncWriter are equal, which is what lets
+// detachGuest remove the one attachGuest appended.
+type guestSink struct{ *uio.AsyncWriter }
+
+func (guestSink) WantsReset() bool { return true }
 
 // guestDropHandler is what a guest's sink calls when it gives up on the guest:
 // it closes the guest's session, then says why.

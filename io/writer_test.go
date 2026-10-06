@@ -677,13 +677,26 @@ func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
 	}
 }
 
+// resetBuffer is a member that wants the session's reset, as a guest's sink
+// does.
+type resetBuffer struct{ *bytes.Buffer }
+
+func (resetBuffer) WantsReset() bool { return true }
+
+// resetSink is the same, for a member that delivers asynchronously.
+type resetSink struct{ *AsyncWriter }
+
+func (resetSink) WantsReset() bool { return true }
+
 // A session can end with its command still holding the terminal: killed on
 // the alternate screen, say, with bracketed paste on. Every terminal watching
 // is left that way too, and a guest's is not one anything else will put back
 // -- a plain ssh client restores termios on the way out and nothing more. So
-// the fan-out's last write, behind everything else each writer was sent,
-// undoes what the session left set: on the writer that watched it all, and on
-// one that joined after the modes had scrolled out of the ring.
+// the fan-out's last write to each member that wants one, behind everything
+// else it was sent, undoes what the session left set: on the member that
+// watched it all, and on one that joined after the modes had scrolled out of
+// the ring. A member that does not want one -- a viewer capturing the output
+// to a file -- is sent what the command wrote and nothing more.
 func TestMultiWriterShutdownPutsEveryTerminalBack(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -719,10 +732,11 @@ func TestMultiWriterShutdownPutsEveryTerminalBack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewMultiWriter(tc.replay)
-			var early, late bytes.Buffer
-			require.NoError(t, w.Append(&early))
+			early, late := resetBuffer{&bytes.Buffer{}}, resetBuffer{&bytes.Buffer{}}
+			var capture bytes.Buffer
+			require.NoError(t, w.Append(early, &capture))
 			_, _ = w.Write([]byte(tc.stream[0]))
-			require.NoError(t, w.Append(&late))
+			require.NoError(t, w.Append(late))
 			_, _ = w.Write([]byte(tc.stream[1]))
 			lateBefore := late.Len()
 
@@ -730,10 +744,46 @@ func TestMultiWriterShutdownPutsEveryTerminalBack(t *testing.T) {
 			defer cancel()
 			require.NoError(t, w.Shutdown(ctx))
 
-			require.Equal(t, strings.Join(tc.stream, "")+tc.restore, early.String(), "the writer that saw it all")
-			require.Equal(t, tc.restore, late.String()[lateBefore:], "the writer that joined later")
+			require.Equal(t, strings.Join(tc.stream, "")+tc.restore, early.String(), "the member that saw it all")
+			require.Equal(t, tc.restore, late.String()[lateBefore:], "the member that joined later")
+			require.Equal(t, strings.Join(tc.stream, ""), capture.String(), "a member that wants no reset")
 		})
 	}
+}
+
+// The reset is queued only once a guest's tail has been delivered. Queued
+// behind it, it could take a sink that was going to drain past its bound, and
+// a sink that overflows is a guest dropped -- for a reset, and its tail with
+// it.
+func TestMultiWriterShutdownResetDoesNotOverflowAGuest(t *testing.T) {
+	gate := newGateWriter()
+	dropped := make(chan error, 1)
+	sink := NewAsyncWriter(gate, 64, func(err error) { dropped <- err })
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{sink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	<-gate.entered
+	// 60 of the sink's 64 bytes queued behind the write the guest has not
+	// taken yet, so an 8-byte reset does not fit beside them.
+	tail := strings.Repeat("x", 60)
+	_, _ = w.Write([]byte(tail))
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(gate.release)
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+
+	select {
+	case err := <-dropped:
+		t.Fatalf("the guest was dropped: %v", err)
+	default:
+	}
+	require.Equal(t, "\x1b[?2004h"+tail+"\x1b[?2004l", string(gate.bytes()))
 }
 
 func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {

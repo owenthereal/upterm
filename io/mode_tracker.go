@@ -22,11 +22,51 @@ const maxSequenceBytes = 64
 // otherwise let the stream pick the snapshot's size.
 const maxStringBytes = 4096
 
-// kittyStackDepth bounds each screen's kitty keyboard stack. It is kitty's own
-// bound, and kitty makes room for a push onto a full stack by dropping the
-// oldest entry, so tracking it the same way keeps the replay in step with the
-// terminal it came from as well as bounded.
+// kittyStackDepth bounds how much of each screen's kitty keyboard stack is
+// kept for replay: kitty's own depth, which makes room for a push onto a full
+// stack by dropping the oldest entry. The protocol leaves the depth to the
+// terminal, though, so the stack's full depth is counted apart; see keyStack.
 const kittyStackDepth = 8
+
+// modifyOtherKeysInitial is modifyOtherKeys while it is at the terminal's
+// initial value, whatever that is.
+const modifyOtherKeysInitial = -1
+
+// keyStack is one screen's kitty keyboard stack: depth entries in all, of
+// which the newest, up to kittyStackDepth, are kept for replay, bottom first.
+// A terminal holds at most depth of them -- fewer when its stack is shallower
+// and dropped the oldest -- so depth is what a pop of the whole stack pops: a
+// pop past the bottom empties a stack, which is where a terminal starts.
+type keyStack struct {
+	entries []int
+	depth   int
+}
+
+func (k *keyStack) push(flags int) {
+	if len(k.entries) == kittyStackDepth {
+		k.entries = append(k.entries[:0], k.entries[1:]...)
+	}
+	k.entries = append(k.entries, flags)
+	k.depth++
+}
+
+// pop takes the newest n entries off, replayed or not.
+func (k *keyStack) pop(n int) {
+	n = min(n, k.depth)
+	k.depth -= n
+	k.entries = k.entries[:len(k.entries)-min(n, len(k.entries))]
+}
+
+// top is the entry a set applies to. kitty sets an empty stack's bottom entry
+// and counts it as pushed, so a pop takes it back off; and a set on an entry
+// the replay no longer holds makes that entry's new value the one to replay.
+func (k *keyStack) top() *int {
+	if len(k.entries) == 0 {
+		k.entries = append(k.entries, 0)
+		k.depth = max(k.depth, 1)
+	}
+	return &k.entries[len(k.entries)-1]
+}
 
 // restorable lists the DEC private modes worth putting a reattaching terminal
 // back into, mapped to the value a terminal holds them at before anything has
@@ -99,17 +139,20 @@ type ModeTracker struct {
 
 	charsetG0 []byte // last "ESC ( X", verbatim
 
-	// The kitty keyboard protocol's flag stacks, bottom first. The protocol
-	// gives each screen buffer its own, so that a full-screen program can push
-	// what it wants without knowing what the shell beneath it had. A screen
-	// switch clears neither -- kitty only swaps which one is current -- so a
-	// program that leaves the alternate screen without popping finds its
-	// flags there again when it comes back.
-	mainKeys []int
-	altKeys  []int
+	// The kitty keyboard protocol's flag stacks. The protocol gives each
+	// screen buffer its own, so that a full-screen program can push what it
+	// wants without knowing what the shell beneath it had. A screen switch
+	// clears neither -- kitty only swaps which one is current -- so a program
+	// that leaves the alternate screen without popping finds its flags there
+	// again when it comes back.
+	mainKeys keyStack
+	altKeys  keyStack
 
 	// modifyOtherKeys is xterm's modifyOtherKeys level, the older way of
-	// asking for keys a terminal otherwise folds together. 0 is the default.
+	// asking for keys a terminal otherwise folds together, or
+	// modifyOtherKeysInitial while nothing has set it. An explicit 0 is not
+	// the initial value: xterm's resource may make that something else, and
+	// only a reset without a value goes back to it.
 	modifyOtherKeys int
 
 	// partial is the raw bytes of the sequence the parser is currently
@@ -162,7 +205,7 @@ const (
 )
 
 func NewModeTracker() *ModeTracker {
-	return &ModeTracker{decPrivate: map[int]bool{}}
+	return &ModeTracker{decPrivate: map[int]bool{}, modifyOtherKeys: modifyOtherKeysInitial}
 }
 
 // bufferedBytes reports the parser's current accumulation: both the CSI
@@ -379,9 +422,9 @@ func (m *ModeTracker) resetToDefaults() {
 	m.mainRegion = nil
 	m.altRegion = nil
 	m.charsetG0 = nil
-	m.mainKeys = nil
-	m.altKeys = nil
-	m.modifyOtherKeys = 0
+	m.mainKeys = keyStack{}
+	m.altKeys = keyStack{}
+	m.modifyOtherKeys = modifyOtherKeysInitial
 }
 
 // softResetModes are the tracked DEC private modes DECSTR returns to their
@@ -480,7 +523,9 @@ func (m *ModeTracker) finishCSI(final byte) {
 			m.xtmodkeys(params[1:])
 		}
 	case 'n':
-		// XTMODKEYS's other form: CSI > 4 n disables modifyOtherKeys.
+		// XTMODKEYS's other form: CSI > 4 n disables modifyOtherKeys, which
+		// is xterm's resource value -1. No XTMODKEYS set can spell that, and
+		// it is off, so it is kept as an explicit 0.
 		if string(params) == ">4" {
 			m.modifyOtherKeys = 0
 		}
@@ -488,7 +533,7 @@ func (m *ModeTracker) finishCSI(final byte) {
 }
 
 // keys returns the kitty keyboard stack of the screen that is showing.
-func (m *ModeTracker) keys() *[]int {
+func (m *ModeTracker) keys() *keyStack {
 	if m.altActive() {
 		return &m.altKeys
 	}
@@ -511,10 +556,7 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 		if !ok {
 			return
 		}
-		if len(*stack) == kittyStackDepth {
-			*stack = append((*stack)[:0], (*stack)[1:]...)
-		}
-		*stack = append(*stack, flags)
+		stack.push(flags)
 	case '<':
 		n, ok := csiNumber(params[1:], 1)
 		if !ok {
@@ -523,7 +565,7 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 		if n == 0 {
 			n = 1
 		}
-		*stack = (*stack)[:len(*stack)-min(n, len(*stack))]
+		stack.pop(n)
 	case '=':
 		fields := bytes.Split(params[1:], []byte{';'})
 		flags, ok := csiNumber(fields[0], 0)
@@ -539,12 +581,7 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 		if mode < 1 || mode > 3 {
 			return
 		}
-		// kitty sets an empty stack's bottom entry and counts it as pushed,
-		// so a pop takes it back off.
-		if len(*stack) == 0 {
-			*stack = append(*stack, 0)
-		}
-		top := &(*stack)[len(*stack)-1]
+		top := stack.top()
 		switch mode {
 		case 1:
 			*top = flags
@@ -558,21 +595,21 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 
 // xtmodkeys applies XTMODKEYS, CSI > resource ; value m, of which only
 // modifyOtherKeys, resource 4, is tracked. A value left out -- vim leaves with
-// CSI > 4 ; m -- is the default, and so is every resource when the sequence
-// names none.
+// CSI > 4 ; m -- resets it to the initial value, as does a sequence that names
+// no resource at all.
 func (m *ModeTracker) xtmodkeys(params []byte) {
 	if len(params) == 0 {
-		m.modifyOtherKeys = 0
+		m.modifyOtherKeys = modifyOtherKeysInitial
 		return
 	}
 	fields := bytes.Split(params, []byte{';'})
 	if resource, ok := csiNumber(fields[0], -1); !ok || resource != 4 {
 		return
 	}
-	level := 0
+	level := modifyOtherKeysInitial
 	if len(fields) > 1 {
 		var ok bool
-		if level, ok = csiNumber(fields[1], 0); !ok {
+		if level, ok = csiNumber(fields[1], modifyOtherKeysInitial); !ok {
 			return
 		}
 	}
@@ -593,10 +630,10 @@ func csiNumber(field []byte, def int) (int, bool) {
 	return n, true
 }
 
-// kittyPushes is the stack replayed as pushes, bottom first, which leaves a
-// terminal with the stack it was replayed from.
-func kittyPushes(out []byte, stack []int) []byte {
-	for _, flags := range stack {
+// kittyPushes is the stack's replayed entries as pushes, bottom first, which
+// leaves a terminal with the stack it was replayed from.
+func kittyPushes(out []byte, stack keyStack) []byte {
+	for _, flags := range stack.entries {
 		out = fmt.Appendf(out, "\x1b[>%du", flags)
 	}
 	return out
@@ -605,11 +642,11 @@ func kittyPushes(out []byte, stack []int) []byte {
 // kittyPop is one pop of the whole stack. A pop that runs past the bottom
 // empties the stack, which is where a terminal starts, so popping the depth
 // recorded is safe on a terminal that holds fewer entries than that.
-func kittyPop(out []byte, stack []int) []byte {
-	if len(stack) == 0 {
+func kittyPop(out []byte, stack keyStack) []byte {
+	if stack.depth == 0 {
 		return out
 	}
-	return fmt.Appendf(out, "\x1b[<%du", len(stack))
+	return fmt.Appendf(out, "\x1b[<%du", stack.depth)
 }
 
 // Restore returns the bytes that put a terminal this tracker has been
@@ -708,7 +745,7 @@ func (m *ModeTracker) Restore() []byte {
 	}
 
 	out = kittyPop(out, m.mainKeys)
-	if m.modifyOtherKeys != 0 {
+	if m.modifyOtherKeys != modifyOtherKeysInitial {
 		out = append(out, "\x1b[>4m"...)
 	}
 
@@ -765,7 +802,7 @@ func (m *ModeTracker) Snapshot() []byte {
 		}
 	}
 	out = kittyPushes(out, m.mainKeys)
-	if m.modifyOtherKeys != 0 {
+	if m.modifyOtherKeys != modifyOtherKeysInitial {
 		out = fmt.Appendf(out, "\x1b[>4;%dm", m.modifyOtherKeys)
 	}
 	if m.altActive() {

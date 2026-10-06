@@ -691,12 +691,29 @@ func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
 		{name: "a bare CSI u restores the cursor and is not kitty", input: "\x1b[u"},
 		{name: "a number that is not one is ignored", input: "\x1b[>1u\x1b[>-1u\x1b[<1:2u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{
-			// kitty keeps eight entries a screen and evicts the oldest to
-			// make room, so a ninth push loses the first.
-			name:         "the stack is bounded at eight, and the oldest goes",
+			// The replay keeps the eight newest entries, kitty's own depth.
+			// But the protocol leaves the depth to the terminal, and one with
+			// a deeper stack holds all nine: the pop is of every push, since
+			// a pop past the bottom of a shallower stack only empties it.
+			name:         "the replay is bounded at eight, and the pop is not",
 			input:        "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u",
 			wantSnapshot: "\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u",
-			wantRestore:  "\x1b[<8u",
+			wantRestore:  "\x1b[<9u",
+		},
+		{
+			// Pops take the newest entries; what a deeper stack still holds
+			// below the replayed ones is popped all the same.
+			name:        "pops past the replayed entries leave the deeper ones counted",
+			input:       "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u\x1b[>10u\x1b[<9u",
+			wantRestore: "\x1b[<1u",
+		},
+		{
+			// A set on an entry the replay no longer holds changes the top
+			// the terminal has, so it is the top the replay gives a joiner.
+			name:         "a set after the replayed entries are popped",
+			input:        "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u\x1b[<8u\x1b[=5u",
+			wantSnapshot: "\x1b[>5u",
+			wantRestore:  "\x1b[<1u",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -784,11 +801,16 @@ func Test_ModeTracker_ModifyOtherKeys(t *testing.T) {
 		{name: "level 2", input: "\x1b[>4;2m", wantSnapshot: "\x1b[>4;2m", wantRestore: "\x1b[>4m"},
 		{name: "level 1", input: "\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
 		{name: "the last level wins", input: "\x1b[>4;2m\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
-		{name: "level 0 is the default", input: "\x1b[>4;2m\x1b[>4;0m"},
+		// An explicit 0 is not the initial value: xterm's resource may set
+		// that to something else, and only a reset without a value goes back
+		// to it. So it is replayed, and undone.
+		{name: "an explicit level 0", input: "\x1b[>4;2m\x1b[>4;0m", wantSnapshot: "\x1b[>4;0m", wantRestore: "\x1b[>4m"},
 		{name: "vim's reset, with an empty value", input: "\x1b[>4;2m\x1b[>4;m"},
 		{name: "a reset with no value", input: "\x1b[>4;2m\x1b[>4m"},
 		{name: "a reset of every resource", input: "\x1b[>4;2m\x1b[>m"},
-		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n"},
+		// Disabling is xterm's resource value -1, which no XTMODKEYS set can
+		// spell; off, like an explicit 0, and as far from initial.
+		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n", wantSnapshot: "\x1b[>4;0m", wantRestore: "\x1b[>4m"},
 		{name: "another resource is not this one", input: "\x1b[>1;2m"},
 		{name: "SGR underline is not XTMODKEYS", input: "\x1b[4m\x1b[4;2m"},
 		{name: "RIS resets it", input: "\x1b[>4;2m\x1bc"},
