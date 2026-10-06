@@ -2,6 +2,7 @@ package command
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -135,29 +136,46 @@ func TestSessionCurrentBadOutputOutsideSession(t *testing.T) {
 	}
 }
 
-// A socket that answers but refuses is "could not ask", not "not in a
-// session": exit 1, one line, in both modes.
+// A socket that answers but refuses, or answers that it timed out, is "could
+// not ask", not "not in a session": exit 1, one line naming the socket and the
+// status, in both modes.
 func TestSessionCurrentRefusedIsOneLine(t *testing.T) {
 	setupSessionRoots(t)
-	socket := socketIn(t, "refusing.sock")
-	ln, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	srv := grpc.NewServer()
-	api.RegisterAdminServiceServer(srv, &stubAdminServer{getErr: status.Error(codes.PermissionDenied, "nope")})
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(srv.Stop)
 
-	for _, args := range [][]string{nil, {"-o", "json"}} {
-		stdout, stderr, code := runCurrent(t, socket, args...)
-		require.Equal(t, 1, code, "args %v", args)
-		require.Empty(t, stdout)
-		require.Equal(t, 1, strings.Count(stderr, "\n"), "one line, no usage: %q", stderr)
-		require.Contains(t, stderr, "code = PermissionDenied")
+	// The stub returns the status at once, so the timeout case does not wait.
+	for _, tc := range []struct {
+		name   string
+		socket string
+		err    error
+		want   string
+	}{
+		{"refused", "refusing.sock", status.Error(codes.PermissionDenied, "nope"), "code = PermissionDenied"},
+		{"timed out", "slow.sock", status.Error(codes.DeadlineExceeded, "slow"), "code = DeadlineExceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socket := socketIn(t, tc.socket)
+			ln, err := net.Listen("unix", socket)
+			require.NoError(t, err)
+			srv := grpc.NewServer()
+			api.RegisterAdminServiceServer(srv, &stubAdminServer{getErr: tc.err})
+			go func() { _ = srv.Serve(ln) }()
+			t.Cleanup(srv.Stop)
+
+			for _, args := range [][]string{nil, {"-o", "json"}} {
+				stdout, stderr, code := runCurrent(t, socket, args...)
+				require.Equal(t, 1, code, "args %v", args)
+				require.Empty(t, stdout)
+				require.Equal(t, 1, strings.Count(stderr, "\n"), "one line, no usage: %q", stderr)
+				require.Contains(t, stderr, "failed to get session at "+socket)
+				require.Contains(t, stderr, tc.want)
+			}
+		})
 	}
 }
 
 // A session that answers with something this command cannot render is a
-// failure like any other: exit 1, one line, nothing half-printed.
+// failure like any other: exit 1 and one line on stderr, with nothing on
+// stdout for these cases.
 func TestSessionCurrentRenderFailureIsOneLine(t *testing.T) {
 	setupSessionRoots(t)
 	good := socketIn(t, "good.sock")
@@ -186,7 +204,8 @@ func TestSessionCurrentRenderFailureIsOneLine(t *testing.T) {
 	}
 }
 
-// Inside a session nothing changes.
+// Inside a session nothing changes: the template and the JSON both print what
+// they always did, and nothing goes to stderr.
 func TestSessionCurrentInSession(t *testing.T) {
 	setupSessionRoots(t)
 	socket := socketIn(t, "live.sock")
@@ -199,4 +218,12 @@ func TestSessionCurrentInSession(t *testing.T) {
 	require.Equal(t, 0, code)
 	require.Equal(t, "2", stdout)
 	require.Empty(t, stderr)
+
+	stdout, stderr, code = runCurrent(t, socket, "-o", "json")
+	require.Equal(t, 0, code)
+	require.Empty(t, stderr)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), "stdout: %q", stdout)
+	require.Equal(t, "sid", got["sessionId"])
+	require.EqualValues(t, 2, got["clientCount"])
 }

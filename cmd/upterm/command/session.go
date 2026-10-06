@@ -59,6 +59,9 @@ const waitUnavailableCode = 125
 // so a script can tell "no such session" from "could not ask" without reading
 // stderr.
 //
+// `session current` exits with it too, for its own condition: not in a
+// session, because $UPTERM_ADMIN_SOCKET is unset or no session answers at it.
+//
 // Not `session wait`: it passes the hosted command's own exit code through,
 // so no code of its own could be unambiguous there, and it keeps
 // waitUnavailableCode for every lookup failure.
@@ -1301,7 +1304,9 @@ func currentRunE(c *cobra.Command, args []string) error {
 			}
 			return notInSession(c, quiet, "no session answers at "+flagAdminSocket)
 		}
-		return ExitCodeError{Code: 1, Err: err}
+		// Any other failure is "could not ask", and the bare gRPC status does not
+		// say which socket it was, so it is named here for both modes.
+		return ExitCodeError{Code: 1, Err: fmt.Errorf("failed to get session at %s: %w", flagAdminSocket, err)}
 	}
 
 	if render != nil {
