@@ -679,7 +679,6 @@ func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
 		{name: "a push with no flags is still an entry", input: "\x1b[>u", wantSnapshot: "\x1b[>0u", wantRestore: "\x1b[<1u"},
 		{name: "two pushes, bottom first", input: "\x1b[>1u\x1b[>3u", wantSnapshot: "\x1b[>1u\x1b[>3u", wantRestore: "\x1b[<2u"},
 		{name: "a pop", input: "\x1b[>1u\x1b[>3u\x1b[<u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
-		{name: "a pop of zero pops one", input: "\x1b[>1u\x1b[>3u\x1b[<0u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{name: "a pop of n", input: "\x1b[>1u\x1b[>3u\x1b[>5u\x1b[<2u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{name: "a pop past the bottom empties it", input: "\x1b[>1u\x1b[<5u"},
 		{name: "a set replaces the top", input: "\x1b[>1u\x1b[>7u\x1b[=2u", wantSnapshot: "\x1b[>1u\x1b[>2u", wantRestore: "\x1b[<2u"},
@@ -688,6 +687,8 @@ func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
 		{name: "a set in mode 3 clears flags", input: "\x1b[>7u\x1b[=2;3u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
 		{name: "a set on an empty stack makes an entry", input: "\x1b[=5u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
 		{name: "a query is not state", input: "\x1b[?u"},
+		// Only an omitted count is one; kitty pops nothing for an explicit 0.
+		{name: "a pop of zero pops nothing", input: "\x1b[>1u\x1b[<0u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{name: "a bare CSI u restores the cursor and is not kitty", input: "\x1b[u"},
 		{name: "a number that is not one is ignored", input: "\x1b[>1u\x1b[>-1u\x1b[<1:2u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{
@@ -752,11 +753,15 @@ func Test_ModeTracker_KittyKeyboardStackPerScreen(t *testing.T) {
 		},
 		{
 			// kitty swaps stacks on a screen switch and clears neither, so a
-			// program that leaves without popping finds its flags again when
-			// it comes back. Off the alternate screen they cannot be replayed
-			// or popped without switching to it, so nothing is said of them.
-			name:  "the alternate stack is not replayed off the alternate screen",
-			input: "\x1b[?1049h\x1b[>3u\x1b[?1049l",
+			// program that leaves without popping finds its flags again the
+			// next time anything enters the alternate screen. A push or pop
+			// reaches only the screen that is showing, so the stack is
+			// replayed and popped on a trip to the alternate screen and back,
+			// which leaves the normal screen and its cursor as they were.
+			name:         "the alternate stack off the alternate screen",
+			input:        "\x1b[?1049h\x1b[>3u\x1b[?1049l",
+			wantSnapshot: "\x1b[?1049h\x1b[>3u\x1b[?1049l",
+			wantRestore:  "\x1b[?1049h\x1b[<1u\x1b[?1049l",
 		},
 		{
 			name:         "and is there again when the alternate screen is",
@@ -769,12 +774,9 @@ func Test_ModeTracker_KittyKeyboardStackPerScreen(t *testing.T) {
 			input: "\x1b[>1u\x1b[?1049h\x1b[>3u\x1bc",
 		},
 		{
-			// DECSTR is xterm's soft reset, and xterm's has no kitty stack
-			// to reset.
-			name:         "DECSTR clears neither",
-			input:        "\x1b[>1u\x1b[!p",
-			wantSnapshot: "\x1b[>1u",
-			wantRestore:  "\x1b[<1u",
+			// kitty's soft reset clears both stacks, as its hard reset does.
+			name:  "DECSTR clears both",
+			input: "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[?1049l\x1b[!p",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

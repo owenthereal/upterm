@@ -37,6 +37,12 @@ const modifyOtherKeysInitial = -1
 // A terminal holds at most depth of them -- fewer when its stack is shallower
 // and dropped the oldest -- so depth is what a pop of the whole stack pops: a
 // pop past the bottom empties a stack, which is where a terminal starts.
+//
+// The replay is bounded and the count is not, on purpose. A terminal whose
+// stack is deeper than kitty's keeps entries this does not, and a joiner given
+// the replay finds them missing only once the session pops eight entries past
+// where it joined. Keeping every entry instead would let the stream decide how
+// much memory an unattended host spends, which nothing else here does.
 type keyStack struct {
 	entries []int
 	depth   int
@@ -450,6 +456,10 @@ func (m *ModeTracker) softReset() {
 		m.mainRegion = nil
 	}
 	m.charsetG0 = nil
+	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
+	// The protocol is kitty's, so its reset is the one to follow here.
+	m.mainKeys = keyStack{}
+	m.altKeys = keyStack{}
 }
 
 // altScreenModes are the DEC private modes that put the alternate screen
@@ -558,12 +568,11 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 		}
 		stack.push(flags)
 	case '<':
+		// Only an omitted count is one: kitty pops nothing for an explicit
+		// 0.
 		n, ok := csiNumber(params[1:], 1)
 		if !ok {
 			return
-		}
-		if n == 0 {
-			n = 1
 		}
 		stack.pop(n)
 	case '=':
@@ -716,6 +725,15 @@ func (m *ModeTracker) Restore() []byte {
 		out = append(out, 0x1b, '[', '?')
 		out = append(out, []byte(strconv.Itoa(m.altVia))...)
 		out = append(out, 'l')
+	} else if m.altKeys.depth > 0 {
+		// A program left the alternate screen without popping, and kitty
+		// keeps that screen's stack: the next program to enter it would
+		// inherit the flags. A pop reaches only the screen that is showing,
+		// so it is a trip there and back, which saves and restores the
+		// normal screen's cursor and leaves that screen as it was.
+		out = append(out, "\x1b[?1049h"...)
+		out = kittyPop(out, m.altKeys)
+		out = append(out, "\x1b[?1049l"...)
 	}
 
 	// The normal screen's margins, which outlive whatever set them: a shell
@@ -771,9 +789,9 @@ func (m *ModeTracker) Restore() []byte {
 // state: the normal screen's margins, then the modes, then the normal
 // screen's kitty keyboard stack and modifyOtherKeys, then the switch to the
 // alternate screen, then that screen's own margins and keyboard stack, and
-// only while it is the one showing. The alternate screen's stack is not
-// replayed while the normal screen is showing, because a push applies to the
-// screen that is showing; it is replayed once the session goes back to it.
+// only while it is the one showing. While the normal screen is showing, the
+// alternate screen's stack is replayed on a trip there and back, because a
+// push applies only to the screen that is showing.
 //
 // The state as of the ring's first byte includes being partway through a
 // sequence, so the partial goes last, after the charset. The ring's first
@@ -804,6 +822,13 @@ func (m *ModeTracker) Snapshot() []byte {
 	out = kittyPushes(out, m.mainKeys)
 	if m.modifyOtherKeys != modifyOtherKeysInitial {
 		out = fmt.Appendf(out, "\x1b[>4;%dm", m.modifyOtherKeys)
+	}
+	if !m.altActive() && len(m.altKeys.entries) > 0 {
+		// The alternate screen's stack, kept while the normal screen shows,
+		// replayed on a trip there and back; see Restore.
+		out = append(out, "\x1b[?1049h"...)
+		out = kittyPushes(out, m.altKeys)
+		out = append(out, "\x1b[?1049l"...)
 	}
 	if m.altActive() {
 		// Replayed through the mode that entered, so a joiner is left in the
