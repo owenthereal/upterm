@@ -1557,6 +1557,29 @@ func TestARebuildAfterAnIndexDropStaysHeld(t *testing.T) {
 	assert.Nil(t, consul.entry(), "shutdown left the rebuilt registration in Consul")
 }
 
+// A value that parses but names no session, such as `{}` or `null` written
+// into a key by hand, is no registration. The watch leaves it out of the cache
+// and out of the view it hands the observers, rather than keying it under the
+// empty ID.
+func TestTheWatchLeavesOutAValueThatNamesNoSession(t *testing.T) {
+	store := newFakeConsulStore(t, newFakeConsul(t))
+	var seen map[string]StoreEntry
+	store.Observe(func(_, _ uint64, entries map[string]StoreEntry) { seen = entries })
+	stored, err := json.Marshal(&Session{ID: "id", NodeAddr: "node", Generation: 1})
+	require.NoError(t, err)
+
+	store.updateSessionReplica(10, api.KVPairs{
+		{Key: store.SessionKey("a"), Value: []byte("{}"), ModifyIndex: 8},
+		{Key: store.SessionKey("b"), Value: []byte("null"), ModifyIndex: 9},
+		{Key: store.SessionKey("id"), Value: stored, ModifyIndex: 10},
+	})
+
+	assert.False(t, store.HasInCache(""), "a value that names no session was cached under the empty ID")
+	assert.NotContains(t, seen, "", "the observers were handed a value that names no session")
+	assert.True(t, store.HasInCache("id"))
+	assert.Contains(t, seen, "id")
+}
+
 // A guest whose cached route failed reads its session again with GetFresh,
 // which goes to Consul even though the cache holds an entry: the watch may not
 // have caught up with the host's move yet. What it reads then replaces the

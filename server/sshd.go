@@ -242,12 +242,13 @@ func (l *localSessions) replace(next *Registration) bool {
 // store's view of every session as of index in epoch, which a watch delivers.
 // For each one:
 //   - an entry of its own identity: nothing to do;
-//   - another registration's entry with a generation at least its own: it is
-//     superseded. Its slot, count and lease keeper go, its connection is
-//     closed so its guests go with it, and the handle its slot held is
-//     released;
-//   - no entry, or an older registration's: its lease keeper is told of the
-//     loss, and re-asserts it.
+//   - another registration's entry with a generation at least its own, held
+//     by another lease: it is superseded. Its slot, count and lease keeper go,
+//     its connection is closed so its guests go with it, and the handle its
+//     slot held is released;
+//   - no entry, an older registration's, or anything its own lease holds (see
+//     heldByOwnLease): its lease keeper is told of the loss, and re-asserts
+//     it.
 //
 // A registration whose write the view predates is skipped; the next delivery
 // includes it. Indexes order only within an epoch, so a registration from an
@@ -257,7 +258,7 @@ func (l *localSessions) replace(next *Registration) bool {
 //
 // It runs on the watch's goroutine, so it makes no store calls, and the
 // releases and closes it causes happen after the lock is let go.
-func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Session) {
+func (l *localSessions) reconcile(epoch, index uint64, entries map[string]StoreEntry) {
 	type superseded struct {
 		conn io.Closer
 		reg  *Registration
@@ -272,16 +273,12 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Sessi
 		}
 		cur, ok := entries[id]
 		switch {
-		case ok && sameIdentity(cur, reg.Session):
-		case ok && cur.Generation >= reg.Generation():
+		case ok && sameIdentity(cur.Session, reg.Session):
+		case ok && !heldByOwnLease(cur, reg) && cur.Session.Generation >= reg.Generation():
 			l.removeLocked(id, lr)
-			ended = append(ended, superseded{lr.conn, reg, cur})
-		case !ok || cur.Generation < reg.Generation():
-			lr.lostEpoch, lr.lostIndex = epoch, index
-			select {
-			case lr.lost <- struct{}{}:
-			default:
-			}
+			ended = append(ended, superseded{lr.conn, reg, cur.Session})
+		default:
+			reportLossLocked(lr, epoch, index)
 		}
 	}
 	l.mu.Unlock()
@@ -296,16 +293,30 @@ func (l *localSessions) reconcile(epoch, index uint64, entries map[string]*Sessi
 
 // confirm checks reg, which add has just accepted, against the store's view
 // of its entry. If that shows another registration with a generation at least
-// reg's, reg is superseded: it ends as reconcile would end it, and confirm
-// returns an error wrapping ErrSuperseded. The delivery showing that
-// registration can be processed before add, when there is no slot yet for
-// reconcile to find; the store's view is updated before reconcile runs, so
-// checking it after add covers that order. A lookup that fails leaves reg
-// adopted: the next delivery, or its keeper's next renewal, still finds it
-// out.
+// reg's, held by another lease, reg is superseded: it ends as reconcile would
+// end it, and confirm returns an error wrapping ErrSuperseded. If it shows
+// another value in the key reg's own lease holds, reg's keeper is told of the
+// loss, as reconcile would tell it. The delivery showing either can be
+// processed before add, when there is no slot yet for reconcile to find; the
+// store's view is updated before reconcile runs, so checking it after add
+// covers that order. A lookup that fails leaves reg adopted: the next
+// delivery, or its keeper's next renewal, still finds it out.
 func (l *localSessions) confirm(reg *Registration) error {
-	cur, err := l.sessionManager.GetSession(reg.ID())
-	if err != nil || sameIdentity(cur, reg.Session) || cur.Generation < reg.Generation() {
+	cur, err := l.sessionManager.GetEntry(reg.ID())
+	if err != nil || sameIdentity(cur.Session, reg.Session) {
+		return nil
+	}
+	if heldByOwnLease(cur, reg) {
+		// The view is no earlier than reg's own write, and a rebuild that
+		// answers it writes later still.
+		l.mu.Lock()
+		if lr, ok := l.regs[reg.ID()]; ok && lr.reg.Same(reg) {
+			reportLossLocked(lr, reg.epoch, reg.index)
+		}
+		l.mu.Unlock()
+		return nil
+	}
+	if cur.Session.Generation < reg.Generation() {
 		return nil
 	}
 	l.mu.Lock()
@@ -320,7 +331,25 @@ func (l *localSessions) confirm(reg *Registration) error {
 	if handle != nil {
 		l.retire(lr.conn, handle)
 	}
-	return supersededError(reg.Session, cur)
+	return supersededError(reg.Session, cur.Session)
+}
+
+// heldByOwnLease reports whether e's key is held by reg's own lease. Every
+// registration moves the lock to its own lease, and a plain write keeps the
+// lock, so such a key is still reg's entry, whatever was written into it.
+// reg.lease is "" without leases, and so is an unlocked entry's.
+func heldByOwnLease(e StoreEntry, reg *Registration) bool {
+	return reg.lease != "" && e.Lease == reg.lease
+}
+
+// reportLossLocked tells lr's keeper that its entry is lost, as the store's
+// view at index in epoch showed. The caller holds l.mu.
+func reportLossLocked(lr *localRegistration, epoch, index uint64) {
+	lr.lostEpoch, lr.lostIndex = epoch, index
+	select {
+	case lr.lost <- struct{}{}:
+	default:
+	}
 }
 
 // removeLocked drops lr, the slot for id, which a newer registration has
