@@ -388,13 +388,29 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 // Members that do not buffer are skipped: a synchronous writer is delivered by
 // definition. A sink that has already failed flushes to nil, because a guest
 // that is already gone is not a shutdown error.
+//
+// Before the flush, each member is sent what puts its terminal back where it
+// started -- the modes the session left set, undone -- behind everything else
+// it was sent. A session can end with its command still holding the terminal,
+// killed on the alternate screen with the mouse on, and a guest's terminal is
+// not one anything else will put back: a plain ssh client restores termios on
+// the way out and nothing more. It goes under writeMu, as a Write would, so it
+// lands after the command's last output and before any flush.
 func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
+	first := !t.closed
 	t.closed = true
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
 	copy(writers, t.writers)
 	t.membersMu.Unlock()
+	if first {
+		if restore := t.restore(); len(restore) > 0 {
+			for _, w := range writers {
+				_, _ = w.Write(restore)
+			}
+		}
+	}
 	t.writeMu.Unlock()
 
 	var (
@@ -415,4 +431,20 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	wg.Wait()
 
 	return errors.Join(errs...)
+}
+
+// restore is what puts a terminal that watched the whole stream back where it
+// started. The tracker describes the terminal as of the ring's first byte, so
+// it is first brought up to date with the ring, and with the sequence the
+// replay filter is still holding, which together are everything sent since.
+//
+// That spends the tracker: its snapshot no longer describes the ring's start.
+// So it runs once, from Shutdown, after which Append refuses every joiner and
+// nothing asks for a snapshot again. Called with writeMu held.
+func (t *MultiWriter) restore() []byte {
+	for _, d := range t.buffer.Data() {
+		_, _ = t.modes.Write(d)
+	}
+	_, _ = t.modes.Write(t.replay.Pending())
+	return t.modes.Restore()
 }

@@ -677,6 +677,65 @@ func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
 	}
 }
 
+// A session can end with its command still holding the terminal: killed on
+// the alternate screen, say, with bracketed paste on. Every terminal watching
+// is left that way too, and a guest's is not one anything else will put back
+// -- a plain ssh client restores termios on the way out and nothing more. So
+// the fan-out's last write, behind everything else each writer was sent,
+// undoes what the session left set: on the writer that watched it all, and on
+// one that joined after the modes had scrolled out of the ring.
+func TestMultiWriterShutdownPutsEveryTerminalBack(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replay  int
+		stream  []string
+		restore string
+	}{
+		{
+			name:    "modes still in the ring",
+			replay:  1024,
+			stream:  []string{"\x1b[?1049h\x1b[?2004h\x1b[>1u", "0123456789abcdefghij"},
+			restore: "\x1b[<1u\x1b[?1049l\x1b[?2004l",
+		},
+		{
+			name:    "modes only in the tracker",
+			replay:  16,
+			stream:  []string{"\x1b[?1049h\x1b[?2004h\x1b[>1u", "0123456789abcdefghij"},
+			restore: "\x1b[<1u\x1b[?1049l\x1b[?2004l",
+		},
+		{
+			// The terminal is inside the OSC as well, and would read the
+			// reset as the rest of its title.
+			name:    "output stopped inside a sequence",
+			replay:  1024,
+			stream:  []string{"\x1b[?2004h", "\x1b]0;a title"},
+			restore: "\x18\x1b[?2004l",
+		},
+		{
+			name:   "the command put everything back itself",
+			replay: 1024,
+			stream: []string{"\x1b[?1049h\x1b[?2004h", "\x1b[?2004l\x1b[?1049l"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(tc.replay)
+			var early, late bytes.Buffer
+			require.NoError(t, w.Append(&early))
+			_, _ = w.Write([]byte(tc.stream[0]))
+			require.NoError(t, w.Append(&late))
+			_, _ = w.Write([]byte(tc.stream[1]))
+			lateBefore := late.Len()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			require.NoError(t, w.Shutdown(ctx))
+
+			require.Equal(t, strings.Join(tc.stream, "")+tc.restore, early.String(), "the writer that saw it all")
+			require.Equal(t, tc.restore, late.String()[lateBefore:], "the writer that joined later")
+		})
+	}
+}
+
 func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
 	w := NewMultiWriter(5)
 	var plain bytes.Buffer
