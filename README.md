@@ -414,7 +414,19 @@ set-option -ga update-environment " UPTERM_ADMIN_SOCKET UPTERM_SESSION_NAME"
 
 ```bash
 # Show 🆙 emoji and connected client count when in upterm session
-export PS1='$(upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+# (zsh also needs `setopt PROMPT_SUBST` for the prompt to run the command)
+export PS1='$([ -n "$UPTERM_ADMIN_SOCKET" ] && upterm session current -o go-template="🆙 {{.ClientCount}} " 2>/dev/null)'"$PS1"
+```
+
+The `UPTERM_ADMIN_SOCKET` check keeps `upterm` from running on every prompt outside a session. With [Starship](https://starship.rs), add to `~/.config/starship.toml` and include `${custom.upterm}` in your `format` (or leave `format` unset so Starship places it):
+
+```toml
+[custom.upterm]
+command = "upterm session current -o go-template='{{.ClientCount}}'"
+when = 'test -n "$UPTERM_ADMIN_SOCKET"'
+format = "([🆙 $output]($style) )"
+style = "bold yellow"
+shell = ["sh"]
 ```
 
 **Template variables available** (Go templates use PascalCase field names):
