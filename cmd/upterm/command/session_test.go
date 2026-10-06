@@ -422,6 +422,10 @@ type stubAdminServer struct {
 	mu    sync.Mutex
 	resps []*api.GetSessionResponse
 
+	// getErr, if set, is what GetSession answers instead of a response: a
+	// socket that is up but refuses the query.
+	getErr error
+
 	// onStop, if set, is called on StopSession; nil answers Unimplemented, the
 	// way a daemon that predates this RPC would.
 	onStop func()
@@ -449,6 +453,9 @@ func (s *stubAdminServer) GetSession(context.Context, *api.GetSessionRequest) (*
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
 	resp := s.resps[0]
 	if len(s.resps) > 1 {
 		s.resps = s.resps[1:]

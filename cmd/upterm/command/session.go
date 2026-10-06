@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -57,6 +58,9 @@ const waitUnavailableCode = 125
 // systemctl's "no such unit". Every other failure of those commands keeps 1,
 // so a script can tell "no such session" from "could not ask" without reading
 // stderr.
+//
+// `session current` exits with it too, for its own condition: not in a
+// session, because $UPTERM_ADMIN_SOCKET is unset or no session answers at it.
 //
 // Not `session wait`: it passes the hosted command's own exit code through,
 // so no code of its own could be unambiguous there, and it keeps
@@ -652,7 +656,11 @@ Output formats:
   -o json                           JSON output
   -o go-template='{{.ClientCount}}' Custom Go template
 
-Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, sessiondir.SessionsRoot(runtimeDir)),
+Template variables: SessionID, ClientCount, Host, Command, ForceCommand
+
+Exits 4 when not in a session ($UPTERM_ADMIN_SOCKET is unset, or no session
+answers at it), and 1 for any other failure. With -o, not being in a session
+prints nothing.`, sessiondir.SessionsRoot(runtimeDir)),
 		Example: `  # Display the active session as defined in $UPTERM_ADMIN_SOCKET:
   upterm session current
 
@@ -664,11 +672,10 @@ Template variables: SessionID, ClientCount, Host, Command, ForceCommand`, sessio
 
   # For terminal title:
   upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionID}}'`,
-		PreRunE: validateCurrentRequiredFlags,
-		RunE:    currentRunE,
+		RunE: currentRunE,
 	}
 
-	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path (required).")
+	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path; defaults to $UPTERM_ADMIN_SOCKET.")
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
@@ -738,15 +745,6 @@ func listRunE(c *cobra.Command, args []string) error {
 	model := tui.NewSessionListModel(sessions)
 	_, err = tui.RunModel(model)
 	return err
-}
-
-// fetchSessionDetail returns session details for an admin socket
-func fetchSessionDetail(ctx context.Context, adminSocket string) (tui.SessionDetail, error) {
-	sess, err := session(ctx, adminSocket)
-	if err != nil {
-		return tui.SessionDetail{}, err
-	}
-	return buildSessionDetail(sess)
 }
 
 // sessionInfo is the single shape `session info -o json` returns, live or not.
@@ -1256,73 +1254,130 @@ func withTunnelState(detail tui.SessionDetail, info sessionInfo) tui.SessionDeta
 	return detail
 }
 
+// currentRunE tells "not in a session" apart from every other failure, because
+// the way this command is used turns on it. A shell prompt calls it on every
+// redraw, in and out of a session, and has to learn which from the status
+// alone; printing the usage and the error twice for the common case, as it
+// once did, is thirty lines on every prompt outside a session.
 func currentRunE(c *cobra.Command, args []string) error {
-	// One deadline for whichever branch runs. Both ask the admin socket, and
-	// a host that was stopped rather than killed accepts the connection and
-	// then never answers on it — which for the shell-prompt use this command
-	// exists for means a prompt that never returns.
+	// Set first, so that no failure returned below prints the usage. Cobra
+	// raises a bad flag before this runs, and usage is the right answer to that.
+	c.SilenceUsage = true
+
+	// The format is checked before the socket, so that a typo in a prompt's
+	// config is reported outside a session too. Behind the quiet path it would
+	// go unnoticed for as long as nobody happened to be sharing.
+	quiet := flagOutput != ""
+	var render func(io.Writer, *api.GetSessionResponse) error
+	if quiet {
+		var err error
+		render, err = sessionOutput(flagOutput)
+		if err != nil {
+			return ExitCodeError{Code: 1, Err: err}
+		}
+	}
+
+	if flagAdminSocket == "" {
+		return notInSession(c, quiet, "$UPTERM_ADMIN_SOCKET is not set")
+	}
+
+	// One deadline for the query. A host that was stopped rather than killed
+	// accepts the connection and then never answers on it — which for the
+	// shell-prompt use this command exists for means a prompt that never
+	// returns.
 	ctx, cancel := context.WithTimeout(c.Context(), sessionQueryTimeout)
 	defer cancel()
 
-	// If output format specified, use special handling (non-interactive)
-	if flagOutput != "" {
-		return outputSession(ctx, flagAdminSocket, flagOutput)
+	sess, err := session(ctx, flagAdminSocket)
+	if err != nil {
+		// Unavailable is the transport saying nobody is listening: a socket
+		// path that does not exist, or a file a killed host left behind. The
+		// host never answers with it itself. Here that reads as "no session
+		// answers there", where `session set` has to treat it as possibly
+		// transient because it acts on the answer: this is a read-only query,
+		// so a misread costs one prompt without its badge.
+		if status.Code(err) == codes.Unavailable {
+			// The cause stays out of what a prompt prints, so --debug is
+			// where to find why.
+			if logger := uptermctx.Logger(ctx); logger != nil {
+				logger.Debug("no session answers at the admin socket", "socket", flagAdminSocket, "error", err)
+			}
+			return notInSession(c, quiet, "no session answers at "+flagAdminSocket)
+		}
+		// Any other failure is "could not ask", and the bare gRPC status does not
+		// say which socket it was, so it is named here for both modes.
+		return ExitCodeError{Code: 1, Err: fmt.Errorf("failed to get session at %s: %w", flagAdminSocket, err)}
 	}
 
-	detail, err := fetchSessionDetail(ctx, flagAdminSocket)
+	if render != nil {
+		if err := render(os.Stdout, sess); err != nil {
+			return ExitCodeError{Code: 1, Err: err}
+		}
+		return nil
+	}
+
+	detail, err := buildSessionDetail(sess)
 	if err != nil {
-		return err
+		return ExitCodeError{Code: 1, Err: err}
 	}
 
 	tui.PrintSessionDetail(detail)
 	return nil
 }
 
-// outputSession handles -o/--output flag for session current
-func outputSession(ctx context.Context, adminSocket, format string) error {
-	// Error if not in upterm session (no admin socket)
-	if adminSocket == "" {
-		return fmt.Errorf("not in upterm session (UPTERM_ADMIN_SOCKET not set)")
+// notInSession is the answer to "is there a session here" when there is not
+// one: notFoundCode, as `session info`, `session stop` and `session set` give
+// for a name nobody holds. With -o it says nothing at all, which is what a
+// prompt that renders the output wants to show; otherwise it is one line for a
+// person, and why.
+func notInSession(c *cobra.Command, quiet bool, why string) error {
+	if quiet {
+		// A bare ExitCodeError, as `session wait` returns one: cobra prints
+		// Err unless it is silenced, and with none it prints "exit status 4".
+		c.SilenceErrors = true
+		return ExitCodeError{Code: notFoundCode}
 	}
+	return ExitCodeError{Code: notFoundCode, Err: errors.New("not in an upterm session: " + why)}
+}
 
-	// Validate format
+// sessionOutput builds the renderer for -o/--output, or the error that says why
+// the format or the template is not one. It runs before any socket work so
+// that a malformed format is reported the same wherever the command is run.
+func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) error, error) {
 	if format != "json" && !strings.HasPrefix(format, "go-template=") {
-		return fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
+		return nil, fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
 	}
 
-	// Try to get session
-	sess, err := session(ctx, adminSocket)
-	if err != nil {
-		return fmt.Errorf("failed to get session: %w", err)
+	templateData := func(sess *api.GetSessionResponse) sessionTemplateData {
+		return sessionTemplateData{
+			SessionID:    sess.SessionId,
+			ClientCount:  len(sess.ConnectedClients),
+			Host:         sess.Host,
+			Command:      strings.Join(sess.Command, " "),
+			ForceCommand: strings.Join(sess.ForceCommand, " "),
+		}
 	}
 
-	// Build template data
-	data := sessionTemplateData{
-		SessionID:    sess.SessionId,
-		ClientCount:  len(sess.ConnectedClients),
-		Host:         sess.Host,
-		Command:      strings.Join(sess.Command, " "),
-		ForceCommand: strings.Join(sess.ForceCommand, " "),
-	}
-
-	// Handle json output
 	if format == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(data)
+		return func(w io.Writer, sess *api.GetSessionResponse) error {
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "  ")
+			return enc.Encode(templateData(sess))
+		}, nil
 	}
 
-	// Handle go-template output
 	tmplStr := strings.TrimPrefix(format, "go-template=")
 	// Remove surrounding quotes if present
 	tmplStr = strings.Trim(tmplStr, "'\"")
 
 	tmpl, err := template.New("session").Parse(tmplStr)
 	if err != nil {
-		return fmt.Errorf("invalid template: %w", err)
+		return nil, fmt.Errorf("invalid template: %w", err)
 	}
 
-	return tmpl.Execute(os.Stdout, data)
+	return func(w io.Writer, sess *api.GetSessionResponse) error {
+		return tmpl.Execute(w, templateData(sess))
+	}, nil
 }
 
 // listSessions reports every session that exists right now, carrying whatever
@@ -1587,19 +1642,6 @@ func sessionWithTimeout(ctx context.Context, adminSocket string) (*api.GetSessio
 	defer cancel()
 
 	return session(ctx, adminSocket)
-}
-
-func validateCurrentRequiredFlags(c *cobra.Command, args []string) error {
-	missingFlagNames := []string{}
-	if flagAdminSocket == "" {
-		missingFlagNames = append(missingFlagNames, "admin-socket")
-	}
-
-	if len(missingFlagNames) > 0 {
-		return fmt.Errorf(`required flag(s) "%s" not set`, strings.Join(missingFlagNames, ", "))
-	}
-
-	return nil
 }
 
 func displayAuthorizedKeys(keys []*api.AuthorizedKey) string {
