@@ -191,7 +191,7 @@ background and this command prints how to reach it.`,
 	registerAuthUserFlag(cmd.PersistentFlags(), &flagSourceHutUsers, "srht-user", "Authorize specified SourceHut users by allowing their public keys to connect.")
 	cmd.PersistentFlags().BoolVar(&flagAccept, "accept", false, "Automatically accept client connections without prompts.")
 	cmd.PersistentFlags().BoolVarP(&flagReadOnly, "read-only", "r", false, "Host a read-only session, preventing client interaction. Also restricts SFTP to download-only.")
-	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
+	cmd.PersistentFlags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output, and from forced commands' SSH_CONNECTION and SSH_CLIENT (auto-enabled in CI environments).")
 	cmd.PersistentFlags().BoolVar(&flagSkipHostKeyCheck, "skip-host-key-check", false, "Automatically accept unknown server host keys and add them to known_hosts (similar to SSH's StrictHostKeyChecking=accept-new). This bypasses host key verification for new connections.")
 	cmd.PersistentFlags().StringVar(&flagProxy, "proxy", "", "HTTP proxy to connect to the server through (e.g. http://proxy.example.com:3128). Works with ssh, ws, and wss servers. Without it, ws and wss connections use HTTPS_PROXY/HTTP_PROXY and ssh connections go direct.")
 	cmd.PersistentFlags().BoolVar(&flagNoSFTP, "no-sftp", false, "Disable file transfer via SFTP/SCP. By default, clients can transfer files with the same access as the terminal session.")

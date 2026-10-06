@@ -163,6 +163,8 @@ This mirrors functionality provided by tmate:
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
 
+Each guest's forced command runs on a pty of its own, with `SSH_TTY`, `SSH_CONNECTION` and `SSH_CLIENT` set as sshd sets them, so a program that copies over OSC 52 when it runs over SSH copies to the guest's clipboard. `--hide-client-ip` leaves out the two that carry the guest's address.
+
 ### Running Without a Terminal
 
 Host a session from a script or CI step with nothing attached to its terminal. `--accept` skips the confirmation prompt, `--name` gives the session a local name you choose, and `--pty-size` pins the terminal geometry so the command renders the same for every client:

@@ -44,6 +44,10 @@ type Server struct {
 	Command      []string
 	CommandEnv   []string
 	ForceCommand []string
+	// HideClientIP keeps a guest's address out of its forced command's
+	// SSH_CONNECTION and SSH_CLIENT, as --hide-client-ip keeps it out of
+	// what upterm prints.
+	HideClientIP bool
 	// HostKey is the key both doors present. A session's key, not the
 	// operator's identity: a key exchange signs with whatever is here, on
 	// every join, attach and rekey, and an identity held by a confirming
@@ -240,6 +244,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	sh := sessionHandler{
 		forceCommand:          s.ForceCommand,
 		commandEnv:            s.CommandEnv,
+		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
 		shared:                shared,
 		eventEmmiter:          s.EventEmitter,
@@ -594,6 +599,7 @@ func (h *hostPublicKeyHandler) HandlePublicKey(ctx gssh.Context, key gssh.Public
 type sessionHandler struct {
 	forceCommand []string
 	commandEnv   []string
+	hideClientIP bool
 	ptmx         PTY
 	eventEmmiter *emitter.Emitter
 	// terminals is the geometry of every terminal attached to the session,
@@ -724,7 +730,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
-		ptmx, err = h.startForceCommand(ctx, ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height)
+		var auth *server.AuthRequest
+		if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
+			auth = guest.auth
+		}
+		ptmx, err = h.startForceCommand(ctx, ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height, auth)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
@@ -1251,15 +1261,19 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 
 // startForceCommand runs the forced command for a guest on its own pty.
 // CommandEnv wins over anything the host inherited, and the guest's own TERM
-// wins over both.
-func (h *sessionHandler) startForceCommand(ctx context.Context, term string, width, height int) (PTY, error) {
+// wins over both. The command is the guest's SSH session, so it is described
+// as sshd describes one, from auth -- the guest's certificate -- and its pty,
+// and the host's own SSH session variables are not passed on. The session's
+// shared command gets none of this: it is nobody's SSH session.
+func (h *sessionHandler) startForceCommand(ctx context.Context, term string, width, height int, auth *server.AuthRequest) (PTY, error) {
 	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
-	cmd.Env = append(os.Environ(), h.commandEnv...)
+	cmd.Env = append(withoutSSHSessionVars(os.Environ()), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
+	cmd.Env = append(cmd.Env, guestConnectionEnv(auth, h.hideClientIP)...)
 	// The guest's own geometry, taken from its pty request. A full-screen
 	// program reads its window size before the first window-change request
 	// arrives, so opening at the default drew that first frame at 80x24 on a
 	// terminal that is nothing of the sort. A request that carries no usable
-	// size falls back inside startPty.
-	return startPty(cmd, termsize.Size{Cols: width, Rows: height}, false)
+	// size falls back inside startSessionPty.
+	return startSessionPty(cmd, termsize.Size{Cols: width, Rows: height})
 }

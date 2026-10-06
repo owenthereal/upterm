@@ -68,6 +68,13 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	return p, nil
 }
 
+// startSessionPty is startPty for a command a guest runs on a pty of its own.
+// The Unix one also sets SSH_TTY; a ConPTY has no device name to put in it, so
+// here it is left unset rather than made up.
+func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
+	return startPty(c, size, false)
+}
+
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
 type pty struct {
 	cpty                *conpty.ConPty

@@ -302,6 +302,9 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		auth = &AuthRequest{
 			ClientVersion: string(conn.ClientVersion()),
 			RemoteAddr:    conn.RemoteAddr().String(),
+			// Behind a PROXY-protocol front end this is the address the
+			// guest dialled, which is what sshd puts in SSH_CONNECTION.
+			LocalAddr:     conn.LocalAddr().String(),
 			AuthorizedKey: ssh.MarshalAuthorizedKey(key),
 		}
 	}

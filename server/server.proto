@@ -35,4 +35,8 @@ message AuthRequest {
   string client_version = 1;
   string remote_addr = 2;
   bytes authorized_key = 3;
+  // The relay's own end of the guest's connection, as remote_addr is the
+  // guest's: the server half of the SSH_CONNECTION a guest's forced command
+  // sees. Empty from a relay that predates it.
+  string local_addr = 4;
 }

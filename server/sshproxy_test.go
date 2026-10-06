@@ -201,18 +201,43 @@ func testCertSigner(user string, signer ssh.Signer) (ssh.Signer, error) {
 }
 
 // fakeConnMetadata is a minimal ssh.ConnMetadata stub for unit tests that
-// consult only the user and the client version.
+// consult the user and the client version, and the connection's two ends when
+// a test sets them.
 type fakeConnMetadata struct {
 	user          string
 	clientVersion string
+	remote, local net.Addr
 }
 
 func (f *fakeConnMetadata) User() string          { return f.user }
 func (f *fakeConnMetadata) SessionID() []byte     { return nil }
 func (f *fakeConnMetadata) ClientVersion() []byte { return []byte(f.clientVersion) }
 func (f *fakeConnMetadata) ServerVersion() []byte { return nil }
-func (f *fakeConnMetadata) RemoteAddr() net.Addr  { return nil }
-func (f *fakeConnMetadata) LocalAddr() net.Addr   { return nil }
+func (f *fakeConnMetadata) RemoteAddr() net.Addr  { return f.remote }
+func (f *fakeConnMetadata) LocalAddr() net.Addr   { return f.local }
+
+// A guest's forced command is told both ends of the guest's connection, as
+// sshd tells a session in SSH_CONNECTION, and the relay is the only one that
+// knows them: the host sees the relay's connection, not the guest's.
+func Test_proxyAuth_authenticateRecordsBothEndsOfTheConnection(t *testing.T) {
+	sm, err := NewSessionManager(routing.ModeEmbedded)
+	require.NoError(t, err)
+	guest, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+
+	a := proxyAuth{SessionManager: sm, Logger: logging.Must(logging.Console(), logging.Debug()).Logger}
+	conn := &fakeConnMetadata{
+		user:          sm.GetEncodeDecoder().Encode("session", "127.0.0.1:2222"),
+		clientVersion: "SSH-2.0-OpenSSH_9.0",
+		remote:        &net.TCPAddr{IP: net.ParseIP("203.0.113.7"), Port: 51234},
+		local:         &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 22},
+	}
+
+	auth, _, err := a.authenticate(conn, guest.PublicKey())
+	require.NoError(t, err)
+	require.Equal(t, "203.0.113.7:51234", auth.GetRemoteAddr(), "the guest's end")
+	require.Equal(t, "198.51.100.1:22", auth.GetLocalAddr(), "the relay's end")
+}
 
 func writeKeyFile(t *testing.T, content string) string {
 	t.Helper()

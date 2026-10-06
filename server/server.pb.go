@@ -189,6 +189,10 @@ type AuthRequest struct {
 	ClientVersion string                 `protobuf:"bytes,1,opt,name=client_version,json=clientVersion,proto3" json:"client_version,omitempty"`
 	RemoteAddr    string                 `protobuf:"bytes,2,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
 	AuthorizedKey []byte                 `protobuf:"bytes,3,opt,name=authorized_key,json=authorizedKey,proto3" json:"authorized_key,omitempty"`
+	// The relay's own end of the guest's connection, as remote_addr is the
+	// guest's: the server half of the SSH_CONNECTION a guest's forced command
+	// sees. Empty from a relay that predates it.
+	LocalAddr     string `protobuf:"bytes,4,opt,name=local_addr,json=localAddr,proto3" json:"local_addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -244,6 +248,13 @@ func (x *AuthRequest) GetAuthorizedKey() []byte {
 	return nil
 }
 
+func (x *AuthRequest) GetLocalAddr() string {
+	if x != nil {
+		return x.LocalAddr
+	}
+	return ""
+}
+
 var File_server_proto protoreflect.FileDescriptor
 
 const file_server_proto_rawDesc = "" +
@@ -262,12 +273,14 @@ const file_server_proto_rawDesc = "" +
 	"\tsessionID\x18\x01 \x01(\tR\tsessionID\x12\x1a\n" +
 	"\bnodeAddr\x18\x02 \x01(\tR\bnodeAddr\x12\x19\n" +
 	"\bssh_user\x18\x03 \x01(\tR\asshUser\x12*\n" +
-	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"|\n" +
+	"\x10sessionKeyRedial\x18\x04 \x01(\bR\x10sessionKeyRedial\"\x9b\x01\n" +
 	"\vAuthRequest\x12%\n" +
 	"\x0eclient_version\x18\x01 \x01(\tR\rclientVersion\x12\x1f\n" +
 	"\vremote_addr\x18\x02 \x01(\tR\n" +
 	"remoteAddr\x12%\n" +
-	"\x0eauthorized_key\x18\x03 \x01(\fR\rauthorizedKeyB&Z$github.com/owenthereal/upterm/serverb\x06proto3"
+	"\x0eauthorized_key\x18\x03 \x01(\fR\rauthorizedKey\x12\x1d\n" +
+	"\n" +
+	"local_addr\x18\x04 \x01(\tR\tlocalAddrB&Z$github.com/owenthereal/upterm/serverb\x06proto3"
 
 var (
 	file_server_proto_rawDescOnce sync.Once

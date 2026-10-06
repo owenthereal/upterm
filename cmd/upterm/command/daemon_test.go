@@ -406,6 +406,24 @@ func TestBuildDaemonHostRefusesAnEmptyName(t *testing.T) {
 	require.ErrorContains(t, err, "without a session name")
 }
 
+// TestBuildDaemonHostHidesClientIPs pins that --hide-client-ip reaches the
+// session, which keeps a guest's address out of its forced command's
+// environment as well as out of what upterm prints.
+func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	orig := flagHideClientIP
+	flagHideClientIP = true
+	t.Cleanup(func() { flagHideClientIP = orig })
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+	require.True(t, h.HideClientIP)
+}
+
 // TestRunDaemonProcessReportsAGenericFailure pins that a run error which is
 // neither ErrNameInUse nor ErrSessionAbandoned reaches the parent as neither.
 func TestRunDaemonProcessReportsAGenericFailure(t *testing.T) {

@@ -156,6 +156,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Command:           opts.command,
 		JoinTimeout:       opts.joinTimeout,
 		ForceCommand:      opts.forceCommand,
+		HideClientIP:      shouldHideClientIP(),
 		Signers:           signers,
 		IdentitiesOnly:    identitiesOnlyRequested(),
 		HostKey:           hostKey,
