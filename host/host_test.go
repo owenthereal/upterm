@@ -615,13 +615,14 @@ func newJoinTimeoutHost(t *testing.T) *joinTimeoutHost {
 		Command:                []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep 0.01; done; read code < "$1"; exit "$code"`, "sh", f.finishFile},
 		SessionCreatedCallback: func(_ context.Context, s *api.GetSessionResponse) error { f.created = s; return nil },
 		SessionReadyCallback:   func(string) { close(f.ready) },
+		// Every client but the session's own terminal: a guest, or a jump.
 		ClientJoinedCallback: func(c *api.Client) {
-			if c.Kind == api.Client_GUEST {
+			if c.Kind != api.Client_HOST {
 				f.joined <- struct{}{}
 			}
 		},
 		ClientLeftCallback: func(c *api.Client) {
-			if c.Kind == api.Client_GUEST {
+			if c.Kind != api.Client_HOST {
 				f.left <- struct{}{}
 			}
 		},

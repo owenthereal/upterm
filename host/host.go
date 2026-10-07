@@ -900,6 +900,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	}
 
 	clientRepo := internal.NewClientRepo()
+	forwards := &internal.Forwards{}
 	eventEmitter := emitter.New(1)
 
 	logger = logger.With("cmd", c.Command, "force_cmd", c.ForceCommand)
@@ -971,6 +972,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		Session:     session,
 		Route:       route,
 		ClientRepo:  clientRepo,
+		Forwards:    forwards,
 		LaunchID:    launchID,
 		OnListening: func() { adminOnce.Do(func() { close(adminReady) }) },
 		OnStop:      requestStop,
@@ -1133,6 +1135,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			Logger:                  logger.With("component", "server"),
 			ReadOnly:                c.ReadOnly,
 			AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
+			Forwards:                forwards,
 			PtySize:                 c.PtySize,
 			PinPtySize:              c.PinPtySize,
 			Term:                    c.Term,

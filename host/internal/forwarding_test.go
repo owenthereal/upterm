@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"sync"
 	"testing"
 
 	gssh "charm.land/ssh"
@@ -64,7 +63,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 	}{
 		{"missing presence state", func(values map[any]any) { delete(values, forwardingPresenceKey{}) }},
 		{"wrong presence state", func(values map[any]any) { values[forwardingPresenceKey{}] = "wrong" }},
-		{"typed nil presence state", func(values map[any]any) { values[forwardingPresenceKey{}] = (*sync.Once)(nil) }},
+		{"typed nil presence state", func(values map[any]any) { values[forwardingPresenceKey{}] = (*forwardingPresence)(nil) }},
 		{"missing guest", func(values map[any]any) { delete(values, authenticatedGuestKey{}) }},
 		{"wrong guest", func(values map[any]any) { values[authenticatedGuestKey{}] = "wrong" }},
 		{"guest without auth", func(values map[any]any) { values[authenticatedGuestKey{}] = authenticatedGuest{key: key} }},
@@ -74,8 +73,8 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			once := new(sync.Once)
-			values := map[any]any{forwardingPresenceKey{}: once, authenticatedGuestKey{}: validGuest}
+			presence := &forwardingPresence{}
+			values := map[any]any{forwardingPresenceKey{}: presence, authenticatedGuestKey{}: validGuest}
 			tt.corrupt(values)
 			ctx := forwardingTestContext{values: values}
 			channel := &rejectingForwardingChannel{}
@@ -87,7 +86,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 				return false // A mistaken delegation still cannot dial a target.
 			}}
 
-			forwardingHandler(events)(srv, nil, channel, ctx)
+			forwardingHandler(events, &Forwards{})(srv, nil, channel, ctx)
 
 			require.Equal(t, ssh.ConnectionFailed, channel.rejectReason)
 			require.Contains(t, channel.rejectMessage, "metadata")
@@ -100,7 +99,7 @@ func TestForwardingRejectsMissingConnectionMetadata(t *testing.T) {
 			default:
 			}
 			consumed := false
-			once.Do(func() { consumed = true })
+			presence.once.Do(func() { consumed = true })
 			require.True(t, consumed, "invalid metadata must not consume presence latch")
 		})
 	}

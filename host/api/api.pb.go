@@ -84,6 +84,11 @@ type Client_Kind int32
 const (
 	Client_GUEST Client_Kind = 0
 	Client_HOST  Client_Kind = 1
+	// A guest connection's forwards, listed apart from any terminal or SFTP
+	// session on the same connection: a jump through the session (`ssh -J`)
+	// or an `ssh -L`, to somewhere the host can reach. A reader built before
+	// this value existed sees it as a guest, which it also is.
+	Client_FORWARD Client_Kind = 2
 )
 
 // Enum value maps for Client_Kind.
@@ -91,10 +96,12 @@ var (
 	Client_Kind_name = map[int32]string{
 		0: "GUEST",
 		1: "HOST",
+		2: "FORWARD",
 	}
 	Client_Kind_value = map[string]int32{
-		"GUEST": 0,
-		"HOST":  1,
+		"GUEST":   0,
+		"HOST":    1,
+		"FORWARD": 2,
 	}
 )
 
@@ -664,9 +671,15 @@ type Client struct {
 	PublicKeyFingerprint string                 `protobuf:"bytes,4,opt,name=public_key_fingerprint,json=publicKeyFingerprint,proto3" json:"public_key_fingerprint,omitempty"`
 	// Which door the client came in by. GUEST is zero so a reader built before
 	// this field existed sees every client as a guest, which is what they were.
-	Kind          Client_Kind `protobuf:"varint,5,opt,name=kind,proto3,enum=api.Client_Kind" json:"kind,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Kind Client_Kind `protobuf:"varint,5,opt,name=kind,proto3,enum=api.Client_Kind" json:"kind,omitempty"`
+	// Where a FORWARD client's forwards go: the distinct host:port destinations
+	// it has opened, as it asked for them, in the order first opened, at most
+	// 16 of them. unlisted_forwards counts the forwards it opened to anywhere
+	// past those.
+	ForwardDestinations []string `protobuf:"bytes,6,rep,name=forward_destinations,json=forwardDestinations,proto3" json:"forward_destinations,omitempty"`
+	UnlistedForwards    uint32   `protobuf:"varint,7,opt,name=unlisted_forwards,json=unlistedForwards,proto3" json:"unlisted_forwards,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Client) Reset() {
@@ -732,6 +745,20 @@ func (x *Client) GetKind() Client_Kind {
 		return x.Kind
 	}
 	return Client_GUEST
+}
+
+func (x *Client) GetForwardDestinations() []string {
+	if x != nil {
+		return x.ForwardDestinations
+	}
+	return nil
+}
+
+func (x *Client) GetUnlistedForwards() uint32 {
+	if x != nil {
+		return x.UnlistedForwards
+	}
+	return 0
 }
 
 type Identifier struct {
@@ -839,16 +866,19 @@ const file_api_proto_rawDesc = "" +
 	"\x04open\x18\f \x01(\bR\x04open\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
-	"\acomment\x18\x02 \x01(\tR\acomment\"\xbf\x01\n" +
+	"\acomment\x18\x02 \x01(\tR\acomment\"\xac\x02\n" +
 	"\x06Client\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x12\n" +
 	"\x04addr\x18\x03 \x01(\tR\x04addr\x124\n" +
 	"\x16public_key_fingerprint\x18\x04 \x01(\tR\x14publicKeyFingerprint\x12$\n" +
-	"\x04kind\x18\x05 \x01(\x0e2\x10.api.Client.KindR\x04kind\"\x1b\n" +
+	"\x04kind\x18\x05 \x01(\x0e2\x10.api.Client.KindR\x04kind\x121\n" +
+	"\x14forward_destinations\x18\x06 \x03(\tR\x13forwardDestinations\x12+\n" +
+	"\x11unlisted_forwards\x18\a \x01(\rR\x10unlistedForwards\"(\n" +
 	"\x04Kind\x12\t\n" +
 	"\x05GUEST\x10\x00\x12\b\n" +
-	"\x04HOST\x10\x01\"\x81\x01\n" +
+	"\x04HOST\x10\x01\x12\v\n" +
+	"\aFORWARD\x10\x02\"\x81\x01\n" +
 	"\n" +
 	"Identifier\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12(\n" +

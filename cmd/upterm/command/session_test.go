@@ -93,12 +93,51 @@ func TestSessionInfoSaysWhenTheSessionIsOpen(t *testing.T) {
 // The address is redacted under CI, so it is the prefix that is compared
 // rather than the whole line.
 func Test_clientDesc_NamesTheDoorEachClientCameInBy(t *testing.T) {
-	guest := clientDesc(api.Client_GUEST, "1.2.3.4:5", "SSH-2.0-x", "SHA256:abc")
+	guest := clientDesc(&api.Client{Kind: api.Client_GUEST, Addr: "1.2.3.4:5", Version: "SSH-2.0-x", PublicKeyFingerprint: "SHA256:abc"})
 	require.Equal(t, "guest", strings.Fields(guest)[0])
 	require.Contains(t, guest, "SSH-2.0-x SHA256:abc", "and still says what it always said")
 
-	host := clientDesc(api.Client_HOST, "local", "SSH-2.0-upterm-attach", "SHA256:abc")
+	host := clientDesc(&api.Client{Kind: api.Client_HOST, Addr: "local", Version: "SSH-2.0-upterm-attach", PublicKeyFingerprint: "SHA256:abc"})
 	require.Equal(t, "host", strings.Fields(host)[0])
+}
+
+// A jump is still a guest for counting: guestCount has always included
+// forwarding connections, and scripts that read it keep their answer.
+func Test_countGuests_CountsJumps(t *testing.T) {
+	require.Equal(t, 2, countGuests([]*api.Client{
+		{Kind: api.Client_HOST}, {Kind: api.Client_GUEST}, {Kind: api.Client_FORWARD},
+	}))
+}
+
+// withClientIPs sets whether client addresses are hidden for the rest of t:
+// by --hide-client-ip, or by CI, which hides them on its own.
+func withClientIPs(t *testing.T, hidden bool) {
+	t.Helper()
+	orig := flagHideClientIP
+	flagHideClientIP = hidden
+	t.Cleanup(func() { flagHideClientIP = orig })
+	for _, v := range []string{"CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "JENKINS_URL", "BUILDKITE", "TF_BUILD", "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER"} {
+		t.Setenv(v, "")
+	}
+	require.Equal(t, hidden, shouldHideClientIP())
+}
+
+// A jump -- a guest connection that has only forwarded -- is named as one,
+// and says where it goes: localhost:22 is someone reaching this machine's
+// sshd, and anywhere else someone reaching past it. Its destinations say as
+// much about the host's network as an address says about the guest, so they
+// are hidden whenever addresses are.
+func Test_clientDesc_NamesAJumpAndWhereItGoes(t *testing.T) {
+	jump := &api.Client{Kind: api.Client_FORWARD, Addr: "1.2.3.4:5", Version: "SSH-2.0-x", PublicKeyFingerprint: "SHA256:abc",
+		ForwardDestinations: []string{"localhost:22", "10.0.0.5:445"}}
+
+	withClientIPs(t, false)
+	require.Equal(t, "jump 1.2.3.4:5 SSH-2.0-x SHA256:abc → localhost:22, 10.0.0.5:445", clientDesc(jump))
+	jump.UnlistedForwards = 3
+	require.Equal(t, "jump 1.2.3.4:5 SSH-2.0-x SHA256:abc → localhost:22, 10.0.0.5:445 (+3 more)", clientDesc(jump))
+
+	withClientIPs(t, true)
+	require.Equal(t, "jump [redacted] SSH-2.0-x SHA256:abc → [redacted]", clientDesc(jump))
 }
 
 func TestBuildSessionDetailWebSocket(t *testing.T) {

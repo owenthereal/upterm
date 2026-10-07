@@ -684,7 +684,7 @@ func clientLeftCallback(c *api.Client) {
 }
 
 func notifyBody(c *api.Client) string {
-	return clientDesc(c.Kind, c.Addr, c.Version, c.PublicKeyFingerprint)
+	return clientDesc(c)
 }
 
 // bannerFlushTimeout bounds how long startup waits for the banner to reach a

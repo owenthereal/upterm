@@ -65,6 +65,7 @@ type Server struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	Forwards                *Forwards // where each jump's destinations are recorded, for GetSession; optional
 	PtySize                 termsize.Size
 	PinPtySize              bool
 	Term                    string
@@ -289,7 +290,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			PublicKeyHandler: ph.HandlePublicKey,
 			ConnCallback: func(ctx gssh.Context, conn net.Conn) net.Conn {
 				// Installed before authentication or any concurrent channel handlers.
-				ctx.SetValue(forwardingPresenceKey{}, &sync.Once{})
+				ctx.SetValue(forwardingPresenceKey{}, &forwardingPresence{})
 				return conn
 			},
 			LocalPortForwardingCallback: func(ctx gssh.Context, destinationHost string, destinationPort uint32) bool {
@@ -310,7 +311,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": forwardingHandler(s.EventEmitter),
+				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {

@@ -1565,7 +1565,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 
 	var clients []string
 	for _, c := range sess.ConnectedClients {
-		clients = append(clients, clientDesc(c.Kind, c.Addr, c.Version, c.PublicKeyFingerprint))
+		clients = append(clients, clientDesc(c))
 	}
 
 	// Build SFTP/SCP commands if enabled and using direct SSH
@@ -1608,19 +1608,40 @@ func quoteShellArg(s string) string {
 // in by. A session's own terminals are clients of it now, and a line that did
 // not say which was which would show an operator a stranger where their own
 // window is.
-func clientDesc(kind api.Client_Kind, addr, clientVer, fingerprint string) string {
-	if shouldHideClientIP() {
+//
+// A jump ends with where it goes. Its destinations say as much about the
+// host's network as an address says about the guest, so they are hidden
+// whenever addresses are.
+func clientDesc(c *api.Client) string {
+	hide := shouldHideClientIP()
+	addr := c.GetAddr()
+	if hide {
 		addr = "[redacted]"
 	}
-	return fmt.Sprintf("%s %s %s %s", kindName(kind), addr, clientVer, fingerprint)
+	desc := fmt.Sprintf("%s %s %s %s", kindName(c.GetKind()), addr, c.GetVersion(), c.GetPublicKeyFingerprint())
+	if c.GetKind() != api.Client_FORWARD || len(c.GetForwardDestinations()) == 0 {
+		return desc
+	}
+	if hide {
+		return desc + " → [redacted]"
+	}
+	desc += " → " + strings.Join(c.GetForwardDestinations(), ", ")
+	if n := c.GetUnlistedForwards(); n > 0 {
+		desc += fmt.Sprintf(" (+%d more)", n)
+	}
+	return desc
 }
 
 // kindName names a client's door for a person reading it. The proto's own
 // String() shouts (GUEST, HOST) and is a wire detail; these are the words the
-// README and `session info` use.
+// README and `session info` use. A jump came in by the guest door, but it
+// reached past the session rather than into it.
 func kindName(k api.Client_Kind) string {
-	if k == api.Client_HOST {
+	switch k {
+	case api.Client_HOST:
 		return "host"
+	case api.Client_FORWARD:
+		return "jump"
 	}
 	return "guest"
 }
