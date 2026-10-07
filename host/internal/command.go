@@ -497,6 +497,15 @@ type outputFlusher interface {
 // escalation as it would without the flush. A failed flush is logged and
 // changes nothing that follows it.
 func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *slog.Logger, name string) {
+	terminateWith(ptmx, exited, hangupGrace, grace, logger, name)
+}
+
+// terminateWith is terminate with the first step's bound given rather than
+// read from hangupGrace: a guest's forced command is torn down on its
+// handler's goroutine, which can outlive the session, so the handler is given
+// the bounds the session read when it started rather than reading package
+// vars a test may be restoring.
+func terminateWith(ptmx PTY, exited <-chan struct{}, hangup, grace time.Duration, logger *slog.Logger, name string) {
 	// gone reports whether exited has already closed, without blocking:
 	// sending a signal after that would reach whatever pid the kernel has
 	// since reused, not the command, and closing or killing an already-gone
@@ -589,7 +598,7 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 		kill()
 		return
 	}
-	if wait(hangupGrace) {
+	if wait(hangup) {
 		return
 	}
 

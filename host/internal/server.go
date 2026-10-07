@@ -244,6 +244,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	sh := sessionHandler{
 		forceCommand:          s.ForceCommand,
 		forceCommands:         &forceCommandTeardowns{},
+		forceCommandHangup:    hangupGrace,
+		forceCommandGrace:     forceCommandStopGrace,
 		commandEnv:            s.CommandEnv,
 		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
@@ -373,7 +375,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// sent what it says on the way out and a reset once it has gone.
 			// Wait for them, bounded, before the session ends and its tunnel
 			// closes under them.
-			if bound := forceCommandStopBound(); !sh.forceCommands.wait(bound) {
+			if bound := forceCommandStopBound(sh.forceCommandHangup, sh.forceCommandGrace); !sh.forceCommands.wait(bound) {
 				s.Logger.Warn("gave up waiting for forced commands to end", "bound", bound)
 			}
 
@@ -463,12 +465,12 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 var forceCommandStopGrace = time.Second
 
 // forceCommandStopBound is how long a session that is ending waits for its
-// forced commands' teardowns: terminate's worst case, then the drain of what
-// they wrote on the way out, then a guest's flush. Past it the session ends
-// anyway -- a guest that has stopped reading holds its handler in a write
-// nothing else releases.
-func forceCommandStopBound() time.Duration {
-	return hangupGrace + 3*forceCommandStopGrace + forceCommandDrainTimeout + guestFlushTimeout
+// forced commands' teardowns, given their hangup and later grace: terminate's
+// worst case, then the drain of what they wrote on the way out, then a guest's
+// flush. Past it the session ends anyway -- a guest that has stopped reading
+// holds its handler in a write nothing else releases.
+func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
+	return hangup + 3*grace + forceCommandDrainTimeout + guestFlushTimeout
 }
 
 // forceCommandTeardowns tracks the guests' forced commands still running, so a
@@ -725,6 +727,13 @@ type sessionHandler struct {
 	// commands' teardowns. Shared by every guest's handler; nil in a test's
 	// handler, which waits for nothing.
 	forceCommands *forceCommandTeardowns
+	// forceCommandHangup and forceCommandGrace bound a forced command's
+	// teardown: hangupGrace and forceCommandStopGrace, read once when the
+	// session starts. A handler can outlive its session -- one whose guest
+	// stopped reading is parked in a write -- so it must not read the package
+	// vars, which a test restores when it ends.
+	forceCommandHangup time.Duration
+	forceCommandGrace  time.Duration
 
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
@@ -895,7 +904,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// away would, and escalate only if it stays. Killing it
 					// outright left a full-screen program no chance to put the
 					// guest's terminal back.
-					terminate(ptmx, exited, forceCommandStopGrace, h.logger, h.forceCommand[0])
+					terminateWith(ptmx, exited, h.forceCommandHangup, h.forceCommandGrace, h.logger, h.forceCommand[0])
 				}
 				// terminate's own waits are bounded, so the command may not be
 				// confirmed gone; waitErr is only safe to read once it is.

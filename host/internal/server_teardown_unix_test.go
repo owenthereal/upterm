@@ -188,5 +188,5 @@ func TestSessionEndStopsWaitingForAGuestThatStoppedReading(t *testing.T) {
 
 	took := h.stop(t)
 
-	assert.Less(t, took, forceCommandStopBound()+2*time.Second)
+	assert.Less(t, took, forceCommandStopBound(hangupGrace, forceCommandStopGrace)+2*time.Second)
 }
