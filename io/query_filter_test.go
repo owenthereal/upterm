@@ -506,3 +506,42 @@ func TestTerminalQueryFilter_ErrorNotReturnedForFilteredContent(t *testing.T) {
 	assert.Equal(4, n)
 	assert.NoError(err) // No error because nothing was written to underlying writer
 }
+
+// CAN and SUB cancel a sequence from any state on the DEC parser terminals
+// implement. A filter holding one -- an unterminated OSC, a query still
+// arriving -- passes what it holds straight through with the cancel, and the
+// terminal discards it. Holding on instead kept the cancel from the terminal:
+// the reset a session sends a guest last is a lone CAN when all the session
+// left open was a sequence, and nothing after it ever pushed it out.
+func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
+	for _, cancel := range []string{"\x18", "\x1a"} {
+		for _, tc := range []struct {
+			name string
+			held string
+		}{
+			{name: "an OSC", held: "\x1b]0;a title"},
+			{name: "an OSC colour query", held: "\x1b]10;?"},
+			{name: "a CSI query", held: "\x1b[6"},
+			{name: "an ESC", held: "\x1b"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var out bytes.Buffer
+				f := NewTerminalQueryFilter(&out)
+				_, err := f.Write([]byte(tc.held))
+				require.NoError(t, err)
+				require.Empty(t, out.String(), "held until it ends")
+
+				// On its own, as a reset is when nothing but the sequence
+				// was left open: nothing after it would push it out.
+				_, err = f.Write([]byte(cancel))
+				require.NoError(t, err)
+				require.Equal(t, tc.held+cancel, out.String())
+				require.Empty(t, f.Pending())
+
+				_, err = f.Write([]byte("\x1b[?2004l"))
+				require.NoError(t, err)
+				require.Equal(t, tc.held+cancel+"\x1b[?2004l", out.String())
+			})
+		}
+	}
+}

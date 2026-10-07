@@ -689,6 +689,8 @@ func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
 		{name: "a set in mode 3 clears flags", input: "\x1b[>7u\x1b[=2;3u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
 		{name: "a set on an empty stack makes an entry", input: "\x1b[=5u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
 		{name: "a query is not state", input: "\x1b[?u"},
+		// kitty takes at most two parameters for a set and ignores more.
+		{name: "a set with a third parameter is ignored", input: "\x1b[=1;1;1u"},
 		// Only an omitted count is one; kitty pops nothing for an explicit 0.
 		{name: "a pop of zero pops nothing", input: "\x1b[>1u\x1b[<0u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{name: "a bare CSI u restores the cursor and is not kitty", input: "\x1b[u"},

@@ -580,6 +580,10 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 		stack.pop(n)
 	case '=':
 		fields := bytes.Split(params[1:], []byte{';'})
+		if len(fields) > 2 {
+			// kitty takes at most two parameters for a set and ignores more.
+			return
+		}
 		flags, ok := csiNumber(fields[0], 0)
 		if !ok {
 			return

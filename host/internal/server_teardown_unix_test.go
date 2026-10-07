@@ -158,19 +158,44 @@ func TestAForcedCommandsGuestIsPutBack(t *testing.T) {
 }
 
 // The same for the guests of the shared command: when the session ends with
-// the command still holding the terminal, each guest is put back.
+// the command still holding the terminal, each guest is put back -- also when
+// its output stopped inside a sequence, which the guest's own query filter is
+// still holding and the reset has to get past.
 func TestSessionEndPutsItsGuestsBack(t *testing.T) {
-	h := startHost(t, &Server{
-		Command: []string{"sh", "-c", `printf '\033[?1049h\033[?2004hREADY'; exec sleep 30`},
-	})
-	_, out, _ := h.connectGuestSession(t)
-	seen := readUntil(t, out, "READY")
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "modes set",
+			command: `printf '\033[?1049h\033[?2004hREADY'; exec sleep 30`,
+			want:    "\x1b[?1049h\x1b[?2004hREADY" + "\x1b[?1049l\x1b[?2004l",
+		},
+		{
+			name:    "output stopped inside a title",
+			command: `printf '\033[?2004hREADY\033]0;a title'; exec sleep 30`,
+			want:    "\x1b[?2004hREADY" + "\x1b]0;a title" + "\x18\x1b[?2004l",
+		},
+		{
+			// Nothing but the cancel to send, and nothing after it.
+			name:    "output stopped inside a title and nothing else left set",
+			command: `printf 'READY\033]0;a title'; exec sleep 30`,
+			want:    "READY" + "\x1b]0;a title" + "\x18",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHost(t, &Server{Command: []string{"sh", "-c", tc.command}})
+			_, out, _ := h.connectGuestSession(t)
+			seen := readUntil(t, out, "READY")
 
-	h.stop(t)
+			h.stop(t)
 
-	rest, err := io.ReadAll(out)
-	require.NoError(t, err)
-	assert.Equal(t, "\x1b[?1049h\x1b[?2004hREADY"+"\x1b[?1049l\x1b[?2004l", seen+string(rest))
+			rest, err := io.ReadAll(out)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, seen+string(rest))
+		})
+	}
 }
 
 // The wait at the session's end is bounded. A guest that has stopped reading

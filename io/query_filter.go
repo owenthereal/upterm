@@ -98,6 +98,17 @@ func (f *TerminalQueryFilter) Pending() []byte {
 
 // processByte processes a single byte, appending non-filtered output to f.outBuf.
 func (f *TerminalQueryFilter) processByte(b byte) {
+	if (b == 0x18 || b == 0x1a) && f.state != qfStateNormal {
+		// CAN or SUB cancels a sequence from any state on the DEC parser
+		// terminals implement. What is held goes out with the cancel, and the
+		// terminal discards it -- a query included, which a terminal answers
+		// only at its terminator. Held back, it kept the cancel from the
+		// terminal: a session's last reset to a guest is a lone CAN when all
+		// it left open was a sequence, and nothing after it would push it out.
+		f.seqBuf = append(f.seqBuf, b)
+		f.flushAndReset()
+		return
+	}
 	switch f.state {
 	case qfStateNormal:
 		if b == 0x1b { // ESC
