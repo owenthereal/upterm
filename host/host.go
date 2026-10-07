@@ -258,6 +258,9 @@ type Host struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	// HideClientIP keeps a guest's address out of its forced command's
+	// SSH_CONNECTION and SSH_CLIENT.
+	HideClientIP bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
 	ProxyURL   *url.URL
@@ -1114,6 +1117,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			Command:                 c.Command,
 			CommandEnv:              commandEnv,
 			ForceCommand:            c.ForceCommand,
+			HideClientIP:            c.HideClientIP,
 			HostKey:                 hostKey,
 			AuthorizedKeys:          aks,
 			GuestCertAuthority:      relayAuthority.IsUserAuthority,

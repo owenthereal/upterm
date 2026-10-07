@@ -34,6 +34,47 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	return wrapPty(f, c, pinned), nil
 }
 
+// startSessionPty is startPty for a command a guest runs on a pty of its own,
+// whose environment also names that pty in SSH_TTY, as sshd's does for a
+// session with a terminal.
+//
+// What ptylib.StartWithSize does, with one step added: the name is only known
+// once the pty is open, and the environment is fixed once the command starts.
+func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
+	if !size.Valid() {
+		size = termsize.Default
+	}
+
+	f, slave, err := ptylib.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = slave.Close() }()
+
+	// Sized before the command starts, for the reason startPty gives.
+	if err := ptylib.Setsize(f, &ptylib.Winsize{Rows: uint16(size.Rows), Cols: uint16(size.Cols)}); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	if c.Env == nil {
+		c.Env = os.Environ()
+	}
+	c.Env = append(c.Env, "SSH_TTY="+slave.Name())
+	c.Stdin, c.Stdout, c.Stderr = slave, slave, slave
+	if c.SysProcAttr == nil {
+		c.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	c.SysProcAttr.Setsid = true
+	c.SysProcAttr.Setctty = true
+	if err := c.Start(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	return wrapPty(f, c, false), nil
+}
+
 // Linux kernel return EIO when attempting to read from a master pseudo
 // terminal which no longer has an open slave. So ignore error here.
 // See https://github.com/creack/pty/issues/21

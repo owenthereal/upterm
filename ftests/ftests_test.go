@@ -129,6 +129,7 @@ var ConnectionTestCases = []FtestCase{
 	testClientNewcomerDoesNotDisplacePacer,
 	testHostExitsWhileGuestHoldsConnection,
 	testHostKindAndGuestKindInConnectedClients,
+	testForcedCommandSeesTheGuestsConnection,
 }
 
 // CallbackTestCases contains all callback/event-related test functions
@@ -539,6 +540,7 @@ type Host struct {
 	AllowLocalTCPForwarding  bool
 	ReadOnly                 bool
 	SFTPDisabled             bool // Disable SFTP subsystem
+	HideClientIP             bool
 	// Reconnect paces the tunnel's liveness and its redials; a field left
 	// zero takes host.ReconnectTiming's default.
 	Reconnect host.ReconnectTiming
@@ -660,6 +662,7 @@ func (c *Host) Share(url string) error {
 		AllowLocalTCPForwarding: c.AllowLocalTCPForwarding,
 		ReadOnly:                c.ReadOnly,
 		SFTPDisabled:            c.SFTPDisabled,
+		HideClientIP:            c.HideClientIP,
 		AttachSocketFile:        attachSocket,
 		AwaitInitialClient:      true,
 		AttachListeningCallback: func(s string) { attachReady <- s },
