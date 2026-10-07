@@ -813,6 +813,13 @@ func Test_ModeTracker_ModifyOtherKeys(t *testing.T) {
 		// Disabling is xterm's resource value -1, which no XTMODKEYS set can
 		// spell; off, like an explicit 0, and as far from initial.
 		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n", wantSnapshot: "\x1b[>4;0m", wantRestore: "\x1b[>4m"},
+		// xterm's colon form: a subparameter on the resource is a mask of
+		// modifiers to leave out of the encoding, and is replayed with it.
+		{name: "a mask and a level", input: "\x1b[>4:1;2m", wantSnapshot: "\x1b[>4:1;2m", wantRestore: "\x1b[>4m"},
+		{name: "a mask alone", input: "\x1b[>4:1m", wantSnapshot: "\x1b[>4:1m", wantRestore: "\x1b[>4m"},
+		{name: "a reset clears the mask", input: "\x1b[>4:1;2m\x1b[>4m"},
+		{name: "a level without a mask clears it", input: "\x1b[>4:1;2m\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
+		{name: "a mask that is not one number is ignored", input: "\x1b[>4:1:2;2m"},
 		{name: "another resource is not this one", input: "\x1b[>1;2m"},
 		{name: "SGR underline is not XTMODKEYS", input: "\x1b[4m\x1b[4;2m"},
 		{name: "RIS resets it", input: "\x1b[>4;2m\x1bc"},

@@ -160,6 +160,10 @@ type ModeTracker struct {
 	// the initial value: xterm's resource may make that something else, and
 	// only a reset without a value goes back to it.
 	modifyOtherKeys int
+	// modifyOtherKeysMask is the subparameter of xterm's colon form, CSI > 4 :
+	// mask ; level m: modifiers to leave out of the encoding, kept verbatim
+	// for the replay. Empty when the last XTMODKEYS for it had none.
+	modifyOtherKeysMask []byte
 
 	// partial is the raw bytes of the sequence the parser is currently
 	// inside, ESC included. The tracker is fed the ring's evictions, so the
@@ -431,6 +435,7 @@ func (m *ModeTracker) resetToDefaults() {
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
 	m.modifyOtherKeys = modifyOtherKeysInitial
+	m.modifyOtherKeysMask = nil
 }
 
 // softResetModes are the tracked DEC private modes DECSTR returns to their
@@ -538,6 +543,7 @@ func (m *ModeTracker) finishCSI(final byte) {
 		// it is off, so it is kept as an explicit 0.
 		if string(params) == ">4" {
 			m.modifyOtherKeys = 0
+			m.modifyOtherKeysMask = nil
 		}
 	}
 }
@@ -609,10 +615,16 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 func (m *ModeTracker) xtmodkeys(params []byte) {
 	if len(params) == 0 {
 		m.modifyOtherKeys = modifyOtherKeysInitial
+		m.modifyOtherKeysMask = nil
 		return
 	}
 	fields := bytes.Split(params, []byte{';'})
-	if resource, ok := csiNumber(fields[0], -1); !ok || resource != 4 {
+	// xterm's colon form puts a mask on the resource: CSI > 4 : mask m.
+	resource, mask, _ := bytes.Cut(fields[0], []byte{':'})
+	if n, ok := csiNumber(resource, -1); !ok || n != 4 {
+		return
+	}
+	if _, ok := csiNumber(mask, 0); !ok {
 		return
 	}
 	level := modifyOtherKeysInitial
@@ -623,6 +635,13 @@ func (m *ModeTracker) xtmodkeys(params []byte) {
 		}
 	}
 	m.modifyOtherKeys = level
+	m.modifyOtherKeysMask = append(m.modifyOtherKeysMask[:0], mask...)
+}
+
+// modifyOtherKeysSet reports whether anything has moved modifyOtherKeys off
+// its initial value: a level, or a mask.
+func (m *ModeTracker) modifyOtherKeysSet() bool {
+	return m.modifyOtherKeys != modifyOtherKeysInitial || len(m.modifyOtherKeysMask) > 0
 }
 
 // csiNumber parses one CSI parameter: def when it is empty, and not ok when it
@@ -763,7 +782,7 @@ func (m *ModeTracker) Restore() []byte {
 	}
 
 	out = kittyPop(out, m.mainKeys)
-	if m.modifyOtherKeys != modifyOtherKeysInitial {
+	if m.modifyOtherKeysSet() {
 		out = append(out, "\x1b[>4m"...)
 	}
 
@@ -820,8 +839,16 @@ func (m *ModeTracker) Snapshot() []byte {
 		}
 	}
 	out = kittyPushes(out, m.mainKeys)
-	if m.modifyOtherKeys != modifyOtherKeysInitial {
-		out = fmt.Appendf(out, "\x1b[>4;%dm", m.modifyOtherKeys)
+	if m.modifyOtherKeysSet() {
+		out = append(out, "\x1b[>4"...)
+		if len(m.modifyOtherKeysMask) > 0 {
+			out = append(out, ':')
+			out = append(out, m.modifyOtherKeysMask...)
+		}
+		if m.modifyOtherKeys != modifyOtherKeysInitial {
+			out = fmt.Appendf(out, ";%d", m.modifyOtherKeys)
+		}
+		out = append(out, 'm')
 	}
 	if !m.altActive() && len(m.altKeys.entries) > 0 {
 		// The alternate screen's stack, kept while the normal screen shows,
