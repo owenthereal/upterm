@@ -656,9 +656,9 @@ func (m *ModeTracker) xtmodkeys(params []byte) {
 // 32-bit number, whatever an int is on this build: def when it is empty, and
 // not ok when it is not one -- negative, too wide, or with anything else in
 // it. kitty takes a pop's count as a uint32, and a 32-bit client must track a
-// stream as a 64-bit one does. Past an int's range, on a 32-bit build, it is
-// the largest int, which every use here treats alike: a count past any stack's
-// depth, or flags whose low bits -- the only ones kitty keeps -- are the same.
+// stream as a 64-bit one does. Past the largest int32 it is the largest int32,
+// on every build, so every build tracks it alike: a count that large is past
+// any stack's depth, and flags that wide are bits no terminal defines.
 func csiNumber(field []byte, def int) (int, bool) {
 	if len(field) == 0 {
 		return def, true
@@ -667,7 +667,10 @@ func csiNumber(field []byte, def int) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return int(min(n, uint64(math.MaxInt))), true
+	if n > math.MaxInt32 {
+		return math.MaxInt32, true
+	}
+	return int(n), true
 }
 
 // kittyPushes is the stack's replayed entries as pushes, bottom first, which

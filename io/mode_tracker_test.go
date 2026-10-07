@@ -390,9 +390,9 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 
 	// The worst case is both screen buffers carrying margins and a full kitty
 	// keyboard stack, so the normal screen's are set before the modes switch
-	// to the alternate one. The widest flags are the widest number a CSI's
-	// parameters can hold and still parse: an unsigned 32-bit one.
-	widest := strconv.FormatUint(math.MaxUint32, 10)
+	// to the alternate one. The widest flags are the widest the tracker
+	// keeps, the largest int32, as wide as any number it parses.
+	widest := strconv.Itoa(math.MaxInt32)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
 	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
@@ -901,7 +901,7 @@ func Test_ModeTracker_EmbeddedControlInACSI(t *testing.T) {
 func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
 	n, ok := csiNumber([]byte("4294967295"), 0)
 	require.True(t, ok, "the widest unsigned 32-bit number")
-	require.Equal(t, int(min(uint64(math.MaxUint32), uint64(math.MaxInt))), n, "clamped to an int on a 32-bit build")
+	require.Equal(t, math.MaxInt32, n, "clamped to what every build's int holds, so every build tracks it alike")
 
 	_, ok = csiNumber([]byte("4294967296"), 0)
 	require.False(t, ok, "past it")
