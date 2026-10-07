@@ -211,14 +211,11 @@ func (c *command) Result() CommandResult {
 }
 
 // setupCommand builds the *forced* command — the one a guest gets on its own
-// pty, started by startForceCommand. Only that path uses it; the session's
-// own command is built inline by Start, which explains why the two differ:
-// this one keeps CommandContext, because a forced command's teardown is the
-// guest's channel closing and an outright kill is the right end for it,
-// while the session's command needs the graded hangup/terminate/kill that
-// CommandContext would pre-empt.
-func setupCommand(ctx context.Context, name string, args []string) *exec.Cmd {
-	return exec.CommandContext(ctx, name, args...)
+// pty, started by startForceCommand. exec.Command, not CommandContext, for the
+// reason Start gives: Go's cancellation kills the process outright, ahead of
+// the hangup HandleSession's teardown sends first.
+func setupCommand(name string, args []string) *exec.Cmd {
+	return exec.Command(name, args...)
 }
 
 // Start opens the command's pty and starts it. initial is the geometry the
@@ -227,9 +224,8 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	c.ctx = ctx
 	// exec.Command, not CommandContext: Go's own cancellation kills the
 	// process outright the instant the context ends, ahead of the hangup
-	// the wait actor below sends first. The forced command keeps
-	// CommandContext (see startForceCommand): its teardown is the guest's
-	// channel closing, and a kill is the right end for it.
+	// the wait actor below sends first. A forced command is torn down the
+	// same way, at a shorter grace (see forceCommandStopGrace).
 	c.cmd = exec.Command(c.name, c.args...)
 	// The session's own variables go last, and that is the whole rule for all
 	// three of them. exec.Cmd keeps the last duplicate key, so appending is
@@ -501,6 +497,15 @@ type outputFlusher interface {
 // escalation as it would without the flush. A failed flush is logged and
 // changes nothing that follows it.
 func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *slog.Logger, name string) {
+	terminateWith(ptmx, exited, hangupGrace, grace, logger, name)
+}
+
+// terminateWith is terminate with the first step's bound given rather than
+// read from hangupGrace: a guest's forced command is torn down on its
+// handler's goroutine, which can outlive the session, so the handler is given
+// the bounds the session read when it started rather than reading package
+// vars a test may be restoring.
+func terminateWith(ptmx PTY, exited <-chan struct{}, hangup, grace time.Duration, logger *slog.Logger, name string) {
 	// gone reports whether exited has already closed, without blocking:
 	// sending a signal after that would reach whatever pid the kernel has
 	// since reused, not the command, and closing or killing an already-gone
@@ -593,7 +598,7 @@ func terminate(ptmx PTY, exited <-chan struct{}, grace time.Duration, logger *sl
 		kill()
 		return
 	}
-	if wait(hangupGrace) {
+	if wait(hangup) {
 		return
 	}
 

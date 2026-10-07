@@ -7,6 +7,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"time"
 )
 
 // DefaultReplayBytes bounds the replay ring handed to a joining writer.
@@ -388,13 +389,30 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 // Members that do not buffer are skipped: a synchronous writer is delivered by
 // definition. A sink that has already failed flushes to nil, because a guest
 // that is already gone is not a shutdown error.
+//
+// Then each member that wants one (ResetTarget) is sent what puts its terminal
+// back where it started -- the modes the session left set, undone -- and
+// flushed again. A session can end with its command still holding the
+// terminal, killed on the alternate screen with the mouse on, and a guest's
+// terminal is not one anything else will put back. A member's reset waits for
+// its own first flush: queued behind a tail, it could take a sink that was
+// going to drain past its bound, and a sink that overflows is a guest dropped.
+// It waits for nothing else, so a guest stuck until the deadline costs the
+// others nothing; and one still behind at the deadline loses the reset with
+// its tail, as it would have lost the tail anyway. The reset's own flush gets
+// ResetFlushTimeout, which may run past ctx's deadline.
 func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
+	first := !t.closed
 	t.closed = true
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
 	copy(writers, t.writers)
 	t.membersMu.Unlock()
+	var restore []byte
+	if first {
+		restore = t.restore()
+	}
 	t.writeMu.Unlock()
 
 	var (
@@ -402,17 +420,72 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 		errs = make([]error, len(writers))
 	)
 	for i, w := range writers {
-		f, ok := w.(Flusher)
-		if !ok {
+		f, flushes := w.(Flusher)
+		r, resets := w.(ResetTarget)
+		resets = resets && len(restore) > 0 && r.WantsReset()
+		if !flushes && !resets {
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = f.Flush(ctx)
+			if flushes {
+				if errs[i] = f.Flush(ctx); errs[i] != nil {
+					return
+				}
+			}
+			if !resets {
+				return
+			}
+			t.writeMu.Lock()
+			_, err := w.Write(restore)
+			t.writeMu.Unlock()
+			if err == nil && flushes {
+				// A window of its own, not what is left of ctx's: a guest
+				// that took its tail just inside the deadline would get
+				// none, and its reset would be closed out of the sink.
+				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ResetFlushTimeout)
+				errs[i] = f.Flush(rctx)
+				cancel()
+			}
 		}()
 	}
 	wg.Wait()
 
 	return errors.Join(errs...)
+}
+
+// ResetFlushTimeout bounds how long Shutdown waits for a member's reset to be
+// delivered once its tail has been. Shutdown can therefore return this much
+// past its context's deadline. A reset is a few hundred bytes at most, but the
+// tail may have used up the guest's SSH window, and then the reset waits a
+// round trip for the window to open again: so a whole guest flush's bound, the
+// one the host gives a guest's tail, not a guess at how fast a small write is.
+const ResetFlushTimeout = time.Second
+
+// ResetTarget is implemented by an attached writer that wants the session's
+// reset when the fan-out shuts down: one whose far end is a terminal nothing
+// else will put back. A guest's is the one -- behind a plain ssh client, which
+// restores termios on the way out and nothing more. Every other member is sent
+// none: a viewer capturing the output to a file gets what the command wrote,
+// and a local client puts its own terminal back. Its Write must not block, as
+// an AsyncWriter's does not: Shutdown writes the reset with writeMu held.
+type ResetTarget interface {
+	WantsReset() bool
+}
+
+// restore is what puts a terminal that watched the whole stream back where it
+// started. The tracker describes the terminal as of the ring's first byte, so
+// it is first brought up to date with the ring, and with the sequence the
+// replay filter is still holding, which together are everything sent since.
+//
+// That spends the tracker: its snapshot no longer describes the ring's start.
+// So it runs once, from Shutdown, after which Append refuses every joiner and
+// nothing asks for a snapshot again. Called with writeMu held.
+func (t *MultiWriter) restore() []byte {
+	for _, d := range t.buffer.Data() {
+		_, _ = t.modes.Write(d)
+	}
+	_, _ = t.modes.Write(t.replay.Pending())
+	return t.modes.Restore()
 }

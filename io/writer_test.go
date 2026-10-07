@@ -677,6 +677,184 @@ func TestMultiWriterAppendRacingShutdownHasOnlyTwoOutcomes(t *testing.T) {
 	}
 }
 
+// resetBuffer is a member that wants the session's reset, as a guest's sink
+// does.
+type resetBuffer struct{ *bytes.Buffer }
+
+func (resetBuffer) WantsReset() bool { return true }
+
+// resetSink is the same, for a member that delivers asynchronously.
+type resetSink struct{ *AsyncWriter }
+
+func (resetSink) WantsReset() bool { return true }
+
+// A session can end with its command still holding the terminal: killed on
+// the alternate screen, say, with bracketed paste on. Every terminal watching
+// is left that way too, and a guest's is not one anything else will put back
+// -- a plain ssh client restores termios on the way out and nothing more. So
+// the fan-out's last write to each member that wants one, behind everything
+// else it was sent, undoes what the session left set: on the member that
+// watched it all, and on one that joined after the modes had scrolled out of
+// the ring. A member that does not want one -- a viewer capturing the output
+// to a file -- is sent what the command wrote and nothing more.
+func TestMultiWriterShutdownPutsEveryTerminalBack(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replay  int
+		stream  []string
+		restore string
+	}{
+		{
+			name:    "modes still in the ring",
+			replay:  1024,
+			stream:  []string{"\x1b[?1049h\x1b[?2004h\x1b[>1u", "0123456789abcdefghij"},
+			restore: "\x1b[<1u\x1b[?1049l\x1b[?2004l",
+		},
+		{
+			name:    "modes only in the tracker",
+			replay:  16,
+			stream:  []string{"\x1b[?1049h\x1b[?2004h\x1b[>1u", "0123456789abcdefghij"},
+			restore: "\x1b[<1u\x1b[?1049l\x1b[?2004l",
+		},
+		{
+			// The terminal is inside the OSC as well, and would read the
+			// reset as the rest of its title.
+			name:    "output stopped inside a sequence",
+			replay:  1024,
+			stream:  []string{"\x1b[?2004h", "\x1b]0;a title"},
+			restore: "\x18\x1b[?2004l",
+		},
+		{
+			name:   "the command put everything back itself",
+			replay: 1024,
+			stream: []string{"\x1b[?1049h\x1b[?2004h", "\x1b[?2004l\x1b[?1049l"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(tc.replay)
+			early, late := resetBuffer{&bytes.Buffer{}}, resetBuffer{&bytes.Buffer{}}
+			var capture bytes.Buffer
+			require.NoError(t, w.Append(early, &capture))
+			_, _ = w.Write([]byte(tc.stream[0]))
+			require.NoError(t, w.Append(late))
+			_, _ = w.Write([]byte(tc.stream[1]))
+			lateBefore := late.Len()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			require.NoError(t, w.Shutdown(ctx))
+
+			require.Equal(t, strings.Join(tc.stream, "")+tc.restore, early.String(), "the member that saw it all")
+			require.Equal(t, tc.restore, late.String()[lateBefore:], "the member that joined later")
+			require.Equal(t, strings.Join(tc.stream, ""), capture.String(), "a member that wants no reset")
+		})
+	}
+}
+
+// The reset is queued only once a guest's tail has been delivered. Queued
+// behind it, it could take a sink that was going to drain past its bound, and
+// a sink that overflows is a guest dropped -- for a reset, and its tail with
+// it.
+func TestMultiWriterShutdownResetDoesNotOverflowAGuest(t *testing.T) {
+	gate := newGateWriter()
+	dropped := make(chan error, 1)
+	sink := NewAsyncWriter(gate, 64, func(err error) { dropped <- err })
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{sink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	<-gate.entered
+	// 60 of the sink's 64 bytes queued behind the write the guest has not
+	// taken yet, so an 8-byte reset does not fit beside them.
+	tail := strings.Repeat("x", 60)
+	_, _ = w.Write([]byte(tail))
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(gate.release)
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+
+	select {
+	case err := <-dropped:
+		t.Fatalf("the guest was dropped: %v", err)
+	default:
+	}
+	require.Equal(t, "\x1b[?2004h"+tail+"\x1b[?2004l", string(gate.bytes()))
+}
+
+// laggingWriter takes a while over every write, as a guest at the far end of a
+// real network does.
+type laggingWriter struct{ recordingWriter }
+
+func (s *laggingWriter) Write(p []byte) (int, error) {
+	time.Sleep(20 * time.Millisecond)
+	return s.recordingWriter.Write(p)
+}
+
+// A guest that is stuck until the deadline must not cost the others their
+// reset. Each member is reset as soon as its own tail is delivered, so the
+// healthy one has its reset by the time Shutdown gives up on the stuck one.
+func TestMultiWriterShutdownResetsEachGuestOnItsOwnTime(t *testing.T) {
+	stuck := newGateWriter()
+	defer close(stuck.release)
+	stuckSink := NewAsyncWriter(stuck, DefaultGuestBufferSize, nil)
+	defer func() { _ = stuckSink.Close() }()
+	healthy := &laggingWriter{}
+	healthySink := NewAsyncWriter(healthy, DefaultGuestBufferSize, nil)
+	defer func() { _ = healthySink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{stuckSink}, resetSink{healthySink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	<-stuck.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, w.Shutdown(ctx), context.DeadlineExceeded, "the stuck guest")
+
+	require.Equal(t, "\x1b[?2004h\x1b[?2004l", string(healthy.bytes()), "the healthy guest, reset before Shutdown returned")
+}
+
+// pacedWriter takes the next of its delays over each write, as a guest on a
+// slow link does.
+type pacedWriter struct {
+	recordingWriter
+	delays []time.Duration
+}
+
+func (p *pacedWriter) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	var d time.Duration
+	if len(p.delays) > 0 {
+		d, p.delays = p.delays[0], p.delays[1:]
+	}
+	p.mu.Unlock()
+	time.Sleep(d)
+	return p.recordingWriter.Write(b)
+}
+
+// A guest that takes its tail just inside the deadline still gets its reset:
+// the reset's own flush has a window of its own rather than what is left of
+// the shared one, which may be nothing.
+func TestMultiWriterShutdownGivesAResetItsOwnWindow(t *testing.T) {
+	slow := &pacedWriter{delays: []time.Duration{200 * time.Millisecond, 150 * time.Millisecond}}
+	sink := NewAsyncWriter(slow, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{sink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+	require.Equal(t, "\x1b[?2004h\x1b[?2004l", string(slow.bytes()))
+}
+
 func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
 	w := NewMultiWriter(5)
 	var plain bytes.Buffer

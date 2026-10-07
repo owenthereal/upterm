@@ -2,6 +2,8 @@ package io
 
 import (
 	"bytes"
+	"fmt"
+	"math"
 	"sort"
 	"strconv"
 )
@@ -20,6 +22,54 @@ const maxSequenceBytes = 64
 // of. It is still a cap, because a string whose terminator never arrives would
 // otherwise let the stream pick the snapshot's size.
 const maxStringBytes = 4096
+
+// kittyStackDepth bounds how much of each screen's kitty keyboard stack is
+// kept for replay: kitty's own depth, which makes room for a push onto a full
+// stack by dropping the oldest entry. The protocol leaves the depth to the
+// terminal, though, so the stack's full depth is counted apart; see keyStack.
+const kittyStackDepth = 8
+
+// keyStack is one screen's kitty keyboard stack: depth entries in all, of
+// which the newest, up to kittyStackDepth, are kept for replay, bottom first.
+// A terminal holds at most depth of them -- fewer when its stack is shallower
+// and dropped the oldest -- so depth is what a pop of the whole stack pops: a
+// pop past the bottom empties a stack, which is where a terminal starts.
+//
+// The replay is bounded and the count is not, on purpose. A terminal whose
+// stack is deeper than kitty's keeps entries this does not, and a joiner given
+// the replay finds them missing only once the session pops eight entries past
+// where it joined. Keeping every entry instead would let the stream decide how
+// much memory an unattended host spends, which nothing else here does.
+type keyStack struct {
+	entries []int
+	depth   int
+}
+
+func (k *keyStack) push(flags int) {
+	if len(k.entries) == kittyStackDepth {
+		k.entries = append(k.entries[:0], k.entries[1:]...)
+	}
+	k.entries = append(k.entries, flags)
+	k.depth++
+}
+
+// pop takes the newest n entries off, replayed or not.
+func (k *keyStack) pop(n int) {
+	n = min(n, k.depth)
+	k.depth -= n
+	k.entries = k.entries[:len(k.entries)-min(n, len(k.entries))]
+}
+
+// top is the entry a set applies to. kitty sets an empty stack's bottom entry
+// and counts it as pushed, so a pop takes it back off; and a set on an entry
+// the replay no longer holds makes that entry's new value the one to replay.
+func (k *keyStack) top() *int {
+	if len(k.entries) == 0 {
+		k.entries = append(k.entries, 0)
+		k.depth = max(k.depth, 1)
+	}
+	return &k.entries[len(k.entries)-1]
+}
 
 // restorable lists the DEC private modes worth putting a reattaching terminal
 // back into, mapped to the value a terminal holds them at before anything has
@@ -91,6 +141,26 @@ type ModeTracker struct {
 	altRegion  []byte // last DECSTBM on the alternate screen, verbatim
 
 	charsetG0 []byte // last "ESC ( X", verbatim
+
+	// The kitty keyboard protocol's flag stacks. The protocol gives each
+	// screen buffer its own, so that a full-screen program can push what it
+	// wants without knowing what the shell beneath it had. A screen switch
+	// clears neither -- kitty only swaps which one is current -- so a program
+	// that leaves the alternate screen without popping finds its flags there
+	// again when it comes back.
+	mainKeys keyStack
+	altKeys  keyStack
+
+	// modifyOtherKeys is the last sequence that moved xterm's modifyOtherKeys
+	// -- the older way of asking for keys a terminal otherwise folds together
+	// -- off its initial value, verbatim, or nil while it is there. Kept as
+	// written rather than as a level because the level is not all of it: an
+	// explicit 0 is not the initial value, which xterm's resource may make
+	// something else; CSI > 4 n is a value no level spells; and a mask may
+	// ride on the resource, as xterm's documentation has it, or on the value,
+	// as its parser does. A joiner replayed the same bytes does whatever the
+	// session's own terminal did with them.
+	modifyOtherKeys []byte
 
 	// partial is the raw bytes of the sequence the parser is currently
 	// inside, ESC included. The tracker is fed the ring's evictions, so the
@@ -248,6 +318,15 @@ func (m *ModeTracker) step(b byte) {
 			m.openPartial()
 			return
 		}
+		if b < 0x20 || b == 0x7f {
+			// A C0 control inside a CSI is executed where it stands and the
+			// CSI goes on -- the DEC parser's "execute" in its CSI states,
+			// which kitty follows too -- and DEL is ignored there. Neither
+			// is one of the sequence's parameters, and neither is replayed
+			// with it: the session's terminal has already acted on it. ESC,
+			// CAN and SUB, which end a CSI, are handled before this.
+			return
+		}
 		if len(m.seq) >= maxSequenceBytes {
 			// Stop accumulating but stay in msCSI, so the sequence's real
 			// terminator still returns the parser to normal.
@@ -359,6 +438,9 @@ func (m *ModeTracker) resetToDefaults() {
 	m.mainRegion = nil
 	m.altRegion = nil
 	m.charsetG0 = nil
+	m.mainKeys = keyStack{}
+	m.altKeys = keyStack{}
+	m.modifyOtherKeys = nil
 }
 
 // softResetModes are the tracked DEC private modes DECSTR returns to their
@@ -384,6 +466,14 @@ func (m *ModeTracker) softReset() {
 		m.mainRegion = nil
 	}
 	m.charsetG0 = nil
+	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
+	// The protocol is kitty's, so its reset is the one to follow here.
+	m.mainKeys = keyStack{}
+	m.altKeys = keyStack{}
+	// And xterm's puts the key modifiers back to their initial values, mask
+	// and all (ReallyReset's modify_now and ignore_now, outside its "full"
+	// branch).
+	m.modifyOtherKeys = nil
 }
 
 // altScreenModes are the DEC private modes that put the alternate screen
@@ -448,7 +538,184 @@ func (m *ModeTracker) finishCSI(final byte) {
 		if len(params) == 1 && params[0] == '!' {
 			m.softReset()
 		}
+	case 'u':
+		m.kittyKeyboard(params)
+	case 'm':
+		// XTMODKEYS is marked by a leading '>'. Without one this is SGR,
+		// which is attributes, and attributes are not tracked.
+		if len(params) > 0 && params[0] == '>' {
+			m.xtmodkeys(params[1:])
+		}
+	case 'n':
+		// XTMODKEYS's other form: CSI > 4 n disables modifyOtherKeys, which
+		// is xterm's resource value -1, and no CSI > 4 ; v m can spell it.
+		if string(params) == ">4" {
+			m.modifyOtherKeys = []byte("\x1b[>4n")
+		}
 	}
+}
+
+// keys returns the kitty keyboard stack of the screen that is showing.
+func (m *ModeTracker) keys() *keyStack {
+	if m.altActive() {
+		return &m.altKeys
+	}
+	return &m.mainKeys
+}
+
+// kittyKeyboard applies one of the kitty keyboard protocol's stack operations
+// to the screen that is showing: CSI > flags u pushes, CSI < n u pops n, and
+// CSI = flags ; mode u sets the top entry. CSI ? u asks the terminal for its
+// flags and changes nothing, and a bare CSI u is not the protocol's at all:
+// it restores the cursor, as SCORC.
+func (m *ModeTracker) kittyKeyboard(params []byte) {
+	if len(params) == 0 {
+		return
+	}
+	stack := m.keys()
+	switch params[0] {
+	case '>':
+		flags, ok := kittyFlags(params[1:])
+		if !ok {
+			return
+		}
+		stack.push(flags)
+	case '<':
+		// Only an omitted count is one: kitty pops nothing for an explicit
+		// 0.
+		n, ok := csiNumber(params[1:], 1)
+		if !ok {
+			return
+		}
+		stack.pop(n)
+	case '=':
+		fields := bytes.Split(params[1:], []byte{';'})
+		if len(fields) > 2 {
+			// kitty takes at most two parameters for a set and ignores more.
+			return
+		}
+		flags, ok := kittyFlags(fields[0])
+		if !ok {
+			return
+		}
+		mode := 1
+		if len(fields) > 1 {
+			if mode, ok = csiNumber(fields[1], 1); !ok {
+				return
+			}
+		}
+		if mode < 1 || mode > 3 {
+			return
+		}
+		top := stack.top()
+		switch mode {
+		case 1:
+			*top = flags
+		case 2:
+			*top |= flags
+		case 3:
+			*top &^= flags
+		}
+	}
+}
+
+// xtmodkeys applies XTMODKEYS, CSI > resource ; value m, of which only
+// modifyOtherKeys, resource 4, is tracked. A value left out -- vim leaves with
+// CSI > 4 ; m -- resets it to the initial value, as does a sequence that names
+// no resource at all; anything else is kept verbatim (see modifyOtherKeys).
+// Each field may carry one subparameter, a mask; a field that is not a number,
+// or one with more than one subparameter, makes the sequence one xterm ignores
+// too.
+func (m *ModeTracker) xtmodkeys(params []byte) {
+	if len(params) == 0 {
+		m.modifyOtherKeys = nil
+		return
+	}
+	fields := bytes.Split(params, []byte{';'})
+	resource, resourceMask, _ := bytes.Cut(fields[0], []byte{':'})
+	if n, ok := csiNumber(resource, -1); !ok || n != 4 {
+		return
+	}
+	var value, valueMask []byte
+	if len(fields) > 1 {
+		value, valueMask, _ = bytes.Cut(fields[1], []byte{':'})
+	}
+	for _, part := range [][]byte{resourceMask, value, valueMask} {
+		if _, ok := csiNumber(part, 0); !ok {
+			return
+		}
+	}
+	if len(resourceMask) == 0 && len(value) == 0 && len(valueMask) == 0 {
+		m.modifyOtherKeys = nil
+		return
+	}
+	m.modifyOtherKeys = append(append(append(m.modifyOtherKeys[:0], "\x1b[>"...), params...), 'm')
+}
+
+// csiNumber parses one CSI parameter at the protocols' own width, an unsigned
+// 32-bit number, whatever an int is on this build: def when it is empty, and
+// not ok when it is not one -- negative, too wide, or with anything else in
+// it. kitty takes a pop's count as a uint32, and a 32-bit client must track a
+// stream as a 64-bit one does. Past the largest int32 it is the largest int32,
+// on every build, so every build tracks it alike: a count that large is past
+// any stack's depth. kitty's flags, whose low bits matter however wide the
+// number, are read by kittyFlags instead.
+func csiNumber(field []byte, def int) (int, bool) {
+	if len(field) == 0 {
+		return def, true
+	}
+	n, err := strconv.ParseUint(string(field), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	if n > math.MaxInt32 {
+		return math.MaxInt32, true
+	}
+	return int(n), true
+}
+
+// kittyFlagMask is the bits of a flags value kitty keeps
+// (screen_push_key_encoding_flags and screen_set_key_encoding_flags: val &
+// 0x7f).
+const kittyFlagMask = 0x7f
+
+// kittyFlags parses a kitty flags parameter as kitty does: a 32-bit number of
+// which it keeps the low seven bits, so the replay is what the session's
+// terminal holds. Masked before it is narrowed, so a number past an int32 keeps
+// the bits kitty reads rather than becoming csiNumber's largest int32.
+func kittyFlags(field []byte) (int, bool) {
+	if len(field) == 0 {
+		return 0, true
+	}
+	n, err := strconv.ParseUint(string(field), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	flags := n & kittyFlagMask
+	// The mask is the bound; this states it where the conversion can see it.
+	if flags > kittyFlagMask {
+		return 0, false
+	}
+	return int(flags), true
+}
+
+// kittyPushes is the stack's replayed entries as pushes, bottom first, which
+// leaves a terminal with the stack it was replayed from.
+func kittyPushes(out []byte, stack keyStack) []byte {
+	for _, flags := range stack.entries {
+		out = fmt.Appendf(out, "\x1b[>%du", flags)
+	}
+	return out
+}
+
+// kittyPop is one pop of the whole stack. A pop that runs past the bottom
+// empties the stack, which is where a terminal starts, so popping the depth
+// recorded is safe on a terminal that holds fewer entries than that.
+func kittyPop(out []byte, stack keyStack) []byte {
+	if stack.depth == 0 {
+		return out
+	}
+	return fmt.Appendf(out, "\x1b[<%du", stack.depth)
 }
 
 // Restore returns the bytes that put a terminal this tracker has been
@@ -492,10 +759,20 @@ func (m *ModeTracker) finishCSI(final byte) {
 // sequence from any state on the DEC parser terminals implement, and does
 // nothing outside one.
 //
+// The keyboard is state too. A program that asked for the kitty keyboard
+// protocol or modifyOtherKeys and never put them back leaves the shell it
+// returns to receiving Ctrl-letter keys, and with kitty's flags most others,
+// as escape sequences it does not read. The kitty stacks are popped whole, in
+// one pop each: a pop past the bottom empties a stack, which is where a
+// terminal starts, so the depth this tracker recorded is safe to pop even on
+// a terminal that was replayed fewer entries than that.
+//
 // The order is the order a terminal has to receive it in: out of any sequence
-// first, so the rest is not read as part of it; then off the alternate
-// screen, through the mode that entered it, since everything after that
-// applies to the screen the terminal is going back to.
+// first, so the rest is not read as part of it; then the alternate screen's
+// keyboard stack, popped while that screen is still the one showing, since a
+// pop applies to the current screen's stack; then off the alternate screen,
+// through the mode that entered it, since everything after that applies to
+// the screen the terminal is going back to, the main screen's stack included.
 func (m *ModeTracker) Restore() []byte {
 	var out []byte
 
@@ -504,9 +781,21 @@ func (m *ModeTracker) Restore() []byte {
 	}
 
 	if m.altActive() {
+		out = kittyPop(out, m.altKeys)
 		out = append(out, 0x1b, '[', '?')
 		out = append(out, []byte(strconv.Itoa(m.altVia))...)
 		out = append(out, 'l')
+	} else if m.altKeys.depth > 0 {
+		// A program left the alternate screen without popping, and kitty
+		// keeps that screen's stack: the next program to enter it would
+		// inherit the flags. A pop reaches only the screen that is showing,
+		// so it is a trip there and back -- through 47, which does not clear
+		// the hidden screen as 1049 does, and between a cursor save and
+		// restore, because kitty homes the cursor on every switch and 47
+		// does not put it back.
+		out = append(out, "\x1b7\x1b[?47h"...)
+		out = kittyPop(out, m.altKeys)
+		out = append(out, "\x1b[?47l\x1b8"...)
 	}
 
 	// The normal screen's margins, which outlive whatever set them: a shell
@@ -535,6 +824,11 @@ func (m *ModeTracker) Restore() []byte {
 		}
 	}
 
+	out = kittyPop(out, m.mainKeys)
+	if m.modifyOtherKeys != nil {
+		out = append(out, "\x1b[>4m"...)
+	}
+
 	if len(m.charsetG0) > 0 {
 		// US ASCII into G0, which is where a terminal starts.
 		out = append(out, 0x1b, '(', 'B')
@@ -546,16 +840,20 @@ func (m *ModeTracker) Restore() []byte {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the screen switch, the three verbatim sequences and one
+// len(restorable) plus the screen switch, the three verbatim sequences, two
+// kitty keyboard stacks of kittyStackDepth entries, modifyOtherKeys and one
 // partial sequence. Only the partial is sized by the stream rather than by
 // this file, and its own bound is maxSequenceBytes for a mode sequence or
-// maxStringBytes for a string: the ceiling is a few kilobytes, not the tens of
-// bytes everything else comes to.
+// maxStringBytes for a string: the ceiling is a few kilobytes, not the hundreds
+// of bytes everything else comes to.
 //
 // The order is the order the stream would have had to use to reach this
-// state: the normal screen's margins, then the modes, then the switch to the
-// alternate screen, then that screen's own margins, and only while it is the
-// one showing.
+// state: the normal screen's margins, then the modes, then the normal
+// screen's kitty keyboard stack and modifyOtherKeys, then the switch to the
+// alternate screen, then that screen's own margins and keyboard stack, and
+// only while it is the one showing. While the normal screen is showing, the
+// alternate screen's stack is replayed on a trip there and back, because a
+// push applies only to the screen that is showing.
 //
 // The state as of the ring's first byte includes being partway through a
 // sequence, so the partial goes last, after the charset. The ring's first
@@ -583,6 +881,15 @@ func (m *ModeTracker) Snapshot() []byte {
 			out = append(out, 'l')
 		}
 	}
+	out = kittyPushes(out, m.mainKeys)
+	out = append(out, m.modifyOtherKeys...)
+	if !m.altActive() && len(m.altKeys.entries) > 0 {
+		// The alternate screen's stack, kept while the normal screen shows,
+		// replayed on a trip there and back; see Restore.
+		out = append(out, "\x1b7\x1b[?47h"...)
+		out = kittyPushes(out, m.altKeys)
+		out = append(out, "\x1b[?47l\x1b8"...)
+	}
 	if m.altActive() {
 		// Replayed through the mode that entered, so a joiner is left in the
 		// state the session's own "l" will match.
@@ -590,6 +897,7 @@ func (m *ModeTracker) Snapshot() []byte {
 		out = append(out, []byte(strconv.Itoa(m.altVia))...)
 		out = append(out, 'h')
 		out = append(out, m.altRegion...)
+		out = kittyPushes(out, m.altKeys)
 	}
 	out = append(out, m.charsetG0...)
 	out = append(out, m.partial...)

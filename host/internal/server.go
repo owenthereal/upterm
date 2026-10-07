@@ -243,6 +243,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	sessCtx, cancel := context.WithCancel(sessionContext(ctx))
 	sh := sessionHandler{
 		forceCommand:          s.ForceCommand,
+		forceCommands:         &forceCommandTeardowns{},
+		forceCommandHangup:    hangupGrace,
+		forceCommandGrace:     forceCommandStopGrace,
 		commandEnv:            s.CommandEnv,
 		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
@@ -368,6 +371,14 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			// closed cmdDone by the time it runs.
 			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
 
+			// That cancel hangs up every forced command, and each one's guest is
+			// sent what it says on the way out and a reset once it has gone.
+			// Wait for them, bounded, before the session ends and its tunnel
+			// closes under them.
+			if bound := forceCommandStopBound(sh.forceCommandHangup, sh.forceCommandGrace); !sh.forceCommands.wait(bound) {
+				s.Logger.Warn("gave up waiting for forced commands to end", "bound", bound)
+			}
+
 			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
 			// connection WaitGroup until the context it is given is done, and
 			// on a command-led exit ctx is still live — a guest that keeps its
@@ -442,6 +453,77 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	}
 
 	return g.Run()
+}
+
+// forceCommandStopGrace bounds each step of a forced command's teardown after
+// the first, which hangupGrace bounds: SIGHUP, then the master's close, then
+// SIGTERM, then SIGKILL, as the session's own command is torn down. A second
+// rather than the session command's DefaultStopGrace, because a forced command
+// is torn down every time its guest leaves, not once per session, and because
+// the session's end waits for it: something that ignores everything is gone in
+// about four seconds rather than sixteen. A var so a test can change it.
+var forceCommandStopGrace = time.Second
+
+// forceCommandStopBound is how long a session that is ending waits for its
+// forced commands' teardowns, given their hangup and later grace: terminate's
+// worst case, then the drain of what they wrote on the way out, then a guest's
+// flush. Past it the session ends anyway -- a guest that has stopped reading
+// holds its handler in a write nothing else releases.
+func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
+	return hangup + 3*grace + forceCommandDrainTimeout + guestFlushTimeout
+}
+
+// forceCommandTeardowns tracks the guests' forced commands still running, so a
+// session that is ending can wait for them: each is hung up and sends its guest
+// a reset once it has gone, and in production the tunnel closes behind the
+// session, which would cut them off first.
+//
+// Not a sync.WaitGroup: a guest can reach the door while the session is ending,
+// and a WaitGroup may not be added to from zero while it is being waited on.
+// wait covers the teardowns registered when it is called, which every guest
+// that can still be sent anything has.
+type forceCommandTeardowns struct {
+	mu      sync.Mutex
+	running map[chan struct{}]struct{}
+}
+
+// begin registers a forced command, returning what marks it finished.
+func (t *forceCommandTeardowns) begin() (finish func()) {
+	done := make(chan struct{})
+	t.mu.Lock()
+	if t.running == nil {
+		t.running = map[chan struct{}]struct{}{}
+	}
+	t.running[done] = struct{}{}
+	t.mu.Unlock()
+	return func() {
+		t.mu.Lock()
+		delete(t.running, done)
+		t.mu.Unlock()
+		close(done)
+	}
+}
+
+// wait blocks until every forced command registered so far has finished, or
+// until timeout, reporting whether they all did.
+func (t *forceCommandTeardowns) wait(timeout time.Duration) bool {
+	t.mu.Lock()
+	pending := make([]chan struct{}, 0, len(t.running))
+	for done := range t.running {
+		pending = append(pending, done)
+	}
+	t.mu.Unlock()
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for _, done := range pending {
+		select {
+		case <-done:
+		case <-deadline.C:
+			return false
+		}
+	}
+	return true
 }
 
 const (
@@ -641,6 +723,18 @@ type sessionHandler struct {
 	// could be primary registers with.
 	hostClients *hostClients
 
+	// forceCommands is what the session's end waits on for the forced
+	// commands' teardowns. Shared by every guest's handler; nil in a test's
+	// handler, which waits for nothing.
+	forceCommands *forceCommandTeardowns
+	// forceCommandHangup and forceCommandGrace bound a forced command's
+	// teardown: hangupGrace and forceCommandStopGrace, read once when the
+	// session starts. A handler can outlive its session -- one whose guest
+	// stopped reading is parked in a write -- so it must not read the package
+	// vars, which a test restores when it ends.
+	forceCommandHangup time.Duration
+	forceCommandGrace  time.Duration
+
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
 }
@@ -727,6 +821,22 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	guestOutput := io.Writer(sess)
 
 	if h.kind == kindGuest && len(h.forceCommand) > 0 {
+		// Registered before the command starts: a session that is ending
+		// waits, bounded, for every teardown registered by then.
+		if h.forceCommands != nil {
+			defer h.forceCommands.begin()()
+		}
+		if h.ctx.Err() != nil {
+			// The session is already tearing down. This guest arrived a moment
+			// too late, which is not its error, and a command started now
+			// would only be hung up again.
+			_ = sess.Exit(0)
+			return
+		}
+
+		// Cancelling ctx starts the teardown: the guest leaving, the session
+		// ending, or any actor below returning. It does not end the output
+		// copy, which runs on outCtx until the command has gone.
 		ctx, cancel := context.WithCancel(h.ctx)
 		defer cancel()
 
@@ -734,46 +844,103 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		if guest, ok := sess.Context().Value(authenticatedGuestKey{}).(authenticatedGuest); ok {
 			auth = guest.auth
 		}
-		ptmx, err = h.startForceCommand(ctx, ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height, auth)
+		ptmx, err = h.startForceCommand(ptyReq.Term, ptyReq.Window.Width, ptyReq.Window.Height, auth)
 		if err != nil {
 			h.logger.Error("error starting force command", "error", err)
 			_ = sess.Exit(1)
 			return
 		}
 
+		// Waited on outside the group, so the wait actor and terminate can
+		// both watch it.
+		exited := make(chan struct{})
+		var waitErr error
+		go func() {
+			waitErr = ptmx.Wait()
+			close(exited)
+		}()
+
 		// The copy below and the wait beneath it are both run.Group actors, and
 		// run.Group interrupts every actor as soon as any one of them returns. A
 		// forced command like `echo hi` exits almost as soon as it writes, so the
-		// wait routinely wins the race and its interrupt closes the pty before the
-		// copy has drained what the command already produced. The guest then sees
-		// a clean exit with no output at all. Measured on Linux, that lost the
-		// output roughly one run in ten.
+		// wait routinely wins the race, and an interrupt that ended the copy cut
+		// off what the command had already produced: the guest saw a clean exit
+		// with no output at all, measured on Linux one run in ten. So the copy
+		// ends on outCtx, which only the wait actor cancels, once the command
+		// has gone and its output has drained -- which is also what lets the
+		// output of a hangup handler through, a full-screen program putting
+		// the guest's terminal back on its way out.
+		outCtx, cancelOut := context.WithCancel(context.WithoutCancel(h.ctx))
+		defer cancelOut()
 		outputDrained := make(chan struct{})
-		output := newActivityReader(uio.NewContextReader(ctx, ptmx))
+		output := newActivityReader(uio.NewContextReader(outCtx, ptmx))
 		{
 			// reattach output
+			modes := uio.NewModeTracker()
 			g.Add(func() error {
-				defer close(outputDrained)
-				_, err := io.Copy(sess, output)
+				_, err := io.Copy(sess, io.TeeReader(output, modes))
+				close(outputDrained)
+				// Whatever the command left set, undone, behind its last
+				// output and before the guest's exit status: a guest's ssh
+				// client restores termios on the way out and nothing more, so
+				// a command killed on the alternate screen, or one that exits
+				// without cleaning up, would leave it there. Nothing at all
+				// for a command that put everything back itself.
+				//
+				// Bounded as the session's last notice to a client is: the
+				// command's last output may have filled the guest's window,
+				// and a guest that has stopped taking output is not one to
+				// hold the handler, and the exit status behind it, for.
+				if restore := modes.Restore(); len(restore) > 0 {
+					release := time.AfterFunc(guestFlushTimeout, func() {
+						if conn := serverConn(sess); conn != nil {
+							_ = conn.Close()
+						} else {
+							_ = sess.Close()
+						}
+					})
+					_, _ = sess.Write(restore)
+					release.Stop()
+				}
 				return ptyError(err)
 			}, func(err error) {
 				cancel()
-				_ = ptmx.Close()
 			})
 		}
 		{
 			g.Add(func() error {
-				err := ptmx.Wait()
-				cmdCode, cmdExited = exitCode(err)
+				select {
+				case <-exited:
+				case <-ctx.Done():
+					// The guest has left, or the session is ending, and the
+					// command is still running: hang it up as a terminal going
+					// away would, and escalate only if it stays. Killing it
+					// outright left a full-screen program no chance to put the
+					// guest's terminal back.
+					terminateWith(ptmx, exited, h.forceCommandHangup, h.forceCommandGrace, h.logger, h.forceCommand[0])
+				}
+				// terminate's own waits are bounded, so the command may not be
+				// confirmed gone; waitErr is only safe to read once it is.
+				select {
+				case <-exited:
+					cmdCode, cmdExited = exitCode(waitErr)
+				default:
+				}
 
-				// Hold this actor open until the output is drained, so the
-				// interrupts above cannot close the pty out from under the copy.
-				drainForceCommandOutput(h.logger, output, outputDrained, ctx.Done())
+				drainForceCommandOutput(h.logger, output, outputDrained, nil)
+				cancelOut()
+				// Fired, not waited on: see terminate for why a close of the
+				// master can never be relied on to return.
+				closeAsync(ptmx)
 
-				return err
+				select {
+				case <-exited:
+					return waitErr
+				default:
+					return ctx.Err()
+				}
 			}, func(err error) {
 				cancel()
-				_ = ptmx.Close()
 			})
 		}
 	} else {
@@ -1179,19 +1346,28 @@ func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 // exposure. Without a pacer it attaches directly.
 func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter) error {
 	if h.pacer == nil {
-		return attachGuestOutput(h.writers, sink)
+		return attachGuestOutput(h.writers, guestSink{sink})
 	}
-	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, sink) })
+	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, guestSink{sink}) })
 }
 
 // detachGuest takes a guest's sink out of the fan-out, then out of the
 // pacer's order. The caller closes it.
 func (h *sessionHandler) detachGuest(sink *uio.AsyncWriter) {
-	h.writers.Remove(sink)
+	h.writers.Remove(guestSink{sink})
 	if h.pacer != nil {
 		h.pacer.remove(sink)
 	}
 }
+
+// guestSink is a guest's sink as the fan-out holds it: one that wants the
+// session's reset when the session ends (uio.ResetTarget). A guest always has
+// a terminal, and behind a plain ssh client nothing else puts it back. Two
+// guestSinks of the same AsyncWriter are equal, which is what lets
+// detachGuest remove the one attachGuest appended.
+type guestSink struct{ *uio.AsyncWriter }
+
+func (guestSink) WantsReset() bool { return true }
 
 // guestDropHandler is what a guest's sink calls when it gives up on the guest:
 // it closes the guest's session, then says why.
@@ -1265,8 +1441,8 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 // as sshd describes one, from auth -- the guest's certificate -- and its pty,
 // and the host's own SSH session variables are not passed on. The session's
 // shared command gets none of this: it is nobody's SSH session.
-func (h *sessionHandler) startForceCommand(ctx context.Context, term string, width, height int, auth *server.AuthRequest) (PTY, error) {
-	cmd := setupCommand(ctx, h.forceCommand[0], h.forceCommand[1:])
+func (h *sessionHandler) startForceCommand(term string, width, height int, auth *server.AuthRequest) (PTY, error) {
+	cmd := setupCommand(h.forceCommand[0], h.forceCommand[1:])
 	cmd.Env = append(withoutSSHSessionVars(os.Environ()), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
 	cmd.Env = append(cmd.Env, guestConnectionEnv(auth, h.hideClientIP)...)

@@ -2,6 +2,8 @@ package io
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -386,14 +388,21 @@ func Test_ModeTracker_BoundsUnterminatedString(t *testing.T) {
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	m := NewModeTracker()
 
-	// The worst case is both screen buffers carrying margins, so the normal
-	// screen's are set before the modes switch to the alternate one.
+	// The worst case is both screen buffers carrying margins and a full kitty
+	// keyboard stack, so the normal screen's are set before the modes switch
+	// to the alternate one. The widest numbers are an unsigned 32-bit one's:
+	// kitty's flags come back as the seven bits kitty keeps, and
+	// modifyOtherKeys as it was written.
+	widest := strconv.FormatUint(math.MaxUint32, 10)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
+	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
+	b.WriteString("\x1b[>4;" + widest + "m")
 	for _, mode := range restorableModes() {
 		fmt.Fprintf(&b, "\x1b[?%dh", mode)
 	}
 	b.WriteString("\x1b[1;99999r\x1b(0")
+	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
 
 	// And then the stream stops inside a string that runs right up to its
 	// bound. The partial is the only part of the snapshot the stream sizes, so
@@ -406,10 +415,12 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 
 	snap := string(m.Snapshot())
 	require.Contains(t, snap, partial, "the partial must be in it, or the bound below is about an empty slot")
+	require.Equal(t, 2*kittyStackDepth, strings.Count(snap, "\x1b[>127u"), "both kitty stacks must be full, or the bound below is about empty ones")
+	require.Contains(t, snap, "\x1b[>4;"+widest+"m", "and modifyOtherKeys set")
 
-	// Every restorable mode set at once, plus both scroll regions, the charset
-	// and a string partial at its own cap, must still be trivially smaller
-	// than a guest's sink.
+	// Every restorable mode set at once, plus both scroll regions, both kitty
+	// stacks full, modifyOtherKeys, the charset and a string partial at its
+	// own cap, must still be trivially smaller than a guest's sink.
 	const constantBudget = 1024 // everything that is not the partial
 	require.Less(t, len(snap), constantBudget+maxStringBytes)
 }
@@ -650,5 +661,260 @@ func Test_ModeTracker_RestoreIsEmptyForAnUntouchedTerminal(t *testing.T) {
 	// Including modes the session set and put back itself.
 	_, err = m.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[?25h\x1b[?1049l"))
 	require.NoError(t, err)
+	require.Empty(t, m.Restore())
+}
+
+// The kitty keyboard protocol keeps its flags on a stack, so that a program
+// can push what it wants and pop back to what was there. A joiner that is not
+// given the stack sends keys the program did not ask for, and a terminal left
+// with it reports every keystroke to the shell it returns to as an escape
+// sequence. So each push is replayed, and on the way out the whole depth is
+// popped at once: a pop past the bottom empties the stack, which is the
+// terminal's default, so popping more than a viewer holds costs nothing.
+func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantSnapshot string
+		wantRestore  string
+	}{
+		{name: "a push", input: "\x1b[>1u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "a push with no flags is still an entry", input: "\x1b[>u", wantSnapshot: "\x1b[>0u", wantRestore: "\x1b[<1u"},
+		{name: "two pushes, bottom first", input: "\x1b[>1u\x1b[>3u", wantSnapshot: "\x1b[>1u\x1b[>3u", wantRestore: "\x1b[<2u"},
+		{name: "a pop", input: "\x1b[>1u\x1b[>3u\x1b[<u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "a pop of n", input: "\x1b[>1u\x1b[>3u\x1b[>5u\x1b[<2u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "a pop past the bottom empties it", input: "\x1b[>1u\x1b[<5u"},
+		{name: "a set replaces the top", input: "\x1b[>1u\x1b[>7u\x1b[=2u", wantSnapshot: "\x1b[>1u\x1b[>2u", wantRestore: "\x1b[<2u"},
+		{name: "a set in mode 1 replaces the top", input: "\x1b[>7u\x1b[=2;1u", wantSnapshot: "\x1b[>2u", wantRestore: "\x1b[<1u"},
+		{name: "a set in mode 2 adds flags", input: "\x1b[>1u\x1b[=4;2u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
+		{name: "a set in mode 3 clears flags", input: "\x1b[>7u\x1b[=2;3u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
+		{name: "a set on an empty stack makes an entry", input: "\x1b[=5u", wantSnapshot: "\x1b[>5u", wantRestore: "\x1b[<1u"},
+		{name: "a query is not state", input: "\x1b[?u"},
+		// kitty takes at most two parameters for a set and ignores more.
+		{name: "a set with a third parameter is ignored", input: "\x1b[=1;1;1u"},
+		// kitty keeps the low seven bits of the 32-bit number it is given
+		// (val & 0x7f), and the replay is what it holds.
+		{name: "flags past seven bits keep the low seven", input: "\x1b[>255u", wantSnapshot: "\x1b[>127u", wantRestore: "\x1b[<1u"},
+		{name: "flags past an int32 keep their low bits too", input: "\x1b[>2147483648u", wantSnapshot: "\x1b[>0u", wantRestore: "\x1b[<1u"},
+		{name: "and so does a set", input: "\x1b[=4294967169u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		// Only an omitted count is one; kitty pops nothing for an explicit 0.
+		{name: "a pop of zero pops nothing", input: "\x1b[>1u\x1b[<0u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "a bare CSI u restores the cursor and is not kitty", input: "\x1b[u"},
+		{name: "a number that is not one is ignored", input: "\x1b[>1u\x1b[>-1u\x1b[<1:2u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{
+			// The replay keeps the eight newest entries, kitty's own depth.
+			// But the protocol leaves the depth to the terminal, and one with
+			// a deeper stack holds all nine: the pop is of every push, since
+			// a pop past the bottom of a shallower stack only empties it.
+			name:         "the replay is bounded at eight, and the pop is not",
+			input:        "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u",
+			wantSnapshot: "\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u",
+			wantRestore:  "\x1b[<9u",
+		},
+		{
+			// Pops take the newest entries; what a deeper stack still holds
+			// below the replayed ones is popped all the same.
+			name:        "pops past the replayed entries leave the deeper ones counted",
+			input:       "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u\x1b[>10u\x1b[<9u",
+			wantRestore: "\x1b[<1u",
+		},
+		{
+			// A set on an entry the replay no longer holds changes the top
+			// the terminal has, so it is the top the replay gives a joiner.
+			name:         "a set after the replayed entries are popped",
+			input:        "\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u\x1b[<8u\x1b[=5u",
+			wantSnapshot: "\x1b[>5u",
+			wantRestore:  "\x1b[<1u",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.input))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "snapshot")
+			require.Equal(t, tc.wantRestore, string(m.Restore()), "restore")
+		})
+	}
+}
+
+// The protocol gives the main and alternate screens a stack each, so that a
+// full-screen program can push its own flags without knowing what the shell
+// beneath it had. The alternate screen's stack is popped while the terminal is
+// still on it -- a pop after leaving would empty the main screen's instead --
+// and the main screen's once the terminal is back.
+func Test_ModeTracker_KittyKeyboardStackPerScreen(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantSnapshot string
+		wantRestore  string
+	}{
+		{
+			name:         "each screen's pushes go to its own stack",
+			input:        "\x1b[>1u\x1b[?1049h\x1b[>3u",
+			wantSnapshot: "\x1b[>1u\x1b[?1049h\x1b[>3u",
+			wantRestore:  "\x1b[<1u\x1b[?1049l\x1b[<1u",
+		},
+		{
+			name:         "a pop on the alternate screen leaves the main stack alone",
+			input:        "\x1b[>1u\x1b[?1049h\x1b[<u",
+			wantSnapshot: "\x1b[>1u\x1b[?1049h",
+			wantRestore:  "\x1b[?1049l\x1b[<1u",
+		},
+		{
+			// kitty swaps stacks on a screen switch and clears neither, so a
+			// program that leaves without popping finds its flags again the
+			// next time anything enters the alternate screen. A push or pop
+			// reaches only the screen that is showing, so the stack is
+			// replayed and popped on a trip to the alternate screen and back:
+			// through 47, which does not clear the hidden screen as 1049
+			// does, between a cursor save and restore, because kitty homes
+			// the cursor on every switch.
+			name:         "the alternate stack off the alternate screen",
+			input:        "\x1b[?1049h\x1b[>3u\x1b[?1049l",
+			wantSnapshot: "\x1b7\x1b[?47h\x1b[>3u\x1b[?47l\x1b8",
+			wantRestore:  "\x1b7\x1b[?47h\x1b[<1u\x1b[?47l\x1b8",
+		},
+		{
+			name:         "and is there again when the alternate screen is",
+			input:        "\x1b[?1049h\x1b[>3u\x1b[?1049l\x1b[?1049h",
+			wantSnapshot: "\x1b[?1049h\x1b[>3u",
+			wantRestore:  "\x1b[<1u\x1b[?1049l",
+		},
+		{
+			name:  "RIS clears both",
+			input: "\x1b[>1u\x1b[?1049h\x1b[>3u\x1bc",
+		},
+		{
+			// kitty's soft reset clears both stacks, as its hard reset does.
+			name:  "DECSTR clears both",
+			input: "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[?1049l\x1b[!p",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.input))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "snapshot")
+			require.Equal(t, tc.wantRestore, string(m.Restore()), "restore")
+		})
+	}
+}
+
+// xterm's modifyOtherKeys is the older way a program asks for keys a terminal
+// otherwise folds together: vim turns it on with \e[>4;2m and off with \e[>4;m.
+// Left on, a shell gets Ctrl-letter keys as escape sequences, so a leaving
+// terminal is put back at the default, and a joiner is given the level.
+func Test_ModeTracker_ModifyOtherKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantSnapshot string
+		wantRestore  string
+	}{
+		{name: "level 2", input: "\x1b[>4;2m", wantSnapshot: "\x1b[>4;2m", wantRestore: "\x1b[>4m"},
+		{name: "level 1", input: "\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
+		{name: "the last level wins", input: "\x1b[>4;2m\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
+		// An explicit 0 is not the initial value: xterm's resource may set
+		// that to something else, and only a reset without a value goes back
+		// to it. So it is replayed, and undone.
+		{name: "an explicit level 0", input: "\x1b[>4;2m\x1b[>4;0m", wantSnapshot: "\x1b[>4;0m", wantRestore: "\x1b[>4m"},
+		{name: "vim's reset, with an empty value", input: "\x1b[>4;2m\x1b[>4;m"},
+		{name: "a reset with no value", input: "\x1b[>4;2m\x1b[>4m"},
+		{name: "a reset of every resource", input: "\x1b[>4;2m\x1b[>m"},
+		// Disabling is xterm's resource value -1, which no XTMODKEYS set can
+		// spell, so it is replayed as itself.
+		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n", wantSnapshot: "\x1b[>4n", wantRestore: "\x1b[>4m"},
+		// xterm's colon form: a subparameter on the resource is a mask of
+		// modifiers to leave out of the encoding, and is replayed with it.
+		{name: "a mask and a level", input: "\x1b[>4:1;2m", wantSnapshot: "\x1b[>4:1;2m", wantRestore: "\x1b[>4m"},
+		{name: "a mask alone", input: "\x1b[>4:1m", wantSnapshot: "\x1b[>4:1m", wantRestore: "\x1b[>4m"},
+		{name: "a reset clears the mask", input: "\x1b[>4:1;2m\x1b[>4m"},
+		{name: "a level without a mask clears it", input: "\x1b[>4:1;2m\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
+		// xterm's own parser takes the mask on the value; its documentation
+		// puts it on the resource. Either is replayed as it was written.
+		{name: "a mask on the value", input: "\x1b[>4;2:1m", wantSnapshot: "\x1b[>4;2:1m", wantRestore: "\x1b[>4m"},
+		{name: "a field of more than one subparameter is ignored", input: "\x1b[>4:1:2;2m"},
+		{name: "another resource is not this one", input: "\x1b[>1;2m"},
+		{name: "SGR underline is not XTMODKEYS", input: "\x1b[4m\x1b[4;2m"},
+		{name: "RIS resets it", input: "\x1b[>4;2m\x1bc"},
+		// xterm's soft reset puts the key modifiers back to their initial
+		// values, mask and all, as its hard reset does.
+		{name: "DECSTR resets it", input: "\x1b[>4:1;2m\x1b[!p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.input))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "snapshot")
+			require.Equal(t, tc.wantRestore, string(m.Restore()), "restore")
+		})
+	}
+}
+
+// Where the keyboard state goes among everything else. A joiner is given the
+// main screen's stack while it is still on the main screen, and the alternate
+// screen's once it has switched; a leaving terminal pops the alternate stack
+// before it leaves that screen and the main one after.
+func Test_ModeTracker_KeyboardStateOrder(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[2;20r\x1b[>1u\x1b[>4;2m\x1b[?2004h\x1b[?1049h\x1b[5;15r\x1b[>3u\x1b(0"))
+	require.NoError(t, err)
+
+	require.Equal(t,
+		"\x1b[2;20r"+"\x1b[?2004h"+"\x1b[>1u"+"\x1b[>4;2m"+"\x1b[?1049h"+"\x1b[5;15r"+"\x1b[>3u"+"\x1b(0",
+		string(m.Snapshot()))
+	require.Equal(t,
+		"\x1b[<1u"+"\x1b[?1049l"+"\x1b[r"+"\x1b[?2004l"+"\x1b[<1u"+"\x1b[>4m"+"\x1b(B",
+		string(m.Restore()))
+}
+
+// A C0 control inside a CSI is executed where it stands, and the CSI goes on:
+// the DEC parser's "execute" in its CSI states, which kitty follows too. A BEL
+// or a backspace there is not one of the sequence's parameters, and nor is
+// DEL, which the parser ignores.
+func Test_ModeTracker_EmbeddedControlInACSI(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantSnapshot string
+		wantRestore  string
+	}{
+		{name: "a DEC mode", input: "\x1b[?10\x0749h", wantSnapshot: "\x1b[?1049h", wantRestore: "\x1b[?1049l"},
+		{name: "a kitty push", input: "\x1b[>1\x08u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "DEL", input: "\x1b[?20\x7f04h", wantSnapshot: "\x1b[?2004h", wantRestore: "\x1b[?2004l"},
+		{
+			// A joiner is not made to execute it again.
+			name:         "in the sequence the stream stopped inside",
+			input:        "\x1b[?10\x07",
+			wantSnapshot: "\x1b[?10",
+			wantRestore:  "\x18",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.input))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "snapshot")
+			require.Equal(t, tc.wantRestore, string(m.Restore()), "restore")
+		})
+	}
+}
+
+// CSI parameters are read at the protocols' width, an unsigned 32-bit number,
+// whatever an int is on the build: kitty takes a pop's count as a uint32, and
+// a 32-bit client must track the same stream a 64-bit one does.
+func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
+	n, ok := csiNumber([]byte("4294967295"), 0)
+	require.True(t, ok, "the widest unsigned 32-bit number")
+	require.Equal(t, math.MaxInt32, n, "clamped to what every build's int holds, so every build tracks it alike")
+
+	_, ok = csiNumber([]byte("4294967296"), 0)
+	require.False(t, ok, "past it")
+
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[>1u\x1b[>2u\x1b[<4294967295u"))
+	require.NoError(t, err)
+	require.Empty(t, m.Snapshot(), "a pop past any depth empties the stack")
 	require.Empty(t, m.Restore())
 }
