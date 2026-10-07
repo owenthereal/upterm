@@ -457,9 +457,11 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 
 // ResetFlushTimeout bounds how long Shutdown waits for a member's reset to be
 // delivered once its tail has been. Shutdown can therefore return this much
-// past its context's deadline. A reset is a few hundred bytes at most, so a
-// guest that has just taken its whole tail takes it at once or not at all.
-const ResetFlushTimeout = 250 * time.Millisecond
+// past its context's deadline. A reset is a few hundred bytes at most, but the
+// tail may have used up the guest's SSH window, and then the reset waits a
+// round trip for the window to open again: so a whole guest flush's bound, the
+// one the host gives a guest's tail, not a guess at how fast a small write is.
+const ResetFlushTimeout = time.Second
 
 // ResetTarget is implemented by an attached writer that wants the session's
 // reset when the fan-out shuts down: one whose far end is a terminal nothing
