@@ -236,7 +236,10 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	// hands us somebody else's session, and TERM comes from whichever terminal
 	// launched the host. Prepended instead, --term would silently do nothing
 	// and `upterm session info` inside the session would name the outer one.
-	c.cmd.Env = append(os.Environ(), c.env...)
+	//
+	// What the host inherited from the multiplexer pane it was started in is
+	// not passed on at all; see paneIdentityVars.
+	c.cmd.Env = append(withoutPaneIdentity(os.Environ()), c.env...)
 	if c.term != "" {
 		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("TERM=%s", c.term))
 	}

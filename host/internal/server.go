@@ -1440,10 +1440,12 @@ func emitClientLeftEvent(eventEmmiter *emitter.Emitter, sessionID string) {
 // wins over both. The command is the guest's SSH session, so it is described
 // as sshd describes one, from auth -- the guest's certificate -- and its pty,
 // and the host's own SSH session variables are not passed on. The session's
-// shared command gets none of this: it is nobody's SSH session.
+// shared command gets none of this: it is nobody's SSH session. Neither is
+// told it is in the multiplexer pane the host was started in; see
+// paneIdentityVars.
 func (h *sessionHandler) startForceCommand(term string, width, height int, auth *server.AuthRequest) (PTY, error) {
 	cmd := setupCommand(h.forceCommand[0], h.forceCommand[1:])
-	cmd.Env = append(withoutSSHSessionVars(os.Environ()), h.commandEnv...)
+	cmd.Env = append(withoutPaneIdentity(withoutSSHSessionVars(os.Environ())), h.commandEnv...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", term))
 	cmd.Env = append(cmd.Env, guestConnectionEnv(auth, h.hideClientIP)...)
 	// The guest's own geometry, taken from its pty request. A full-screen

@@ -165,6 +165,8 @@ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pai
 
 Each guest's forced command runs on a pty of its own, with `SSH_TTY`, `SSH_CONNECTION` and `SSH_CLIENT` set as sshd sets them, so a program that copies over OSC 52 when it runs over SSH copies to the guest's clipboard. `--hide-client-ip` leaves out the two that carry the guest's address.
 
+Neither the hosted command nor a forced command is told it is in the multiplexer pane `upterm host` was started from: `TMUX`, `TMUX_PANE`, `STY`, `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are not passed on, so `herdr` starts there as it would over ssh rather than refusing to nest, and nothing takes the host's pane for its own. `HERDR_SOCKET_PATH` is, so a guest's `herdr` reaches the server the session was started from.
+
 ### Running Without a Terminal
 
 Host a session from a script or CI step with nothing attached to its terminal. `--accept` skips the confirmation prompt, `--name` gives the session a local name you choose, and `--pty-size` pins the terminal geometry so the command renders the same for every client:

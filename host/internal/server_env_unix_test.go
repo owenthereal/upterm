@@ -4,6 +4,7 @@ package internal
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -132,5 +133,52 @@ func TestForcedCommandIsTheGuestsSSHSession(t *testing.T) {
 			assert.True(t, strings.HasPrefix(got["REAL"], "/dev/"), "the command's own terminal: %q", got["REAL"])
 			assert.Equal(t, got["REAL"], got["TTY"], "SSH_TTY names the guest's pty, not the host's login")
 		})
+	}
+}
+
+// The commands a session runs are on upterm's pty, not in the multiplexer pane
+// upterm was started from, so they are not told they are. Herdr refuses to
+// start inside one of its own panes on nothing more than these variables
+// ("nested herdr is disabled by default"), and tmux to nest: a door started
+// from a Herdr pane turned every guest away. Which server is another matter
+// from which pane, so HERDR_SOCKET_PATH still reaches a guest's herdr, and it
+// finds the server the door was started from.
+func TestCommandsAreNotToldTheyAreInTheLaunchingPane(t *testing.T) {
+	pane := map[string]string{
+		"TMUX": "/tmp/tmux-501/default,123,0", "TMUX_PANE": "%3",
+		"STY":    "123.ttys001.host",
+		"ZELLIJ": "0", "ZELLIJ_SESSION_NAME": "work", "ZELLIJ_PANE_ID": "2",
+		"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:t1:p1", "HERDR_TAB_ID": "w1:t1", "HERDR_WORKSPACE_ID": "w1",
+	}
+	for k, v := range pane {
+		t.Setenv(k, v)
+	}
+	t.Setenv("HERDR_SOCKET_PATH", "/tmp/herdr-test.sock")
+	t.Setenv("HERDR_BIN_PATH", "/opt/herdr/bin/herdr")
+
+	command := []string{"sh", "-c", `stty -echo -opost; env; printf '\004'; IFS= read -r line`}
+	h := startHost(t, &Server{Command: command, ForceCommand: command})
+	// A viewer on the host door sees the hosted command's output in the
+	// replay; a guest gets a forced command of its own.
+	_, hostOutput, _ := h.connectHost(t, nil)
+	_, guestOutput := h.connectGuest(t)
+
+	for name, out := range map[string]io.Reader{"hosted command": hostOutput, "forced command": guestOutput} {
+		got, err := bufio.NewReader(out).ReadString('\x04')
+		require.NoError(t, err, name)
+		env := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSuffix(got, "\x04"), "\n") {
+			if k, v, ok := strings.Cut(line, "="); ok {
+				env[k] = v
+			}
+		}
+		// Checked by name, not with NotContains, which prints the whole
+		// environment it was handed.
+		for k := range pane {
+			_, inherited := env[k]
+			assert.False(t, inherited, "the %s inherits %s from the launching pane", name, k)
+		}
+		assert.Equal(t, "/tmp/herdr-test.sock", env["HERDR_SOCKET_PATH"], "the %s's Herdr server", name)
+		assert.Equal(t, "/opt/herdr/bin/herdr", env["HERDR_BIN_PATH"], name)
 	}
 }
