@@ -261,6 +261,11 @@ type Host struct {
 	// HideClientIP keeps a guest's address out of its forced command's
 	// SSH_CONNECTION and SSH_CLIENT.
 	HideClientIP bool
+	// AutoAccept says the session was started without anyone confirming it
+	// (--accept). With no AuthorizedKeys as well, it is open: anyone with
+	// the session ID can join, and nobody was asked. GetSessionResponse.open
+	// reports that; it changes nothing about who may join.
+	AutoAccept bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
 	ProxyURL   *url.URL
@@ -877,6 +882,8 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		ForceCommand:   c.ForceCommand,
 		AuthorizedKeys: toApiAuthorizedKeys(c.AuthorizedKeys),
 		SftpDisabled:   c.SFTPDisabled,
+		// The same emptiness the guest door admits anyone on.
+		Open: c.AutoAccept && len(aks) == 0,
 	}
 
 	if c.SessionCreatedCallback != nil {

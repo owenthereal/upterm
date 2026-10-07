@@ -424,6 +424,28 @@ func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
 	require.True(t, h.HideClientIP)
 }
 
+// TestBuildDaemonHostPassesOnAccept pins that --accept reaches the session,
+// which reports an open one -- nobody asked, and no allowlist -- to every
+// reader of it.
+func TestBuildDaemonHostPassesOnAccept(t *testing.T) {
+	for _, accept := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accept=%t", accept), func(t *testing.T) {
+			hostCmd()
+			daemonTestRoots(t)
+			orig := flagAccept
+			flagAccept = accept
+			t.Cleanup(func() { flagAccept = orig })
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+			child := bootstrap.NewChild(a, nil)
+			t.Cleanup(func() { _ = child.Close() })
+			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+			require.NoError(t, err)
+			require.Equal(t, accept, h.AutoAccept)
+		})
+	}
+}
+
 // TestRunDaemonProcessReportsAGenericFailure pins that a run error which is
 // neither ErrNameInUse nor ErrSessionAbandoned reaches the parent as neither.
 func TestRunDaemonProcessReportsAGenericFailure(t *testing.T) {

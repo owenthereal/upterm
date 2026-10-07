@@ -62,6 +62,29 @@ func TestBuildSessionDetailSSH(t *testing.T) {
 	}
 }
 
+// An open session -- anyone with its ID can join, and nobody was asked -- says
+// so in `session info` and its JSON. A session that isn't keeps the JSON it
+// always had, with no "open" key at all.
+func TestSessionInfoSaysWhenTheSessionIsOpen(t *testing.T) {
+	for _, open := range []bool{false, true} {
+		t.Run(fmt.Sprintf("open=%t", open), func(t *testing.T) {
+			sess := &api.GetSessionResponse{Host: "ssh://example.com:22", SshUser: "sid", Open: open}
+			detail, err := buildSessionDetail(sess)
+			require.NoError(t, err)
+			require.Equal(t, open, detail.Open, "the detail session info prints")
+
+			info := withLiveDetail(sessionInfo{}, sess)
+			out, err := json.Marshal(info)
+			require.NoError(t, err)
+			if open {
+				require.Contains(t, string(out), `"open":true`)
+			} else {
+				require.NotContains(t, string(out), `"open"`)
+			}
+		})
+	}
+}
+
 // Test_clientDesc_NamesTheDoorEachClientCameInBy pins the prefix every client
 // description now carries. The host's own terminal is a client of the session,
 // and a listing that did not say so would show an operator a stranger where

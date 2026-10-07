@@ -1343,6 +1343,42 @@ func TestGetSessionReportsTheLiveJoinState(t *testing.T) {
 	require.NoError(t, f.result(t))
 }
 
+// A session is open when anyone with its ID can join and nobody was asked: no
+// allowlist, and started with --accept. Both the operator's first look at it
+// and every later `session info` say so.
+func TestGetSessionSaysWhetherTheSessionIsOpen(t *testing.T) {
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(testPublicKey))
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name       string
+		autoAccept bool
+		keys       []*AuthorizedKey
+		want       bool
+	}{
+		{name: "no allowlist, accepted unasked", autoAccept: true, want: true},
+		{name: "an allowlist", autoAccept: true, keys: []*AuthorizedKey{{PublicKeys: []ssh.PublicKey{key}}}},
+		{name: "confirmed at start", autoAccept: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newJoinTimeoutHost(t)
+			f.h.AutoAccept = tc.autoAccept
+			f.h.AuthorizedKeys = tc.keys
+			f.start(t)
+			awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+			require.Equal(t, tc.want, f.created.GetOpen(), "the session as created")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, sess.GetOpen(), "the session as GetSession reports it")
+
+			f.finish(t, "0")
+			require.NoError(t, f.result(t))
+		})
+	}
+}
+
 func TestJoinTimeoutIsPublishedPendingThenCounting(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = time.Hour
