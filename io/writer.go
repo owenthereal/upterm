@@ -7,6 +7,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"time"
 )
 
 // DefaultReplayBytes bounds the replay ring handed to a joining writer.
@@ -398,7 +399,8 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 // going to drain past its bound, and a sink that overflows is a guest dropped.
 // It waits for nothing else, so a guest stuck until the deadline costs the
 // others nothing; and one still behind at the deadline loses the reset with
-// its tail, as it would have lost the tail anyway.
+// its tail, as it would have lost the tail anyway. The reset's own flush gets
+// ResetFlushTimeout, which may run past ctx's deadline.
 func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
 	first := !t.closed
@@ -439,7 +441,12 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 			_, err := w.Write(restore)
 			t.writeMu.Unlock()
 			if err == nil && flushes {
-				errs[i] = f.Flush(ctx)
+				// A window of its own, not what is left of ctx's: a guest
+				// that took its tail just inside the deadline would get
+				// none, and its reset would be closed out of the sink.
+				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ResetFlushTimeout)
+				errs[i] = f.Flush(rctx)
+				cancel()
 			}
 		}()
 	}
@@ -447,6 +454,12 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 
 	return errors.Join(errs...)
 }
+
+// ResetFlushTimeout bounds how long Shutdown waits for a member's reset to be
+// delivered once its tail has been. Shutdown can therefore return this much
+// past its context's deadline. A reset is a few hundred bytes at most, so a
+// guest that has just taken its whole tail takes it at once or not at all.
+const ResetFlushTimeout = 250 * time.Millisecond
 
 // ResetTarget is implemented by an attached writer that wants the session's
 // reset when the fan-out shuts down: one whose far end is a terminal nothing

@@ -819,6 +819,42 @@ func TestMultiWriterShutdownResetsEachGuestOnItsOwnTime(t *testing.T) {
 	require.Equal(t, "\x1b[?2004h\x1b[?2004l", string(healthy.bytes()), "the healthy guest, reset before Shutdown returned")
 }
 
+// pacedWriter takes the next of its delays over each write, as a guest on a
+// slow link does.
+type pacedWriter struct {
+	recordingWriter
+	delays []time.Duration
+}
+
+func (p *pacedWriter) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	var d time.Duration
+	if len(p.delays) > 0 {
+		d, p.delays = p.delays[0], p.delays[1:]
+	}
+	p.mu.Unlock()
+	time.Sleep(d)
+	return p.recordingWriter.Write(b)
+}
+
+// A guest that takes its tail just inside the deadline still gets its reset:
+// the reset's own flush has a window of its own rather than what is left of
+// the shared one, which may be nothing.
+func TestMultiWriterShutdownGivesAResetItsOwnWindow(t *testing.T) {
+	slow := &pacedWriter{delays: []time.Duration{200 * time.Millisecond, 150 * time.Millisecond}}
+	sink := NewAsyncWriter(slow, DefaultGuestBufferSize, nil)
+	defer func() { _ = sink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{sink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+	require.Equal(t, "\x1b[?2004h\x1b[?2004l", string(slow.bytes()))
+}
+
 func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
 	w := NewMultiWriter(5)
 	var plain bytes.Buffer
