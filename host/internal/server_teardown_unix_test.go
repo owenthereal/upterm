@@ -9,10 +9,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	gssh "charm.land/ssh"
+	"github.com/olebedev/emitter"
+	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -189,4 +193,64 @@ func TestSessionEndStopsWaitingForAGuestThatStoppedReading(t *testing.T) {
 	took := h.stop(t)
 
 	assert.Less(t, took, forceCommandStopBound(hangupGrace, forceCommandStopGrace)+2*time.Second)
+}
+
+// stallingGuest is a guest that took everything its forced command wrote and
+// then stopped taking output, as one whose SSH window the last write filled
+// would: the reset blocks until the transport is closed under it.
+type stallingGuest struct {
+	fakeGuestSession
+	reset  string
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (g *stallingGuest) Read([]byte) (int, error) {
+	<-g.closed
+	return 0, io.EOF
+}
+
+func (g *stallingGuest) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), g.reset) {
+		<-g.closed
+		return 0, io.EOF
+	}
+	return len(p), nil
+}
+
+func (g *stallingGuest) Close() error {
+	g.once.Do(func() { close(g.closed) })
+	return nil
+}
+
+// The reset sent after a forced command's last output is bounded, as the
+// session's own last notice to a client is: a guest that has stopped taking
+// output does not keep its handler, or the command's exit status, past the
+// bound.
+func TestAForcedCommandsResetIsBounded(t *testing.T) {
+	guest := &stallingGuest{
+		fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "test-session"}, winCh: make(chan gssh.Window)},
+		reset:            "\x1b[?2004l",
+		closed:           make(chan struct{}),
+	}
+	h := &sessionHandler{
+		kind:              kindGuest,
+		forceCommand:      []string{"sh", "-c", `printf '\033[?2004hDONE'; exit 0`},
+		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		keepAliveDuration: time.Hour,
+		ctx:               t.Context(),
+		logger:            discardLogger(),
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); h.HandleSession(guest) }()
+
+	select {
+	case <-done:
+	case <-time.After(guestFlushTimeout + 5*time.Second):
+		_ = guest.Close()
+		t.Fatal("the handler waited on a guest that stopped taking output")
+	}
 }

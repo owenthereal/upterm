@@ -2,6 +2,8 @@ package io
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -389,8 +391,8 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	// The worst case is both screen buffers carrying margins and a full kitty
 	// keyboard stack, so the normal screen's are set before the modes switch
 	// to the alternate one. The widest flags are the widest number a CSI's
-	// parameters can hold and still parse.
-	const widest = "9223372036854775807"
+	// parameters can hold and still parse -- an int's, on whatever this is.
+	widest := strconv.Itoa(math.MaxInt)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
 	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))

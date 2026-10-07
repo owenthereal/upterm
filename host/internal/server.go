@@ -886,8 +886,21 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				// a command killed on the alternate screen, or one that exits
 				// without cleaning up, would leave it there. Nothing at all
 				// for a command that put everything back itself.
+				//
+				// Bounded as the session's last notice to a client is: the
+				// command's last output may have filled the guest's window,
+				// and a guest that has stopped taking output is not one to
+				// hold the handler, and the exit status behind it, for.
 				if restore := modes.Restore(); len(restore) > 0 {
+					release := time.AfterFunc(guestFlushTimeout, func() {
+						if conn := serverConn(sess); conn != nil {
+							_ = conn.Close()
+						} else {
+							_ = sess.Close()
+						}
+					})
 					_, _ = sess.Write(restore)
+					release.Stop()
 				}
 				return ptyError(err)
 			}, func(err error) {
