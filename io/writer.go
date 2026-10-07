@@ -393,11 +393,12 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 // back where it started -- the modes the session left set, undone -- and
 // flushed again. A session can end with its command still holding the
 // terminal, killed on the alternate screen with the mouse on, and a guest's
-// terminal is not one anything else will put back. The reset waits for the
-// first flush: queued behind a tail, it could take a sink that was going to
-// drain past its bound, and a sink that overflows is a guest dropped. So it
-// goes only to the members that drained in time; one still behind loses the
-// reset with its tail, as it would have lost the tail anyway.
+// terminal is not one anything else will put back. A member's reset waits for
+// its own first flush: queued behind a tail, it could take a sink that was
+// going to drain past its bound, and a sink that overflows is a guest dropped.
+// It waits for nothing else, so a guest stuck until the deadline costs the
+// others nothing; and one still behind at the deadline loses the reset with
+// its tail, as it would have lost the tail anyway.
 func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
 	first := !t.closed
@@ -412,22 +413,39 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	}
 	t.writeMu.Unlock()
 
-	errs := flush(ctx, writers)
-	if len(restore) == 0 {
-		return errors.Join(errs...)
-	}
-
-	var targets []io.Writer
-	t.writeMu.Lock()
+	var (
+		wg   sync.WaitGroup
+		errs = make([]error, len(writers))
+	)
 	for i, w := range writers {
-		if r, ok := w.(ResetTarget); ok && r.WantsReset() && errs[i] == nil {
-			if _, err := w.Write(restore); err == nil {
-				targets = append(targets, w)
-			}
+		f, flushes := w.(Flusher)
+		r, resets := w.(ResetTarget)
+		resets = resets && len(restore) > 0 && r.WantsReset()
+		if !flushes && !resets {
+			continue
 		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if flushes {
+				if errs[i] = f.Flush(ctx); errs[i] != nil {
+					return
+				}
+			}
+			if !resets {
+				return
+			}
+			t.writeMu.Lock()
+			_, err := w.Write(restore)
+			t.writeMu.Unlock()
+			if err == nil && flushes {
+				errs[i] = f.Flush(ctx)
+			}
+		}()
 	}
-	t.writeMu.Unlock()
-	return errors.Join(append(errs, flush(ctx, targets)...)...)
+	wg.Wait()
+
+	return errors.Join(errs...)
 }
 
 // ResetTarget is implemented by an attached writer that wants the session's
@@ -439,28 +457,6 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 // an AsyncWriter's does not: Shutdown writes the reset with writeMu held.
 type ResetTarget interface {
 	WantsReset() bool
-}
-
-// flush flushes every member that buffers, at once, and reports each one's
-// error by index.
-func flush(ctx context.Context, writers []io.Writer) []error {
-	var (
-		wg   sync.WaitGroup
-		errs = make([]error, len(writers))
-	)
-	for i, w := range writers {
-		f, ok := w.(Flusher)
-		if !ok {
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = f.Flush(ctx)
-		}()
-	}
-	wg.Wait()
-	return errs
 }
 
 // restore is what puts a terminal that watched the whole stream back where it

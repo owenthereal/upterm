@@ -756,12 +756,14 @@ func Test_ModeTracker_KittyKeyboardStackPerScreen(t *testing.T) {
 			// program that leaves without popping finds its flags again the
 			// next time anything enters the alternate screen. A push or pop
 			// reaches only the screen that is showing, so the stack is
-			// replayed and popped on a trip to the alternate screen and back,
-			// which leaves the normal screen and its cursor as they were.
+			// replayed and popped on a trip to the alternate screen and back:
+			// through 47, which does not clear the hidden screen as 1049
+			// does, between a cursor save and restore, because kitty homes
+			// the cursor on every switch.
 			name:         "the alternate stack off the alternate screen",
 			input:        "\x1b[?1049h\x1b[>3u\x1b[?1049l",
-			wantSnapshot: "\x1b[?1049h\x1b[>3u\x1b[?1049l",
-			wantRestore:  "\x1b[?1049h\x1b[<1u\x1b[?1049l",
+			wantSnapshot: "\x1b7\x1b[?47h\x1b[>3u\x1b[?47l\x1b8",
+			wantRestore:  "\x1b7\x1b[?47h\x1b[<1u\x1b[?47l\x1b8",
 		},
 		{
 			name:         "and is there again when the alternate screen is",

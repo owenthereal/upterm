@@ -786,6 +786,39 @@ func TestMultiWriterShutdownResetDoesNotOverflowAGuest(t *testing.T) {
 	require.Equal(t, "\x1b[?2004h"+tail+"\x1b[?2004l", string(gate.bytes()))
 }
 
+// laggingWriter takes a while over every write, as a guest at the far end of a
+// real network does.
+type laggingWriter struct{ recordingWriter }
+
+func (s *laggingWriter) Write(p []byte) (int, error) {
+	time.Sleep(20 * time.Millisecond)
+	return s.recordingWriter.Write(p)
+}
+
+// A guest that is stuck until the deadline must not cost the others their
+// reset. Each member is reset as soon as its own tail is delivered, so the
+// healthy one has its reset by the time Shutdown gives up on the stuck one.
+func TestMultiWriterShutdownResetsEachGuestOnItsOwnTime(t *testing.T) {
+	stuck := newGateWriter()
+	defer close(stuck.release)
+	stuckSink := NewAsyncWriter(stuck, DefaultGuestBufferSize, nil)
+	defer func() { _ = stuckSink.Close() }()
+	healthy := &laggingWriter{}
+	healthySink := NewAsyncWriter(healthy, DefaultGuestBufferSize, nil)
+	defer func() { _ = healthySink.Close() }()
+
+	w := NewMultiWriter(1024)
+	require.NoError(t, w.Append(resetSink{stuckSink}, resetSink{healthySink}))
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	<-stuck.entered
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, w.Shutdown(ctx), context.DeadlineExceeded, "the stuck guest")
+
+	require.Equal(t, "\x1b[?2004h\x1b[?2004l", string(healthy.bytes()), "the healthy guest, reset before Shutdown returned")
+}
+
 func TestMultiWriterShutdownIgnoresPlainWriters(t *testing.T) {
 	w := NewMultiWriter(5)
 	var plain bytes.Buffer

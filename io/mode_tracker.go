@@ -748,11 +748,13 @@ func (m *ModeTracker) Restore() []byte {
 		// A program left the alternate screen without popping, and kitty
 		// keeps that screen's stack: the next program to enter it would
 		// inherit the flags. A pop reaches only the screen that is showing,
-		// so it is a trip there and back, which saves and restores the
-		// normal screen's cursor and leaves that screen as it was.
-		out = append(out, "\x1b[?1049h"...)
+		// so it is a trip there and back -- through 47, which does not clear
+		// the hidden screen as 1049 does, and between a cursor save and
+		// restore, because kitty homes the cursor on every switch and 47
+		// does not put it back.
+		out = append(out, "\x1b7\x1b[?47h"...)
 		out = kittyPop(out, m.altKeys)
-		out = append(out, "\x1b[?1049l"...)
+		out = append(out, "\x1b[?47l\x1b8"...)
 	}
 
 	// The normal screen's margins, which outlive whatever set them: a shell
@@ -853,9 +855,9 @@ func (m *ModeTracker) Snapshot() []byte {
 	if !m.altActive() && len(m.altKeys.entries) > 0 {
 		// The alternate screen's stack, kept while the normal screen shows,
 		// replayed on a trip there and back; see Restore.
-		out = append(out, "\x1b[?1049h"...)
+		out = append(out, "\x1b7\x1b[?47h"...)
 		out = kittyPushes(out, m.altKeys)
-		out = append(out, "\x1b[?1049l"...)
+		out = append(out, "\x1b[?47l\x1b8"...)
 	}
 	if m.altActive() {
 		// Replayed through the mode that entered, so a joiner is left in the
