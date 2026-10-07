@@ -390,9 +390,10 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 
 	// The worst case is both screen buffers carrying margins and a full kitty
 	// keyboard stack, so the normal screen's are set before the modes switch
-	// to the alternate one. The widest flags are the widest the tracker
-	// keeps, the largest int32, as wide as any number it parses.
-	widest := strconv.Itoa(math.MaxInt32)
+	// to the alternate one. The widest numbers are an unsigned 32-bit one's:
+	// kitty's flags come back as the seven bits kitty keeps, and
+	// modifyOtherKeys as it was written.
+	widest := strconv.FormatUint(math.MaxUint32, 10)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
 	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
@@ -414,7 +415,7 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 
 	snap := string(m.Snapshot())
 	require.Contains(t, snap, partial, "the partial must be in it, or the bound below is about an empty slot")
-	require.Equal(t, 2*kittyStackDepth, strings.Count(snap, widest+"u"), "both kitty stacks must be full, or the bound below is about empty ones")
+	require.Equal(t, 2*kittyStackDepth, strings.Count(snap, "\x1b[>127u"), "both kitty stacks must be full, or the bound below is about empty ones")
 	require.Contains(t, snap, "\x1b[>4;"+widest+"m", "and modifyOtherKeys set")
 
 	// Every restorable mode set at once, plus both scroll regions, both kitty
@@ -691,6 +692,11 @@ func Test_ModeTracker_KittyKeyboardStack(t *testing.T) {
 		{name: "a query is not state", input: "\x1b[?u"},
 		// kitty takes at most two parameters for a set and ignores more.
 		{name: "a set with a third parameter is ignored", input: "\x1b[=1;1;1u"},
+		// kitty keeps the low seven bits of the 32-bit number it is given
+		// (val & 0x7f), and the replay is what it holds.
+		{name: "flags past seven bits keep the low seven", input: "\x1b[>255u", wantSnapshot: "\x1b[>127u", wantRestore: "\x1b[<1u"},
+		{name: "flags past an int32 keep their low bits too", input: "\x1b[>2147483648u", wantSnapshot: "\x1b[>0u", wantRestore: "\x1b[<1u"},
+		{name: "and so does a set", input: "\x1b[=4294967169u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		// Only an omitted count is one; kitty pops nothing for an explicit 0.
 		{name: "a pop of zero pops nothing", input: "\x1b[>1u\x1b[<0u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
 		{name: "a bare CSI u restores the cursor and is not kitty", input: "\x1b[u"},

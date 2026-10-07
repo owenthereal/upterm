@@ -575,7 +575,7 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 	stack := m.keys()
 	switch params[0] {
 	case '>':
-		flags, ok := csiNumber(params[1:], 0)
+		flags, ok := kittyFlags(params[1:])
 		if !ok {
 			return
 		}
@@ -594,7 +594,7 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 			// kitty takes at most two parameters for a set and ignores more.
 			return
 		}
-		flags, ok := csiNumber(fields[0], 0)
+		flags, ok := kittyFlags(fields[0])
 		if !ok {
 			return
 		}
@@ -658,7 +658,8 @@ func (m *ModeTracker) xtmodkeys(params []byte) {
 // it. kitty takes a pop's count as a uint32, and a 32-bit client must track a
 // stream as a 64-bit one does. Past the largest int32 it is the largest int32,
 // on every build, so every build tracks it alike: a count that large is past
-// any stack's depth, and flags that wide are bits no terminal defines.
+// any stack's depth. kitty's flags, whose low bits matter however wide the
+// number, are read by kittyFlags instead.
 func csiNumber(field []byte, def int) (int, bool) {
 	if len(field) == 0 {
 		return def, true
@@ -671,6 +672,31 @@ func csiNumber(field []byte, def int) (int, bool) {
 		return math.MaxInt32, true
 	}
 	return int(n), true
+}
+
+// kittyFlagMask is the bits of a flags value kitty keeps
+// (screen_push_key_encoding_flags and screen_set_key_encoding_flags: val &
+// 0x7f).
+const kittyFlagMask = 0x7f
+
+// kittyFlags parses a kitty flags parameter as kitty does: a 32-bit number of
+// which it keeps the low seven bits, so the replay is what the session's
+// terminal holds. Masked before it is narrowed, so a number past an int32 keeps
+// the bits kitty reads rather than becoming csiNumber's largest int32.
+func kittyFlags(field []byte) (int, bool) {
+	if len(field) == 0 {
+		return 0, true
+	}
+	n, err := strconv.ParseUint(string(field), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	flags := n & kittyFlagMask
+	// The mask is the bound; this states it where the conversion can see it.
+	if flags > kittyFlagMask {
+		return 0, false
+	}
+	return int(flags), true
 }
 
 // kittyPushes is the stack's replayed entries as pushes, bottom first, which
