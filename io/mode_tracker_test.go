@@ -813,19 +813,24 @@ func Test_ModeTracker_ModifyOtherKeys(t *testing.T) {
 		{name: "a reset with no value", input: "\x1b[>4;2m\x1b[>4m"},
 		{name: "a reset of every resource", input: "\x1b[>4;2m\x1b[>m"},
 		// Disabling is xterm's resource value -1, which no XTMODKEYS set can
-		// spell; off, like an explicit 0, and as far from initial.
-		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n", wantSnapshot: "\x1b[>4;0m", wantRestore: "\x1b[>4m"},
+		// spell, so it is replayed as itself.
+		{name: "XTMODKEYS disable", input: "\x1b[>4;2m\x1b[>4n", wantSnapshot: "\x1b[>4n", wantRestore: "\x1b[>4m"},
 		// xterm's colon form: a subparameter on the resource is a mask of
 		// modifiers to leave out of the encoding, and is replayed with it.
 		{name: "a mask and a level", input: "\x1b[>4:1;2m", wantSnapshot: "\x1b[>4:1;2m", wantRestore: "\x1b[>4m"},
 		{name: "a mask alone", input: "\x1b[>4:1m", wantSnapshot: "\x1b[>4:1m", wantRestore: "\x1b[>4m"},
 		{name: "a reset clears the mask", input: "\x1b[>4:1;2m\x1b[>4m"},
 		{name: "a level without a mask clears it", input: "\x1b[>4:1;2m\x1b[>4;1m", wantSnapshot: "\x1b[>4;1m", wantRestore: "\x1b[>4m"},
-		{name: "a mask that is not one number is ignored", input: "\x1b[>4:1:2;2m"},
+		// xterm's own parser takes the mask on the value; its documentation
+		// puts it on the resource. Either is replayed as it was written.
+		{name: "a mask on the value", input: "\x1b[>4;2:1m", wantSnapshot: "\x1b[>4;2:1m", wantRestore: "\x1b[>4m"},
+		{name: "a field of more than one subparameter is ignored", input: "\x1b[>4:1:2;2m"},
 		{name: "another resource is not this one", input: "\x1b[>1;2m"},
 		{name: "SGR underline is not XTMODKEYS", input: "\x1b[4m\x1b[4;2m"},
 		{name: "RIS resets it", input: "\x1b[>4;2m\x1bc"},
-		{name: "DECSTR does not", input: "\x1b[>4;2m\x1b[!p", wantSnapshot: "\x1b[>4;2m", wantRestore: "\x1b[>4m"},
+		// xterm's soft reset puts the key modifiers back to their initial
+		// values, mask and all, as its hard reset does.
+		{name: "DECSTR resets it", input: "\x1b[>4:1;2m\x1b[!p"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewModeTracker()

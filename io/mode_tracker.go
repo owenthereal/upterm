@@ -28,10 +28,6 @@ const maxStringBytes = 4096
 // terminal, though, so the stack's full depth is counted apart; see keyStack.
 const kittyStackDepth = 8
 
-// modifyOtherKeysInitial is modifyOtherKeys while it is at the terminal's
-// initial value, whatever that is.
-const modifyOtherKeysInitial = -1
-
 // keyStack is one screen's kitty keyboard stack: depth entries in all, of
 // which the newest, up to kittyStackDepth, are kept for replay, bottom first.
 // A terminal holds at most depth of them -- fewer when its stack is shallower
@@ -154,16 +150,16 @@ type ModeTracker struct {
 	mainKeys keyStack
 	altKeys  keyStack
 
-	// modifyOtherKeys is xterm's modifyOtherKeys level, the older way of
-	// asking for keys a terminal otherwise folds together, or
-	// modifyOtherKeysInitial while nothing has set it. An explicit 0 is not
-	// the initial value: xterm's resource may make that something else, and
-	// only a reset without a value goes back to it.
-	modifyOtherKeys int
-	// modifyOtherKeysMask is the subparameter of xterm's colon form, CSI > 4 :
-	// mask ; level m: modifiers to leave out of the encoding, kept verbatim
-	// for the replay. Empty when the last XTMODKEYS for it had none.
-	modifyOtherKeysMask []byte
+	// modifyOtherKeys is the last sequence that moved xterm's modifyOtherKeys
+	// -- the older way of asking for keys a terminal otherwise folds together
+	// -- off its initial value, verbatim, or nil while it is there. Kept as
+	// written rather than as a level because the level is not all of it: an
+	// explicit 0 is not the initial value, which xterm's resource may make
+	// something else; CSI > 4 n is a value no level spells; and a mask may
+	// ride on the resource, as xterm's documentation has it, or on the value,
+	// as its parser does. A joiner replayed the same bytes does whatever the
+	// session's own terminal did with them.
+	modifyOtherKeys []byte
 
 	// partial is the raw bytes of the sequence the parser is currently
 	// inside, ESC included. The tracker is fed the ring's evictions, so the
@@ -215,7 +211,7 @@ const (
 )
 
 func NewModeTracker() *ModeTracker {
-	return &ModeTracker{decPrivate: map[int]bool{}, modifyOtherKeys: modifyOtherKeysInitial}
+	return &ModeTracker{decPrivate: map[int]bool{}}
 }
 
 // bufferedBytes reports the parser's current accumulation: both the CSI
@@ -434,8 +430,7 @@ func (m *ModeTracker) resetToDefaults() {
 	m.charsetG0 = nil
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
-	m.modifyOtherKeys = modifyOtherKeysInitial
-	m.modifyOtherKeysMask = nil
+	m.modifyOtherKeys = nil
 }
 
 // softResetModes are the tracked DEC private modes DECSTR returns to their
@@ -465,6 +460,10 @@ func (m *ModeTracker) softReset() {
 	// The protocol is kitty's, so its reset is the one to follow here.
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
+	// And xterm's puts the key modifiers back to their initial values, mask
+	// and all (ReallyReset's modify_now and ignore_now, outside its "full"
+	// branch).
+	m.modifyOtherKeys = nil
 }
 
 // altScreenModes are the DEC private modes that put the alternate screen
@@ -539,11 +538,9 @@ func (m *ModeTracker) finishCSI(final byte) {
 		}
 	case 'n':
 		// XTMODKEYS's other form: CSI > 4 n disables modifyOtherKeys, which
-		// is xterm's resource value -1. No XTMODKEYS set can spell that, and
-		// it is off, so it is kept as an explicit 0.
+		// is xterm's resource value -1, and no CSI > 4 ; v m can spell it.
 		if string(params) == ">4" {
-			m.modifyOtherKeys = 0
-			m.modifyOtherKeysMask = nil
+			m.modifyOtherKeys = []byte("\x1b[>4n")
 		}
 	}
 }
@@ -611,37 +608,34 @@ func (m *ModeTracker) kittyKeyboard(params []byte) {
 // xtmodkeys applies XTMODKEYS, CSI > resource ; value m, of which only
 // modifyOtherKeys, resource 4, is tracked. A value left out -- vim leaves with
 // CSI > 4 ; m -- resets it to the initial value, as does a sequence that names
-// no resource at all.
+// no resource at all; anything else is kept verbatim (see modifyOtherKeys).
+// Each field may carry one subparameter, a mask; a field that is not a number,
+// or one with more than one subparameter, makes the sequence one xterm ignores
+// too.
 func (m *ModeTracker) xtmodkeys(params []byte) {
 	if len(params) == 0 {
-		m.modifyOtherKeys = modifyOtherKeysInitial
-		m.modifyOtherKeysMask = nil
+		m.modifyOtherKeys = nil
 		return
 	}
 	fields := bytes.Split(params, []byte{';'})
-	// xterm's colon form puts a mask on the resource: CSI > 4 : mask m.
-	resource, mask, _ := bytes.Cut(fields[0], []byte{':'})
+	resource, resourceMask, _ := bytes.Cut(fields[0], []byte{':'})
 	if n, ok := csiNumber(resource, -1); !ok || n != 4 {
 		return
 	}
-	if _, ok := csiNumber(mask, 0); !ok {
-		return
-	}
-	level := modifyOtherKeysInitial
+	var value, valueMask []byte
 	if len(fields) > 1 {
-		var ok bool
-		if level, ok = csiNumber(fields[1], modifyOtherKeysInitial); !ok {
+		value, valueMask, _ = bytes.Cut(fields[1], []byte{':'})
+	}
+	for _, part := range [][]byte{resourceMask, value, valueMask} {
+		if _, ok := csiNumber(part, 0); !ok {
 			return
 		}
 	}
-	m.modifyOtherKeys = level
-	m.modifyOtherKeysMask = append(m.modifyOtherKeysMask[:0], mask...)
-}
-
-// modifyOtherKeysSet reports whether anything has moved modifyOtherKeys off
-// its initial value: a level, or a mask.
-func (m *ModeTracker) modifyOtherKeysSet() bool {
-	return m.modifyOtherKeys != modifyOtherKeysInitial || len(m.modifyOtherKeysMask) > 0
+	if len(resourceMask) == 0 && len(value) == 0 && len(valueMask) == 0 {
+		m.modifyOtherKeys = nil
+		return
+	}
+	m.modifyOtherKeys = append(append(append(m.modifyOtherKeys[:0], "\x1b[>"...), params...), 'm')
 }
 
 // csiNumber parses one CSI parameter: def when it is empty, and not ok when it
@@ -784,7 +778,7 @@ func (m *ModeTracker) Restore() []byte {
 	}
 
 	out = kittyPop(out, m.mainKeys)
-	if m.modifyOtherKeysSet() {
+	if m.modifyOtherKeys != nil {
 		out = append(out, "\x1b[>4m"...)
 	}
 
@@ -841,17 +835,7 @@ func (m *ModeTracker) Snapshot() []byte {
 		}
 	}
 	out = kittyPushes(out, m.mainKeys)
-	if m.modifyOtherKeysSet() {
-		out = append(out, "\x1b[>4"...)
-		if len(m.modifyOtherKeysMask) > 0 {
-			out = append(out, ':')
-			out = append(out, m.modifyOtherKeysMask...)
-		}
-		if m.modifyOtherKeys != modifyOtherKeysInitial {
-			out = fmt.Appendf(out, ";%d", m.modifyOtherKeys)
-		}
-		out = append(out, 'm')
-	}
+	out = append(out, m.modifyOtherKeys...)
 	if !m.altActive() && len(m.altKeys.entries) > 0 {
 		// The alternate screen's stack, kept while the normal screen shows,
 		// replayed on a trip there and back; see Restore.
