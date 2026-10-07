@@ -391,8 +391,8 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	// The worst case is both screen buffers carrying margins and a full kitty
 	// keyboard stack, so the normal screen's are set before the modes switch
 	// to the alternate one. The widest flags are the widest number a CSI's
-	// parameters can hold and still parse -- an int's, on whatever this is.
-	widest := strconv.Itoa(math.MaxInt)
+	// parameters can hold and still parse: an unsigned 32-bit one.
+	widest := strconv.FormatUint(math.MaxUint32, 10)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
 	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
@@ -861,4 +861,54 @@ func Test_ModeTracker_KeyboardStateOrder(t *testing.T) {
 	require.Equal(t,
 		"\x1b[<1u"+"\x1b[?1049l"+"\x1b[r"+"\x1b[?2004l"+"\x1b[<1u"+"\x1b[>4m"+"\x1b(B",
 		string(m.Restore()))
+}
+
+// A C0 control inside a CSI is executed where it stands, and the CSI goes on:
+// the DEC parser's "execute" in its CSI states, which kitty follows too. A BEL
+// or a backspace there is not one of the sequence's parameters, and nor is
+// DEL, which the parser ignores.
+func Test_ModeTracker_EmbeddedControlInACSI(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantSnapshot string
+		wantRestore  string
+	}{
+		{name: "a DEC mode", input: "\x1b[?10\x0749h", wantSnapshot: "\x1b[?1049h", wantRestore: "\x1b[?1049l"},
+		{name: "a kitty push", input: "\x1b[>1\x08u", wantSnapshot: "\x1b[>1u", wantRestore: "\x1b[<1u"},
+		{name: "DEL", input: "\x1b[?20\x7f04h", wantSnapshot: "\x1b[?2004h", wantRestore: "\x1b[?2004l"},
+		{
+			// A joiner is not made to execute it again.
+			name:         "in the sequence the stream stopped inside",
+			input:        "\x1b[?10\x07",
+			wantSnapshot: "\x1b[?10",
+			wantRestore:  "\x18",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.input))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSnapshot, string(m.Snapshot()), "snapshot")
+			require.Equal(t, tc.wantRestore, string(m.Restore()), "restore")
+		})
+	}
+}
+
+// CSI parameters are read at the protocols' width, an unsigned 32-bit number,
+// whatever an int is on the build: kitty takes a pop's count as a uint32, and
+// a 32-bit client must track the same stream a 64-bit one does.
+func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
+	n, ok := csiNumber([]byte("4294967295"), 0)
+	require.True(t, ok, "the widest unsigned 32-bit number")
+	require.Equal(t, int(min(uint64(math.MaxUint32), uint64(math.MaxInt))), n, "clamped to an int on a 32-bit build")
+
+	_, ok = csiNumber([]byte("4294967296"), 0)
+	require.False(t, ok, "past it")
+
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[>1u\x1b[>2u\x1b[<4294967295u"))
+	require.NoError(t, err)
+	require.Empty(t, m.Snapshot(), "a pop past any depth empties the stack")
+	require.Empty(t, m.Restore())
 }

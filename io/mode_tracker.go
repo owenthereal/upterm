@@ -3,6 +3,7 @@ package io
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 )
@@ -315,6 +316,15 @@ func (m *ModeTracker) step(b byte) {
 			m.state = msEsc
 			m.reset()
 			m.openPartial()
+			return
+		}
+		if b < 0x20 || b == 0x7f {
+			// A C0 control inside a CSI is executed where it stands and the
+			// CSI goes on -- the DEC parser's "execute" in its CSI states,
+			// which kitty follows too -- and DEL is ignored there. Neither
+			// is one of the sequence's parameters, and neither is replayed
+			// with it: the session's terminal has already acted on it. ESC,
+			// CAN and SUB, which end a CSI, are handled before this.
 			return
 		}
 		if len(m.seq) >= maxSequenceBytes {
@@ -642,18 +652,22 @@ func (m *ModeTracker) xtmodkeys(params []byte) {
 	m.modifyOtherKeys = append(append(append(m.modifyOtherKeys[:0], "\x1b[>"...), params...), 'm')
 }
 
-// csiNumber parses one CSI parameter: def when it is empty, and not ok when it
-// is not a number a terminal would take -- negative, too wide, or with
-// anything else in it.
+// csiNumber parses one CSI parameter at the protocols' own width, an unsigned
+// 32-bit number, whatever an int is on this build: def when it is empty, and
+// not ok when it is not one -- negative, too wide, or with anything else in
+// it. kitty takes a pop's count as a uint32, and a 32-bit client must track a
+// stream as a 64-bit one does. Past an int's range, on a 32-bit build, it is
+// the largest int, which every use here treats alike: a count past any stack's
+// depth, or flags whose low bits -- the only ones kitty keeps -- are the same.
 func csiNumber(field []byte, def int) (int, bool) {
 	if len(field) == 0 {
 		return def, true
 	}
-	n, err := strconv.Atoi(string(field))
-	if err != nil || n < 0 {
+	n, err := strconv.ParseUint(string(field), 10, 32)
+	if err != nil {
 		return 0, false
 	}
-	return n, true
+	return int(min(n, uint64(math.MaxInt))), true
 }
 
 // kittyPushes is the stack's replayed entries as pushes, bottom first, which
