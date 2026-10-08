@@ -20,9 +20,11 @@ import (
 // its Setsize changes nothing.
 //
 // onResize is called with every size the pty applies: the initial size once,
-// before startPty returns, and the size each successful Setsize applies, the
-// same size again included, which the fan-out ignores. Nil for a forced
-// command's pty and for a pinned session's: see command.Start.
+// before startPty returns, and each Setsize's size just before the resize, so
+// that the command's repaint is counted at it (the same size again included,
+// which the fan-out ignores). A resize that fails is followed by the size the
+// pty kept. Nil for a forced command's pty and for a pinned session's: see
+// command.Start.
 func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
@@ -119,6 +121,9 @@ type pty struct {
 	*os.File
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
+
+	// setWinsize is TIOCSWINSZ unless a test has made it fail.
+	setWinsize func(fd int, ws *unix.Winsize) error
 	// onResize hears of each size Setsize applies; see startPty. Nil reports
 	// nothing.
 	onResize func(termsize.Size)
@@ -143,9 +148,38 @@ func (pty *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	setWinsize := pty.setWinsize
+	if setWinsize == nil {
+		setWinsize = func(fd int, ws *unix.Winsize) error {
+			return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, ws)
+		}
+	}
 	err := pty.control(func(fd uintptr) error {
-		return unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ,
-			&unix.Winsize{Row: uint16(h), Col: uint16(w)})
+		// Reported before the ioctl, not after it. The ioctl is what sends
+		// the command SIGWINCH, and a command that repaints at once can have
+		// its repaint in the fan-out before the ioctl returns: reported after,
+		// that repaint counts as drawn at the old size, and a joiner at the
+		// new one is replayed without it. Reported before, the error goes the
+		// other way, and is one the command repairs: output already on its
+		// way at the old size counts as the new, and the repaint that follows
+		// draws over it.
+		//
+		// So the size it had is read first, to put back if the ioctl fails:
+		// the fan-out must not go on counting output at a size the command
+		// was never told. A pty whose size cannot be read is not one the
+		// ioctl will resize either, and reports nothing.
+		before, getErr := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ)
+		report := getErr == nil && pty.onResize != nil
+		if report {
+			pty.onResize(termsize.Size{Cols: w, Rows: h})
+		}
+		if err := setWinsize(int(fd), &unix.Winsize{Row: uint16(h), Col: uint16(w)}); err != nil {
+			if report {
+				pty.onResize(termsize.Size{Cols: int(before.Col), Rows: int(before.Row)})
+			}
+			return err
+		}
+		return nil
 	})
 	if errors.Is(err, os.ErrClosed) {
 		// A resize that lost the race with the end of the session is nothing
@@ -153,16 +187,7 @@ func (pty *pty) Setsize(h, w int) error {
 		// pty either (pty_windows.go's Setsize).
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	// Reported only once the ioctl has applied it: the fan-out weighs a
-	// joiner's replay against this, and a size the command was never told
-	// would weigh it against a geometry nothing was drawn at.
-	if pty.onResize != nil {
-		pty.onResize(termsize.Size{Cols: w, Rows: h})
-	}
-	return nil
+	return err
 }
 
 // Redraw nudges the foreground process group with SIGWINCH, the signal a

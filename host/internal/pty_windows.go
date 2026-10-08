@@ -26,9 +26,11 @@ var (
 // startPty starts a PTY for the given command on Windows using ConPTY.
 //
 // onResize is called with every size the pty applies: the initial size once,
-// before startPty returns, and the size each successful Setsize applies, the
-// same size again included, which the fan-out ignores. Nil for a forced
-// command's pty and for a pinned session's: see command.Start.
+// before startPty returns, and each Setsize's size just before the resize, so
+// that the command's repaint is counted at it (the same size again included,
+// which the fan-out ignores). A resize that fails is followed by the size the
+// pty kept. Nil for a forced command's pty and for a pinned session's: see
+// command.Start.
 func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
@@ -123,7 +125,19 @@ func (p *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	// Reported before the resize, not after it, for the reason the Unix
+	// pty's Setsize gives: a console program repaints on the resize event,
+	// and a repaint that reached the fan-out ahead of the report would count
+	// as drawn at the old size. Put back if the resize fails, so the fan-out
+	// does not go on counting output at a size the program was never given.
+	before := termsize.Size{Cols: int(p.lastW.Load()), Rows: int(p.lastH.Load())}
+	if p.onResize != nil {
+		p.onResize(termsize.Size{Cols: w, Rows: h})
+	}
 	if err := p.cpty.Resize(w, h); err != nil {
+		if p.onResize != nil {
+			p.onResize(before)
+		}
 		return err
 	}
 	// Recorded only once the ConPTY is actually at this size: Redraw comes
@@ -131,12 +145,6 @@ func (p *pty) Setsize(h, w int) error {
 	// the nudge a resize rather than a round-trip.
 	p.lastH.Store(int32(h))
 	p.lastW.Store(int32(w))
-	// Reported for the same reason, and only here: the fan-out weighs a
-	// joiner's replay against this, and a size the command was never told
-	// would weigh it against a geometry nothing was drawn at.
-	if p.onResize != nil {
-		p.onResize(termsize.Size{Cols: w, Rows: h})
-	}
 	return nil
 }
 
