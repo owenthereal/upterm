@@ -383,7 +383,7 @@ func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
 		return t.snapshotAfter(t.buffer.Data()), nil
 	}
 
-	// Back from the pty's size, over every size j fits.
+	// Walk back from the pty's size while j fits each earlier size.
 	k := n - 1
 	for k > 0 && fits(t.boundaries[k-1].size, j) {
 		k--

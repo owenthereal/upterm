@@ -1134,9 +1134,12 @@ func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
 }
 
 // A resize reported just before a join counts for it, with nothing written
-// since: the joiner is weighed against the size the pty is now. A 60x30
-// joiner fits the 45x30 the ring's newest bytes were recorded at, but not the
-// 80x24 the pty is now, so it gets none of the ring.
+// since: the joiner is weighed against the size the pty is now, and nothing
+// has been recorded at that size yet. A 60x30 joiner fits the 45x30 the
+// ring's newest bytes were recorded at, but not the 80x24 the pty is now, so
+// it gets none of the ring. A 100x25 joiner fits 80x24 but not 45x30, which is
+// too tall for it, so it gets none of the ring either: nothing it fits was
+// recorded after the bytes it doesn't.
 func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
@@ -1145,9 +1148,11 @@ func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T)
 	_, _ = w.Write([]byte("after"))
 	w.Resized(at80x24)
 
-	var got bytes.Buffer
-	require.NoError(t, w.AppendSized(termsize.Size{Cols: 60, Rows: 30}, &got))
-	require.Equal(t, "\x1b[?1049h", got.String())
+	for _, j := range []termsize.Size{{Cols: 60, Rows: 30}, {Cols: 100, Rows: 25}} {
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.Equal(t, "\x1b[?1049h", got.String(), "a %v joiner", j)
+	}
 }
 
 // A resize and a resize back, with nothing written between them, leave the
