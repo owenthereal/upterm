@@ -259,7 +259,17 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	// held, promising that an update never blocks. That holds only because
 	// Resized never waits on the fan-out's write lock, which a primary client
 	// whose terminal has stopped can hold indefinitely.
-	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize, c.writers.Resized)
+	//
+	// A pinned pty tells the fan-out nothing, so every joiner gets the whole
+	// ring, as Append gives it. A joiner smaller than the pty is denied the
+	// ring because its arrival shrinks the pty and the command repaints at its
+	// size; a pinned pty never shrinks, so that repaint never comes, and on
+	// Windows a pinned pty is not even nudged to redraw.
+	var onResize func(termsize.Size)
+	if !c.pinPtySize {
+		onResize = c.writers.Resized
+	}
+	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize, onResize)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

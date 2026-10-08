@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -53,4 +54,18 @@ func TestAGuestAtLeastAsBigAsThePtyGetsTheRing(t *testing.T) {
 			readUntil(t, guest, "RING-MARK")
 		})
 	}
+}
+
+// A pinned pty never shrinks to a smaller guest, so the command never repaints
+// at the guest's size, and withholding the ring would leave the guest nothing
+// to see until the command next draws. It gets the ring, as every joiner did
+// before.
+func TestAGuestOfAPinnedSessionGetsTheRing(t *testing.T) {
+	h := startHost(t, &Server{Command: repaintsOnWinch, PtySize: termsize.Size{Cols: 100, Rows: 30}, PinPtySize: true})
+
+	_, viewer, _ := h.connectHost(t, nil)
+	readUntil(t, viewer, "RING-MARK")
+
+	_, guest := h.connectGuest(t, withGuestPty(45, 30))
+	readUntil(t, guest, "RING-MARK")
 }
