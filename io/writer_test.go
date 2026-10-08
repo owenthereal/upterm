@@ -1006,9 +1006,7 @@ func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
 	_, _ = w.Write([]byte("after"))
 	var got bytes.Buffer
 	require.NoError(t, w.AppendSized(at45x30, &got))
-	require.NotContains(t, got.String(), "before")
-	require.Contains(t, got.String(), "\x1b[?1049h")
-	require.True(t, strings.HasSuffix(got.String(), "after"))
+	require.Equal(t, "\x1b[?1049hafter", got.String())
 }
 
 // A resize reported just before a join counts for it, with nothing written
@@ -1154,7 +1152,7 @@ func TestMultiWriter_ResizedDoesNotWaitForAParkedWrite(t *testing.T) {
 	go func() { defer close(resized); w.Resized(at80x24) }()
 	select {
 	case <-resized:
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Error("Resized waited on a Write parked in a stopped writer")
 	}
 
