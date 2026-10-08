@@ -303,10 +303,13 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 
 	// The smaller terminal takes the session down to its own size: the pty is
 	// sized to the smallest terminal watching it. Smaller than the pty as it
-	// joins, it is replayed none of the ring, so what it reads first is the
-	// repaint at its own size.
+	// joins, it is replayed none of the ring, so it never sees the READY that
+	// A read. It reads on to the size the command prints once the pty has
+	// shrunk to it, which need not be the first size it reads: the nudge A's
+	// own arrival sent can be answered after B has joined.
 	_, bOut, bSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
-	readUntil(t, bOut, "24 80")
+	got := readUntil(t, bOut, "24 80")
+	require.NotContains(t, got, "READY", "a terminal smaller than the pty must not be replayed the ring")
 	readUntil(t, aOut, "24 80")
 
 	// And leaving gives it back. B's output is drained from here on, so its
@@ -335,10 +338,13 @@ func TestAGuestsArrivingSizeConstrainsTheSession(t *testing.T) {
 	readUntil(t, aOut, "READY")
 
 	// The harness's guest asks for 80x24 and never resizes. Smaller than the
-	// pty as it joins, it is replayed none of the ring, so what it reads first
-	// is the repaint at its own size.
+	// pty as it joins, it is replayed none of the ring, so it never sees the
+	// READY that A read. It reads on to the size the command prints once the
+	// pty has shrunk to it, which need not be the first size it reads: the
+	// nudge A's own arrival sent can be answered after the guest has joined.
 	_, gOut := h.connectGuest(t)
-	readUntil(t, gOut, "24 80")
+	got := readUntil(t, gOut, "24 80")
+	require.NotContains(t, got, "READY", "a guest smaller than the pty must not be replayed the ring")
 	readUntil(t, aOut, "24 80")
 }
 
