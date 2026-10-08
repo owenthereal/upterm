@@ -1,6 +1,7 @@
 package io
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"strconv"
@@ -917,4 +918,57 @@ func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, m.Snapshot(), "a pop past any depth empties the stack")
 	require.Empty(t, m.Restore())
+}
+
+// A sized join works out the snapshot as of a later point in the ring from a
+// clone, fed the ring's bytes up to it. The tracker it was cloned from has to
+// go on describing the ring's first byte, so nothing the clone is fed may
+// reach it: not through the mode map, not through a key stack's entries,
+// which a kitty set rewrites in place, and not through modifyOtherKeys, which
+// an XTMODKEYS rewrites in place too.
+func TestModeTracker_CloneIsIndependent(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?2004h\x1b[>1u\x1b[>4;1m"))
+	require.NoError(t, err)
+	snapshot, restore := string(m.Snapshot()), string(m.Restore())
+
+	c := m.Clone()
+	_, err = c.Write([]byte("\x1b[?2004l\x1b[=3u\x1b[>4;2m\x1b[?1049h\x1b[>5u"))
+	require.NoError(t, err)
+
+	require.Equal(t, snapshot, string(m.Snapshot()), "the original's snapshot")
+	require.Equal(t, restore, string(m.Restore()), "the original's restore")
+	require.Equal(t, "\x1b[>3u\x1b[>4;2m\x1b[?1049h\x1b[>5u", string(c.Snapshot()), "the clone's snapshot")
+	require.Equal(t, "\x1b[<1u\x1b[?1049l\x1b[<1u\x1b[>4m", string(c.Restore()), "the clone's restore")
+}
+
+// The partial is the case a sized join meets. The ring's eviction cut an OSC
+// in two, so the tracker holds its head as the partial; the snapshot of a
+// joiner a redraw in the ring doesn't fit comes from a clone fed the whole
+// ring, which finishes the OSC and starts the sequence after it. The parser
+// reuses the partial's array from one sequence to the next, so with the array
+// shared, that next sequence would be written over the head the tracker still
+// holds, and every Append after the join would be replayed it in place of the
+// start of the title.
+func TestModeTracker_ACloneFedTheRingLeavesTheTrackersPartialAlone(t *testing.T) {
+	const title = "\x1b]0;a-title-the-ring-cut\a"
+	w := NewMultiWriter(16)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte(title))
+	// Evicts all of the title but its last five bytes: the tracker's
+	// partial is "\x1b]0;a-title-the-ring". The cursor-up makes the ring a
+	// redraw recorded wider than the joiner below.
+	_, _ = w.Write([]byte("\x1b[?2004h\x1b[A"))
+
+	var before bytes.Buffer
+	require.NoError(t, w.Append(&before))
+	require.Equal(t, title+"\x1b[?2004h\x1b[A", before.String())
+
+	var sized bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &sized))
+	require.Equal(t, "\x1b[?2004h", sized.String())
+
+	var after bytes.Buffer
+	require.NoError(t, w.Append(&after))
+	require.Equal(t, before.String(), after.String(), "an Append after the sized join")
 }

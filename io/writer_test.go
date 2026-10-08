@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -957,4 +958,596 @@ func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
+}
+
+var (
+	at80x24  = termsize.Size{Cols: 80, Rows: 24}
+	at45x30  = termsize.Size{Cols: 45, Rows: 30}
+	at200x50 = termsize.Size{Cols: 200, Rows: 50}
+)
+
+// A joiner at least as big as the pty gets what Append gives it.
+func TestMultiWriter_AppendSizedReplaysTheRingToAJoinerItFits(t *testing.T) {
+	for _, j := range []termsize.Size{at80x24, {Cols: 200, Rows: 50}} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at80x24)
+		_, _ = w.Write([]byte("\x1b[?2004hline one\r\nline two\r\n\x1b[A"))
+		var got, want bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.NoError(t, w.Append(&want))
+		require.Equal(t, want.String(), got.String(), "a %v joiner", j)
+	}
+}
+
+// A redraw recorded wider or taller than the joiner, smaller in either
+// dimension: no ring, but the modes as they are now. The joiner is about to
+// shrink the pty and be repainted at its own size, and a redraw recorded wider
+// or taller than its terminal is what that repaint lands on top of. The
+// filter's pending lead-in is live output, so it still comes last.
+func TestMultiWriter_AppendSizedSkipsTheRingForASmallerJoiner(t *testing.T) {
+	for _, j := range []termsize.Size{at45x30, {Cols: 100, Rows: 20}} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at80x24)
+		_, _ = w.Write([]byte("\x1b[?2004htext\x1b[A"))
+		_, _ = w.Write([]byte("\x1b["))
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.Contains(t, got.String(), "\x1b[?2004h", "a %v joiner", j)
+		require.NotContains(t, got.String(), "text", "a %v joiner", j)
+		require.True(t, strings.HasSuffix(got.String(), "\x1b["), "a %v joiner gets the pending lead-in, got %q", j, got.String())
+	}
+}
+
+// 80x24 is wider than a 45x30 joiner, so it gets only the redraws recorded
+// since the resize to 45x30, behind the modes as of then.
+func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?1049hbefore\x1b[A"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("after\x1b[A"))
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "\x1b[?1049hafter\x1b[A", got.String())
+}
+
+// Output recorded before a growth renders the same at the larger size, because
+// nothing in it wrapped at the smaller one, so the replay reaches back over it.
+// This is the CI rejoin: the first guest's join grew the pty from 80x24, and a
+// guest joining after it still sees what was written before.
+func TestMultiWriter_AppendSizedReplaysAcrossAGrowth(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("pre \x1b[A"))
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("post\x1b[A"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "pre \x1b[Apost\x1b[A", got.String())
+}
+
+// The replay stops at a shrink, whatever the joiner's size: what was drawn at
+// 200x50 wrapped differently from what a 45x30 terminal saw, and the repaint
+// recorded at 45x30 moves the cursor relative to the screen as it wrapped
+// there, so a joiner bigger than both would see it laid over the wrong lines.
+// The snapshot carries the modes set before the shrink.
+func TestMultiWriter_AppendSizedStopsAtAShrink(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("\x1b[?1049hbig \x1b[A"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("small\x1b[A"))
+
+	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, at200x50} {
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.Equal(t, "\x1b[?1049hsmall\x1b[A", got.String(), "a %v joiner", j)
+	}
+
+	// The shrink still cuts the replay after the size grows back: each earlier
+	// size is weighed against the one after it, not against the newest, or the
+	// 45x30 repaint would be replayed over the unwrapped 200-column lines.
+	w = NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("a\x1b[A"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("b\x1b[A"))
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("c\x1b[A"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "b\x1b[Ac\x1b[A", got.String(), "a 200x50 joiner after the size grew back")
+}
+
+// Bytes written before the pty first reported a size are the ring's oldest, at
+// a size nobody knows. Plain, and with no redraw after them, their size does
+// not matter, and a replay that walks back to the oldest size takes them too.
+func TestMultiWriter_AppendSizedReachesBackToBytesWrittenBeforeAnySize(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	_, _ = w.Write([]byte("pre "))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("post"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "pre post", got.String())
+
+	// A redraw among them is one recorded at a size that may not fit the
+	// joiner, so the walk stops there.
+	w = NewMultiWriter(DefaultReplayBytes)
+	_, _ = w.Write([]byte("\x1b[Apre "))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("post"))
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "post", got.String(), "behind a redraw written before any size")
+
+	// And so does a redraw after them: plain as they are, nothing says they
+	// wrapped as the redraw's cursor moves assume.
+	w = NewMultiWriter(DefaultReplayBytes)
+	_, _ = w.Write([]byte("pre "))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[Apost"))
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "\x1b[Apost", got.String(), "ahead of a redraw")
+}
+
+// A shrink in rows alone stops the walk too: 80x40 is no wider than 80x24, but
+// it is taller, and a repaint at 24 rows addresses a screen that scrolled at 24
+// rows, not at 40.
+func TestMultiWriter_AppendSizedStopsAtAShrinkInRowsAlone(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(termsize.Size{Cols: 80, Rows: 40})
+	_, _ = w.Write([]byte("a\x1b[A"))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("b\x1b[A"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 80, Rows: 40}, &got))
+	require.Equal(t, "b\x1b[A", got.String(), "an 80x40 joiner")
+}
+
+// The replay reaches back over every growth, not just the newest size, and
+// stops at the first shrink.
+func TestMultiWriter_AppendSizedWalksBackOverGrowthOnly(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	for _, step := range []struct {
+		size termsize.Size
+		out  string
+	}{
+		{at80x24, "a\x1b[A"},
+		{at200x50, "b\x1b[A"},
+		{at45x30, "c\x1b[A"},
+		{termsize.Size{Cols: 120, Rows: 40}, "d\x1b[A"},
+	} {
+		w.Resized(step.size)
+		_, _ = w.Write([]byte(step.out))
+	}
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 120, Rows: 40}, &got))
+	require.Equal(t, "c\x1b[Ad\x1b[A", got.String(), "a 120x40 joiner")
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "c\x1b[Ad\x1b[A", got.String(), "a 200x50 joiner")
+
+	// Nothing but growth: a joiner that fits the newest gets all of it.
+	w = NewMultiWriter(DefaultReplayBytes)
+	for _, step := range []struct {
+		size termsize.Size
+		out  string
+	}{
+		{at80x24, "a\x1b[A"},
+		{termsize.Size{Cols: 120, Rows: 40}, "b\x1b[A"},
+		{at200x50, "c\x1b[A"},
+	} {
+		w.Resized(step.size)
+		_, _ = w.Write([]byte(step.out))
+	}
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "a\x1b[Ab\x1b[Ac\x1b[A", got.String(), "a 200x50 joiner")
+}
+
+// The fan-out remembers 64 sizes. Bytes recorded at a size it has forgotten
+// may have been recorded at any size, and whether they redraw is forgotten
+// with it, so they fit no joiner, however big, behind plain output or a redraw.
+// Each size is wider than the last, so only the cap ends the replay.
+func TestMultiWriter_BoundariesBeyondTheCapDoNotFit(t *testing.T) {
+	for _, redraw := range []string{"", "\x1b[A"} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		var out []string
+		for i := range 70 {
+			w.Resized(termsize.Size{Cols: 80 + i, Rows: 24})
+			p := string(rune('0'+i)) + redraw
+			out = append(out, p)
+			_, _ = w.Write([]byte(p))
+		}
+
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(at200x50, &got))
+		require.Equal(t, strings.Join(out[len(out)-64:], ""), got.String(), "each size's output ending %q", redraw)
+	}
+}
+
+// The sizes are forgotten as the ring forgets what was recorded at them. The
+// one the ring's first byte was recorded at stays, because it is that byte's
+// size; every one older is gone.
+func TestMultiWriter_BoundariesArePrunedAsTheRingEvicts(t *testing.T) {
+	// Four bytes at each of 20 sizes, 80 in all. A ring of 18 starts at
+	// offset 62, inside what was recorded from 60 on, the 16th size; one of
+	// 16 starts at 64, exactly where the 17th begins, so the 16th covers none
+	// of it.
+	for _, tc := range []struct{ ring, oldest int }{{18, 15}, {16, 16}} {
+		w := NewMultiWriter(tc.ring)
+		for i := range 20 {
+			w.Resized(termsize.Size{Cols: 80 + i%2, Rows: 24})
+			_, _ = w.Write([]byte("abcd"))
+		}
+
+		var want []boundary
+		for i := tc.oldest; i < 20; i++ {
+			want = append(want, boundary{offset: uint64(4 * i), size: termsize.Size{Cols: 80 + i%2, Rows: 24}})
+		}
+		require.Equal(t, want, w.boundaries, "a ring of %d", tc.ring)
+	}
+}
+
+// A size the pty took and left with nothing written at it covers no bytes, so
+// it is no size the walk back can stop at. Two guests joining before the
+// command writes anything leave one: the first guest's size is applied at the
+// second guest's join, and the second guest's size replaces it before
+// anything is written. 80x24 to 100x40 is growth, but 200x50 to 100x40 is a
+// shrink, and the 200x50 nothing was written at must not be the one weighed.
+func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
+	at100x40 := termsize.Size{Cols: 100, Rows: 40}
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("pre \x1b[A"))
+	w.Resized(at200x50)
+	require.NoError(t, w.AppendSized(at100x40, &bytes.Buffer{}))
+	w.Resized(at100x40)
+	_, _ = w.Write([]byte("post\x1b[A"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at100x40, &got))
+	require.Equal(t, "pre \x1b[Apost\x1b[A", got.String())
+}
+
+// A size applied at the join, reported just before it with nothing written
+// since, weighs nothing: nothing has been recorded at it yet. The joiner is
+// weighed against the redraw the ring's newest bytes are, at 45x30, not the
+// 80x24 the pty is now. A 60x30 joiner fits 45x30, though not 80x24, and gets
+// that redraw; the 80x24 redraw before it is wider, so the walk stops there.
+// A 100x25 joiner fits 80x24, but 45x30 is taller than it, and it gets none of
+// the ring.
+func TestMultiWriter_ASizeAppliedAtTheJoinWeighsNothing(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?1049hbefore\x1b[A"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("after\x1b[A"))
+	w.Resized(at80x24)
+
+	for _, tc := range []struct {
+		j    termsize.Size
+		want string
+	}{
+		{termsize.Size{Cols: 60, Rows: 30}, "\x1b[?1049hafter\x1b[A"},
+		{termsize.Size{Cols: 100, Rows: 25}, "\x1b[?1049h"},
+	} {
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(tc.j, &got))
+		require.Equal(t, tc.want, got.String(), "a %v joiner", tc.j)
+	}
+}
+
+// A resize and a resize back, with nothing written between them, leave the
+// ring recorded at one size throughout, and so does a resize to the size it
+// already is.
+func TestMultiWriter_ResizedToTheSameSizeIsNoBoundary(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("one\r\n"))
+	w.Resized(at45x30)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("two\r\n"))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("three\r\n"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "one\r\ntwo\r\nthree\r\n", got.String())
+	// Every size recorded here is 80x24, so the replay can't tell a boundary
+	// at an equal size from none. The list can, and each such boundary would
+	// take a place under the cap.
+	require.Equal(t, []boundary{{offset: 0, size: at80x24}}, w.boundaries)
+}
+
+// A report of a size that isn't one, with no columns or no rows, is ignored,
+// and the size reported before it still applies: an ssh -tt guest whose stdin
+// is not a terminal asks for a 0x0 window, and a resize to it reaches the
+// fan-out like any other. Joiners are weighed against 45x30: one that big gets
+// what was recorded since the resize to it, and one a column narrower only
+// the modes.
+func TestMultiWriter_ResizedIgnoresASizeThatIsNotOne(t *testing.T) {
+	for _, invalid := range []termsize.Size{{}, {Cols: 0, Rows: 24}} {
+		t.Run(invalid.String(), func(t *testing.T) {
+			w := NewMultiWriter(DefaultReplayBytes)
+			w.Resized(at80x24)
+			_, _ = w.Write([]byte("\x1b[?1049hbefore\x1b[A"))
+			w.Resized(at45x30)
+			w.Resized(invalid)
+			_, _ = w.Write([]byte("after\x1b[A"))
+
+			var fits, narrower bytes.Buffer
+			require.NoError(t, w.AppendSized(at45x30, &fits))
+			require.NoError(t, w.AppendSized(termsize.Size{Cols: 44, Rows: 30}, &narrower))
+			require.Equal(t, "\x1b[?1049hafter\x1b[A", fits.String(), "a 45x30 joiner")
+			require.Equal(t, "\x1b[?1049h", narrower.String(), "a 44x30 joiner")
+		})
+	}
+}
+
+// A boundary the ring has already evicted leaves the ring recorded at one
+// size throughout, so all of it is the replay.
+func TestMultiWriter_ABoundaryEvictedFromTheRingReplaysItWhole(t *testing.T) {
+	w := NewMultiWriter(16)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("01234567\x1b[A"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("\x1b[AabcdefghijklmnopqrstuvwxyzABCDEF"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "qrstuvwxyzABCDEF", got.String())
+}
+
+// A resize can land between any two bytes of output, including the two halves
+// of an escape sequence. The joiner still has to see the sequence whole.
+func TestMultiWriter_ABoundaryInsideASequenceReplaysItWhole(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?20"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("04hafter\x1b[A"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Contains(t, got.String(), "\x1b[?2004hafter")
+
+	// The query filter holds a CSI back until it has seen its end, so the
+	// boundary above falls before the sequence rather than inside the ring's
+	// copy of it. A charset designation is passed into the ring as soon as its
+	// "(" is seen, so here the boundary does split the ring's bytes, and the
+	// sequence's head is in the snapshot rather than in the replay.
+	w = NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b("))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("0after\x1b[A"))
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "\x1b(0after\x1b[A", got.String())
+}
+
+// A viewer has no terminal size, and a writer never resized has no size to
+// compare one with: either way the joiner gets the whole ring, as Append gives
+// it.
+func TestMultiWriter_AppendSizedWithoutASizeIsAppend(t *testing.T) {
+	never := NewMultiWriter(DefaultReplayBytes)
+	_, _ = never.Write([]byte("\x1b[?2004hnever resized\x1b[A"))
+	for _, j := range []termsize.Size{{}, at45x30, at80x24} {
+		var got, want bytes.Buffer
+		require.NoError(t, never.AppendSized(j, &got))
+		require.NoError(t, never.Append(&want))
+		require.Equal(t, want.String(), got.String(), "a %v joiner", j)
+	}
+
+	resized := NewMultiWriter(DefaultReplayBytes)
+	resized.Resized(at80x24)
+	_, _ = resized.Write([]byte("\x1b[?1049hbefore\x1b[A"))
+	resized.Resized(at45x30)
+	_, _ = resized.Write([]byte("after\x1b[A"))
+	var got, want bytes.Buffer
+	require.NoError(t, resized.AppendSized(termsize.Size{}, &got))
+	require.NoError(t, resized.Append(&want))
+	require.Equal(t, want.String(), got.String())
+	require.Contains(t, got.String(), "before")
+}
+
+// The pty reports a resize with terminalWindows's lock held, whose updates
+// promise never to block, while a Write parked in a stopped primary writer
+// can hold writeMu indefinitely.
+func TestMultiWriter_ResizedDoesNotWaitForAParkedWrite(t *testing.T) {
+	stuck := newBlockingWriter()
+	w := NewMultiWriter(DefaultReplayBytes)
+	require.NoError(t, w.Append(stuck))
+
+	wrote := make(chan struct{})
+	go func() { defer close(wrote); _, _ = w.Write([]byte("output")) }()
+	<-stuck.entered
+
+	resized := make(chan struct{})
+	go func() { defer close(resized); w.Resized(at80x24) }()
+	select {
+	case <-resized:
+	case <-time.After(2 * time.Second):
+		t.Error("Resized waited on a Write parked in a stopped writer")
+	}
+
+	close(stuck.release)
+	<-wrote
+	<-resized
+}
+
+// A sized join works out its snapshot from a copy of the tracker. The tracker
+// itself has to go on describing the ring's first byte, for every joiner after
+// this one and for the Append that a viewer still makes.
+func TestMultiWriter_SizedJoinsDoNotSpendTheTracker(t *testing.T) {
+	w := NewMultiWriter(16)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	// 16 more bytes push the bracketed paste out of the ring and into the
+	// tracker. A kitty push is in what stays, because unlike a mode it is not
+	// the same after being applied twice. The cursor-up makes the ring a
+	// redraw recorded wider than the joiners, so neither is replayed it.
+	_, _ = w.Write([]byte("\x1b[A\x1b[>1u\x1b[?1049h"))
+
+	var before bytes.Buffer
+	require.NoError(t, w.Append(&before))
+
+	var first, second bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &first))
+	require.NoError(t, w.AppendSized(at45x30, &second))
+	require.Equal(t, "\x1b[?2004h\x1b[>1u\x1b[?1049h", first.String())
+	require.Equal(t, first.String(), second.String())
+
+	var after bytes.Buffer
+	require.NoError(t, w.Append(&after))
+	require.Equal(t, before.String(), after.String())
+}
+
+// Plain output only wraps, and wraps afresh on whatever terminal it is
+// replayed onto, so a joiner of any size gets it: a narrower one too.
+func TestMultiWriter_PlainOutputReplaysToANarrowerJoiner(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("line one\r\nline two\r\n"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "line one\r\nline two\r\n", got.String())
+}
+
+// A redraw moves the cursor over lines as they wrapped where it was drawn.
+// Replayed onto a narrower terminal, where they wrap more, it lands on the
+// wrong ones, so a joiner it doesn't fit gets none of it.
+func TestMultiWriter_ARedrawReplaysToNoJoinerItDoesNotFit(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("frame\r\n\x1b[Aframe2"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Empty(t, got.String())
+}
+
+// What makes a stretch a redraw is vertical cursor movement, and only that:
+// the CSIs that move the cursor up or down, address a row, scroll, or set the
+// scrolling region, whatever their parameters, and reverse index. Moving along
+// a line, erasing, colouring, setting modes and titling a window leave it
+// plain, and a title that reads like a sequence is still a title. So does
+// restoring the cursor, which shells do within a row around a right-aligned
+// prompt part (see verticalFinals), and a kitty keyboard push, which shares
+// the restore's final byte.
+func TestMultiWriter_OnlyVerticalCursorMovementIsARedraw(t *testing.T) {
+	for _, seq := range []string{
+		"\x1b[A", "\x1b[2B", "\x1b[E", "\x1b[3F", "\x1b[H", "\x1b[5;10H",
+		"\x1b[5;10f", "\x1b[7d", "\x1b[S", "\x1b[2T", "\x1b[3;20r", "\x1b[?1;2r",
+		"\x1bM",
+	} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at200x50)
+		_, _ = w.Write([]byte("text" + seq))
+
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(at45x30, &got))
+		require.NotContains(t, got.String(), "text", "%q is a redraw", seq)
+	}
+
+	for _, seq := range []string{
+		"\r\n", "\x1b[5C", "\x1b[5D", "\x1b[5G", "\x1b[K", "\x1b[1;31m",
+		"\x1b[?25l", "\x1b(0", "\x1b]0;[A [H M\a", "\x1b]2;title\x1b\\",
+		"\x1b8", "\x1b[u", "\x1b[>1u",
+	} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at200x50)
+		_, _ = w.Write([]byte("text" + seq))
+
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(at45x30, &got))
+		require.Equal(t, "text"+seq, got.String(), "%q is plain", seq)
+	}
+}
+
+// The flow #626's E2E tests ran into. A backgrounded host terminal keeps the
+// pty at 200x24; a client attaching at 99x24 shrinks it and runs a command;
+// detaching, it leaves the stale viewer to grow the pty back. The shell's
+// output is plain, so the client re-attaching at 99x24 gets all of it, the
+// FIRST it watched being printed included.
+func TestMultiWriter_AShellsOutputReplaysPastAStaleWiderSize(t *testing.T) {
+	at200x24 := termsize.Size{Cols: 200, Rows: 24}
+	at99x24 := termsize.Size{Cols: 99, Rows: 24}
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x24)
+	_, _ = w.Write([]byte("$ "))
+	w.Resized(at99x24)
+	_, _ = w.Write([]byte("echo FIRST\r\nFIRST\r\n$ "))
+	w.Resized(at200x24)
+	_, _ = w.Write([]byte("\r$ "))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at99x24, &got))
+	require.Equal(t, "$ echo FIRST\r\nFIRST\r\n$ \r$ ", got.String())
+}
+
+// A redraw's cursor moves depend on how everything before it wrapped, plain
+// output included. Recorded at 45x30 after plain output at 200x50, its moves
+// assume lines that wrapped at 45 columns, and on a 200x50 joiner the wide
+// output above it doesn't wrap at all. So the walk takes the redraw, which
+// fits, and stops at the plain output, which doesn't fit the redraw's size.
+func TestMultiWriter_ARedrawConstrainsWhatPrecedesIt(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("wide "))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("\x1b[Anarrow"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "\x1b[Anarrow", got.String())
+}
+
+// Plain output after a redraw that doesn't fit the joiner is still replayed;
+// the walk stops at the redraw.
+func TestMultiWriter_PlainOutputAfterARedrawThatDoesNotFit(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("\x1b[Aframe"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("text"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "text", got.String())
+}
+
+// A sequence can arrive in two writes. The query filter holds a CSI back until
+// its final byte, so the ring receives the first whole; but it gives up on
+// parameters longer than it holds, and the second reaches the ring in two
+// halves. Either way the cursor moves up, and the stretch is a redraw.
+func TestMultiWriter_ARedrawSplitAcrossWritesIsARedraw(t *testing.T) {
+	for _, writes := range [][]string{
+		{"\x1b[", "Aframe"},
+		{"\x1b[" + strings.Repeat("0", 40), "1Aframe"},
+	} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at200x50)
+		for _, p := range writes {
+			_, _ = w.Write([]byte(p))
+		}
+
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(at45x30, &got))
+		require.Empty(t, got.String(), "written as %q", writes)
+	}
 }

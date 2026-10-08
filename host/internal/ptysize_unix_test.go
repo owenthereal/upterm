@@ -4,6 +4,7 @@ package internal
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -13,11 +14,12 @@ import (
 	ptylib "github.com/creack/pty"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -32,7 +34,7 @@ func Test_StartPty_AppliesInitialSize(t *testing.T) {
 
 func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, true)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, true, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -50,7 +52,7 @@ func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 
 func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -107,7 +109,7 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 	// disposition and kills the command, which on Linux leaves the parked
 	// write with nothing left to release it.
 	cmd := exec.Command("sh", "-c", "stty raw -echo; trap 'exec cat >/dev/null' USR1; printf READY; while :; do sleep 0.05; done")
-	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false, nil)
 	require.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -178,7 +180,7 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 // ignore a closed pty rather than reporting the ioctl's error.
 func Test_Pty_IoctlsOnAClosedPtyAreNotErrors(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -187,4 +189,98 @@ func Test_Pty_IoctlsOnAClosedPtyAreNotErrors(t *testing.T) {
 
 	require.NoError(t, p.Setsize(24, 80))
 	require.NoError(t, p.Redraw())
+}
+
+// TestPtyReportsTheSizesItApplies pins what the pty tells the fan-out about its
+// geometry: every size it applied, and nothing else. The fan-out weighs a
+// joiner's replay against the last size reported, so a size reported but never
+// applied -- a pinned pty's, a failed ioctl's, a closed pty's -- would decide a
+// replay against a geometry the command never drew at.
+func TestPtyReportsTheSizesItApplies(t *testing.T) {
+	recorder := func() (func(termsize.Size), *[]termsize.Size) {
+		var got []termsize.Size
+		return func(s termsize.Size) { got = append(got, s) }, &got
+	}
+
+	t.Run("applied", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(exec.Command("sleep", "5"), termsize.Size{Cols: 80, Rows: 24}, false, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}}, *got, "the initial size, before startPty returns")
+
+		require.NoError(t, p.Setsize(30, 100))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}}, *got)
+
+		require.NoError(t, p.Kill())
+		require.NoError(t, p.Close())
+		require.NoError(t, p.Setsize(40, 120))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}}, *got,
+			"a resize on a closed pty applies nothing")
+	})
+
+	// Before the ioctl, so that a command repainting on the SIGWINCH it sends
+	// has its repaint counted at the new size, not the old one.
+	t.Run("reported before it applies", func(t *testing.T) {
+		var f *pty
+		var seen []termsize.Size // the pty's own size as each Setsize reports
+		record := func(termsize.Size) {
+			if f == nil {
+				return // the initial size, reported inside startPty
+			}
+			rows, cols, err := ptylib.Getsize(f.File)
+			require.NoError(t, err)
+			seen = append(seen, termsize.Size{Cols: cols, Rows: rows})
+		}
+		p, err := startPty(exec.Command("sleep", "5"), termsize.Size{Cols: 80, Rows: 24}, false, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		f = p.(*pty)
+
+		require.NoError(t, p.Setsize(30, 100))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}}, seen, "the report came before the ioctl applied it")
+	})
+
+	t.Run("put back when the ioctl fails", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(exec.Command("sleep", "5"), termsize.Size{Cols: 80, Rows: 24}, false, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		p.(*pty).setWinsize = func(int, *unix.Winsize) error { return syscall.EIO }
+
+		require.Error(t, p.Setsize(30, 100))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}, {Cols: 80, Rows: 24}}, *got,
+			"reported, then the size it had put back")
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		// A pty whose ioctl fails: the file is not a terminal.
+		f, err := os.Open(os.DevNull)
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
+		record, got := recorder()
+		p := wrapPty(f, exec.Command("true"), false, record)
+
+		require.Error(t, p.Setsize(30, 100))
+		require.Empty(t, *got, "a resize that failed applies nothing")
+	})
+
+	t.Run("pinned", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(exec.Command("sleep", "5"), termsize.Size{Cols: 80, Rows: 24}, true, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+
+		require.NoError(t, p.Setsize(30, 100))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}}, *got, "a pinned pty applies its initial size and nothing after")
+	})
+
+	t.Run("invalid initial size", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(exec.Command("sleep", "5"), termsize.Size{}, false, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+
+		require.Equal(t, []termsize.Size{termsize.Default}, *got, "the size the pty opened at, not the one asked for")
+	})
 }
