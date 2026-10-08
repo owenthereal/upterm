@@ -338,16 +338,20 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 // The replay is weighed against the pty's size as w joins, which is the size
 // the ring's newest output was recorded at: the host shrinks the pty to its
 // smallest terminal only after the join. A joiner at least as big as the pty
-// in both dimensions gets the longest stretch, back from the ring's end, in
-// which every size the ring was recorded at fits its terminal, no wider and
-// no taller, behind the snapshot as of the stretch's first byte. Output
-// recorded no bigger than a terminal renders on it as it was drawn; output
-// recorded wider or taller wraps and splits. A joiner smaller in either
-// dimension is about to shrink the pty and have the command repaint at its
-// size, and a replay recorded wider or taller than its terminal would wrap and
-// split under that repaint. So it gets the modes as they are now and none of
-// the ring. A pty that has never reported a size gives neither answer, and the
-// joiner gets what Append gives it.
+// in both dimensions gets the longest stretch, back from the ring's end, over
+// which the size never shrank, behind the snapshot as of the stretch's first
+// byte. Each size in it is no wider and no taller than the one after it, and
+// the newest fits the joiner, so every one does. Output recorded before a
+// growth renders the same at the larger size, because nothing in it wrapped at
+// the smaller one. Output recorded before a shrink does not: the command's
+// repaint at the smaller size moves the cursor relative to a screen on which
+// the earlier lines wrapped, and replayed onto a wider terminal, where they
+// don't, it lands on top of them. A joiner smaller in either dimension is
+// about to shrink the pty and have the command repaint at its size, and a
+// replay recorded wider or taller than its terminal would wrap and split under
+// that repaint. So it gets the modes as they are now and none of the ring. A
+// pty that has never reported a size gives neither answer, and the joiner gets
+// what Append gives it.
 //
 // Attaching is atomic with respect to a Write, as it is for Append.
 func (t *MultiWriter) AppendSized(size termsize.Size, w io.Writer) error {
@@ -383,9 +387,10 @@ func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
 		return t.snapshotAfter(t.buffer.Data()), nil
 	}
 
-	// Walk back from the pty's size while j fits each earlier size.
+	// Walk back from the pty's size over each earlier size that is no bigger
+	// than the one after it. The newest fits j, so by transitivity they all do.
 	k := n - 1
-	for k > 0 && fits(t.boundaries[k-1].size, j) {
+	for k > 0 && fits(t.boundaries[k-1].size, t.boundaries[k].size) {
 		k--
 	}
 
@@ -406,7 +411,8 @@ func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
 }
 
 // fits reports whether output recorded at size renders on a terminal of j as
-// it was drawn: it is no wider and no taller.
+// it was drawn: it is no wider and no taller. Asked of a recorded size and the
+// one after it, it reports that the size did not shrink between them.
 func fits(size, j termsize.Size) bool {
 	return size.Cols <= j.Cols && size.Rows <= j.Rows
 }
@@ -500,9 +506,9 @@ func (t *MultiWriter) Resized(size termsize.Size) {
 // Append and AppendSized, so a join weighs the size the pty is now.
 //
 // A newest boundary nothing was written after holds no bytes, so the new size
-// replaces it rather than following it: kept, it would be a size a joiner
-// could fail to fit with nothing recorded at it, and would cut its replay off
-// there. Two joins before the command writes anything leave one: the first
+// replaces it rather than following it: kept, it would be a size the walk back
+// could stop at with nothing recorded at it, and would cut a joiner's replay
+// off there. Two joins before the command writes anything leave one: the first
 // joiner's size is applied at the second's join, and the second's own size
 // follows before any output.
 func (t *MultiWriter) applyResize() {

@@ -1011,11 +1011,11 @@ func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
 	require.Equal(t, "\x1b[?1049hafter", got.String())
 }
 
-// Output recorded smaller than the joiner's terminal renders on it as it was
-// drawn, so a joiner every recorded size fits gets the whole ring. This is the
-// CI rejoin: the first guest's join grew the pty from 80x24, and a guest
-// joining after it still sees what was written before.
-func TestMultiWriter_AppendSizedReplaysEverythingThatFits(t *testing.T) {
+// Output recorded before a growth renders the same at the larger size, because
+// nothing in it wrapped at the smaller one, so the replay reaches back over it.
+// This is the CI rejoin: the first guest's join grew the pty from 80x24, and a
+// guest joining after it still sees what was written before.
+func TestMultiWriter_AppendSizedReplaysAcrossAGrowth(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
 	_, _ = w.Write([]byte("pre "))
@@ -1027,30 +1027,43 @@ func TestMultiWriter_AppendSizedReplaysEverythingThatFits(t *testing.T) {
 	require.Equal(t, "pre post", got.String())
 }
 
-// The replay stops at the newest size the joiner doesn't fit, in either
-// dimension, and the snapshot carries the modes set before it. 200x40 has
-// the columns 200x50 was recorded at but not the rows.
-func TestMultiWriter_AppendSizedStopsAtASizeThatDoesNotFit(t *testing.T) {
+// The replay stops at a shrink, whatever the joiner's size: what was drawn at
+// 200x50 wrapped differently from what a 45x30 terminal saw, and the repaint
+// recorded at 45x30 moves the cursor relative to the screen as it wrapped
+// there, so a joiner bigger than both would see it laid over the wrong lines.
+// The snapshot carries the modes set before the shrink.
+func TestMultiWriter_AppendSizedStopsAtAShrink(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at200x50)
 	_, _ = w.Write([]byte("\x1b[?1049hbig "))
 	w.Resized(at45x30)
 	_, _ = w.Write([]byte("small"))
 
-	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, {Cols: 200, Rows: 40}} {
+	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, {Cols: 200, Rows: 40}, at200x50} {
 		var got bytes.Buffer
 		require.NoError(t, w.AppendSized(j, &got))
 		require.Equal(t, "\x1b[?1049hsmall", got.String(), "a %v joiner", j)
 	}
-
-	var got bytes.Buffer
-	require.NoError(t, w.AppendSized(at200x50, &got))
-	require.Equal(t, "\x1b[?1049hbig small", got.String(), "a 200x50 joiner")
 }
 
-// The replay reaches back over every size the joiner fits, not just the
-// newest, and stops at the first one it doesn't.
-func TestMultiWriter_AppendSizedWalksBackOverEveryFittingSize(t *testing.T) {
+// A shrink in rows alone stops the walk too: 80x40 is no wider than 80x24, but
+// it is taller, and a repaint at 24 rows addresses a screen that scrolled at 24
+// rows, not at 40.
+func TestMultiWriter_AppendSizedStopsAtAShrinkInRowsAlone(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(termsize.Size{Cols: 80, Rows: 40})
+	_, _ = w.Write([]byte("a"))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("b"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 80, Rows: 40}, &got))
+	require.Equal(t, "b", got.String(), "an 80x40 joiner")
+}
+
+// The replay reaches back over every growth, not just the newest size, and
+// stops at the first shrink.
+func TestMultiWriter_AppendSizedWalksBackOverGrowthOnly(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	for _, step := range []struct {
 		size termsize.Size
@@ -1071,16 +1084,35 @@ func TestMultiWriter_AppendSizedWalksBackOverEveryFittingSize(t *testing.T) {
 
 	got.Reset()
 	require.NoError(t, w.AppendSized(at200x50, &got))
-	require.Equal(t, "abcd", got.String(), "a 200x50 joiner")
+	require.Equal(t, "cd", got.String(), "a 200x50 joiner")
+
+	// Nothing but growth: a joiner that fits the newest gets all of it.
+	w = NewMultiWriter(DefaultReplayBytes)
+	for _, step := range []struct {
+		size termsize.Size
+		out  string
+	}{
+		{at80x24, "a"},
+		{termsize.Size{Cols: 120, Rows: 40}, "b"},
+		{at200x50, "c"},
+	} {
+		w.Resized(step.size)
+		_, _ = w.Write([]byte(step.out))
+	}
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "abc", got.String(), "a 200x50 joiner")
 }
 
 // The fan-out remembers 64 sizes. Bytes recorded at a size it has forgotten
-// may have been recorded at any size, so they fit no joiner, however big.
+// may have been recorded at any size, so they fit no joiner, however big. Each
+// size is wider than the last, so only the cap ends the replay.
 func TestMultiWriter_BoundariesBeyondTheCapDoNotFit(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	var out []byte
 	for i := range 70 {
-		w.Resized(termsize.Size{Cols: 80 + i%2, Rows: 24})
+		w.Resized(termsize.Size{Cols: 80 + i, Rows: 24})
 		b := byte('0' + i)
 		out = append(out, b)
 		_, _ = w.Write([]byte{b})
@@ -1115,21 +1147,23 @@ func TestMultiWriter_BoundariesArePrunedAsTheRingEvicts(t *testing.T) {
 }
 
 // A size the pty took and left with nothing written at it covers no bytes, so
-// it is no size a joiner can fail to fit. Two guests joining before the
+// it is no size the walk back can stop at. Two guests joining before the
 // command writes anything leave one: the first guest's size is applied at the
 // second guest's join, and the second guest's size replaces it before
-// anything is written.
+// anything is written. 80x24 to 100x40 is growth, but 200x50 to 100x40 is a
+// shrink, and the 200x50 nothing was written at must not be the one weighed.
 func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
+	at100x40 := termsize.Size{Cols: 100, Rows: 40}
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
 	_, _ = w.Write([]byte("pre "))
 	w.Resized(at200x50)
-	require.NoError(t, w.AppendSized(at45x30, &bytes.Buffer{}))
-	w.Resized(at45x30)
+	require.NoError(t, w.AppendSized(at100x40, &bytes.Buffer{}))
+	w.Resized(at100x40)
 	_, _ = w.Write([]byte("post"))
 
 	var got bytes.Buffer
-	require.NoError(t, w.AppendSized(termsize.Size{Cols: 100, Rows: 40}, &got))
+	require.NoError(t, w.AppendSized(at100x40, &got))
 	require.Equal(t, "pre post", got.String())
 }
 
@@ -1137,9 +1171,9 @@ func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
 // since: the joiner is weighed against the size the pty is now, and nothing
 // has been recorded at that size yet. A 60x30 joiner fits the 45x30 the
 // ring's newest bytes were recorded at, but not the 80x24 the pty is now, so
-// it gets none of the ring. A 100x25 joiner fits 80x24 but not 45x30, which is
-// too tall for it, so it gets none of the ring either: nothing it fits was
-// recorded after the bytes it doesn't.
+// it gets none of the ring. A 100x25 joiner fits 80x24, but the walk back
+// from it stops at once: 45x30 is taller, so the pty shrank in rows, and the
+// joiner gets none of the ring either.
 func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
