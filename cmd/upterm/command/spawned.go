@@ -122,6 +122,11 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		SessionCreated: func(sess *api.GetSessionResponse) api.Accept_Decision {
 			created = sess
 			displayErr = s.display(ctx, sess, s.name)
+			if displayErr == nil && sess.GetOpen() {
+				// On stderr whatever the display was, the banner or nothing at
+				// all: stdout may be the JSON a script is reading.
+				logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning(s.name)+"\n")
+			}
 			switch {
 			case displayErr == nil:
 				return api.Accept_ACCEPTED
@@ -258,6 +263,12 @@ func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.C
 	return <-done
 }
 
+// openSessionWarning is what upterm host says as an open session starts: one
+// anyone with the session ID can join, with nobody asked.
+func openSessionWarning(name string) string {
+	return fmt.Sprintf("upterm: warning: session %s is open: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys", name)
+}
+
 // detachedMessage is what upterm host prints when its own terminal leaves.
 func detachedMessage(name string) string {
 	return fmt.Sprintf("upterm: detached from session %s; the session continues; reattach with 'upterm attach %s' or stop it with 'upterm session stop %s'", name, name, name)
@@ -329,6 +340,7 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 			info.Command = detail.Command
 			info.ForceCommand = detail.ForceCommand
 			info.SSHCommand = detail.SSHCommand
+			info.Open = detail.Open
 		}
 	}
 	enc := json.NewEncoder(s.stdout)

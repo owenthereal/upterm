@@ -153,6 +153,10 @@ upterm host --private-key ~/.ssh/id_ed25519_sk.pub
 
 Guests still authenticate with a key of their own. A session with no
 `--authorized-keys` or `--authorized-user` accepts any key, but not none.
+Started with `--accept` as well, such a session is open: anyone with the
+session ID can join, and nobody is asked. `upterm host` warns about it as the
+session starts, and `upterm session info` says so (`"open": true` in its
+JSON).
 
 ### Force command
 

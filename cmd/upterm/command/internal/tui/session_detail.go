@@ -71,6 +71,9 @@ type SessionDetail struct {
 	SCPDownload      string // SCP download example
 	AuthorizedKeys   string
 	ConnectedClients []string
+	// Open is true when anyone with the session ID can join and nobody was
+	// asked: no allowlist, and started with --accept.
+	Open bool
 
 	// Reconnect is "supported" or "unsupported" once the first connection has
 	// shown whether the relay lets a dropped session come back under the same
@@ -305,6 +308,11 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	}
 	if detail.AuthorizedKeys != "" {
 		renderWrappedRow(&b, "Authorized Keys:", detail.AuthorizedKeys, labelWidth, valueWidth, ValueStyle)
+	}
+	// Where the allowlist would be: its absence is what makes the session
+	// open, and nothing else on the screen says so.
+	if detail.Open {
+		renderProseRow(&b, "Access:", "open: anyone with the session ID can join", labelWidth, valueWidth, ValueStyle)
 	}
 
 	// Commands section - each command on its own line for readability

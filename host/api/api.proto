@@ -71,6 +71,11 @@ message GetSessionResponse {
   // run it read a record for from one that has since claimed the name. Empty
   // from a daemon that claimed no name, and from daemons before this field.
   string launch_id = 11;
+  // open is true when anyone with the session ID can join and nobody was
+  // asked: there is no allowlist, and the session was started with --accept,
+  // so nobody confirmed it either. It describes the session and changes
+  // nothing about who may join. False from daemons before this field.
+  bool open = 12;
 }
 
 message AuthorizedKey {

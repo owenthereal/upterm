@@ -438,3 +438,21 @@ func Test_renderSessionDetail_RowsByStatus(t *testing.T) {
 	assert.Contains(t, reconnecting, row("Hint:", "upterm can't reach the relay; it keeps retrying."))
 	assert.NotContains(t, reconnecting, "Reconnect:", "a relay that supports it has nothing to add")
 }
+
+// An open session -- no allowlist, and nobody asked -- says so wherever its
+// detail is shown: the banner at start and every `session info` after.
+func Test_FormatSessionDetail_open(t *testing.T) {
+	detail := SessionDetail{
+		SessionID:  "test123",
+		Command:    "bash",
+		Host:       "ssh://example.com:22",
+		SSHCommand: "ssh test123@example.com",
+	}
+
+	assert.NotContains(t, FormatSessionDetail(detail), "Access:", "a session that is not open")
+
+	detail.Open = true
+	output := FormatSessionDetail(detail)
+	assert.Contains(t, output, "Access:")
+	assert.Contains(t, output, "open: anyone with the session ID can join")
+}

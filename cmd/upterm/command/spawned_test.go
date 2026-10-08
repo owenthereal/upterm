@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +26,9 @@ import (
 // script, standing in for the daemon process.
 type scriptedDaemon struct {
 	child *bootstrap.Child
+	// open is what the session the daemon creates reports. Set before
+	// startup.
+	open  bool
 	ready chan struct{} // closed once spawn has built the child
 	gone  chan struct{} // closed when the child's watcher fires (parent left while armed)
 }
@@ -66,7 +70,7 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 	go func() {
 		child := d.await()
 		_ = child.Claimed(&api.Claimed{Name: name, LaunchId: "launch-1", AdminSocket: "/run/a.sock", AttachSocket: "/run/t.sock", LogPath: "/var/log/upterm.log", Pid: 4242})
-		dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}})
+		dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open})
 		got <- dec
 		if err != nil || dec != api.Accept_ACCEPTED {
 			child.Failed("declined", false, true)
@@ -249,6 +253,34 @@ func TestSpawnedSessionDetachRefusesAStatuslessReport(t *testing.T) {
 	require.ErrorContains(t, err, "reported no status")
 	require.ErrorContains(t, err, "/var/log/upterm.log", "the log is where the reason will be")
 	require.Empty(t, stdout.String(), "nothing may be printed for a report that cannot be trusted")
+}
+
+// An open session -- anyone with its ID can join, and nobody was asked -- is
+// warned about as it starts, on stderr, whatever stdout is carrying; and the
+// JSON a script reads says so too. TestSpawnedSessionDetachPrintsJSON pins
+// that a session that isn't open gets neither.
+func TestSpawnedSessionWarnsThatItIsOpen(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOut), func(t *testing.T) {
+			spawn, d := newScriptedDaemon(t)
+			d.open = true
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach, s.jsonOut = true, jsonOut
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.start() }()
+
+			require.NoError(t, s.run(context.Background()))
+
+			require.Contains(t, stderr.String(), "session s is open: anyone with the session ID can join")
+			require.Contains(t, stderr.String(), "--authorized-user")
+			if jsonOut {
+				var info sessionInfo
+				require.NoError(t, json.Unmarshal(stdout.Bytes(), &info))
+				require.True(t, info.Open)
+			}
+		})
+	}
 }
 
 func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {

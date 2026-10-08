@@ -784,6 +784,9 @@ type sessionInfo struct {
 	ExitCode         *int     `json:"exitCode,omitempty"`
 	Signal           string   `json:"signal,omitempty"`
 	SignalNumber     *int     `json:"signalNumber,omitempty"`
+	// Open is true when anyone with the session ID can join and nobody was
+	// asked: no allowlist, and started with --accept. Absent otherwise.
+	Open bool `json:"open,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
 	// latched and never moved by a later join; zero and omitted when none
 	// ever did. Unlike this timestamp, guestCount includes forwarding
@@ -1083,6 +1086,7 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	info.ConnectedClients = detail.ConnectedClients
 	info.ClientCount = len(detail.ConnectedClients)
 	info.GuestCount = countGuests(sess.ConnectedClients)
+	info.Open = detail.Open
 	return info
 }
 
@@ -1592,6 +1596,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		SCPDownload:      scpDownload,
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
+		Open:             sess.GetOpen(),
 	}, nil
 }
 

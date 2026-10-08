@@ -184,6 +184,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
 		ConnectedClients: s.ClientRepo.Clients(),
 		SftpDisabled:     s.Session.SftpDisabled,
+		Open:             s.Session.Open,
 		JoinState:        s.joinState(),
 		LaunchId:         s.LaunchID,
 	}, nil

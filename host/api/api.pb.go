@@ -480,7 +480,12 @@ type GetSessionResponse struct {
 	// launch_id is the launch this daemon speaks for, so a reader can tell the
 	// run it read a record for from one that has since claimed the name. Empty
 	// from a daemon that claimed no name, and from daemons before this field.
-	LaunchId      string `protobuf:"bytes,11,opt,name=launch_id,json=launchId,proto3" json:"launch_id,omitempty"`
+	LaunchId string `protobuf:"bytes,11,opt,name=launch_id,json=launchId,proto3" json:"launch_id,omitempty"`
+	// open is true when anyone with the session ID can join and nobody was
+	// asked: there is no allowlist, and the session was started with --accept,
+	// so nobody confirmed it either. It describes the session and changes
+	// nothing about who may join. False from daemons before this field.
+	Open          bool `protobuf:"varint,12,opt,name=open,proto3" json:"open,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -590,6 +595,13 @@ func (x *GetSessionResponse) GetLaunchId() string {
 		return x.LaunchId
 	}
 	return ""
+}
+
+func (x *GetSessionResponse) GetOpen() bool {
+	if x != nil {
+		return x.Open
+	}
+	return false
 }
 
 type AuthorizedKey struct {
@@ -808,7 +820,7 @@ const file_api_proto_rawDesc = "" +
 	"\tJoinState\x12#\n" +
 	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
 	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
-	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xa6\x03\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xba\x03\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -823,7 +835,8 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"join_state\x18\n" +
 	" \x01(\v2\x0e.api.JoinStateR\tjoinState\x12\x1b\n" +
-	"\tlaunch_id\x18\v \x01(\tR\blaunchId\"a\n" +
+	"\tlaunch_id\x18\v \x01(\tR\blaunchId\x12\x12\n" +
+	"\x04open\x18\f \x01(\bR\x04open\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xbf\x01\n" +

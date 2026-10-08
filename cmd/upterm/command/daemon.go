@@ -162,6 +162,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		HostKey:           hostKey,
 		HostKeyCallback:   hkcb,
 		AuthorizedKeys:    authorizedKeys,
+		AutoAccept:        flagAccept,
 		KeepAliveDuration: 50 * time.Second,
 		ProxyURL:          opts.proxyURL,
 		SessionClaimedCallback: func(dir *sessiondir.Dir) {

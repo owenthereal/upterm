@@ -62,6 +62,17 @@ func daemonTestRoots(t *testing.T) {
 	origSupplied := suppliedFlags
 	suppliedFlags = map[string]bool{}
 	t.Cleanup(func() { suppliedFlags = origSupplied })
+
+	// The developer's own SSH identities stay out of it. hostCmd resets
+	// --private-key to whichever ~/.ssh files exist, and with no agent to
+	// hold an encrypted one, building the daemon's host asks the parent for
+	// its passphrase over a pipe nobody reads: the test hangs. With no key
+	// listed and no agent, the daemon generates one. A test about
+	// identities sets its own after this.
+	t.Setenv("SSH_AUTH_SOCK", "")
+	origKeys := flagPrivateKeys
+	flagPrivateKeys = nil
+	t.Cleanup(func() { flagPrivateKeys = origKeys })
 }
 
 // readyPublishGap is how long fakeRun leaves between the command starting
@@ -422,6 +433,28 @@ func TestBuildDaemonHostHidesClientIPs(t *testing.T) {
 	h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
 	require.NoError(t, err)
 	require.True(t, h.HideClientIP)
+}
+
+// TestBuildDaemonHostPassesOnAccept pins that --accept reaches the session,
+// which reports an open one -- nobody asked, and no allowlist -- to every
+// reader of it.
+func TestBuildDaemonHostPassesOnAccept(t *testing.T) {
+	for _, accept := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accept=%t", accept), func(t *testing.T) {
+			hostCmd()
+			daemonTestRoots(t)
+			orig := flagAccept
+			flagAccept = accept
+			t.Cleanup(func() { flagAccept = orig })
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+			child := bootstrap.NewChild(a, nil)
+			t.Cleanup(func() { _ = child.Close() })
+			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
+			require.NoError(t, err)
+			require.Equal(t, accept, h.AutoAccept)
+		})
+	}
 }
 
 // TestRunDaemonProcessReportsAGenericFailure pins that a run error which is
