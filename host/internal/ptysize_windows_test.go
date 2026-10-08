@@ -177,3 +177,50 @@ func awaitModeCon(t *testing.T, p PTY, out *ptyOutput) (rows, cols int) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestPtyReportsTheSizesItApplies is the Windows twin of ptysize_unix_test.go's:
+// what the ConPTY tells the fan-out about its geometry is every size it
+// applied, and nothing else. Redraw is the case the Unix pty has no form of:
+// its resize out and back ends at the size it started from, so it applies
+// nothing new and reports nothing.
+func TestPtyReportsTheSizesItApplies(t *testing.T) {
+	recorder := func() (func(termsize.Size), *[]termsize.Size) {
+		var got []termsize.Size
+		return func(s termsize.Size) { got = append(got, s) }, &got
+	}
+	// Outlives each case by far; the deferred Kill ends it.
+	longRunning := func() *exec.Cmd { return exec.Command("cmd", "/c", "ping -n 30 127.0.0.1 >nul") }
+
+	t.Run("applied", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(longRunning(), termsize.Size{Cols: 80, Rows: 24}, false, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		readPtyInBackground(p)
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}}, *got, "the initial size, before startPty returns")
+
+		require.NoError(t, p.Setsize(30, 100))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}}, *got)
+
+		require.NoError(t, p.Redraw())
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}}, *got,
+			"the redraw nudge applies no size")
+
+		require.NoError(t, p.Close())
+		require.NoError(t, p.Setsize(40, 120))
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}}, *got,
+			"a resize on a closed pty applies nothing")
+	})
+
+	t.Run("pinned", func(t *testing.T) {
+		record, got := recorder()
+		p, err := startPty(longRunning(), termsize.Size{Cols: 80, Rows: 24}, true, record)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		readPtyInBackground(p)
+
+		require.NoError(t, p.Setsize(30, 100))
+		require.NoError(t, p.Redraw())
+		require.Equal(t, []termsize.Size{{Cols: 80, Rows: 24}}, *got, "a pinned pty applies its initial size and nothing after")
+	})
+}
