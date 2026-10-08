@@ -138,9 +138,15 @@ type Result struct {
 // Run opens a session on client and runs it until it ends. setupBy bounds
 // every request before the shell runs: a peer that answered the handshake
 // and then stopped answering would otherwise hold NewSession, RequestPty or
-// Shell forever, so past it the connection is closed. An error means shell
+// Shell forever, so past it the connection is closed. A zero setupBy has
+// long passed, so the connection is closed at once. An error means shell
 // startup was not confirmed; once it was, every ending is a Result, and Run
 // closes the connection as the session ends.
+//
+// An error comes with the zero Result, whose Released is nil: there is no
+// write to wait for, and a receive from it would never return. Run closes
+// client on an error only if setupBy passed or ctx ended; after any other,
+// client is still open, and the caller's to close.
 func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Time) (Result, error) {
 	if t.Stdout == nil {
 		return Result{}, errors.New("attach: Stdout is required")
@@ -411,9 +417,10 @@ type output struct {
 	// for as long as the terminal is out of the session's modes. A channel
 	// rather than a mutex so that a suspend can give up waiting for it.
 	turn chan struct{}
-	// Once set, nothing more is written to w: a write already in flight
-	// cannot be interrupted without owning the descriptor, but no later one
-	// is started.
+	// Once set, no write to w is started but the one for a chunk the copy
+	// had already fed, which abandon's restore undoes; a write already in
+	// flight cannot be interrupted without owning the descriptor. Released
+	// waits for both.
 	abandoned atomic.Bool
 	// unrestored is the restore abandon left unwritten, under trackerMu.
 	unrestored []byte
@@ -553,8 +560,9 @@ func (t *Terminal) suspend(sess *ssh.Session, o *output, logger *slog.Logger) (k
 		back := time.NewTimer(outputDrainTimeout)
 		defer back.Stop()
 		if snapshot := o.snapshot(); len(snapshot) > 0 && !o.writeWithin(back.C, snapshot, logger) {
-			// The session's modes are on their way back, in a write that may
-			// yet land, and nothing here will take the terminal out of them
+			// The session's modes are on their way back, in a write that
+			// timed out and may yet land, or that failed having written some
+			// of them, and nothing here will take the terminal out of them
 			// again.
 			o.abandon()
 			<-o.turn
@@ -634,8 +642,8 @@ func (o *output) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 // record of what this terminal was asked to do, not of what arrived. Each
 // chunk is fed and written on turn, which a suspend takes to keep the
 // terminal to itself while it is out of the session's modes; the check and
-// the feed are one hold of trackerMu, so a tail that abandons the output reads
-// the tracker either before a chunk or after all of it.
+// the feed are one hold of trackerMu, so an abandon, the tail's or a
+// suspend's, reads the tracker either before a chunk or after all of it.
 func copyOutput(r io.Reader, o *output) error {
 	buf := make([]byte, 32<<10)
 	for {
