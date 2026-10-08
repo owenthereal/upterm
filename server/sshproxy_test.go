@@ -233,7 +233,7 @@ func Test_proxyAuth_authenticateRecordsBothEndsOfTheConnection(t *testing.T) {
 		local:         &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 22},
 	}
 
-	auth, _, err := a.authenticate(conn, guest.PublicKey())
+	auth, _, _, err := a.authenticate(conn, guest.PublicKey())
 	require.NoError(t, err)
 	require.Equal(t, "203.0.113.7:51234", auth.GetRemoteAddr(), "the guest's end")
 	require.Equal(t, "198.51.100.1:22", auth.GetLocalAddr(), "the relay's end")

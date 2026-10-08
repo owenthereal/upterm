@@ -910,25 +910,27 @@ func dialGuest(t *testing.T, addr string, key ssh.Signer) *ssh.Client {
 	return c
 }
 
+// dialTo is a route to addr over loopback TCP.
+func dialTo(addr string) func(context.Context) (net.Conn, error) {
+	return func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", addr) }
+}
+
 func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
 	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
 	require.NoError(t, err)
 	nodeC, peersC := stockTestUpstream(t, false, TestPrivateKeyContent)
 	refusing, _ := stockTestUpstream(t, true, TestPrivateKeyContent)
-	dial := func(a string) func(context.Context) (net.Conn, error) {
-		return func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "tcp", a) }
-	}
 	for name, routeA := range map[string]func(store *staleStore) func(context.Context) (net.Conn, error){
 		"unreachable": func(*staleStore) func(context.Context) (net.Conn, error) {
 			return func(context.Context) (net.Conn, error) { return nil, errors.New("connection refused") }
 		},
-		"no longer holds the session": func(*staleStore) func(context.Context) (net.Conn, error) { return dial(refusing) },
-		"stalls its handshake":        func(*staleStore) func(context.Context) (net.Conn, error) { return dial(stallingListener(t)) },
+		"no longer holds the session": func(*staleStore) func(context.Context) (net.Conn, error) { return dialTo(refusing) },
+		"stalls its handshake":        func(*staleStore) func(context.Context) (net.Conn, error) { return dialTo(stallingListener(t)) },
 		// The watch updates the cache to C while A's handshake stalls.
 		// Comparing with the cache would see no move; comparing with the
 		// attempted route does.
 		"watch lands mid-handshake": func(store *staleStore) func(context.Context) (net.Conn, error) {
-			stall := dial(stallingListener(t))
+			stall := dialTo(stallingListener(t))
 			return func(ctx context.Context) (net.Conn, error) {
 				c, err := stall(ctx)
 				store.watchDelivers()
@@ -939,7 +941,7 @@ func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := movedSession(t, good)
 			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){
-				"node-a:22": routeA(store), "node-c:22": dial(nodeC),
+				"node-a:22": routeA(store), "node-c:22": dialTo(nodeC),
 			}}
 			dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
 			select {
@@ -950,6 +952,224 @@ func TestStockSSHRefreshesAStaleRoute(t *testing.T) {
 			require.Equal(t, int32(2), dialer.calls.Load())
 		})
 	}
+}
+
+// staleNotMoved: the cache and the store both say node A at generation 1, so
+// the refresh finds no move.
+func staleNotMoved(t *testing.T, good ssh.Signer) *staleStore {
+	logger := slog.New(slog.DiscardHandler)
+	store := &staleStore{memorySessionStore: newMemorySessionStore(logger)}
+	keys := [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}
+	fresh := NewSession("session", "node-a:22", "host", keys, nil)
+	fresh.Generation = 1
+	_, err := store.Register(context.Background(), fresh)
+	require.NoError(t, err)
+	stale := NewSession("session", "node-a:22", "host", keys, nil)
+	stale.Generation = 1
+	store.stale = stale
+	return store
+}
+
+// consulModeProxyRoutingTo is another Consul-mode relay node, whose store has
+// the session on node, reached by route.
+func consulModeProxyRoutingTo(t *testing.T, good ssh.Signer, node string, route func(context.Context) (net.Conn, error)) string {
+	store := newMemorySessionStore(slog.New(slog.DiscardHandler))
+	sess := NewSession("session", node, "host", [][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}, nil)
+	sess.Generation = 1
+	_, err := store.Register(context.Background(), sess)
+	require.NoError(t, err)
+	return consulModeProxy(t, store, &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){node: route}})
+}
+
+// stockTestHop serves cfg on loopback TCP as a relay node, presenting the
+// relay's own host key, and rejects every channel with message.
+func stockTestHop(t *testing.T, cfg *ssh.ServerConfig, message string) string {
+	t.Helper()
+	signer, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	cfg.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			raw, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = raw.Close() }()
+				_, channels, requests, err := ssh.NewServerConn(raw, cfg)
+				if err != nil {
+					return
+				}
+				go ssh.DiscardRequests(requests)
+				for ch := range channels {
+					_ = ch.Reject(ssh.ConnectionFailed, message)
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// stockTestUpstreamRefusing is a relay node that refuses every key, sending
+// banner with the refusal, or no banner when it is "".
+func stockTestUpstreamRefusing(t *testing.T, banner string) string {
+	return stockTestHop(t, &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+		return nil, &ssh.BannerError{Err: errors.New("upstream denied key"), Message: banner}
+	}}, "")
+}
+
+// legacyHopRejecting is a relay node that doesn't read the next hop's banner,
+// whose own upstream refused, as its hop sees it: it admits any key, and then
+// rejects every channel with message.
+func legacyHopRejecting(t *testing.T, message string) string {
+	return stockTestHop(t, &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+		return &ssh.Permissions{}, nil
+	}}, message)
+}
+
+func TestStockSSHReportsTheNextHopsVerdict(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	for name, tc := range map[string]struct {
+		banner string
+		want   string
+	}{
+		"no host":             {fmt.Sprintf(upterm.BannerNoHostFormat, "session"), upterm.UpstreamNoHost},
+		"lookup failed":       {upterm.BannerLookupFailed, upterm.UpstreamLookupFailed},
+		"key refused, stated": {upterm.HopBannerKeyRefused, upterm.UpstreamKeyRefused},
+		"no banner":           {"", upterm.UpstreamAuthFailed}, // a node that predates these verdicts, or another failure: ambiguous
+		"another banner":      {"welcome\n", upterm.UpstreamAuthFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The store still names node A (the refresh finds no move); A
+			// answers the hop as the next node would.
+			store := staleNotMoved(t, good)
+			nodeA := stockTestUpstreamRefusing(t, tc.banner)
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){"node-a:22": dialTo(nodeA)}}
+			client := dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+			_, err := client.NewSession()
+			var open *ssh.OpenChannelError
+			require.ErrorAs(t, err, &open)
+			require.Equal(t, tc.want, open.Message)
+		})
+	}
+}
+
+// sessionNode is a Consul-mode relay node holding a local session that admits
+// only the good key.
+func sessionNode(t *testing.T) string {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	store := newMemorySessionStore(slog.New(slog.DiscardHandler))
+	_, err = store.Register(context.Background(), NewSession("session", "127.0.0.1:2222", "host", nil,
+		[][]byte{ssh.MarshalAuthorizedKey(good.PublicKey())}))
+	require.NoError(t, err)
+	return consulModeProxy(t, store, &stockTestDialer{addr: "127.0.0.1:1"})
+}
+
+// relayHopCert is what another relay node presents for a guest holding key: a
+// certificate this relay's authority minted, whose AuthRequest names key.
+func relayHopCert(t *testing.T, key ssh.Signer) ssh.Signer {
+	authority, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	cert, err := (&UserCertSigner{SessionID: "hop", User: "session", AuthRequest: &AuthRequest{
+		ClientVersion: "SSH-2.0-Go", AuthorizedKey: ssh.MarshalAuthorizedKey(key.PublicKey()),
+	}}).SignCert(authority)
+	require.NoError(t, err)
+	return cert
+}
+
+// agentCert is a certificate for key that an authority other than the relay's
+// signed, as a guest's ssh-agent may hold one.
+func agentCert(t *testing.T, key ssh.Signer) ssh.Signer {
+	cert := &ssh.Certificate{Key: key.PublicKey(), CertType: ssh.UserCert, KeyId: "agent",
+		ValidPrincipals: []string{"session"}, ValidBefore: ssh.CertTimeInfinity}
+	require.NoError(t, cert.SignCert(rand.Reader, certTestSigner(t)))
+	signer, err := ssh.NewCertSigner(cert, key)
+	require.NoError(t, err)
+	return signer
+}
+
+// authenticateCollectingBanners offers key to the relay at addr, which must
+// refuse it, and returns the banners it sent.
+func authenticateCollectingBanners(t *testing.T, addr string, key ssh.Signer) []string {
+	return dialForBanners(t, addr, "session", key)
+}
+
+func TestTheSessionsNodeStatesAKeyRefusalOnlyToARelayHop(t *testing.T) {
+	otherKey, err := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	require.NoError(t, err)
+	// A Consul-mode proxy holding a local session that admits only the good
+	// key. A relay hop: a certificate minted by this relay's authority for an
+	// AuthRequest naming otherKey. A guest: otherKey itself, or its agent's
+	// certificate for otherKey.
+	hopBanners := authenticateCollectingBanners(t, sessionNode(t), relayHopCert(t, otherKey))
+	require.Equal(t, []string{upterm.HopBannerKeyRefused}, hopBanners)
+	guestBanners := authenticateCollectingBanners(t, sessionNode(t), otherKey)
+	require.Empty(t, guestBanners) // a guest refused its own key is still told nothing
+	agentBanners := authenticateCollectingBanners(t, sessionNode(t), agentCert(t, otherKey))
+	require.Empty(t, agentBanners) // only a certificate the relay's authority signed marks a hop
+}
+
+// Three nodes, mixed versions: entry → A → C, where C no longer has the
+// session. A receives C's banner, so A is where the verdict is converted. A
+// current A converts it and the entry forwards the explicit verdict. A legacy
+// A (a fake behaving as a node that doesn't read the next hop's banner: it
+// completes the hop's handshake, then rejects the channel with the legacy
+// text) loses it, and the entry forwards that verbatim: the guest sees the
+// ambiguous text, never a confirmed refusal. The entry's forwarding
+// (sshforward.go, sshForwarder's channel) is code every release shares, so an
+// older entry in front of a current A would carry the explicit verdict just
+// the same.
+func TestAChainKeepsTheVerdictUnlessAnOlderNodeReadsTheBanner(t *testing.T) {
+	good, err := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	require.NoError(t, err)
+	nodeC := stockTestUpstreamRefusing(t, fmt.Sprintf(upterm.BannerNoHostFormat, "session"))
+	for name, tc := range map[string]struct {
+		nodeA func(t *testing.T) string
+		want  string
+	}{
+		"current intermediate": {func(t *testing.T) string {
+			return consulModeProxyRoutingTo(t, good, "node-c:22", dialTo(nodeC)) // A's store names C
+		}, upterm.UpstreamNoHost},
+		"legacy intermediate": {func(t *testing.T) string {
+			return legacyHopRejecting(t, upterm.UpstreamAuthFailed)
+		}, upterm.UpstreamAuthFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := staleNotMoved(t, good) // the entry's stale route names A
+			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){"node-a:22": dialTo(tc.nodeA(t))}}
+			entry := consulModeProxyWithin(t, refreshRoomTimeout, store, dialer)
+			require.Equal(t, tc.want, rejectionThrough(t, entry, good))
+		})
+	}
+}
+
+// rejectionThrough has a guest join through the relay at addr, on a fresh
+// connection each time, until its session channel is rejected, and returns the
+// rejection's message. An attempt that ends in a bare disconnect is tried
+// again, up to ten in all: the entry may close the guest's connection before
+// it forwards a rejection from a node that rejects and disconnects at once, as
+// a relay node whose own upstream failed does. Such an attempt carries no
+// verdict, right or wrong. Ten of them fail the test.
+func rejectionThrough(t *testing.T, addr string, key ssh.Signer) string {
+	t.Helper()
+	for range 10 {
+		client := dialGuest(t, addr, key)
+		_, err := client.NewSession()
+		_ = client.Close()
+		require.Error(t, err)
+		var open *ssh.OpenChannelError
+		if errors.As(err, &open) {
+			return open.Message
+		}
+		t.Logf("no rejection arrived; joining again: %v", err)
+	}
+	t.Fatal("no rejection arrived in ten joins")
+	return ""
 }
 
 // A watch that replaces or removes the cache entry between GetFresh and the

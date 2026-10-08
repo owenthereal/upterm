@@ -28,6 +28,10 @@ const maxSSHRejectTimeout = 5 * time.Second
 var (
 	errUpstreamUnavailable = errors.New(upterm.UpstreamUnavailable)
 	errUpstreamAuthFailed  = errors.New(upterm.UpstreamAuthFailed)
+	// The next relay node's verdict, which it states in a banner.
+	errUpstreamNoHost       = errors.New(upterm.UpstreamNoHost)
+	errUpstreamLookupFailed = errors.New(upterm.UpstreamLookupFailed)
+	errUpstreamKeyRefused   = errors.New(upterm.UpstreamKeyRefused)
 )
 
 // sshAuthFailure is the message x/crypto composes when no auth method is left
@@ -44,18 +48,49 @@ type dialError struct{ err error }
 func (e *dialError) Error() string { return e.err.Error() }
 func (e *dialError) Unwrap() error { return e.err }
 
+// upstreamAuthError is an upstream that refused every key offered it, with the
+// banner it sent as it did, if any.
+type upstreamAuthError struct {
+	banner string
+	err    error
+}
+
+func (e *upstreamAuthError) Error() string { return e.err.Error() }
+func (e *upstreamAuthError) Unwrap() error { return e.err }
+
+// verdict is what the peer is told of e: the next relay node's verdict, when
+// its banner states one. Otherwise it is only that authentication failed, which
+// may mean either that the key was refused or that there is no session there.
+func (e *upstreamAuthError) verdict() error {
+	switch {
+	case strings.HasPrefix(e.banner, upterm.BannerNoHostPrefix):
+		return errUpstreamNoHost
+	case e.banner == upterm.BannerLookupFailed:
+		return errUpstreamLookupFailed
+	case e.banner == upterm.HopBannerKeyRefused:
+		return errUpstreamKeyRefused
+	default:
+		return errUpstreamAuthFailed
+	}
+}
+
 // upstreamFailureReason maps an upstream failure onto what the peer is told.
 // It is an allowlist: only outcomes recognized here are named, and everything
 // else — most importantly any transport error, which carries the address of an
 // internal node or socket — becomes the generic reason. A dial failure is
 // generic whatever its text. The detail stays in the connection log either way.
 func upstreamFailureReason(err error) error {
-	var dial *dialError
+	var (
+		dial *dialError
+		auth *upstreamAuthError
+	)
 	switch {
 	case errors.As(err, &dial):
 		return errUpstreamUnavailable
 	case errors.Is(err, errUpstreamHostKeyMismatch):
 		return errUpstreamHostKeyMismatch
+	case errors.As(err, &auth):
+		return auth.verdict()
 	case err != nil && strings.Contains(err.Error(), sshAuthFailure):
 		return errUpstreamAuthFailed
 	default:
@@ -330,7 +365,8 @@ func (u *upstreamConn) Close() {
 // upstreamAttempt dials pr's target, and nothing else, and completes the
 // handshake with pr's credentials and host-key policy, all within ctx. A
 // shutdown, which cancels parent, closes the transport at any point, as it
-// does the downstream's. A failed attempt leaves nothing open.
+// does the downstream's. A failed attempt leaves nothing open. An
+// authentication failure carries the banner the target sent with it.
 func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRoute) (*upstreamConn, error) {
 	raw, err := p.Auth.ConnDialer.DialContext(ctx, pr.id)
 	if err != nil {
@@ -348,6 +384,9 @@ func (p *SSHRouting) upstreamAttempt(ctx, parent context.Context, pr *preparedRo
 	}
 	conn, channels, requests, err := ssh.NewClientConn(raw, raw.RemoteAddr().String(), pr.config)
 	if err != nil {
+		if strings.Contains(err.Error(), sshAuthFailure) {
+			err = &upstreamAuthError{pr.banner, err}
+		}
 		return fail(err)
 	}
 	if err := raw.SetDeadline(time.Time{}); err != nil {
