@@ -49,7 +49,7 @@ func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	// Composed into the command line as `cmd /c "mode con"`: the argument has
 	// a space in it, so it is quoted, and cmd strips the surrounding quotes
 	// before running what is inside them.
-	p, err := startPty(exec.Command("cmd", "/c", "mode con"), termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(exec.Command("cmd", "/c", "mode con"), termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
 
@@ -64,6 +64,7 @@ func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 		exec.Command("cmd", "/c", "ping -n 3 127.0.0.1 >nul & mode con"),
 		termsize.Size{Cols: 132, Rows: 43},
 		true,
+		nil,
 	)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
@@ -85,6 +86,7 @@ func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 		exec.Command("cmd", "/c", "ping -n 3 127.0.0.1 >nul & mode con"),
 		termsize.Size{Cols: 132, Rows: 43},
 		false,
+		nil,
 	)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()

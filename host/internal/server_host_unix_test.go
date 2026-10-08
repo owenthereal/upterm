@@ -302,9 +302,11 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 	readUntil(t, aOut, "READY")
 
 	// The smaller terminal takes the session down to its own size: the pty is
-	// sized to the smallest terminal watching it.
+	// sized to the smallest terminal watching it. Smaller than the pty as it
+	// joins, it is replayed none of the ring, so what it reads first is the
+	// repaint at its own size.
 	_, bOut, bSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
-	readUntil(t, bOut, "READY")
+	readUntil(t, bOut, "24 80")
 	readUntil(t, aOut, "24 80")
 
 	// And leaving gives it back. B's output is drained from here on, so its
@@ -332,9 +334,11 @@ func TestAGuestsArrivingSizeConstrainsTheSession(t *testing.T) {
 	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
 	readUntil(t, aOut, "READY")
 
-	// The harness's guest asks for 80x24 and never resizes.
+	// The harness's guest asks for 80x24 and never resizes. Smaller than the
+	// pty as it joins, it is replayed none of the ring, so what it reads first
+	// is the repaint at its own size.
 	_, gOut := h.connectGuest(t)
-	readUntil(t, gOut, "READY")
+	readUntil(t, gOut, "24 80")
 	readUntil(t, aOut, "24 80")
 }
 

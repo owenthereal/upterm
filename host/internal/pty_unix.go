@@ -15,7 +15,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+// startPty starts c on a pty of the given size, falling back to
+// termsize.Default for a size that is not one. A pinned pty keeps that size:
+// its Setsize changes nothing.
+//
+// onResize is called with every size the pty applies: the initial size once,
+// before startPty returns, and each Setsize that changes its geometry. Nil
+// for a forced command's pty.
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
@@ -30,8 +37,11 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	if err != nil {
 		return nil, err
 	}
+	if onResize != nil {
+		onResize(size)
+	}
 
-	return wrapPty(f, c, pinned), nil
+	return wrapPty(f, c, pinned, onResize), nil
 }
 
 // startSessionPty is startPty for a command a guest runs on a pty of its own,
@@ -72,7 +82,7 @@ func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
 		return nil, err
 	}
 
-	return wrapPty(f, c, false), nil
+	return wrapPty(f, c, false, nil), nil
 }
 
 // Linux kernel return EIO when attempting to read from a master pseudo
@@ -86,7 +96,7 @@ func ptyError(err error) error {
 	return nil
 }
 
-func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
+func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, onResize func(termsize.Size)) *pty {
 	// Snapshotted once, here, rather than read from cmd through the RWMutex
 	// below every time Signal or Kill needs them: see Signal's and Kill's
 	// own comments for why.
@@ -96,7 +106,7 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
 		pid = cmd.Process.Pid
 		process = cmd.Process
 	}
-	return &pty{File: f, cmd: cmd, pinned: pinned, pid: pid, process: process}
+	return &pty{File: f, cmd: cmd, pinned: pinned, onResize: onResize, pid: pid, process: process}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -108,6 +118,9 @@ type pty struct {
 	*os.File
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
+	// onResize hears of each size Setsize applies; see startPty. Nil reports
+	// nothing.
+	onResize func(termsize.Size)
 	// pid and process are cmd.Process.Pid and cmd.Process, fixed at
 	// construction (see wrapPty) and never touched again. Signal and Kill
 	// read them without the RWMutex below; nothing else does.
@@ -139,7 +152,16 @@ func (pty *pty) Setsize(h, w int) error {
 		// pty either (pty_windows.go's Setsize).
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// Reported only once the ioctl has applied it: the fan-out weighs a
+	// joiner's replay against this, and a size the command was never told
+	// would weigh it against a geometry nothing was drawn at.
+	if pty.onResize != nil {
+		pty.onResize(termsize.Size{Cols: w, Rows: h})
+	}
+	return nil
 }
 
 // Redraw nudges the foreground process group with SIGWINCH, the signal a

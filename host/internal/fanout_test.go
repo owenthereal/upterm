@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
@@ -62,7 +63,7 @@ func TestAttachGuestOutputReleasesTheSinkWhenRefused(t *testing.T) {
 	var out recordingWriter
 	sink := uio.NewAsyncWriter(&out, uio.DefaultGuestBufferSize, nil)
 
-	require.ErrorIs(t, attachGuestOutput(writers, sink), uio.ErrClosed)
+	require.ErrorIs(t, attachGuestOutput(writers, sink, termsize.Size{}), uio.ErrClosed)
 
 	_, err := sink.Write([]byte("output"))
 	require.ErrorIs(t, err, uio.ErrWriterClosed,

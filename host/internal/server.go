@@ -962,7 +962,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				}
 			}
 			sink := newHostSink(sess, disconnect, sessionID, h.logger)
-			if err := attachGuestOutput(h.writers, sink); err != nil {
+			// A client with a terminal is replayed what fits it; one without
+			// is a viewer, with no size to fit.
+			var size termsize.Size
+			if isPty {
+				size = termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}
+			}
+			if err := attachGuestOutput(h.writers, sink, size); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This client
 					// arrived a moment too late, which is not its error.
@@ -1096,7 +1102,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			onDrop := guestDropHandler(sess.Close, h.logger, sessionID, pacingStallTimeout)
 
 			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
-			if err := h.attachGuest(sink); err != nil {
+			// A guest always has a terminal (see the check above), and is
+			// replayed what fits it.
+			if err := h.attachGuest(sink, termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This guest arrived a
 					// moment too late, which is not its error.
@@ -1145,8 +1153,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			h.terminals.changed(ptmx, sessionID, ptyReq.Window.Width, ptyReq.Window.Height, alive)
 		}
 
-		// Everything a repaint needs is now queued: the mode snapshot, the
-		// ring, and this client's subscription. Ask the command to redraw
+		// Everything a repaint needs is now queued: the mode snapshot, as much
+		// of the ring as fits this client's terminal, and this client's
+		// subscription. Ask the command to redraw
 		// without changing geometry. Best-effort, and the only use this
 		// branch makes of the handle, so a handler built without one — a
 		// test's — is left alone.
@@ -1329,11 +1338,15 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 // It takes a built sink rather than building one so the caller, and a test,
 // keeps a handle on what it must release. The sink is whatever the door built:
 // an AsyncWriter for a guest, a hostSink for a local client.
+//
+// size is the joiner's terminal, and decides how much of the ring it is
+// replayed (uio.MultiWriter.AppendSized). A zero size, a client with no pty, is
+// a viewer's, which gets the whole of it, as Append gives.
 func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 	io.Writer
 	Close() error
-}) error {
-	if err := writers.Append(sink); err != nil {
+}, size termsize.Size) error {
+	if err := writers.AppendSized(size, sink); err != nil {
 		_ = sink.Close()
 		return err
 	}
@@ -1343,12 +1356,13 @@ func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 // attachGuest attaches a guest's sink to the fan-out through the pacer, which
 // registers it first and takes the registration back if the fan-out refuses:
 // see guestPacer.attach for why the order is what bounds a new guest's
-// exposure. Without a pacer it attaches directly.
-func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter) error {
+// exposure. Without a pacer it attaches directly. size is the guest's terminal,
+// as attachGuestOutput takes it.
+func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter, size termsize.Size) error {
 	if h.pacer == nil {
-		return attachGuestOutput(h.writers, guestSink{sink})
+		return attachGuestOutput(h.writers, guestSink{sink}, size)
 	}
-	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, guestSink{sink}) })
+	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, guestSink{sink}, size) })
 }
 
 // detachGuest takes a guest's sink out of the fan-out, then out of the

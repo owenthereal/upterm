@@ -710,7 +710,9 @@ func TestReattachAfterRolloverRestoresModesAndNudges(t *testing.T) {
 
 	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	got := readUntil(t, aOut, "WINCH_SEEN")
-	head := got[:strings.Index(got, "ROLLED")]
+	// Narrower than the pinned pty, so the attach replays none of the ring:
+	// what comes ahead of the nudge's own output is the snapshot alone.
+	head := got[:strings.Index(got, "WINCH_SEEN")]
 	require.Contains(t, head, "\x1b[?1049h", "alternate screen restored from the snapshot")
 	require.Contains(t, head, "\x1b[?1000h", "mouse mode restored from the snapshot")
 

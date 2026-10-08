@@ -252,7 +252,14 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	var err error
 	// startPty falls back to termsize.Default for a size that is not one, so
 	// a session nobody offered a geometry still opens at something usable.
-	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize)
+	//
+	// The fan-out hears every size the pty applies, so it can weigh what to
+	// replay a joiner against the size the ring was recorded at. Resized runs
+	// inside the pty's Setsize, which terminalWindows calls with its own lock
+	// held, promising that an update never blocks. That holds only because
+	// Resized never waits on the fan-out's write lock, which a primary client
+	// whose terminal has stopped can hold indefinitely.
+	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize, c.writers.Resized)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

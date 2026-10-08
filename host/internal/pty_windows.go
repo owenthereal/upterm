@@ -23,8 +23,12 @@ var (
 	procSetInformationJobObject = modkernel32.NewProc("SetInformationJobObject")
 )
 
-// startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+// startPty starts a PTY for the given command on Windows using ConPTY.
+//
+// onResize is called with every size the pty applies: the initial size once,
+// before startPty returns, and each Setsize that changes its geometry. Nil
+// for a forced command's pty.
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
@@ -57,14 +61,18 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	}
 
 	p := &pty{
-		cpty:   cpty,
-		handle: handle,
-		pid:    pid,
-		job:    job,
-		pinned: pinned,
+		cpty:     cpty,
+		handle:   handle,
+		pid:      pid,
+		job:      job,
+		pinned:   pinned,
+		onResize: onResize,
 	}
 	p.lastH.Store(int32(size.Rows))
 	p.lastW.Store(int32(size.Cols))
+	if onResize != nil {
+		onResize(size)
+	}
 	return p, nil
 }
 
@@ -72,7 +80,7 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 // The Unix one also sets SSH_TTY; a ConPTY has no device name to put in it, so
 // here it is left unset rather than made up.
 func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
-	return startPty(c, size, false)
+	return startPty(c, size, false, nil)
 }
 
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
@@ -84,6 +92,9 @@ type pty struct {
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
 	pinned              bool
+	// onResize hears of each size Setsize applies; see startPty. Nil reports
+	// nothing.
+	onResize func(termsize.Size)
 
 	// lastH, lastW are the geometry the ConPTY was last set to. Windows has no
 	// SIGWINCH, so Redraw nudges by resizing out and back, and it needs a size
@@ -119,6 +130,12 @@ func (p *pty) Setsize(h, w int) error {
 	// the nudge a resize rather than a round-trip.
 	p.lastH.Store(int32(h))
 	p.lastW.Store(int32(w))
+	// Reported for the same reason, and only here: the fan-out weighs a
+	// joiner's replay against this, and a size the command was never told
+	// would weigh it against a geometry nothing was drawn at.
+	if p.onResize != nil {
+		p.onResize(termsize.Size{Cols: w, Rows: h})
+	}
 	return nil
 }
 
@@ -145,6 +162,8 @@ func (p *pty) Redraw() error {
 	if h <= 0 || w <= 0 {
 		return nil
 	}
+	// The ConPTY directly, not Setsize: the round-trip ends where it began,
+	// so the geometry has not changed and onResize hears nothing of it.
 	if err := p.cpty.Resize(w+1, h); err != nil {
 		return err
 	}
