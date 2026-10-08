@@ -120,8 +120,8 @@ first, or the connection fails without a word.
 ## Share an agent through a door, not its own terminal
 
 `upterm host -- claude` shares Claude Code's own terminal: every guest sees
-one screen at the smallest guest's size, and a guest smaller than the others
-joins without the earlier scrollback. Through a Herdr (or tmux) door, each
+one screen at the smallest guest's size, and a guest who joins at a
+different size can find the earlier scrollback garbled. Through a Herdr (or tmux) door, each
 guest gets a client of its own at its own size, and the agent doesn't notice
 who comes and goes.
 
