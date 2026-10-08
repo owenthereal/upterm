@@ -456,6 +456,48 @@ func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr
 	assert.ErrorContains(err, "port forwarding is disabled")
 }
 
+// testGuestKeepaliveIsAnswered pins what a guest's liveness check relies on: a
+// keepalive it sends on its SSH connection comes back with a reply, whether the
+// relay answers it or passes it on to the session's node. The reply may be a
+// refusal; only silence would leave the guest unable to tell a quiet connection
+// from a dead one.
+func testGuestKeepaliveIsAnswered(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
+	require := require.New(t)
+
+	adminSocketFile := setupAdminSocket(t)
+
+	h := &Host{
+		Command:         getTestShell(),
+		PrivateKeys:     []string{HostPrivateKey},
+		AdminSocketFile: adminSocketFile,
+	}
+	err := h.Share(hostShareURL)
+	require.NoError(err)
+	defer h.Close()
+
+	session := getAndVerifySession(t, adminSocketFile, hostShareURL, hostNodeAddr)
+
+	c := &Client{
+		PrivateKeys: []string{ClientPrivateKey},
+	}
+	err = c.Join(session, clientJoinURL)
+	require.NoError(err)
+	defer c.Close()
+
+	replied := make(chan error, 1)
+	go func() {
+		_, _, err := c.sshClient.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+		replied <- err
+	}()
+
+	select {
+	case err := <-replied:
+		require.NoError(err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reply to a guest's keepalive through the relay")
+	}
+}
+
 func getAndVerifySession(t *testing.T, adminSocketFile string, wantHostURL, wantNodeURL string) *api.GetSessionResponse {
 	require := require.New(t)
 
