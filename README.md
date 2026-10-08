@@ -80,6 +80,7 @@ go install ./cmd/upterm/...
 ## :blue_book: Quick Reference
 
 Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
+To reach agents running in [Herdr](https://github.com/herdrdev/herdr) at home from a phone or another laptop, see [Reach your Herdr agents from anywhere](guides/herdr.md).
 Below are some notable highlights:
 
 ### Command Execution
