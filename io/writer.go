@@ -214,6 +214,16 @@ const (
 // verticalFinals are the final bytes of the CSIs that move the cursor up or
 // down, or the screen under it, whatever their parameters: CUU, CUD, CNL,
 // CPL, CUP, HVP, VPA, SU, SD, and DECSTBM, which homes the cursor.
+//
+// Others that can move the cursor between rows stay plain on purpose: a
+// cursor restore (ESC 8, and CSI u, bare or with a kitty keyboard marker),
+// insert and delete line (CSI L, CSI M), VPR (CSI e), and leaving the
+// alternate screen (CSI ?1049l). Shells save and restore the cursor within
+// one row, around a right-aligned prompt part (ESC 7 ... ESC 8, CSI s ...
+// CSI u), and a program that redraws sends one of the sequences listed here,
+// a CUU or a CUP, in every stretch it writes after a resize. Counting these
+// would cost a shell's joiners its history and catch no redraw the list does
+// not.
 const verticalFinals = "ABEFHfdSTr"
 
 // scan reports whether p ends a sequence that moves the cursor vertically:

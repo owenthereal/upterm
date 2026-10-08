@@ -1221,14 +1221,14 @@ func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
 	require.Equal(t, "pre \x1b[Apost\x1b[A", got.String())
 }
 
-// A resize reported just before a join, with nothing written since, is a size
-// nothing has been recorded at yet, so there is nothing at it to weigh: the
-// joiner is weighed against the redraw the ring's newest bytes are, at 45x30.
-// A 60x30 joiner fits it, though not the 80x24 the pty is now, and gets it;
-// the 80x24 redraw before it is wider, so the walk stops there. A 100x25
-// joiner fits 80x24, but 45x30 is taller than it, and it gets none of the
-// ring.
-func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T) {
+// A size applied at the join, reported just before it with nothing written
+// since, weighs nothing: nothing has been recorded at it yet. The joiner is
+// weighed against the redraw the ring's newest bytes are, at 45x30, not the
+// 80x24 the pty is now. A 60x30 joiner fits 45x30, though not 80x24, and gets
+// that redraw; the 80x24 redraw before it is wider, so the walk stops there.
+// A 100x25 joiner fits 80x24, but 45x30 is taller than it, and it gets none of
+// the ring.
+func TestMultiWriter_ASizeAppliedAtTheJoinWeighsNothing(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
 	_, _ = w.Write([]byte("\x1b[?1049hbefore\x1b[A"))
@@ -1445,7 +1445,10 @@ func TestMultiWriter_ARedrawReplaysToNoJoinerItDoesNotFit(t *testing.T) {
 // the CSIs that move the cursor up or down, address a row, scroll, or set the
 // scrolling region, whatever their parameters, and reverse index. Moving along
 // a line, erasing, colouring, setting modes and titling a window leave it
-// plain, and a title that reads like a sequence is still a title.
+// plain, and a title that reads like a sequence is still a title. So does
+// restoring the cursor, which shells do within a row around a right-aligned
+// prompt part (see verticalFinals), and a kitty keyboard push, which shares
+// the restore's final byte.
 func TestMultiWriter_OnlyVerticalCursorMovementIsARedraw(t *testing.T) {
 	for _, seq := range []string{
 		"\x1b[A", "\x1b[2B", "\x1b[E", "\x1b[3F", "\x1b[H", "\x1b[5;10H",
@@ -1464,6 +1467,7 @@ func TestMultiWriter_OnlyVerticalCursorMovementIsARedraw(t *testing.T) {
 	for _, seq := range []string{
 		"\r\n", "\x1b[5C", "\x1b[5D", "\x1b[5G", "\x1b[K", "\x1b[1;31m",
 		"\x1b[?25l", "\x1b(0", "\x1b]0;[A [H M\a", "\x1b]2;title\x1b\\",
+		"\x1b8", "\x1b[u", "\x1b[>1u",
 	} {
 		w := NewMultiWriter(DefaultReplayBytes)
 		w.Resized(at200x50)
