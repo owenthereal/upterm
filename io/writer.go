@@ -147,6 +147,14 @@ func (c *buffer) End() uint64 {
 	return c.total
 }
 
+// Start is the stream offset of the ring's first byte, or, while it holds
+// none, of the next byte it is handed.
+func (c *buffer) Start() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total - uint64(c.size)
+}
+
 // Split returns what Data does, cut at the stream offset at: before runs from
 // the ring's first byte up to at, and from runs on from it. An offset the ring
 // has already evicted puts all of it in from.
@@ -253,18 +261,36 @@ type MultiWriter struct {
 	sizeMu  sync.Mutex
 	resized termsize.Size
 
-	// size is the pty's size as of the ring's newest byte, and boundary the
-	// stream offset from which the ring was recorded at it. The zero size is
-	// none: no size has been reported. Both are guarded by writeMu and moved
-	// only by applyResize.
-	size     termsize.Size
-	boundary uint64
+	// boundaries are the sizes the ring was recorded at, oldest first. Each
+	// holds from its offset to the next one's, and the newest, whose size is
+	// the pty's as of the ring's newest byte, to the ring's end. Bytes before
+	// the oldest were recorded before any size was reported, or at a size the
+	// cap has since dropped: unsized says which. Empty is no size reported.
+	// Guarded by writeMu, and moved only by applyResize and prune.
+	boundaries []boundary
+
+	// unsized is the stream offset before which the bytes were recorded at a
+	// size the cap has dropped. Any of them still in the ring fit no joiner.
+	// Guarded by writeMu.
+	unsized uint64
 
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
 	closed bool
 }
+
+// boundary is a stream offset from which the ring was recorded at size.
+type boundary struct {
+	offset uint64
+	size   termsize.Size
+}
+
+// maxBoundaries caps the sizes the fan-out remembers, against a window
+// dragged across a screen with output between every step. Past it the oldest
+// is dropped, and the bytes recorded at it fit no joiner: they could have been
+// recorded at any size.
+const maxBoundaries = 64
 
 // Append attaches writers, handing each the replay buffer first so it starts
 // from recent output rather than mid-screen.
@@ -312,13 +338,16 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 // The replay is weighed against the pty's size as w joins, which is the size
 // the ring's newest output was recorded at: the host shrinks the pty to its
 // smallest terminal only after the join. A joiner at least as big as the pty
-// in both dimensions gets the ring from the last resize on, behind the
-// snapshot as of there, which is output recorded at a size its terminal fits.
-// A joiner smaller in either dimension is about to shrink the pty and have the
-// command repaint at its size, and a replay recorded wider or taller than its
-// terminal would wrap and split under that repaint. So it gets the modes as
-// they are now and none of the ring. A pty that has never reported a size
-// gives neither answer, and the joiner gets what Append gives it.
+// in both dimensions gets the longest stretch, back from the ring's end, in
+// which every size the ring was recorded at fits its terminal, no wider and
+// no taller, behind the snapshot as of the stretch's first byte. Output
+// recorded no bigger than a terminal renders on it as it was drawn; output
+// recorded wider or taller wraps and splits. A joiner smaller in either
+// dimension is about to shrink the pty and have the command repaint at its
+// size, and a replay recorded wider or taller than its terminal would wrap and
+// split under that repaint. So it gets the modes as they are now and none of
+// the ring. A pty that has never reported a size gives neither answer, and the
+// joiner gets what Append gives it.
 //
 // Attaching is atomic with respect to a Write, as it is for Append.
 func (t *MultiWriter) AppendSized(size termsize.Size, w io.Writer) error {
@@ -346,21 +375,40 @@ func (t *MultiWriter) AppendSized(size termsize.Size, w io.Writer) error {
 // sizedReplay is the snapshot and the ring bytes AppendSized hands a joiner
 // whose terminal is j. Called with writeMu held.
 func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
-	p := t.size
-	if !j.Valid() || p == (termsize.Size{}) {
+	n := len(t.boundaries)
+	if !j.Valid() || n == 0 {
 		return t.modes.Snapshot(), t.buffer.Data()
 	}
-	if j.Cols < p.Cols || j.Rows < p.Rows {
+	if !fits(t.boundaries[n-1].size, j) {
 		return t.snapshotAfter(t.buffer.Data()), nil
 	}
 
-	// A boundary the ring has already evicted leaves all of it recorded at p,
-	// and the tracker already describes its first byte.
-	before, since := t.buffer.Split(t.boundary)
+	// Back from the pty's size, over every size j fits.
+	k := n - 1
+	for k > 0 && fits(t.boundaries[k-1].size, j) {
+		k--
+	}
+
+	// The replay starts where the earliest of them does. The oldest the
+	// fan-out remembers also takes in the bytes before it, recorded before any
+	// size was reported, unless they were recorded at a size the cap dropped.
+	// An offset the ring has already evicted puts all of it in since, and the
+	// tracker already describes its first byte.
+	start := t.boundaries[k].offset
+	if k == 0 && t.unsized <= t.buffer.Start() {
+		start = 0
+	}
+	before, since := t.buffer.Split(start)
 	if len(before) == 0 {
 		return t.modes.Snapshot(), since
 	}
 	return t.snapshotAfter(before), since
+}
+
+// fits reports whether output recorded at size renders on a terminal of j as
+// it was drawn: it is no wider and no taller.
+func fits(size, j termsize.Size) bool {
+	return size.Cols <= j.Cols && size.Rows <= j.Rows
 }
 
 // snapshotAfter is the snapshot as of the end of chunks, which run on from the
@@ -445,22 +493,61 @@ func (t *MultiWriter) Resized(size termsize.Size) {
 }
 
 // applyResize applies the size Resized last recorded, if any. A size other
-// than the one recorded moves the boundary to the stream offset of the next
+// than the newest boundary's adds a boundary at the stream offset of the next
 // byte to enter the ring, everything from which is recorded at that size. An
-// equal size moves nothing, so a resize and a resize back with no write
-// between them make no boundary. Called with writeMu held, at the start of
-// Write, Append and AppendSized, so a join weighs the size the pty is now.
+// equal size adds nothing, so a resize and a resize back with no write between
+// them make no boundary. Called with writeMu held, at the start of Write,
+// Append and AppendSized, so a join weighs the size the pty is now.
+//
+// A newest boundary nothing was written after holds no bytes, so the new size
+// replaces it rather than following it: kept, it would be a size a joiner
+// could fail to fit with nothing recorded at it, and would cut its replay off
+// there. Two joins before the command writes anything leave one: the first
+// joiner's size is applied at the second's join, and the second's own size
+// follows before any output.
 func (t *MultiWriter) applyResize() {
 	t.sizeMu.Lock()
 	size := t.resized
 	t.resized = termsize.Size{}
 	t.sizeMu.Unlock()
 
-	if size == (termsize.Size{}) || size == t.size {
+	if size == (termsize.Size{}) || size == t.newestSize() {
 		return
 	}
-	t.size = size
-	t.boundary = t.buffer.End()
+	end := t.buffer.End()
+	if n := len(t.boundaries); n > 0 && t.boundaries[n-1].offset == end {
+		t.boundaries = t.boundaries[:n-1]
+		if size == t.newestSize() {
+			return
+		}
+	}
+	t.boundaries = append(t.boundaries, boundary{offset: end, size: size})
+	if len(t.boundaries) > maxBoundaries {
+		t.boundaries = t.boundaries[1:]
+		t.unsized = t.boundaries[0].offset
+	}
+}
+
+// newestSize is the newest boundary's size, the pty's as of the ring's newest
+// byte, or the zero size if none has been reported. Called with writeMu held.
+func (t *MultiWriter) newestSize() termsize.Size {
+	if n := len(t.boundaries); n > 0 {
+		return t.boundaries[n-1].size
+	}
+	return termsize.Size{}
+}
+
+// prune forgets the sizes of bytes the ring has evicted. A boundary goes once
+// the next one starts at or before the ring's first byte; the one that covers
+// that byte stays, as the size it was recorded at. Called with writeMu held,
+// after the ring is fed.
+func (t *MultiWriter) prune() {
+	first := t.buffer.Start()
+	i := 0
+	for i+1 < len(t.boundaries) && t.boundaries[i+1].offset <= first {
+		i++
+	}
+	t.boundaries = t.boundaries[i:]
 }
 
 // checkRemovable rejects a writer that Remove could not match.
@@ -548,6 +635,7 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	// boundary.
 	t.applyResize()
 	_, _ = t.replay.Write(p)
+	t.prune()
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))

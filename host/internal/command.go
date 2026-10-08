@@ -254,7 +254,7 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	// a session nobody offered a geometry still opens at something usable.
 	//
 	// The fan-out hears every size the pty applies, so it can weigh what to
-	// replay a joiner against the size the ring was recorded at. Resized runs
+	// replay a joiner against the sizes the ring was recorded at. Resized runs
 	// inside the pty's Setsize, and so with a lock held: terminalWindows's,
 	// whose updates promise never to block, or sharedPTY.mu, which
 	// sharedPTY.set holds while it applies a size offered before the pty

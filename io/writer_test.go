@@ -961,8 +961,9 @@ func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
 }
 
 var (
-	at80x24 = termsize.Size{Cols: 80, Rows: 24}
-	at45x30 = termsize.Size{Cols: 45, Rows: 30}
+	at80x24  = termsize.Size{Cols: 80, Rows: 24}
+	at45x30  = termsize.Size{Cols: 45, Rows: 30}
+	at200x50 = termsize.Size{Cols: 200, Rows: 50}
 )
 
 // A joiner at least as big as the pty gets what Append gives it.
@@ -997,7 +998,8 @@ func TestMultiWriter_AppendSizedSkipsTheRingForASmallerJoiner(t *testing.T) {
 	}
 }
 
-// Only what was recorded since the last resize, behind the modes as of then.
+// 80x24 is wider than a 45x30 joiner, so it gets only what was recorded since
+// the resize to 45x30, behind the modes as of then.
 func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
@@ -1009,9 +1011,132 @@ func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
 	require.Equal(t, "\x1b[?1049hafter", got.String())
 }
 
+// Output recorded smaller than the joiner's terminal renders on it as it was
+// drawn, so a joiner every recorded size fits gets the whole ring. This is the
+// CI rejoin: the first guest's join grew the pty from 80x24, and a guest
+// joining after it still sees what was written before.
+func TestMultiWriter_AppendSizedReplaysEverythingThatFits(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("pre "))
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("post"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "pre post", got.String())
+}
+
+// The replay stops at the newest size the joiner doesn't fit, in either
+// dimension, and the snapshot carries the modes set before it. 200x40 has
+// the columns 200x50 was recorded at but not the rows.
+func TestMultiWriter_AppendSizedStopsAtASizeThatDoesNotFit(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("\x1b[?1049hbig "))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("small"))
+
+	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, {Cols: 200, Rows: 40}} {
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.Equal(t, "\x1b[?1049hsmall", got.String(), "a %v joiner", j)
+	}
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "\x1b[?1049hbig small", got.String(), "a 200x50 joiner")
+}
+
+// The replay reaches back over every size the joiner fits, not just the
+// newest, and stops at the first one it doesn't.
+func TestMultiWriter_AppendSizedWalksBackOverEveryFittingSize(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	for _, step := range []struct {
+		size termsize.Size
+		out  string
+	}{
+		{at80x24, "a"},
+		{at200x50, "b"},
+		{at45x30, "c"},
+		{termsize.Size{Cols: 120, Rows: 40}, "d"},
+	} {
+		w.Resized(step.size)
+		_, _ = w.Write([]byte(step.out))
+	}
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 120, Rows: 40}, &got))
+	require.Equal(t, "cd", got.String(), "a 120x40 joiner")
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "abcd", got.String(), "a 200x50 joiner")
+}
+
+// The fan-out remembers 64 sizes. Bytes recorded at a size it has forgotten
+// may have been recorded at any size, so they fit no joiner, however big.
+func TestMultiWriter_BoundariesBeyondTheCapDoNotFit(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	var out []byte
+	for i := range 70 {
+		w.Resized(termsize.Size{Cols: 80 + i%2, Rows: 24})
+		b := byte('0' + i)
+		out = append(out, b)
+		_, _ = w.Write([]byte{b})
+	}
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, string(out[len(out)-64:]), got.String())
+}
+
+// The sizes are forgotten as the ring forgets what was recorded at them. The
+// one the ring's first byte was recorded at stays, because it is that byte's
+// size; every one older is gone.
+func TestMultiWriter_BoundariesArePrunedAsTheRingEvicts(t *testing.T) {
+	// Four bytes at each of 20 sizes, 80 in all. A ring of 18 starts at
+	// offset 62, inside what was recorded from 60 on, the 16th size; one of
+	// 16 starts at 64, exactly where the 17th begins, so the 16th covers none
+	// of it.
+	for _, tc := range []struct{ ring, oldest int }{{18, 15}, {16, 16}} {
+		w := NewMultiWriter(tc.ring)
+		for i := range 20 {
+			w.Resized(termsize.Size{Cols: 80 + i%2, Rows: 24})
+			_, _ = w.Write([]byte("abcd"))
+		}
+
+		var want []boundary
+		for i := tc.oldest; i < 20; i++ {
+			want = append(want, boundary{offset: uint64(4 * i), size: termsize.Size{Cols: 80 + i%2, Rows: 24}})
+		}
+		require.Equal(t, want, w.boundaries, "a ring of %d", tc.ring)
+	}
+}
+
+// A size the pty took and left with nothing written at it covers no bytes, so
+// it is no size a joiner can fail to fit. Two guests joining before the
+// command writes anything leave one: the first guest's size is applied at the
+// second guest's join, and the second guest's size replaces it before
+// anything is written.
+func TestMultiWriter_ASizeNothingWasRecordedAtIsNoBoundary(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("pre "))
+	w.Resized(at200x50)
+	require.NoError(t, w.AppendSized(at45x30, &bytes.Buffer{}))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("post"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 100, Rows: 40}, &got))
+	require.Equal(t, "pre post", got.String())
+}
+
 // A resize reported just before a join counts for it, with nothing written
-// since: the joiner is weighed against the size the pty is now, and nothing
-// has been recorded at that size yet.
+// since: the joiner is weighed against the size the pty is now. A 60x30
+// joiner fits the 45x30 the ring's newest bytes were recorded at, but not the
+// 80x24 the pty is now, so it gets none of the ring.
 func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T) {
 	w := NewMultiWriter(DefaultReplayBytes)
 	w.Resized(at80x24)
@@ -1021,7 +1146,7 @@ func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T)
 	w.Resized(at80x24)
 
 	var got bytes.Buffer
-	require.NoError(t, w.AppendSized(termsize.Size{Cols: 200, Rows: 50}, &got))
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 60, Rows: 30}, &got))
 	require.Equal(t, "\x1b[?1049h", got.String())
 }
 
@@ -1041,6 +1166,10 @@ func TestMultiWriter_ResizedToTheSameSizeIsNoBoundary(t *testing.T) {
 	var got bytes.Buffer
 	require.NoError(t, w.AppendSized(at80x24, &got))
 	require.Equal(t, "one\r\ntwo\r\nthree\r\n", got.String())
+	// Every size recorded here is 80x24, so the replay can't tell a boundary
+	// at an equal size from none. The list can, and each such boundary would
+	// take a place under the cap.
+	require.Equal(t, []boundary{{offset: 0, size: at80x24}}, w.boundaries)
 }
 
 // A report of a size that isn't one, with no columns or no rows, is ignored,
