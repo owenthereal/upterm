@@ -1626,8 +1626,10 @@ func clientDesc(c *api.Client) string {
 		return desc + " → [redacted]"
 	}
 	desc += " → " + strings.Join(c.GetForwardDestinations(), ", ")
+	// A count of forwards, not of destinations: past the list's bound the
+	// host stops remembering where they went, which is what bounds it.
 	if n := c.GetUnlistedForwards(); n > 0 {
-		desc += fmt.Sprintf(" (+%d more)", n)
+		desc += fmt.Sprintf(" (+%d more forwards)", n)
 	}
 	return desc
 }

@@ -519,8 +519,10 @@ type guestJoinLatch struct {
 // Emit is asynchronous, so a short session's left may reach the consumer
 // before its joined. This state reconciles both topics in one actor.
 type clientLifecycle struct {
-	repo        *internal.ClientRepo
-	pendingLeft map[string]struct{}
+	repo *internal.ClientRepo
+	// pendingLeft holds the departures that arrived before their joins, each
+	// with the final snapshot its left carried, if any.
+	pendingLeft map[string]*api.Client
 	onGuestJoin func(*api.Client) error
 	onJoined    func(*api.Client)
 	onLeft      func(*api.Client)
@@ -542,17 +544,23 @@ func (l *clientLifecycle) joined(client *api.Client, qualifiesAsGuestJoin bool) 
 	if l.onJoined != nil {
 		l.onJoined(client)
 	}
-	if _, left := l.pendingLeft[client.Id]; left {
+	if final, left := l.pendingLeft[client.Id]; left {
 		delete(l.pendingLeft, client.Id)
-		l.left(client.Id)
+		l.left(client.Id, final)
 	}
 }
 
-func (l *clientLifecycle) left(id string) {
+// left removes the client and reports it gone. final, when not nil, is the
+// client as it was when it left, which the callback is handed in place of the
+// join's snapshot: a jump's destinations grow after it joins.
+func (l *clientLifecycle) left(id string, final *api.Client) {
 	client := l.repo.Get(id)
 	if client == nil {
-		l.pendingLeft[id] = struct{}{}
+		l.pendingLeft[id] = final
 		return
+	}
+	if final != nil {
+		client = final
 	}
 	if l.logger != nil {
 		l.logger.Info("Client left", "client", client.Addr)
@@ -1213,7 +1221,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		guestLatch = &guestJoinLatch{update: c.SessionDir.Update, disarm: joins.join}
 	}
 	lifecycle := &clientLifecycle{
-		repo: clientRepo, pendingLeft: make(map[string]struct{}),
+		repo: clientRepo, pendingLeft: make(map[string]*api.Client),
 		onJoined: c.ClientJoinedCallback, onLeft: c.ClientLeftCallback,
 		logger: logger,
 	}
@@ -1259,7 +1267,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 					}
 					if len(evt.Args) > 0 {
 						if id, ok := evt.Args[0].(string); ok {
-							lifecycle.left(id)
+							// A jump's left carries it as it ended.
+							var final *api.Client
+							if len(evt.Args) > 1 {
+								final, _ = evt.Args[1].(*api.Client)
+							}
+							lifecycle.left(id, final)
 						}
 					}
 				}

@@ -134,7 +134,7 @@ func Test_clientDesc_NamesAJumpAndWhereItGoes(t *testing.T) {
 	withClientIPs(t, false)
 	require.Equal(t, "jump 1.2.3.4:5 SSH-2.0-x SHA256:abc → localhost:22, 10.0.0.5:445", clientDesc(jump))
 	jump.UnlistedForwards = 3
-	require.Equal(t, "jump 1.2.3.4:5 SSH-2.0-x SHA256:abc → localhost:22, 10.0.0.5:445 (+3 more)", clientDesc(jump))
+	require.Equal(t, "jump 1.2.3.4:5 SSH-2.0-x SHA256:abc → localhost:22, 10.0.0.5:445 (+3 more forwards)", clientDesc(jump))
 
 	withClientIPs(t, true)
 	require.Equal(t, "jump [redacted] SSH-2.0-x SHA256:abc → [redacted]", clientDesc(jump))

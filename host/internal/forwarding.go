@@ -156,10 +156,17 @@ func forwardingHandler(events *emitter.Emitter, forwards *Forwards) gssh.Channel
 				// The lifecycle consumer reconciles a left delivered before its join.
 				go func() {
 					<-ctx.Done()
+					// The departure carries the jump as it ended, so the leave
+					// callback names every destination, not the join's first.
+					// A copy: the joined client is shared with the repo's
+					// readers. Emitted before the registry forgets it, so a
+					// session info in between still sees the destinations.
+					final := proto.Clone(client).(*api.Client)
+					presence.describe(final)
+					events.Emit(upterm.EventClientLeft, id, final)
 					if forwards != nil {
 						forwards.remove(id)
 					}
-					emitClientLeftEvent(events, id)
 				}()
 			})
 		}}, ctx)

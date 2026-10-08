@@ -176,6 +176,8 @@ func TestForwardingClientListsItsDestinations(t *testing.T) {
 	}
 	f := newJoinTimeoutHost(t)
 	f.h.AllowLocalTCPForwarding = true
+	left := make(chan *api.Client, 1)
+	f.h.ClientLeftCallback = func(c *api.Client) { left <- c }
 	f.start(t)
 	awaitJoinTimeoutSignal(t, f.ready, "readiness")
 	admin := forwardingAdmin(t, f)
@@ -212,8 +214,12 @@ func TestForwardingClientListsItsDestinations(t *testing.T) {
 	require.Equal(t, targets[:listed], jump().ForwardDestinations, "the list stops growing at its bound")
 	require.Equal(t, uint32(2), jump().UnlistedForwards, "forwards past it are counted")
 
+	// The departure is reported as the jump ended, not as it began: the
+	// leave notification names every destination the join one couldn't.
 	require.NoError(t, client.Close())
-	awaitJoinTimeoutSignal(t, f.left, "forwarding departure")
+	gone := forwardingCallback(t, left)
+	require.Equal(t, targets[:listed], gone.ForwardDestinations)
+	require.Equal(t, uint32(2), gone.UnlistedForwards)
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 }
@@ -353,13 +359,13 @@ func TestForwardingLifecycleReconcilesLeftBeforePresenceWithoutJoining(t *testin
 	repo := internal.NewClientRepo()
 	var events []string
 	lifecycle := &clientLifecycle{
-		repo: repo, pendingLeft: make(map[string]struct{}),
+		repo: repo, pendingLeft: make(map[string]*api.Client),
 		onGuestJoin: func(*api.Client) error { t.Error("forwarding disarmed first-guest deadline"); return nil },
 		onJoined:    func(*api.Client) { events = append(events, "joined") },
 		onLeft:      func(*api.Client) { events = append(events, "left") },
 	}
 	client := &api.Client{Id: "quick-forward", Kind: api.Client_GUEST}
-	lifecycle.left(client.Id)
+	lifecycle.left(client.Id, nil)
 	lifecycle.joined(client, false)
 	require.Empty(t, repo.Clients())
 	require.Empty(t, lifecycle.pendingLeft)
