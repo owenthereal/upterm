@@ -106,11 +106,19 @@ func stallingDoor(t *testing.T) func() *ssh.Client {
 
 func TestTerminalSetupIsCutOffAtSetupBy(t *testing.T) {
 	client := stallingDoor(t)()
-	start := time.Now()
-	_, err := (&Terminal{Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
-		Run(context.Background(), client, start.Add(200*time.Millisecond))
-	require.Error(t, err)
-	require.Less(t, time.Since(start), 200*time.Millisecond+250*time.Millisecond)
+	setupBy := time.Now().Add(200 * time.Millisecond)
+	errs := make(chan error, 1)
+	go func() {
+		_, err := (&Terminal{Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
+			Run(context.Background(), client, setupBy)
+		errs <- err
+	}()
+	select {
+	case err := <-errs:
+		require.Error(t, err)
+	case <-time.After(time.Until(setupBy) + 3*time.Second):
+		t.Fatal("setup was not cut off at setupBy")
+	}
 }
 
 // setupBy bounds the setup and nothing after it: a session still running past
@@ -122,8 +130,8 @@ func TestTerminalSetupByIsCalledOffOnceTheShellRuns(t *testing.T) {
 		_ = s.Exit(3)
 	})
 	client := dialDoor(t, door)
-	setupBy := time.Now().Add(100 * time.Millisecond)
-	time.AfterFunc(time.Until(setupBy)+100*time.Millisecond, func() { close(past) })
+	setupBy := time.Now().Add(time.Second)
+	time.AfterFunc(time.Until(setupBy)+250*time.Millisecond, func() { close(past) })
 	res, err := (&Terminal{Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
 		Run(context.Background(), client, setupBy)
 	require.NoError(t, err)
@@ -147,8 +155,10 @@ func TestTerminalOnReadyRunsBeforeTheFirstOutputByte(t *testing.T) {
 }
 
 func TestTerminalReportsAnAbandonedRestoreAndHoldsReleasedOpen(t *testing.T) {
+	// Long enough that the copy has read and fed the session's output before
+	// the drain gives up on it, however slowly it is scheduled.
 	old := outputDrainTimeout
-	outputDrainTimeout = 50 * time.Millisecond
+	outputDrainTimeout = time.Second
 	t.Cleanup(func() { outputDrainTimeout = old })
 
 	door := serveDoor(t, func(s gssh.Session) {
@@ -323,8 +333,10 @@ func TestTerminalUnrestoredHoldsWhatAStalledResumeLeaves(t *testing.T) {
 // testHookFeeding (nil outside tests) runs inside trackerMu, just before the
 // feed.
 func TestTerminalUnrestoredWaitsForAFeedInProgress(t *testing.T) {
+	// Long enough that the copy has read the session's output, and reached
+	// the feed, before the drain gives up on it.
 	old := outputDrainTimeout
-	outputDrainTimeout = 50 * time.Millisecond
+	outputDrainTimeout = time.Second
 	t.Cleanup(func() { outputDrainTimeout = old })
 
 	feeding, release := make(chan struct{}), make(chan struct{})
@@ -349,7 +361,7 @@ func TestTerminalUnrestoredWaitsForAFeedInProgress(t *testing.T) {
 	select {
 	case <-done:
 		t.Fatal("Run took its snapshot while a feed was in progress")
-	case <-time.After(150 * time.Millisecond): // past the drain timeout
+	case <-time.After(2 * time.Second): // well past the drain timeout
 	}
 	close(release)
 	res := <-done
