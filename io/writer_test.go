@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -957,4 +958,208 @@ func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
+}
+
+var (
+	at80x24 = termsize.Size{Cols: 80, Rows: 24}
+	at45x30 = termsize.Size{Cols: 45, Rows: 30}
+)
+
+// A joiner at least as big as the pty gets what Append gives it.
+func TestMultiWriter_AppendSizedReplaysTheRingToAJoinerItFits(t *testing.T) {
+	for _, j := range []termsize.Size{at80x24, {Cols: 200, Rows: 50}} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at80x24)
+		_, _ = w.Write([]byte("\x1b[?2004hline one\r\nline two\r\n"))
+		var got, want bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.NoError(t, w.Append(&want))
+		require.Equal(t, want.String(), got.String(), "a %v joiner", j)
+	}
+}
+
+// Smaller in either dimension: no ring, but the modes as they are now. The
+// joiner is about to shrink the pty and be repainted at its own size, and a
+// replay recorded wider or taller than its terminal is what that repaint lands
+// on top of. The filter's pending lead-in is live output, so it still comes
+// last.
+func TestMultiWriter_AppendSizedSkipsTheRingForASmallerJoiner(t *testing.T) {
+	for _, j := range []termsize.Size{at45x30, {Cols: 100, Rows: 20}} {
+		w := NewMultiWriter(DefaultReplayBytes)
+		w.Resized(at80x24)
+		_, _ = w.Write([]byte("\x1b[?2004htext"))
+		_, _ = w.Write([]byte("\x1b["))
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(j, &got))
+		require.Contains(t, got.String(), "\x1b[?2004h", "a %v joiner", j)
+		require.NotContains(t, got.String(), "text", "a %v joiner", j)
+		require.True(t, strings.HasSuffix(got.String(), "\x1b["), "a %v joiner gets the pending lead-in, got %q", j, got.String())
+	}
+}
+
+// Only what was recorded since the last resize, behind the modes as of then.
+func TestMultiWriter_AppendSizedReplaysOnlySinceTheLastResize(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?1049hbefore"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("after"))
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.NotContains(t, got.String(), "before")
+	require.Contains(t, got.String(), "\x1b[?1049h")
+	require.True(t, strings.HasSuffix(got.String(), "after"))
+}
+
+// A resize reported just before a join counts for it, with nothing written
+// since: the joiner is weighed against the size the pty is now, and nothing
+// has been recorded at that size yet.
+func TestMultiWriter_AppendSizedSeesAResizeWithNothingWrittenSince(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?1049hbefore"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("after"))
+	w.Resized(at80x24)
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(termsize.Size{Cols: 200, Rows: 50}, &got))
+	require.Equal(t, "\x1b[?1049h", got.String())
+}
+
+// A resize and a resize back, with nothing written between them, leave the
+// ring recorded at one size throughout, and so does a resize to the size it
+// already is.
+func TestMultiWriter_ResizedToTheSameSizeIsNoBoundary(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("one\r\n"))
+	w.Resized(at45x30)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("two\r\n"))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("three\r\n"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "one\r\ntwo\r\nthree\r\n", got.String())
+}
+
+// A boundary the ring has already evicted leaves the ring recorded at one
+// size throughout, so all of it is the replay.
+func TestMultiWriter_ABoundaryEvictedFromTheRingReplaysItWhole(t *testing.T) {
+	w := NewMultiWriter(16)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("01234567"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("abcdefghijklmnopqrstuvwxyzABCDEF"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "qrstuvwxyzABCDEF", got.String())
+}
+
+// A resize can land between any two bytes of output, including the two halves
+// of an escape sequence. The joiner still has to see the sequence whole.
+func TestMultiWriter_ABoundaryInsideASequenceReplaysItWhole(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?20"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("04hafter"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Contains(t, got.String(), "\x1b[?2004hafter")
+
+	// The query filter holds a CSI back until it has seen its end, so the
+	// boundary above falls before the sequence rather than inside the ring's
+	// copy of it. A charset designation is passed into the ring as soon as its
+	// "(" is seen, so here the boundary does split the ring's bytes, and the
+	// sequence's head is in the snapshot rather than in the replay.
+	w = NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b("))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("0after"))
+
+	got.Reset()
+	require.NoError(t, w.AppendSized(at45x30, &got))
+	require.Equal(t, "\x1b(0after", got.String())
+}
+
+// A viewer has no terminal size, and a writer never resized has no size to
+// compare one with: either way the joiner gets the whole ring, as Append gives
+// it.
+func TestMultiWriter_AppendSizedWithoutASizeIsAppend(t *testing.T) {
+	never := NewMultiWriter(DefaultReplayBytes)
+	_, _ = never.Write([]byte("\x1b[?2004hnever resized"))
+	for _, j := range []termsize.Size{{}, at45x30, at80x24} {
+		var got, want bytes.Buffer
+		require.NoError(t, never.AppendSized(j, &got))
+		require.NoError(t, never.Append(&want))
+		require.Equal(t, want.String(), got.String(), "a %v joiner", j)
+	}
+
+	resized := NewMultiWriter(DefaultReplayBytes)
+	resized.Resized(at80x24)
+	_, _ = resized.Write([]byte("\x1b[?1049hbefore"))
+	resized.Resized(at45x30)
+	_, _ = resized.Write([]byte("after"))
+	var got, want bytes.Buffer
+	require.NoError(t, resized.AppendSized(termsize.Size{}, &got))
+	require.NoError(t, resized.Append(&want))
+	require.Equal(t, want.String(), got.String())
+	require.Contains(t, got.String(), "before")
+}
+
+// The pty reports a resize with terminalWindows's lock held, whose updates
+// promise never to block, while a Write parked in a stopped primary writer
+// can hold writeMu indefinitely.
+func TestMultiWriter_ResizedDoesNotWaitForAParkedWrite(t *testing.T) {
+	stuck := newBlockingWriter()
+	w := NewMultiWriter(DefaultReplayBytes)
+	require.NoError(t, w.Append(stuck))
+
+	wrote := make(chan struct{})
+	go func() { defer close(wrote); _, _ = w.Write([]byte("output")) }()
+	<-stuck.entered
+
+	resized := make(chan struct{})
+	go func() { defer close(resized); w.Resized(at80x24) }()
+	select {
+	case <-resized:
+	case <-time.After(50 * time.Millisecond):
+		t.Error("Resized waited on a Write parked in a stopped writer")
+	}
+
+	close(stuck.release)
+	<-wrote
+	<-resized
+}
+
+// A sized join works out its snapshot from a copy of the tracker. The tracker
+// itself has to go on describing the ring's first byte, for every joiner after
+// this one and for the Append that a viewer still makes.
+func TestMultiWriter_SizedJoinsDoNotSpendTheTracker(t *testing.T) {
+	w := NewMultiWriter(16)
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("\x1b[?2004h"))
+	// 16 more bytes push the bracketed paste out of the ring and into the
+	// tracker. A kitty push is in what stays, because unlike a mode it is not
+	// the same after being applied twice.
+	_, _ = w.Write([]byte("abc\x1b[>1u\x1b[?1049h"))
+
+	var before bytes.Buffer
+	require.NoError(t, w.Append(&before))
+
+	var first, second bytes.Buffer
+	require.NoError(t, w.AppendSized(at45x30, &first))
+	require.NoError(t, w.AppendSized(at45x30, &second))
+	require.Equal(t, "\x1b[?2004h\x1b[>1u\x1b[?1049h", first.String())
+	require.Equal(t, first.String(), second.String())
+
+	var after bytes.Buffer
+	require.NoError(t, w.Append(&after))
+	require.Equal(t, before.String(), after.String())
 }

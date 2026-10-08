@@ -918,3 +918,24 @@ func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
 	require.Empty(t, m.Snapshot(), "a pop past any depth empties the stack")
 	require.Empty(t, m.Restore())
 }
+
+// A sized join works out the snapshot as of a later point in the ring from a
+// clone, fed the ring's bytes up to it. The tracker it was cloned from has to
+// go on describing the ring's first byte, so nothing the clone is fed may
+// reach it: not through the mode map, and not through a key stack's entries,
+// which a kitty set rewrites in place.
+func TestModeTracker_CloneIsIndependent(t *testing.T) {
+	m := NewModeTracker()
+	_, err := m.Write([]byte("\x1b[?2004h\x1b[>1u"))
+	require.NoError(t, err)
+	snapshot, restore := string(m.Snapshot()), string(m.Restore())
+
+	c := m.Clone()
+	_, err = c.Write([]byte("\x1b[?2004l\x1b[=3u\x1b[?1049h\x1b[>5u"))
+	require.NoError(t, err)
+
+	require.Equal(t, snapshot, string(m.Snapshot()), "the original's snapshot")
+	require.Equal(t, restore, string(m.Restore()), "the original's restore")
+	require.Equal(t, "\x1b[>3u\x1b[?1049h\x1b[>5u", string(c.Snapshot()), "the clone's snapshot")
+	require.Equal(t, "\x1b[<1u\x1b[?1049l\x1b[<1u", string(c.Restore()), "the clone's restore")
+}

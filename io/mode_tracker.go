@@ -3,7 +3,9 @@ package io
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 )
@@ -213,6 +215,29 @@ const (
 
 func NewModeTracker() *ModeTracker {
 	return &ModeTracker{decPrivate: map[int]bool{}}
+}
+
+// Clone returns an independent copy: writing to either leaves the other's
+// Snapshot and Restore unchanged.
+//
+// A sized join needs the snapshot as of a later point in the ring than its
+// first byte, and gets it by feeding a clone the ring's bytes up to there. The
+// tracker itself has to go on describing the ring's first byte, so the copy is
+// deep: the parser appends to its slices in place and rewrites a key stack's
+// top entry in place, and a shared backing array or map would carry the
+// clone's writes back into the original.
+func (m *ModeTracker) Clone() *ModeTracker {
+	c := *m
+	c.decPrivate = maps.Clone(m.decPrivate)
+	c.mainRegion = slices.Clone(m.mainRegion)
+	c.altRegion = slices.Clone(m.altRegion)
+	c.charsetG0 = slices.Clone(m.charsetG0)
+	c.mainKeys.entries = slices.Clone(m.mainKeys.entries)
+	c.altKeys.entries = slices.Clone(m.altKeys.entries)
+	c.modifyOtherKeys = slices.Clone(m.modifyOtherKeys)
+	c.partial = slices.Clone(m.partial)
+	c.seq = slices.Clone(m.seq)
+	return &c
 }
 
 // bufferedBytes reports the parser's current accumulation: both the CSI
