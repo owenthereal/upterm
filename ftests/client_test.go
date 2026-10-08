@@ -14,6 +14,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/routing"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,10 +72,11 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	err = c.Join(session, clientJoinURL)
 
 	// Test authorization failure - use assert for expected error validation.
-	// uptermd reports the outcome in its own words: the upstream's error text
-	// names internal node addresses and is never relayed to the joiner.
+	// Through another node, uptermd reports the outcome in its own words: the
+	// upstream's error text names internal node addresses and is never relayed
+	// to the joiner.
 	require.Error(err, "connection should be rejected with wrong key")
-	assert.ErrorContains(err, "unable to authenticate", "should fail with an SSH authentication error")
+	assert.ErrorContains(err, keyRefusal(hostShareURL, clientJoinURL), "should fail with the session's refusal of the key")
 }
 
 func testClientNonExistingSession(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
@@ -557,4 +559,17 @@ func setupAdminSocket(t *testing.T) string {
 		_ = os.RemoveAll(adminSockDir)
 	})
 	return filepath.Join(adminSockDir, "u.sock")
+}
+
+// keyRefusal is what a guest joining at clientJoinURL is told when the session
+// shared at hostShareURL refuses its key. Over ssh at another node, that node
+// completes the guest's handshake and carries it on to the session's node,
+// which refuses the key and says so; the guest hears that verdict when it opens
+// its session. Otherwise the guest's handshake is with the session's node
+// itself, which a ws entry dials directly, and fails to authenticate.
+func keyRefusal(hostShareURL, clientJoinURL string) string {
+	if mustParseURL(clientJoinURL).Scheme == "ssh" && hostShareURL != clientJoinURL {
+		return upterm.UpstreamKeyRefused
+	}
+	return "unable to authenticate"
 }
