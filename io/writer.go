@@ -204,9 +204,9 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	}
 }
 
-// ErrClosed is returned by Append once Shutdown has run. A guest that reaches
-// the door as the session is ending is refused rather than attached to a
-// fan-out nothing will flush again.
+// ErrClosed is returned by Append and AppendSized once Shutdown has run. A
+// guest that reaches the door as the session is ending is refused rather than
+// attached to a fan-out nothing will flush again.
 var ErrClosed = errors.New("multiwriter: closed to new writers")
 
 // Flusher is implemented by attached writers that deliver asynchronously and so
@@ -423,12 +423,13 @@ func (t *MultiWriter) attach(writers ...io.Writer) {
 // Resized tells the fan-out that the pty is now size. It never waits on
 // writeMu.
 //
-// It only records the size. The pty reports a resize from its Setsize with
-// terminalWindows's lock held, and terminalWindows promises its updates never
-// block, while Write holds writeMu for as long as a synchronous primary writer
-// takes, which for one whose terminal is stopped is indefinitely. So the next
-// Write or join to take writeMu applies it instead, before it adds anything to
-// the ring; see applyResize.
+// It only records the size. The pty reports a resize from its Setsize, which
+// runs with a lock held: terminalWindows's, whose updates promise never to
+// block, or sharedPTY.mu, which sharedPTY.set holds while it applies a size
+// offered before the pty existed. Write holds writeMu for as long as a
+// synchronous primary writer takes, which for one whose terminal is stopped
+// is indefinitely. So the next Write or join to take writeMu applies it
+// instead, before it adds anything to the ring; see applyResize.
 //
 // A size that isn't Valid is ignored. Nothing is drawn at a geometry with no
 // columns or no rows, and recorded, it would overwrite a size still waiting to
@@ -673,8 +674,9 @@ type ResetTarget interface {
 // replay filter is still holding, which together are everything sent since.
 //
 // That spends the tracker: its snapshot no longer describes the ring's start.
-// So it runs once, from Shutdown, after which Append refuses every joiner and
-// nothing asks for a snapshot again. Called with writeMu held.
+// So it runs once, from Shutdown, after which Append and AppendSized refuse
+// every joiner and nothing asks for a snapshot again. Called with writeMu
+// held.
 func (t *MultiWriter) restore() []byte {
 	for _, d := range t.buffer.Data() {
 		_, _ = t.modes.Write(d)

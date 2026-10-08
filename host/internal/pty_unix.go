@@ -20,8 +20,9 @@ import (
 // its Setsize changes nothing.
 //
 // onResize is called with every size the pty applies: the initial size once,
-// before startPty returns, and each Setsize that changes its geometry. Nil
-// for a forced command's pty and for a pinned session's: see command.Start.
+// before startPty returns, and the size each successful Setsize applies, the
+// same size again included, which the fan-out ignores. Nil for a forced
+// command's pty and for a pinned session's: see command.Start.
 func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default

@@ -962,8 +962,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				}
 			}
 			sink := newHostSink(sess, disconnect, sessionID, h.logger)
-			// A client with a terminal is replayed what fits it; one without
-			// is a viewer, with no size to fit.
+			// A client with a terminal is attached at its size, which weighs
+			// its replay (see attachGuestOutput); one without is a viewer,
+			// with no size.
 			var size termsize.Size
 			if isPty {
 				size = termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}
@@ -1103,7 +1104,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
 			// A guest always has a terminal (see the check above), and is
-			// replayed what fits it.
+			// attached at its size, as a local client is.
 			if err := h.attachGuest(sink, termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This guest arrived a
@@ -1154,11 +1155,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 
 		// Everything a repaint needs is now queued: the mode snapshot, as much
-		// of the ring as fits this client's terminal, and this client's
-		// subscription. Ask the command to redraw
-		// without changing geometry. Best-effort, and the only use this
-		// branch makes of the handle, so a handler built without one — a
-		// test's — is left alone.
+		// of the ring as this client is replayed, and this client's
+		// subscription. Ask the command to redraw without changing geometry.
+		// Best-effort, and the only use this branch makes of the handle, so a
+		// handler built without one — a test's — is left alone.
 		if ptmx != nil {
 			if err := ptmx.Redraw(); err != nil {
 				h.logger.Debug("redraw nudge skipped", "session-id", sessionID, "error", err)
