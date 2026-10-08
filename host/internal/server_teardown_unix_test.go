@@ -50,6 +50,64 @@ func TestAForcedCommandIsHungUpWhenItsGuestLeaves(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond, "the forced command was never hung up")
 }
 
+// A guest whose input ends is still there to read what its forced command
+// writes: `ssh -tt door < /dev/null`, or a script feeding the door from a
+// file. OpenSSH ignores a client's EOF on a pty session and runs the command
+// to the end. Taken as the guest leaving, it hung the command up before it
+// had finished, or before it had started, and the guest got nothing.
+func TestAForcedCommandOutlivesItsGuestsInput(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		t.Run("read-only="+strconv.FormatBool(readOnly), func(t *testing.T) {
+			h := startHost(t, &Server{
+				Command:      []string{"sh", "-c", "sleep 30"},
+				ForceCommand: []string{"sh", "-c", `sleep 0.3; printf DONE; exit 7`},
+				ReadOnly:     readOnly,
+			})
+			in, out, sess := h.connectGuestSession(t)
+			exited := make(chan error, 1)
+			go func() { exited <- sess.Wait() }()
+
+			require.NoError(t, in.(io.Closer).Close())
+
+			readUntil(t, out, "DONE")
+			select {
+			case err := <-exited:
+				var exitErr *ssh.ExitError
+				require.ErrorAs(t, err, &exitErr)
+				assert.Equal(t, 7, exitErr.ExitStatus(), "the forced command's own status")
+			case <-time.After(harnessTimeout):
+				t.Fatal("the guest was never sent its forced command's status")
+			}
+		})
+	}
+}
+
+// A guest whose input has ended and who then leaves still hangs its forced
+// command up: the end of its input is not the guest leaving, but its
+// channel closing is.
+func TestAForcedCommandIsHungUpWhenItsGuestLeavesAfterItsInputEnds(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hup")
+	h := startHost(t, &Server{
+		Command:      []string{"sh", "-c", "sleep 30"},
+		ForceCommand: []string{"sh", "-c", `trap 'echo hup > "$0"; exit 0' HUP; printf READY; while :; do sleep 0.05; done`, marker},
+	})
+	in, out, sess := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+	require.NoError(t, in.(io.Closer).Close())
+
+	// Still running with its input closed.
+	time.Sleep(300 * time.Millisecond)
+	_, err := os.Stat(marker)
+	require.ErrorIs(t, err, os.ErrNotExist, "the forced command was hung up when its guest's input ended")
+
+	require.NoError(t, sess.Close())
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "the forced command was never hung up")
+}
+
 // When the session ends, a forced command is hung up too, and what it writes
 // on its way out -- a full-screen program putting the guest's terminal back
 // -- reaches the guest, with its exit status. The session waits for that

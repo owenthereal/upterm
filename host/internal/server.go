@@ -1201,6 +1201,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}, func(err error) { cancel() })
 	}
 
+	// Closed once the guest's channel has gone: charm closes winCh when the
+	// channel's request loop ends, which is the channel closing or, with
+	// every channel on it, the connection. Unlike the end of the guest's
+	// input, that is the guest leaving. Only a pty session has a winCh, and
+	// only the forced-command path below asks, which always has one.
+	channelGone := make(chan struct{})
+
 	{
 		// pty
 		ctx, cancel := context.WithCancel(h.ctx)
@@ -1209,6 +1216,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				select {
 				case win, ok := <-winCh:
 					if !ok {
+						close(channelGone)
 						// charm closes this channel when the session's
 						// request loop ends, and a closed channel yields the
 						// zero Window immediately and forever. Without this
@@ -1243,6 +1251,27 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		})
 	}
 
+	// The end of a forced command's guest's input is not the guest leaving:
+	// `ssh -tt door < /dev/null`, or a script feeding the door from a file,
+	// sends EOF at once and stays to read the output. OpenSSH ignores a
+	// client's EOF on a pty session, and the command runs to its end. Ending
+	// the group on it instead hung the command up before it had finished, or
+	// before it had started, and the guest got nothing. So the input actor
+	// holds on after the EOF until the channel itself has gone, or the group
+	// ends some other way -- the command exiting, the session ending.
+	//
+	// The shared command's guests are left as they were: their EOF still
+	// detaches them, and nothing of theirs is hung up by it.
+	untilGuestLeaves := func(ctx context.Context, err error) error {
+		if err == nil && h.kind == kindGuest && len(h.forceCommand) > 0 {
+			select {
+			case <-channelGone:
+			case <-ctx.Done():
+			}
+		}
+		return err
+	}
+
 	// if a readonly session has been requested, don't connect stdin. --read-only
 	// is about what guests may do; the host is not a guest of its own session.
 	if h.kind == kindGuest && h.readonly {
@@ -1255,7 +1284,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
 			_, err := io.Copy(io.Discard, uio.NewContextReader(ctx, sess))
-			return err
+			return untilGuestLeaves(ctx, err)
 		}, func(err error) {
 			cancel()
 		})
@@ -1264,7 +1293,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		ctx, cancel := context.WithCancel(h.ctx)
 		g.Add(func() error {
 			_, err := io.Copy(ptmx, uio.NewContextReader(ctx, sess))
-			return err
+			return untilGuestLeaves(ctx, err)
 		}, func(err error) {
 			cancel()
 		})
