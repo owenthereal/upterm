@@ -72,9 +72,9 @@ func testClientAuthorizedKeyNotMatching(t *testing.T, hostShareURL, hostNodeAddr
 	err = c.Join(session, clientJoinURL)
 
 	// Test authorization failure - use assert for expected error validation.
-	// Through another node, uptermd reports the outcome in its own words: the
-	// upstream's error text names internal node addresses and is never relayed
-	// to the joiner.
+	// Over ssh through another node, uptermd reports the outcome in its own
+	// words: the upstream's error text names internal node addresses and is
+	// never relayed to the joiner.
 	require.Error(err, "connection should be rejected with wrong key")
 	assert.ErrorContains(err, keyRefusal(hostShareURL, clientJoinURL), "should fail with the session's refusal of the key")
 }
@@ -458,7 +458,7 @@ func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr
 
 // testGuestKeepaliveIsAnswered pins what a guest's liveness check relies on: a
 // keepalive it sends on its SSH connection comes back with a reply, whether the
-// relay answers it or passes it on to the session's node. The reply may be a
+// relay answers it or passes it on towards the host. The reply may be a
 // refusal; only silence would leave the guest unable to tell a quiet connection
 // from a dead one.
 func testGuestKeepaliveIsAnswered(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {
