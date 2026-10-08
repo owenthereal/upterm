@@ -39,6 +39,9 @@ func (r *SessionRoute) Get() (nodeAddr, sshUser string) {
 type AdminServer struct {
 	Session    *api.GetSessionResponse
 	ClientRepo *ClientRepo
+	// Forwards, when set, is where GetSession finds each jump's
+	// destinations; the session's Server records them there.
+	Forwards *Forwards
 
 	// Route, when set, is where GetSession says guests reach the session,
 	// in place of Session's NodeAddr and SshUser: a reconnect can register
@@ -119,6 +122,7 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 		Session:          s.Session,
 		Route:            s.Route,
 		ClientRepo:       s.ClientRepo,
+		Forwards:         s.Forwards,
 		LaunchID:         s.LaunchID,
 		OnStop:           s.OnStop,
 		OnSetJoinTimeout: s.OnSetJoinTimeout,
@@ -163,6 +167,7 @@ type adminServiceServer struct {
 	Session          *api.GetSessionResponse
 	Route            *SessionRoute
 	ClientRepo       *ClientRepo
+	Forwards         *Forwards
 	LaunchID         string
 	OnStop           func()
 	OnSetJoinTimeout func(time.Duration) *api.SetJoinTimeoutResponse
@@ -182,7 +187,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		Command:          s.Session.Command,
 		ForceCommand:     s.Session.ForceCommand,
 		AuthorizedKeys:   s.Session.AuthorizedKeys,
-		ConnectedClients: s.ClientRepo.Clients(),
+		ConnectedClients: s.Forwards.describe(s.ClientRepo.Clients()),
 		SftpDisabled:     s.Session.SftpDisabled,
 		Open:             s.Session.Open,
 		JoinState:        s.joinState(),

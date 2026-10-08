@@ -91,10 +91,21 @@ message Client {
   // Which door the client came in by. GUEST is zero so a reader built before
   // this field existed sees every client as a guest, which is what they were.
   Kind kind = 5;
+  // Where a FORWARD client's forwards go: the distinct host:port destinations
+  // it has opened, as it asked for them, in the order first opened, at most
+  // 16 of them. unlisted_forwards counts the forwards it opened to anywhere
+  // past those.
+  repeated string forward_destinations = 6;
+  uint32 unlisted_forwards = 7;
 
   enum Kind {
     GUEST = 0;
     HOST = 1;
+    // A guest connection's forwards, listed apart from any terminal or SFTP
+    // session on the same connection: a jump through the session (`ssh -J`)
+    // or an `ssh -L`, to somewhere the host can reach. A reader built before
+    // this value existed sees it as a guest, which it also is.
+    FORWARD = 2;
   }
 }
 

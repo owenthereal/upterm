@@ -126,12 +126,14 @@ func TestForwardingPresenceFollowsTransport(t *testing.T) {
 		require.NoError(t, err)
 	}
 	guest := forwardingCallback(t, joined)
-	require.Equal(t, api.Client_GUEST, guest.Kind)
+	require.Equal(t, api.Client_FORWARD, guest.Kind, "a connection that only forwards is a jump, not a terminal guest")
+	require.Equal(t, []string{target}, guest.ForwardDestinations, "the join names where the jump goes")
 	require.NotEmpty(t, guest.Id)
 	require.NotEmpty(t, guest.PublicKeyFingerprint)
 	require.NotEmpty(t, guest.Addr)
 	require.Len(t, connectedForwardingGuests(t, admin), 1)
 	require.Equal(t, guest.Id, connectedForwardingGuests(t, admin)[0].Id)
+	require.Equal(t, api.Client_FORWARD, connectedForwardingGuests(t, admin)[0].Kind)
 	require.True(t, f.record(t).FirstGuestJoinedAt.IsZero())
 	for _, conn := range conns {
 		require.NoError(t, conn.Close())
@@ -156,6 +158,68 @@ func TestForwardingPresenceFollowsTransport(t *testing.T) {
 		t.Fatalf("duplicate left: %v", c)
 	case <-time.After(50 * time.Millisecond):
 	}
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+// A jump's destinations are what the host most wants to know about it:
+// localhost:22 is someone reaching this machine's sshd, and anywhere else is
+// someone reaching past it. Each distinct one is listed once, in the order
+// first opened, as the connection opens them; past a bound, further forwards
+// are counted rather than listed, so a guest cannot grow the session's
+// answer without limit.
+func TestForwardingClientListsItsDestinations(t *testing.T) {
+	const listed = 16
+	targets := make([]string, listed+1)
+	for i := range targets {
+		targets[i] = forwardingTarget(t)
+	}
+	f := newJoinTimeoutHost(t)
+	f.h.AllowLocalTCPForwarding = true
+	left := make(chan *api.Client, 1)
+	f.h.ClientLeftCallback = func(c *api.Client) { left <- c }
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	admin := forwardingAdmin(t, f)
+	client := f.guestClient(t)
+
+	forward := func(target string) {
+		t.Helper()
+		conn, err := transferForward(client, target)
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	}
+	jump := func() *api.Client {
+		t.Helper()
+		clients := connectedForwardingGuests(t, admin)
+		require.Len(t, clients, 1)
+		return clients[0]
+	}
+
+	forward(targets[0])
+	awaitJoinTimeoutSignal(t, f.joined, "forwarding presence")
+	forward(targets[1])
+	forward(targets[0])
+	require.Equal(t, targets[:2], jump().ForwardDestinations, "each destination once, in the order first opened")
+
+	for _, target := range targets[2:listed] {
+		forward(target)
+	}
+	require.Equal(t, targets[:listed], jump().ForwardDestinations)
+	require.Zero(t, jump().UnlistedForwards)
+
+	forward(targets[listed])
+	forward(targets[listed])
+	forward(targets[0])
+	require.Equal(t, targets[:listed], jump().ForwardDestinations, "the list stops growing at its bound")
+	require.Equal(t, uint32(2), jump().UnlistedForwards, "forwards past it are counted")
+
+	// The departure is reported as the jump ended, not as it began: the
+	// leave notification names every destination the join one couldn't.
+	require.NoError(t, client.Close())
+	gone := forwardingCallback(t, left)
+	require.Equal(t, targets[:listed], gone.ForwardDestinations)
+	require.Equal(t, uint32(2), gone.UnlistedForwards)
 	f.finish(t, "0")
 	require.NoError(t, f.result(t))
 }
@@ -295,13 +359,13 @@ func TestForwardingLifecycleReconcilesLeftBeforePresenceWithoutJoining(t *testin
 	repo := internal.NewClientRepo()
 	var events []string
 	lifecycle := &clientLifecycle{
-		repo: repo, pendingLeft: make(map[string]struct{}),
+		repo: repo, pendingLeft: make(map[string]*api.Client),
 		onGuestJoin: func(*api.Client) error { t.Error("forwarding disarmed first-guest deadline"); return nil },
 		onJoined:    func(*api.Client) { events = append(events, "joined") },
 		onLeft:      func(*api.Client) { events = append(events, "left") },
 	}
 	client := &api.Client{Id: "quick-forward", Kind: api.Client_GUEST}
-	lifecycle.left(client.Id)
+	lifecycle.left(client.Id, nil)
 	lifecycle.joined(client, false)
 	require.Empty(t, repo.Clients())
 	require.Empty(t, lifecycle.pendingLeft)

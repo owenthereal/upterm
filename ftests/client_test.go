@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -398,6 +399,25 @@ func testClientLocalPortForward(t *testing.T, hostShareURL, hostNodeAddr, client
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for forwarded TCP target")
 	}
+
+	// The host lists the forward as a jump, apart from the terminal this
+	// client joined with, and says where it went: the destination the guest
+	// asked for, through the relay unchanged.
+	adminClient, err := host.AdminClient(adminSocketFile)
+	require.NoError(err)
+	want := []string{targetLn.Addr().String()}
+	require.Eventually(func() bool {
+		sess, err := adminClient.GetSession(context.Background(), &api.GetSessionRequest{})
+		if err != nil {
+			return false
+		}
+		for _, c := range sess.ConnectedClients {
+			if c.Kind == api.Client_FORWARD {
+				return slices.Equal(want, c.ForwardDestinations)
+			}
+		}
+		return false
+	}, 5*time.Second, 20*time.Millisecond, "the host never listed a jump to %s", want)
 }
 
 func testClientLocalPortForwardDisabled(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL string) {

@@ -230,7 +230,7 @@ Put a terminal on a session started without one, from any shell on the same mach
 upterm attach build-shell
 ```
 
-Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host` and guests as `guest`. In its JSON, `guestCount` counts currently connected guests (including forwarding, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
+Type `~.` at the start of a line to detach; the session keeps running, and `upterm attach` again picks up where the screen left off. On Unix, `~^Z` suspends the terminal instead — `fg` resumes it. `--escape-char none` sends every keystroke to the session. A session's own terminal counts as a client too: `session info` lists it as `host`, guests as `guest`, and a guest connection's forwards (see [Local TCP Forwarding](#local-tcp-forwarding)) as `jump`. In its JSON, `guestCount` counts currently connected guests (including jumps, excluding host terminals); scripts asking whether a terminal or SFTP guest has ever joined should use `firstGuestJoinedAt`.
 
 ### Reconnecting
 
@@ -305,7 +305,7 @@ upterm host --allow-local-tcp-forwarding
 ssh -L 5555:127.0.0.1:8080 SESSION_SSH_USER@uptermd.upterm.dev
 ```
 
-After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
+After the first successful forward, the guest appears in session info and join/leave notifications until its SSH connection closes, even between forwarding channels. It is listed as `jump`, followed by where its forwards go, such as `→ 127.0.0.1:8080`: each distinct destination once, up to 16, then how many more forwards it opened, to anywhere else (`(+N more forwards)`). `--hide-client-ip`, and CI, hide the destinations along with the address. Multiple forwards on that connection share one entry; terminal and SFTP sessions retain their own entries. Forwarding alone does not set `firstGuestJoinedAt` or satisfy `--join-timeout`: an accepted terminal or SFTP session must join before that deadline. An idle `ssh -N` connection or a failed forward does not appear.
 
 ### WebSocket Connection
 
