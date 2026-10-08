@@ -943,24 +943,26 @@ func TestModeTracker_CloneIsIndependent(t *testing.T) {
 }
 
 // The partial is the case a sized join meets. The ring's eviction cut an OSC
-// in two, so the tracker holds its head as the partial; a smaller joiner's
-// snapshot comes from a clone fed the whole ring, which finishes the OSC and
-// starts the sequence after it. The parser reuses the partial's array from one
-// sequence to the next, so with the array shared, that next sequence would be
-// written over the head the tracker still holds, and every Append after the
-// join would be replayed it in place of the start of the title.
+// in two, so the tracker holds its head as the partial; the snapshot of a
+// joiner a redraw in the ring doesn't fit comes from a clone fed the whole
+// ring, which finishes the OSC and starts the sequence after it. The parser
+// reuses the partial's array from one sequence to the next, so with the array
+// shared, that next sequence would be written over the head the tracker still
+// holds, and every Append after the join would be replayed it in place of the
+// start of the title.
 func TestModeTracker_ACloneFedTheRingLeavesTheTrackersPartialAlone(t *testing.T) {
 	const title = "\x1b]0;a-title-the-ring-cut\a"
 	w := NewMultiWriter(16)
 	w.Resized(at80x24)
 	_, _ = w.Write([]byte(title))
-	// Evicts all of the title but its last eight bytes: the tracker's
-	// partial is "\x1b]0;a-title-the-r".
-	_, _ = w.Write([]byte("\x1b[?2004h"))
+	// Evicts all of the title but its last five bytes: the tracker's
+	// partial is "\x1b]0;a-title-the-ring". The cursor-up makes the ring a
+	// redraw recorded wider than the joiner below.
+	_, _ = w.Write([]byte("\x1b[?2004h\x1b[A"))
 
 	var before bytes.Buffer
 	require.NoError(t, w.Append(&before))
-	require.Equal(t, title+"\x1b[?2004h", before.String())
+	require.Equal(t, title+"\x1b[?2004h\x1b[A", before.String())
 
 	var sized bytes.Buffer
 	require.NoError(t, w.AppendSized(at45x30, &sized))

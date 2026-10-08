@@ -10,22 +10,30 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// repaintsOnWinch prints RING-MARK once, and then on every SIGWINCH the size
-// its terminal has at that moment, rows first, as `stty size` prints it: a
-// full-screen program repainting at the size it is told.
+// repaintsOnWinch prints its first output once, and then on every SIGWINCH
+// the size its terminal has at that moment, rows first, as `stty size` prints
+// it: a full-screen program repainting at the size it is told. The first
+// output is printf's format, so octal escapes in it are sequences.
 //
 // The trap's body is single-quoted so that $(stty size) runs each time the
 // trap does. Double-quoted, the shell would expand it once, as the trap is
 // set, and every repaint would report the size the command started at.
-var repaintsOnWinch = []string{"sh", "-c", `trap 'printf "REPAINT %s\n" "$(stty size)"' WINCH; printf RING-MARK; while :; do sleep 0.05; done`}
+func repaintsOnWinch(first string) []string {
+	return []string{"sh", "-c", `trap 'printf "REPAINT %s\n" "$(stty size)"' WINCH; printf '` + first + `'; while :; do sleep 0.05; done`}
+}
+
+// ringRedraw is RING-MARK drawn as a full-screen program draws, after moving
+// the cursor home: a redraw, which the fan-out replays only to a joiner it
+// fits.
+var ringRedraw = repaintsOnWinch(`\033[HRING-MARK`)
 
 // A guest whose terminal is narrower or shorter than the pty is about to
 // shrink it, and the command repaints at the guest's size once it has. The
-// ring was recorded wider than the guest can show, so replaying it would wrap
-// and split under that repaint: the guest gets the repaint and none of the
-// ring.
+// ring is a redraw recorded wider than the guest can show, so replaying it
+// would wrap and split under that repaint: the guest gets the repaint and none
+// of the ring.
 func TestAGuestSmallerThanThePtyGetsNoRingButTheRepaint(t *testing.T) {
-	h := startHost(t, &Server{Command: repaintsOnWinch})
+	h := startHost(t, &Server{Command: ringRedraw})
 
 	// The pty opened at 80x24, nobody having offered a size; a viewer has no
 	// terminal to change that, and reading the mark proves the ring holds it.
@@ -41,11 +49,11 @@ func TestAGuestSmallerThanThePtyGetsNoRingButTheRepaint(t *testing.T) {
 }
 
 // A guest whose terminal fits the pty in both dimensions shows the ring as it
-// was drawn, so it gets the ring, as every joiner did before.
+// was drawn, redraw and all, so it gets the ring, as every joiner did before.
 func TestAGuestAtLeastAsBigAsThePtyGetsTheRing(t *testing.T) {
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {120, 40}} {
 		t.Run(fmt.Sprintf("%dx%d", size.cols, size.rows), func(t *testing.T) {
-			h := startHost(t, &Server{Command: repaintsOnWinch})
+			h := startHost(t, &Server{Command: ringRedraw})
 
 			_, viewer, _ := h.connectHost(t, nil)
 			readUntil(t, viewer, "RING-MARK")
@@ -61,11 +69,24 @@ func TestAGuestAtLeastAsBigAsThePtyGetsTheRing(t *testing.T) {
 // to see until the command next draws. It gets the ring, as every joiner did
 // before.
 func TestAGuestOfAPinnedSessionGetsTheRing(t *testing.T) {
-	h := startHost(t, &Server{Command: repaintsOnWinch, PtySize: termsize.Size{Cols: 100, Rows: 30}, PinPtySize: true})
+	h := startHost(t, &Server{Command: ringRedraw, PtySize: termsize.Size{Cols: 100, Rows: 30}, PinPtySize: true})
 
 	_, viewer, _ := h.connectHost(t, nil)
 	readUntil(t, viewer, "RING-MARK")
 
 	_, guest := h.connectGuest(t, withGuestPty(45, 30))
 	readUntil(t, guest, "RING-MARK")
+}
+
+// Plain output only wraps, and wraps afresh on the guest's own terminal, so a
+// guest smaller than the pty is replayed it, ahead of the repaint at its size.
+func TestAGuestSmallerThanThePtyGetsPlainOutput(t *testing.T) {
+	h := startHost(t, &Server{Command: repaintsOnWinch(`PLAIN-MARK`)})
+
+	_, viewer, _ := h.connectHost(t, nil)
+	readUntil(t, viewer, "PLAIN-MARK")
+
+	_, guest := h.connectGuest(t, withGuestPty(45, 30))
+	got := readUntil(t, guest, "REPAINT 30 45")
+	assert.Contains(t, got, "PLAIN-MARK", "a guest smaller than the pty must be replayed plain output")
 }

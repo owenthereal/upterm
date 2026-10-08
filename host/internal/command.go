@@ -254,17 +254,17 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	// a session nobody offered a geometry still opens at something usable.
 	//
 	// The fan-out hears every size the pty applies, so it can replay a joiner
-	// only the stretch of the ring since the size last shrank, and none of it
-	// to a joiner smaller than the pty. Resized runs inside the pty's Setsize,
-	// and so with a lock held: terminalWindows's, whose updates promise never
-	// to block, or sharedPTY.mu, which sharedPTY.set holds while it applies a
-	// size offered before the pty existed. Neither may wait on the fan-out's
-	// write lock, which a primary client whose terminal has stopped can hold
-	// indefinitely, and Resized never does.
+	// plain output whatever its size, but a redraw only at a size that fits
+	// the joiner, and from there back only over growth. Resized runs inside
+	// the pty's Setsize, and so with a lock held: terminalWindows's, whose
+	// updates promise never to block, or sharedPTY.mu, which sharedPTY.set
+	// holds while it applies a size offered before the pty existed. Neither
+	// may wait on the fan-out's write lock, which a primary client whose
+	// terminal has stopped can hold indefinitely, and Resized never does.
 	//
 	// A pinned pty tells the fan-out nothing, so every joiner gets the whole
-	// ring, as Append gives it. A joiner smaller than the pty is denied the
-	// ring because its arrival shrinks the pty and the command repaints at its
+	// ring, as Append gives it. A joiner smaller than a redraw is denied it
+	// because its arrival shrinks the pty and the command repaints at its
 	// size; a pinned pty never shrinks, so that repaint never comes, and on
 	// Windows a pinned pty is not even nudged to redraw.
 	var onResize func(termsize.Size)
