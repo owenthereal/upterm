@@ -387,8 +387,9 @@ func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
 		return t.snapshotAfter(t.buffer.Data()), nil
 	}
 
-	// Walk back from the pty's size over each earlier size that is no bigger
-	// than the one after it. The newest fits j, so by transitivity they all do.
+	// Walk back from the pty's size over each earlier size that is no wider and
+	// no taller than the one after it. The newest fits j, so by transitivity
+	// they all do.
 	k := n - 1
 	for k > 0 && fits(t.boundaries[k-1].size, t.boundaries[k].size) {
 		k--

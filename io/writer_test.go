@@ -1039,11 +1039,39 @@ func TestMultiWriter_AppendSizedStopsAtAShrink(t *testing.T) {
 	w.Resized(at45x30)
 	_, _ = w.Write([]byte("small"))
 
-	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, {Cols: 200, Rows: 40}, at200x50} {
+	for _, j := range []termsize.Size{{Cols: 100, Rows: 40}, at200x50} {
 		var got bytes.Buffer
 		require.NoError(t, w.AppendSized(j, &got))
 		require.Equal(t, "\x1b[?1049hsmall", got.String(), "a %v joiner", j)
 	}
+
+	// The shrink still cuts the replay after the size grows back: each earlier
+	// size is weighed against the one after it, not against the newest, or the
+	// 45x30 repaint would be replayed over the unwrapped 200-column lines.
+	w = NewMultiWriter(DefaultReplayBytes)
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("a"))
+	w.Resized(at45x30)
+	_, _ = w.Write([]byte("b"))
+	w.Resized(at200x50)
+	_, _ = w.Write([]byte("c"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at200x50, &got))
+	require.Equal(t, "bc", got.String(), "a 200x50 joiner after the size grew back")
+}
+
+// Bytes written before the pty first reported a size are the ring's oldest, and
+// a replay that walks back to the oldest size takes them too.
+func TestMultiWriter_AppendSizedReachesBackToBytesWrittenBeforeAnySize(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	_, _ = w.Write([]byte("pre "))
+	w.Resized(at80x24)
+	_, _ = w.Write([]byte("post"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(at80x24, &got))
+	require.Equal(t, "pre post", got.String())
 }
 
 // A shrink in rows alone stops the walk too: 80x40 is no wider than 80x24, but
