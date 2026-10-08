@@ -62,6 +62,17 @@ func daemonTestRoots(t *testing.T) {
 	origSupplied := suppliedFlags
 	suppliedFlags = map[string]bool{}
 	t.Cleanup(func() { suppliedFlags = origSupplied })
+
+	// The developer's own SSH identities stay out of it. hostCmd resets
+	// --private-key to whichever ~/.ssh files exist, and with no agent to
+	// hold an encrypted one, building the daemon's host asks the parent for
+	// its passphrase over a pipe nobody reads: the test hangs. With no key
+	// listed and no agent, the daemon generates one. A test about
+	// identities sets its own after this.
+	t.Setenv("SSH_AUTH_SOCK", "")
+	origKeys := flagPrivateKeys
+	flagPrivateKeys = nil
+	t.Cleanup(func() { flagPrivateKeys = origKeys })
 }
 
 // readyPublishGap is how long fakeRun leaves between the command starting
