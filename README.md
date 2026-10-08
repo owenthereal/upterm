@@ -165,7 +165,7 @@ upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pai
 
 Each guest's forced command runs on a pty of its own, with `SSH_TTY`, `SSH_CONNECTION` and `SSH_CLIENT` set as sshd sets them, so a program that copies over OSC 52 when it runs over SSH copies to the guest's clipboard. `--hide-client-ip` leaves out the two that carry the guest's address.
 
-Neither the hosted command nor a forced command is told it is in the multiplexer pane `upterm host` was started from: `TMUX`, `TMUX_PANE`, `STY`, `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are not passed on, so `herdr` starts there as it would over ssh rather than refusing to nest, and nothing takes the host's pane for its own. `HERDR_SOCKET_PATH` is, so a guest's `herdr` reaches the server the session was started from.
+Neither the hosted command nor a forced command is told it is in the multiplexer pane `upterm host` was started from: `TMUX`, `TMUX_PANE`, `STY`, `ZELLIJ`, `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID` are not passed on, so `herdr` starts there as it would over ssh rather than refusing to nest, and nothing takes the host's pane for its own. `HERDR_SOCKET_PATH` is, so a guest's `herdr` reaches the server the session was started from. tmux has no such variable of its own: a server on a non-default socket is found only through `TMUX`, so a door into one names it, as in `--force-command 'tmux -L work attach -t pair-programming'`.
 
 ### Running Without a Terminal
 

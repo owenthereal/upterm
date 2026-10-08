@@ -16,8 +16,12 @@ import (
 //
 // Which server is another matter from which pane: HERDR_SOCKET_PATH and
 // HERDR_BIN_PATH stay, so a guest's herdr reaches the server the door was
-// started from. The terminal emulator's own identity, TERM_PROGRAM and the
-// like, stays too.
+// started from. tmux keeps both in TMUX, so its server goes with the pane: a
+// bare tmux in the session finds the default server, and a door into one on
+// another socket names it (tmux -L). Kept, TMUX would tell every program
+// here it is inside tmux, and they would wrap what they send for a tmux
+// that none of the guests' terminals is. The terminal emulator's own
+// identity, TERM_PROGRAM and the like, stays too.
 var paneIdentityVars = []string{
 	"TMUX", "TMUX_PANE",
 	"STY",
