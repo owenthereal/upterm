@@ -26,8 +26,8 @@ const maxSSHRejectTimeout = 5 * time.Second
 // ever relayed: a transport failure reads "read tcp <local>-><node>: i/o
 // timeout" and a dial failure names the session socket path.
 var (
-	errUpstreamUnavailable = errors.New("upstream unavailable")
-	errUpstreamAuthFailed  = errors.New("ssh: unable to authenticate with the upstream")
+	errUpstreamUnavailable = errors.New(upterm.UpstreamUnavailable)
+	errUpstreamAuthFailed  = errors.New(upterm.UpstreamAuthFailed)
 )
 
 // sshAuthFailure is the message x/crypto composes when no auth method is left

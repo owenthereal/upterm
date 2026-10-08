@@ -1323,9 +1323,9 @@ func TestBannerFor(t *testing.T) {
 	}{
 		{"no error", guest, nil, ""},
 		{"a refusal that is not a lookup", guest, errors.New("public key not allowed"), ""},
-		{"a session that is not stored", guest, notFound, fmt.Sprintf(bannerNoHost, "s")},
-		{"a session not stored, in a wrapped chain", guest, fmt.Errorf("refused: %w", notFound), fmt.Sprintf(bannerNoHost, "s")},
-		{"a store that fails", guest, unreachable, bannerLookupFailed},
+		{"a session that is not stored", guest, notFound, fmt.Sprintf(upterm.BannerNoHostFormat, "s")},
+		{"a session not stored, in a wrapped chain", guest, fmt.Errorf("refused: %w", notFound), fmt.Sprintf(upterm.BannerNoHostFormat, "s")},
+		{"a store that fails", guest, unreachable, upterm.BannerLookupFailed},
 		{"a host connection", host, notFound, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1379,6 +1379,6 @@ func TestBannerForQuotesAnOddSessionID(t *testing.T) {
 		"a\x1b[2Jb": `"a\x1b[2Jb"`,
 		"a\u202eb":  `"a\u202eb"`,
 	} {
-		require.Equal(t, fmt.Sprintf(bannerNoHost, want), bannerFor(&fakeConnMetadata{}, id, notFound), "%q", id)
+		require.Equal(t, fmt.Sprintf(upterm.BannerNoHostFormat, want), bannerFor(&fakeConnMetadata{}, id, notFound), "%q", id)
 	}
 }

@@ -91,15 +91,6 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	return r.routing.Serve(ln)
 }
 
-// What a guest is told when the relay can't take it to a session, ahead of the
-// refusal itself, which says nothing more than that authentication failed.
-const (
-	bannerNoHost = "upterm: no host is connected for session %s right now. " +
-		"If it is reconnecting, this same ssh command will work again once it's back. " +
-		"Try again in a few seconds.\n"
-	bannerLookupFailed = "upterm: the relay can't look up sessions right now. Try again shortly.\n"
-)
-
 // lookupError marks a refusal that came from reading the guest's session, not
 // from judging the guest, so the guest can be told why it was turned away.
 type lookupError struct{ err error }
@@ -120,9 +111,9 @@ func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
 	}
 	var missing *ErrSessionNotFound
 	if errors.As(err, &missing) {
-		return fmt.Sprintf(bannerNoHost, bannerSessionID(sessionID))
+		return fmt.Sprintf(upterm.BannerNoHostFormat, bannerSessionID(sessionID))
 	}
-	return bannerLookupFailed
+	return upterm.BannerLookupFailed
 }
 
 // bannerSessionID is how a banner names sessionID, which is whatever the
@@ -142,7 +133,7 @@ func bannerSessionID(sessionID string) string {
 // errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
 // A sentinel rather than an ad-hoc error so the failure can be recognized after
 // x/crypto has wrapped it, and reported to the peer by identity, not by text.
-var errUpstreamHostKeyMismatch = errors.New("ssh: host key mismatch")
+var errUpstreamHostKeyMismatch = errors.New(upterm.UpstreamHostKeyMismatch)
 
 type proxyAuth struct {
 	NodeAddr       string
