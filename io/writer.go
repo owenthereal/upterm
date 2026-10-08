@@ -429,7 +429,15 @@ func (t *MultiWriter) attach(writers ...io.Writer) {
 // takes, which for one whose terminal is stopped is indefinitely. So the next
 // Write or join to take writeMu applies it instead, before it adds anything to
 // the ring; see applyResize.
+//
+// A size that isn't Valid is ignored. Nothing is drawn at a geometry with no
+// columns or no rows, and recorded, it would overwrite a size still waiting to
+// be applied. The pty does take one: an ssh -tt guest whose stdin is not a
+// terminal asks for a 0x0 window.
 func (t *MultiWriter) Resized(size termsize.Size) {
+	if !size.Valid() {
+		return
+	}
 	t.sizeMu.Lock()
 	defer t.sizeMu.Unlock()
 	t.resized = size

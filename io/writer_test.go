@@ -1045,6 +1045,31 @@ func TestMultiWriter_ResizedToTheSameSizeIsNoBoundary(t *testing.T) {
 	require.Equal(t, "one\r\ntwo\r\nthree\r\n", got.String())
 }
 
+// A report of a size that isn't one, with no columns or no rows, is ignored,
+// and the size reported before it still applies: an ssh -tt guest whose stdin
+// is not a terminal asks for a 0x0 window, and a resize to it reaches the
+// fan-out like any other. Joiners are weighed against 45x30: one that big gets
+// what was recorded since the resize to it, and one a column narrower only
+// the modes.
+func TestMultiWriter_ResizedIgnoresASizeThatIsNotOne(t *testing.T) {
+	for _, invalid := range []termsize.Size{{}, {Cols: 0, Rows: 24}} {
+		t.Run(invalid.String(), func(t *testing.T) {
+			w := NewMultiWriter(DefaultReplayBytes)
+			w.Resized(at80x24)
+			_, _ = w.Write([]byte("\x1b[?1049hbefore"))
+			w.Resized(at45x30)
+			w.Resized(invalid)
+			_, _ = w.Write([]byte("after"))
+
+			var fits, narrower bytes.Buffer
+			require.NoError(t, w.AppendSized(at45x30, &fits))
+			require.NoError(t, w.AppendSized(termsize.Size{Cols: 44, Rows: 30}, &narrower))
+			require.Equal(t, "\x1b[?1049hafter", fits.String(), "a 45x30 joiner")
+			require.Equal(t, "\x1b[?1049h", narrower.String(), "a 44x30 joiner")
+		})
+	}
+}
+
 // A boundary the ring has already evicted leaves the ring recorded at one
 // size throughout, so all of it is the replay.
 func TestMultiWriter_ABoundaryEvictedFromTheRingReplaysItWhole(t *testing.T) {
