@@ -86,7 +86,13 @@ Host home
   User SESSION_ID
 ```
 
-`ssh home` lands you in Herdr.
+The key has to be one whose public half is on your GitHub account. If ssh
+doesn't offer it by default, add `IdentityFile ~/.ssh/YOUR_KEY` under
+`Host home`.
+
+`ssh home` lands you in Herdr. To leave, detach with `ctrl+b q` (Herdr's
+default binding): your agents and the door keep running, and `ssh home` takes
+you back.
 
 ## Connect from a phone
 
@@ -96,7 +102,8 @@ In Termius or Blink, add a host with:
 - **Username:** the user from the connect command (the session ID);
 - **Key:** one whose public half is on your GitHub account.
 
-Connecting lands you in Herdr's mobile layout.
+Connecting lands you in Herdr's mobile layout, and `ctrl+b q` leaves it the
+same way.
 
 ## `herdr --remote`, VS Code and scp: jump to the machine's own sshd
 
@@ -145,12 +152,18 @@ reach, your LAN included, so use it only with `--authorized-user`.
 ## Saved machines in Herdr
 
 Herdr's saved machines connect with `BatchMode=yes` and
-`StrictHostKeyChecking=yes`, so they never prompt, and an unknown host key
-fails the connection without prompting. Pin the relay as above first. Then
-save `home-sshd` as the machine, and record the home machine's own host key
-before Herdr uses it: connect once with `ssh home-sshd`, and check the
-fingerprint it shows against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
-on that machine before you accept it.
+`StrictHostKeyChecking=yes`, so an unknown host key fails the connection
+instead of prompting. Pin the relay as above first, and record the home
+machine's own host key before Herdr uses it: connect once with
+`ssh home-sshd`, and check the fingerprint it shows against
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine before you
+accept it. Then save it, on the laptop:
+
+```console
+herdr machine add home-sshd --label Home
+```
+
+and choose Home in Herdr's sidebar.
 
 ## Share an agent through a door, not its own terminal
 
