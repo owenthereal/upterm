@@ -124,7 +124,8 @@ func (s *schedule) next(elapsed time.Duration) (wait time.Duration, long bool) {
 
 // ready says that a session ended after being ready for d. Only a session that
 // stayed up for ResetAfter restarts the schedule. One that drops sooner leaves
-// n where it was, so the wait after it is no shorter than the one before.
+// n where it was, so the bound of the wait after it is no lower than the last
+// one's; the wait itself is jittered below its bound, and may be shorter.
 func (s *schedule) ready(d time.Duration) {
 	if d >= s.t.ResetAfter {
 		s.n = 0

@@ -33,8 +33,13 @@ const (
 const firstRelayWithBanners = "0.34.0"
 
 // evidence is what one attempt saw on its way to an error or a session. The
-// handshake's callbacks write it on the goroutine that runs the handshake, and
-// the attempt reads it after the handshake has returned.
+// auth, banner and signing callbacks write it on the goroutine that runs the
+// handshake, which is the attempt's own. The host key check writes it on
+// x/crypto's key exchange goroutine, and the attempt reads that only once the
+// handshake has returned, which it does only after the first key exchange,
+// and the check with it, has ended. Later key exchanges run the check again,
+// mid-session, which is why hostKeyErr is read only to explain a handshake
+// that failed.
 type evidence struct {
 	banner        string         // the last banner the relay sent while authenticating
 	hostKeyErr    error          // CheckHostKey's verdict; nil once accepted

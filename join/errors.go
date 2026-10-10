@@ -88,7 +88,9 @@ func (e *HostKeyError) Is(target error) bool { return target == ErrHostKey }
 
 func (e *HostKeyError) Unwrap() error { return e.Err }
 
-// WaitReason is what a first join was waiting on when its time ran out.
+// WaitReason is why the guest is waiting: the Why of a Lost or Waiting
+// event, and of a DeadlineError, what a first join was waiting on when its
+// time ran out.
 type WaitReason int
 
 const (
@@ -119,7 +121,7 @@ func (r WaitReason) text() string {
 	return "unknown"
 }
 
-// DeadlineError ends a first join whose 30 s ran out.
+// DeadlineError ends a first join whose Timing.FirstJoin ran out.
 type DeadlineError struct {
 	Why WaitReason
 	Err error

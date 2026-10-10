@@ -509,16 +509,23 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 	})
 }
 
-func TestAFinalOutcomeDoesNotWaitOnAParkedWrite(t *testing.T) {
-	never := make(chan struct{}) // Released never closes
-	relay := newFakeRelay(t, relayKnobs{})
-	cfg := config(t, relay)
+func TestAFinalOutcomeWaitsForAParkedWriteOnlySoLong(t *testing.T) {
+	released, release := newGate(t) // the parked write lands only once the run is over
+	sink := &syncSink{}
+	cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(sink))
 	cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
-		return attach.Result{Reason: attach.Exited, Status: 5, Released: never, Unrestored: []byte("\x1b[?1049l")}, nil
+		return attach.Result{Reason: attach.Exited, Status: 5, Released: released, Unrestored: []byte("\x1b[?1049l")}, nil
 	}
 	start := time.Now()
 	require.Equal(t, Outcome{Kind: Exited, Status: 5}, runJoin(t, cfg))
-	require.Less(t, time.Since(start), 1500*time.Millisecond)
+	require.GreaterOrEqual(t, time.Since(start), finalBound, "the run gave the parked write less than its bound")
+	require.Less(t, time.Since(start), finalBound+2*time.Second)
+
+	// Past the bound nothing more is written, not even once the parked write
+	// lets go.
+	release()
+	require.Never(t, func() bool { return sink.String() != "" }, 100*time.Millisecond, 10*time.Millisecond,
+		"the restore was written after the run gave up on it")
 }
 
 func TestAFinalOutcomeRestoresAfterTheParkedWrite(t *testing.T) {

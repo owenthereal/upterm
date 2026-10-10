@@ -32,12 +32,19 @@ type KeySource struct {
 
 // Identity is the guest's keys.
 type Identity struct {
-	// Signers is called once per attempt, with the attempt's ctx. Every agent
-	// operation it or its signers start is bound to ctx, and release closes
-	// the attempt's agent connection. release is idempotent. Run arms it on
-	// ctx and calls it when the attempt returns, so an agent that stops
-	// answering costs no more than the attempt's deadline: the agent is a
+	// Signers is called once per attempt, with the attempt's ctx, and returns
+	// promptly once ctx ends. Every agent operation it or its signers start
+	// is bound to ctx, and release, which may be nil, closes the attempt's
+	// agent connection. release must be idempotent: Run arms it on ctx and
+	// calls it again when the attempt returns, so an agent that stops
+	// answering costs no more than the attempt's deadline. The agent is a
 	// connection of its own, which closing the relay's would not end.
+	//
+	// An error from Signers is the guest's own identity failing, as a signer
+	// that fails to sign is: a first join stops on it (ErrIdentity), and a
+	// rejoin waits it out (IdentityFailure). It should return at least one
+	// signer: an empty list leaves no key to offer, which ends the join as
+	// refused.
 	Signers func(ctx context.Context) (signers []ssh.Signer, release func(), err error)
 	Source  KeySource
 }
@@ -47,22 +54,31 @@ type Identity struct {
 type Config struct {
 	Target Target
 	// Dial opens a connection to the relay. It is called once per attempt,
-	// with the attempt's ctx.
+	// with the attempt's ctx, and returns promptly once ctx ends: a stop, and
+	// the attempt's deadline, wait for it.
 	Dial     func(ctx context.Context) (net.Conn, error)
 	Identity Identity
 	// CheckHostKey decides on the relay's key without blocking on anyone: nil
 	// (trusted), or an error that wraps ErrHostKeyUnknown or
-	// ErrHostKeyChanged. It may record a key itself.
+	// ErrHostKeyChanged. It may record a key itself. Its hostname is
+	// Target.Host, host:port, and it runs again at every key exchange, not
+	// only the first. An unknown key goes to ConfirmHostKey, if the guest may
+	// still be asked; any other error, ErrHostKeyChanged or not, stops the
+	// join.
 	CheckHostKey ssh.HostKeyCallback
 	// ConfirmHostKey asks the guest about an unknown key, with no connection
 	// open, and records it if they accept. It returns promptly when ctx ends.
 	// It is never called once TakeTerminal has run: from then on nothing
-	// prompts. Nil means an unknown key is never accepted.
+	// prompts. Nil means an unknown key is never accepted. A "no", or an
+	// error, ends the join as Failed.
 	ConfirmHostKey func(ctx context.Context, hostname string, key ssh.PublicKey) (accepted bool, err error)
 	// Terminal runs each session. Run sets Stdin, Pty.Size and OnReady on a
 	// copy for each session, and wraps its Stdout so that nothing reaches it
 	// before the guest has been told the session is ready; this one is left
-	// as it is. Resizes that arrive between sessions are dropped.
+	// as it is. Resizes still pending when a session starts came while no
+	// session had the terminal, and are dropped: the session's pty request
+	// carries the size measured then. Terminal.Escape is the session's escape
+	// byte; see Escape.
 	Terminal *attach.Terminal
 	// Size is measured afresh for each session's pty request. Nil keeps
 	// Terminal.Pty's.
@@ -72,16 +88,22 @@ type Config struct {
 	// is ready or else to Run. Nil means no keys.
 	Input io.Reader
 	// Escape is the escape byte: at the start of a line, followed by '.', it
-	// leaves. Zero disables it.
+	// leaves. Zero disables it. It covers the keys join reads itself, while
+	// no session has the keyboard; Terminal.Escape covers a session's. Set
+	// both.
 	Escape byte
 	// TakeTerminal runs once, when a handshake first succeeds: it is where
-	// the command puts the terminal in raw mode. Nil does nothing.
+	// the command puts the terminal in raw mode. Nil does nothing. An error
+	// ends the join as Failed, with that error.
 	TakeTerminal func() error
 	// Events tells the guest how the join is going. It returns only once
 	// whatever it wrote has been written or has failed: Run starts no attempt
-	// and lets no session write while it is in progress. Each call runs on
-	// its own goroutine, so a write stuck on a terminal never keeps a stop
-	// from ending the run. Nil tells nobody.
+	// and lets no session write while it is in progress. While the run goes
+	// on, calls are serial, each starting once the last has returned. Each
+	// runs on its own goroutine, so a write stuck on a terminal never keeps a
+	// stop from ending the run: no call starts once the run has stopped, but
+	// one the stop abandoned may still be writing after Run returns. Nil
+	// tells nobody.
 	Events func(Event)
 	// Wait removes the first join's deadline.
 	Wait   bool
@@ -111,8 +133,18 @@ const (
 // Outcome is how a run ended.
 type Outcome struct {
 	Kind   OutcomeKind
-	Status int   // Exited
-	Err    error // Failed
+	Status int // Exited
+	// Err is why a run Failed. It is one of:
+	//   - a *DeadlineError: a first join's time ran out, waiting on its Why;
+	//   - a *RefusedError (ErrKeysRefused);
+	//   - an *IdentityError (ErrIdentity), on a first join;
+	//   - a *HostKeyError (ErrHostKey): a changed key, an unknown one the
+	//     guest declined or couldn't be asked about, CheckHostKey's own
+	//     error, or ConfirmHostKey's;
+	//   - ErrUpstreamHostKey;
+	//   - TakeTerminal's error, as it is;
+	//   - an error naming a Config field Run needs and wasn't given.
+	Err error
 }
 
 // EventKind is what an Event reports.
@@ -751,7 +783,7 @@ func (r *runner) ended(s *sessionEnd) step {
 // for. Its own goroutine does the waiting, so that a run that stops meanwhile
 // can still give it a bounded chance to finish.
 type handover struct {
-	done   chan struct{} // the restore has been written, or there was none
+	done   chan struct{} // the restore has been written, there was none, or finish gave up on it
 	gaveUp chan struct{} // closed by finish
 	state  atomic.Int32
 }

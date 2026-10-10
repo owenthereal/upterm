@@ -62,7 +62,9 @@ func TestParseTargetBareForm(t *testing.T) {
 		require.Equal(t, tc.want, got, tc.in)
 	}
 
-	// An opaque URL has a known scheme and no "//" after it, whatever its case.
+	// Refused: an opaque URL, which has a known scheme, whatever its case,
+	// and no "//" after it; a port that is empty, not a number or out of
+	// range; and an empty host.
 	for _, bad := range []string{
 		"ssh:abc@relay.test", "SSH:abc@relay.test", "ws:abc@relay.test", "wss:abc@relay.test",
 		"abc@relay.test:", "abc@relay.test:port", "abc@relay.test:0", "abc@relay.test:65536",
