@@ -186,6 +186,14 @@ type Event struct {
 // mend. A connection that drops is rejoined, however long that takes; a
 // first join that can't get in gives up after Timing.FirstJoin, unless
 // cfg.Wait.
+//
+// The end of a run is bounded, and a write to a terminal can't be
+// interrupted: Run doesn't own the descriptor, which is what would have to be
+// closed. So a write Run has given up on may still complete after it returns:
+// a status line that a stop or the first join's deadline abandoned, or the
+// last session's output or mode restore, still parked on Terminal.Stdout when
+// their one-second bound passed. A caller that writes to the same terminal
+// afterwards should allow for that; the command exits.
 func Run(ctx context.Context, cfg Config) Outcome {
 	if err := cfg.validate(); err != nil {
 		return Outcome{Kind: Failed, Err: err}
