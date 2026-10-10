@@ -43,10 +43,14 @@ upterm host --detach --name home --accept \
 stays the same through network drops and relay deploys, for as long as the
 door runs. It changes when you restart the door.
 
-## Keep the Mac awake
+## Keep the machine awake
 
-On AC power, `caffeinate` stops the Mac idling to sleep for as long as the
-door runs (it needs `jq`; `brew install jq` if `command -v jq` finds none):
+A machine that sleeps can't answer the door, and its agents stop until it
+wakes.
+
+On macOS, on AC power, `caffeinate` stops the Mac idling to sleep for as long
+as the door runs (it needs `jq`; `brew install jq` if `command -v jq` finds
+none):
 
 ```console
 caffeinate -is -w "$(upterm session info home -o json | jq .pid)" &
@@ -55,6 +59,9 @@ caffeinate -is -w "$(upterm session info home -o json | jq .pid)" &
 It can't stop the sleep that closing the lid forces: leave a laptop's lid
 open, or run it closed only in clamshell mode, with power and an external
 display.
+
+On Linux, servers rarely sleep. On a desktop that suspends when idle, turn
+that off in its power settings.
 
 ## Connect from a laptop
 
@@ -102,7 +109,7 @@ ciphertext.
 Open the door with forwarding allowed, instead of the command above. If a
 door named `home` is already running, stop it first with
 `upterm session stop home`; the new door gets a new session ID, so update
-your clients' `User`, and start `caffeinate` again for the new pid.
+your clients' `User`, and on a Mac, start `caffeinate` again for the new pid.
 
 ```console
 upterm host --detach --name home --accept \
@@ -139,7 +146,7 @@ reach, your LAN included, so use it only with `--authorized-user`.
 
 Herdr's saved machines connect with `BatchMode=yes` and
 `StrictHostKeyChecking=yes`, so they never prompt, and an unknown host key
-fails the connection without a word. Pin the relay as above first. Then
+fails the connection without prompting. Pin the relay as above first. Then
 save `home-sshd` as the machine, and record the home machine's own host key
 before Herdr uses it: connect once with `ssh home-sshd`, and check the
 fingerprint it shows against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
