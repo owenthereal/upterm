@@ -6,7 +6,8 @@ another laptop. upterm is the door: it gives the machine an address you can
 reach from anywhere, without opening a port. Herdr keeps the agents, so losing
 the door costs a rejoin, not the work.
 
-This needs upterm v0.37.0 or later.
+This needs upterm v0.37.0 or later, and Herdr 0.9.0 or later (its saved
+machines, and clients that view tabs independently).
 
 ## Open the door
 
@@ -23,8 +24,10 @@ upterm host --detach --name home --accept \
   layout. Clients looking at the same tab share its panes, though, and Herdr
   sizes them for the client that last interacted with the tab, so the agent
   repaints when you switch from the laptop to the phone.
-- `--authorized-user` lets in only the keys on your GitHub account.
-  Without it, anyone with the session ID can join, and upterm warns you so.
+- `--authorized-user` lets in only the keys on your GitHub account, as they
+  are when the door starts: after you add, change or revoke a key on GitHub,
+  restart the door. Without it, anyone with the session ID can join, and
+  upterm warns you so.
 - `env -u HERDR_ENV` matters when you start the door from inside a Herdr
   pane: Herdr refuses to start "nested" when it sees that variable. Outside
   Herdr, it does nothing.
@@ -42,11 +45,16 @@ door runs. It changes when you restart the door.
 
 ## Keep the Mac awake
 
-On AC power, `caffeinate` stops the Mac sleeping for as long as the door runs:
+On AC power, `caffeinate` stops the Mac idling to sleep for as long as the
+door runs (it needs `jq`; `brew install jq` if `command -v jq` finds none):
 
 ```console
 caffeinate -is -w "$(upterm session info home -o json | jq .pid)" &
 ```
+
+It can't stop the sleep that closing the lid forces: leave a laptop's lid
+open, or run it closed only in clamshell mode, with power and an external
+display.
 
 ## Connect from a laptop
 
@@ -55,6 +63,7 @@ Terminal](../README.md#running-without-a-terminal) for the fingerprint to
 check):
 
 ```console
+mkdir -p ~/.ssh
 cat >> ~/.ssh/known_hosts <<'EOF'
 @cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
 EOF
