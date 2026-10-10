@@ -10,9 +10,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -34,7 +37,8 @@ var errFixtureRefused = errors.New("fixture relay: key refused")
 // unbuffered net.Pipe deadlocks; x/crypto's own tests use TCP for this).
 // Zero means: accept any key, no banner, version "SSH-2.0-uptermd-0.37.0" (a
 // release, so refusals at authentication are definitive), accept the session
-// channel.
+// channel, its pty and its shell, and then keep the session open, quiet, and
+// answering keepalives, until the connection closes.
 type relayKnobs struct {
 	refuseAll       bool          // every publickey query fails
 	allow           ssh.PublicKey // accept only this key (nil: any)
@@ -44,12 +48,74 @@ type relayKnobs struct {
 	version         string
 	pubKeyAlgos     []string
 	rejectSession   string // reject "session" with ConnectionFailed and this message
+
+	// What a join's CheckHostKey says about this connection's relay key; the
+	// fixture's config reads them.
+	hostKeyUnknown, hostKeyChanged bool
+	// stallHandshake never sends the relay's version line.
+	stallHandshake bool
+	// acceptUpstreamOnly rejects "session" unless the guest authenticated with
+	// this key (nil: no such check), as the session's node does when the entry
+	// node let a key in that the host doesn't authorize. The rejection is the
+	// ambiguous UpstreamAuthFailed of a node that predates the refined
+	// verdicts, or, with confirmRefusal, UpstreamKeyRefused.
+	acceptUpstreamOnly ssh.PublicKey
+	confirmRefusal     bool
+	// setupFails rejects the pty request.
+	setupFails bool
+	// output is written once the shell starts.
+	output string
+	// exit, after output, sends this exit status and closes the session.
+	exit *int
+	// dropAfterReady, after output, closes the connection without a status.
+	dropAfterReady bool
+	// silentAfterReady, after output, stops sending anything, keepalive
+	// replies included.
+	silentAfterReady bool
 }
 
-// serve runs the relay's end of one connection until it closes. It is the one
-// place that end is written, so a behaviour the fixture learns lands here.
-func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer) {
+// connLog is what the relay saw on one connection.
+type connLog struct {
+	mu    sync.Mutex
+	key   ssh.PublicKey   // the key that authenticated
+	ptys  []termsize.Size // the size of each pty request
+	input bytes.Buffer    // what the session received
+}
+
+func (l *connLog) setKey(k ssh.PublicKey) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.key = k
+}
+
+func (l *connLog) pty(s termsize.Size) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ptys = append(l.ptys, s)
+}
+
+func (l *connLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.input.Write(p)
+}
+
+// permKey is the Permissions extension the relay keeps the authenticated key
+// in, so that it knows which key got in once the handshake is over.
+const permKey = "fixture-key"
+
+// serve runs the relay's end of one connection until it closes, noting in seen
+// what it saw. It is the one place that end is written, so a behaviour the
+// fixture learns lands here.
+func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer, seen *connLog) {
 	defer func() { _ = conn.Close() }()
+
+	if k.stallHandshake {
+		// A relay that took the connection and then stopped: it reads what the
+		// guest sends and never answers, until the guest gives up.
+		_, _ = io.Copy(io.Discard, conn)
+		return
+	}
 
 	cfg := &ssh.ServerConfig{
 		ServerVersion:           cmp.Or(k.version, defaultRelayVersion),
@@ -60,10 +126,10 @@ func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer) {
 				_ = conn.Close()
 				return nil, errFixtureRefused
 			}
-			if k.refuseAll || (k.allow != nil && !bytes.Equal(key.Marshal(), k.allow.Marshal())) {
+			if k.refuseAll || (k.allow != nil && !sameKey(key, k.allow)) {
 				return nil, k.refusal()
 			}
-			return &ssh.Permissions{}, nil
+			return &ssh.Permissions{Extensions: map[string]string{permKey: string(key.Marshal())}}, nil
 		},
 	}
 	cfg.AddHostKey(hostKey)
@@ -75,9 +141,23 @@ func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer) {
 		return
 	}
 	defer func() { _ = sconn.Close() }()
-	go ssh.DiscardRequests(reqs)
+	key, err := ssh.ParsePublicKey([]byte(sconn.Permissions.Extensions[permKey]))
+	if err == nil {
+		seen.setKey(key)
+	}
 
-	k.channels(chans)
+	// The connection's global requests are the guest's keepalives: answered,
+	// as the relay forwards them to a host that answers, until silent.
+	var silent atomic.Bool
+	go func() {
+		for req := range reqs {
+			if req.WantReply && !silent.Load() {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}()
+
+	k.channels(chans, sconn, key, &silent, seen)
 }
 
 // refusal is the error the relay's key callback returns: carrying the banner,
@@ -90,33 +170,84 @@ func (k relayKnobs) refusal() error {
 }
 
 // channels answers the channels a guest opens until the connection closes.
-func (k relayKnobs) channels(chans <-chan ssh.NewChannel) {
+func (k relayKnobs) channels(chans <-chan ssh.NewChannel, sconn *ssh.ServerConn, key ssh.PublicKey, silent *atomic.Bool, seen *connLog) {
 	for nc := range chans {
 		switch {
 		case nc.ChannelType() != "session":
 			_ = nc.Reject(ssh.UnknownChannelType, "unknown channel type")
 		case k.rejectSession != "":
 			_ = nc.Reject(ssh.ConnectionFailed, k.rejectSession)
+		case k.acceptUpstreamOnly != nil && (key == nil || !sameKey(key, k.acceptUpstreamOnly)):
+			msg := upterm.UpstreamAuthFailed
+			if k.confirmRefusal {
+				msg = upterm.UpstreamKeyRefused
+			}
+			_ = nc.Reject(ssh.ConnectionFailed, msg)
 		default:
-			// The session stays open, and silent, until the connection closes.
-			_, reqs, err := nc.Accept()
+			ch, reqs, err := nc.Accept()
 			if err != nil {
 				continue
 			}
-			go ssh.DiscardRequests(reqs)
+			go k.session(ch, reqs, sconn, silent, seen)
 		}
 	}
 }
 
-// listen serves each connection to a loopback listener with k and returns the
-// listener's address. The test's cleanup closes the listener and every
+// session answers one session's requests: its pty, which it notes, and its
+// shell, which starts the script the knobs describe.
+func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh.ServerConn, silent *atomic.Bool, seen *connLog) {
+	go func() { _, _ = io.Copy(seen, ch) }()
+	for req := range reqs {
+		switch req.Type {
+		case "pty-req":
+			var pty struct {
+				Term                      string
+				Cols, Rows, Width, Height uint32
+				Modes                     string
+			}
+			if err := ssh.Unmarshal(req.Payload, &pty); err == nil {
+				seen.pty(termsize.Size{Cols: int(pty.Cols), Rows: int(pty.Rows)})
+			}
+			_ = req.Reply(!k.setupFails, nil)
+		case "shell":
+			_ = req.Reply(true, nil)
+			go k.script(ch, sconn, silent)
+		default:
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}
+}
+
+// script is what the session does once its shell has started.
+func (k relayKnobs) script(ch ssh.Channel, sconn *ssh.ServerConn, silent *atomic.Bool) {
+	if k.output != "" {
+		_, _ = ch.Write([]byte(k.output))
+	}
+	switch {
+	case k.exit != nil:
+		status := struct{ Status uint32 }{uint32(*k.exit)}
+		_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&status))
+		_ = ch.Close()
+	case k.dropAfterReady:
+		_ = sconn.Close()
+	case k.silentAfterReady:
+		silent.Store(true)
+	}
+}
+
+func sameKey(a, b ssh.PublicKey) bool { return bytes.Equal(a.Marshal(), b.Marshal()) }
+
+// listen serves each connection to a loopback listener with serve, which is
+// told the connection's index in the order they were accepted, and returns
+// the listener's address. The test's cleanup closes the listener and every
 // connection it accepted, and waits for their goroutines.
-func (k relayKnobs) listen(t *testing.T) string {
+func listen(t *testing.T, serve func(i int, conn net.Conn)) string {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	hostKey := newSigner(t)
 
 	var (
 		mu     sync.Mutex
@@ -127,7 +258,7 @@ func (k relayKnobs) listen(t *testing.T) string {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for {
+		for i := 0; ; i++ {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
@@ -143,7 +274,7 @@ func (k relayKnobs) listen(t *testing.T) string {
 			mu.Unlock()
 			go func() {
 				defer wg.Done()
-				k.serve(conn, hostKey)
+				serve(i, conn)
 			}()
 		}
 	}()
@@ -166,7 +297,8 @@ func (k relayKnobs) listen(t *testing.T) string {
 func (k relayKnobs) open(t *testing.T, signers []ssh.Signer, checkHostKey ssh.HostKeyCallback) (*ssh.Client, *evidence, error) {
 	t.Helper()
 
-	addr := k.listen(t)
+	hostKey := newSigner(t)
+	addr := listen(t, func(_ int, conn net.Conn) { k.serve(conn, hostKey, &connLog{}) })
 	nc, err := net.Dial("tcp", addr)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = nc.Close() })

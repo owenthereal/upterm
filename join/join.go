@@ -1,0 +1,802 @@
+package join
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/owenthereal/upterm/attach"
+	"github.com/owenthereal/upterm/internal/liveness"
+	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/upterm"
+	"golang.org/x/crypto/ssh"
+)
+
+// finalBound is how long the end of a run waits for the last session's
+// writes, and the restore after them, to reach the terminal.
+const finalBound = time.Second
+
+// KeySource says where the guest's keys came from, so that the command can
+// explain a refusal in terms the guest recognises. It is known before Run:
+// the identity is prepared, and the agent listed, before the first attempt.
+type KeySource struct {
+	Agent, Files int  // keys from the agent, and from key files
+	Generated    bool // no agent keys and no default key files: a key was generated
+	Explicit     bool // the keys were named with -i
+}
+
+// Identity is the guest's keys.
+type Identity struct {
+	// Signers is called once per attempt, with the attempt's ctx. Every agent
+	// operation it or its signers start is bound to ctx, and release closes
+	// the attempt's agent connection. release is idempotent. Run arms it on
+	// ctx and calls it when the attempt returns, so an agent that stops
+	// answering costs no more than the attempt's deadline: the agent is a
+	// connection of its own, which closing the relay's would not end.
+	Signers func(ctx context.Context) (signers []ssh.Signer, release func(), err error)
+	Source  KeySource
+}
+
+// Config is a join: the session, and the seams through which Run reaches the
+// world.
+type Config struct {
+	Target Target
+	// Dial opens a connection to the relay. It is called once per attempt,
+	// with the attempt's ctx.
+	Dial     func(ctx context.Context) (net.Conn, error)
+	Identity Identity
+	// CheckHostKey decides on the relay's key without blocking on anyone: nil
+	// (trusted), or an error that wraps ErrHostKeyUnknown or
+	// ErrHostKeyChanged. It may record a key itself.
+	CheckHostKey ssh.HostKeyCallback
+	// ConfirmHostKey asks the guest about an unknown key, with no connection
+	// open, and records it if they accept. It returns promptly when ctx ends.
+	// It is never called once TakeTerminal has run: from then on nothing
+	// prompts. Nil means an unknown key is never accepted.
+	ConfirmHostKey func(ctx context.Context, hostname string, key ssh.PublicKey) (accepted bool, err error)
+	// Terminal runs each session. Run sets Stdin, Pty.Size and OnReady on a
+	// copy for each session and leaves this one as it is.
+	Terminal *attach.Terminal
+	// Size is measured afresh for each session's pty request. Nil keeps
+	// Terminal.Pty's.
+	Size func() termsize.Size
+	// Input is the guest's keys. Run reads it only once TakeTerminal has run,
+	// and then from one goroutine, which gives each key to the session that
+	// is ready or else to Run. Nil means no keys.
+	Input io.Reader
+	// Escape is the escape byte: at the start of a line, followed by '.', it
+	// leaves. Zero disables it.
+	Escape byte
+	// TakeTerminal runs once, when a handshake first succeeds: it is where
+	// the command puts the terminal in raw mode. Nil does nothing.
+	TakeTerminal func() error
+	// Events tells the guest how the join is going. It returns only once
+	// whatever it wrote has been written or has failed: Run starts no attempt
+	// and lets no session write while it is in progress. Each call runs on
+	// its own goroutine, so a write stuck on a terminal never keeps a stop
+	// from ending the run. Nil tells nobody.
+	Events func(Event)
+	// Wait removes the first join's deadline.
+	Wait   bool
+	Timing Timing
+
+	// runSession runs one session; nil means the session's Terminal.Run.
+	// Tests replace it to stage a Result.
+	runSession func(ctx context.Context, c *ssh.Client, setupBy time.Time) (attach.Result, error)
+}
+
+// OutcomeKind is how a run ended.
+type OutcomeKind int
+
+const (
+	// Exited: the session sent an exit status.
+	Exited OutcomeKind = iota + 1
+	// Left: the guest left, with the escape sequence or by closing the
+	// terminal.
+	Left
+	// Stopped: ctx ended, or the guest pressed Ctrl-C while no session had
+	// the keyboard.
+	Stopped
+	// Failed: the join can't go on; Err says why.
+	Failed
+)
+
+// Outcome is how a run ended.
+type Outcome struct {
+	Kind   OutcomeKind
+	Status int   // Exited
+	Err    error // Failed
+}
+
+// EventKind is what an Event reports.
+type EventKind int
+
+const (
+	// Joined: a session is ready. Its output follows.
+	Joined EventKind = iota + 1
+	// Lost: the connection to a session went away without an exit status.
+	Lost
+	// Waiting: the next attempt is a wait away.
+	Waiting
+)
+
+// Event is a change the guest is told about.
+type Event struct {
+	Kind   EventKind
+	Rejoin bool          // Joined: not the first
+	Down   time.Duration // Joined, on a rejoin: how long the session was out of reach
+	Why    WaitReason    // Lost, Waiting
+	Err    error         // Lost, Waiting: the error behind Why, if any
+	Since  time.Time     // Waiting: when this wait began, on the wall clock
+	Next   time.Time     // Waiting: when the next attempt is due, on the wall clock
+	Long   bool          // Waiting: the wait has gone on long enough to slow down
+	First  bool          // Waiting: no session has been ready yet
+}
+
+// Run joins the session cfg names and stays with it until it ends: an exit
+// status, the guest leaving or stopping, or a failure that waiting won't
+// mend. A connection that drops is rejoined, however long that takes; a
+// first join that can't get in gives up after Timing.FirstJoin, unless
+// cfg.Wait.
+func Run(ctx context.Context, cfg Config) Outcome {
+	if err := cfg.validate(); err != nil {
+		return Outcome{Kind: Failed, Err: err}
+	}
+	r := newRunner(ctx, cfg)
+	defer r.close()
+	return r.loop()
+}
+
+func (c Config) validate() error {
+	switch {
+	case c.Dial == nil:
+		return errors.New("join: Config.Dial is required")
+	case c.Identity.Signers == nil:
+		return errors.New("join: Config.Identity.Signers is required")
+	case c.CheckHostKey == nil:
+		return errors.New("join: Config.CheckHostKey is required")
+	case c.Terminal == nil:
+		return errors.New("join: Config.Terminal is required")
+	}
+	return nil
+}
+
+// runner is one Run. Its loop runs on Run's goroutine and owns everything
+// below mu's fields; one other goroutine reads join's keys (see readKeys).
+type runner struct {
+	cfg    Config
+	timing Timing
+	sched  *schedule
+	in     *input
+
+	// runCtx ends with ctx, or when a key stops the run. Everything an
+	// attempt or a session starts is bound to it, so cancelling it is all a
+	// stop has to do.
+	runCtx context.Context
+	cancel context.CancelFunc
+
+	// quit closes when Run returns; keysDone once readKeys has seen it.
+	quit, keysDone chan struct{}
+
+	mu sync.Mutex
+	// cause is the key that stopped the run; zero when ctx did, or nothing
+	// has.
+	cause OutcomeKind
+	// retry is the current wait's: Enter during a wait goes there. Nil while
+	// nothing waits, when Enter does nothing.
+	retry chan struct{}
+
+	// The loop's alone.
+	tookTerminal bool
+	joined       bool      // a session has been ready
+	deadline     time.Time // the first join's, monotonic; zero until the first attempt, and with Wait
+	since        time.Time // the wall time the current wait began; zero while a session is ready
+	// lastWhy and lastErr are what a first join last waited on, which its
+	// DeadlineError wraps; zero before its first wait.
+	lastWhy WaitReason
+	lastErr error
+	// refused holds the keys the session's node turned away, by SHA256
+	// fingerprint. A session's authorized keys don't change while it runs,
+	// so they stay out for the run.
+	refused map[string]bool
+	// sitOut holds the keys an ambiguous refusal set aside for this round.
+	// It empties when a session is ready, and when a rejoin's round runs out.
+	sitOut map[string]bool
+	// joinedWith holds the keys that have had a session ready in this run.
+	// The session's node let them in once, so an ambiguous refusal of one is
+	// a session that isn't there, not a refusal.
+	joinedWith map[string]bool
+}
+
+func newRunner(ctx context.Context, cfg Config) *runner {
+	runCtx, cancel := context.WithCancel(ctx)
+	timing := cfg.Timing.orDefault()
+	r := &runner{
+		cfg:        cfg,
+		timing:     timing,
+		sched:      newSchedule(timing),
+		in:         newInput(cfg.Input, cfg.Escape),
+		runCtx:     runCtx,
+		cancel:     cancel,
+		quit:       make(chan struct{}),
+		keysDone:   make(chan struct{}),
+		refused:    map[string]bool{},
+		sitOut:     map[string]bool{},
+		joinedWith: map[string]bool{},
+	}
+	go r.readKeys()
+	return r
+}
+
+func (r *runner) close() {
+	close(r.quit)
+	<-r.keysDone
+	r.cancel()
+}
+
+// readKeys takes join's keys for the whole run. input delivers them only
+// while no session's view is active, so reading them all the time is reading
+// them in every phase that has no session: waits, each step of an attempt,
+// the Joined line, and the gap after a session ends. Before TakeTerminal
+// nothing reads Input, and none arrive.
+//
+// A stop only records its cause and cancels runCtx: whatever the loop is
+// blocked on is bound to it, and the loop returns once the attempt's
+// goroutines have let go.
+func (r *runner) readKeys() {
+	defer close(r.keysDone)
+	for {
+		select {
+		case k := <-r.in.keys():
+			r.key(k)
+		case <-r.quit:
+			return
+		}
+	}
+}
+
+func (r *runner) key(k waitKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch k {
+	case keyRetry:
+		// During an attempt there is no wait to cut short: one is already
+		// in progress.
+		if r.retry != nil {
+			select {
+			case r.retry <- struct{}{}:
+			default:
+			}
+		}
+	case keyStop, keyLeave:
+		if r.cause == 0 && r.runCtx.Err() == nil {
+			r.cause = Stopped
+			if k == keyLeave {
+				r.cause = Left
+			}
+		}
+		r.cancel()
+	}
+}
+
+// stopped is the outcome of a run whose runCtx ended: the key that ended it,
+// or Stopped for ctx.
+func (r *runner) stopped() Outcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cause != 0 {
+		return Outcome{Kind: r.cause}
+	}
+	return Outcome{Kind: Stopped}
+}
+
+func failed(err error) Outcome { return Outcome{Kind: Failed, Err: err} }
+
+// step is what the loop does after an attempt: end the run with out, wait
+// (why, err) and attempt again, or attempt again at once.
+type step struct {
+	done bool
+	out  Outcome
+	wait bool
+	why  WaitReason
+	err  error
+}
+
+var attemptNow = step{}
+
+func finish(out Outcome) step { return step{done: true, out: out} }
+
+func waitThen(why WaitReason, err error) step { return step{wait: true, why: why, err: err} }
+
+func (r *runner) loop() Outcome {
+	for {
+		if r.firstJoinOver() {
+			return r.timedOut(Unreachable, nil)
+		}
+		s := r.next(r.attempt())
+		if s.done {
+			return s.out
+		}
+		if s.wait {
+			if out, ok := r.wait(s.why, s.err); !ok {
+				return out
+			}
+		}
+	}
+}
+
+// firstJoinOver reports whether a first join has used up its deadline.
+func (r *runner) firstJoinOver() bool {
+	return r.firstJoin() && !time.Now().Before(r.deadline)
+}
+
+// firstJoin reports whether the run is a first join with a deadline.
+func (r *runner) firstJoin() bool { return !r.joined && !r.deadline.IsZero() }
+
+// timedOut ends a first join whose deadline has passed. It wraps what the
+// join last waited on or, if it never waited, why.
+func (r *runner) timedOut(why WaitReason, err error) Outcome {
+	if r.lastWhy != 0 {
+		why, err = r.lastWhy, r.lastErr
+	}
+	return failed(&DeadlineError{Why: why, Err: err})
+}
+
+// attempted is how one attempt ended.
+type attempted struct {
+	v         verdict
+	exhausted bool          // no candidate key was left to offer
+	offered   []ssh.Signer  // the keys offered
+	selected  ssh.PublicKey // the key whose signature got in
+	hostKey   ssh.PublicKey // the relay's key, for vHostKeyUnknown
+	cut       bool          // the first join's deadline ended it
+	err       error         // the run can't go on
+	session   *sessionEnd   // the session ran and returned a Result
+}
+
+// sessionEnd is a session that ran.
+type sessionEnd struct {
+	res     attach.Result
+	ready   bool
+	readyAt time.Time
+	err     error // why the connection went: the liveness error, or the one it closed with
+}
+
+// attempt runs one attempt under its own deadline: the identity, the dial,
+// the handshake and the session's setup, and then, if it gets that far, the
+// session.
+func (r *runner) attempt() (a attempted) {
+	now := time.Now()
+	if !r.cfg.Wait && !r.joined && r.deadline.IsZero() {
+		r.deadline = now.Add(r.timing.FirstJoin)
+	}
+	by := now.Add(r.timing.Attempt)
+	cutoff := r.firstJoin() && !r.deadline.After(by)
+	if cutoff {
+		by = r.deadline
+	}
+	actx, cancel := context.WithDeadline(r.runCtx, by)
+	defer cancel()
+	// An attempt the first join's deadline ended says nothing about the
+	// relay or the session: whatever it failed with, it failed because its
+	// time was up. Read before cancel, which would make any ctx look ended.
+	defer func() { a.cut = cutoff && errors.Is(actx.Err(), context.DeadlineExceeded) }()
+
+	signers, release, err := r.cfg.Identity.Signers(actx)
+	if release != nil {
+		// As soon as actx ends, at the deadline or with a stop, the agent's
+		// connection closes, which ends a signature waiting on it. Either that
+		// close never runs, or it has started and is waited for.
+		released := make(chan struct{})
+		stop := context.AfterFunc(actx, func() {
+			defer close(released)
+			release()
+		})
+		defer func() {
+			if !stop() {
+				<-released
+			}
+			release()
+		}()
+	}
+	if err != nil {
+		var idErr *IdentityError
+		if !errors.As(err, &idErr) {
+			idErr = &IdentityError{Err: err}
+		}
+		return attempted{v: verdict{kind: vWait, why: IdentityFailure, err: idErr}}
+	}
+
+	offered := r.candidates(signers)
+	if len(offered) == 0 {
+		return attempted{exhausted: true}
+	}
+
+	ev := &evidence{}
+	conn, err := r.cfg.Dial(actx)
+	if err != nil {
+		return attempted{v: classifyConnect(err, ev), offered: offered}
+	}
+	lc := liveness.NewConn(conn)
+	// Nothing in the handshake watches actx, so it is closed under it.
+	stopClosing := context.AfterFunc(actx, func() { _ = lc.Close() })
+	// The relay's key, for a prompt. The callback runs again at every key
+	// exchange, so it is read only to explain a handshake that failed, as
+	// the evidence is.
+	var hostKey ssh.PublicKey
+	check := func(host string, remote net.Addr, key ssh.PublicKey) error {
+		hostKey = key
+		return r.cfg.CheckHostKey(host, remote, key)
+	}
+	sc, chans, reqs, err := ssh.NewClientConn(lc, r.cfg.Target.Host, clientConfig(r.cfg.Target.User, offered, check, ev))
+	if err != nil {
+		stopClosing()
+		_ = lc.Close()
+		return attempted{v: classifyConnect(err, ev), offered: offered, selected: ev.selected, hostKey: hostKey}
+	}
+	if !stopClosing() {
+		// actx ended as the handshake finished, and the connection with it.
+		_ = sc.Close()
+		return attempted{v: verdict{kind: vWait, why: Unreachable, err: actx.Err()}, offered: offered}
+	}
+	client := ssh.NewClient(sc, chans, reqs)
+
+	if !r.tookTerminal {
+		r.tookTerminal = true
+		if r.cfg.TakeTerminal != nil {
+			if err := r.cfg.TakeTerminal(); err != nil {
+				_ = client.Close()
+				return attempted{err: err}
+			}
+		}
+		if r.cfg.Input != nil {
+			r.in.start()
+		}
+	}
+
+	end, err := r.session(client, lc, ev.selected, by)
+	if err != nil {
+		return attempted{v: classifySetup(err, ev), offered: offered, selected: ev.selected}
+	}
+	return attempted{session: end, offered: offered, selected: ev.selected}
+}
+
+// candidates is signers without the keys that are refused or sitting out.
+func (r *runner) candidates(signers []ssh.Signer) []ssh.Signer {
+	var out []ssh.Signer
+	for _, s := range signers {
+		fp := ssh.FingerprintSHA256(s.PublicKey())
+		if !r.refused[fp] && !r.sitOut[fp] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// session runs one session on client. An error means the shell never
+// started, and Terminal has closed client.
+func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKey, setupBy time.Time) (*sessionEnd, error) {
+	end := &sessionEnd{}
+	v := r.in.session()
+
+	term := *r.cfg.Terminal
+	term.Stdin = v
+	if term.Pty != nil {
+		pty := *term.Pty
+		if r.cfg.Size != nil {
+			pty.Size = r.cfg.Size()
+		}
+		term.Pty = &pty
+	}
+	// Terminal writes no output until OnReady returns, and the view gets no
+	// keys until it is activated: so the guest is told first, and only then
+	// does the session get the screen and the keyboard.
+	term.OnReady = func() {
+		e := Event{Kind: Joined}
+		if r.joined {
+			e.Rejoin, e.Down = true, max(0, r.timing.Wall().Sub(r.since))
+		}
+		if !r.emit(e) {
+			return
+		}
+		end.ready, end.readyAt = true, time.Now()
+		r.ready(key)
+		v.activate()
+	}
+	run := r.cfg.runSession
+	if run == nil {
+		run = term.Run
+	}
+
+	// Liveness closes the connection, never runCtx: a silent peer is a
+	// session lost, to be rejoined, and not the guest leaving.
+	sessCtx, endSession := context.WithCancel(r.runCtx)
+	watched := make(chan struct{})
+	var dead error
+	go func() {
+		defer close(watched)
+		liveness.Watch(sessCtx, r.timing.Liveness, lc.LastRead, func() error {
+			_, _, err := client.SendRequest(upterm.OpenSSHKeepAliveRequestType, true, nil)
+			return err
+		}, func(err error) {
+			dead = err
+			_ = client.Close()
+		})
+	}()
+
+	res, err := run(r.runCtx, client, setupBy)
+	endSession()
+	<-watched
+	_ = client.Close()
+	_ = v.Close()
+	if err != nil {
+		return nil, err
+	}
+	end.res = res
+	end.err = dead
+	if end.err == nil {
+		// Closed above, so this returns with whatever ended the connection
+		// first.
+		end.err = client.Wait()
+	}
+	return end, nil
+}
+
+// ready marks a session ready: its key got in, and a new round starts.
+func (r *runner) ready(key ssh.PublicKey) {
+	if key != nil {
+		r.joinedWith[ssh.FingerprintSHA256(key)] = true
+	}
+	clear(r.sitOut)
+	r.joined = true
+	r.since = time.Time{}
+}
+
+// next decides what follows an attempt.
+func (r *runner) next(a attempted) step {
+	switch {
+	case a.session != nil:
+		return r.ended(a.session)
+	case r.runCtx.Err() != nil:
+		return finish(r.stopped())
+	case a.err != nil:
+		return finish(failed(a.err))
+	case a.exhausted:
+		return r.exhausted()
+	}
+
+	v := a.v
+	switch v.kind {
+	case vWait:
+		if a.cut && v.why != IdentityFailure {
+			return finish(r.timedOut(v.why, v.err))
+		}
+		return waitThen(v.why, v.err)
+	case vHostKeyUnknown:
+		return r.unknownHostKey(v, a.hostKey)
+	case vRetryNow:
+		// The session's node refused the one key the entry node let in.
+		// x/crypto stops offering keys at the first one the entry accepts, so
+		// the rest haven't been tried: they get their turn at once.
+		if a.selected == nil {
+			return finish(failed(&RefusedError{}))
+		}
+		r.refused[ssh.FingerprintSHA256(a.selected)] = true
+		return attemptNow
+	case vAmbiguous:
+		if a.selected == nil {
+			return finish(failed(&RefusedError{}))
+		}
+		fp := ssh.FingerprintSHA256(a.selected)
+		if r.joinedWith[fp] {
+			return waitThen(NoHost, nil)
+		}
+		r.sitOut[fp] = true
+		return attemptNow
+	}
+
+	// vStop. A refusal at the entry node with no evidence that it was one
+	// could be a session that isn't there. On a rejoin, where a key it turned
+	// away has been in before, that is what it is taken for.
+	var refused *RefusedError
+	if errors.As(v.err, &refused) && refused.Ambiguous && r.joined && r.offeredJoined(a.offered) {
+		return waitThen(NoHost, nil)
+	}
+	return finish(failed(v.err))
+}
+
+func (r *runner) offeredJoined(offered []ssh.Signer) bool {
+	for _, s := range offered {
+		if r.joinedWith[ssh.FingerprintSHA256(s.PublicKey())] {
+			return true
+		}
+	}
+	return false
+}
+
+// exhausted decides what follows an attempt with no key left to offer.
+func (r *runner) exhausted() step {
+	switch {
+	case !r.joined:
+		return finish(failed(&RefusedError{Ambiguous: len(r.sitOut) > 0}))
+	case len(r.sitOut) > 0:
+		// Every key left sat out an ambiguous refusal, which a node that
+		// predates the refined verdicts also gives a session that isn't
+		// there. On a rejoin that is the likelier story: wait for the
+		// session, and start a new round with every key.
+		clear(r.sitOut)
+		return waitThen(NoHost, nil)
+	}
+	return finish(failed(&RefusedError{}))
+}
+
+// unknownHostKey asks the guest about the relay's key, if anyone may still
+// ask. The connection is already closed, and the first join's clock stops
+// for as long as the guest takes.
+func (r *runner) unknownHostKey(v verdict, key ssh.PublicKey) step {
+	if r.tookTerminal || r.cfg.ConfirmHostKey == nil {
+		return finish(failed(&HostKeyError{Err: v.err}))
+	}
+	start := time.Now()
+	accepted, err := r.cfg.ConfirmHostKey(r.runCtx, r.cfg.Target.Host, key)
+	if !r.deadline.IsZero() {
+		r.deadline = r.deadline.Add(time.Since(start))
+	}
+	switch {
+	case r.runCtx.Err() != nil:
+		return finish(r.stopped())
+	case err != nil:
+		return finish(failed(&HostKeyError{Err: err}))
+	case !accepted:
+		return finish(failed(&HostKeyError{Declined: true}))
+	}
+	return attemptNow
+}
+
+// ended decides what follows a session that ran.
+func (r *runner) ended(s *sessionEnd) step {
+	switch {
+	case s.res.Reason == attach.Exited:
+		r.restore(s.res)
+		return finish(Outcome{Kind: Exited, Status: s.res.Status})
+	case r.runCtx.Err() != nil:
+		// Whatever Terminal made of it, a session that ended with the run
+		// ended because Run stopped it.
+		r.restore(s.res)
+		return finish(r.stopped())
+	case s.res.Reason == attach.Detached:
+		r.restore(s.res)
+		return finish(Outcome{Kind: Left})
+	}
+
+	// Disconnected: lost, to be rejoined.
+	if s.ready {
+		r.sched.ready(time.Since(s.readyAt))
+	}
+	if r.since.IsZero() {
+		r.since = r.timing.Wall()
+	}
+	if !r.emit(Event{Kind: Lost, Why: Unreachable, Err: s.err}) || !r.barrier(s.res) {
+		return finish(r.stopped())
+	}
+	return waitThen(Unreachable, s.err)
+}
+
+// barrier hands the terminal over between sessions: it waits for the last
+// session's writes to return, however long that takes, and then writes the
+// restore it left. A stop ends it.
+func (r *runner) barrier(res attach.Result) bool {
+	if res.Released != nil {
+		select {
+		case <-res.Released:
+		case <-r.runCtx.Done():
+			return false
+		}
+	}
+	if len(res.Unrestored) == 0 {
+		return true
+	}
+	return r.call(func() { _, _ = r.cfg.Terminal.Stdout.Write(res.Unrestored) })
+}
+
+// restore is the barrier for the last session: the run is ending, so it waits
+// at most finalBound for the session's writes and the restore after them.
+// Past that nothing more is written.
+func (r *runner) restore(res attach.Result) {
+	const (
+		pending int32 = iota
+		writing
+		late
+	)
+	var state atomic.Int32
+	gaveUp := make(chan struct{})
+	logging.Within(finalBound, func() {
+		if res.Released != nil {
+			select {
+			case <-res.Released:
+			case <-gaveUp:
+				return
+			}
+		}
+		if len(res.Unrestored) > 0 && state.CompareAndSwap(pending, writing) {
+			_, _ = r.cfg.Terminal.Stdout.Write(res.Unrestored)
+		}
+	})
+	state.CompareAndSwap(pending, late)
+	close(gaveUp)
+}
+
+// wait waits out a verdict before the next attempt. It returns false, with
+// the outcome, if the run ends instead.
+func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
+	first := !r.joined
+	if first {
+		// The guest's own identity failing won't mend by waiting: a first
+		// join stops on it.
+		if why == IdentityFailure {
+			return failed(err), false
+		}
+		r.lastWhy, r.lastErr = why, err
+	}
+
+	now := r.timing.Wall()
+	if r.since.IsZero() {
+		r.since = now
+	}
+	delay, long := r.sched.next(max(0, now.Sub(r.since)))
+	if r.firstJoin() {
+		left := time.Until(r.deadline)
+		if left <= 0 {
+			return r.timedOut(why, err), false
+		}
+		delay = min(delay, left)
+	}
+
+	retry := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.retry = retry
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.retry = nil
+		r.mu.Unlock()
+	}()
+
+	e := Event{Kind: Waiting, Why: why, Err: err, Since: r.since, Next: now.Add(delay), Long: long, First: first}
+	if !r.emit(e) || waitFor(r.runCtx, r.timing, delay, retry) != nil {
+		return r.stopped(), false
+	}
+	return Outcome{}, true
+}
+
+// emit tells the guest about e, and returns once that has been written,
+// or false once the run has stopped.
+func (r *runner) emit(e Event) bool {
+	if r.cfg.Events == nil {
+		return r.runCtx.Err() == nil
+	}
+	return r.call(func() { r.cfg.Events(e) })
+}
+
+// call runs fn, a write to the guest's terminal, on its own goroutine, and
+// waits for it to return or for the run to stop. A write stuck on a terminal
+// that isn't taking output is abandoned with the process, so it never keeps
+// Ctrl-C or a signal from ending the run.
+func (r *runner) call(fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return r.runCtx.Err() == nil
+	case <-r.runCtx.Done():
+		return false
+	}
+}
