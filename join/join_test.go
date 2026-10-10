@@ -267,7 +267,9 @@ func TestNoStatusLineAfterAStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rec := &recorder{}
-	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec))
+	// withWait: with no first-join deadline, a slow handshake can't end the
+	// run before its first wait does.
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec), withWait())
 	// The run is stopped as its first wait begins: the wait reads the wall
 	// clock before it tells the guest about itself.
 	var once sync.Once
