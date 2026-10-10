@@ -790,6 +790,132 @@ func TestSSHRejectChannelsBoundedThroughBufferedWrites(t *testing.T) {
 	}
 }
 
+// forwardTestPeer is one side of forwardSSH with no network under it, so that
+// synctest can tell when forwardSSH has done all it will do. Ending it ends it
+// as a real transport ends: Wait returns and the mux stops delivering opens
+// and requests. forwardSSH closing it ends it the same way.
+type forwardTestPeer struct {
+	ssh.Conn
+	channels chan ssh.NewChannel
+	requests chan *ssh.Request
+	ended    chan struct{}
+	end      func()
+
+	// rejection answers every channel opened toward this peer. It is handed
+	// back only once answered closes: the goroutine that passes an answer on
+	// can run well after the answer arrived, and after the transport ended.
+	rejection error
+	answered  chan struct{}
+}
+
+func newForwardTestPeer() *forwardTestPeer {
+	p := &forwardTestPeer{
+		channels: make(chan ssh.NewChannel, 1),
+		requests: make(chan *ssh.Request),
+		ended:    make(chan struct{}),
+		answered: make(chan struct{}),
+	}
+	p.end = sync.OnceFunc(func() { close(p.ended); close(p.channels); close(p.requests) })
+	return p
+}
+
+func (p *forwardTestPeer) sshPeer() sshPeer { return sshPeer{p, p.channels, p.requests} }
+
+func (p *forwardTestPeer) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.Request, error) {
+	<-p.answered
+	return nil, nil, p.rejection
+}
+
+func (p *forwardTestPeer) Close() error {
+	p.end()
+	return nil
+}
+
+func (p *forwardTestPeer) Wait() error {
+	<-p.ended
+	return io.EOF
+}
+
+// open has this peer open a session channel, and returns where the channel's
+// rejection arrives. A rejection reaches the peer only while its transport is
+// up. A stalled peer has stopped reading, so Reject blocks until its transport
+// ends, and nothing arrives.
+func (p *forwardTestPeer) open(stalled bool) <-chan *ssh.OpenChannelError {
+	rejected := make(chan *ssh.OpenChannelError, 1)
+	p.channels <- forwardTestOpen{from: p, stalled: stalled, rejected: rejected}
+	return rejected
+}
+
+type forwardTestOpen struct {
+	ssh.NewChannel
+	from     *forwardTestPeer
+	stalled  bool
+	rejected chan<- *ssh.OpenChannelError
+}
+
+func (o forwardTestOpen) ChannelType() string { return "session" }
+
+func (o forwardTestOpen) ExtraData() []byte { return nil }
+
+func (o forwardTestOpen) Reject(reason ssh.RejectionReason, message string) error {
+	if o.stalled {
+		<-o.from.ended
+	}
+	select {
+	case <-o.from.ended:
+		return net.ErrClosed
+	default:
+	}
+	o.rejected <- &ssh.OpenChannelError{Reason: reason, Message: message}
+	return nil
+}
+
+// A relay node whose own upstream failed rejects the entry's channel open and
+// closes its transport at once (rejectSSHChannels). The entry has the rejection
+// before it sees that transport end, but the goroutine that passes it on can
+// run after: the guest must still be told why, not have its connection closed
+// with its open unanswered.
+func TestSSHForwardPassesOnARejectionFromAPeerThatThenLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guest, node := newForwardTestPeer(), newForwardTestPeer()
+		node.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
+		done := make(chan error, 1)
+		go func() {
+			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter)
+		}()
+		rejected := guest.open(false)
+		synctest.Wait() // the open is in flight toward the node
+		node.end()      // which rejected it, then left
+		synctest.Wait() // forwardSSH has done all it does before the rejection is handed back
+		close(node.answered)
+		<-done
+		select {
+		case rejection := <-rejected:
+			require.Equal(t, &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}, rejection)
+		default:
+			t.Fatal("the guest's connection closed with its open unanswered")
+		}
+	})
+}
+
+// Waiting for that rejection is bounded like the drain: a guest that has
+// stopped reading cannot hold its connection open by not taking it.
+func TestSSHForwardWaitsForThatRejectionOnlyAsLongAsTheDrain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guest, node := newForwardTestPeer(), newForwardTestPeer()
+		node.rejection = &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}
+		close(node.answered)
+		done := make(chan error, 1)
+		go func() {
+			done <- forwardSSH(t.Context(), guest.sshPeer(), node.sshPeer(), abortConnection, discardCounter)
+		}()
+		guest.open(true)
+		synctest.Wait() // the rejection is stuck in a write the guest is not reading
+		node.end()
+		require.EqualError(t, <-done, "ssh: buffered data drain timed out")
+	})
+}
+
 // The concurrent-open cap must bound opens in progress, not established
 // channels: every guest on a session holds a channel open on the host
 // connection for as long as it is joined.

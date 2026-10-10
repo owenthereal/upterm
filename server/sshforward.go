@@ -113,9 +113,10 @@ const (
 var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after source close")
 
 // forwardSSH owns both authenticated connections and joins all workers before
-// returning. Ordinary transport completion first drains received channel data
-// and request tails toward the surviving peer; forced cancellation closes both
-// transports immediately to release blocked opens, requests and writes.
+// returning. Ordinary transport completion first drains received channel data,
+// answers to channel opens and request tails toward the surviving peer; forced
+// cancellation closes both transports immediately to release blocked opens,
+// requests and writes.
 func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -136,12 +137,15 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 	}
 	exited := make(chan peerExit, 2)
 	channelsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	opensDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	requestsDone := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 	peers := []sshPeer{downstream, upstream}
 	for i, source := range peers {
 		destination := peers[1-i]
 		workers.Go(func() { exited <- peerExit{i, source.conn.Wait()} })
-		workers.Go(func() { forwarder.channels(destination.conn, source.channels, draining, channelsDone[i]) })
+		workers.Go(func() {
+			forwarder.channels(destination.conn, source.channels, draining, channelsDone[i], opensDone[i])
+		})
 		workers.Go(func() {
 			finished := sync.OnceFunc(func() { close(requestsDone[i]) })
 			defer finished()
@@ -165,8 +169,14 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 		timer := time.NewTimer(sshForwardDrainTimeout)
 		firstChannels, secondChannels := channelsDone[0], channelsDone[1]
 		sourceRequests := requestsDone[closedPeer]
+		// Opens the surviving peer sent toward the one that left. That peer
+		// answered them before it left or never will, so each resolves at once,
+		// but the answer still has to reach the survivor before its transport
+		// closes: another relay node's rejectSSHChannels rejects an open and
+		// disconnects in one go.
+		survivorOpens := opensDone[1-closedPeer]
 	drain:
-		for firstChannels != nil || secondChannels != nil || sourceRequests != nil {
+		for firstChannels != nil || secondChannels != nil || sourceRequests != nil || survivorOpens != nil {
 			select {
 			case <-firstChannels:
 				firstChannels = nil
@@ -174,6 +184,8 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 				secondChannels = nil
 			case <-sourceRequests:
 				sourceRequests = nil
+			case <-survivorOpens:
+				survivorOpens = nil
 			case <-ctx.Done():
 				err = context.Cause(ctx)
 				break drain
@@ -226,16 +238,22 @@ const maxSSHConcurrentChannelOpens = 64
 // Once draining starts, stop opening channels and report completion of the
 // accepted channels independently of connection Wait. Keep rejecting incoming
 // opens until transport shutdown so the surviving mux never loses its reader.
-func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChannel, draining <-chan struct{}, done chan struct{}) {
+//
+// opensDone closes once no more opens will be forwarded and every one already
+// forwarded has been answered back to its source, whichever way it went.
+func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChannel, draining <-chan struct{}, done, opensDone chan struct{}) {
 	var workers sync.WaitGroup
 	var accepted sshChannelDrain
+	var opening sync.WaitGroup
 	defer workers.Wait()
 	finish := func() { accepted.wait(); close(done) }
+	settle := func() { opening.Wait(); close(opensDone) }
 	opens := make(chan struct{}, maxSSHConcurrentChannelOpens)
 	for {
 		select {
 		case <-draining:
 			go finish()
+			workers.Go(settle)
 			for channel := range channels {
 				_ = channel.Reject(ssh.ConnectionFailed, "SSH peer disconnected")
 			}
@@ -243,6 +261,7 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 			return
 		case channel, ok := <-channels:
 			if !ok {
+				workers.Go(settle)
 				finish()
 				return
 			}
@@ -252,8 +271,9 @@ func (f sshForwarder) channels(destination ssh.Conn, channels <-chan ssh.NewChan
 				_ = channel.Reject(ssh.ResourceShortage, "too many concurrent channel opens")
 				continue
 			}
+			opening.Add(1)
 			workers.Go(func() {
-				f.channel(destination, channel, &accepted, func() { <-opens })
+				f.channel(destination, channel, &accepted, func() { <-opens; opening.Done() })
 			})
 		}
 	}
