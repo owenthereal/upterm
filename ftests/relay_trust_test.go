@@ -54,7 +54,7 @@ func testClientCertFromUnknownAuthorityRejected(t *testing.T, hostShareURL, host
 	c := &Client{Signers: []ssh.Signer{forged}}
 	err = c.Join(session, clientJoinURL)
 	require.Error(err, "a certificate from an unrecognized authority must not join")
-	assert.ErrorContains(err, "unable to authenticate")
+	assert.ErrorContains(err, keyRefusal(hostShareURL, clientJoinURL))
 }
 
 // testClientAgentCertAuthorizedAsItsOwnKey covers the other half of the

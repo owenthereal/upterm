@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -42,7 +41,7 @@ import (
 // the callback the socket's peer, which is then the proxy rather than the
 // server, and presenting it as the server's address is misleading — OpenSSH
 // prints a placeholder in the same situation. It is display-only: knownhosts
-// matches on the hostname argument and appendHostLine stores only that, so
+// matches on the hostname argument and KnownHosts.Record stores only that, so
 // verification is unaffected either way.
 func NewPromptingHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename string, proxied bool) (ssh.HostKeyCallback, error) {
 	return newHostKeyCallback(stdin, stdout, knownHostsFilename, false, proxied)
@@ -65,166 +64,35 @@ func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename st
 		return nil, err
 	}
 
-	cb, err := knownhosts.New(knownHostsFilename)
-	if err != nil {
+	// KnownHosts.Check reads the file on every call; parse it once here so that
+	// a malformed file fails the command now rather than at the handshake.
+	if _, err := knownhosts.New(knownHostsFilename); err != nil {
 		return nil, err
 	}
 
-	hkcb := hostKeyCallback{
-		stdin:           stdin,
-		stdout:          stdout,
-		file:            knownHostsFilename,
-		HostKeyCallback: cb,
-		autoAccept:      autoAccept,
-		proxied:         proxied,
-	}
+	kh := KnownHosts{File: knownHostsFilename, Stdout: stdout, Proxied: proxied}
 
-	return hkcb.checkHostKey, nil
-}
-
-const (
-	markerCert = "@cert-authority"
-
-	errKeyMismatch = `
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
-Someone could be eavesdropping on you right now (man-in-the-middle attack)!
-It is also possible that a host key has just been changed.
-The fingerprint for the %s key sent by the remote host is
-%s.
-Please contact your system administrator.
-Add correct host key in %s to get rid of this message.
-Offending %s key in %s:%d`
-	errNoAuthoritiesHostname = "ssh: no authorities for hostname"
-)
-
-type hostKeyCallback struct {
-	stdin      io.Reader
-	stdout     io.Writer
-	file       string
-	autoAccept bool
-	// proxied suppresses the peer address in the prompt, because through a
-	// tunnel it belongs to the proxy rather than to the server.
-	proxied bool
-	ssh.HostKeyCallback
-}
-
-// noHostIP stands in for the server's address when the connection was
-// tunnelled. OpenSSH prints "<no hostip for proxy command>" in the same
-// situation; upterm reaches it through --proxy or the proxy environment rather
-// than a ProxyCommand.
-const noHostIP = "<no hostip for proxy>"
-
-func (cb hostKeyCallback) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
-	if err := cb.HostKeyCallback(hostname, remote, key); err != nil {
-		kerr, ok := err.(*knownhosts.KeyError)
-		// Return err if it's neither key error or no authorities hostname error
-		if !ok && !strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := kh.Check(hostname, remote, key)
+		if !errors.Is(err, ErrUnknownHostKey) {
 			return err
 		}
 
-		// If keer.Want is non-empty, there was a mismatch, which can signify a MITM attack
-		if kerr != nil && len(kerr.Want) != 0 {
-			kk := kerr.Want[0] // TODO: take care of multiple key mismatches
-			fp := utils.FingerprintSHA256(kk.Key)
-			kt := keyType(kk.Key.Type())
-			return fmt.Errorf(errKeyMismatch, kt, fp, kk.Filename, kt, kk.Filename, kk.Line)
-		}
-
 		// Auto-accept unknown host keys if enabled
-		if cb.autoAccept {
-			return cb.autoAcceptHostKey(hostname, key)
+		if autoAccept {
+			return kh.Record(hostname, key, true)
 		}
 
-		return cb.promptForConfirmation(hostname, remote, key)
-	}
-
-	return nil
-}
-
-func (cb hostKeyCallback) promptForConfirmation(hostname string, remote net.Addr, key ssh.PublicKey) error {
-	cert, isCert := key.(*ssh.Certificate)
-	if isCert {
-		key = cert.SignatureKey
-	}
-
-	fp := utils.FingerprintSHA256(key)
-	hostIP := knownhosts.Normalize(remote.String())
-	if cb.proxied {
-		hostIP = noHostIP
-	}
-	_, _ = fmt.Fprintf(cb.stdout, "The authenticity of host '%s (%s)' can't be established.\n", knownhosts.Normalize(hostname), hostIP)
-	_, _ = fmt.Fprintf(cb.stdout, "%s key fingerprint is %s.\n", keyType(key.Type()), fp)
-	_, _ = fmt.Fprintf(cb.stdout, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
-
-	reader := bufio.NewReader(cb.stdin)
-	for {
-		confirm, err := reader.ReadString('\n')
+		ok, err := kh.Confirm(context.Background(), stdin, hostname, remote, key)
 		if err != nil {
-			return fmt.Errorf("could not read host-key confirmation from stdin: %w; "+
-				"to confirm the %s host key of %s, re-run interactively, "+
-				"pre-populate %s with a verified host key, or use --skip-host-key-check to automatically accept new host keys",
-				err, keyType(key.Type()), hostname, cb.file)
+			return err
 		}
-
-		confirm = strings.TrimSpace(confirm)
-
-		if confirm == "yes" || confirm == fp {
-			return cb.appendHostLine(isCert, hostname, key)
-		}
-
-		if confirm == "no" {
+		if !ok {
 			return fmt.Errorf("Host key verification failed")
 		}
 
-		_, _ = fmt.Fprintf(cb.stdout, "Please type 'yes', 'no' or the fingerprint: ")
-	}
-}
-
-func (cb hostKeyCallback) autoAcceptHostKey(hostname string, key ssh.PublicKey) error {
-	cert, isCert := key.(*ssh.Certificate)
-	if isCert {
-		key = cert.SignatureKey
-	}
-
-	_, _ = fmt.Fprintf(cb.stdout, "Warning: Permanently added '%s' (%s) to the list of known hosts.\n", knownhosts.Normalize(hostname), keyType(key.Type()))
-
-	return cb.appendHostLine(isCert, hostname, key)
-}
-
-func (cb hostKeyCallback) appendHostLine(isCert bool, hostname string, key ssh.PublicKey) error {
-	f, err := os.OpenFile(cb.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	// Only store the hostname, not the IP address.
-	// This prevents breakage when server IPs change due to:
-	// - Load balancers and auto-scaling
-	// - Cloud redeployments
-	// - CDN/proxy rotation
-	// - IPv6 address rotation
-	// The security benefit of storing IPs is minimal in modern infrastructure
-	// since we already trust DNS, and MITM attacks would need to compromise
-	// both DNS and the host key.
-	addr := []string{hostname}
-
-	line := knownhosts.Line(addr, key)
-
-	if isCert {
-		line = fmt.Sprintf("%s %s", markerCert, line)
-	}
-
-	if _, err := f.WriteString(line + "\n"); err != nil {
-		return err
-	}
-
-	return nil
+		return nil
+	}, nil
 }
 
 type Host struct {

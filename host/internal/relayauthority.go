@@ -118,7 +118,7 @@ var errNotTheRecordedKey = errors.New("ssh: host key is not the relay key this s
 // and is never changed by it.
 //
 // A first connection under --skip-host-key-check accepts a certificate without
-// checking its principals (host.autoAcceptHostKey). If that certificate does not
+// checking its principals (host.KnownHosts.Record). If that certificate does not
 // name the hostname dialled, as when the public relay is dialled by IP, every
 // redial is refused here. That is the verdict known_hosts gives the same host on
 // the next run, so it is kept; CheckRedial reports it as soon as the first

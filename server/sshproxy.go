@@ -91,15 +91,6 @@ func (r *sshProxy) Serve(ln net.Listener) error {
 	return r.routing.Serve(ln)
 }
 
-// What a guest is told when the relay can't take it to a session, ahead of the
-// refusal itself, which says nothing more than that authentication failed.
-const (
-	bannerNoHost = "upterm: no host is connected for session %s right now. " +
-		"If it is reconnecting, this same ssh command will work again once it's back. " +
-		"Try again in a few seconds.\n"
-	bannerLookupFailed = "upterm: the relay can't look up sessions right now. Try again shortly.\n"
-)
-
 // lookupError marks a refusal that came from reading the guest's session, not
 // from judging the guest, so the guest can be told why it was turned away.
 type lookupError struct{ err error }
@@ -107,22 +98,34 @@ type lookupError struct{ err error }
 func (e *lookupError) Error() string { return e.err.Error() }
 func (e *lookupError) Unwrap() error { return e.err }
 
+// hopRefusal marks a key refused to another relay node, which presents it on a
+// guest's behalf, so that node can be told, and tell its guest why.
+type hopRefusal struct{ err error }
+
+func (e *hopRefusal) Error() string { return e.err.Error() }
+func (e *hopRefusal) Unwrap() error { return e.err }
+
 // bannerFor is the banner to send with err, the refusal of meta's connection,
-// or "" for none. Only a failed lookup of the guest's session earns one: the
+// or "" for none. A guest earns one only by a failed lookup of its session: the
 // session isn't stored (its host may be reconnecting, and about to store it
 // again) or the store couldn't say. Refusing the guest itself, a key the
 // session doesn't admit, say, sends none, and neither does a host's connection.
-// sessionID is the one meta's user names.
+// A key refused to another relay node earns the hop banner, for that node to
+// read. sessionID is the one meta's user names.
 func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
+	var hop *hopRefusal
+	if errors.As(err, &hop) {
+		return upterm.HopBannerKeyRefused
+	}
 	var lookup *lookupError
 	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion || !errors.As(err, &lookup) {
 		return ""
 	}
 	var missing *ErrSessionNotFound
 	if errors.As(err, &missing) {
-		return fmt.Sprintf(bannerNoHost, bannerSessionID(sessionID))
+		return fmt.Sprintf(upterm.BannerNoHostFormat, bannerSessionID(sessionID))
 	}
-	return bannerLookupFailed
+	return upterm.BannerLookupFailed
 }
 
 // bannerSessionID is how a banner names sessionID, which is whatever the
@@ -142,7 +145,7 @@ func bannerSessionID(sessionID string) string {
 // errUpstreamHostKeyMismatch is returned by the upstream HostKeyCallback below.
 // A sentinel rather than an ad-hoc error so the failure can be recognized after
 // x/crypto has wrapped it, and reported to the peer by identity, not by text.
-var errUpstreamHostKeyMismatch = errors.New("ssh: host key mismatch")
+var errUpstreamHostKeyMismatch = errors.New(upterm.UpstreamHostKeyMismatch)
 
 type proxyAuth struct {
 	NodeAddr       string
@@ -236,6 +239,9 @@ type preparedRoute struct {
 	id     *api.Identifier   // the dial target
 	route  Route             // node and generation, for the refresh comparison
 	config *ssh.ClientConfig // credentials, and the host-key policy for that target
+	// banner is the last banner the target sent as the attempt authenticated.
+	// A relay node states its verdict on a refused key there.
+	banner string
 }
 
 // upstreamTarget is where one read of the session sends a connection, before
@@ -258,14 +264,16 @@ func (t *upstreamTarget) admits(key ssh.PublicKey) bool {
 // authenticate decides who an offered key speaks for, without reading the
 // session store: the user's format, the authorized_keys gate on hosts, and the
 // identity a certificate this relay minted carries. The key it returns is the
-// one a session's authorized keys are checked against.
-func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, error) {
+// one a session's authorized keys are checked against. The flag reports that
+// such a certificate carried it: the mark of another relay node, presenting a
+// guest's key. A guest's own agent certificate is not one.
+func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, ssh.PublicKey, bool, error) {
 	if string(conn.ClientVersion()) == upterm.HostSSHClientVersion {
 		if conn.User() == "" {
-			return nil, nil, fmt.Errorf("empty session ID for host connection")
+			return nil, nil, false, fmt.Errorf("empty session ID for host connection")
 		}
 	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
-		return nil, nil, fmt.Errorf("invalid SSH user format: %w", err)
+		return nil, nil, false, fmt.Errorf("invalid SSH user format: %w", err)
 	}
 	checker := UserCertChecker{
 		IsUserAuthority: a.isOwnAuthority,
@@ -276,7 +284,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 
 	// Gate registration based on authorized_keys before any cert/upstream work.
 	if err := a.checkAuthorizedKeys(conn, pk); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
 	auth, key, err := checker.Authenticate(conn.User(), pk)
@@ -290,7 +298,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		err = nil
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("error checking user cert: %w", err)
+		return nil, nil, false, fmt.Errorf("error checking user cert: %w", err)
 	}
 
 	// Use the public-key if a key can't be parsed from cert
@@ -298,6 +306,9 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		key = pk
 	}
 
+	// Only a certificate this relay's authority minted yields an AuthRequest,
+	// and only a relay node holds one.
+	hop := auth != nil
 	if auth == nil {
 		auth = &AuthRequest{
 			ClientVersion: string(conn.ClientVersion()),
@@ -309,7 +320,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 		}
 	}
 
-	return auth, key, nil
+	return auth, key, hop, nil
 }
 
 // authorize decides whether an offered key may proceed, and resolves where its
@@ -318,7 +329,7 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 // cheap: no certificate minting, no upstream connection, and at most one read
 // of the session.
 func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, error) {
-	auth, key, err := a.authenticate(conn, pk)
+	auth, key, hop, err := a.authenticate(conn, pk)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -329,7 +340,11 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 	}
 	// TODO: simplify auth key validation by moving it to host validation only
 	if !target.admits(key) {
-		return nil, nil, fmt.Errorf("public key not allowed")
+		err = fmt.Errorf("public key not allowed")
+		if hop {
+			err = &hopRefusal{err}
+		}
+		return nil, nil, err
 	}
 
 	return auth, target, nil
@@ -401,11 +416,13 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []s
 		return errUpstreamHostKeyMismatch
 	}
 
-	return &preparedRoute{
-		id:     target.id,
-		route:  target.route,
-		config: &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: creds},
+	pr := &preparedRoute{id: target.id, route: target.route}
+	pr.config = &ssh.ClientConfig{User: conn.User(), HostKeyCallback: hostKeyCb, Auth: creds}
+	pr.config.BannerCallback = func(message string) error {
+		pr.banner = message
+		return nil
 	}
+	return pr
 }
 
 // prepare mints upstream credentials for a key whose ownership the client has
@@ -435,7 +452,7 @@ func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRo
 // and reads nothing itself, so a watch that replaces or removes the cache entry
 // meanwhile changes nothing about the attempt.
 func (a proxyAuth) prepareFrom(conn ssh.ConnMetadata, pk ssh.PublicKey, sess *Session, creds []ssh.AuthMethod) (*preparedRoute, error) {
-	_, key, err := a.authenticate(conn, pk)
+	_, key, _, err := a.authenticate(conn, pk)
 	if err != nil {
 		return nil, err
 	}
