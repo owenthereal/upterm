@@ -140,14 +140,22 @@ type Result struct {
 // and then stopped answering would otherwise hold NewSession, RequestPty or
 // Shell forever, so past it the connection is closed. A zero setupBy has
 // long passed, so the connection is closed at once. An error means shell
-// startup was not confirmed; once it was, every ending is a Result, and Run
-// closes the connection as the session ends.
+// startup was not confirmed, and Run has closed client before returning it,
+// whatever the cause; once startup was confirmed, every ending is a Result,
+// and Run closes the connection as the session ends.
 //
 // An error comes with the zero Result, whose Released is nil: there is no
-// write to wait for, and a receive from it would never return. Run closes
-// client on an error only if setupBy passed or ctx ended; after any other,
-// client is still open, and the caller's to close.
-func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Time) (Result, error) {
+// write to wait for, and a receive from it would never return.
+func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Time) (_ Result, err error) {
+	// Registered first, so it runs last. Closing here, once, leaves no error
+	// returning with the connection open. The closes armed below for ctx and
+	// setupBy can't be relied on for that: the return stops them, and an
+	// error that comes first leaves them unrun.
+	defer func() {
+		if err != nil {
+			_ = client.Close()
+		}
+	}()
 	if t.Stdout == nil {
 		return Result{}, errors.New("attach: Stdout is required")
 	}
@@ -212,11 +220,9 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		return Result{}, fmt.Errorf("attach: %w", err)
 	}
 	if !setup.Stop() || time.Now().After(setupBy) {
-		// The shell was confirmed just as setupBy passed. If the timer has
-		// run, the connection is already being closed under it; if not, it
-		// is closed here, so that whether this fails never depends on when
-		// the timer got to run.
-		_ = client.Close()
+		// The shell was confirmed just as setupBy passed. Whether the timer
+		// has run is a matter of scheduling, and this fails either way: the
+		// connection is closed on the way out, as for any error.
 		return Result{}, errors.New("attach: the shell started after the setup deadline")
 	}
 	if t.OnReady != nil {

@@ -104,6 +104,66 @@ func stallingDoor(t *testing.T) func() *ssh.Client {
 	}
 }
 
+// refusingDoor completes the handshake and accepts the session channel, then
+// refuses every request on it: a host that gives this client neither a pty
+// nor a shell. Loopback TCP, as for stallingDoor.
+func refusingDoor(t *testing.T) *ssh.Client {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	cfg := &ssh.ServerConfig{NoClientAuth: true}
+	cfg.AddHostKey(newSigner(t))
+	go func() {
+		srvConn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, chans, reqs, err := ssh.NewServerConn(srvConn, cfg)
+		if err != nil {
+			return
+		}
+		go ssh.DiscardRequests(reqs)
+		for nc := range chans {
+			ch, chReqs, err := nc.Accept()
+			if err != nil {
+				continue
+			}
+			t.Cleanup(func() { _ = ch.Close() })
+			go func() {
+				for r := range chReqs {
+					_ = r.Reply(false, nil)
+				}
+			}()
+		}
+	}()
+	c, err := ssh.Dial("tcp", ln.Addr().String(), &ssh.ClientConfig{
+		User: "host", HostKeyCallback: ssh.InsecureIgnoreHostKey(), // a test door on loopback
+	})
+	require.NoError(t, err)
+	return c
+}
+
+// Whatever fails startup, Run has closed the client by the time it returns the
+// error, so the caller has nothing to clean up after. setupBy is an hour off
+// and ctx is never cancelled, so neither of Run's own timers is what closes it.
+func TestTerminalClosesTheClientBeforeReturningAnError(t *testing.T) {
+	client := refusingDoor(t)
+	_, err := (&Terminal{Stdout: io.Discard, Pty: &Pty{Term: "xterm", Size: termsize.Default}}).
+		Run(context.Background(), client, time.Now().Add(time.Hour))
+	require.ErrorContains(t, err, "pty request")
+
+	closed := make(chan struct{})
+	go func() {
+		_ = client.Wait()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run returned its error with the client still open")
+	}
+}
+
 func TestTerminalSetupIsCutOffAtSetupBy(t *testing.T) {
 	client := stallingDoor(t)()
 	setupBy := time.Now().Add(200 * time.Millisecond)
