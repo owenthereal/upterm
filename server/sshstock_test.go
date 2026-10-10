@@ -1142,34 +1142,13 @@ func TestAChainKeepsTheVerdictUnlessAnOlderNodeReadsTheBanner(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := staleNotMoved(t, good) // the entry's stale route names A
 			dialer := &routeDialer{routes: map[string]func(context.Context) (net.Conn, error){"node-a:22": dialTo(tc.nodeA(t))}}
-			entry := consulModeProxyWithin(t, refreshRoomTimeout, store, dialer)
-			require.Equal(t, tc.want, rejectionThrough(t, entry, good))
+			client := dialGuest(t, consulModeProxyWithin(t, refreshRoomTimeout, store, dialer), good)
+			_, err := client.NewSession()
+			var open *ssh.OpenChannelError
+			require.ErrorAs(t, err, &open)
+			require.Equal(t, tc.want, open.Message)
 		})
 	}
-}
-
-// rejectionThrough has a guest join through the relay at addr, on a fresh
-// connection each time, until its session channel is rejected, and returns the
-// rejection's message. An attempt that ends in a bare disconnect is tried
-// again, up to ten in all: the entry may close the guest's connection before
-// it forwards a rejection from a node that rejects and disconnects at once, as
-// a relay node whose own upstream failed does. Such an attempt carries no
-// verdict, right or wrong. Ten of them fail the test.
-func rejectionThrough(t *testing.T, addr string, key ssh.Signer) string {
-	t.Helper()
-	for range 10 {
-		client := dialGuest(t, addr, key)
-		_, err := client.NewSession()
-		_ = client.Close()
-		require.Error(t, err)
-		var open *ssh.OpenChannelError
-		if errors.As(err, &open) {
-			return open.Message
-		}
-		t.Logf("no rejection arrived; joining again: %v", err)
-	}
-	t.Fatal("no rejection arrived in ten joins")
-	return ""
 }
 
 // A watch that replaces or removes the cache entry between GetFresh and the
