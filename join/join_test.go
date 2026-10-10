@@ -114,12 +114,15 @@ func TestEveryOutcomeRow(t *testing.T) {
 }
 
 func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
-	for name, k := range map[string]relayKnobs{
-		"no host":           {refuseAll: true, banner: noHostBanner},
-		"a stalled attempt": {stallHandshake: true},
+	for name, tc := range map[string]struct {
+		knobs relayKnobs
+		why   WaitReason
+	}{
+		"no host":           {relayKnobs{refuseAll: true, banner: noHostBanner}, NoHost},
+		"a stalled attempt": {relayKnobs{stallHandshake: true}, Unreachable},
 	} {
 		t.Run(name, func(t *testing.T) {
-			relay := newFakeRelay(t, k)
+			relay := newFakeRelay(t, tc.knobs)
 			cfg := config(t, relay) // FirstJoin 300 ms
 			// An attempt's own deadline is an hour away: only the first join's
 			// can be what ends one.
@@ -151,7 +154,7 @@ func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 			require.False(t, first.deadline.Before(start.Add(cfg.Timing.FirstJoin)), "%v is before the first join's deadline", first.deadline)
 			require.False(t, first.deadline.After(first.at.Add(cfg.Timing.FirstJoin)), "%v is after the first join's deadline", first.deadline)
 
-			deadlineOf(t, recv(t, done))
+			require.Equal(t, tc.why, deadlineOf(t, recv(t, done)).Why)
 			// A loose ceiling: the exact figure is the deadlines.
 			require.Less(t, time.Since(start), cfg.Timing.FirstJoin+5*time.Second)
 			// Every later attempt's connect deadline is what is left of the
