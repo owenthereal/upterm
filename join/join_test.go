@@ -93,6 +93,7 @@ func TestEveryOutcomeRow(t *testing.T) {
 		}
 		rec := &recorder{}
 		cfg := config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{}), withIdentity(id), withWait())
+		cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
 		cfg.Events = func(e Event) {
 			if e.Kind == Joined {
 				joined.Store(true)
@@ -101,7 +102,10 @@ func TestEveryOutcomeRow(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := runJoinAsync(t, ctx, cfg)
-		e := rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && e.Why == IdentityFailure })
+		// The wait after the drop, and then the one after the rejoin's attempt.
+		require.Equal(t, Unreachable, rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && !e.First }).Why)
+		e := rec.await(t, done, func(e Event) bool { return e.Kind == Waiting })
+		require.Equal(t, IdentityFailure, e.Why)
 		require.False(t, e.First)
 		require.ErrorIs(t, e.Err, ErrIdentity)
 		cancel()
@@ -689,4 +693,200 @@ func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("a stalled agent held the attempt past its deadline")
 	}
+}
+
+// waitingAfterADrop starts a run whose session drops and whose next attempt
+// is an hour away, and returns once the run is waiting, with the guest's
+// keyboard and the run's outcome. Only a key can end the wait. next is what
+// the relay does on the connections after the first.
+func waitingAfterADrop(t *testing.T, next relayKnobs) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	relay = newFakeRelay(t, relayKnobs{dropAfterReady: true}, next)
+	rec := &recorder{}
+	cfg := config(t, relay, withInput(pr), withEvents(rec), withWait())
+	cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
+	cfg.Timing.FastBase, cfg.Timing.FastCap = time.Hour, time.Hour
+	cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+	done = runJoinAsync(t, context.Background(), cfg)
+	rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && !e.First })
+	return pw, relay, done
+}
+
+func TestEnterDuringAWaitAttemptsAtOnce(t *testing.T) {
+	keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)})
+	press(keys, "\r")
+	select {
+	case out := <-done:
+		require.Equal(t, Exited, out.Kind)
+	case <-time.After(testTimeout):
+		t.Fatal("Enter didn't cut the wait short")
+	}
+	require.Equal(t, 2, relay.connections())
+}
+
+func TestKeysBetweenSessionsEndTheRun(t *testing.T) {
+	for name, tc := range map[string]struct {
+		act  func(keys *io.PipeWriter)
+		want OutcomeKind
+	}{
+		"~. leaves":                      {func(keys *io.PipeWriter) { press(keys, "~.") }, Left},
+		"Ctrl-C stops":                   {func(keys *io.PipeWriter) { press(keys, "\x03") }, Stopped},
+		"the terminal going away leaves": {func(keys *io.PipeWriter) { _ = keys.Close() }, Left},
+	} {
+		t.Run(name, func(t *testing.T) {
+			keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)})
+			tc.act(keys)
+			select {
+			case out := <-done:
+				require.Equal(t, tc.want, out.Kind)
+			case <-time.After(testTimeout):
+				t.Fatal("the key didn't end the wait")
+			}
+			require.Equal(t, 1, relay.connections(), "the run attempted again")
+		})
+	}
+}
+
+func TestAnIdentityThatFailsStopsAFirstJoinAndHoldsUpARejoin(t *testing.T) {
+	cause := errors.New("the agent's socket is gone")
+	t.Run("a first join", func(t *testing.T) {
+		id := Identity{Signers: func(context.Context) ([]ssh.Signer, func(), error) { return nil, nil, cause }}
+		out := runJoin(t, config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id)))
+		require.Equal(t, Failed, out.Kind)
+		require.IsType(t, &IdentityError{}, out.Err) // and not a DeadlineError
+		require.ErrorIs(t, out.Err, ErrIdentity)
+		require.ErrorIs(t, out.Err, cause)
+	})
+	t.Run("a rejoin", func(t *testing.T) {
+		key := newSigner(t)
+		var joined atomic.Bool
+		id := Identity{Signers: func(context.Context) ([]ssh.Signer, func(), error) {
+			if joined.Load() {
+				return nil, nil, cause
+			}
+			return []ssh.Signer{key}, func() {}, nil
+		}}
+		rec := &recorder{}
+		cfg := config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}), withIdentity(id), withWait())
+		cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
+		cfg.Events = func(e Event) {
+			if e.Kind == Joined {
+				joined.Store(true)
+			}
+			rec.event(e)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := runJoinAsync(t, ctx, cfg)
+		// The wait after the drop, and then the one after the rejoin's attempt.
+		require.Equal(t, Unreachable, rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && !e.First }).Why)
+		e := rec.await(t, done, func(e Event) bool { return e.Kind == Waiting })
+		require.Equal(t, IdentityFailure, e.Why)
+		require.False(t, e.First)
+		require.ErrorIs(t, e.Err, ErrIdentity)
+		require.ErrorIs(t, e.Err, cause)
+		cancel()
+		require.Equal(t, Stopped, recv(t, done).Kind)
+	})
+}
+
+func TestEventsSayWhyAndSinceWhen(t *testing.T) {
+	// A wall clock that moves on a millisecond at every reading, so that no
+	// two readings are the same.
+	base := time.Now().Round(0)
+	var ticks atomic.Int64
+	rec := &recorder{}
+	relay := newFakeRelay(t,
+		relayKnobs{dropAfterReady: true},                  // joined, then dropped
+		relayKnobs{refuseAll: true, banner: noHostBanner}, // the host isn't back yet
+		relayKnobs{dropAfterReady: true},                  // rejoined, then dropped again
+		relayKnobs{exit: intp(0)})
+	cfg := config(t, relay, withEvents(rec), withWait())
+	cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
+	cfg.Timing.Wall = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * time.Millisecond) }
+	require.Equal(t, Exited, runJoin(t, cfg).Kind)
+	require.Equal(t, []EventKind{Joined, Lost, Waiting, Waiting, Joined, Lost, Waiting, Joined}, rec.kinds())
+	e := rec.all()
+	joined, lost, dropWait, noHostWait, rejoined, nextWait := e[0], e[1], e[2], e[3], e[4], e[6]
+
+	require.False(t, joined.Rejoin)
+	// A drop and the wait after it are the relay being out of reach, for the
+	// reason the connection went.
+	require.Equal(t, Unreachable, lost.Why)
+	require.Error(t, lost.Err)
+	require.Equal(t, Unreachable, dropWait.Why)
+	require.Equal(t, lost.Err, dropWait.Err)
+	require.False(t, dropWait.First)
+	// One wait, however many attempts it takes.
+	require.Equal(t, NoHost, noHostWait.Why)
+	require.False(t, dropWait.Since.IsZero())
+	require.True(t, noHostWait.Since.Equal(dropWait.Since), "the wait began at %v, then at %v", dropWait.Since, noHostWait.Since)
+	require.True(t, rejoined.Rejoin)
+	require.Positive(t, rejoined.Down)
+	// A session that was ready ends the wait: the next one begins anew.
+	require.True(t, nextWait.Since.After(dropWait.Since), "the wait after a rejoin began at %v, the one before it at %v", nextWait.Since, dropWait.Since)
+}
+
+func TestAWaitThatHasGoneOnLongSaysSo(t *testing.T) {
+	// Each Waiting call is held until the test lets it through, so the test
+	// knows the next wait is reckoned only after that.
+	rec := &recorder{gate: make(chan struct{})}
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec), withWait())
+	cfg.Timing.LongAfter = 100 * time.Millisecond
+	cfg.Timing.SlowWait, cfg.Timing.SlowJitter = 10*time.Millisecond, 10*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJoinAsync(t, ctx, cfg)
+	defer close(rec.gate)
+
+	first := recv(t, rec.held())
+	began := time.Now() // after the wait began
+	require.Equal(t, Waiting, first.Kind)
+	require.False(t, first.Long)
+	// The wait has lasted LongAfter by the time the next one is reckoned.
+	<-time.After(time.Until(began.Add(cfg.Timing.LongAfter)))
+	rec.gate <- struct{}{}
+	next := recv(t, rec.held())
+	require.Equal(t, Waiting, next.Kind)
+	require.True(t, next.Long, "a wait of %v isn't long", time.Since(began))
+	require.True(t, next.Since.Equal(first.Since), "a long wait is the same wait")
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+}
+
+func TestARelayKeyNotTrustedEndsTheJoin(t *testing.T) {
+	t.Run("the guest says no", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true})
+		confirm := &countingConfirm{}
+		out := runJoin(t, config(t, relay, withConfirm(confirm)))
+		require.Equal(t, Failed, out.Kind)
+		var hostKey *HostKeyError
+		require.ErrorAs(t, out.Err, &hostKey)
+		require.True(t, hostKey.Declined)
+		require.ErrorIs(t, out.Err, ErrHostKey)
+		require.Equal(t, 1, confirm.calls(), "the guest was asked again")
+		require.Equal(t, 1, relay.connections())
+	})
+	t.Run("asking fails", func(t *testing.T) {
+		cause := errors.New("the terminal went away")
+		relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true})
+		confirm := &countingConfirm{accept: true, err: cause}
+		out := runJoin(t, config(t, relay, withConfirm(confirm)))
+		require.Equal(t, Failed, out.Kind)
+		require.ErrorIs(t, out.Err, cause)
+		require.ErrorIs(t, out.Err, ErrHostKey)
+		require.Equal(t, 1, confirm.calls())
+		require.Equal(t, 1, relay.connections())
+	})
+}
+
+func TestTakingTheTerminalFailingEndsTheJoin(t *testing.T) {
+	cause := errors.New("stdin is not a terminal")
+	relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
+	out := runJoin(t, config(t, relay, withTakeTerminal(func() error { return cause })))
+	require.Equal(t, Failed, out.Kind)
+	require.ErrorIs(t, out.Err, cause)
+	require.Empty(t, relay.ptySizes(), "a session was set up on a terminal that wasn't taken")
+	require.Equal(t, 1, relay.connections())
 }

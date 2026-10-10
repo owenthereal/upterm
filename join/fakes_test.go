@@ -339,6 +339,13 @@ func (r *recorder) await(t *testing.T, done <-chan Outcome, match func(Event) bo
 	}
 }
 
+// all is every event, in order.
+func (r *recorder) all() []Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Event(nil), r.events...)
+}
+
 // waits is every Waiting event, in order.
 func (r *recorder) waits() []Event {
 	r.mu.Lock()
@@ -353,10 +360,11 @@ func (r *recorder) waits() []Event {
 }
 
 // countingConfirm is a ConfirmHostKey. block: wait for ctx. during: runs
-// inside the call.
+// inside the call. err: what the call fails with.
 type countingConfirm struct {
 	accept, block bool
 	during        func()
+	err           error
 
 	once    sync.Once
 	calledc chan struct{}
@@ -377,7 +385,7 @@ func (c *countingConfirm) confirm(ctx context.Context, _ string, _ ssh.PublicKey
 		<-ctx.Done()
 		return false, ctx.Err()
 	}
-	return c.accept, nil
+	return c.accept, c.err
 }
 
 func (c *countingConfirm) calls() int { return int(c.n.Load()) }

@@ -32,9 +32,20 @@ func TestRefusedOnlyOnADefiniteAnswer(t *testing.T) {
 	// MaxAuthTries: six refused keys, then the server's disconnect.
 	ev, err = connect(t, relayKnobs{refuseAll: true, maxAuthTries: 6}, sevenSigners(t))
 	v = classifyConnect(err, ev)
+	require.Equal(t, vStop, v.kind)
+	require.ErrorIs(t, v.err, ErrKeysRefused)
 	var refused *RefusedError
 	require.ErrorAs(t, v.err, &refused)
-	require.True(t, refused.TooMany)
+	require.Equal(t, RefusedError{TooMany: true}, *refused)
+
+	// The disconnect is no more evidence than a refusal is from a relay that
+	// predates the no-host banner: before it, a session that isn't there
+	// turned every key away too.
+	ev, err = connect(t, relayKnobs{refuseAll: true, maxAuthTries: 6, version: "SSH-2.0-uptermd-0.33.2"}, sevenSigners(t))
+	v = classifyConnect(err, ev)
+	require.Equal(t, vStop, v.kind)
+	require.ErrorAs(t, v.err, &refused)
+	require.Equal(t, RefusedError{TooMany: true, Ambiguous: true}, *refused)
 
 	// A signer that fails: an identity failure, never a refusal.
 	ev, err = connect(t, relayKnobs{}, []ssh.Signer{failingSigner{key}})
