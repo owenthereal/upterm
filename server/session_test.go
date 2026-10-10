@@ -147,6 +147,18 @@ func (suite *EmbeddedSessionManagerTestSuite) TestDeleteSession() {
 	suite.Error(err)
 }
 
+// suiteConsulURL is the Consul URL with a key prefix of the suite's own. Other
+// packages' tests share the agent and the default prefix, so a suite that
+// deletes its tree when it ends must not be pointed at that.
+func suiteConsulURL(suiteName string) (*url.URL, error) {
+	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	if err != nil {
+		return nil, err
+	}
+	consulURL.Path = fmt.Sprintf("/uptermd-test-%s-%d", suiteName, time.Now().UnixNano())
+	return consulURL, nil
+}
+
 // ConsulSessionManagerTestSuite tests SessionManager behavior in consul mode
 type ConsulSessionManagerTestSuite struct {
 	suite.Suite
@@ -160,7 +172,7 @@ func (suite *ConsulSessionManagerTestSuite) SetupSuite() {
 		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	consulURL, err := suiteConsulURL("session-manager")
 	suite.Require().NoError(err)
 
 	sm, err := newConsulSessionManager(consulURL, 5*time.Minute, sessionTestLogger)
@@ -386,6 +398,8 @@ type ConsulStoreTestSuite struct {
 	store1 *consulSessionStore // First store instance
 	store2 *consulSessionStore // Second store instance
 	client *api.Client
+
+	consulURL *url.URL // the suite's own key prefix
 }
 
 func (suite *ConsulStoreTestSuite) SetupSuite() {
@@ -394,8 +408,9 @@ func (suite *ConsulStoreTestSuite) SetupSuite() {
 		suite.T().Skip("Consul not available - set CONSUL_URL or ensure Consul is running on localhost:8500")
 	}
 
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
+	consulURL, err := suiteConsulURL("store")
 	suite.Require().NoError(err)
+	suite.consulURL = consulURL
 
 	// Create two store instances to simulate multi-node setup
 	store1, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
@@ -941,8 +956,7 @@ func (t txnRollback) RoundTrip(r *http.Request) (*http.Response, error) {
 // delete; nor may a rollback that names nothing it can drop be retried
 // forever.
 func (suite *ConsulStoreTestSuite) TestBatchDeleteReportsOtherFailures() {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	for name, errs := range map[string]string{
 		"a denied delete":           `[{"OpIndex":1,"What":"Permission denied"}]`,
 		"a denied session check":    `[{"OpIndex":0,"What":"Permission denied"}]`,
@@ -1004,8 +1018,7 @@ func (f *firstSend) RoundTrip(r *http.Request) (*http.Response, error) {
 // The lease's TTL clock starts when Consul creates its lock session, so the
 // expiry budget must start no later than that request was sent.
 func (suite *ConsulStoreTestSuite) TestConfirmedAtIsTheLeaseCreationSendTime() {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	defer func() { _ = store.Close() }()
@@ -1056,8 +1069,7 @@ func (d *delayedTxnReply) release() { d.resumed.Do(func() { close(d.resume) }) }
 // whose first transaction's reply arrives only once the returned delay is
 // released. Its watch runs on a client of its own, and isn't delayed.
 func (suite *ConsulStoreTestSuite) storeWithADelayedReply() (*consulSessionStore, *delayedTxnReply) {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	delay := &delayedTxnReply{entered: make(chan struct{}), resume: make(chan struct{}), next: http.DefaultTransport}
@@ -1249,8 +1261,7 @@ func (l *lostTxnReply) RoundTrip(r *http.Request) (*http.Response, error) {
 // its own entry when it retries. That is its own write, not a registration to
 // order it against: it succeeds, and the entry stays under its lease.
 func (suite *ConsulStoreTestSuite) TestALostReplyToACommittedRegistrationStillSucceeds() {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	for _, gen := range []uint64{0, 1} {
 		suite.Run(fmt.Sprintf("generation %d", gen), func() {
 			store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
@@ -1309,8 +1320,7 @@ func (suite *ConsulStoreTestSuite) TestALateReplyDoesNotRestoreARemovedEntry() {
 // relay the next watch delivery could be a long way off, and until then later
 // guests would be routed to a host that has left, and not told it has.
 func (suite *ConsulStoreTestSuite) TestAFreshReadThatFindsTheEntryGoneUncachesIt() {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	store, err := newConsulSessionStore(consulURL, 5*time.Minute, sessionTestLogger)
 	suite.Require().NoError(err)
 	defer func() { _ = store.Close() }()
@@ -1334,8 +1344,7 @@ func (suite *ConsulStoreTestSuite) TestAFreshReadThatFindsTheEntryGoneUncachesIt
 // Without renewal, Consul expires an entry within twice its TTL, which is at
 // least 10 s.
 func (suite *ConsulStoreTestSuite) TestLeaseExpiryAndRenewal() {
-	consulURL, err := url.Parse(testhelpers.ConsulURL())
-	suite.Require().NoError(err)
+	consulURL := suite.consulURL
 	short, err := newConsulSessionStore(consulURL, 10*time.Second, sessionTestLogger)
 	suite.Require().NoError(err)
 	defer func() { _ = short.Close() }()
