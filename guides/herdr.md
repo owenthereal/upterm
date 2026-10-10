@@ -10,6 +10,20 @@ This needs upterm v0.37.0 or later and Herdr 0.9.0 or later (its saved
 machines, and clients that view tabs independently), with the machine at home
 on macOS or Linux.
 
+## Pin the relay
+
+On the machine at home, and on each laptop you connect from, pin the relay's
+host certificate once, so neither has to trust whatever key answers first
+(see [Running Without a Terminal](../README.md#running-without-a-terminal)
+for the fingerprint to check):
+
+```console
+mkdir -p ~/.ssh
+cat >> ~/.ssh/known_hosts <<'EOF'
+@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+EOF
+```
+
 ## Open the door
 
 On the machine running Herdr:
@@ -36,6 +50,10 @@ upterm host --detach --name home --accept \
   sees it, but it holds the door open: the door lasts as long as it does.
   Don't `upterm attach home` and type `exit`. Use `upterm session info home`
   to look, and `upterm session stop home` to close the door.
+- Bare `herdr` attaches to Herdr's default session. If your agents live in a
+  named session, make the command `env -u HERDR_ENV herdr session attach
+  NAME`, and add `--session NAME` to `herdr --remote` and
+  `--remote-session NAME` to `herdr machine add` below.
 - Copy inside Herdr goes to the guest's clipboard, over OSC 52: upterm sets
   `SSH_TTY` for the door's command, so Herdr leaves the home machine's
   clipboard alone. The guest's terminal has to allow OSC 52 writes.
@@ -70,20 +88,10 @@ that off in its power settings.
 
 ## Connect from a laptop
 
-Pin the relay's host certificate once (see [Running Without a
-Terminal](../README.md#running-without-a-terminal) for the fingerprint to
-check):
-
-```console
-mkdir -p ~/.ssh
-cat >> ~/.ssh/known_hosts <<'EOF'
-@cert-authority uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
-EOF
-```
-
-Then give the door a name in `~/.ssh/config`, with the user from the connect
-command `upterm session info home` prints (on the public relay, that's the
-session ID):
+With the relay pinned on the laptop too (above), give the door a name in
+`~/.ssh/config`, with the user from the connect command
+`upterm session info home` prints (on the public relay, that's the session
+ID):
 
 ```
 Host home
@@ -146,7 +154,9 @@ Host home-sshd
 ```
 
 `User` is your account on the machine at home, and the machine's sshd has to
-accept your key for it (in that account's `~/.ssh/authorized_keys`).
+accept your key for it (in that account's `~/.ssh/authorized_keys`). If ssh
+doesn't offer that key by default, give `Host home-sshd` its own
+`IdentityFile`: ssh doesn't carry `Host home`'s over to it.
 
 Now `herdr --remote home-sshd`, `scp file home-sshd:`, and VS Code's
 "Remote-SSH: Connect to Host… home-sshd" all work. `upterm session info home`
@@ -163,7 +173,7 @@ reach, your LAN included, so use it only with `--authorized-user`.
 
 Herdr's saved machines connect with `BatchMode=yes` and
 `StrictHostKeyChecking=yes`, so an unknown host key fails the connection
-instead of prompting. Pin the relay as above first, and record the home
+instead of prompting. With the relay pinned (above), record the home
 machine's own host key before Herdr uses it: connect once with
 `ssh home-sshd`, and before you accept it, check the fingerprint it shows
 against the line of the same type from
