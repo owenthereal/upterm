@@ -435,6 +435,22 @@ func press(w io.Writer, keys string) {
 	go func() { _, _ = io.WriteString(w, keys) }()
 }
 
+// watchedInput is an Input that says when it is read: reading receives once
+// as each Read begins. It holds 64, more than any test reads.
+type watchedInput struct {
+	io.Reader
+	reading chan struct{}
+}
+
+func newWatchedInput(r io.Reader) *watchedInput {
+	return &watchedInput{Reader: r, reading: make(chan struct{}, 64)}
+}
+
+func (w *watchedInput) Read(p []byte) (int, error) {
+	w.reading <- struct{}{}
+	return w.Reader.Read(p)
+}
+
 // rejectedWith is the error Terminal.Run returns for a session channel the
 // relay rejected with msg.
 func rejectedWith(msg string) error {

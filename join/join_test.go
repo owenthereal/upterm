@@ -816,6 +816,32 @@ func TestKeysBetweenSessionsEndTheRun(t *testing.T) {
 	}
 }
 
+// Once Run has returned, Input is the caller's again. The Read in progress
+// takes one more chunk, which goes nowhere, and nothing reads Input after it.
+func TestNothingReadsInputOnceRunHasReturned(t *testing.T) {
+	keys, typed := io.Pipe()
+	input := newWatchedInput(keys)
+	rec := &recorder{}
+	cfg := config(t, newFakeRelay(t, relayKnobs{}), withInput(input), withEvents(rec))
+	cfg.inputExited = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runJoinAsync(t, ctx, cfg)
+	require.Equal(t, Joined, recv(t, rec.held()).Kind)
+	recv(t, input.reading) // the reader's first Read, which nothing has been typed for
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+
+	// An Enter: join, were it still reading its keys, would attempt again.
+	_, err := typed.Write([]byte("\r"))
+	require.NoError(t, err) // the Read in progress took it
+	select {
+	case <-cfg.inputExited:
+	case <-time.After(testTimeout):
+		t.Fatal("the reader of Input outlived Run")
+	}
+	require.Empty(t, input.reading, "Input was read again after Run returned")
+}
+
 func TestAnIdentityThatFailsStopsAFirstJoinAndHoldsUpARejoin(t *testing.T) {
 	cause := errors.New("the agent's socket is gone")
 	t.Run("a first join", func(t *testing.T) {

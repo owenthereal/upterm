@@ -212,3 +212,72 @@ func TestAnEscapeStartedBeforeASessionDoesNotCarryOver(t *testing.T) {
 	_, _ = pw.Write([]byte(".\r"))
 	require.Equal(t, keyRetry, <-in.keys()) // the "." was dropped, not the end of a "~."
 }
+
+// A stopped reader returns at once from wherever it holds what it read, and
+// otherwise as the Read in progress returns, dropping what that Read took.
+func TestAStoppedReaderDeliversNothing(t *testing.T) {
+	// reader starts a reader of r whose return closes exited.
+	reader := func(r io.Reader, handing chan struct{}) *input {
+		in := newInput(r, '~')
+		in.exited = make(chan struct{})
+		in.handing = handing
+		in.start()
+		return in
+	}
+	// stop stops in, and fails the test if its reader doesn't return.
+	stop := func(t *testing.T, in *input) {
+		t.Helper()
+		in.stop()
+		select {
+		case <-in.exited:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the reader outlived its stop")
+		}
+	}
+	t.Run("holding a key join didn't take", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		in := reader(pr, nil)
+		// Two Enters in one chunk: join takes the first, and has stopped taking
+		// keys by the second, which the reader holds.
+		_, _ = pw.Write([]byte("\r\r"))
+		require.Equal(t, keyRetry, <-in.keys())
+		stop(t, in)
+	})
+	t.Run("holding a chunk a session didn't take", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		handing := make(chan struct{}, 1)
+		in := reader(pr, handing)
+		in.session().activate() // nobody reads it
+		_, _ = pw.Write([]byte("x"))
+		<-handing
+		stop(t, in)
+	})
+	t.Run("holding the end of the input", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		in := reader(pr, nil)
+		in.session().activate() // nobody reads it, so the reader waits for it to close
+		require.NoError(t, pw.Close())
+		<-in.ended
+		stop(t, in)
+	})
+	t.Run("in a Read", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		input := newWatchedInput(pr)
+		in := reader(input, nil)
+		v := in.session()
+		v.activate()
+		got := make(chan string, 1)
+		go func() { // the session, waiting for its keys
+			b := make([]byte, 8)
+			n, _ := v.Read(b)
+			got <- string(b[:n])
+		}()
+		<-input.reading
+		in.stop()
+		_, _ = pw.Write([]byte("x")) // taken by the Read in progress
+		stop(t, in)
+		require.Empty(t, input.reading, "a stopped reader read again")
+		require.NoError(t, v.Close())
+		require.Empty(t, <-got, "a stopped reader handed a chunk to a session")
+	})
+}

@@ -41,6 +41,14 @@ type input struct {
 	// starts handing a chunk to a view, before the hand-off completes. It is
 	// set before start.
 	handing chan struct{}
+	// exited, when non-nil (tests only), closes as the reader returns. It is
+	// set before start.
+	exited chan struct{}
+
+	// stopped closes with stop: Run is over, and the reader delivers nothing
+	// more.
+	stopped  chan struct{}
+	stopOnce sync.Once
 
 	mu sync.Mutex
 	// current is the active view; nil while the keys are join's.
@@ -87,6 +95,7 @@ func newInput(r io.Reader, escape byte) *input {
 		keyc:     make(chan waitKey),
 		controls: newControls(escape),
 		ended:    make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
 }
 
@@ -95,6 +104,25 @@ func newInput(r io.Reader, escape byte) *input {
 // nothing, so that r never has two readers.
 func (in *input) start() {
 	in.once.Do(func() { go in.read() })
+}
+
+// stop ends the reader as Run returns, once nothing takes join's keys and
+// every view is closed. From then on it delivers nothing, neither a key nor a
+// chunk: one it holds is dropped at once, and it reads no more. A Read can't
+// be interrupted, so one in progress may still take a chunk, which is
+// dropped, and the reader returns as that Read does. Stopping twice does
+// nothing.
+func (in *input) stop() {
+	in.stopOnce.Do(func() { close(in.stopped) })
+}
+
+func (in *input) isStopped() bool {
+	select {
+	case <-in.stopped:
+		return true
+	default:
+		return false
+	}
 }
 
 // session creates a view for one session. It starts inactive: chunks keep
@@ -127,9 +155,18 @@ func (in *input) keys() <-chan waitKey {
 
 // read is the reader goroutine: the only caller of r.Read.
 func (in *input) read() {
+	if in.exited != nil {
+		defer close(in.exited)
+	}
 	buf := make([]byte, 4096)
-	for {
+	for !in.isStopped() {
 		n, err := in.r.Read(buf)
+		if in.isStopped() {
+			// Run returned while this Read was in progress. What it took was
+			// typed for whoever has the input now, and join can't give it
+			// back: it is dropped.
+			return
+		}
 		if n > 0 {
 			in.route(buf[:n])
 		}
@@ -165,6 +202,7 @@ func (in *input) hand(v *view, chunk []byte) {
 	select {
 	case v.chunks <- chunk:
 	case <-v.done:
+	case <-in.stopped:
 	}
 }
 
@@ -190,13 +228,15 @@ func (in *input) control(c *controls, chunk []byte) {
 	}
 }
 
-// send delivers k to join, unless a view is activated first. It reports
-// whether k was delivered.
+// send delivers k to join, unless a view is activated, or the reader is
+// stopped, first. It reports whether k was delivered.
 func (in *input) send(c *controls, k waitKey) bool {
 	select {
 	case in.keyc <- k:
 		return true
 	case <-c.over:
+		return false
+	case <-in.stopped:
 		return false
 	}
 }
@@ -223,8 +263,12 @@ func (in *input) end(err error) {
 		v, c := in.current, in.controls
 		in.mu.Unlock()
 		if v != nil {
-			<-v.done
-		} else if in.send(c, keyLeave) {
+			select {
+			case <-v.done:
+			case <-in.stopped:
+				return
+			}
+		} else if in.send(c, keyLeave) || in.isStopped() {
 			return
 		}
 		// v closed, or a view was activated before join took its keyLeave:

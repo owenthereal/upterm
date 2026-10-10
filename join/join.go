@@ -85,7 +85,11 @@ type Config struct {
 	Size func() termsize.Size
 	// Input is the guest's keys. Run reads it only once TakeTerminal has run,
 	// and then from one goroutine, which gives each key to the session that
-	// is ready or else to Run. Nil means no keys.
+	// is ready or else to Run. From then until Run returns, Input is Run's. A
+	// Read can't be interrupted, so one in progress as Run returns may still
+	// take one more chunk, which is dropped, and then nothing reads Input. A
+	// caller that needs its input back after Run gives it a reader it can
+	// close or interrupt. Nil means no keys.
 	Input io.Reader
 	// Escape is the escape byte: at the start of a line, followed by '.', it
 	// leaves. Zero disables it. It covers the keys join reads itself, while
@@ -114,6 +118,9 @@ type Config struct {
 	// runSession runs one session; nil means the session's Terminal.Run.
 	// Tests replace it to stage a Result.
 	runSession func(ctx context.Context, c *ssh.Client, setupBy time.Time) (attach.Result, error)
+	// inputExited, when non-nil (tests only), closes as the goroutine that
+	// reads Input returns.
+	inputExited chan struct{}
 }
 
 // OutcomeKind is how a run ended.
@@ -267,11 +274,13 @@ type runner struct {
 func newRunner(ctx context.Context, cfg Config) *runner {
 	runCtx, cancel := context.WithCancel(ctx)
 	timing := cfg.Timing.orDefault()
+	in := newInput(cfg.Input, cfg.Escape)
+	in.exited = cfg.inputExited
 	r := &runner{
 		cfg:        cfg,
 		timing:     timing,
 		sched:      newSchedule(timing),
-		in:         newInput(cfg.Input, cfg.Escape),
+		in:         in,
 		runCtx:     runCtx,
 		cancel:     cancel,
 		quit:       make(chan struct{}),
@@ -287,6 +296,9 @@ func newRunner(ctx context.Context, cfg Config) *runner {
 func (r *runner) close() {
 	close(r.quit)
 	<-r.keysDone
+	// Nothing takes join's keys now, and every view is closed: whatever the
+	// reader reads from here on was typed at whoever has Input next.
+	r.in.stop()
 	r.cancel()
 }
 
