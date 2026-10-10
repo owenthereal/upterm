@@ -205,7 +205,11 @@ type runner struct {
 	tookTerminal bool
 	joined       bool      // a session has been ready
 	deadline     time.Time // the first join's, monotonic; zero until the first attempt, and with Wait
-	since        time.Time // the wall time the current wait began; zero while a session is ready
+	// since is when the current wait began on the wall clock, for the guest;
+	// zero while a session is ready. waitFrom is the same moment on the
+	// monotonic clock, which the schedule measures the wait by: a laptop's
+	// sleep or a clock that is stepped mustn't move it into the slow tier.
+	since, waitFrom time.Time
 	// lastWhy and lastErr are the reason a first join last had, which its
 	// DeadlineError wraps: what it last waited on, or tried again at once
 	// over. Zero until it has one.
@@ -725,9 +729,7 @@ func (r *runner) ended(s *sessionEnd) step {
 	if s.ready {
 		r.sched.ready(time.Since(s.readyAt))
 	}
-	if r.since.IsZero() {
-		r.since = r.timing.Wall()
-	}
+	r.beginWait(r.timing.Wall())
 	// The terminal is handed over before the guest is told: a line written
 	// while a parked write still holds the alternate screen would land there,
 	// and the restore would take it away again. The wait has no bound, but a
@@ -808,10 +810,8 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	}
 
 	now := r.timing.Wall()
-	if r.since.IsZero() {
-		r.since = now
-	}
-	delay, long := r.sched.next(max(0, now.Sub(r.since)))
+	r.beginWait(now)
+	delay, long := r.sched.next(time.Since(r.waitFrom))
 	if r.firstJoin() {
 		delay = min(delay, left)
 	}
@@ -833,6 +833,13 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	return Outcome{}, true
 }
 
+// beginWait notes that a wait began at wall, now, unless one is under way.
+func (r *runner) beginWait(wall time.Time) {
+	if r.since.IsZero() {
+		r.since, r.waitFrom = wall, time.Now()
+	}
+}
+
 // emit tells the guest about e, and returns once that has been written,
 // or false once the run has stopped.
 func (r *runner) emit(e Event) bool {
@@ -847,6 +854,11 @@ func (r *runner) emit(e Event) bool {
 // that isn't taking output is abandoned with the process, so it never keeps
 // Ctrl-C or a signal from ending the run.
 func (r *runner) call(fn func()) bool {
+	// A run that has stopped starts no write: the command's own last line
+	// is what follows.
+	if r.runCtx.Err() != nil {
+		return false
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

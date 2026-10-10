@@ -18,7 +18,9 @@ type Timing struct {
 	FastBase, FastCap time.Duration
 
 	// LongAfter is how long a wait has lasted when the slow tier begins, and
-	// when Waiting says so. 5 min.
+	// when Waiting says so. 5 min. The wait is measured on the monotonic
+	// clock, as the deadlines are, and not on Wall: a wall clock that is
+	// stepped, or that jumps when a laptop wakes, leaves it where it was.
 	LongAfter time.Duration
 
 	// SlowWait and SlowJitter are what separates attempts in the slow tier:

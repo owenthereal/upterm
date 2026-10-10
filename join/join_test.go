@@ -184,6 +184,50 @@ func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
 	})
 }
 
+func TestAWallClockJumpDoesNotSlowTheSchedule(t *testing.T) {
+	base := time.Now().Round(0)
+	var jumped atomic.Bool
+	rec := &recorder{gate: make(chan struct{})}
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withWait(), withEvents(rec))
+	cfg.Timing.Wall = func() time.Time {
+		if jumped.Load() {
+			return base.Add(time.Hour)
+		}
+		return base
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJoinAsync(t, ctx, cfg)
+	require.Equal(t, Waiting, recv(t, rec.held()).Kind)
+	jumped.Store(true) // the lid opens an hour later, while the join waits
+	rec.gate <- struct{}{}
+	next := recv(t, rec.held())
+	close(rec.gate)
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+
+	require.Equal(t, Waiting, next.Kind)
+	require.False(t, next.Long, "an hour on the wall clock is not an hour of waiting")
+	require.LessOrEqual(t, next.Next.Sub(base.Add(time.Hour)), cfg.Timing.FastCap, "the wait after the jump left the fast tier")
+}
+
+func TestNoStatusLineAfterAStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recorder{}
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec))
+	// The run is stopped as its first wait begins: the wait reads the wall
+	// clock before it tells the guest about itself.
+	var once sync.Once
+	cfg.Timing.Wall = func() time.Time {
+		once.Do(cancel)
+		return time.Now().Round(0)
+	}
+	require.Equal(t, Stopped, recv(t, runJoinAsync(t, ctx, cfg)).Kind)
+	require.Never(t, func() bool { return len(rec.kinds()) > 0 }, 100*time.Millisecond, 10*time.Millisecond,
+		"a status line was begun after the stop")
+}
+
 func TestAKeyRefusedUpstreamIsRetriedWithoutIt(t *testing.T) {
 	bad, good := newSigner(t), newSigner(t)
 	relay := newFakeRelay(t, relayKnobs{acceptUpstreamOnly: good.PublicKey(), confirmRefusal: true, exit: intp(0)})

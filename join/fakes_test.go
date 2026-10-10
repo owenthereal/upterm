@@ -15,12 +15,30 @@ import (
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/termsize"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
 
 // testTimeout bounds every wait a test makes on a run.
 const testTimeout = 10 * time.Second
+
+// noHostBanner is the banner of a relay that has no host for session abc.
+var noHostBanner = fmt.Sprintf(upterm.BannerNoHostFormat, "abc")
+
+// recv receives from c, failing the test if nothing arrives within
+// testTimeout.
+func recv[T any](t *testing.T, c <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-c:
+		return v
+	case <-time.After(testTimeout):
+		t.Fatal("nothing arrived in time")
+		var zero T
+		return zero
+	}
+}
 
 // fakeRelay is a relay that serves each connection with its own relayKnobs,
 // for a run that connects more than once.
