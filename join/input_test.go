@@ -144,11 +144,31 @@ func TestEOFWhileASessionIsActiveReachesIt(t *testing.T) {
 	require.NoError(t, pw.Close())
 	_, err := v.Read(make([]byte, 8))
 	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestEOFTakenByAnAbandonedReadIsStillLeaving(t *testing.T) {
+	pr, pw := io.Pipe()
+	in := newInput(pr, '~')
+	in.start()
+	v := in.session()
+	v.activate()
+	// The session has ended for some other reason, and the goroutine its
+	// Terminal read Stdin on is still parked in v.Read, its result going to
+	// nobody. The test waits for that result only to know the EOF went there
+	// before v closes.
+	abandoned := make(chan error, 1)
+	go func() {
+		_, err := v.Read(make([]byte, 8))
+		abandoned <- err
+	}()
+	require.NoError(t, pw.Close())
+	require.ErrorIs(t, <-abandoned, io.EOF)
 	require.NoError(t, v.Close())
 	select {
 	case k := <-in.keys():
-		t.Fatalf("the session took the EOF, yet join got key %v", k)
-	case <-time.After(50 * time.Millisecond):
+		require.Equal(t, keyLeave, k)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminal went away, and join was never told")
 	}
 }
 
@@ -159,7 +179,7 @@ func TestEOFASessionNeverTookIsLeaving(t *testing.T) {
 	v := in.session()
 	v.activate()
 	require.NoError(t, pw.Close())
-	<-in.ended // the reader has the EOF, and v is where it is going
+	<-in.ended // the reader has the EOF, and waits for v to close
 	require.NoError(t, v.Close())
 	require.Equal(t, keyLeave, <-in.keys())
 }

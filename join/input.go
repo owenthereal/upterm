@@ -112,7 +112,6 @@ func (in *input) session() *view {
 		in:     in,
 		chunks: make(chan []byte),
 		done:   make(chan struct{}),
-		took:   make(chan struct{}),
 	}
 	in.last = v
 	return v
@@ -203,11 +202,19 @@ func (in *input) send(c *controls, k waitKey) bool {
 }
 
 // end delivers r's terminal error, EOF or another: the terminal went away.
-// If a view is active, its Read returns it and the session ends as the guest
-// leaving; with no view active, or one that closes without taking it, join
-// gets keyLeave instead. It also sticks: every Read from then on returns it
-// at once, active or not, so that no later session waits for input that is
-// gone.
+// It sticks: every Read from then on returns it at once, active or not, so
+// that no later session waits for input that is gone. And join gets keyLeave
+// as soon as no view is active: at once if none is, or else when the active
+// view closes, whether or not its Read returned the error.
+//
+// A Read that returned it proves nothing about the session. Terminal reads
+// Stdin through a goroutine that outlives a Read its ctx gave up on, and a
+// view stays active after its session has ended for another reason, through
+// the last of the output and the status line, until it is closed. A parked
+// read takes the error then and hands it to nobody, and join, told nothing,
+// would go on rejoining with a terminal that is gone. When the session did
+// take it, it has ended as the guest leaving, and join, having left, never
+// reads this keyLeave.
 func (in *input) end(err error) {
 	in.mu.Lock()
 	in.err = err
@@ -216,22 +223,12 @@ func (in *input) end(err error) {
 		v, c := in.current, in.controls
 		in.mu.Unlock()
 		if v != nil {
-			select {
-			case <-v.took:
-				return
-			case <-v.done:
-			}
-			// Taken, and then closed, before this looked.
-			select {
-			case <-v.took:
-				return
-			default:
-			}
+			<-v.done
 		} else if in.send(c, keyLeave) {
 			return
 		}
-		// v closed without taking it, or a view was activated before join
-		// took its keyLeave: see who has the keyboard now.
+		// v closed, or a view was activated before join took its keyLeave:
+		// see who has the keyboard now.
 		in.mu.Lock()
 	}
 }
@@ -245,9 +242,6 @@ type view struct {
 	// done closes with Close; closed is under in.mu.
 	done   chan struct{}
 	closed bool
-	// took closes when Read returns r's terminal error.
-	took     chan struct{}
-	tookOnce sync.Once
 	// rest is what a short Read left of the last chunk. Read's alone.
 	rest []byte
 }
@@ -283,7 +277,6 @@ func (v *view) Read(p []byte) (int, error) {
 		case <-v.done:
 		case <-v.in.ended:
 			if !v.isClosed() {
-				v.tookOnce.Do(func() { close(v.took) })
 				return 0, v.in.err
 			}
 		}
