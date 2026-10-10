@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,16 +148,29 @@ func (suite *EmbeddedSessionManagerTestSuite) TestDeleteSession() {
 	suite.Error(err)
 }
 
-// suiteConsulURL is the Consul URL with a key prefix of the suite's own. Other
-// packages' tests share the agent and the default prefix, so a suite that
-// deletes its tree when it ends must not be pointed at that.
+// suiteConsulURL is the Consul URL with a key prefix of the suite's own, inside
+// the one CONSUL_URL names. Other packages' tests share the agent and the
+// default prefix, so a suite that deletes its tree when it ends must not be
+// pointed at that.
 func suiteConsulURL(suiteName string) (*url.URL, error) {
 	consulURL, err := url.Parse(testhelpers.ConsulURL())
 	if err != nil {
 		return nil, err
 	}
-	consulURL.Path = fmt.Sprintf("/uptermd-test-%s-%d", suiteName, time.Now().UnixNano())
+	consulURL.Path = path.Join("/", consulURL.Path, fmt.Sprintf("uptermd-test-%s-%d", suiteName, time.Now().UnixNano()))
 	return consulURL, nil
+}
+
+// removeSuiteConsulData deletes what a suite wrote: its keys, and the catalog
+// node its stores registered, which every store on one prefix shares. Without
+// the node, each run leaves another on an agent that outlives it.
+func removeSuiteConsulData(client *api.Client, store *consulSessionStore) error {
+	_, err := client.KV().DeleteTree(store.KeyPrefix(), nil)
+	if err != nil {
+		return err
+	}
+	_, err = client.Catalog().Deregister(&api.CatalogDeregistration{Node: store.NodeName()}, nil)
+	return err
 }
 
 // ConsulSessionManagerTestSuite tests SessionManager behavior in consul mode
@@ -189,8 +203,7 @@ func (suite *ConsulSessionManagerTestSuite) TearDownSuite() {
 	if suite.client != nil && suite.sm != nil {
 		// Clean up test data using the actual key prefix from the store
 		if store, ok := suite.sm.GetStore().(*consulSessionStore); ok {
-			_, err := suite.client.KV().DeleteTree(store.KeyPrefix(), nil)
-			suite.NoError(err)
+			suite.NoError(removeSuiteConsulData(suite.client, store))
 		}
 	}
 }
@@ -436,8 +449,7 @@ func (suite *ConsulStoreTestSuite) TearDownSuite() {
 	}
 	if suite.client != nil {
 		// Clean up test data using the actual key prefix from the store
-		_, err := suite.client.KV().DeleteTree(suite.store1.KeyPrefix(), nil)
-		suite.NoError(err)
+		suite.NoError(removeSuiteConsulData(suite.client, suite.store1))
 	}
 }
 

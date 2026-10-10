@@ -211,9 +211,12 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	if err := sess.Shell(); err != nil {
 		return Result{}, fmt.Errorf("attach: %w", err)
 	}
-	if !setup.Stop() {
-		// The shell was confirmed just as setupBy passed, and the connection
-		// is already being closed under it.
+	if !setup.Stop() || time.Now().After(setupBy) {
+		// The shell was confirmed just as setupBy passed. If the timer has
+		// run, the connection is already being closed under it; if not, it
+		// is closed here, so that whether this fails never depends on when
+		// the timer got to run.
+		_ = client.Close()
 		return Result{}, errors.New("attach: the shell started after the setup deadline")
 	}
 	if t.OnReady != nil {
