@@ -101,9 +101,11 @@ type Config struct {
 	// and lets no session write while it is in progress. While the run goes
 	// on, calls are serial, each starting once the last has returned. Each
 	// runs on its own goroutine, so a write stuck on a terminal never keeps a
-	// stop from ending the run. Run starts no call once it has stopped, but
-	// one that began as the stop landed, or that the stop abandoned, may
-	// still be writing after Run returns. Nil tells nobody.
+	// stop from ending the run, nor a first join's deadline, which a Waiting
+	// line counts against as the rest of the wait does. Run starts no call
+	// once it has stopped, but one that began as the stop landed, or that the
+	// stop or the deadline abandoned, may still be writing after Run returns.
+	// Nil tells nobody.
 	Events func(Event)
 	// Wait removes the first join's deadline.
 	Wait   bool
@@ -575,7 +577,9 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 		if r.joined {
 			e.Rejoin, e.Down = true, max(0, r.timing.Wall().Sub(r.since))
 		}
-		if !r.emit(e) {
+		// The shell has started, so a first join has got in, and the deadline
+		// it had for that doesn't bound the Joined line.
+		if !r.emit(r.runCtx, e) {
 			return
 		}
 		end.ready, end.readyAt = true, time.Now()
@@ -771,7 +775,7 @@ func (r *runner) ended(s *sessionEnd) step {
 	case <-r.runCtx.Done():
 		return finish(r.stopped())
 	}
-	if !r.emit(Event{Kind: Lost, Why: Unreachable, Err: s.err}) {
+	if !r.emit(r.runCtx, Event{Kind: Lost, Why: Unreachable, Err: s.err}) {
 		return finish(r.stopped())
 	}
 	return waitThen(Unreachable, s.err)
@@ -829,6 +833,11 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	if first && why == IdentityFailure {
 		return failed(err), false
 	}
+	// The wait, its status line included, ends with ctx: with the run, and on
+	// a first join at its deadline too. A line the terminal is slow to take
+	// uses up the first join's time as the rest of the wait does, and one it
+	// never takes is abandoned at the deadline, as a stop abandons it.
+	ctx := r.runCtx
 	var left time.Duration
 	if r.firstJoin() {
 		// An attempt that ended after the first join's time ran out doesn't
@@ -836,6 +845,9 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 		if left = time.Until(r.deadline); left <= 0 {
 			return r.timedOut(why, err), false
 		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(r.runCtx, r.deadline)
+		defer cancel()
 	}
 	if first {
 		r.lastWhy, r.lastErr = why, err
@@ -859,8 +871,12 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	}()
 
 	e := Event{Kind: Waiting, Why: why, Err: err, Since: r.since, Next: now.Add(delay), Long: long, First: first}
-	if !r.emit(e) || waitFor(r.runCtx, r.timing, delay, retry) != nil {
-		return r.stopped(), false
+	if !r.emit(ctx, e) || waitFor(ctx, r.timing, delay, retry) != nil {
+		if r.runCtx.Err() != nil {
+			return r.stopped(), false
+		}
+		// The first join's time ran out during the line or the wait after it.
+		return r.timedOut(why, err), false
 	}
 	return Outcome{}, true
 }
@@ -873,22 +889,22 @@ func (r *runner) beginWait(wall time.Time) {
 }
 
 // emit tells the guest about e, and returns once that has been written,
-// or false once the run has stopped.
-func (r *runner) emit(e Event) bool {
+// or false once ctx has ended: the run's, or one that ends sooner.
+func (r *runner) emit(ctx context.Context, e Event) bool {
 	if r.cfg.Events == nil {
-		return r.runCtx.Err() == nil
+		return ctx.Err() == nil
 	}
-	return r.call(func() { r.cfg.Events(e) })
+	return call(ctx, func() { r.cfg.Events(e) })
 }
 
 // call runs fn, a write to the guest's terminal, on its own goroutine, and
-// waits for it to return or for the run to stop. A write stuck on a terminal
-// that isn't taking output is abandoned with the process, so it never keeps
-// Ctrl-C or a signal from ending the run.
-func (r *runner) call(fn func()) bool {
-	// A run that has stopped starts no write: the command's own last line
-	// is what follows.
-	if r.runCtx.Err() != nil {
+// waits for it to return or for ctx to end. A write stuck on a terminal that
+// isn't taking output is abandoned with the process, so it never keeps
+// Ctrl-C, a signal or a first join's deadline from ending the run.
+func call(ctx context.Context, fn func()) bool {
+	// A run that has stopped, or a first join whose time is up, starts no
+	// write: the command's own last line is what follows.
+	if ctx.Err() != nil {
 		return false
 	}
 	done := make(chan struct{})
@@ -898,8 +914,8 @@ func (r *runner) call(fn func()) bool {
 	}()
 	select {
 	case <-done:
-		return r.runCtx.Err() == nil
-	case <-r.runCtx.Done():
+		return ctx.Err() == nil
+	case <-ctx.Done():
 		return false
 	}
 }

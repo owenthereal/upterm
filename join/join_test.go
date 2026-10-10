@@ -236,6 +236,62 @@ func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
 	})
 }
 
+// A status line written during a first join's wait counts against its
+// deadline: a terminal slow to take the line, or not taking it at all, still
+// ends the join when its time runs out.
+func TestAStatusLineDoesNotHoldAFirstJoinPastItsDeadline(t *testing.T) {
+	t.Run("one the terminal never takes", func(t *testing.T) {
+		// FirstJoin 300 ms. The gate opens only as the test ends.
+		cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}))
+		stuck, _ := newGate(t)
+		cfg.Events = func(e Event) {
+			if e.Kind == Waiting {
+				<-stuck
+			}
+		}
+		// A loose ceiling: the exact figure is the deadline's.
+		ceiling := cfg.Timing.FirstJoin + 2*time.Second
+		done := runJoinAsync(t, context.Background(), cfg)
+		select {
+		case out := <-done:
+			require.Equal(t, NoHost, deadlineOf(t, out).Why)
+		case <-time.After(ceiling):
+			t.Fatal("a status line stuck on the terminal held the first join past its deadline")
+		}
+	})
+	t.Run("one the terminal takes just before the deadline", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner})
+		cfg := config(t, relay)
+		cfg.Timing.FirstJoin = time.Second
+		// An attempt's own deadline is an hour away, so the first attempt's is
+		// the first join's. The first wait, unjittered and with nothing shorter
+		// to cap it, is all the time the first join has left.
+		cfg.Timing.Attempt = time.Hour
+		cfg.Timing.FastBase, cfg.Timing.FastCap = time.Hour, time.Hour
+		cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+		var deadline time.Time
+		cfg.Dial = func(ctx context.Context) (net.Conn, error) {
+			if deadline.IsZero() {
+				deadline, _ = ctx.Deadline()
+			}
+			return relay.Dial(ctx)
+		}
+		// The terminal takes the Waiting line 100 ms before the deadline.
+		cfg.Events = func(e Event) {
+			if e.Kind == Waiting {
+				<-time.After(time.Until(deadline) - 100*time.Millisecond)
+			}
+		}
+		out := runJoin(t, cfg)
+		late := time.Since(deadline)
+		require.Equal(t, NoHost, deadlineOf(t, out).Why)
+		// What is left to wait is measured after the line, not before it: a
+		// wait measured from before would end as long after the deadline as
+		// the line took, about 900 ms here. The bound is loose.
+		require.Less(t, late, 400*time.Millisecond, "the run ended %v after the first join's deadline", late)
+	})
+}
+
 func TestAWallClockJumpDoesNotSlowTheSchedule(t *testing.T) {
 	base := time.Now().Round(0)
 	var jumped atomic.Bool
