@@ -337,6 +337,15 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 		stopsWithin(t, config(t, relay, withInput(pr), withEvents(rec)), pw, func() { require.Equal(t, Joined, (<-rec.held()).Kind) })
 		require.Empty(t, relay.input(0), "the Ctrl-C reached a session that wasn't ready")
 	})
+	t.Run("a blocked Joined line with the replay in", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		rec := &recorder{gate: make(chan struct{})} // never opened
+		stuck := newStuckWriter(t)                  // a terminal that isn't taking output, as the Joined line found
+		relay := newFakeRelay(t, relayKnobs{output: "REPLAY", outputFirst: true})
+		cfg := config(t, relay, withInput(pr), withEvents(rec), withStdout(stuck))
+		stopsWithin(t, cfg, pw, func() { require.Equal(t, Joined, (<-rec.held()).Kind) })
+		require.Zero(t, stuck.offered.Load(), "a session whose start was stopped wrote to the terminal")
+	})
 }
 
 func TestAFinalOutcomeDoesNotWaitOnAParkedWrite(t *testing.T) {
@@ -375,7 +384,8 @@ func TestTheNextSessionWaitsForTheLastOnesWrites(t *testing.T) {
 	released := make(chan struct{})
 	relay := newFakeRelay(t, relayKnobs{}, relayKnobs{})
 	out := &syncSink{}
-	cfg := config(t, relay, withStdout(out))
+	rec := &recorder{w: out}
+	cfg := config(t, relay, withStdout(out), withEvents(rec))
 	var runs atomic.Int32
 	cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 		if runs.Add(1) == 1 {
@@ -387,10 +397,93 @@ func TestTheNextSessionWaitsForTheLastOnesWrites(t *testing.T) {
 		return attach.Result{Reason: attach.Exited, Released: done}, nil
 	}
 	result := runJoinAsync(t, context.Background(), cfg)
-	require.Never(t, func() bool { return relay.connections() > 1 }, 100*time.Millisecond, 10*time.Millisecond)
+	// Neither the next attempt nor the line saying the session was lost comes
+	// before the last session's parked write: the line would land on the
+	// screen the restore then leaves.
+	require.Never(t, func() bool { return relay.connections() > 1 || len(rec.kinds()) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
 	close(released)
 	require.Equal(t, Exited, (<-result).Kind)
-	require.Contains(t, out.String(), "\x1b[?1049lNEXT")
+	require.Equal(t, "\x1b[?1049l<LOST><WAITING>NEXT", out.String())
+}
+
+func TestAStopStillRestoresAfterTheParkedWrite(t *testing.T) {
+	t.Run("while the write is parked", func(t *testing.T) {
+		sink := &syncSink{}
+		gate := make(chan struct{})
+		lost := make(chan struct{})
+		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(sink))
+		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
+			released := make(chan struct{})
+			go func() { // a write parked on the terminal, which lands once let go
+				<-gate
+				_, _ = sink.Write([]byte("PARKED"))
+				close(released)
+			}()
+			close(lost)
+			return attach.Result{Reason: attach.Disconnected, Released: released, Unrestored: []byte("R")}, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := runJoinAsync(t, ctx, cfg)
+		<-lost
+		cancel()
+		// Stopping, the run still waits, within its bound, to put the terminal back.
+		require.Never(t, func() bool { return len(done) > 0 || sink.String() != "" }, 100*time.Millisecond, 10*time.Millisecond)
+		close(gate)
+		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, "PARKEDR", sink.String())
+	})
+	t.Run("while the restore is being written", func(t *testing.T) {
+		term := &heldWriter{entered: make(chan struct{}), let: make(chan struct{})}
+		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(term))
+		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
+			released := make(chan struct{})
+			close(released)
+			return attach.Result{Reason: attach.Disconnected, Released: released, Unrestored: []byte("R")}, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := runJoinAsync(t, ctx, cfg)
+		<-term.entered // the hand-over between sessions is writing the restore
+		cancel()
+		require.Never(t, func() bool { return len(done) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
+		close(term.let)
+		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, "R", term.String())
+	})
+}
+
+func TestResizesBetweenSessionsAreDropped(t *testing.T) {
+	first, now, stale := termsize.Size{Rows: 24, Cols: 80}, termsize.Size{Rows: 43, Cols: 132}, termsize.Size{Rows: 10, Cols: 20}
+	var n atomic.Int32
+	resizes := make(chan termsize.Size, 1)
+	rec := &recorder{}
+	relay := newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{})
+	cfg := config(t, relay, withSize(func() termsize.Size {
+		if n.Add(1) == 1 {
+			return first
+		}
+		return now
+	}))
+	cfg.Terminal.Resizes = resizes
+	cfg.Events = func(e Event) {
+		if e.Kind == Lost {
+			select {
+			case resizes <- stale: // the terminal resized while no session had it
+			default:
+			}
+		}
+		rec.event(e)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runJoinAsync(t, ctx, cfg)
+	for e := range rec.held() {
+		if e.Kind == Joined && e.Rejoin {
+			break
+		}
+	}
+	require.Never(t, func() bool { return len(relay.windowChanges(1)) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
+	cancel()
+	require.Equal(t, Stopped, (<-done).Kind)
+	require.Equal(t, []termsize.Size{first, now}, relay.ptySizes())
 }
 
 func TestPtySizeIsMeasuredForEachSession(t *testing.T) {

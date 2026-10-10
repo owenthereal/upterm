@@ -60,7 +60,9 @@ type Config struct {
 	// prompts. Nil means an unknown key is never accepted.
 	ConfirmHostKey func(ctx context.Context, hostname string, key ssh.PublicKey) (accepted bool, err error)
 	// Terminal runs each session. Run sets Stdin, Pty.Size and OnReady on a
-	// copy for each session and leaves this one as it is.
+	// copy for each session, and wraps its Stdout so that nothing reaches it
+	// before the guest has been told the session is ready; this one is left
+	// as it is. Resizes that arrive between sessions are dropped.
 	Terminal *attach.Terminal
 	// Size is measured afresh for each session's pty request. Nil keeps
 	// Terminal.Pty's.
@@ -149,7 +151,13 @@ func Run(ctx context.Context, cfg Config) Outcome {
 	}
 	r := newRunner(ctx, cfg)
 	defer r.close()
-	return r.loop()
+	out := r.loop()
+	if r.last != nil {
+		// However the run ends, the last session's writes and its restore
+		// get the same bounded chance to land.
+		r.last.finish()
+	}
+	return out
 }
 
 func (c Config) validate() error {
@@ -162,6 +170,8 @@ func (c Config) validate() error {
 		return errors.New("join: Config.CheckHostKey is required")
 	case c.Terminal == nil:
 		return errors.New("join: Config.Terminal is required")
+	case c.Terminal.Stdout == nil:
+		return errors.New("join: Config.Terminal.Stdout is required")
 	}
 	return nil
 }
@@ -211,6 +221,8 @@ type runner struct {
 	// The session's node let them in once, so an ambiguous refusal of one is
 	// a session that isn't there, not a refusal.
 	joinedWith map[string]bool
+	// last is the hand-over of the last session that ran; nil before one has.
+	last *handover
 }
 
 func newRunner(ctx context.Context, cfg Config) *runner {
@@ -486,6 +498,17 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 
 	term := *r.cfg.Terminal
 	term.Stdin = v
+	// Until the session is ready and the guest has been told, its writes go
+	// nowhere: a session whose start is stopped, its Joined line still being
+	// written, writes nothing at all, not even its mode restore, and so can't
+	// be held up by the terminal the line is stuck on.
+	out := &gatedWriter{w: term.Stdout}
+	term.Stdout = out
+	// The pty request carries the size measured now. A resize that arrived
+	// between sessions is older than that, and would follow it.
+	if term.Resizes != nil {
+		drain(term.Resizes)
+	}
 	if term.Pty != nil {
 		pty := *term.Pty
 		if r.cfg.Size != nil {
@@ -507,6 +530,7 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 		end.ready, end.readyAt = true, time.Now()
 		r.ready(key)
 		v.activate()
+		out.open.Store(true)
 	}
 	run := r.cfg.runSession
 	if run == nil {
@@ -660,17 +684,15 @@ func (r *runner) unknownHostKey(v verdict, key ssh.PublicKey) step {
 
 // ended decides what follows a session that ran.
 func (r *runner) ended(s *sessionEnd) step {
+	r.last = r.handOver(s.res)
 	switch {
 	case s.res.Reason == attach.Exited:
-		r.restore(s.res)
 		return finish(Outcome{Kind: Exited, Status: s.res.Status})
 	case r.runCtx.Err() != nil:
 		// Whatever Terminal made of it, a session that ended with the run
 		// ended because Run stopped it.
-		r.restore(s.res)
 		return finish(r.stopped())
 	case s.res.Reason == attach.Detached:
-		r.restore(s.res)
 		return finish(Outcome{Kind: Left})
 	}
 
@@ -681,54 +703,62 @@ func (r *runner) ended(s *sessionEnd) step {
 	if r.since.IsZero() {
 		r.since = r.timing.Wall()
 	}
-	if !r.emit(Event{Kind: Lost, Why: Unreachable, Err: s.err}) || !r.barrier(s.res) {
+	// The terminal is handed over before the guest is told: a line written
+	// while a parked write still holds the alternate screen would land there,
+	// and the restore would take it away again. The wait has no bound, but a
+	// stop ends it.
+	select {
+	case <-r.last.done:
+	case <-r.runCtx.Done():
+		return finish(r.stopped())
+	}
+	if !r.emit(Event{Kind: Lost, Why: Unreachable, Err: s.err}) {
 		return finish(r.stopped())
 	}
 	return waitThen(Unreachable, s.err)
 }
 
-// barrier hands the terminal over between sessions: it waits for the last
-// session's writes to return, however long that takes, and then writes the
-// restore it left. A stop ends it.
-func (r *runner) barrier(res attach.Result) bool {
-	if res.Released != nil {
-		select {
-		case <-res.Released:
-		case <-r.runCtx.Done():
-			return false
-		}
-	}
-	if len(res.Unrestored) == 0 {
-		return true
-	}
-	return r.call(func() { _, _ = r.cfg.Terminal.Stdout.Write(res.Unrestored) })
+// handover is a session letting go of the terminal: once its writes have
+// returned (Released), the restore it left (Unrestored) is written. Nothing
+// else writes to the terminal until it is done, which the next session waits
+// for. Its own goroutine does the waiting, so that a run that stops meanwhile
+// can still give it a bounded chance to finish.
+type handover struct {
+	done   chan struct{} // the restore has been written, or there was none
+	gaveUp chan struct{} // closed by finish
+	state  atomic.Int32
 }
 
-// restore is the barrier for the last session: the run is ending, so it waits
-// at most finalBound for the session's writes and the restore after them.
-// Past that nothing more is written.
-func (r *runner) restore(res attach.Result) {
-	const (
-		pending int32 = iota
-		writing
-		late
-	)
-	var state atomic.Int32
-	gaveUp := make(chan struct{})
-	logging.Within(finalBound, func() {
+const (
+	handoverPending int32 = iota
+	handoverWriting
+	handoverLate
+)
+
+func (r *runner) handOver(res attach.Result) *handover {
+	h := &handover{done: make(chan struct{}), gaveUp: make(chan struct{})}
+	go func() {
+		defer close(h.done)
 		if res.Released != nil {
 			select {
 			case <-res.Released:
-			case <-gaveUp:
+			case <-h.gaveUp:
 				return
 			}
 		}
-		if len(res.Unrestored) > 0 && state.CompareAndSwap(pending, writing) {
+		if len(res.Unrestored) > 0 && h.state.CompareAndSwap(handoverPending, handoverWriting) {
 			_, _ = r.cfg.Terminal.Stdout.Write(res.Unrestored)
 		}
-	})
-	state.CompareAndSwap(pending, late)
-	close(gaveUp)
+	}()
+	return h
+}
+
+// finish is the end of the run: it waits at most finalBound for h, and past
+// that nothing more is written.
+func (h *handover) finish() {
+	logging.Within(finalBound, func() { <-h.done })
+	h.state.CompareAndSwap(handoverPending, handoverLate)
+	close(h.gaveUp)
 }
 
 // wait waits out a verdict before the next attempt. It returns false, with
@@ -798,5 +828,33 @@ func (r *runner) call(fn func()) bool {
 		return r.runCtx.Err() == nil
 	case <-r.runCtx.Done():
 		return false
+	}
+}
+
+// gatedWriter passes writes on to w once open, and before then drops them,
+// reporting success.
+type gatedWriter struct {
+	w    io.Writer
+	open atomic.Bool
+}
+
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	if !g.open.Load() {
+		return len(p), nil
+	}
+	return g.w.Write(p)
+}
+
+// drain takes whatever c holds without waiting for more.
+func drain(c <-chan termsize.Size) {
+	for {
+		select {
+		case _, ok := <-c:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
 	}
 }

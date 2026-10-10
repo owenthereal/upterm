@@ -65,6 +65,9 @@ type relayKnobs struct {
 	setupFails bool
 	// output is written once the shell starts.
 	output string
+	// outputFirst writes output before confirming the shell instead, so that
+	// it is already in join's hands when the session becomes ready.
+	outputFirst bool
 	// exit, after output, sends this exit status and closes the session.
 	exit *int
 	// dropAfterReady, after output, closes the connection without a status.
@@ -76,10 +79,11 @@ type relayKnobs struct {
 
 // connLog is what the relay saw on one connection.
 type connLog struct {
-	mu    sync.Mutex
-	key   ssh.PublicKey   // the key that authenticated
-	ptys  []termsize.Size // the size of each pty request
-	input bytes.Buffer    // what the session received
+	mu      sync.Mutex
+	key     ssh.PublicKey   // the key that authenticated
+	ptys    []termsize.Size // the size of each pty request
+	windows []termsize.Size // the size of each window change
+	input   bytes.Buffer    // what the session received
 }
 
 func (l *connLog) setKey(k ssh.PublicKey) {
@@ -92,6 +96,12 @@ func (l *connLog) pty(s termsize.Size) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ptys = append(l.ptys, s)
+}
+
+func (l *connLog) window(s termsize.Size) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.windows = append(l.windows, s)
 }
 
 func (l *connLog) Write(p []byte) (int, error) {
@@ -193,8 +203,8 @@ func (k relayKnobs) channels(chans <-chan ssh.NewChannel, sconn *ssh.ServerConn,
 	}
 }
 
-// session answers one session's requests: its pty, which it notes, and its
-// shell, which starts the script the knobs describe.
+// session answers one session's requests: its pty and its window changes,
+// which it notes, and its shell, which starts the script the knobs describe.
 func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh.ServerConn, silent *atomic.Bool, seen *connLog) {
 	go func() { _, _ = io.Copy(seen, ch) }()
 	for req := range reqs {
@@ -209,9 +219,19 @@ func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh
 				seen.pty(termsize.Size{Cols: int(pty.Cols), Rows: int(pty.Rows)})
 			}
 			_ = req.Reply(!k.setupFails, nil)
+		case "window-change":
+			var size struct{ Cols, Rows, Width, Height uint32 }
+			if err := ssh.Unmarshal(req.Payload, &size); err == nil {
+				seen.window(termsize.Size{Cols: int(size.Cols), Rows: int(size.Rows)})
+			}
 		case "shell":
+			script := k
+			if k.outputFirst {
+				_, _ = ch.Write([]byte(k.output))
+				script.output = ""
+			}
 			_ = req.Reply(true, nil)
-			go k.script(ch, sconn, silent)
+			go script.script(ch, sconn, silent)
 		default:
 			if req.WantReply {
 				_ = req.Reply(false, nil)

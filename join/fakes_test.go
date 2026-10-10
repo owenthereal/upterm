@@ -123,6 +123,14 @@ func (r *fakeRelay) ptySizes() []termsize.Size {
 	return sizes
 }
 
+// windowChanges is every window change connection i's session received.
+func (r *fakeRelay) windowChanges(i int) []termsize.Size {
+	l := r.log(i)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]termsize.Size(nil), l.windows...)
+}
+
 // input is what connection i's session received.
 func (r *fakeRelay) input(i int) string {
 	l := r.log(i)
@@ -356,6 +364,39 @@ func (s blockingSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
 }
 
 func intp(i int) *int { return &i }
+
+// stuckWriter is a terminal that has stopped taking output: each Write blocks
+// until the test ends. It counts the bytes it was offered.
+type stuckWriter struct {
+	offered atomic.Int64
+	until   chan struct{}
+}
+
+func newStuckWriter(t *testing.T) *stuckWriter {
+	w := &stuckWriter{until: make(chan struct{})}
+	t.Cleanup(func() { close(w.until) })
+	return w
+}
+
+func (w *stuckWriter) Write(p []byte) (int, error) {
+	w.offered.Add(int64(len(p)))
+	<-w.until
+	return len(p), nil
+}
+
+// heldWriter is a terminal that is slow to take output: entered closes as
+// the first Write begins, and every Write waits for let.
+type heldWriter struct {
+	syncSink
+	entered, let chan struct{}
+	once         sync.Once
+}
+
+func (w *heldWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.let
+	return w.syncSink.Write(p)
+}
 
 // syncSink is a Stdout that a test can read while the run writes it.
 type syncSink struct {
