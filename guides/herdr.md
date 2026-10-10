@@ -18,8 +18,11 @@ upterm host --detach --name home --accept \
   --force-command 'env -u HERDR_ENV herdr'
 ```
 
-- Each guest gets a Herdr client of its own, at its own size. On a phone
-  (64 columns or fewer), Herdr switches to its mobile layout.
+- Each guest gets a Herdr client of its own, with a layout for its own
+  screen: on a phone (64 columns or fewer), Herdr switches to its mobile
+  layout. Clients looking at the same tab share its panes, though, and Herdr
+  sizes them for whichever client typed last, so the agent repaints when you
+  switch from the laptop to the phone.
 - `--authorized-user` lets in only the keys on your GitHub account.
   Without it, anyone with the session ID can join, and upterm warns you so.
 - `env -u HERDR_ENV` matters when you start the door from inside a Herdr
@@ -100,9 +103,13 @@ and add to `~/.ssh/config`:
 ```
 Host home-sshd
   HostName localhost
+  User YOUR_USER_ON_THE_MACHINE
   HostKeyAlias home-sshd
   ProxyJump home
 ```
+
+`User` is your account on the machine at home, and the machine's sshd has to
+accept your key for it (in that account's `~/.ssh/authorized_keys`).
 
 Now `herdr --remote home-sshd`, `scp file home-sshd:`, and VS Code's
 "Remote-SSH: Connect to Host… home-sshd" all work. `upterm session info home`
@@ -120,10 +127,11 @@ first, or the connection fails without a word.
 ## Share an agent through a door, not its own terminal
 
 `upterm host -- claude` shares Claude Code's own terminal: every guest sees
-one screen at the smallest guest's size, and a guest who joins at a
-different size can find the earlier scrollback garbled. Through a Herdr (or tmux) door, each
-guest gets a client of its own at its own size, and the agent doesn't notice
-who comes and goes.
+one screen at the smallest guest's size, and a guest who joins at a different
+size can find the earlier scrollback garbled. Through a Herdr (or tmux) door,
+each guest gets a client of its own, and joining or leaving neither replays
+the agent's transcript nor resizes it. Guests looking at the same tab do share
+its size, which follows whoever typed last.
 
 ## Sensitive work
 
