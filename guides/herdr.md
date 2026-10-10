@@ -6,8 +6,9 @@ another laptop. upterm is the door: it gives the machine an address you can
 reach from anywhere, without opening a port. Herdr keeps the agents, so losing
 the door costs a rejoin, not the work.
 
-This needs upterm v0.37.0 or later, and Herdr 0.9.0 or later (its saved
-machines, and clients that view tabs independently).
+This needs upterm v0.37.0 or later and Herdr 0.9.0 or later (its saved
+machines, and clients that view tabs independently), with the machine at home
+on macOS or Linux.
 
 ## Open the door
 
@@ -55,8 +56,10 @@ as the door runs (it needs `jq`; `brew install jq` if `command -v jq` finds
 none):
 
 ```console
-caffeinate -is -w "$(upterm session info home -o json | jq .pid)" &
+caffeinate -is -w "$(upterm session info home -o json | jq .pid)" & disown
 ```
+
+`disown` keeps it running after you close the terminal.
 
 It can't stop the sleep that closing the lid forces: leave a laptop's lid
 open, or run it closed only in clamshell mode, with power and an external
@@ -103,6 +106,11 @@ In Termius or Blink, add a host with:
 - **Host:** `uptermd.upterm.dev`, port 22;
 - **Username:** the user from the connect command (the session ID);
 - **Key:** one whose public half is on your GitHub account.
+
+The first time, the app asks you to trust the relay's key. Accept it only if
+its fingerprint is `SHA256:9ajV8JqMe6jJE/s3TYjb/9xw7T0pfJ2+gADiBIJWDPE`, the
+one [Running Without a Terminal](../README.md#running-without-a-terminal)
+publishes.
 
 Connecting lands you in Herdr's mobile layout, and `ctrl+b q` leaves it the
 same way.
@@ -157,9 +165,11 @@ Herdr's saved machines connect with `BatchMode=yes` and
 `StrictHostKeyChecking=yes`, so an unknown host key fails the connection
 instead of prompting. Pin the relay as above first, and record the home
 machine's own host key before Herdr uses it: connect once with
-`ssh home-sshd`, and check the fingerprint it shows against
-`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine before you
-accept it. Then save it, on the laptop:
+`ssh home-sshd`, and before you accept it, check the fingerprint it shows
+against the line of the same type from
+`ssh-keyscan localhost | ssh-keygen -lf -`, run on that machine. Herdr can't
+ask for a key's passphrase either: load a passphrase-protected key into your
+agent first (`ssh-add`). Then save the machine, on the laptop:
 
 ```console
 herdr machine add home-sshd --label Home
