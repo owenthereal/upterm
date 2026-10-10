@@ -121,8 +121,12 @@ reach, your LAN included, so use it only with `--authorized-user`.
 ## Saved machines in Herdr
 
 Herdr's saved machines connect with `BatchMode=yes` and
-`StrictHostKeyChecking=yes`, so they never prompt: pin the relay as above
-first, or the connection fails without a word.
+`StrictHostKeyChecking=yes`, so they never prompt, and an unknown host key
+fails the connection without a word. Pin the relay as above first. For
+`home-sshd`, also record the home machine's own host key: connect once with
+`ssh home-sshd`, and check the fingerprint it shows against
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine before you
+accept it.
 
 ## Share an agent through a door, not its own terminal
 
