@@ -35,7 +35,9 @@ upterm host --detach --name home --accept \
   sees it, but it holds the door open: the door lasts as long as it does.
   Don't `upterm attach home` and type `exit`. Use `upterm session info home`
   to look, and `upterm session stop home` to close the door.
-- Copy inside Herdr goes to the guest's clipboard, over OSC 52.
+- Copy inside Herdr goes to the guest's clipboard, over OSC 52: upterm sets
+  `SSH_TTY` for the door's command, so Herdr leaves the home machine's
+  clipboard alone. The guest's terminal has to allow OSC 52 writes.
 - When the door closes, or a guest's Herdr exits, upterm puts the guest's
   terminal back.
 
