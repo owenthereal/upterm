@@ -101,9 +101,9 @@ type Config struct {
 	// and lets no session write while it is in progress. While the run goes
 	// on, calls are serial, each starting once the last has returned. Each
 	// runs on its own goroutine, so a write stuck on a terminal never keeps a
-	// stop from ending the run: no call starts once the run has stopped, but
-	// one the stop abandoned may still be writing after Run returns. Nil
-	// tells nobody.
+	// stop from ending the run. Run starts no call once it has stopped, but
+	// one that began as the stop landed, or that the stop abandoned, may
+	// still be writing after Run returns. Nil tells nobody.
 	Events func(Event)
 	// Wait removes the first join's deadline.
 	Wait   bool
