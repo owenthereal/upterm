@@ -206,8 +206,9 @@ type runner struct {
 	joined       bool      // a session has been ready
 	deadline     time.Time // the first join's, monotonic; zero until the first attempt, and with Wait
 	since        time.Time // the wall time the current wait began; zero while a session is ready
-	// lastWhy and lastErr are what a first join last waited on, which its
-	// DeadlineError wraps; zero before its first wait.
+	// lastWhy and lastErr are the reason a first join last had, which its
+	// DeadlineError wraps: what it last waited on, or tried again at once
+	// over. Zero until it has one.
 	lastWhy WaitReason
 	lastErr error
 	// refused holds the keys the session's node turned away, by SHA256
@@ -325,10 +326,22 @@ func finish(out Outcome) step { return step{done: true, out: out} }
 
 func waitThen(why WaitReason, err error) step { return step{wait: true, why: why, err: err} }
 
+// again attempts again at once. On a first join, why and err are the reason
+// its DeadlineError wraps should the time run out before the next attempt
+// has its say.
+func (r *runner) again(why WaitReason, err error) step {
+	if !r.joined {
+		r.lastWhy, r.lastErr = why, err
+	}
+	return attemptNow
+}
+
 func (r *runner) loop() Outcome {
 	for {
 		if r.firstJoinOver() {
-			return r.timedOut(Unreachable, nil)
+			// The time ran out between attempts: after one that tried again at
+			// once, which left its reason, or after a prompt.
+			return r.timedOut(Unreachable, context.DeadlineExceeded)
 		}
 		s := r.next(r.attempt())
 		if s.done {
@@ -350,8 +363,9 @@ func (r *runner) firstJoinOver() bool {
 // firstJoin reports whether the run is a first join with a deadline.
 func (r *runner) firstJoin() bool { return !r.joined && !r.deadline.IsZero() }
 
-// timedOut ends a first join whose deadline has passed. It wraps what the
-// join last waited on or, if it never waited, why.
+// timedOut ends a first join whose deadline has passed. It wraps the last
+// reason the join had, what it last waited on or tried again at once over,
+// or, if it has none, why and err.
 func (r *runner) timedOut(why WaitReason, err error) Outcome {
 	if r.lastWhy != 0 {
 		why, err = r.lastWhy, r.lastErr
@@ -394,10 +408,11 @@ func (r *runner) attempt() (a attempted) {
 	}
 	actx, cancel := context.WithDeadline(r.runCtx, by)
 	defer cancel()
-	// An attempt the first join's deadline ended says nothing about the
-	// relay or the session: whatever it failed with, it failed because its
-	// time was up. Read before cancel, which would make any ctx look ended.
-	defer func() { a.cut = cutoff && errors.Is(actx.Err(), context.DeadlineExceeded) }()
+	// Whether the first join's deadline is what ended the attempt is read off
+	// the clock, not off actx: a dial returns on its socket's deadline, and a
+	// setup on Terminal's own timer, either of which can come before actx's
+	// timer has fired. next decides what a cut attempt's verdict is worth.
+	defer func() { a.cut = cutoff && !time.Now().Before(by) }()
 
 	signers, release, err := r.cfg.Identity.Signers(actx)
 	if release != nil {
@@ -598,7 +613,13 @@ func (r *runner) next(a attempted) step {
 	switch v.kind {
 	case vWait:
 		if a.cut && v.why != IdentityFailure {
-			return finish(r.timedOut(v.why, v.err))
+			// An attempt the first join's deadline cut short says nothing about
+			// the relay or the session, and its error is the cut's own doing: a
+			// closed connection, a socket's timeout. The join ends wrapping
+			// what it last waited on, or else the deadline. A signer that
+			// failed is the exception: whatever stopped it, the guest's own
+			// identity failing is what a first join stops on (see wait).
+			return finish(r.timedOut(v.why, context.DeadlineExceeded))
 		}
 		return waitThen(v.why, v.err)
 	case vHostKeyUnknown:
@@ -611,7 +632,9 @@ func (r *runner) next(a attempted) step {
 			return finish(failed(&RefusedError{}))
 		}
 		r.refused[ssh.FingerprintSHA256(a.selected)] = true
-		return attemptNow
+		// Should a first join's time run out before the next key has its
+		// turn, what it met was a session that wouldn't start.
+		return r.again(Setup, v.err)
 	case vAmbiguous:
 		if a.selected == nil {
 			return finish(failed(&RefusedError{}))
@@ -621,7 +644,9 @@ func (r *runner) next(a attempted) step {
 			return waitThen(NoHost, nil)
 		}
 		r.sitOut[fp] = true
-		return attemptNow
+		// Refused, or no session: should a first join's time run out first,
+		// it is taken for no session, as a rejoin takes it.
+		return r.again(NoHost, nil)
 	}
 
 	// vStop. A refusal at the entry node with no evidence that it was one
@@ -765,12 +790,20 @@ func (h *handover) finish() {
 // the outcome, if the run ends instead.
 func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	first := !r.joined
-	if first {
-		// The guest's own identity failing won't mend by waiting: a first
-		// join stops on it.
-		if why == IdentityFailure {
-			return failed(err), false
+	// The guest's own identity failing won't mend by waiting: a first join
+	// stops on it.
+	if first && why == IdentityFailure {
+		return failed(err), false
+	}
+	var left time.Duration
+	if r.firstJoin() {
+		// An attempt that ended after the first join's time ran out doesn't
+		// replace the reason the join was waiting on.
+		if left = time.Until(r.deadline); left <= 0 {
+			return r.timedOut(why, err), false
 		}
+	}
+	if first {
 		r.lastWhy, r.lastErr = why, err
 	}
 
@@ -780,10 +813,6 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	}
 	delay, long := r.sched.next(max(0, now.Sub(r.since)))
 	if r.firstJoin() {
-		left := time.Until(r.deadline)
-		if left <= 0 {
-			return r.timedOut(why, err), false
-		}
 		delay = min(delay, left)
 	}
 

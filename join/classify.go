@@ -214,7 +214,7 @@ func classifySetup(err error, ev *evidence) verdict {
 	}
 	switch rejected.Message {
 	case upterm.UpstreamKeyRefused:
-		return verdict{kind: vRetryNow}
+		return verdict{kind: vRetryNow, err: err}
 	case upterm.UpstreamAuthFailed:
 		// A node that predates the refined verdicts says this for a refusal and
 		// for a missing session alike.

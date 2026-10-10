@@ -2,6 +2,7 @@ package join
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -119,6 +120,67 @@ func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 		require.Never(t, func() bool { return len(done) > 0 }, time.Second, 50*time.Millisecond)
 		cancel()
 		require.Equal(t, Stopped, (<-done).Kind)
+	})
+}
+
+// A first join whose time runs out wraps the last reason it had, never what
+// the cut did to the attempt it ended.
+func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
+	// With an attempt's own deadline an hour away, the first join's is what
+	// ends the last attempt.
+	cutting := func(cfg Config) Config {
+		cfg.Timing.Attempt = time.Hour
+		return cfg
+	}
+	t.Run("a setup cut by its own timer", func(t *testing.T) {
+		// Terminal's setup timer and the attempt's ctx end at the same moment,
+		// in either order.
+		relay := newFakeRelay(t, relayKnobs{rejectSession: upterm.UpstreamUnavailable}, relayKnobs{stallSetup: true})
+		require.Equal(t, Upstream, deadlineOf(t, runJoin(t, cutting(config(t, relay)))).Why)
+
+		// With nothing waited on, it is the deadline, not the close of the
+		// connection that the timer made.
+		dl := deadlineOf(t, runJoin(t, cutting(config(t, newFakeRelay(t, relayKnobs{stallSetup: true})))))
+		require.Equal(t, Setup, dl.Why)
+		require.ErrorIs(t, dl, context.DeadlineExceeded)
+	})
+	t.Run("a handshake cut with nothing waited on", func(t *testing.T) {
+		dl := deadlineOf(t, runJoin(t, cutting(config(t, newFakeRelay(t, relayKnobs{stallHandshake: true})))))
+		require.Equal(t, Unreachable, dl.Why)
+		require.ErrorIs(t, dl, context.DeadlineExceeded)
+	})
+	t.Run("an attempt that ended after the time ran out", func(t *testing.T) {
+		// The attempt's own deadline comes before the first join's, so nothing
+		// cuts it; its setup overruns both.
+		const firstJoin = time.Second
+		cfg := config(t, newFakeRelay(t, relayKnobs{}))
+		cfg.Timing.FirstJoin = firstJoin // Attempt 200 ms
+		var first time.Time              // the first session's start, after the first join's deadline was set
+		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
+			if first.IsZero() {
+				first = time.Now()
+				return attach.Result{}, rejectedWith(upterm.UpstreamUnavailable)
+			}
+			<-time.After(time.Until(first.Add(firstJoin)))
+			return attach.Result{}, errors.New("attach: the shell never started")
+		}
+		require.Equal(t, Upstream, deadlineOf(t, runJoin(t, cfg)).Why)
+	})
+	t.Run("keys tried again at once", func(t *testing.T) {
+		for msg, why := range map[string]WaitReason{
+			upterm.UpstreamKeyRefused: Setup,  // the session wouldn't start
+			upterm.UpstreamAuthFailed: NoHost, // refused, or no session
+		} {
+			cfg := config(t, newFakeRelay(t, relayKnobs{}), withSigners(newSigner(t), newSigner(t)))
+			// The session's node turns the first key away once the first
+			// join's time is up, which leaves the second key untried.
+			firstJoin := cfg.Timing.FirstJoin
+			cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
+				<-time.After(firstJoin)
+				return attach.Result{}, rejectedWith(msg)
+			}
+			require.Equal(t, why, deadlineOf(t, runJoin(t, cfg)).Why, msg)
+		}
 	})
 }
 

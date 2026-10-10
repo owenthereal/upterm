@@ -63,6 +63,8 @@ type relayKnobs struct {
 	confirmRefusal     bool
 	// setupFails rejects the pty request.
 	setupFails bool
+	// stallSetup never answers the pty request.
+	stallSetup bool
 	// output is written once the shell starts.
 	output string
 	// outputFirst writes output before confirming the shell instead, so that
@@ -217,6 +219,9 @@ func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh
 			}
 			if err := ssh.Unmarshal(req.Payload, &pty); err == nil {
 				seen.pty(termsize.Size{Cols: int(pty.Cols), Rows: int(pty.Rows)})
+			}
+			if k.stallSetup {
+				continue
 			}
 			_ = req.Reply(!k.setupFails, nil)
 		case "window-change":

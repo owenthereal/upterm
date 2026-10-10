@@ -365,6 +365,20 @@ func (s blockingSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
 
 func intp(i int) *int { return &i }
 
+// rejectedWith is the error Terminal.Run returns for a session channel the
+// relay rejected with msg.
+func rejectedWith(msg string) error {
+	return fmt.Errorf("attach: %w", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: msg})
+}
+
+// deadlineOf is the DeadlineError out ended with.
+func deadlineOf(t *testing.T, out Outcome) *DeadlineError {
+	t.Helper()
+	var dl *DeadlineError
+	require.ErrorAs(t, out.Err, &dl, "%+v", out)
+	return dl
+}
+
 // stuckWriter is a terminal that has stopped taking output: each Write blocks
 // until the test ends. It counts the bytes it was offered.
 type stuckWriter struct {
