@@ -21,8 +21,8 @@ upterm host --detach --name home --accept \
 - Each guest gets a Herdr client of its own, with a layout for its own
   screen: on a phone (64 columns or fewer), Herdr switches to its mobile
   layout. Clients looking at the same tab share its panes, though, and Herdr
-  sizes them for whichever client typed last, so the agent repaints when you
-  switch from the laptop to the phone.
+  sizes them for the client that last interacted with the tab, so the agent
+  repaints when you switch from the laptop to the phone.
 - `--authorized-user` lets in only the keys on your GitHub account.
   Without it, anyone with the session ID can join, and upterm warns you so.
 - `env -u HERDR_ENV` matters when you start the door from inside a Herdr
@@ -84,12 +84,16 @@ Connecting lands you in Herdr's mobile layout.
 
 ## `herdr --remote`, VS Code and scp: jump to the machine's own sshd
 
-`herdr --remote`, VS Code Remote-SSH and scp need a real SSH server. If the
+`herdr --remote` and VS Code Remote-SSH need a real SSH server. If the
 machine runs one (Remote Login on macOS, sshd on Linux), jump to it through
-the door. The inner connection is end to end between you and the machine's
-sshd; the relay forwards only ciphertext.
+the door; scp then works through the same jump. The inner connection is end
+to end between you and the machine's sshd; the relay forwards only
+ciphertext.
 
-Open the door with forwarding allowed:
+Open the door with forwarding allowed, instead of the command above. If a
+door named `home` is already running, stop it first with
+`upterm session stop home`; the new door gets a new session ID, so update
+your clients' `User`, and start `caffeinate` again for the new pid.
 
 ```console
 upterm host --detach --name home --accept \
@@ -115,6 +119,10 @@ Now `herdr --remote home-sshd`, `scp file home-sshd:`, and VS Code's
 "Remote-SSH: Connect to Host… home-sshd" all work. `upterm session info home`
 lists each jump as `jump … → localhost:22`.
 
+Run `herdr --remote` from an ordinary terminal, not from inside a Herdr pane:
+a pane's `HERDR_ENV` sets off Herdr's nested-client guard, and its
+`HERDR_SESSION` can pick a remote session you didn't mean.
+
 `--allow-local-tcp-forwarding` lets a guest reach anything the machine can
 reach, your LAN included, so use it only with `--authorized-user`.
 
@@ -122,20 +130,21 @@ reach, your LAN included, so use it only with `--authorized-user`.
 
 Herdr's saved machines connect with `BatchMode=yes` and
 `StrictHostKeyChecking=yes`, so they never prompt, and an unknown host key
-fails the connection without a word. Pin the relay as above first. For
-`home-sshd`, also record the home machine's own host key: connect once with
-`ssh home-sshd`, and check the fingerprint it shows against
-`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine before you
-accept it.
+fails the connection without a word. Pin the relay as above first. Then
+save `home-sshd` as the machine, and record the home machine's own host key
+before Herdr uses it: connect once with `ssh home-sshd`, and check the
+fingerprint it shows against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+on that machine before you accept it.
 
 ## Share an agent through a door, not its own terminal
 
 `upterm host -- claude` shares Claude Code's own terminal: every guest sees
 one screen at the smallest guest's size, and a guest who joins at a different
 size can find the earlier scrollback garbled. Through a Herdr (or tmux) door,
-each guest gets a client of its own, and joining or leaving neither replays
-the agent's transcript nor resizes it. Guests looking at the same tab do share
-its size, which follows whoever typed last.
+each guest gets a client of its own, and joining never replays the agent's
+transcript. Clients looking at the same tab do share its size: Herdr sizes it
+for the client that last interacted with the tab, so focusing a tab, selecting
+it or a client leaving can resize the agent.
 
 ## Sensitive work
 
