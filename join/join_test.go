@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,62 +65,106 @@ func TestEveryOutcomeRow(t *testing.T) {
 		pr, pw := io.Pipe()
 		rec := &recorder{}
 		done := runJoinAsync(t, context.Background(), config(t, newFakeRelay(t, relayKnobs{}), withInput(pr), withEvents(rec)))
-		<-rec.held() // Joined
-		_, _ = pw.Write([]byte("\r~."))
-		require.Equal(t, Left, (<-done).Kind)
+		require.Equal(t, Joined, recv(t, rec.held()).Kind)
+		press(pw, "\r~.")
+		require.Equal(t, Left, recv(t, done).Kind)
 	})
 	t.Run("cancelled is stopped", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		rec := &recorder{}
 		done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{}), withEvents(rec)))
-		<-rec.held()
+		require.Equal(t, Joined, recv(t, rec.held()).Kind)
 		cancel()
-		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, Stopped, recv(t, done).Kind)
 	})
 	t.Run("sign fails on a rejoin", func(t *testing.T) {
-		var n atomic.Int32
+		good, bad := newSigner(t), failingSigner{newSigner(t)}
+		var joined atomic.Bool
 		id := Identity{
+			// The key signs until a session has been ready, however many
+			// attempts that takes, and fails from then on.
 			Signers: func(context.Context) ([]ssh.Signer, func(), error) {
-				if n.Add(1) == 1 {
-					return []ssh.Signer{newSigner(t)}, func() {}, nil
+				if joined.Load() {
+					return []ssh.Signer{bad}, func() {}, nil
 				}
-				return []ssh.Signer{failingSigner{newSigner(t)}}, func() {}, nil
+				return []ssh.Signer{good}, func() {}, nil
 			},
 			Source: KeySource{Agent: 1},
 		}
 		rec := &recorder{}
-		ctx, cancel := context.WithCancel(context.Background())
-		done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{}), withIdentity(id), withEvents(rec)))
-		for e := range rec.held() {
-			if e.Kind == Waiting && e.Why == IdentityFailure && !e.First {
-				break
+		cfg := config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{}), withIdentity(id), withWait())
+		cfg.Events = func(e Event) {
+			if e.Kind == Joined {
+				joined.Store(true)
 			}
+			rec.event(e)
 		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := runJoinAsync(t, ctx, cfg)
+		e := rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && e.Why == IdentityFailure })
+		require.False(t, e.First)
+		require.ErrorIs(t, e.Err, ErrIdentity)
 		cancel()
-		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, Stopped, recv(t, done).Kind)
 	})
 }
 
 func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 	for name, k := range map[string]relayKnobs{
-		"no host":           {refuseAll: true, banner: fmt.Sprintf(upterm.BannerNoHostFormat, "abc")},
-		"a stalled attempt": {stallHandshake: true}, // its deadline is cut to what's left
+		"no host":           {refuseAll: true, banner: noHostBanner},
+		"a stalled attempt": {stallHandshake: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			relay := newFakeRelay(t, k)
+			cfg := config(t, relay) // FirstJoin 300 ms
+			// An attempt's own deadline is an hour away: only the first join's
+			// can be what ends one.
+			cfg.Timing.Attempt = time.Hour
+			var (
+				mu        sync.Mutex
+				deadlines []time.Time // each attempt's connect deadline
+			)
+			// The first attempt's dial: when, and with what deadline.
+			type dial struct{ at, deadline time.Time }
+			firstDial := make(chan dial, 1)
+			cfg.Dial = func(ctx context.Context) (net.Conn, error) {
+				d, _ := ctx.Deadline()
+				mu.Lock()
+				if len(deadlines) == 0 {
+					firstDial <- dial{time.Now(), d}
+				}
+				deadlines = append(deadlines, d)
+				mu.Unlock()
+				return relay.Dial(ctx)
+			}
 			start := time.Now()
-			out := runJoin(t, config(t, newFakeRelay(t, k))) // FirstJoin 300 ms, Attempt 200 ms
-			var dl *DeadlineError
-			require.ErrorAs(t, out.Err, &dl)
-			require.InDelta(t, 300, time.Since(start).Milliseconds(), 60)
+			done := runJoinAsync(t, context.Background(), cfg)
+
+			// The first attempt starts between start and its dial. The first
+			// join's deadline, which is the attempt's own too, is FirstJoin
+			// after that start.
+			first := recv(t, firstDial)
+			require.False(t, first.deadline.Before(start.Add(cfg.Timing.FirstJoin)), "%v is before the first join's deadline", first.deadline)
+			require.False(t, first.deadline.After(first.at.Add(cfg.Timing.FirstJoin)), "%v is after the first join's deadline", first.deadline)
+
+			deadlineOf(t, recv(t, done))
+			// A loose ceiling: the exact figure is the deadlines.
+			require.Less(t, time.Since(start), cfg.Timing.FirstJoin+5*time.Second)
+			// Every later attempt's connect deadline is what is left of the
+			// first join's: an attempt started at 28 s of 30 gets 2 s.
+			mu.Lock()
+			defer mu.Unlock()
+			for i, d := range deadlines {
+				require.True(t, d.Equal(first.deadline), "attempt %d's deadline %v is not the first join's, %v", i, d, first.deadline)
+			}
 		})
 	}
 	t.Run("--wait never fails", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		rec := &recorder{}
-		done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: fmt.Sprintf(upterm.BannerNoHostFormat, "abc")}), withWait(), withEvents(rec)))
+		done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withWait()))
 		require.Never(t, func() bool { return len(done) > 0 }, time.Second, 50*time.Millisecond)
 		cancel()
-		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, Stopped, recv(t, done).Kind)
 	})
 }
 
@@ -345,9 +390,11 @@ func TestNoPromptOnceTheTerminalIsTaken(t *testing.T) {
 
 func TestPromptHappensWithNoConnectionOpen(t *testing.T) {
 	relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true}, relayKnobs{exit: intp(0)})
-	confirm := &countingConfirm{accept: true, during: func() { require.False(t, relay.connOpen(0)) }}
+	var open atomic.Bool // whether the connection was open as the guest was asked
+	confirm := &countingConfirm{accept: true, during: func() { open.Store(relay.connOpen(0)) }}
 	require.Equal(t, Exited, runJoin(t, config(t, relay, withConfirm(confirm))).Kind)
 	require.Equal(t, 1, confirm.calls())
+	require.False(t, open.Load(), "the guest was asked with the connection open")
 }
 
 func TestPromptTimeDoesNotCountAgainstTheFirstJoin(t *testing.T) {
@@ -361,7 +408,7 @@ func TestAPromptEndsWithTheRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	blocking := &countingConfirm{block: true}
 	done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{hostKeyUnknown: true}), withConfirm(blocking)))
-	<-blocking.called()
+	recv(t, blocking.called())
 	cancel()
 	select {
 	case out := <-done:
@@ -376,32 +423,29 @@ func TestNoOutputWhileAStatusLineIsBeingWritten(t *testing.T) {
 	rec := &recorder{gate: make(chan struct{}), w: out}
 	relay := newFakeRelay(t, relayKnobs{output: "REPLAY", exit: intp(0)})
 	done := runJoinAsync(t, context.Background(), config(t, relay, withEvents(rec), withStdout(out)))
-	require.Equal(t, Joined, (<-rec.held()).Kind) // the Joined line's write is held
+	require.Equal(t, Joined, recv(t, rec.held()).Kind) // the Joined line's write is held
 	require.Never(t, func() bool { return strings.Contains(out.String(), "REPLAY") }, 100*time.Millisecond, 10*time.Millisecond)
 	close(rec.gate)
-	require.Equal(t, Exited, (<-done).Kind)
+	require.Equal(t, Exited, recv(t, done).Kind)
 	require.True(t, strings.HasPrefix(out.String(), "<JOINED>REPLAY"), "%q", out.String())
 
 	// Ctrl-C while a status write is held still stops the run.
 	pr, pw := io.Pipe()
 	rec2 := &recorder{gate: make(chan struct{})}
 	done2 := runJoinAsync(t, context.Background(),
-		config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}), withEvents(rec2), withInput(pr)))
-	for e := range rec2.held() {
-		if e.Kind == Lost {
-			break
-		}
-		rec2.gate <- struct{}{} // let Joined through
+		config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}), withEvents(rec2), withInput(pr), withWait()))
+	for e := recv(t, rec2.held()); e.Kind != Lost; e = recv(t, rec2.held()) {
+		rec2.gate <- struct{}{} // let Joined, or a wait before it, through
 	}
-	_, _ = pw.Write([]byte{0x03})
-	require.Equal(t, Stopped, (<-done2).Kind)
+	press(pw, "\x03")
+	require.Equal(t, Stopped, recv(t, done2).Kind)
 }
 
 func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 	stopsWithin := func(t *testing.T, cfg Config, pw *io.PipeWriter, ready func()) {
 		done := runJoinAsync(t, context.Background(), cfg)
 		ready()
-		_, _ = pw.Write([]byte{0x03})
+		press(pw, "\x03")
 		select {
 		case out := <-done:
 			require.Equal(t, Stopped, out.Kind)
@@ -412,7 +456,7 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 	t.Run("a stalled handshake on a rejoin", func(t *testing.T) {
 		pr, pw := io.Pipe()
 		relay := newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{stallHandshake: true})
-		cfg := config(t, relay, withInput(pr))
+		cfg := config(t, relay, withInput(pr), withWait())
 		cfg.Timing.Attempt = time.Hour // only Ctrl-C can end it
 		stopsWithin(t, cfg, pw, func() {
 			require.Eventually(t, func() bool { return relay.connections() == 2 }, testTimeout, time.Millisecond)
@@ -420,36 +464,43 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 	})
 	t.Run("a stalled agent on a rejoin", func(t *testing.T) {
 		pr, pw := io.Pipe()
-		var n atomic.Int32
-		signing := make(chan struct{})
+		good, signing := newSigner(t), make(chan struct{})
+		var joined atomic.Bool
 		id := Identity{
+			// The key signs until a session has been ready, and then the agent
+			// stops answering.
 			Signers: func(ctx context.Context) ([]ssh.Signer, func(), error) {
-				if n.Add(1) == 1 {
-					return []ssh.Signer{newSigner(t)}, func() {}, nil
+				if !joined.Load() {
+					return []ssh.Signer{good}, func() {}, nil
 				}
 				release := make(chan struct{})
-				return []ssh.Signer{blockingSigner{Signer: newSigner(t), until: release, entered: signing}}, sync.OnceFunc(func() { close(release) }), nil
+				return []ssh.Signer{blockingSigner{Signer: good, until: release, entered: signing}}, sync.OnceFunc(func() { close(release) }), nil
 			},
 			Source: KeySource{Agent: 1},
 		}
-		cfg := config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{}), withInput(pr), withIdentity(id))
+		cfg := config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{}), withInput(pr), withIdentity(id), withWait())
+		cfg.Events = func(e Event) {
+			if e.Kind == Joined {
+				joined.Store(true)
+			}
+		}
 		cfg.Timing.Attempt = time.Hour
-		stopsWithin(t, cfg, pw, func() { <-signing })
+		stopsWithin(t, cfg, pw, func() { recv(t, signing) })
 	})
 	t.Run("a blocked Joined line", func(t *testing.T) {
 		pr, pw := io.Pipe()
 		rec := &recorder{gate: make(chan struct{})} // never opened
 		relay := newFakeRelay(t, relayKnobs{})
-		stopsWithin(t, config(t, relay, withInput(pr), withEvents(rec)), pw, func() { require.Equal(t, Joined, (<-rec.held()).Kind) })
-		require.Empty(t, relay.input(0), "the Ctrl-C reached a session that wasn't ready")
+		stopsWithin(t, config(t, relay, withInput(pr), withEvents(rec), withWait()), pw, func() { require.Equal(t, Joined, recv(t, rec.held()).Kind) })
+		require.Empty(t, relay.input(t, 0), "the Ctrl-C reached a session that wasn't ready")
 	})
 	t.Run("a blocked Joined line with the replay in", func(t *testing.T) {
 		pr, pw := io.Pipe()
 		rec := &recorder{gate: make(chan struct{})} // never opened
 		stuck := newStuckWriter(t)                  // a terminal that isn't taking output, as the Joined line found
 		relay := newFakeRelay(t, relayKnobs{output: "REPLAY", outputFirst: true})
-		cfg := config(t, relay, withInput(pr), withEvents(rec), withStdout(stuck))
-		stopsWithin(t, cfg, pw, func() { require.Equal(t, Joined, (<-rec.held()).Kind) })
+		cfg := config(t, relay, withInput(pr), withEvents(rec), withStdout(stuck), withWait())
+		stopsWithin(t, cfg, pw, func() { require.Equal(t, Joined, recv(t, rec.held()).Kind) })
 		require.Zero(t, stuck.offered.Load(), "a session whose start was stopped wrote to the terminal")
 	})
 }
@@ -468,7 +519,7 @@ func TestAFinalOutcomeDoesNotWaitOnAParkedWrite(t *testing.T) {
 
 func TestAFinalOutcomeRestoresAfterTheParkedWrite(t *testing.T) {
 	sink := &syncSink{}
-	gate := make(chan struct{})
+	gate, open := newGate(t)
 	cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(sink))
 	cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 		released := make(chan struct{})
@@ -481,17 +532,19 @@ func TestAFinalOutcomeRestoresAfterTheParkedWrite(t *testing.T) {
 	}
 	done := runJoinAsync(t, context.Background(), cfg)
 	require.Never(t, func() bool { return sink.String() != "" }, 100*time.Millisecond, 10*time.Millisecond)
-	close(gate)
-	require.Equal(t, Exited, (<-done).Kind)
+	open()
+	require.Equal(t, Exited, recv(t, done).Kind)
 	require.Equal(t, "PARKEDR", sink.String())
 }
 
 func TestTheNextSessionWaitsForTheLastOnesWrites(t *testing.T) {
-	released := make(chan struct{})
+	released, release := newGate(t)
 	relay := newFakeRelay(t, relayKnobs{}, relayKnobs{})
 	out := &syncSink{}
 	rec := &recorder{w: out}
-	cfg := config(t, relay, withStdout(out), withEvents(rec))
+	// No session here is ever ready, so the first join's deadline would
+	// otherwise run under the test's own waits.
+	cfg := config(t, relay, withStdout(out), withEvents(rec), withWait())
 	var runs atomic.Int32
 	cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 		if runs.Add(1) == 1 {
@@ -507,17 +560,17 @@ func TestTheNextSessionWaitsForTheLastOnesWrites(t *testing.T) {
 	// before the last session's parked write: the line would land on the
 	// screen the restore then leaves.
 	require.Never(t, func() bool { return relay.connections() > 1 || len(rec.kinds()) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
-	close(released)
-	require.Equal(t, Exited, (<-result).Kind)
+	release()
+	require.Equal(t, Exited, recv(t, result).Kind)
 	require.Equal(t, "\x1b[?1049l<LOST><WAITING>NEXT", out.String())
 }
 
 func TestAStopStillRestoresAfterTheParkedWrite(t *testing.T) {
 	t.Run("while the write is parked", func(t *testing.T) {
 		sink := &syncSink{}
-		gate := make(chan struct{})
+		gate, open := newGate(t)
 		lost := make(chan struct{})
-		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(sink))
+		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(sink), withWait())
 		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 			released := make(chan struct{})
 			go func() { // a write parked on the terminal, which lands once let go
@@ -530,17 +583,17 @@ func TestAStopStillRestoresAfterTheParkedWrite(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := runJoinAsync(t, ctx, cfg)
-		<-lost
+		recv(t, lost)
 		cancel()
 		// Stopping, the run still waits, within its bound, to put the terminal back.
 		require.Never(t, func() bool { return len(done) > 0 || sink.String() != "" }, 100*time.Millisecond, 10*time.Millisecond)
-		close(gate)
-		require.Equal(t, Stopped, (<-done).Kind)
+		open()
+		require.Equal(t, Stopped, recv(t, done).Kind)
 		require.Equal(t, "PARKEDR", sink.String())
 	})
 	t.Run("while the restore is being written", func(t *testing.T) {
 		term := &heldWriter{entered: make(chan struct{}), let: make(chan struct{})}
-		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(term))
+		cfg := config(t, newFakeRelay(t, relayKnobs{}), withStdout(term), withWait())
 		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 			released := make(chan struct{})
 			close(released)
@@ -548,11 +601,11 @@ func TestAStopStillRestoresAfterTheParkedWrite(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := runJoinAsync(t, ctx, cfg)
-		<-term.entered // the hand-over between sessions is writing the restore
+		recv(t, term.entered) // the hand-over between sessions is writing the restore
 		cancel()
 		require.Never(t, func() bool { return len(done) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
 		close(term.let)
-		require.Equal(t, Stopped, (<-done).Kind)
+		require.Equal(t, Stopped, recv(t, done).Kind)
 		require.Equal(t, "R", term.String())
 	})
 }
@@ -581,14 +634,10 @@ func TestResizesBetweenSessionsAreDropped(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runJoinAsync(t, ctx, cfg)
-	for e := range rec.held() {
-		if e.Kind == Joined && e.Rejoin {
-			break
-		}
-	}
+	rec.await(t, done, func(e Event) bool { return e.Kind == Joined && e.Rejoin })
 	require.Never(t, func() bool { return len(relay.windowChanges(1)) > 0 }, 100*time.Millisecond, 10*time.Millisecond)
 	cancel()
-	require.Equal(t, Stopped, (<-done).Kind)
+	require.Equal(t, Stopped, recv(t, done).Kind)
 	require.Equal(t, []termsize.Size{first, now}, relay.ptySizes())
 }
 
@@ -619,15 +668,25 @@ func TestASilentPeerIsLostNotLeft(t *testing.T) { // liveness 50 ms + 50 ms
 }
 
 func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
-	release := make(chan struct{})
+	key := newSigner(t)
 	id := Identity{
+		// Each attempt has an agent connection of its own, which release
+		// closes.
 		Signers: func(context.Context) ([]ssh.Signer, func(), error) {
-			return []ssh.Signer{blockingSigner{Signer: newSigner(t), until: release}}, sync.OnceFunc(func() { close(release) }), nil
+			release := make(chan struct{})
+			return []ssh.Signer{blockingSigner{Signer: key, until: release}}, sync.OnceFunc(func() { close(release) }), nil
 		},
 		Source: KeySource{Agent: 1},
 	}
+	cfg := config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id)) // Attempt 200 ms
 	start := time.Now()
-	out := runJoin(t, config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id))) // Attempt 200 ms
-	require.ErrorIs(t, out.Err, ErrIdentity)                                      // a first join stops on it
-	require.Less(t, time.Since(start), 200*time.Millisecond+100*time.Millisecond)
+	select {
+	case out := <-runJoinAsync(t, context.Background(), cfg):
+		require.ErrorIs(t, out.Err, ErrIdentity) // a first join stops on it
+		// A loose ceiling: a signature nothing ends would take the test's
+		// whole timeout.
+		require.Less(t, time.Since(start), cfg.Timing.Attempt+2*time.Second)
+	case <-time.After(testTimeout):
+		t.Fatal("a stalled agent held the attempt past its deadline")
+	}
 }

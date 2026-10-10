@@ -99,12 +99,18 @@ func TestWaitAttemptsWhenTheWallClockJumps(t *testing.T) {
 	}}.orDefault()
 	done := make(chan error, 1)
 	go func() { done <- waitFor(context.Background(), tm, 60*time.Second, nil) }()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait never read the wall clock")
+	}
 	jumped.Store(true) // the lid opened an hour later
+	// The wait is a minute long; a ceiling well short of it is all that tells
+	// a wait that looked at the wall clock from one that didn't.
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("a wait whose wall-clock target had passed kept sleeping")
 	}
 }
@@ -120,7 +126,10 @@ func TestWaitIsNotLengthenedByAClockSteppedBack(t *testing.T) {
 	}}.orDefault()
 	start := time.Now()
 	require.NoError(t, waitFor(context.Background(), tm, 100*time.Millisecond, nil))
-	require.InDelta(t, 100, time.Since(start).Milliseconds(), 50)
+	// The delay, and nowhere near the hour the wall clock now says is left.
+	took := time.Since(start)
+	require.GreaterOrEqual(t, took, 100*time.Millisecond)
+	require.Less(t, took, time.Second)
 }
 
 func TestWaitEndsEarlyWhenToldToRetry(t *testing.T) {

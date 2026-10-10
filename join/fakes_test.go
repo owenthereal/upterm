@@ -149,9 +149,12 @@ func (r *fakeRelay) windowChanges(i int) []termsize.Size {
 	return append([]termsize.Size(nil), l.windows...)
 }
 
-// input is what connection i's session received.
-func (r *fakeRelay) input(i int) string {
+// input is everything connection i's session received, once its input has
+// ended; the test fails if that takes longer than testTimeout.
+func (r *fakeRelay) input(t *testing.T, i int) string {
+	t.Helper()
 	l := r.log(i)
+	recv(t, l.inputEnded())
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.input.String()
@@ -310,6 +313,32 @@ func (r *recorder) kinds() []EventKind {
 	return kinds
 }
 
+// await returns the first event that match accepts, of those not yet taken
+// from held. It fails the test if the run ends, with its outcome on done,
+// before such an event, or if none comes within testTimeout.
+func (r *recorder) await(t *testing.T, done <-chan Outcome, match func(Event) bool) Event {
+	t.Helper()
+	timeout := time.After(testTimeout)
+	for {
+		select {
+		case e := <-r.held():
+			if match(e) {
+				return e
+			}
+		case out := <-done:
+			// The event may have come before the end did.
+			for len(r.held()) > 0 {
+				if e := <-r.held(); match(e) {
+					return e
+				}
+			}
+			t.Fatalf("the run ended (%+v) before the event it was to send", out)
+		case <-timeout:
+			t.Fatal("the event didn't come")
+		}
+	}
+}
+
 // waits is every Waiting event, in order.
 func (r *recorder) waits() []Event {
 	r.mu.Lock()
@@ -382,6 +411,21 @@ func (s blockingSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
 }
 
 func intp(i int) *int { return &i }
+
+// newGate returns a gate and the func that opens it. The gate opens when the
+// test ends, too, so that nothing parked on it outlives the test.
+func newGate(t *testing.T) (gate <-chan struct{}, open func()) {
+	c := make(chan struct{})
+	open = sync.OnceFunc(func() { close(c) })
+	t.Cleanup(open)
+	return c, open
+}
+
+// press types keys on w, the guest's keyboard, without waiting for them to
+// be read.
+func press(w io.Writer, keys string) {
+	go func() { _, _ = io.WriteString(w, keys) }()
+}
 
 // rejectedWith is the error Terminal.Run returns for a session channel the
 // relay rejected with msg.

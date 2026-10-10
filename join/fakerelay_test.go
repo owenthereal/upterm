@@ -86,6 +86,16 @@ type connLog struct {
 	ptys    []termsize.Size // the size of each pty request
 	windows []termsize.Size // the size of each window change
 	input   bytes.Buffer    // what the session received
+
+	inputOnce sync.Once
+	inputEnd  chan struct{} // closes once the session's input has ended; see inputEnded
+}
+
+// inputEnded closes once the session's input has ended: the guest closed it
+// or the connection, so everything the guest sent the session is in input.
+func (l *connLog) inputEnded() chan struct{} {
+	l.inputOnce.Do(func() { l.inputEnd = make(chan struct{}) })
+	return l.inputEnd
 }
 
 func (l *connLog) setKey(k ssh.PublicKey) {
@@ -208,7 +218,10 @@ func (k relayKnobs) channels(chans <-chan ssh.NewChannel, sconn *ssh.ServerConn,
 // session answers one session's requests: its pty and its window changes,
 // which it notes, and its shell, which starts the script the knobs describe.
 func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh.ServerConn, silent *atomic.Bool, seen *connLog) {
-	go func() { _, _ = io.Copy(seen, ch) }()
+	go func() {
+		_, _ = io.Copy(seen, ch)
+		close(seen.inputEnded())
+	}()
 	for req := range reqs {
 		switch req.Type {
 		case "pty-req":
