@@ -81,6 +81,10 @@ test-e2e:
 vet:
 	docker run --rm -v $(CURDIR):/app:z -w /app golangci/golangci-lint:latest golangci-lint run -v --timeout 15m --fix
 
+.PHONY: wasm-check
+wasm-check:
+	GOOS=js GOARCH=wasm go build ./join ./attach
+
 DOCKER_REPO ?= ghcr.io/owenthereal/upterm/uptermd
 .PHONY: goreleaser
 goreleaser:
