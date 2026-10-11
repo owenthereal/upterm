@@ -224,6 +224,7 @@ func TestParseTargetSuggestsNothingForOtherText(t *testing.T) {
 		`ssh -o ProxyCommand=upterm sid@example.com:443`,
 		// A % ssh would expand, and text a shell would expand or run.
 		`ssh -o ProxyCommand='upterm proxy wss://sid@%h' sid@example.com:443`,
+		`ssh -o ProxyCommand='upterm proxy wss://s%41@example.com' sid@example.com:443`,
 		`ssh -o ProxyCommand='upterm proxy wss://sid@example.com%%%' sid@example.com:443`,
 		`ssh -o ProxyCommand='upterm proxy $(id)' sid@example.com:443`,
 		`ssh -o ProxyCommand='upterm proxy wss://sid@example.com; id' sid@example.com:443`,
@@ -232,6 +233,8 @@ func TestParseTargetSuggestsNothingForOtherText(t *testing.T) {
 		`ssh "sid@example.com"`, `ssh sid@example.com\`, `ssh 'sid@example.com`,
 		// Whitespace other than the space upterm separates words with.
 		"ssh\tsid@example.com", "ssh sid@example.com\n", "ssh\u00a0sid@example.com",
+		"ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com:443\n",
+		"ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com\t:443",
 	} {
 		_, err := ParseTarget(in)
 		require.ErrorIs(t, err, ErrNotATarget, "%q", in)
