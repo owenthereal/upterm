@@ -258,7 +258,7 @@ func (f *TerminalQueryFilter) cancel(b byte) {
 // (0x30–0x7E), except that ESC [ starts a CSI, ESC ] an OSC, and ESC P, ESC _,
 // ESC ^ and ESC X a DCS, APC, PM and SOS instead.
 func (f *TerminalQueryFilter) escByte(b byte) {
-	if f.headControl(b) {
+	if (b < 0x20 || b >= 0x7f) && f.headControl(b) {
 		return
 	}
 	switch {
@@ -299,7 +299,7 @@ func (f *TerminalQueryFilter) escByte(b byte) {
 // (0x3C–0x3F), parameter bytes (0x30–0x3B), intermediates (0x20–0x2F), and a
 // final byte (0x40–0x7E). Out of that order a terminal ignores the CSI.
 func (f *TerminalQueryFilter) csiByte(b byte) {
-	if f.headControl(b) {
+	if (b < 0x20 || b >= 0x7f) && f.headControl(b) {
 		return
 	}
 	switch {
@@ -338,7 +338,9 @@ func (f *TerminalQueryFilter) csiIgnores(b byte) bool {
 
 // headControl takes the bytes a terminal treats the same way in every ESC and
 // CSI state, and reports whether b was one of them. CAN and SUB never get
-// here; processByte cancels on them first.
+// here; processByte cancels on them first. It takes none of 0x20–0x7E, so its
+// callers test for that range before calling it, and a head's printable
+// bytes, nearly all of them, skip the call.
 func (f *TerminalQueryFilter) headControl(b byte) bool {
 	switch {
 	case b == 0x1b:
