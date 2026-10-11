@@ -6,13 +6,32 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ErrNotATarget is what ParseTarget's errors wrap: the text names no session to
 // join.
 var ErrNotATarget = errors.New("not a join target")
+
+// TargetError is ParseTarget's error for text that names no session to join.
+type TargetError struct {
+	Input  string // the text, as given
+	Reason string // what is wrong with it
+	// Suggestion is the target Input's command reaches, when Input is one of
+	// the ssh commands upterm prints for guests; "" for anything else. It
+	// parses as a target.
+	Suggestion string
+}
+
+func (e *TargetError) Error() string {
+	return fmt.Sprintf("%v %q: %s", ErrNotATarget, e.Input, e.Reason)
+}
+
+// Is reports a match with ErrNotATarget.
+func (e *TargetError) Is(target error) bool { return target == ErrNotATarget }
 
 // defaultPorts maps each scheme a target may carry to its default port. A
 // scheme absent here is not a join scheme.
@@ -32,9 +51,18 @@ type Target struct {
 // ParseTarget reads scheme://USER@HOST[:PORT][/] or the bare USER@HOST[:PORT],
 // which means ssh. USER is the session ID, or SESSION:NODE when the relay is
 // one of several and the connect string names the node that holds the session.
-// An IPv6 literal must be bracketed, as it is in a URL. The error wraps
-// ErrNotATarget.
+// An IPv6 literal must be bracketed, as it is in a URL. The error is a
+// *TargetError, which wraps ErrNotATarget.
 func ParseTarget(s string) (Target, error) {
+	// Nothing a target is made of is whitespace or a control character, so
+	// text that has one is not a target, whatever the parts around it look
+	// like: "ssh abc@relay.test" would otherwise be the session "ssh abc".
+	if strings.ContainsFunc(s, isSpaceOrControl) {
+		err := notATarget(s, "whitespace or a control character")
+		err.Suggestion = suggestTarget(s)
+		return Target{}, err
+	}
+
 	if strings.Contains(s, "://") {
 		return parseURLTarget(s)
 	}
@@ -143,8 +171,150 @@ func normalizeHost(hostPort, defaultPort string) (string, error) {
 	return net.JoinHostPort(host, strconv.FormatUint(n, 10)), nil
 }
 
-func notATarget(in, why string) error {
-	return fmt.Errorf("%w %q: %s", ErrNotATarget, in, why)
+func notATarget(in, why string) *TargetError {
+	return &TargetError{Input: in, Reason: why}
+}
+
+func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
+
+// suggestTarget reads s as one of the ssh commands upterm prints for guests
+// and returns the target it reaches, or "" for any other text. It takes only
+// those shapes, and not a likeness of them, so that a suggestion is never a
+// guess:
+//
+//	ssh ID@HOST
+//	ssh ID@HOST -p PORT       (or ssh -p PORT ID@HOST)
+//	ssh -o ProxyCommand=... ID@HOST:PORT
+//
+// The last reaches the relay by `upterm proxy URL`, and that URL, not the last
+// field, is the target: read as a target, the last field would be an ssh one,
+// and the session is not reached by ssh.
+func suggestTarget(s string) string {
+	// A word ends at a space and at no other whitespace, as in the commands
+	// upterm prints.
+	if strings.ContainsFunc(s, func(r rune) bool { return r != ' ' && isSpaceOrControl(r) }) {
+		return ""
+	}
+	words, ok := shellWords(s)
+	if !ok || len(words) < 2 || words[0] != "ssh" {
+		return ""
+	}
+
+	switch args := words[1:]; {
+	case len(args) == 1:
+		return sshTarget(args[0], "")
+	case len(args) == 3 && args[1] == "-p":
+		return sshTarget(args[0], args[2])
+	case len(args) == 3 && args[0] == "-p":
+		return sshTarget(args[2], args[1])
+	case len(args) == 3 && args[0] == "-o" && strings.HasPrefix(args[1], "ProxyCommand="):
+		// args[2] is the ssh address the proxied connection is for, which the
+		// proxy's URL already says.
+		return proxyTarget(strings.TrimPrefix(args[1], "ProxyCommand="))
+	}
+	return ""
+}
+
+// sshTarget is the target of `ssh USER@HOST [-p PORT]`, or "" if there is none.
+func sshTarget(userHost, port string) string {
+	i := strings.LastIndex(userHost, "@")
+	// ssh would also take an ssh:// URL here, which upterm doesn't print.
+	if i < 0 || strings.Contains(userHost, "://") {
+		return ""
+	}
+	user, host := userHost[:i], userHost[i+1:]
+	// upterm prints an IPv6 address as ssh takes it, bare, and a target needs
+	// its brackets.
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	target := user + "@" + host
+	if port != "" {
+		target += ":" + port
+	}
+	return targetOf(target, "ssh")
+}
+
+// proxyTarget is the target of a ProxyCommand that runs `upterm proxy URL`, or
+// "" if it runs anything else. upterm doubles each % in the URL, because ssh
+// reads %% as one before it hands the command to a shell, and quotes the URL
+// for that shell. The command arrives here as ssh has it after the guest's own
+// shell is done with it, so those two layers are undone in ssh's order.
+func proxyTarget(command string) string {
+	if strings.Contains(strings.ReplaceAll(command, "%%", ""), "%") {
+		// A token ssh would expand to something else.
+		return ""
+	}
+	words, ok := shellWords(strings.ReplaceAll(command, "%%", "%"))
+	if !ok || len(words) != 3 || words[0] != "upterm" || words[1] != "proxy" {
+		return ""
+	}
+	return targetOf(words[2], "ws", "wss")
+}
+
+// targetOf returns s if it parses as a target with one of schemes, and "" if
+// it doesn't.
+func targetOf(s string, schemes ...string) string {
+	// ParseTarget would look for a command in text with a space in it.
+	if strings.ContainsFunc(s, isSpaceOrControl) {
+		return ""
+	}
+	t, err := ParseTarget(s)
+	if err != nil || !slices.Contains(schemes, t.Scheme) {
+		return ""
+	}
+	return s
+}
+
+// shellWords splits s into words as a POSIX shell would, for the quoting
+// upterm writes: single quotes, and a backslash outside them, which is how a
+// single quote inside them is written. It reports false for text a shell would
+// expand or read as more than words, rather than reading it its own way.
+func shellWords(s string) ([]string, bool) {
+	var (
+		words  []string
+		word   strings.Builder
+		inWord bool // an empty word, as in '', is still a word
+		quoted bool
+	)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quoted:
+			if c == '\'' {
+				quoted = false
+			} else {
+				word.WriteByte(c)
+			}
+		case c == '\'':
+			quoted, inWord = true, true
+		case c == '\\':
+			if i+1 == len(s) {
+				return nil, false
+			}
+			i++
+			word.WriteByte(s[i])
+			inWord = true
+		case c == ' ':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		case strings.IndexByte("\"$`;&|<>()*?[]{}~!#", c) >= 0:
+			return nil, false
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	if quoted {
+		return nil, false
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words, true
 }
 
 // SessionID is the part of User before its first colon.
