@@ -734,6 +734,18 @@ var oscStringCases = []filterCase{
 		in:   "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b[?2026$p\x1b[c\x1b]11;?\x07prompt",
 		want: "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b\x18prompt"},
 	{name: "a non-query after a lone ESC in a wrapper closes it", in: "\x1bPtmux;\x1b[31mX", want: "\x1bPtmux;\x1b[31mX"},
+	// A DEL or a high byte after a wrapper's ESC is dropped, as after any ESC,
+	// so nothing that goes out says the wrapper has ended. The close goes out
+	// at once instead, as before a C0. Owed until later, it left a joiner's
+	// filter inside the wrapper, where it took the held ESC for one escaping
+	// the next byte.
+	{name: "a DEL after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\x7f\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
+	{name: "a high byte after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\xa0\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
+	{name: "a DEL after a wrapper's ESC, then a doubled ESC", in: "\x1bPtmux;\x1b\x7f\x1b\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
+	{name: "a DEL after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\x7f[1mX", want: "\x1bPtmux;\x1b\x18\x1b[1mX"},
+	{name: "a high byte after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\xff[1mX", want: "\x1bPtmux;\x1b\x18\x1b[1mX"},
+	{name: "a C0 after a wrapper's ESC settles the close first", in: "\x1bPtmux;\x1b\r[6nX", want: "\x1bPtmux;\x1b\x18\rX"},
+	{name: "an ESC sequence with an intermediate ends a wrapper", in: "\x1bPtmux;\x1b(BX", want: "\x1bPtmux;\x1b(BX"},
 	{name: "CAN ends a passed DCS", in: "\x1bPq#0\x18X", want: "\x1bPq#0\x18X"},
 	{name: "SUB ends a passed DCS", in: "\x1bPq#0\x1aX", want: "\x1bPq#0\x1aX"},
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},

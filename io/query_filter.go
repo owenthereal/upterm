@@ -45,7 +45,8 @@ type TerminalQueryFilter struct {
 	// closeOwed is set while the terminal downstream is still inside a
 	// sequence the filter emitted unfinished, which the input has ended with
 	// the ESC that starts seqBuf. That ESC is held, so the terminal hasn't
-	// seen the end yet; see endPassAtESC and settleClose.
+	// seen the end yet. endPassAtESC and wrapperByte set it; settleClose
+	// settles it with ESC CAN, and flushAndReset when the held ESC goes out.
 	closeOwed bool
 
 	// wrapAt is how much of tmuxPrefix a DCS's first bytes have matched, in
@@ -538,6 +539,16 @@ func (f *TerminalQueryFilter) wrapperByte(b byte) {
 	default:
 		f.closeOwed = true
 		f.state = qfStateEsc
+		if b == 0x7f || b >= 0xa0 {
+			// The ESC drops the byte, as any ESC drops a DEL or a high byte
+			// (headControl), so nothing that goes out says the wrapper has
+			// ended, and a joiner's filter, still in the wrapper, would take
+			// the held ESC for one escaping the next byte. So the close goes
+			// out now, as before a C0, and the ESC stays held with nothing
+			// owed.
+			f.settleClose()
+			return
+		}
 		f.escByte(b)
 	}
 }
