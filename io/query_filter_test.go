@@ -699,6 +699,11 @@ var oscStringCases = []filterCase{
 	{name: "ignored CRs in the number trip the number guard", in: "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b[6nhello",
 		want: "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b\x18hello"},
 	{name: "ignored CRs in the payload don't", in: "\x1b]0;" + strings.Repeat("\r", 9) + "t\x1b[6nhello", want: "hello"},
+	// Found by the fuzz test: CRs between the ESC and the ']' are executed
+	// before the OSC begins, so they go out at once and the OSC holds only
+	// "ESC ]". Held, it is dropped when it ends at the ESC.
+	{name: "CRs before the ] aren't held with the OSC", in: "\x1b" + strings.Repeat("\r", 7) + "]\x1b\x18",
+		want: strings.Repeat("\r", 7) + "\x1b\x18"},
 	{name: "cancel with an obligation drops the held OSC (CAN)", in: "\x1bPq\x07\x1b]4;0;\x18;1;?\x07",
 		want: "\x1bPq\x07\x1b\x18;1;?\x07", kitty: true},
 	{name: "cancel with an obligation drops the held OSC (SUB)", in: "\x1bPq\x07\x1b]4;0;\x1a;1;?\x07",
@@ -714,6 +719,10 @@ var oscStringCases = []filterCase{
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
 	{name: "BEL doesn't end an APC", in: "\x1b_Gx\x07Y\x1b\\", want: "\x1b_Gx\x07Y\x1b\\"},
 	{name: "PM and SOS pass", in: "\x1b^privacy\x1b\\\x1bXsos\x1b\\", want: "\x1b^privacy\x1b\\\x1bXsos\x1b\\"},
+	// Found by the fuzz test: the DEL after the ESC that ends a passed string
+	// is dropped, as after any ESC, and ESC \ then passes as the close. The
+	// string ended at the ESC either way.
+	{name: "DEL after a passed string's ESC", in: "\x1bX0\x1b\x7f\\", want: "\x1bX0\x1b\\"},
 }
 
 func init() {
@@ -758,15 +767,21 @@ func continuationCheck(t *testing.T, in string) {
 	t.Helper()
 	whole := filterAll(in)
 	for k := 0; k <= len(in); k++ {
-		var outA, outB bytes.Buffer
-		a := NewTerminalQueryFilter(&outA)
-		_, _ = a.Write([]byte(in[:k]))
-		b := NewTerminalQueryFilter(&outB)
-		_, _ = b.Write(outA.Bytes())
-		_, _ = b.Write(a.Pending())
-		_, _ = b.Write([]byte(in[k:]))
-		require.Equal(t, whole, outB.String(), "split at %d of %q", k, in)
+		require.Equal(t, whole, continuedAt(in, k), "split at %d of %q", k, in)
 	}
+}
+
+// continuedAt is continuationCheck's joiner at the one boundary k: it returns
+// what filter B emitted. The fuzz test checks it at a boundary of its choice.
+func continuedAt(in string, k int) string {
+	var outA, outB bytes.Buffer
+	a := NewTerminalQueryFilter(&outA)
+	_, _ = a.Write([]byte(in[:k]))
+	b := NewTerminalQueryFilter(&outB)
+	_, _ = b.Write(outA.Bytes())
+	_, _ = b.Write(a.Pending())
+	_, _ = b.Write([]byte(in[k:]))
+	return outB.String()
 }
 
 func TestTerminalQueryFilter_ContinuesAtEveryBoundary(t *testing.T) {

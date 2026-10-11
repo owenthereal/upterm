@@ -79,7 +79,11 @@ type refEvent struct {
 
 	// Bookkeeping, used for policy decisions and never compared. Both count
 	// raw bytes, ignored control bytes included: dropping an ignored CR from
-	// a DCS header changes them without changing the terminal's effect.
+	// a DCS header changes them without changing the terminal's effect. A
+	// byte the escape state executes or ignores between the introducer's ESC
+	// and its second byte, such as a CR in ESC CR ], comes before the string
+	// begins and isn't counted: the filter forwards or drops it, never holds
+	// it.
 	held    int // strings: from the introducer through the payload
 	numHeld int // OSC: from the introducer up to, not including, the first ';' or the end
 }
@@ -378,12 +382,14 @@ type refParser struct {
 	params []byte
 	inter  []byte
 
-	str    refEvent // the string being collected: its kind and DCS header
-	data   []byte   // its payload so far
-	strAt  int      // offset of its introducer's ESC
-	semiAt int      // offset of an OSC's first ';', or -1
+	str     refEvent // the string being collected: its kind and DCS header
+	data    []byte   // its payload so far
+	strAt   int      // offset of its introducer's ESC
+	strSkip int      // bytes the escape state skipped between that ESC and the introducer's second byte
+	semiAt  int      // offset of an OSC's first ';', or -1
 
 	escAt   int // offset of the last ESC that entered the escape state
+	escSkip int // bytes the escape state has executed or ignored since escAt
 	stEvent int // index of a string event an ESC ended on the last byte, or -1
 
 	// refKitty and refTmux: an ESC inside a string whose next byte decides
@@ -483,7 +489,11 @@ func (p *refParser) apply(c byte, at int, t refTransition) {
 	if c == 0x1b && t.state == rsEscape {
 		// Every ESC restarts, ESC ESC included, though Ghostty runs no entry
 		// action for it: escape to escape isn't a change of state.
-		p.escAt = at
+		p.escAt, p.escSkip = at, 0
+	} else if p.state == rsEscape && t.state == rsEscape {
+		// A C0 the escape state executes, or a byte it ignores, comes before
+		// any sequence the ESC starts and is no part of it.
+		p.escSkip++
 	}
 	changed := t.state != p.state
 	if changed {
@@ -559,16 +569,22 @@ func (p *refParser) clear() {
 }
 
 func (p *refParser) beginString(kind refKind) {
-	p.str, p.data, p.strAt, p.semiAt = refEvent{kind: kind}, p.data[:0], p.escAt, -1
+	p.str, p.data, p.strAt, p.strSkip, p.semiAt = refEvent{kind: kind}, p.data[:0], p.escAt, p.escSkip, -1
+}
+
+// strHeld is how many raw bytes of the current string come before offset
+// end: from its introducer's ESC, less what the escape state skipped.
+func (p *refParser) strHeld(end int) int {
+	return end - p.strAt - p.strSkip
 }
 
 func (p *refParser) endString(c byte, at int) {
 	ev := p.str
-	ev.data, ev.end, ev.held = string(p.data), c, at-p.strAt
+	ev.data, ev.end, ev.held = string(p.data), c, p.strHeld(at)
 	if ev.kind == refOSC {
 		ev.numHeld = ev.held
 		if p.semiAt >= 0 {
-			ev.numHeld = p.semiAt - p.strAt
+			ev.numHeld = p.strHeld(p.semiAt)
 		}
 	}
 	p.events = append(p.events, ev)
@@ -740,9 +756,20 @@ func refNoEffect(ev refEvent) bool {
 	return false
 }
 
-// refSemantic is ev without its bookkeeping, which preservation never compares.
+// refSemantic is ev as a DEC terminal sees it, without its bookkeeping, which
+// preservation never compares.
+//
+// Ghostty ends a string at its ESC and never reads the byte after it: an OSC
+// gets the terminator ST whatever follows (osc.zig's Terminator), and a DCS,
+// APC, PM or SOS ends the same way on any exit. So a string ended by an ESC
+// that isn't ST is, to it, one ended by ST, and the bytes after the ESC are
+// compared as events of their own. end keeps the difference for rule 9's
+// policy, which refCheck reads before this: kitty keeps such a string open.
 func refSemantic(ev refEvent) refEvent {
 	ev.held, ev.numHeld = 0, 0
+	if ev.end == 0x1b {
+		ev.end = '\\'
+	}
 	return ev
 }
 
@@ -871,6 +898,13 @@ func TestRefParse_StringEnds(t *testing.T) {
 	require.Equal(t, "11;?", osc.data)
 	require.Equal(t, 7, osc.held)
 	require.Equal(t, 5, osc.numHeld)
+
+	// A CR before the ']' is executed by the escape state, before the OSC
+	// begins, so neither counts it, and a DEL there is ignored just the same.
+	osc = ev(refDEC, "\x1b\r\x7f]11;?\x07")[1]
+	require.Equal(t, "11;?", osc.data)
+	require.Equal(t, 6, osc.held)
+	require.Equal(t, 4, osc.numHeld)
 }
 
 func TestRefQuery_Families(t *testing.T) {
@@ -913,6 +947,8 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		{"\x1b(\rB", "\r\x1b(B\x18"},                                                  // C0 in an ESC-intermediate
 		{"\x1bPq\x07\x1b]4;0;\x18;1;?\x07", "\x1bPq\x07\x1b\x18;1;?\x07\x18"},         // cancel with an obligation
 		{"\x1b]10;?", "\x18"},                                                         // held query resolved by the CAN
+		{"\x1bX0\x1b\x7f\\", "\x1bX0\x1b\\\x18"},                                      // DEL after a string's ESC dropped: it ends at the ESC either way
+		{"\x1b]0;t\x1b\x7f\\", "\x1b\\\x18"},                                          // but an OSC that ESC ends is still held and dropped by policy
 		// Same events under DEC (the CRs are ignored), different holds: the
 		// first trips the 8-byte number guard and passes, the second stays
 		// held and is dropped. Only numHeld tells them apart.
