@@ -55,6 +55,19 @@ func (h *testHarness) deadlineInfo() deadlineSessionInfo {
 	return info
 }
 
+// endedInfo is deadlineInfo once the session's daemon has finished. An
+// attached terminal exits as soon as the command's status reaches it, while
+// the daemon is still tearing down, closing its tunnel among other things;
+// until it is done the record still says ready. Against a relay across the
+// internet that takes long enough to be seen. session wait returns once the
+// daemon is done.
+func (h *testHarness) endedInfo() deadlineSessionInfo {
+	h.t.Helper()
+	out, err := h.runCLI(15*time.Second, "session", "wait", h.name)
+	require.NoError(h.t, err, "%s", out)
+	return h.deadlineInfo()
+}
+
 func (h *testHarness) startDetachedDeadlineHost(flags []string, command ...string) {
 	h.t.Helper()
 	args := []string{"host", "--detach", "--accept", "--skip-host-key-check",
@@ -179,7 +192,7 @@ func TestAttachReportsJoinTimeoutWithoutClaimingCommandExit(t *testing.T) {
 	require.Contains(t, out, "upterm: session "+h.name+" ended (status 0)")
 	require.NotContains(t, out, "command exited")
 
-	ended := h.deadlineInfo()
+	ended := h.endedInfo()
 	require.Equal(t, "ended", ended.Status)
 	require.Equal(t, "join_timeout", ended.Reason)
 	require.Empty(t, ended.FirstGuestJoinedAt)
@@ -211,7 +224,7 @@ func TestForegroundJoinTimeoutWithoutGuestExitsZero(t *testing.T) {
 	status, err := os.ReadFile(statusFile)
 	require.NoError(t, err)
 	require.Equal(t, "0\n", string(status), "the foreground host must exit 0")
-	ended := h.deadlineInfo()
+	ended := h.endedInfo()
 	require.Equal(t, "ended", ended.Status)
 	require.Equal(t, "join_timeout", ended.Reason)
 	require.Empty(t, ended.FirstGuestJoinedAt, "the host's own attachment is not a guest")
