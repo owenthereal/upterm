@@ -326,3 +326,105 @@ func TestReadyCallbackReportsTheDerivedStatus(t *testing.T) {
 	require.True(t, rec.TunnelLostAt.Equal(lostAt))
 	require.True(t, rec.NextAttemptAt.Equal(lostAt.Add(time.Minute)))
 }
+
+// parkAfterEnding holds Run at the barrier after the ending write, so that a
+// read of the record during teardown is ordered after that write rather than
+// raced against it. The caller registers release as a cleanup after f.start,
+// as with parkAfterCommit.
+func parkAfterEnding(t *testing.T, f *joinTimeoutHost) (reached <-chan struct{}, release func()) {
+	t.Helper()
+	r, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(released) }) }
+	f.h.afterEndingPublish = func() {
+		close(r)
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Error("ending barrier not released")
+		}
+	}
+	return r, release
+}
+
+// From the moment teardown begins the record says ending, though Run has yet
+// to return. It used to say ready until then, with a connect string, for a
+// session whose command had already exited: a script that read it the moment
+// `upterm host` returned was told the session could be joined.
+func TestRecordSaysEndingOnceTeardownBegins(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	reached, release := parkAfterEnding(t, f)
+	f.start(t)
+	t.Cleanup(release)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+	f.finish(t, "0")
+	awaitJoinTimeoutSignal(t, reached, "teardown")
+	rec := f.record(t)
+	require.Equal(t, sessiondir.StatusEnding, rec.Status, "teardown has begun")
+	require.Equal(t, sessiondir.ReasonUnknown, rec.Reason, "and Run has not finished: no outcome is recorded yet")
+	require.Equal(t, sessiondir.StatusEnding, f.h.Status())
+
+	release()
+	require.NoError(t, f.result(t))
+	require.Equal(t, sessiondir.ReasonExited, f.record(t).Reason)
+}
+
+// isClosed reports whether teardown has closed the join state.
+func (s *joinState) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// Readiness can still be published once teardown has begun, for a command
+// that exits as it starts, and ending waits for it. Otherwise the ready write
+// would carry ending, and `upterm host --detach` would report a session it
+// started as ending, which action-upterm takes for a failed launch. The ready
+// write is held until teardown has begun, so the two overlap by construction:
+// ending must not be published while it is held, and must be once it is let
+// go.
+func TestEndingWaitsForTheReadyPublish(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	var joins *joinState
+	atReady, readyReleased := make(chan struct{}), make(chan struct{})
+	var readyOnce sync.Once
+	releaseReady := func() { readyOnce.Do(func() { close(readyReleased) }) }
+	f.h.beforeReadyPublish = func(*sessionState) {
+		joins = f.h.joins
+		close(atReady)
+		select {
+		case <-readyReleased:
+		case <-time.After(5 * time.Second):
+			t.Error("ready barrier not released")
+		}
+	}
+	called := make(chan string, 1)
+	f.h.SessionReadyCallback = func(status string) { called <- status }
+	reached, release := parkAfterEnding(t, f)
+	f.start(t)
+	t.Cleanup(release)
+	t.Cleanup(releaseReady)
+	awaitJoinTimeoutSignal(t, atReady, "the ready write")
+
+	f.finish(t, "0")
+	require.Eventually(t, joins.isClosed, 5*time.Second, time.Millisecond, "teardown did not begin")
+	select {
+	case <-reached:
+		t.Fatal("ending was published with the ready write still to come")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseReady()
+	select {
+	case status := <-called:
+		require.Equal(t, sessiondir.StatusReady, status, "the ready write went first")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the readiness callback was not called")
+	}
+	awaitJoinTimeoutSignal(t, reached, "the ending write")
+	require.Equal(t, sessiondir.StatusEnding, f.record(t).Status)
+
+	release()
+	require.NoError(t, f.result(t))
+}

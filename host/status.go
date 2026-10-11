@@ -8,8 +8,9 @@ import (
 )
 
 // phase is how far the host process has got. It only moves forward, and only
-// Run writes it: running once the session is ready to serve, ending once Run
-// is on its way out.
+// Run writes it: running once the session is ready to serve, ending once its
+// teardown has begun, or at the final write for a run that returned before it
+// had a teardown.
 type phase int
 
 // The zero value is the earliest phase, so a sessionState needs no setup.
