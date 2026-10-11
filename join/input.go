@@ -30,17 +30,24 @@ const (
 // join's: Enter attempts at once, Ctrl-C stops, the escape sequence leaves,
 // and everything else is dropped. So nothing typed while join had the
 // keyboard ever reaches a session, and a Ctrl-C before a session is ready
-// stops join instead of going to a shell that isn't reading yet.
+// stops join instead of going to a shell that isn't reading yet. One that
+// join hasn't acted on by the time the session's view is activated is
+// dropped instead (see take): it never stops a session the guest has been
+// told is ready.
 type input struct {
 	r      io.Reader
 	escape byte
-	keyc   chan waitKey
+	keyc   chan key
 	once   sync.Once
 
 	// handing, when non-nil (tests only), receives once each time the reader
 	// starts handing a chunk to a view, before the hand-off completes. It is
 	// set before start.
 	handing chan struct{}
+	// controlling, when non-nil (tests only), is called each time the reader
+	// has found that a chunk is join's, before it reads a key from it. It is
+	// set before start.
+	controlling func()
 	// exited, when non-nil (tests only), closes as the reader returns. It is
 	// set before start.
 	exited chan struct{}
@@ -67,13 +74,8 @@ type input struct {
 // or from the close of the view that had them, until a view is activated.
 // Each begins at the start of a line with nothing pending, so that nothing
 // typed before a session, half an escape sequence say, combines with what is
-// typed after it.
+// typed after it. A key typed in one acts only while it lasts (see take).
 type controls struct {
-	// over closes when a view is activated. A key join hasn't taken by then
-	// is dropped, with the rest of its chunk: join has moved on, and those
-	// keys were never the session's.
-	over chan struct{}
-
 	// The reader's alone.
 	filter *attach.EscapeFilter
 	// cr says the last byte was '\r', so that a '\n' straight after it, as a
@@ -83,7 +85,17 @@ type controls struct {
 }
 
 func newControls(escape byte) *controls {
-	return &controls{over: make(chan struct{}), filter: attach.NewEscapeFilter(escape, false)}
+	return &controls{filter: attach.NewEscapeFilter(escape, false)}
+}
+
+// key is one of join's keys, as the reader hands it over.
+type key struct {
+	waitKey
+	// c is the stretch of time it was typed in.
+	c *controls
+	// acted learns whether it acted. Buffered, so that take never waits on
+	// the reader.
+	acted chan bool
 }
 
 // newInput returns the reader of r. escape is the escape byte that, at the
@@ -92,7 +104,7 @@ func newInput(r io.Reader, escape byte) *input {
 	return &input{
 		r:        r,
 		escape:   escape,
-		keyc:     make(chan waitKey),
+		keyc:     make(chan key),
 		controls: newControls(escape),
 		ended:    make(chan struct{}),
 		stopped:  make(chan struct{}),
@@ -145,12 +157,29 @@ func (in *input) session() *view {
 	return v
 }
 
-// keys delivers join's keys whenever no view is active: during waits,
-// attempts, setup and the Joined line. A key is delivered only while that
-// lasts. One not taken before a view is activated is dropped, so that a key
-// pressed before a session never acts on a wait after it.
-func (in *input) keys() <-chan waitKey {
+// keys delivers join's keys, typed while no view was active: during waits,
+// attempts, setup and the Joined line. Each is to be given to take, which has
+// it act only if no view has been activated since it was typed. So a key
+// acts before a session's view is activated or not at all, however late it
+// is taken: one pressed before a session was ready never acts on it once it
+// is, nor on a wait after it. The reader waits for take before it reads on,
+// so whatever receives a key takes it.
+func (in *input) keys() <-chan key {
 	return in.keyc
+}
+
+// take runs act on k, unless a view has been activated since k was typed:
+// then k is dropped, and the rest of its chunk with it. act runs under mu,
+// which activate takes too, so a key acts before a view is activated or not
+// at all. act must not block, nor call into in.
+func (in *input) take(k key, act func(waitKey)) {
+	in.mu.Lock()
+	ok := in.current == nil && in.controls == k.c
+	if ok {
+		act(k.waitKey)
+	}
+	in.mu.Unlock()
+	k.acted <- ok
 }
 
 // read is the reader goroutine: the only caller of r.Read.
@@ -189,6 +218,9 @@ func (in *input) route(chunk []byte) {
 		in.hand(v, bytes.Clone(chunk))
 		return
 	}
+	if in.controlling != nil {
+		in.controlling()
+	}
 	in.control(c, chunk)
 }
 
@@ -209,7 +241,9 @@ func (in *input) hand(v *view, chunk []byte) {
 // control reads join's keys from chunk. The keys before an escape sequence
 // that leaves count first, as they would in a read of their own, so that how
 // the reads happen to split what was typed never changes what it does; the
-// filter has dropped whatever followed the sequence.
+// filter has dropped whatever followed the sequence. Once a key doesn't act,
+// the rest is dropped: a view has been activated since it was typed, or the
+// reader is stopped.
 func (in *input) control(c *controls, chunk []byte) {
 	out, action := c.filter.Feed(chunk)
 	for _, b := range out {
@@ -230,14 +264,17 @@ func (in *input) control(c *controls, chunk []byte) {
 	}
 }
 
-// send delivers k to join, unless a view is activated, or the reader is
-// stopped, first. It reports whether k was delivered.
+// send hands k, typed in c, to join, and reports whether it acted: false if
+// a view was activated before join took it, or if the reader was stopped
+// before join had it. Whether k acts is decided only as join takes it (see
+// take): a view activated after any check made here would find k acting on
+// its session. Join takes its keys as long as the run lasts, so waiting for
+// it never holds the reader for long.
 func (in *input) send(c *controls, k waitKey) bool {
+	acted := make(chan bool, 1)
 	select {
-	case in.keyc <- k:
-		return true
-	case <-c.over:
-		return false
+	case in.keyc <- key{waitKey: k, c: c, acted: acted}:
+		return <-acted
 	case <-in.stopped:
 		return false
 	}
@@ -247,7 +284,9 @@ func (in *input) send(c *controls, k waitKey) bool {
 // It sticks: every Read from then on returns it at once, active or not, so
 // that no later session waits for input that is gone. And join gets keyLeave
 // as soon as no view is active: at once if none is, or else when the active
-// view closes, whether or not its Read returned the error.
+// view closes, whether or not its Read returned the error. A keyLeave that a
+// view's activation drops before join acts on it comes again as that view
+// closes.
 //
 // A Read that returned it proves nothing about the session. Terminal reads
 // Stdin through a goroutine that outlives a Read its ctx gave up on, and a
@@ -273,8 +312,8 @@ func (in *input) end(err error) {
 		} else if in.send(c, keyLeave) || in.isStopped() {
 			return
 		}
-		// v closed, or a view was activated before join took its keyLeave:
-		// see who has the keyboard now.
+		// v closed, or a view was activated before join acted on its
+		// keyLeave: see who has the keyboard now.
 		in.mu.Lock()
 	}
 }
@@ -303,9 +342,9 @@ func (v *view) activate() {
 		return
 	}
 	// Only the last view can be open, so nothing else is active: the keys
-	// are join's, and stop being so now.
+	// are join's, and stop being so now. A key typed before acts no more,
+	// however late join takes it (see take).
 	in.current = v
-	close(in.controls.over)
 }
 
 // Read blocks until an active v has a chunk, or v is closed (io.EOF). A p

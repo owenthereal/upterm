@@ -330,11 +330,12 @@ func (r *runner) close() {
 	r.cancel()
 }
 
-// readKeys takes join's keys for the whole run. input delivers them only
-// while no session's view is active, so reading them all the time is reading
-// them in every phase that has no session: waits, each step of an attempt,
-// the Joined line, and the gap after a session ends. Before TakeTerminal
-// nothing reads Input, and none arrive.
+// readKeys takes join's keys for the whole run. input delivers only the keys
+// typed while no session's view is active, and has one act only if no view
+// has been activated since, so reading them all the time is reading them in
+// every phase that has no session: waits, each step of an attempt, the
+// Joined line, and the gap after a session ends. Before TakeTerminal nothing
+// reads Input, and none arrive.
 //
 // A stop only records its cause and cancels runCtx: whatever the loop is
 // blocked on is bound to it, and the loop returns once the attempt's
@@ -344,13 +345,15 @@ func (r *runner) readKeys() {
 	for {
 		select {
 		case k := <-r.in.keys():
-			r.key(k)
+			r.in.take(k, r.key)
 		case <-r.quit:
 			return
 		}
 	}
 }
 
+// key acts on one of join's keys. It runs under input's lock (see take), so
+// nothing in it may block.
 func (r *runner) key(k waitKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
