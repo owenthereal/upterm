@@ -180,7 +180,7 @@ type Event struct {
 	Err    error         // Lost, Waiting: the error behind Why, if any
 	Since  time.Time     // Waiting: when this wait began, on the wall clock
 	Next   time.Time     // Waiting: when the next attempt is due, on the wall clock
-	Long   bool          // Waiting: the wait has gone on long enough to slow down
+	Long   bool          // Waiting: this wait has lasted Timing.LongAfter
 	First  bool          // Waiting: no session has been ready yet
 }
 

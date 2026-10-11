@@ -42,6 +42,23 @@ func TestAFlappingSessionBacksOff(t *testing.T) {
 	require.Equal(t, time.Second, first)
 }
 
+func TestABriefRejoinKeepsTheSlowTier(t *testing.T) {
+	s := newSchedule(Timing{Jitter: func(max time.Duration) time.Duration { return max }})
+	_, long := s.next(5 * time.Minute) // an outage long enough for the slow tier
+	require.True(t, long)
+
+	s.ready(time.Second) // the session came back for a second, then dropped
+	w, long := s.next(0)
+	require.Equal(t, 90*time.Second, w, "a session up for a second put the guest back in the fast tier")
+	// Long is the wait's own: this one has only just begun.
+	require.False(t, long)
+
+	s.ready(time.Minute) // one that stayed up for ResetAfter
+	w, long = s.next(0)
+	require.Equal(t, time.Second, w)
+	require.False(t, long)
+}
+
 func TestZeroAndNegativeFieldsTakeTheirDefaults(t *testing.T) {
 	got := Timing{FastBase: -time.Second, SlowWait: 7 * time.Second}.orDefault()
 

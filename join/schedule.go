@@ -18,9 +18,12 @@ type Timing struct {
 	FastBase, FastCap time.Duration
 
 	// LongAfter is how long a wait has lasted when the slow tier begins, and
-	// when Waiting says so. 5 min. The wait is measured on the monotonic
-	// clock, as the deadlines are, and not on Wall: a wall clock that is
-	// stepped, or that jumps when a laptop wakes, leaves it where it was.
+	// when Waiting says so. 5 min. The slow tier lasts until the schedule
+	// starts over (see ResetAfter), so a session that comes back only briefly
+	// doesn't put the guest back in the fast tier; Waiting's Long is the
+	// current wait's alone. The wait is measured on the monotonic clock, as
+	// the deadlines are, and not on Wall: a wall clock that is stepped, or
+	// that jumps when a laptop wakes, leaves it where it was.
 	LongAfter time.Duration
 
 	// SlowWait and SlowJitter are what separates attempts in the slow tier:
@@ -28,8 +31,9 @@ type Timing struct {
 	SlowWait, SlowJitter time.Duration
 
 	// ResetAfter is how long a session has to have been ready for the next
-	// drop to start the schedule over. A session that drops sooner leaves the
-	// schedule where it was, so that a host that keeps dropping a guest is
+	// drop to start the schedule over, in the fast tier at FastBase. A
+	// session that drops sooner leaves the schedule where it was, in the slow
+	// tier if it had got there, so that a host that keeps dropping a guest is
 	// not rejoined every second. 60 s.
 	ResetAfter time.Duration
 
@@ -97,22 +101,29 @@ func uniformJitter(max time.Duration) time.Duration {
 // its own: the caller says how long the wait has lasted and how long a session
 // was ready, so the same figures drive it in a test and in a run.
 type schedule struct {
-	t Timing
-	n int // the waits so far since the schedule last restarted
+	t    Timing
+	n    int  // the waits so far since the schedule last restarted
+	slow bool // a wait has lasted LongAfter since then
 }
 
 func newSchedule(t Timing) *schedule { return &schedule{t: t.orDefault()} }
 
 // next is the wait before the next attempt, for a wait that has lasted elapsed
-// so far; long reports that it has lasted long enough to be in the slow tier.
+// so far; long reports that this wait has lasted LongAfter.
+//
+// Once a wait has, the waits after it stay in the slow tier until a session
+// has been ready for ResetAfter: an outage that a session interrupts for a
+// second is still the same outage.
 //
 // In the fast tier the n-th wait is jittered below min(FastCap, FastBase·2ⁿ).
 // n keeps counting once the bound has reached FastCap, so that a guest who
 // connects and drops again comes back to a wait that is still at the cap.
 func (s *schedule) next(elapsed time.Duration) (wait time.Duration, long bool) {
-	if elapsed >= s.t.LongAfter {
+	long = elapsed >= s.t.LongAfter
+	s.slow = s.slow || long
+	if s.slow {
 		s.n++
-		return s.t.SlowWait + s.t.Jitter(s.t.SlowJitter), true
+		return s.t.SlowWait + s.t.Jitter(s.t.SlowJitter), long
 	}
 	bound := s.t.FastBase
 	for i := 0; i < s.n && bound < s.t.FastCap; i++ {
@@ -124,11 +135,12 @@ func (s *schedule) next(elapsed time.Duration) (wait time.Duration, long bool) {
 
 // ready says that a session ended after being ready for d. Only a session that
 // stayed up for ResetAfter restarts the schedule. One that drops sooner leaves
-// n where it was, so the bound of the wait after it is no lower than the last
-// one's; the wait itself is jittered below its bound, and may be shorter.
+// n, and the slow tier, where they were, so the bound of the wait after it is
+// no lower than the last one's; the wait itself is jittered below its bound,
+// and may be shorter.
 func (s *schedule) ready(d time.Duration) {
 	if d >= s.t.ResetAfter {
-		s.n = 0
+		s.n, s.slow = 0, false
 	}
 }
 
