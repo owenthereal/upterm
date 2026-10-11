@@ -63,9 +63,12 @@ func TestEveryOutcomeRow(t *testing.T) {
 	}
 	t.Run("~. leaves", func(t *testing.T) {
 		pr, pw := io.Pipe()
-		rec := &recorder{}
-		done := runJoinAsync(t, context.Background(), config(t, newFakeRelay(t, relayKnobs{}), withInput(pr), withEvents(rec)))
-		require.Equal(t, Joined, recv(t, rec.held()).Kind)
+		out := &syncSink{}
+		done := runJoinAsync(t, context.Background(), config(t, newFakeRelay(t, relayKnobs{output: "READY"}), withInput(pr), withStdout(out)))
+		// The session's output reaches the terminal only once the session has
+		// the keyboard, so what is typed from then on is the session's. Typed
+		// sooner, it could be join's, which takes keys only until then.
+		require.Eventually(t, func() bool { return strings.Contains(out.String(), "READY") }, testTimeout, time.Millisecond)
 		press(pw, "\r~.")
 		require.Equal(t, Left, recv(t, done).Kind)
 	})
