@@ -27,7 +27,11 @@ import (
 //   - The C1 "anywhere" transitions (0x80–0x9F) aren't modelled. In UTF-8
 //     output those bytes are continuation bytes far more often than
 //     introducers, so 0x80–0xFF print in ground and are payload in strings.
-//     The fuzz generator never produces 0x80–0x9F.
+//     The fuzz generator never produces 0x80–0x9F. It produces 0xA0–0xFF as
+//     they are, which Ghostty's table ignores in an ESC or CSI head, as here,
+//     and in an APC, PM or SOS, where this model keeps them as payload. A
+//     filter passes a string's payload as it came, so keeping them there
+//     only holds it to more.
 //   - Ghostty's handler-level limits aren't modelled: it drops a CSI with ':'
 //     separators unless its final byte is 'm', a CSI or DCS with more than 24
 //     parameters, intermediates past four, and an OSC its own grammar doesn't

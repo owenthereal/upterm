@@ -21,18 +21,19 @@ import (
 const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!" +
 	"cnpqtmgSuxwvy|RZBhlHJG\x07\x18\x1a\r\n\x7fa"
 
-// refDomainByte maps b onto refAlphabet. A byte of the alphabet is itself.
-// Any other ASCII byte becomes the alphabet's byte of its class in the DEC
-// grammar, which every state parses as it would have parsed b, and which no
-// family tells apart from b: a C0 becomes CR, an intermediate SP, and a final
-// byte 'a'. So a seed whose text has letters outside the alphabet keeps its
-// structure, and its queries stay queries. Bytes 0x80–0xFF are
+// refDomainByte maps b into the fuzz domain: refAlphabet and the bytes
+// 0xA0–0xFF. A byte of either is itself, so UTF-8 in text and in an OSC, and
+// the high bytes a terminal ignores inside an ESC or CSI head, are fuzzed as
+// they come. Any other ASCII byte becomes the alphabet's byte of its class in
+// the DEC grammar, which every state parses as it would have parsed b, and
+// which no family tells apart from b: a C0 becomes CR, an intermediate SP, and
+// a final byte 'a'. So a seed whose text has letters outside the alphabet
+// keeps its structure, and its queries stay queries. Bytes 0x80–0x9F are
 // outside the domain (C1 introducers aren't covered) and no class stands for
-// them, so they are spread over the whole alphabet instead, which keeps a
-// fuzzer's random bytes reaching all of it.
+// them, so they are spread over the alphabet instead.
 func refDomainByte(b byte) byte {
 	switch {
-	case strings.IndexByte(refAlphabet, b) >= 0:
+	case strings.IndexByte(refAlphabet, b) >= 0, b >= 0xa0:
 		return b
 	case b >= 0x80:
 		return refAlphabet[int(b-0x80)%len(refAlphabet)]
@@ -46,7 +47,7 @@ func refDomainByte(b byte) byte {
 
 // refGenerate maps a fuzzer's bytes onto the domain spec test 12 fuzzes: the
 // inputs outside "Not covered", on which the filter has to keep every
-// property. Each byte is mapped onto refAlphabet (refDomainByte), then cut --
+// property. Each byte is mapped into the domain (refDomainByte), then cut --
 // left out, with the bytes after it still taken -- if it would take the input
 // out of the domain:
 //   - a byte the filter would hold past a bound: past 8 bytes of an ESC
@@ -118,16 +119,16 @@ func (p *refParser) wraps(c byte) bool {
 
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
-// refAlphabet, it holds no tmux wrapper, and no sequence in it passes its
-// bound; the rows that do are the five named below, which pin the bounds
-// themselves. refGenerate has to give every such row back unchanged.
+// refAlphabet or 0xA0–0xFF, it holds no tmux wrapper, and no sequence in it
+// passes its bound; the rows that do are the five named below, which pin the
+// bounds themselves. refGenerate has to give every such row back unchanged.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
 // "a" + query + "b". refDomainByte maps that text within its class, so the
 // caps must cut nothing from those either, and the seed reaches the checks
 // with the row's structure. The over-bound and wrapper rows must be cut. Rows
-// with a byte from 0x80 to 0xFF are left out: their high bytes map anywhere in
-// the alphabet. Every row out of the domain is pinned byte for byte by the
+// with a C1 byte, 0x80 to 0x9F, are left out: those map anywhere in the
+// alphabet. Every row out of the domain is pinned byte for byte by the
 // filterCases tests.
 func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	overBound := []string{
@@ -137,27 +138,32 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		"over-bound title closed with ESC CAN",
 		"ignored CRs in the number trip the number guard",
 	}
-	identity := 0
+	identity, high := 0, 0
 	for _, c := range filterCases {
 		mapped := []byte(c.in)
-		high := false
+		c1, upper := false, false
 		for i, b := range mapped {
-			high = high || b >= 0x80
+			c1 = c1 || b >= 0x80 && b < 0xa0
+			upper = upper || b >= 0xa0
 			mapped[i] = refDomainByte(b)
 		}
 		got := string(refGenerate([]byte(c.in)))
 		switch {
 		case slices.Contains(overBound, c.name) || strings.Contains(c.in, "tmux;"):
 			require.NotEqual(t, string(mapped), got, "%s: out of the domain, so refGenerate cuts it", c.name)
-		case high:
+		case c1:
 		default:
 			require.Equal(t, string(mapped), got, "%s: no sequence past its bound, so nothing is cut", c.name)
 			if got == c.in {
 				identity++
+				if upper {
+					high++
+				}
 			}
 		}
 	}
 	require.NotZero(t, identity, "some rows are in the domain byte for byte")
+	require.NotZero(t, high, "and some of those have a byte from 0xA0 to 0xFF")
 }
 
 // FuzzTerminalQueryFilter is spec test 12. Whatever refGenerate makes of the
