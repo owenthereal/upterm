@@ -290,9 +290,10 @@ func (f *TerminalQueryFilter) escByte(b byte) {
 	}
 	switch {
 	case b >= 0x80:
-		// A byte of 0x80 or more, which the design leaves uncovered, gives
-		// the head up as it does a CSI's: what is held goes out, and the rest
-		// passes to its final byte.
+		// 0x80–0x9F, the 8-bit C1 controls the design leaves uncovered (in
+		// UTF-8 they are continuation bytes far more often), give the head up
+		// as they do a CSI's: what is held goes out, and the rest passes to
+		// its final byte. 0xA0–0xFF never get here; headControl drops them.
 		f.passFrom(b, qfStateEscOverBound)
 	case b <= 0x2f:
 		// An intermediate, which a terminal collects until the final byte.
@@ -328,8 +329,8 @@ func (f *TerminalQueryFilter) csiByte(b byte) {
 		// Out of order, the CSI puts a terminal in CSI-ignore, which
 		// dispatches nothing, so it is no query: what is held goes out, and
 		// the rest passes to the final byte, which CSI-ignore still waits
-		// for. A byte of 0x80 or more, which the design leaves uncovered, is
-		// given up on the same way.
+		// for. A byte of 0x80–0x9F, a C1 control the design leaves
+		// uncovered, gives the head up the same way.
 		f.passFrom(b, qfStateCSIIgnore)
 	case b <= 0x2f:
 		f.hold(b, qfStateCSIInter, maxCSIHeld, qfStateCSIOverBound)
@@ -368,9 +369,12 @@ func (f *TerminalQueryFilter) headControl(b byte) bool {
 		f.drop()
 		f.seqBuf = append(f.seqBuf, b)
 		f.state = qfStateEsc
-	case b == 0x7f:
+	case b == 0x7f, b >= 0xa0:
 		// The terminal ignores DEL here, so it is dropped. It is never held,
-		// so it doesn't count toward the head's bound either.
+		// so it doesn't count toward the head's bound either. Ghostty's parse
+		// table ignores 0xA0–0xFF in these states just the same, so they are
+		// dropped too (Owen, 2026-10-11). Giving the head up on one instead
+		// let "ESC 0xA0 [6n" through, which the terminal reads as ESC [6n.
 	case b < 0x20:
 		// The terminal executes a C0 where it stands and carries on with the
 		// head, so it goes out now and the head stays held. Taken for the

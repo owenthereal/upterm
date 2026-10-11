@@ -606,6 +606,16 @@ var escCSICases = []filterCase{
 		want: "\x1b[" + strings.Repeat("0", 40) + "mX"},
 	{name: "CSI-ignore passes to its final byte", in: "\x1b[1$2qX", want: "\x1b[1$2qX"},
 	{name: "a drop after CSI-ignore closes it", in: "\x1b[1$2\x1b[6nX", want: "\x1b[1$2\x1b\x18X"},
+	// Bytes 0xA0–0xFF inside a head are ignored, as DEL is (Owen,
+	// 2026-10-11); 0x80–0x9F still give the head up under the C1 limit.
+	{name: "a high byte inside a CSI query", in: "\x1b[6\xa0n", want: ""},
+	{name: "a high byte after a lone ESC", in: "\x1b\xa0Z", want: ""},
+	{name: "a high byte before a CSI's introducer", in: "\x1b\xa0[6nX", want: "X"},
+	{name: "a high byte, then an abandoned head", in: "\x1b\xa0[1\x1b[6nX", want: "X"},
+	{name: "a high byte inside a passed CSI", in: "\x1b[1\xa0m", want: "\x1b[1m"},
+	{name: "a high byte inside an ESC-intermediate", in: "\x1b(\xffB", want: "\x1b(B"},
+	{name: "high bytes never count toward the bound", in: "\x1b[" + strings.Repeat("\xa0", 40) + "6n", want: ""},
+	{name: "a C1 byte still gives the head up", in: "\x1b[1\x85mX", want: "\x1b[1\x85mX"},
 }
 
 func init() {
