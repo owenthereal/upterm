@@ -850,8 +850,8 @@ func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 // waitingAfterADrop starts a run whose session drops and whose next attempt
 // is an hour away, and returns once the run is waiting, with the guest's
 // keyboard and the run's outcome. Only a key can end the wait. next is what
-// the relay does on the connections after the first.
-func waitingAfterADrop(t *testing.T, next relayKnobs) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
+// the relay does on the connections after the first; opts apply last.
+func waitingAfterADrop(t *testing.T, next relayKnobs, opts ...option) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
 	t.Helper()
 	pr, pw := io.Pipe()
 	relay = newFakeRelay(t, relayKnobs{dropAfterReady: true}, next)
@@ -860,6 +860,9 @@ func waitingAfterADrop(t *testing.T, next relayKnobs) (keys *io.PipeWriter, rela
 	cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
 	cfg.Timing.FastBase, cfg.Timing.FastCap = time.Hour, time.Hour
 	cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+	for _, o := range opts {
+		o(&cfg)
+	}
 	done = runJoinAsync(t, context.Background(), cfg)
 	rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && !e.First })
 	return pw, relay, done
@@ -898,6 +901,20 @@ func TestKeysBetweenSessionsEndTheRun(t *testing.T) {
 			require.Equal(t, 1, relay.connections(), "the run attempted again")
 		})
 	}
+}
+
+// The keys join reads itself have the session's escape byte: there is no
+// other to set, so detaching works the same connected or not.
+func TestKeysBetweenSessionsTakeTheSessionsEscape(t *testing.T) {
+	keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)}, func(c *Config) { c.Terminal.Escape = '%' })
+	press(keys, "%.")
+	select {
+	case out := <-done:
+		require.Equal(t, Left, out.Kind)
+	case <-time.After(testTimeout):
+		t.Fatal("the session's escape sequence didn't leave the wait")
+	}
+	require.Equal(t, 1, relay.connections(), "the run attempted again")
 }
 
 // Once Run has returned, Input is the caller's again. The Read in progress

@@ -78,8 +78,10 @@ type Config struct {
 	// before the guest has been told the session is ready; this one is left
 	// as it is. Resizes still pending when a session starts came while no
 	// session had the terminal, and are dropped: the session's pty request
-	// carries the size measured then. Terminal.Escape is the session's escape
-	// byte; see Escape.
+	// carries the size measured then. Terminal.Escape is the one escape byte,
+	// a session's and that of the keys Run reads itself while no session has
+	// the keyboard: at the start of a line, followed by '.', it leaves. Zero
+	// disables it.
 	Terminal *attach.Terminal
 	// Size is measured afresh for each session's pty request. Nil keeps
 	// Terminal.Pty's.
@@ -92,11 +94,6 @@ type Config struct {
 	// caller that needs its input back after Run gives it a reader it can
 	// close or interrupt. Nil means no keys.
 	Input io.Reader
-	// Escape is the escape byte: at the start of a line, followed by '.', it
-	// leaves. Zero disables it. It covers the keys join reads itself, while
-	// no session has the keyboard; Terminal.Escape covers a session's. Set
-	// both.
-	Escape byte
 	// TakeTerminal runs once, when a handshake first succeeds: it is where
 	// the command puts the terminal in raw mode. Nil does nothing. An error
 	// ends the join as Failed, with that error.
@@ -285,7 +282,7 @@ type runner struct {
 func newRunner(ctx context.Context, cfg Config) *runner {
 	runCtx, cancel := context.WithCancel(ctx)
 	timing := cfg.Timing.orDefault()
-	in := newInput(cfg.Input, cfg.Escape)
+	in := newInput(cfg.Input, cfg.Terminal.Escape)
 	in.exited = cfg.inputExited
 	r := &runner{
 		cfg:        cfg,

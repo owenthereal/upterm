@@ -183,9 +183,9 @@ type relayAddr struct {
 
 type option func(*Config)
 
-// config is a Config on relay: a Terminal on a syncSink, one generated signer,
-// CheckHostKey per the knobs, Escape '~', an Input nobody types on, and short
-// timings.
+// config is a Config on relay: a Terminal on a syncSink with escape byte '~',
+// one generated signer, CheckHostKey per the knobs, an Input nobody types on,
+// and short timings.
 func config(t *testing.T, relay *fakeRelay, opts ...option) Config {
 	t.Helper()
 	// Nothing is ever written, so a Read blocks: an empty reader would be EOF,
@@ -197,7 +197,6 @@ func config(t *testing.T, relay *fakeRelay, opts ...option) Config {
 		CheckHostKey: relay.checkHostKey,
 		Terminal:     &attach.Terminal{Stdout: &syncSink{}, Pty: &attach.Pty{Term: "xterm"}, Escape: '~'},
 		Input:        idle,
-		Escape:       '~',
 		Timing: Timing{
 			FastBase:  10 * time.Millisecond,
 			FastCap:   40 * time.Millisecond,
