@@ -134,11 +134,13 @@ func csiQuery(seq []byte) bool {
 		// 10: XTTITLEPOS.
 		return (inter == 0 && prefix == '?') || (inter == '#' && prefix == 0 && info.count == 0)
 	case 'u':
-		// 9: the kitty keyboard query, which takes no parameters at all: a
-		// `CSI ? 0 u` is not it. `CSI > 1 u`, `CSI < u`, `CSI = 1;1 u` and a
-		// bare `CSI u` push, pop, set and restore.
+		// 9: the kitty keyboard query, with any parameters. kitty, Ghostty,
+		// foot, Alacritty and iTerm2 answer `CSI ? 1 u` with the flags, as
+		// they do a bare `CSI ? u`, without looking at the parameters, so each
+		// form is a request. `CSI > 1 u`, `CSI < u`, `CSI = 1;1 u` and a bare
+		// `CSI u` push, pop, set and restore.
 		// 10: DECRQUPSS.
-		return (inter == 0 && prefix == '?' && info.count == 0) || (inter == '&' && prefix == 0)
+		return (inter == 0 && prefix == '?') || (inter == '&' && prefix == 0)
 	case 'x': // 10: DECREQTPARM
 		return bare && info.first <= 1
 	case 'w': // 10: DECRQPSR

@@ -21,7 +21,7 @@ var (
 		"\x1b[18t", "\x1b[19t", "\x1b[20t", "\x1b[21t", // 6
 		"\x1b[?4m", "\x1b[?1g", // 7
 		"\x1b[?1;1;0S", "\x1b[?2;1;0S", "\x1b[?1;3;256S", // 8, setters too
-		"\x1b[?u", // 9
+		"\x1b[?u", "\x1b[?0u", "\x1b[?1u", "\x1b[?1;2u", "\x1b[?;u", // 9, whatever the parameters
 		"\x1b[x", "\x1b[0x", "\x1b[1x", "\x1b[01x", "\x1b[1$w", "\x1b[&u", "\x1b[\"v",
 		"\x1b[1;1;1;1;24;80*y", "\x1b[1;1;24;80#|", "\x1b[1'|", "\x1b[#R", "\x1b[#S", // 10
 	}
@@ -34,7 +34,7 @@ var (
 		"\x1b[8;24;80t", "\x1b[22;0t", "\x1b[23;0t", "\x1b[>0t", "\x1b[>4;2m", "\x1b[1m",
 		"\x1b[38:2::255:0:0m", "\x1b[6:1n", "\x1b[3S", "\x1b[>1u", "\x1b[<u", "\x1b[=1;1u",
 		"\x1b[u", "\x1b[2x", "\x1b[2*x", "\x1b[#{", "\x1b[132$|", "\x1b[1#Q", "\x1b[2J",
-		"\x1b[10;20H", "\x1b[1$ p",
+		"\x1b[10;20H", "\x1b[1$ p", "\x1b[?1:2u",
 	}
 
 	// oscQueryExamples are requests, by family number (11 to 14).
@@ -82,8 +82,8 @@ func TestCSIQuery_Boundaries(t *testing.T) {
 	for _, c := range []string{
 		// A number saturates, rather than wrapping round to one a family wants.
 		"\x1b[" + nines + "t", "\x1b[" + nines + "x", "\x1b[" + nines + "n",
-		// "No parameters" means none, not zero or empty.
-		"\x1b[?0u", "\x1b[?;u", "\x1b[#0R", "\x1b[#0S",
+		// Family 10's `# R` and `# S` take no parameters: none, not zero.
+		"\x1b[#0R", "\x1b[#0S",
 		// Two intermediates match no family, whichever they are.
 		"\x1b[?2026$$p", "\x1b[?2026$ p", "\x1b[1$$w", "\x1b[ $w",
 		// Sub-parameters match no family, however well the rest fits.

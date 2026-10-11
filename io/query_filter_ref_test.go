@@ -629,7 +629,7 @@ func refCSIQuery(ev refEvent) bool {
 	case f == 't' && plain && slices.Contains([]int{11, 13, 14, 15, 16, 18, 19, 20, 21}, first): // 6: window reports
 	case (f == 'm' || f == 'g') && in == "" && pre == '?': // 7: XTQMODKEYS, XTQFMTKEYS
 	case f == 'S' && in == "" && pre == '?': // 8: XTSMGRAPHICS, every action
-	case f == 'u' && in == "" && pre == '?' && count == 0: // 9: kitty keyboard
+	case f == 'u' && in == "" && pre == '?': // 9: kitty keyboard, whatever the parameters
 	case f == 'x' && plain && (first == 0 || first == 1): // 10: DECREQTPARM
 	case pre == 0 && (in == "$" && f == 'w' || in == "&" && f == 'u' || in == `"` && f == 'v' ||
 		in == "*" && f == 'y' || in == "#" && f == '|' || in == "'" && f == '|'): // 10: DECRQPSR, DECRQUPSS, DECRQDE, DECRQCRA, XTREPORTSGR, DECRQLP
@@ -913,7 +913,7 @@ func TestRefParse_StringEnds(t *testing.T) {
 
 func TestRefQuery_Families(t *testing.T) {
 	for _, q := range []string{"\x1b[?2026$p", "\x1b[06n", "\x1b[0;1c", "\x1b[;c",
-		"\x1b[?996n", "\x1b[14;2t", "\x1b[?4m", "\x1b[?1;3;256S", "\x1b[?u",
+		"\x1b[?996n", "\x1b[14;2t", "\x1b[?4m", "\x1b[?1;3;256S", "\x1b[?u", "\x1b[?1u",
 		"\x1b[01x", "\x1bZ", "\x1b]11;?\x07", "\x1b]4;0;rgb:0/0/0;1;?\x07",
 		"\x1b]52;c;?\x07", "\x1b]50;?\x07", "\x1b]60\x07"} {
 		evs := refParse(refDEC, []byte(q))
