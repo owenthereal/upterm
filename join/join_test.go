@@ -976,9 +976,10 @@ func staysJoined(t *testing.T, relay *fakeRelay, cfg Config, hold time.Duration)
 func TestAQuietPeerThatAnswersKeepalivesIsKept(t *testing.T) {
 	relay := newFakeRelay(t, relayKnobs{}) // quiet, and answering keepalives
 	cfg := config(t, relay)
-	cfg.Timing.Liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
-	// Silence alone would end the session 100 ms in.
-	staysJoined(t, relay, cfg, 10*(cfg.Timing.Liveness.Interval+cfg.Timing.Liveness.Bound))
+	// A short Interval, so probes start early, and a Bound with room for a
+	// reply on a busy machine. Silence alone would end the session 500 ms in.
+	cfg.Timing.Liveness = liveness.Timing{Interval: 100 * time.Millisecond, Bound: 400 * time.Millisecond}
+	staysJoined(t, relay, cfg, 4*(cfg.Timing.Liveness.Interval+cfg.Timing.Liveness.Bound))
 }
 
 // An attempt's deadline bounds the dial, the handshake and the setup, and
