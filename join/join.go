@@ -80,18 +80,24 @@ type Config struct {
 	// CheckHostKey can find the relay's key unknown and the guest can be
 	// asked.
 	ConfirmHostKey func(ctx context.Context, hostname string, key ssh.PublicKey) (accepted bool, err error)
-	// Terminal runs each session. Run sets Stdin, Pty.Size and OnReady on a
-	// copy for each session, and wraps its Stdout so that nothing reaches it
-	// before the guest has been told the session is ready; this one is left
-	// as it is. Resizes still pending when a session starts came while no
-	// session had the terminal, and are dropped: the session's pty request
-	// carries the size measured then. Terminal.Escape is the one escape byte,
-	// a session's and that of the keys Run reads itself while no session has
-	// the keyboard: at the start of a line, followed by '.', it leaves. Zero
-	// disables it.
+	// Terminal runs each session. Run sets Stdin, Pty.Size, Resizes and
+	// OnReady on a copy for each session, and wraps its Stdout so that
+	// nothing reaches it before the guest has been told the session is ready;
+	// this one is left as it is. A value on Terminal.Resizes only says that
+	// the terminal's size changed, since one measured before a session's pty
+	// request can arrive after it. Run reads Resizes from its start until it
+	// returns, and never closes it. A change that comes while a session runs
+	// gives the session the size Size measures then, which is never older
+	// than the size its pty request carried; one that comes while no session
+	// runs is dropped, and the next pty request measures the size anew.
+	// Terminal.Escape is the one escape byte, a session's and that of the
+	// keys Run reads itself while no session has the keyboard: at the start
+	// of a line, followed by '.', it leaves. Zero disables it.
 	Terminal *attach.Terminal
-	// Size is measured afresh for each session's pty request. Nil keeps
-	// Terminal.Pty's.
+	// Size measures the terminal: afresh for each session's pty request, and
+	// for each change on Terminal.Resizes while a session runs. Calls are
+	// never concurrent, and none is made after Run returns. Nil keeps
+	// Terminal.Pty's size, and gives a session the value on Resizes as it is.
 	Size func() termsize.Size
 	// Input is the guest's keys. Run reads it only once TakeTerminal has run:
 	// from the start when ConfirmHostKey is nil, and otherwise not until a
@@ -244,12 +250,16 @@ func (c Config) validate() error {
 }
 
 // runner is one Run. Its loop runs on Run's goroutine and owns everything
-// below mu's fields; one other goroutine reads join's keys (see readKeys).
+// below mu's fields; one other goroutine reads join's keys (see readKeys),
+// and one passes the terminal's resizes on (see resizer).
 type runner struct {
 	cfg    Config
 	timing Timing
 	sched  *schedule
 	in     *input
+	// resizes passes Terminal.Resizes on to the session that is running; nil
+	// without one.
+	resizes *resizer
 
 	// runCtx ends with ctx, or when a key stops the run. Everything an
 	// attempt or a session starts is bound to it, so cancelling it is all a
@@ -317,6 +327,9 @@ func newRunner(ctx context.Context, cfg Config) *runner {
 		sitOut:     map[string]bool{},
 		joinedWith: map[string]bool{},
 	}
+	if cfg.Terminal.Resizes != nil {
+		r.resizes = newResizer(cfg.Terminal.Resizes, cfg.Size)
+	}
 	go r.readKeys()
 	return r
 }
@@ -327,6 +340,9 @@ func (r *runner) close() {
 	// Nothing takes join's keys now, and every view is closed: whatever the
 	// reader reads from here on was typed at whoever has Input next.
 	r.in.stop()
+	if r.resizes != nil {
+		r.resizes.stop()
+	}
 	r.cancel()
 }
 
@@ -640,15 +656,21 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 	// be held up by the terminal the line is stuck on.
 	out := &gatedWriter{w: term.Stdout}
 	term.Stdout = out
-	// The pty request carries the size measured now. A resize that arrived
-	// between sessions is older than that, and would follow it.
-	if term.Resizes != nil {
-		drain(term.Resizes)
+	// The pty request carries the size measured now, and the session's
+	// window changes the sizes measured after it (see resizer).
+	measure := term.Pty != nil && r.cfg.Size != nil
+	var size termsize.Size
+	if r.resizes != nil {
+		changes := make(chan termsize.Size, 1)
+		term.Resizes = changes
+		size = r.resizes.begin(changes, measure)
+	} else if measure {
+		size = r.cfg.Size()
 	}
 	if term.Pty != nil {
 		pty := *term.Pty
-		if r.cfg.Size != nil {
-			pty.Size = r.cfg.Size()
+		if measure {
+			pty.Size = size
 		}
 		term.Pty = &pty
 	}
@@ -692,6 +714,9 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 	}()
 
 	res, err := run(r.runCtx, client, setupBy)
+	if r.resizes != nil {
+		r.resizes.end()
+	}
 	endSession()
 	<-watched
 	_ = client.Close()
@@ -1077,18 +1102,4 @@ func (g *gatedWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return g.w.Write(p)
-}
-
-// drain takes whatever c holds without waiting for more.
-func drain(c <-chan termsize.Size) {
-	for {
-		select {
-		case _, ok := <-c:
-			if !ok {
-				return
-			}
-		default:
-			return
-		}
-	}
 }

@@ -893,7 +893,8 @@ func TestAStopStillRestoresAfterTheParkedWrite(t *testing.T) {
 func TestResizesBetweenSessionsAreDropped(t *testing.T) {
 	first, now, stale := termsize.Size{Rows: 24, Cols: 80}, termsize.Size{Rows: 43, Cols: 132}, termsize.Size{Rows: 10, Cols: 20}
 	var n atomic.Int32
-	resizes := make(chan termsize.Size, 1)
+	// Unbuffered: a send returns once Run has taken the change.
+	resizes := make(chan termsize.Size)
 	rec := &recorder{}
 	relay := newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{})
 	cfg := config(t, relay, withSize(func() termsize.Size {
@@ -905,9 +906,11 @@ func TestResizesBetweenSessionsAreDropped(t *testing.T) {
 	cfg.Terminal.Resizes = resizes
 	cfg.Events = func(e Event) {
 		if e.Kind == Lost {
+			// The terminal resized while no session had it.
 			select {
-			case resizes <- stale: // the terminal resized while no session had it
-			default:
+			case resizes <- stale:
+			case <-time.After(testTimeout):
+				t.Error("a change between sessions was never taken")
 			}
 		}
 		rec.event(e)
@@ -919,6 +922,47 @@ func TestResizesBetweenSessionsAreDropped(t *testing.T) {
 	cancel()
 	require.Equal(t, Stopped, recv(t, done).Kind)
 	require.Equal(t, []termsize.Size{first, now}, relay.ptySizes())
+	// The change was dropped as it came, not measured for a session.
+	require.Equal(t, int32(2), n.Load())
+}
+
+func TestAResizeGivesTheSessionTheSizeMeasuredThen(t *testing.T) {
+	old, now, later := termsize.Size{Rows: 24, Cols: 80}, termsize.Size{Rows: 43, Cols: 132}, termsize.Size{Rows: 50, Cols: 160}
+	var current atomic.Pointer[termsize.Size]
+	current.Store(&now)
+	// Unbuffered: a send returns once Run has taken the change.
+	resizes := make(chan termsize.Size)
+	rec := &recorder{}
+	relay := newFakeRelay(t, relayKnobs{})
+	cfg := config(t, relay, withEvents(rec), withSize(func() termsize.Size { return *current.Load() }))
+	cfg.Terminal.Resizes = resizes
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runJoinAsync(t, ctx, cfg)
+	rec.await(t, done, func(e Event) bool { return e.Kind == Joined })
+	windows := func(n int) []termsize.Size {
+		t.Helper()
+		require.Eventually(t, func() bool { return len(relay.windowChanges(0)) >= n }, testTimeout, time.Millisecond)
+		return relay.windowChanges(0)
+	}
+
+	// The sender measured old, and the terminal then took the size the pty
+	// request carried, before old arrived: the session keeps that size.
+	send(t, resizes, old)
+	require.Equal(t, []termsize.Size{now}, windows(1))
+	// A change carries the size measured as it comes, whatever its value.
+	current.Store(&later)
+	send(t, resizes, old)
+	require.Equal(t, []termsize.Size{now, later}, windows(2))
+
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+	require.Equal(t, []termsize.Size{now}, relay.ptySizes())
+	// Run has let go of Resizes: nothing takes a change any more.
+	select {
+	case resizes <- later:
+		t.Fatal("a change was taken after Run returned")
+	default:
+	}
 }
 
 func TestPtySizeIsMeasuredForEachSession(t *testing.T) {

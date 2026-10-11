@@ -40,6 +40,16 @@ func recv[T any](t *testing.T, c <-chan T) T {
 	}
 }
 
+// send sends v on c, failing the test if nothing takes it within testTimeout.
+func send[T any](t *testing.T, c chan<- T, v T) {
+	t.Helper()
+	select {
+	case c <- v:
+	case <-time.After(testTimeout):
+		t.Fatal("nothing took it in time")
+	}
+}
+
 // fakeRelay is a relay that serves each connection with its own relayKnobs,
 // for a run that connects more than once.
 type fakeRelay struct {
