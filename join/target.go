@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ErrNotATarget is what ParseTarget's errors wrap: the text names no session to
@@ -57,6 +58,11 @@ func ParseTarget(s string) (Target, error) {
 	// Nothing a target is made of is whitespace or a control character, so
 	// text that has one is not a target, whatever the parts around it look
 	// like: "ssh abc@relay.test" would otherwise be the session "ssh abc".
+	// Nor a byte that isn't UTF-8: one such as 0x9b is a control sequence to
+	// some terminals, and the session ID is printed on the guest's.
+	if !utf8.ValidString(s) {
+		return Target{}, notATarget(s, "text that isn't UTF-8")
+	}
 	if strings.ContainsFunc(s, isSpaceOrControl) {
 		err := notATarget(s, "whitespace or a control character")
 		err.Suggestion = suggestTarget(s)
@@ -109,7 +115,11 @@ func parseURLTarget(s string) (Target, error) {
 	// url.Parse has decoded the escapes in the userinfo, and in the host those
 	// of bytes past ASCII and of an IPv6 zone, so the parts can hold what the
 	// text, checked above, doesn't: "ssh://abc%0Adef@relay.test" is the user
-	// "abc\ndef". What an escape spells belongs to no target either.
+	// "abc\ndef". What an escape spells belongs to no target either, and
+	// neither does a byte that isn't UTF-8 ("%9b").
+	if !utf8.ValidString(user) || !utf8.ValidString(u.Host) {
+		return Target{}, notATarget(s, "an escape that isn't UTF-8")
+	}
 	if strings.ContainsFunc(user, isSpaceOrControl) || strings.ContainsFunc(u.Host, isSpaceOrControl) {
 		return Target{}, notATarget(s, "an escaped whitespace or control character")
 	}

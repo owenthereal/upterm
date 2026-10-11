@@ -166,6 +166,23 @@ func TestParseTargetRefusesEscapedWhitespaceAndControlCharacters(t *testing.T) {
 	}
 }
 
+// A byte that isn't UTF-8 is no part of a target either, typed or escaped:
+// one such as 0x9b is a control sequence to some terminals, and the session
+// ID is printed on the guest's.
+func TestParseTargetRefusesTextThatIsNotUTF8(t *testing.T) {
+	for _, bad := range []string{
+		"abc\x9b@relay.test", "ssh://abc@relay\xff.test", "abc@relay.test\x85",
+		"ssh://abc%9B@relay.test", "wss://abc:node%FF@relay.test", "ssh://abc@relay.test%85",
+	} {
+		_, err := ParseTarget(bad)
+		require.ErrorIs(t, err, ErrNotATarget, "%q", bad)
+
+		var targetErr *TargetError
+		require.ErrorAs(t, err, &targetErr, "%q", bad)
+		require.Empty(t, targetErr.Suggestion, "%q", bad)
+	}
+}
+
 // No character of a session ID or a node needs an escape: an ID is letters
 // and digits, and a node is URL-safe base64. An escape can still spell one of
 // them, and the target is the one the character itself would give.
@@ -298,6 +315,8 @@ func TestTargetErrorText(t *testing.T) {
 		{"ssh sid@example.com", `not a join target "ssh sid@example.com": whitespace or a control character`},
 		{"abc@relay.test\n", `not a join target "abc@relay.test\n": whitespace or a control character`},
 		{"ssh://abc%0Adef@relay.test", `not a join target "ssh://abc%0Adef@relay.test": an escaped whitespace or control character`},
+		{"abc\x9b@relay.test", `not a join target "abc\x9b@relay.test": text that isn't UTF-8`},
+		{"ssh://abc%9B@relay.test", `not a join target "ssh://abc%9B@relay.test": an escape that isn't UTF-8`},
 	} {
 		_, err := ParseTarget(tc.in)
 		require.EqualError(t, err, tc.want)
