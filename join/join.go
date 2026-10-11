@@ -599,6 +599,12 @@ func (r *runner) takeTerminal() error {
 			return err
 		}
 	}
+	// A stop that came while the terminal was being taken leaves the keys
+	// unread: a reader started now would take a chunk for a run that has
+	// ended, or the caller's next one after Run returns.
+	if err := r.runCtx.Err(); err != nil {
+		return err
+	}
 	if r.cfg.Input != nil {
 		r.in.start()
 	}

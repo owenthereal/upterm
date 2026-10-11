@@ -964,6 +964,31 @@ func TestARunStoppedBeforeItStartsTakesNothing(t *testing.T) {
 	}
 }
 
+// A stop that lands while the terminal is being taken leaves the guest's keys
+// unread, however the taking went: a reader started after it would take a
+// chunk for a run that has ended.
+func TestAStopWhileTheTerminalIsTakenLeavesTheKeysUnread(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts  []option
+		dials int
+	}{
+		"as the run starts":         {nil, 0},
+		"after the first handshake": {[]option{withConfirm(&countingConfirm{accept: true})}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			input := newWatchedInput(strings.NewReader("\r")) // an Enter, ready to be read
+			opts := append([]option{withTakeTerminal(func() error { cancel(); return nil }), withInput(input)}, tc.opts...)
+			cfg := config(t, newFakeRelay(t, relayKnobs{exit: intp(0)}), opts...)
+			dialed := dialsOn(&cfg)
+			require.Equal(t, Stopped, recv(t, runJoinAsync(t, ctx, cfg)).Kind)
+			require.Len(t, dialed, tc.dials)
+			require.Len(t, input.reading, 0, "Input was read after the stop")
+		})
+	}
+}
+
 func TestASilentPeerIsLostNotLeft(t *testing.T) {
 	rec := &recorder{}
 	cfg := config(t, newFakeRelay(t, relayKnobs{silentAfterReady: true}, relayKnobs{exit: intp(0)}), withEvents(rec))
