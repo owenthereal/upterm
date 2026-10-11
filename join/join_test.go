@@ -1097,6 +1097,64 @@ func TestEnterDuringAWaitAttemptsAtOnce(t *testing.T) {
 	}
 }
 
+// The keys are join's from the moment a session's view closes, before the
+// wait after it has begun. An Enter pressed then, while the terminal is handed
+// over or the line saying the session is lost is written, is that wait's: the
+// next attempt comes as soon as the wait begins.
+func TestEnterAsASessionIsLostEndsTheWaitAfterIt(t *testing.T) {
+	// lose starts a join whose session drops, and whose wait after the drop
+	// only a key can end. It returns as the Lost line is being written, held
+	// until release, with an Enter that join has acted on by then.
+	lose := func(t *testing.T) (typed *io.PipeWriter, relay *fakeRelay, rec *recorder, release func(), done <-chan Outcome) {
+		t.Helper()
+		keys, typed := io.Pipe()
+		input := newWatchedInput(keys)
+		relay = newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{exit: intp(0)})
+		rec = &recorder{gate: make(chan struct{})}
+		release = sync.OnceFunc(func() { close(rec.gate) })
+		t.Cleanup(release)
+		cfg := config(t, relay, withInput(input), withEvents(rec), withWait())
+		cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
+		cfg.Timing.FastBase, cfg.Timing.FastCap = time.Hour, time.Hour
+		cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		done = runJoinAsync(t, ctx, cfg)
+
+		require.Equal(t, Joined, recv(t, rec.held()).Kind)
+		rec.gate <- struct{}{}
+		require.Equal(t, Lost, recv(t, rec.held()).Kind)
+
+		// The reader hands join one key at a time, and join takes a key only
+		// once it has acted on the one before: so once the Read after two
+		// Enters has begun, join has acted on the first.
+		recv(t, input.reading) // the Read in progress since the run began
+		_, err := typed.Write([]byte("\r\r"))
+		require.NoError(t, err)
+		recv(t, input.reading)
+		return typed, relay, rec, release, done
+	}
+
+	t.Run("the next attempt comes as the wait begins", func(t *testing.T) {
+		_, relay, rec, release, done := lose(t)
+		release()
+		select {
+		case out := <-done:
+			require.Equal(t, Exited, out.Kind)
+		case <-time.After(testTimeout):
+			t.Fatal("the Enter went nowhere, and the wait after the drop ran its course")
+		}
+		require.Equal(t, 2, relay.connections())
+		require.Equal(t, []EventKind{Joined, Lost, Waiting, Joined}, rec.kinds())
+	})
+	t.Run("Ctrl-C after it still stops", func(t *testing.T) {
+		typed, relay, _, _, done := lose(t)
+		press(typed, "\x03")
+		require.Equal(t, Stopped, recv(t, done).Kind)
+		require.Equal(t, 1, relay.connections(), "the run attempted again")
+	})
+}
+
 func TestKeysDuringAWaitEndTheRun(t *testing.T) {
 	for wait, w := range keyWaits {
 		t.Run(wait, func(t *testing.T) {

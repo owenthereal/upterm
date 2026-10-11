@@ -264,8 +264,9 @@ type runner struct {
 	// cause is the key that stopped the run; zero when ctx did, or nothing
 	// has.
 	cause OutcomeKind
-	// retry is the current wait's: Enter during a wait goes there. Nil while
-	// nothing waits, when Enter does nothing.
+	// retry is the next wait's, or the current one's: Enter goes there from
+	// the close of a ready session's view, which a wait or the end follows,
+	// and during each wait. Nil during an attempt, when Enter does nothing.
 	retry chan struct{}
 
 	// The loop's alone.
@@ -680,6 +681,14 @@ func (r *runner) session(client *ssh.Client, lc *liveness.Conn, key ssh.PublicKe
 	endSession()
 	<-watched
 	_ = client.Close()
+	if end.ready {
+		// The keys are join's again as the view closes, and a session that was
+		// ready is followed by the end of the run or by a wait, once the
+		// terminal is handed over and the guest told the session is lost. An
+		// Enter from now on is that wait's, which then attempts as it begins,
+		// rather than going nowhere while the guest is still being told.
+		r.armRetry()
+	}
 	_ = v.Close()
 	if err != nil {
 		return nil, err
@@ -931,6 +940,16 @@ func (h *handover) finish() {
 // wait waits out a verdict before the next attempt. It returns false, with
 // the outcome, if the run ends instead.
 func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
+	// Enter ends the wait: one pressed from now until the attempt after it
+	// begins, and one pressed since a session that was ready ended, which the
+	// channel already holds (see session).
+	retry := r.armRetry()
+	defer func() {
+		r.mu.Lock()
+		r.retry = nil
+		r.mu.Unlock()
+	}()
+
 	first := !r.joined
 	// The guest's own identity failing won't mend by waiting: a first join
 	// stops on it.
@@ -970,16 +989,6 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	// attempt at once.
 	until := due{mono: time.Now().Add(delay), wall: now.Add(delay)}
 
-	retry := make(chan struct{}, 1)
-	r.mu.Lock()
-	r.retry = retry
-	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		r.retry = nil
-		r.mu.Unlock()
-	}()
-
 	e := Event{Kind: Waiting, Why: why, Err: err, Since: r.since, Next: until.wall, Long: long, First: first}
 	if !r.emit(ctx, e) || waitFor(ctx, r.timing, until, retry) != nil {
 		if r.runCtx.Err() != nil {
@@ -989,6 +998,18 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 		return r.timedOut(why, err), false
 	}
 	return Outcome{}, true
+}
+
+// armRetry has Enter end the next wait from now on, and returns the channel
+// that wait takes it from: the one already armed, with any Enter it holds, or
+// a new one.
+func (r *runner) armRetry() chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retry == nil {
+		r.retry = make(chan struct{}, 1)
+	}
+	return r.retry
 }
 
 // beginWait notes that a wait began at wall, now, unless one is under way.
