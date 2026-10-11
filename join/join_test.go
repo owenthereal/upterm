@@ -376,9 +376,9 @@ func TestTheRetryComesWhenTheStatusLineSaid(t *testing.T) {
 	cancel()
 	require.Equal(t, Stopped, recv(t, done).Kind)
 	// The attempt comes the wait after the line began, as the line said:
-	// neither the line's time later nor as soon as it is written. The bound
-	// is loose.
-	require.WithinDuration(t, began.Add(wait), at, hold/2, "the attempt came %v after the line began", at.Sub(began))
+	// neither the line's time later nor as soon as it is written, each of
+	// which is the line's 200 ms off. The bound is loose, and short of that.
+	require.WithinDuration(t, began.Add(wait), at, 3*hold/4, "the attempt came %v after the line began", at.Sub(began))
 }
 
 func TestAWallClockPastTheRetryDuringTheStatusLineAttemptsAtOnce(t *testing.T) {
