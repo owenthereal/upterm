@@ -18,7 +18,8 @@ type resizer struct {
 	size func() termsize.Size
 
 	// starts takes each session's forwarding as the session starts, and the
-	// zero one as it ends; measured answers a start that asks for the size.
+	// zero one as it ends; measured answers each start, with the size when
+	// the start asks for it.
 	starts   chan forwarding
 	measured chan termsize.Size
 	// quit closes with stop; done once run has returned.
@@ -65,24 +66,48 @@ func (f *resizer) run() {
 			}
 		case fw := <-f.starts:
 			to = fw.to
-			if fw.measure {
-				f.measured <- f.size()
+			if to == nil {
+				break
 			}
+			// What the caller had queued by now came while no session was
+			// running. Taken after this, it could reach the session as it is
+			// when there is no Size to measure with. The answer below is what
+			// begin waits for, so a change sent once begin has returned is
+			// the session's.
+			f.dropQueued()
+			var size termsize.Size
+			if fw.measure {
+				size = f.size()
+			}
+			f.measured <- size
 		case <-f.quit:
 			return
 		}
 	}
 }
 
+// dropQueued takes and drops what is already on the caller's channel.
+func (f *resizer) dropQueued() {
+	for {
+		select {
+		case _, ok := <-f.changes:
+			if !ok {
+				f.changes = nil
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
 // begin forwards the changes to to, the channel of a session that is
-// starting, from now until end. With measure, it returns the size for the
-// session's pty request, measured after every change the session won't get
-// and before every one it will; measure needs Size.
+// starting, from its return until end; what was queued before is dropped.
+// With measure, it returns the size for the session's pty request, measured
+// after every change the session won't get and before every one it will;
+// measure needs Size.
 func (f *resizer) begin(to chan termsize.Size, measure bool) termsize.Size {
 	f.starts <- forwarding{to: to, measure: measure}
-	if !measure {
-		return termsize.Size{}
-	}
 	return <-f.measured
 }
 
