@@ -72,7 +72,8 @@ func (hostKeyChangedError) Unwrap() error   { return ErrHostKeyChanged }
 // directory, is an empty trust store. It returns nil when a key line or an
 // @cert-authority line trusts key, an error wrapping ErrUnknownHostKey when no
 // line names it, and an error wrapping ErrHostKeyChanged when a line for
-// hostname names a different key. Anything else is as knownhosts returns it.
+// hostname names a different key. A certificate that no @cert-authority line
+// trusts is checked by its own key. Anything else is as knownhosts returns it.
 func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -83,18 +84,24 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 	}
 
 	err = cb(hostname, remote, key)
+	if cert, isCert := key.(*ssh.Certificate); isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
+		// No @cert-authority line trusts the certificate's signer, so its own
+		// key is checked as a plain key would be, as OpenSSH does. Unlike
+		// OpenSSH's, this check counts the host's @cert-authority lines too,
+		// so another authority for the host is a changed key.
+		err = cb(hostname, remote, cert.Key)
+	}
 	if err == nil {
 		return nil
 	}
 
 	kerr, ok := err.(*knownhosts.KeyError)
-	// Return err if it's neither key error or no authorities hostname error
-	if !ok && !strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
+	if !ok {
 		return err
 	}
 
 	// If kerr.Want is non-empty, there was a mismatch, which can signify a MITM attack
-	if kerr != nil && len(kerr.Want) != 0 {
+	if len(kerr.Want) != 0 {
 		kk := kerr.Want[0] // TODO: take care of multiple key mismatches
 		fp := utils.FingerprintSHA256(kk.Key)
 		kt := keyType(kk.Key.Type())

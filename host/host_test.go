@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -375,6 +376,62 @@ func Test_autoAcceptingHostKeyCallbackValidatesKnownKeys(t *testing.T) {
 	err = cb("127.0.0.1:22", addr, pk)
 	assert.Error(t, err, "should reject mismatched key to prevent MITM")
 	assert.Contains(t, err.Error(), "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED")
+}
+
+// Neither callback asks about, or records, a certificate that a key line
+// already decides.
+func Test_hostKeyCallbackJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t *testing.T) {
+	ca := newSigner(t)
+	pinned, presented := newSigner(t).PublicKey(), newSigner(t).PublicKey()
+	pin := knownhosts.Line([]string{"relay.test"}, pinned) + "\n"
+	recorded := "@cert-authority relay.test " + string(ssh.MarshalAuthorizedKey(ca.PublicKey()))
+
+	callbacks := []struct {
+		name string
+		new  func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error)
+	}{
+		{"prompting", func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
+			return NewPromptingHostKeyCallback(stdin, stdout, file, false)
+		}},
+		{"auto-accepting", func(_ io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
+			return NewAutoAcceptingHostKeyCallback(stdout, file)
+		}},
+	}
+	for _, tc := range []struct {
+		name       string
+		knownHosts string
+		key        ssh.PublicKey // the certificate's own key
+		wantErr    error
+		wantFile   string // known_hosts afterwards
+	}{
+		{"its own key is pinned", pin, pinned, nil, pin},
+		{"the host's line names another key", pin, presented, ErrHostKeyChanged, pin},
+		{"no line names the host", "", presented, nil, recorded},
+	} {
+		for _, c := range callbacks {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				file := writeKnownHosts(t, tc.knownHosts)
+				stdout := &bytes.Buffer{}
+				cb, err := c.new(strings.NewReader("yes\n"), stdout, file)
+				require.NoError(t, err)
+
+				err = cb("relay.test:22", fakeAddr, signHostCert(t, ca, tc.key, "relay.test"))
+				if tc.wantErr == nil {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, tc.wantErr)
+				}
+				content, err := os.ReadFile(file)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantFile, string(content))
+				if tc.wantFile == tc.knownHosts {
+					require.Empty(t, stdout.String(), "nothing is asked or announced")
+				} else {
+					require.NotEmpty(t, stdout.String(), "the user is asked, or told the key was added")
+				}
+			})
+		}
+	}
 }
 
 func TestGuestLatchDisarmsBeforePublishing(t *testing.T) {
