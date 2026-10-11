@@ -40,7 +40,7 @@ func ExampleRun() {
 
 	// The embedder's stop ends the run in any phase; Dial and Signers return on it.
 	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
+	defer stop() // its close button calls stop too, from any goroutine
 
 	// ConfirmHostKey is nil, so nothing can prompt and the keys are Run's from
 	// its start: while no session is ready, Enter cuts a wait short, "~." leaves
@@ -77,11 +77,12 @@ func ExampleRun() {
 	// drop the next chunk written. Closing pw ends it; nothing reads pr after.
 	_ = pw.Close()
 
-	// A write Run gave up on, a status line or the last session's restore, may
-	// still finish after it returns: screen must tolerate it among its own.
+	// A write Run gave up on may still finish after it returns, so screen must
+	// tolerate one among its own: a status line, or the last session's output
+	// or restore.
 	switch out.Kind {
 	case join.Exited:
-		say("the session exited with status %d", out.Status)
+		say("the connection ended with status %d", out.Status)
 	case join.Left: // "~." was typed, or pw was closed while Run ran
 		say("you left the session")
 	case join.Stopped: // stop was called, or Ctrl-C was typed outside a session
