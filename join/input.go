@@ -163,7 +163,7 @@ func (in *input) session() *view {
 // acts before a session's view is activated or not at all, however late it
 // is taken: one pressed before a session was ready never acts on it once it
 // is, nor on a wait after it. The reader waits for take before it reads on,
-// so whatever receives a key takes it.
+// so whatever receives a key must take it.
 func (in *input) keys() <-chan key {
 	return in.keyc
 }

@@ -3,6 +3,7 @@ package join
 import (
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +109,33 @@ func TestAKeyTypedBeforeASessionWasReadyNeverActsOnIt(t *testing.T) {
 	n, _ := v.Read(b)
 	require.Equal(t, "x", string(b[:n]))
 	require.Empty(t, acted, "a Ctrl-C typed before the session was ready acted once it was")
+}
+
+// A key typed before a session, which reaches join only once that session's
+// view has closed, belongs to neither: it never acts on the wait after it. A
+// key typed in that wait does.
+func TestAKeyTypedBeforeASessionNeverActsOnTheWaitAfterIt(t *testing.T) {
+	pr, pw := io.Pipe()
+	in := newInput(pr, '~')
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	in.controlling = func() {
+		once.Do(func() {
+			held <- struct{}{}
+			<-release
+		})
+	}
+	in.start()
+	v := in.session()
+	go func() { _, _ = pw.Write([]byte("\r")) }()
+	<-held // the reader has found the Enter is join's
+	v.activate()
+	require.NoError(t, v.Close()) // the session ended, and a wait begins
+	close(release)
+	require.Zero(t, takeKey(in, <-in.keys()), "an Enter typed before the session acted on the wait after it")
+
+	_, _ = pw.Write([]byte("\r")) // typed during the wait
+	require.Equal(t, keyRetry, next(in))
 }
 
 func TestWaitCountsCRLFAsOneEnter(t *testing.T) {
