@@ -10,23 +10,22 @@ import (
 // from reaching connected clients, whose terminals would otherwise respond
 // and pollute the PTY input.
 //
-// What counts as a query is decided by family, in query_classify.go, from the
-// tables in the terminal query families design
-// (designs/2026-10-11-terminal-query-families-design.md). The filter itself
-// only follows the stream the way a terminal's DEC parser does -- where each
-// sequence starts, where it ends, and what the terminal does with the bytes
-// in between -- and holds a sequence until its classifier can decide it: an
-// ESC sequence or a CSI to its final byte, an OSC to its terminator. A DCS,
-// APC, PM or SOS is passed as it streams, so a sixel or an image is never
-// buffered, and a well-formed tmux passthrough wrapper passes byte for byte.
+// What counts as a query is decided by family, in query_classify.go. The
+// filter itself only follows the stream the way a terminal's DEC parser does
+// -- where each sequence starts, where it ends, and what the terminal does
+// with the bytes in between -- and holds a sequence until its classifier can
+// decide it: an ESC sequence or a CSI to its final byte, an OSC to its
+// terminator. A DCS, APC, PM or SOS is passed as it streams, so a sixel or an
+// image is never buffered, and a well-formed tmux passthrough wrapper passes
+// byte for byte.
 //
 // Terminals disagree on where a malformed string ends. A DEC parser ends one
-// at a CAN, a SUB or an ESC that isn't ST; kitty and tmux keep it open there,
-// and take what follows as more of it. So an OSC the filter is still holding
-// when it ends one of those ways is dropped whole, query or not: passed
-// through, "ESC ]4;0; CAN ;1;? BEL" is a palette query to kitty. What that
-// costs is a malformed OSC's effect on a DEC terminal, such as a title ended
-// by a stray ESC.
+// at a CAN, a SUB or an ESC that isn't ST; kitty keeps any string open there,
+// and tmux a DCS, and each takes what follows as more of it. So an OSC the
+// filter is still holding when it ends one of those ways is dropped whole,
+// query or not: passed through, "ESC ]4;0; CAN ;1;? BEL" is a palette query to
+// kitty. What that costs is a malformed OSC's effect on a DEC terminal, such
+// as a title ended by a stray ESC.
 //
 // A sequence the filter has emitted before its end -- a string it passes, a
 // tmux wrapper among them, a CSI a terminal ignores, or one it gave up on past
@@ -146,7 +145,7 @@ const tmuxPrefix = "tmux;"
 // its bound can still be waiting to see whether the ESC that follows begins its
 // ST, and that ESC is not counted in the 256. So 256 + 1 = 257.
 //
-// It matters because Pending is replayed to every joining writer ahead of the
+// It matters because Pending is replayed to every joining writer after the
 // ring: what the filter holds is output no reader has seen yet, and it is held
 // outside the ring's byte budget.
 const maxPendingBytes = 257
@@ -282,7 +281,7 @@ func (f *TerminalQueryFilter) escByte(b byte) {
 		f.seqBuf = append(f.seqBuf, b)
 		f.state = qfStateOSCNum
 	case f.state == qfStateEsc && b == 'P':
-		// PR 1 classifies no DCS, so its introducer goes out at once, and
+		// No DCS is classified, so its introducer goes out at once, and
 		// the DCS passes as it streams. Its first bytes are watched for a
 		// tmux wrapper, whose doubled ESCs would otherwise each end it.
 		f.passFrom(b, qfStateDCS)
@@ -355,8 +354,8 @@ func (f *TerminalQueryFilter) headControl(b byte) bool {
 		// The terminal ignores DEL here, so it is dropped. It is never held,
 		// so it doesn't count toward the head's bound either. Ghostty's parse
 		// table ignores 0xA0–0xFF in these states just the same, so they are
-		// dropped too (Owen, 2026-10-11). Giving the head up on one instead
-		// let "ESC 0xA0 [6n" through, which the terminal reads as ESC [6n.
+		// dropped too. Giving the head up on one instead let "ESC 0xA0 [6n"
+		// through, which the terminal reads as ESC [6n.
 	case b < 0x20:
 		// The terminal executes a C0 where it stands and carries on with the
 		// head, so it goes out now and the head stays held. Taken for the
@@ -486,8 +485,8 @@ func (f *TerminalQueryFilter) oscEscByte(b byte) {
 }
 
 // endOSCAtESC ends a held OSC at an ESC that isn't ST. A DEC terminal
-// dispatches the OSC there, but kitty and tmux keep it open and read on into
-// what follows, so it is dropped whole, query or not. Passed through as it
+// dispatches the OSC there, but kitty keeps it open and reads on into what
+// follows, so it is dropped whole, query or not. Passed through as it
 // used to be, "ESC ]11; ESC [6n ? BEL" lost only the query and went out as
 // "ESC ]11;? BEL", a colour query glued back together. The ESC starts a new
 // sequence, held like any other, and a close owed is settled as for any drop.

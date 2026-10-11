@@ -2,18 +2,19 @@ package io
 
 // This file is the only place that knows what a terminal query is. The filter
 // finds where each sequence starts and ends and hands its bytes to one
-// classifier per kind (csiQuery, escQuery and oscQuery here); it never looks at
-// a final byte or an OSC number itself. A query is a sequence the terminal
-// answers on its input, which the host's PTY would take for keystrokes, so the
-// filter drops it on the way to a guest. Everything else must reach the guest
-// unchanged.
+// classifier per kind (csiQuery, escQuery and oscQuery here); it reads a
+// sequence's bytes for its grammar alone, and never decides by a final byte or
+// an OSC number whether the sequence is a query. A query is a sequence the
+// terminal answers on its input, which the host's PTY would take for
+// keystrokes, so the filter drops it on the way to a guest. Everything else
+// must reach the guest unchanged.
 //
-// The families, and the counter-case each one must let through, are the tables
-// in "What gets filtered" in the terminal query families design
-// (designs/2026-10-11-terminal-query-families-design.md); the family numbers in
-// the comments below are that table's. The classifiers are pure functions over
-// the bytes the filter held, and none of them allocates: the filter calls them
-// from Write, which makes no allocations in steady state.
+// The families come from xterm's Control Sequences (ctlseqs) and kitty's
+// keyboard protocol. The comments below number them, name the sequences each
+// one asks with (DA, DSR, DECRQM and so on), and give the counter-cases each
+// must let through. The classifiers are pure functions over the bytes the
+// filter held, and none of them allocates: the filter calls them from Write,
+// which makes no allocations in steady state.
 
 // maxQueryNumber is where a number saturates. No family looks at a value near
 // it, so a run of digits long enough to overflow an int can only land on a

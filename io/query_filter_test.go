@@ -221,7 +221,7 @@ func TestTerminalQueryFilter_PreservesNonQueryOSC(t *testing.T) {
 // exists to prevent.
 //
 // An OSC that ends at such an ESC is dropped, not passed, query or not, since
-// kitty and tmux keep it open past the ESC. Passed, it was glued to whatever
+// kitty keeps it open past the ESC. Passed, it was glued to whatever
 // followed the dropped query: "ESC ]11;? ESC [6n BEL" came out as
 // "ESC ]11;? BEL", a complete colour query.
 func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
@@ -434,7 +434,7 @@ func TestTerminalQueryFilter_OSCNumberIsBounded(t *testing.T) {
 	require.Equal(t, string(input), buf.String())
 }
 
-// Pending is replayed to every joiner ahead of the ring, so whatever the
+// Pending is replayed to every joiner after the ring, so whatever the
 // filter is holding has to stay small whatever the stream does.
 func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 	const runLength = 2048
@@ -615,8 +615,9 @@ type filterCase struct {
 	kitty    bool // also assert no query under refKitty (refParse on want)
 }
 
-// filterCases accumulates every exact-bytes case; Tasks 4, 8, 9 and 10 append
-// to it. Task 5's continuation test and Task 6's fuzz seeds range over it.
+// filterCases is every exact-bytes case: escCSICases and oscStringCases, with
+// the rows init() generates from the classifier tests' examples. The split,
+// continuation and oracle tests range over it, and it seeds the fuzz test.
 var filterCases []filterCase
 
 // filterAll runs in through a fresh filter in one Write and returns what it
@@ -642,9 +643,9 @@ func filterBytewise(in string) string {
 // and the close an emitted, unfinished head is owed when what follows it is
 // dropped.
 var escCSICases = []filterCase{
-	// Generated in init() from Task 2's vars, not copied out: every entry of
-	// csiQueryExamples and "\x1bZ", wrapped as "a"+q+"b", wants "ab"; every
-	// csiPassExamples entry wants itself.
+	// Generated in init() from query_classify_test.go's examples, not copied
+	// out: every entry of csiQueryExamples and "\x1bZ", wrapped as "a"+q+"b",
+	// wants "ab"; every csiPassExamples entry wants itself.
 	{name: "counter-cases pass", in: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q",
 		want: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q"},
 	// Spec test 2 (CSI and ESC rows).
@@ -670,8 +671,9 @@ var escCSICases = []filterCase{
 	// byte, so the X here is text, not the over-bound sequence's final byte.
 	{name: "a drop after an over-bound ESC sequence closes it", in: "\x1b" + strings.Repeat(" ", 8) + "\x1b[6nX",
 		want: "\x1b" + strings.Repeat(" ", 8) + "\x1b\x18X"},
-	// Bytes 0xA0–0xFF inside a head are ignored, as DEL is (Owen,
-	// 2026-10-11); 0x80–0x9F still give the head up under the C1 limit.
+	// Bytes 0xA0–0xFF inside a head are ignored, as DEL is, as Ghostty's
+	// parse table ignores them; 0x80–0x9F still give the head up, since C1
+	// introducers aren't covered.
 	{name: "a high byte inside a CSI query", in: "\x1b[6\xa0n", want: ""},
 	{name: "a high byte after a lone ESC", in: "\x1b\xa0Z", want: ""},
 	{name: "a high byte before a CSI's introducer", in: "\x1b\xa0[6nX", want: "X"},
@@ -685,9 +687,10 @@ var escCSICases = []filterCase{
 // OSCs held to their end, held strings that end abnormally, the close, and
 // the strings PR 1 passes opaquely: DCS, APC, PM, SOS and tmux wrappers.
 var oscStringCases = []filterCase{
-	// Generated in init() from Task 2's vars: every oscQueryExamples entry,
-	// terminated by BEL and by ST and wrapped "a"+q+"b", wants "ab"; every
-	// oscPassExamples entry, terminated by BEL, wants itself.
+	// Generated in init() from query_classify_test.go's examples: every
+	// oscQueryExamples entry, terminated by BEL and by ST and wrapped
+	// "a"+q+"b", wants "ab"; every oscPassExamples entry, terminated by BEL,
+	// wants itself.
 	// Spec tests 2–3 (OSC rows).
 	{name: "OSC query, stray ESC, lone ESC", in: "\x1b]11;?\x1b\x1b[6n", want: ""},
 	{name: "title ended by a stray ESC is dropped", in: "\x1b]0;t\x1b\x1b[6nhello", want: "hello"},
