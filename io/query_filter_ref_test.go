@@ -108,7 +108,7 @@ func (e refEvent) String() string {
 	return fmt.Sprintf("%s data %q end %q", name, e.data, e.end)
 }
 
-// refHeldAtEnd reports whether the filter, under the spec's bounds, would
+// refHeldAtEnd reports whether the filter, under its bounds, would
 // still have been holding ev's string undecided when it ended: an OSC whose
 // number stayed within the 8-byte guard (numHeld <= 8) and whose whole string
 // stayed within the 256-byte bound (held <= 256). The filter holds no other
@@ -597,10 +597,9 @@ func (p *refParser) endString(c byte, at int) {
 	}
 }
 
-// refQuery reports whether ev is a request in the spec's families. It is
-// written from the spec's tables, independently of io/query_classify.go, so
-// a classifier bug can't hide itself. Families 1–14 read the same under every
-// mode.
+// refQuery reports whether ev is a request in the query families. It is
+// written apart from io/query_classify.go, so a classifier bug can't hide
+// itself. Families 1–14 read the same under every mode.
 func refQuery(mode refMode, ev refEvent) bool {
 	switch ev.kind {
 	case refESC:
@@ -767,8 +766,9 @@ func refNoEffect(ev refEvent) bool {
 // gets the terminator ST whatever follows (osc.zig's Terminator), and a DCS,
 // APC, PM or SOS ends the same way on any exit. So a string ended by an ESC
 // that isn't ST is, to it, one ended by ST, and the bytes after the ESC are
-// compared as events of their own. end keeps the difference for rule 9's
-// policy, which refCheck reads before this: kitty keeps such a string open.
+// compared as events of their own. end keeps the difference for the policy
+// that drops a held string ended abnormally, which refCheck reads before
+// this: kitty keeps such a string open.
 func refSemantic(ev refEvent) refEvent {
 	ev.held, ev.numHeld = 0, 0
 	if ev.end == 0x1b {
@@ -937,8 +937,8 @@ func TestRefCheck_CatchesASplice(t *testing.T) {
 	require.NotEmpty(t, refCheck("\x1b]0;t\x1b[6nhello", splice))
 }
 
-// The oracle accepts every transformation the spec calls correct. Each out
-// is filter(in + CAN), written out by hand from the spec's rules.
+// The oracle accepts every transformation the filter is meant to make. Each
+// out is filter(in + CAN), written out by hand from the filter's rules.
 func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 	zeros, title := strings.Repeat("0", 31), strings.Repeat("t", 300)
 	for _, c := range []struct{ in, out string }{

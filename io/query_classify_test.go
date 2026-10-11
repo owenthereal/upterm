@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The spec's family rows as exact sequences: CSIs complete, OSCs without their
+// The families' rows as exact sequences: CSIs complete, OSCs without their
 // terminator. They are package-level so the filter's tests can build their
 // cases from the same rows, and so a row added here is exercised by both.
 var (
@@ -20,13 +20,13 @@ var (
 		"\x1b[11t", "\x1b[13t", "\x1b[13;2t", "\x1b[14t", "\x1b[14;2t", "\x1b[15t", "\x1b[16t",
 		"\x1b[18t", "\x1b[19t", "\x1b[20t", "\x1b[21t", // 6
 		"\x1b[?4m", "\x1b[?1g", // 7
-		"\x1b[?1;1;0S", "\x1b[?2;1;0S", "\x1b[?1;3;256S", // 8 (C2: setters too)
+		"\x1b[?1;1;0S", "\x1b[?2;1;0S", "\x1b[?1;3;256S", // 8, setters too
 		"\x1b[?u", // 9
 		"\x1b[x", "\x1b[0x", "\x1b[1x", "\x1b[01x", "\x1b[1$w", "\x1b[&u", "\x1b[\"v",
 		"\x1b[1;1;1;1;24;80*y", "\x1b[1;1;24;80#|", "\x1b[1'|", "\x1b[#R", "\x1b[#S", // 10
 	}
 
-	// csiPassExamples are the spec's counter-cases: sequences near a family
+	// csiPassExamples are the counter-cases: sequences near a family
 	// that a terminal answers nothing to, and so must reach a guest.
 	csiPassExamples = []string{
 		"\x1b[?6c", "\x1b[>4n", "\x1b[0n", "\x1b[!p", "\x1b[>1p", "\x1b[61\"p",

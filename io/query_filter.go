@@ -114,8 +114,8 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 // framing included. The bound counts what is held before the final byte: a
 // final byte that arrives with the head full is still classified, and the next
 // byte that isn't one gives the head up, so it passes unclassified to its end.
-// Queries are a handful of bytes; one padded past its bound passes, which is a
-// stated limit of the design.
+// Queries are a handful of bytes; one padded past its bound passes, which the
+// filter accepts so that what it holds stays bounded.
 const (
 	maxEscHeld = 8
 	maxCSIHeld = 32
@@ -264,10 +264,11 @@ func (f *TerminalQueryFilter) escByte(b byte) {
 	}
 	switch {
 	case b >= 0x80:
-		// 0x80–0x9F, the 8-bit C1 controls the design leaves uncovered (in
-		// UTF-8 they are continuation bytes far more often), give the head up
-		// as they do a CSI's: what is held goes out, and the rest passes to
-		// its final byte. 0xA0–0xFF never get here; headControl drops them.
+		// 0x80–0x9F, the 8-bit C1 controls, which the filter doesn't act on
+		// (in UTF-8 they are continuation bytes far more often), give the
+		// head up as they do a CSI's: what is held goes out, and the rest
+		// passes to its final byte. 0xA0–0xFF never get here; headControl
+		// drops them.
 		f.passFrom(b, qfStateEscOverBound)
 	case b <= 0x2f:
 		// An intermediate, which a terminal collects until the final byte.
@@ -311,8 +312,8 @@ func (f *TerminalQueryFilter) csiByte(b byte) {
 		// Out of order, the CSI puts a terminal in CSI-ignore, which
 		// dispatches nothing, so it is no query: what is held goes out, and
 		// the rest passes to the final byte, which CSI-ignore still waits
-		// for. A byte of 0x80–0x9F, a C1 control the design leaves
-		// uncovered, gives the head up the same way.
+		// for. A byte of 0x80–0x9F, a C1 control the filter doesn't act on,
+		// gives the head up the same way.
 		f.passFrom(b, qfStateCSIIgnore)
 	case b <= 0x2f:
 		f.hold(b, qfStateCSIInter, maxCSIHeld, qfStateCSIOverBound)

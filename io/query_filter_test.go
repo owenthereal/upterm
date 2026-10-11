@@ -510,8 +510,7 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 	largest := max(maxEscHeld, maxCSIHeld, maxOSCNumHeld, maxOSCHeld)
 	require.Equal(t, largest+1, maxPendingBytes, "the largest hold, plus one held ESC")
 
-	// PR 1: 256 (the largest hold, an OSC with framing) + 1 held ESC. PR 2
-	// raises it to 259 for a wrapper's re-encoded inner ESCs. If the bounds
+	// 256 (the largest hold, an OSC with framing) + 1 held ESC. If the bounds
 	// change, change both this and the constant's comment.
 	require.Equal(t, 257, maxPendingBytes)
 
@@ -648,19 +647,19 @@ var escCSICases = []filterCase{
 	// wants "ab"; every csiPassExamples entry wants itself.
 	{name: "counter-cases pass", in: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q",
 		want: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q"},
-	// Spec test 2 (CSI and ESC rows).
+	// An ESC abandons whatever head is held and starts a new sequence.
 	{name: "ESC restarts a lone ESC", in: "\x1b\x1b[6n", want: ""},
 	{name: "ESC restarts a CSI head", in: "\x1b[6\x1b[6nhello", want: "hello"},
 	{name: "abandoned head then a passed CSI", in: "\x1b[1\x1b[1m", want: "\x1b[1m"},
 	{name: "ESC restarts an ESC-intermediate head", in: "\x1b(\x1b[6nBfoo", want: "Bfoo"},
-	// Spec test 3.
+	// Control bytes inside a head: a C0 goes out at once, a DEL is dropped.
 	{name: "C0 after a lone ESC", in: "\x1b\r[6n", want: "\r"},
 	{name: "DEL after a lone ESC", in: "\x1b\x7f[6n", want: ""},
 	{name: "C0 inside a CSI query", in: "\x1b[6\rn", want: "\r"},
 	{name: "C0 inside a passed CSI", in: "\x1b[1\rm", want: "\r\x1b[1m"},
 	{name: "C0 inside an ESC-intermediate", in: "\x1b(\rB", want: "\r\x1b(B"},
 	{name: "DEL never counts toward the bound", in: "\x1b[" + strings.Repeat("\x7f", 40) + "6n", want: ""},
-	// Spec test 4 (over-bound head).
+	// Heads emitted unfinished, past a bound or in CSI-ignore, and their close.
 	{name: "a drop after an over-bound head closes it", in: "\x1b[" + strings.Repeat("0", 31) + "\x1b[6nhello",
 		want: "\x1b[" + strings.Repeat("0", 31) + "\x1b\x18hello"},
 	{name: "an over-bound CSI passes to its final byte", in: "\x1b[" + strings.Repeat("0", 40) + "mX",
@@ -685,17 +684,17 @@ var escCSICases = []filterCase{
 }
 
 // OSCs held to their end, held strings that end abnormally, the close, and
-// the strings PR 1 passes opaquely: DCS, APC, PM, SOS and tmux wrappers.
+// the strings passed opaquely: DCS, APC, PM, SOS and tmux wrappers.
 var oscStringCases = []filterCase{
 	// Generated in init() from query_classify_test.go's examples: every
 	// oscQueryExamples entry, terminated by BEL and by ST and wrapped
 	// "a"+q+"b", wants "ab"; every oscPassExamples entry, terminated by BEL,
 	// wants itself.
-	// Spec tests 2–3 (OSC rows).
+	// An OSC ended by a stray ESC, and a C0 after one.
 	{name: "OSC query, stray ESC, lone ESC", in: "\x1b]11;?\x1b\x1b[6n", want: ""},
 	{name: "title ended by a stray ESC is dropped", in: "\x1b]0;t\x1b\x1b[6nhello", want: "hello"},
 	{name: "C0 after a dropped title", in: "abc\x1b]0;t\x1b[6\rnX", want: "abc\rX"},
-	// Spec test 4.
+	// OSCs that end abnormally, and the close an emitted one is owed.
 	{name: "title then a dropped query", in: "\x1b]0;newtitle\x1b[6n", want: ""},
 	{name: "no OSC glued back together", in: "\x1b]11;\x1b[6n?\x07", want: "?\x07"},
 	{name: "OSC query ended by ESC", in: "\x1b]11;?\x1b[6n\x07", want: "\x07"},
@@ -715,7 +714,7 @@ var oscStringCases = []filterCase{
 		want: "\x1bPq\x07\x1b\x18;1;?\x07", kitty: true},
 	{name: "cancel with an obligation drops the held OSC (SUB)", in: "\x1bPq\x07\x1b]4;0;\x1a;1;?\x07",
 		want: "\x1bPq\x07\x1b\x1a;1;?\x07", kitty: true},
-	// Spec test 5.
+	// DCS, APC, PM, SOS and tmux wrappers, passed as they stream.
 	{name: "query after a passed DCS", in: "\x1bP0;1;0q#0\x1b[6n\x1b\\", want: "\x1bP0;1;0q#0\x1b\x18\x1b\\"},
 	// A C0 inside the held head is due before the head is decided, and must
 	// not land inside the DCS the input had already ended, so the close goes
@@ -793,7 +792,7 @@ func TestTerminalQueryFilter_SplitWritesMatchWholeWrites(t *testing.T) {
 	}
 }
 
-// continuationCheck is spec test 8: a joiner at any boundary ends where the
+// continuationCheck checks that a joiner at any boundary ends where the
 // filter would. Filter A takes the first k bytes of in; a fresh filter B takes
 // what A emitted, then A.Pending(), then the rest. B's output must equal the
 // output of one filter fed all of in, which also holds B to re-filtering A's

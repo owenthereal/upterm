@@ -11,13 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// refAlphabet is the fuzz domain's alphabet (spec test 12): ESC and what
-// follows one to start a CSI, an OSC or a string, or to end a string as ST;
-// digits and the other parameter bytes, with ':'; the prefixes and the
-// intermediates the families name, and the ESC intermediates '(', '!' and '#';
-// the final byte of every family, and B, h, l, H, J and G, which end common
-// sequences that ask nothing; BEL, CAN and SUB, which end sequences, CR and
-// LF, which stand for every other C0; DEL; and 'a' for text.
+// refAlphabet is the fuzz domain's alphabet: ESC and what follows one to start
+// a CSI, an OSC or a string, or to end a string as ST; digits and the other
+// parameter bytes, with ':'; the prefixes and the intermediates the families
+// name, and the ESC intermediates '(', '!' and '#'; the final byte of every
+// family, and B, h, l, H, J and G, which end common sequences that ask
+// nothing; BEL, CAN and SUB, which end sequences, CR and LF, which stand for
+// every other C0; DEL; and 'a' for text.
 const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!" +
 	"cnpqtmgSuxwvy|RZBhlHJG\x07\x18\x1a\r\n\x7fa"
 
@@ -45,18 +45,18 @@ func refDomainByte(b byte) byte {
 	return 'a' // 0x40–0x7E: 0x30–0x3F and DEL are all in the alphabet
 }
 
-// refGenerate maps a fuzzer's bytes onto the domain spec test 12 fuzzes: the
-// inputs outside "Not covered", on which the filter has to keep every
-// property. Each byte is mapped into the domain (refDomainByte), then cut --
-// left out, with the bytes after it still taken -- if it would take the input
-// out of the domain:
+// refGenerate maps a fuzzer's bytes onto the fuzz domain: the inputs outside
+// the limits the filter states, on which it has to keep every property. Each
+// byte is mapped into the domain (refDomainByte), then cut -- left out, with
+// the bytes after it still taken -- if it would take the input out of the
+// domain:
 //   - a byte the filter would hold past a bound: past 8 bytes of an ESC
 //     sequence with intermediates, 32 of a CSI head, 8 of an OSC's number or
-//     256 of an OSC. Past its bound a query passes by design, and a sequence
-//     isn't known to be a query until it ends, so every sequence is held to
-//     its bound;
+//     256 of an OSC. Past its bound a query passes, a limit the filter
+//     accepts, and a sequence isn't known to be a query until it ends, so
+//     every sequence is held to its bound;
 //   - the ';' that would make a DCS a tmux wrapper (final byte 't', data from
-//     "mux;"), which PR 1 passes byte for byte, query or not.
+//     "mux;"), which the filter passes byte for byte, query or not.
 //
 // Nothing else is changed, so an input already in the domain comes back as it
 // was. Where a sequence starts and how much of it the filter holds is read
@@ -77,15 +77,14 @@ func refGenerate(seed []byte) []byte {
 }
 
 // pastBound reports whether c, at offset at, would have the filter hold the
-// sequence being parsed past its bound, under rule 6 of the design. A bound
-// counts raw bytes from the sequence's ESC, as the filter holds them: of an
-// ESC sequence or a CSI head, what the parser collects, and not the C0 it
-// executes or the DEL it ignores; of an OSC, every byte up to its terminator,
-// the control bytes it ignores included, but not one the escape state skipped
-// before the ']' (refParser.strHeld). The ';' that ends an OSC's number isn't
-// counted against the number's bound, and a byte that ends a sequence is
-// never held past one. The numbers are the design's, not the filter's
-// constants.
+// sequence being parsed past its bound. A bound counts raw bytes from the
+// sequence's ESC, as the filter holds them: of an ESC sequence or a CSI head,
+// what the parser collects, and not the C0 it executes or the DEL it ignores;
+// of an OSC, every byte up to its terminator, the control bytes it ignores
+// included, but not one the escape state skipped before the ']'
+// (refParser.strHeld). The ';' that ends an OSC's number isn't counted against
+// the number's bound, and a byte that ends a sequence is never held past one.
+// The numbers are written out here, not read from the filter's constants.
 func (p *refParser) pastBound(c byte, at int) bool {
 	t := refTable[c][p.state]
 	collects := t.action == raCollect || t.action == raParam
@@ -166,7 +165,7 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	require.NotZero(t, high, "and some of those have a byte from 0xA0 to 0xFF")
 }
 
-// FuzzTerminalQueryFilter is spec test 12. Whatever refGenerate makes of the
+// FuzzTerminalQueryFilter checks that, whatever refGenerate makes of the
 // fuzzer's bytes, the filter keeps every property it promises a guest:
 //   - it never panics;
 //   - Pending never holds more than maxPendingBytes, after any byte;
@@ -179,8 +178,8 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 //     three string-end models, and the same effects as the input's, less its
 //     queries and the held strings the filter drops by policy (refCheck).
 //
-// The seeds are every filterCases input and the inputs of the design's
-// Problem table, which master's filter got wrong.
+// The seeds are every filterCases input and four inputs the filter used to
+// get wrong.
 func FuzzTerminalQueryFilter(f *testing.F) {
 	seeds := []string{"\x1b\x1b[6n", "\x1b[6\x1b[6n", "\x1b]0;t\x1b[6nhello", "\x1b]11;?\x1b[6n\x07"}
 	for _, c := range filterCases {
