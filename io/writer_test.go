@@ -129,6 +129,53 @@ func Test_MultiWriter_ReplayStripsTerminalQueries(t *testing.T) {
 	require.Equal(t, "beforeafter", late.String())
 }
 
+// tmux 3.8 asks its terminal whether synchronized output is supported with
+// DECRQM, "ESC [ ? 2026 $ p", and a guest whose terminal answers it types the
+// reply into the shared pty. The primary's stream is raw, so its terminal
+// answers; every guest must see none of it, whether it was attached when the
+// query was written, joins after it, or joins in the middle of it. The guests
+// are built the way server.go builds one: a TerminalQueryFilter in front of
+// what takes the bytes.
+func TestMultiWriter_GuestsNeverSeeDECRQM(t *testing.T) {
+	const query = "\x1b[?2026$p"
+
+	w := NewMultiWriter(DefaultReplayBytes)
+	primary := &recordingWriter{}
+	require.NoError(t, w.Append(primary))
+	attached := &recordingWriter{}
+	require.NoError(t, w.Append(NewTerminalQueryFilter(attached)))
+
+	_, err := w.Write([]byte("\x1b[?1049h" + query + "frame"))
+	require.NoError(t, err)
+
+	// Joining after the query was written: the ring replays it, and the ring
+	// is filtered already, so the joiner's own filter has nothing to catch.
+	joined := &recordingWriter{}
+	require.NoError(t, w.Append(NewTerminalQueryFilter(joined)))
+
+	for name, got := range map[string]*recordingWriter{"attached": attached, "joined": joined} {
+		require.Equal(t, "\x1b[?1049hframe", string(got.bytes()), name)
+	}
+	require.Equal(t, 1, strings.Count(string(primary.bytes()), query), "the primary's terminal answers it once")
+
+	// Joining in the middle of it: the filter is holding the lead-in, which
+	// Append replays ahead of the live bytes, so the joiner's filter holds it
+	// too and drops the query when its last byte arrives.
+	_, err = w.Write([]byte("more\x1b[?2026$"))
+	require.NoError(t, err)
+	midway := &recordingWriter{}
+	require.NoError(t, w.Append(NewTerminalQueryFilter(midway)))
+	_, err = w.Write([]byte("pend"))
+	require.NoError(t, err)
+
+	for name, got := range map[string]*recordingWriter{"attached": attached, "joined": joined, "midway": midway} {
+		require.NotContains(t, string(got.bytes()), "$p", name)
+		require.Contains(t, string(got.bytes()), "frame", name)
+		require.Equal(t, "\x1b[?1049hframemoreend", string(got.bytes()), name)
+	}
+	require.Equal(t, 2, strings.Count(string(primary.bytes()), query), "the primary's terminal answers both")
+}
+
 // A joiner that attaches mid-sequence must see the sequence whole, not just
 // the tail the live fan-out delivers after it joins. The lead-in the filter
 // is still holding is not in the ring yet, so Append must hand it over too.

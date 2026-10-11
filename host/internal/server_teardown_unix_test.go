@@ -218,7 +218,11 @@ func TestAForcedCommandsGuestIsPutBack(t *testing.T) {
 // The same for the guests of the shared command: when the session ends with
 // the command still holding the terminal, each guest is put back -- also when
 // its output stopped inside a sequence, which the guest's own query filter is
-// still holding and the reset has to get past.
+// still holding and the reset has to get past. The title never reaches the
+// guest: its filter is still holding it, unfinished, when the reset's CAN
+// arrives, and a held string a CAN ends is dropped, which is what the guest's
+// terminal would have done with it anyway. The CAN and the reset still get
+// through.
 func TestSessionEndPutsItsGuestsBack(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -233,13 +237,13 @@ func TestSessionEndPutsItsGuestsBack(t *testing.T) {
 		{
 			name:    "output stopped inside a title",
 			command: `printf '\033[?2004hREADY\033]0;a title'; exec sleep 30`,
-			want:    "\x1b[?2004hREADY" + "\x1b]0;a title" + "\x18\x1b[?2004l",
+			want:    "\x1b[?2004hREADY" + "\x18\x1b[?2004l",
 		},
 		{
 			// Nothing but the cancel to send, and nothing after it.
 			name:    "output stopped inside a title and nothing else left set",
 			command: `printf 'READY\033]0;a title'; exec sleep 30`,
-			want:    "READY" + "\x1b]0;a title" + "\x18",
+			want:    "READY" + "\x18",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
