@@ -666,6 +666,10 @@ var escCSICases = []filterCase{
 		want: "\x1b[" + strings.Repeat("0", 40) + "mX"},
 	{name: "CSI-ignore passes to its final byte", in: "\x1b[1$2qX", want: "\x1b[1$2qX"},
 	{name: "a drop after CSI-ignore closes it", in: "\x1b[1$2\x1b[6nX", want: "\x1b[1$2\x1b\x18X"},
+	// An ESC sequence given up on past its bound still ends at its final
+	// byte, so the X here is text, not the over-bound sequence's final byte.
+	{name: "a drop after an over-bound ESC sequence closes it", in: "\x1b" + strings.Repeat(" ", 8) + "\x1b[6nX",
+		want: "\x1b" + strings.Repeat(" ", 8) + "\x1b\x18X"},
 	// Bytes 0xA0–0xFF inside a head are ignored, as DEL is (Owen,
 	// 2026-10-11); 0x80–0x9F still give the head up under the C1 limit.
 	{name: "a high byte inside a CSI query", in: "\x1b[6\xa0n", want: ""},
@@ -710,6 +714,10 @@ var oscStringCases = []filterCase{
 		want: "\x1bPq\x07\x1b\x1a;1;?\x07", kitty: true},
 	// Spec test 5.
 	{name: "query after a passed DCS", in: "\x1bP0;1;0q#0\x1b[6n\x1b\\", want: "\x1bP0;1;0q#0\x1b\x18\x1b\\"},
+	// A C0 inside the held head is due before the head is decided, and must
+	// not land inside the DCS the input had already ended, so the close goes
+	// out first.
+	{name: "a C0 in a head settles the close first", in: "\x1bPq#0\x1b[6\rnX", want: "\x1bPq#0\x1b\x18\rX"},
 	{name: "DCS-ignore closed too", in: "\x1bP$1qhidden\x1b[6nVISIBLE", want: "\x1bP$1qhidden\x1b\x18VISIBLE"},
 	{name: "tmux wrapper", in: "\x1bPtmux;\x1b\x1b[31mX\x1b\\", want: "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
 	{name: "wrapped kitty command", in: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\", want: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"},
@@ -727,6 +735,10 @@ var oscStringCases = []filterCase{
 	{name: "SUB ends a passed DCS", in: "\x1bPq#0\x1aX", want: "\x1bPq#0\x1aX"},
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
 	{name: "BEL doesn't end an APC", in: "\x1b_Gx\x07Y\x1b\\", want: "\x1b_Gx\x07Y\x1b\\"},
+	// Past a BEL the string is still open, so a query dropped after it still
+	// owes the string a close.
+	{name: "a drop after a BEL in a DCS closes it", in: "\x1bPq#0\x07\x1b[6nX", want: "\x1bPq#0\x07\x1b\x18X"},
+	{name: "a drop after a BEL in an APC closes it", in: "\x1b_G\x07\x1b[6nX", want: "\x1b_G\x07\x1b\x18X"},
 	{name: "PM and SOS pass", in: "\x1b^privacy\x1b\\\x1bXsos\x1b\\", want: "\x1b^privacy\x1b\\\x1bXsos\x1b\\"},
 	// Found by the fuzz test: the DEL after the ESC that ends a passed string
 	// is dropped, as after any ESC, and ESC \ then passes as the close. The
@@ -809,6 +821,19 @@ func TestTerminalQueryFilter_KittyRowsAskNothing(t *testing.T) {
 		for _, ev := range refParse(refKitty, []byte(c.want)) {
 			require.False(t, refQuery(refKitty, ev), "%s: %q asks %v under kitty", c.name, c.want, ev)
 		}
+	}
+}
+
+// Every exact-bytes case passes the oracle as it stands, the ones the fuzz
+// domain leaves out included. A sequence past its bound passes unclassified,
+// so a query there is a stated limit, but a non-query must still reach the
+// terminal with the effect it had, and only these rows check that: the fuzz
+// never takes a sequence past its bound.
+func TestTerminalQueryFilter_CasesPassTheOracle(t *testing.T) {
+	for _, c := range filterCases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Empty(t, refCheck(c.in, filterAll))
+		})
 	}
 }
 

@@ -119,7 +119,7 @@ func (p *refParser) wraps(c byte) bool {
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
 // refAlphabet, it holds no tmux wrapper, and no sequence in it passes its
-// bound; the rows that do are the four named below, which pin the bounds
+// bound; the rows that do are the five named below, which pin the bounds
 // themselves. refGenerate has to give every such row back unchanged.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
@@ -132,6 +132,7 @@ func (p *refParser) wraps(c byte) bool {
 func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	overBound := []string{
 		"a drop after an over-bound head closes it",
+		"a drop after an over-bound ESC sequence closes it",
 		"an over-bound CSI passes to its final byte",
 		"over-bound title closed with ESC CAN",
 		"ignored CRs in the number trip the number guard",
