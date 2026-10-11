@@ -236,6 +236,10 @@ type Host struct {
 	// record write, with the run's state: a test that needs the tunnel down
 	// by the time of that write takes it down here.
 	beforeReadyPublish func(*sessionState)
+	// afterEndingPublish is a per-Host test barrier run once teardown has
+	// begun and the record has been told so: blocking in it holds Run open
+	// with that write behind it.
+	afterEndingPublish func()
 	// joins is the running session's join state, for JoinState. Set by Run
 	// before any actor starts and cleared on its way out, so a callback Run
 	// makes reads it without a lock of its own.
@@ -787,6 +791,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	adminReady := make(chan struct{})
 	cmdReady := make(chan struct{})
 	sessionReady := make(chan struct{})
+	// Closed once the ready actor has published readiness, failed to, or
+	// given up on it. Unlike sessionReady it always closes, since teardown
+	// waits on it before it publishes ending.
+	readySettled := make(chan struct{})
 	// sync.Once on each, since a callback that fires twice must not panic on a
 	// double close.
 	var adminOnce, cmdOnce sync.Once
@@ -972,9 +980,29 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// will enforce. joins.close() never blocks -- it only stops a timer
 		// under a mutex nothing holds across a wait -- which is why it may
 		// run before the cause reaches the command.
+		//
+		// The actor then tells the record the session is ending, so that a
+		// reader between here and the final write -- which waits for the
+		// tunnel to close and the group to finish -- isn't told ready, with
+		// a connect string, for a session that has ended. Here rather than
+		// in the interrupt: shutting the command down never waits on a
+		// record write. And after the ready write, if there is to be one,
+		// which teardown doesn't prevent: a ready write that came second
+		// would carry ending, and the ready callback would report a session
+		// that started as one that is ending.
 		tearingDown := make(chan struct{})
 		g.Add(func() error {
 			<-tearingDown
+			<-readySettled
+			state.setPhase(phaseEnding)
+			if c.SessionDir != nil {
+				if err := c.SessionDir.Update(state.apply); err != nil {
+					logger.Warn("failed to publish that the session is ending", "error", err)
+				}
+			}
+			if c.afterEndingPublish != nil {
+				c.afterEndingPublish()
+			}
 			return nil
 		}, func(error) {
 			joins.close()
@@ -1156,6 +1184,8 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	{
 		ready := make(chan struct{})
 		g.Add(func() error {
+			settle := sync.OnceFunc(func() { close(readySettled) })
+			defer settle()
 			if !readinessEstablished(adminReady, cmdReady, ready) {
 				return nil
 			}
@@ -1220,6 +1250,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 
 			// Unlike ready (closed on teardown), this signals successful readiness.
 			close(sessionReady)
+			settle()
 
 			<-ready
 			return nil
