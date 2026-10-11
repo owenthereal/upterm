@@ -106,7 +106,8 @@ type Config struct {
 	Input io.Reader
 	// TakeTerminal runs once: as Run starts when ConfirmHostKey is nil, since
 	// nothing can prompt, and otherwise when a handshake first succeeds, even
-	// if that attempt's session then fails to start. It is where the command
+	// if that attempt's session then fails to start. A run whose ctx has
+	// already ended never runs it, and is Stopped. It is where the command
 	// puts the terminal in raw mode, and from then on the guest's keys are
 	// Run's. So a caller passes ConfirmHostKey only when a prompt is actually
 	// possible: setting it delays this, and the guest's keys with it, until
@@ -413,6 +414,13 @@ func (r *runner) again(why WaitReason, err error) step {
 }
 
 func (r *runner) loop() Outcome {
+	// A run stopped before it starts takes nothing: not the terminal, whose
+	// raw mode would be for nothing, nor a chunk of the guest's keys, which
+	// the reader would take for no one, nor a connection. And it is Stopped,
+	// whatever taking the terminal would have done.
+	if r.runCtx.Err() != nil {
+		return r.stopped()
+	}
 	if r.cfg.ConfirmHostKey == nil {
 		// Nothing can prompt, so the terminal is the run's from the start: a
 		// first join's waits answer Enter and the escape sequence too, and a

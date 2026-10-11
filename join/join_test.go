@@ -940,6 +940,30 @@ func TestTakeTerminalRunsOnce(t *testing.T) {
 	})
 }
 
+// A run whose ctx has ended before it starts is stopped as it starts. It
+// takes nothing on the way: not the terminal, whose raw mode would be for
+// nothing, nor a chunk of the guest's keys, nor a connection.
+func TestARunStoppedBeforeItStartsTakesNothing(t *testing.T) {
+	for name, opts := range map[string][]option{
+		"when nothing can prompt": nil,
+		"when a prompt can come":  {withConfirm(&countingConfirm{accept: true})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			took := 0
+			input := newWatchedInput(strings.NewReader("\r")) // an Enter, ready to be read
+			opts := append([]option{withTakeTerminal(func() error { took++; return nil }), withInput(input)}, opts...)
+			cfg := config(t, newFakeRelay(t, relayKnobs{exit: intp(0)}), opts...)
+			dialed := dialsOn(&cfg)
+			require.Equal(t, Stopped, recv(t, runJoinAsync(t, ctx, cfg)).Kind)
+			require.Zero(t, took, "the terminal was taken")
+			require.Len(t, dialed, 0, "the run attempted")
+			require.Len(t, input.reading, 0, "Input was read")
+		})
+	}
+}
+
 func TestASilentPeerIsLostNotLeft(t *testing.T) {
 	rec := &recorder{}
 	cfg := config(t, newFakeRelay(t, relayKnobs{silentAfterReady: true}, relayKnobs{exit: intp(0)}), withEvents(rec))
