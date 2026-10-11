@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/attach"
+	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,9 @@ func TestEveryOutcomeRow(t *testing.T) {
 	wantErr := func(target error) func(*testing.T, Outcome, *recorder) {
 		return func(t *testing.T, out Outcome, _ *recorder) { require.ErrorIs(t, out.Err, target) }
 	}
+	// The rows that end at the first join's deadline give it one short enough
+	// to wait for.
+	timesOut := []option{withFirstJoin(300 * time.Millisecond)}
 	for name, tc := range map[string]struct {
 		scripts []relayKnobs
 		opts    []option
@@ -43,13 +47,13 @@ func TestEveryOutcomeRow(t *testing.T) {
 			require.Equal(t, Exited, out.Kind)
 			require.Equal(t, []EventKind{Joined, Lost, Waiting, Joined}, rec.kinds())
 		}},
-		"no host":                 {[]relayKnobs{{refuseAll: true, banner: noHost}}, nil, wantDeadline(NoHost)},
-		"lookup failed":           {[]relayKnobs{{refuseAll: true, banner: upterm.BannerLookupFailed}}, nil, wantDeadline(RelayLookup)},
-		"upstream unavailable":    {[]relayKnobs{{rejectSession: upterm.UpstreamUnavailable}}, nil, wantDeadline(Upstream)},
-		"upstream has no session": {[]relayKnobs{{rejectSession: upterm.UpstreamNoHost}}, nil, wantDeadline(NoHost)},
-		"upstream lookup failed":  {[]relayKnobs{{rejectSession: upterm.UpstreamLookupFailed}}, nil, wantDeadline(RelayLookup)},
-		"unknown channel text":    {[]relayKnobs{{rejectSession: "something new"}}, nil, wantDeadline(Setup)},
-		"unreachable":             {[]relayKnobs{{dropOnPublicKey: true}}, nil, wantDeadline(Unreachable)},
+		"no host":                 {[]relayKnobs{{refuseAll: true, banner: noHost}}, timesOut, wantDeadline(NoHost)},
+		"lookup failed":           {[]relayKnobs{{refuseAll: true, banner: upterm.BannerLookupFailed}}, timesOut, wantDeadline(RelayLookup)},
+		"upstream unavailable":    {[]relayKnobs{{rejectSession: upterm.UpstreamUnavailable}}, timesOut, wantDeadline(Upstream)},
+		"upstream has no session": {[]relayKnobs{{rejectSession: upterm.UpstreamNoHost}}, timesOut, wantDeadline(NoHost)},
+		"upstream lookup failed":  {[]relayKnobs{{rejectSession: upterm.UpstreamLookupFailed}}, timesOut, wantDeadline(RelayLookup)},
+		"unknown channel text":    {[]relayKnobs{{rejectSession: "something new"}}, timesOut, wantDeadline(Setup)},
+		"unreachable":             {[]relayKnobs{{dropOnPublicKey: true}}, timesOut, wantDeadline(Unreachable)},
 		"refused":                 {[]relayKnobs{{refuseAll: true}}, nil, wantErr(ErrKeysRefused)},
 		"changed relay key":       {[]relayKnobs{{hostKeyChanged: true}}, nil, wantErr(ErrHostKey)},
 		"upstream host key":       {[]relayKnobs{{rejectSession: upterm.UpstreamHostKeyMismatch}}, nil, wantErr(ErrUpstreamHostKey)},
@@ -126,7 +130,7 @@ func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			relay := newFakeRelay(t, tc.knobs)
-			cfg := config(t, relay) // FirstJoin 300 ms
+			cfg := config(t, relay, withFirstJoin(300*time.Millisecond))
 			// An attempt's own deadline is an hour away: only the first join's
 			// can be what ends one.
 			cfg.Timing.Attempt = time.Hour
@@ -181,10 +185,10 @@ func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 // A first join whose time runs out wraps the last reason it had, never what
 // the cut did to the attempt it ended.
 func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
-	// With an attempt's own deadline an hour away, the first join's is what
-	// ends the last attempt.
+	// With the first join's deadline 300 ms away and an attempt's own an hour
+	// away, the first join's is what ends the last attempt.
 	cutting := func(cfg Config) Config {
-		cfg.Timing.Attempt = time.Hour
+		cfg.Timing.FirstJoin, cfg.Timing.Attempt = 300*time.Millisecond, time.Hour
 		return cfg
 	}
 	t.Run("a setup cut by its own timer", func(t *testing.T) {
@@ -209,8 +213,8 @@ func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
 		// cuts it; its setup overruns both.
 		const firstJoin = time.Second
 		cfg := config(t, newFakeRelay(t, relayKnobs{}))
-		cfg.Timing.FirstJoin = firstJoin // Attempt 200 ms
-		var first time.Time              // the first session's start, after the first join's deadline was set
+		cfg.Timing.FirstJoin, cfg.Timing.Attempt = firstJoin, 200*time.Millisecond
+		var first time.Time // the first session's start, after the first join's deadline was set
 		cfg.runSession = func(context.Context, *ssh.Client, time.Time) (attach.Result, error) {
 			if first.IsZero() {
 				first = time.Now()
@@ -226,7 +230,7 @@ func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
 			upterm.UpstreamKeyRefused: Setup,  // the session wouldn't start
 			upterm.UpstreamAuthFailed: NoHost, // refused, or no session
 		} {
-			cfg := config(t, newFakeRelay(t, relayKnobs{}), withSigners(newSigner(t), newSigner(t)))
+			cfg := config(t, newFakeRelay(t, relayKnobs{}), withSigners(newSigner(t), newSigner(t)), withFirstJoin(300*time.Millisecond))
 			// The session's node turns the first key away once the first
 			// join's time is up, which leaves the second key untried.
 			firstJoin := cfg.Timing.FirstJoin
@@ -244,8 +248,8 @@ func TestATimedOutFirstJoinSaysWhatItWasWaitingOn(t *testing.T) {
 // ends the join when its time runs out.
 func TestAStatusLineDoesNotHoldAFirstJoinPastItsDeadline(t *testing.T) {
 	t.Run("one the terminal never takes", func(t *testing.T) {
-		// FirstJoin 300 ms. The gate opens only as the test ends.
-		cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}))
+		// The gate opens only as the test ends.
+		cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withFirstJoin(300*time.Millisecond))
 		stuck, _ := newGate(t)
 		cfg.Events = func(e Event) {
 			if e.Kind == Waiting {
@@ -288,9 +292,11 @@ func TestAStatusLineDoesNotHoldAFirstJoinPastItsDeadline(t *testing.T) {
 		out := runJoin(t, cfg)
 		late := time.Since(deadline)
 		require.Equal(t, NoHost, deadlineOf(t, out).Why)
-		// What is left to wait is measured after the line, not before it: a
-		// wait measured from before would end as long after the deadline as
-		// the line took, about 900 ms here. The bound is loose.
+		// The run ends at the deadline: the wait is due there, and the
+		// deadline bounds it besides. A wait begun only once the line was
+		// written, with nothing but its own timer to end it, would end as long
+		// after the deadline as the line took, about 900 ms here. The bound is
+		// loose.
 		require.Less(t, late, 400*time.Millisecond, "the run ended %v after the first join's deadline", late)
 	})
 }
@@ -548,9 +554,10 @@ func TestPromptHappensWithNoConnectionOpen(t *testing.T) {
 
 func TestPromptTimeDoesNotCountAgainstTheFirstJoin(t *testing.T) {
 	relay := newFakeRelay(t, relayKnobs{hostKeyUnknown: true}, relayKnobs{exit: intp(0)})
-	// The guest takes 500 ms over the fingerprint; FirstJoin is 300 ms.
+	// The guest takes 500 ms over the fingerprint, and the first join has
+	// 300 ms.
 	slow := &countingConfirm{accept: true, during: func() { time.Sleep(500 * time.Millisecond) }}
-	require.Equal(t, Exited, runJoin(t, config(t, relay, withConfirm(slow))).Kind)
+	require.Equal(t, Exited, runJoin(t, config(t, relay, withConfirm(slow), withFirstJoin(300*time.Millisecond))).Kind)
 }
 
 func TestAPromptEndsWithTheRun(t *testing.T) {
@@ -849,10 +856,12 @@ func TestTakeTerminalRunsOnce(t *testing.T) {
 	})
 }
 
-func TestASilentPeerIsLostNotLeft(t *testing.T) { // liveness 50 ms + 50 ms
+func TestASilentPeerIsLostNotLeft(t *testing.T) {
 	rec := &recorder{}
+	cfg := config(t, newFakeRelay(t, relayKnobs{silentAfterReady: true}, relayKnobs{exit: intp(0)}), withEvents(rec))
+	cfg.Timing.Liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
 	start := time.Now()
-	out := runJoin(t, config(t, newFakeRelay(t, relayKnobs{silentAfterReady: true}, relayKnobs{exit: intp(0)}), withEvents(rec)))
+	out := runJoin(t, cfg)
 	require.Equal(t, Exited, out.Kind)
 	require.Equal(t, []EventKind{Joined, Lost, Waiting, Joined}, rec.kinds())
 	require.Less(t, time.Since(start), time.Second)
@@ -869,7 +878,8 @@ func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 		},
 		Source: KeySource{Agent: 1},
 	}
-	cfg := config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id)) // Attempt 200 ms
+	cfg := config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id))
+	cfg.Timing.Attempt = 200 * time.Millisecond
 	start := time.Now()
 	select {
 	case out := <-runJoinAsync(t, context.Background(), cfg):
@@ -1008,7 +1018,8 @@ func TestAnIdentityThatFailsStopsAFirstJoinAndHoldsUpARejoin(t *testing.T) {
 	cause := errors.New("the agent's socket is gone")
 	t.Run("a first join", func(t *testing.T) {
 		id := Identity{Signers: func(context.Context) ([]ssh.Signer, func(), error) { return nil, nil, cause }}
-		out := runJoin(t, config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id)))
+		// A deadline the run would reach, were it waiting the failure out.
+		out := runJoin(t, config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id), withFirstJoin(300*time.Millisecond)))
 		require.Equal(t, Failed, out.Kind)
 		require.IsType(t, &IdentityError{}, out.Err) // and not a DeadlineError
 		require.ErrorIs(t, out.Err, ErrIdentity)

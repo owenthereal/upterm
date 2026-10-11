@@ -185,7 +185,11 @@ type option func(*Config)
 
 // config is a Config on relay: a Terminal on a syncSink with escape byte '~',
 // one generated signer, CheckHostKey per the knobs, an Input nobody types on,
-// and short timings.
+// and timings that a test runs into only if it means to. Waits are short. The
+// first join's deadline, an attempt's and liveness are an hour, so that on a
+// loaded machine a slow handshake never ends a first join, nor adds an
+// attempt, a status line or a drop, in a test that isn't about them; a test
+// of one of those sets it short itself.
 func config(t *testing.T, relay *fakeRelay, opts ...option) Config {
 	t.Helper()
 	// Nothing is ever written, so a Read blocks: an empty reader would be EOF,
@@ -200,9 +204,9 @@ func config(t *testing.T, relay *fakeRelay, opts ...option) Config {
 		Timing: Timing{
 			FastBase:  10 * time.Millisecond,
 			FastCap:   40 * time.Millisecond,
-			FirstJoin: 300 * time.Millisecond,
-			Attempt:   200 * time.Millisecond,
-			Liveness:  liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond},
+			FirstJoin: time.Hour,
+			Attempt:   time.Hour,
+			Liveness:  liveness.Timing{Interval: time.Hour, Bound: time.Hour},
 			WallCheck: 10 * time.Millisecond,
 		},
 	}
@@ -237,6 +241,8 @@ func withInput(r io.Reader) option { return func(c *Config) { c.Input = r } }
 func withSize(size func() termsize.Size) option { return func(c *Config) { c.Size = size } }
 
 func withWait() option { return func(c *Config) { c.Wait = true } }
+
+func withFirstJoin(d time.Duration) option { return func(c *Config) { c.Timing.FirstJoin = d } }
 
 // runJoin runs cfg to its outcome, failing the test if that takes longer than
 // testTimeout.
