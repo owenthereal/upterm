@@ -96,7 +96,9 @@ type Config struct {
 	Terminal *attach.Terminal
 	// Size measures the terminal: afresh for each session's pty request, and
 	// for each change on Terminal.Resizes while a session runs. Calls are
-	// never concurrent, and none is made after Run returns. Nil keeps
+	// never concurrent, and none is made after Run returns. With Resizes
+	// set, they run on a goroutine of Run's own, and may run while a
+	// session's Terminal does, its Suspend included, or an Events call. Nil keeps
 	// Terminal.Pty's size, and gives a session the value on Resizes as it is.
 	Size func() termsize.Size
 	// Input is the guest's keys. Run reads it only once TakeTerminal has run:
