@@ -427,6 +427,11 @@ func (r *runner) loop() Outcome {
 		// first join's waits answer Enter and the escape sequence too, and a
 		// guest with no signal to send, in a browser, can still stop it.
 		if err := r.takeTerminal(); err != nil {
+			// A stop that came while the terminal was being taken is the
+			// run's end, as it is at any later step.
+			if r.runCtx.Err() != nil {
+				return r.stopped()
+			}
 			return failed(err)
 		}
 	}

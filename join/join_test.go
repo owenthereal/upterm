@@ -1441,4 +1441,15 @@ func TestTakingTheTerminalFailingEndsTheJoin(t *testing.T) {
 		require.Empty(t, relay.ptySizes(), "a session was set up on a terminal that wasn't taken")
 		require.Equal(t, 1, relay.connections())
 	})
+	// A stop that lands while the terminal is being taken is the run's end,
+	// however the taking then went.
+	t.Run("as the run is stopped", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
+		cfg := config(t, relay, withTakeTerminal(func() error { cancel(); return cause }))
+		out := recv(t, runJoinAsync(t, ctx, cfg))
+		require.Equal(t, Stopped, out.Kind)
+		require.Zero(t, relay.connections())
+	})
 }
