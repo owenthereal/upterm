@@ -3,6 +3,9 @@ package io
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -542,6 +545,100 @@ func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, tc.held+cancel+"\x1b[?2004l", out.String())
 			})
+		}
+	}
+}
+
+type filterCase struct {
+	name     string
+	in, want string
+	kitty    bool // also assert no query under refKitty (refParse on want)
+}
+
+// filterCases accumulates every exact-bytes case; Tasks 4, 8, 9 and 10 append
+// to it. Task 5's continuation test and Task 6's fuzz seeds range over it.
+var filterCases []filterCase
+
+// filterAll runs in through a fresh filter in one Write and returns what it
+// emitted.
+func filterAll(in string) string {
+	var out bytes.Buffer
+	_, _ = NewTerminalQueryFilter(&out).Write([]byte(in))
+	return out.String()
+}
+
+// filterBytewise is filterAll with one Write per byte, so every state has to
+// carry across a write boundary.
+func filterBytewise(in string) string {
+	var out bytes.Buffer
+	f := NewTerminalQueryFilter(&out)
+	for i := range len(in) {
+		_, _ = f.Write([]byte{in[i]})
+	}
+	return out.String()
+}
+
+// The ESC and CSI grammar: restarts, control bytes inside a head, the bounds,
+// and the close an emitted, unfinished head is owed when what follows it is
+// dropped.
+var escCSICases = []filterCase{
+	// Generated in init() from Task 2's vars, not copied out: every entry of
+	// csiQueryExamples and "\x1bZ", wrapped as "a"+q+"b", wants "ab"; every
+	// csiPassExamples entry wants itself.
+	{name: "counter-cases pass", in: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q",
+		want: "\x1b[?6c\x1b7\x1b8\x1b(B\x1b[>4n\x1b[0n\x1b[!p\x1b[61\"p\x1b[?2026h\x1b[2 q\x1b[1q\x1b[8;24;80t\x1b[22;0t\x1b[>0t\x1b[>4;2m\x1b[38:2::255:0:0m\x1b[3S\x1b[>1u\x1b[<u\x1b[=1;1u\x1b[u\x1b[2*x\x1b[#{\x1b[132$|\x1b[1#Q"},
+	// Spec test 2 (CSI and ESC rows).
+	{name: "ESC restarts a lone ESC", in: "\x1b\x1b[6n", want: ""},
+	{name: "ESC restarts a CSI head", in: "\x1b[6\x1b[6nhello", want: "hello"},
+	{name: "abandoned head then a passed CSI", in: "\x1b[1\x1b[1m", want: "\x1b[1m"},
+	{name: "ESC restarts an ESC-intermediate head", in: "\x1b(\x1b[6nBfoo", want: "Bfoo"},
+	// Spec test 3.
+	{name: "C0 after a lone ESC", in: "\x1b\r[6n", want: "\r"},
+	{name: "DEL after a lone ESC", in: "\x1b\x7f[6n", want: ""},
+	{name: "C0 inside a CSI query", in: "\x1b[6\rn", want: "\r"},
+	{name: "C0 inside a passed CSI", in: "\x1b[1\rm", want: "\r\x1b[1m"},
+	{name: "C0 inside an ESC-intermediate", in: "\x1b(\rB", want: "\r\x1b(B"},
+	{name: "DEL never counts toward the bound", in: "\x1b[" + strings.Repeat("\x7f", 40) + "6n", want: ""},
+	// Spec test 4 (over-bound head).
+	{name: "a drop after an over-bound head closes it", in: "\x1b[" + strings.Repeat("0", 31) + "\x1b[6nhello",
+		want: "\x1b[" + strings.Repeat("0", 31) + "\x1b\x18hello"},
+	{name: "an over-bound CSI passes to its final byte", in: "\x1b[" + strings.Repeat("0", 40) + "mX",
+		want: "\x1b[" + strings.Repeat("0", 40) + "mX"},
+	{name: "CSI-ignore passes to its final byte", in: "\x1b[1$2qX", want: "\x1b[1$2qX"},
+	{name: "a drop after CSI-ignore closes it", in: "\x1b[1$2\x1b[6nX", want: "\x1b[1$2\x1b\x18X"},
+}
+
+func init() {
+	for _, q := range append(slices.Clone(csiQueryExamples), "\x1bZ") {
+		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "b", want: "ab"})
+	}
+	for _, c := range csiPassExamples {
+		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: c, want: c})
+	}
+	filterCases = append(filterCases, escCSICases...)
+}
+
+// Every exact-bytes case gives the same output whether it arrives in one
+// write or one byte per write: a sequence split across writes is the normal
+// case for a pty read, not an edge.
+func TestTerminalQueryFilter_SplitWritesMatchWholeWrites(t *testing.T) {
+	for _, c := range filterCases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, filterAll(c.in), "whole")
+			require.Equal(t, c.want, filterBytewise(c.in), "byte by byte")
+		})
+	}
+}
+
+// A row marked kitty is one whose output a kitty guest could read differently
+// from a DEC one; under kitty's string ends it still asks nothing.
+func TestTerminalQueryFilter_KittyRowsAskNothing(t *testing.T) {
+	for _, c := range filterCases {
+		if !c.kitty {
+			continue
+		}
+		for _, ev := range refParse(refKitty, []byte(c.want)) {
+			require.False(t, refQuery(refKitty, ev), "%s: %q asks %v under kitty", c.name, c.want, ev)
 		}
 	}
 }

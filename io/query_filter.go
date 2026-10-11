@@ -10,30 +10,38 @@ import (
 // from reaching connected clients, whose terminals would otherwise respond
 // and pollute the PTY input.
 //
-// Filtered queries include:
-//   - OSC 10/11/12 queries (foreground/background/cursor color): ESC ] N ; ? BEL/ST
-//   - CSI 5 n (device status request)
-//   - CSI 6 n (cursor position request)
-//   - CSI 14 t / CSI 18 t (text area size in pixels / characters)
-//   - CSI c / CSI 0 c (primary device attributes)
-//   - CSI > c / CSI > 0 c (secondary device attributes)
-//   - CSI = c / CSI = 0 c (tertiary device attributes)
-//   - CSI > q / CSI > 0 q (terminal name and version)
+// What counts as a query is decided by family, in query_classify.go, from the
+// tables in the terminal query families design
+// (designs/2026-10-11-terminal-query-families-design.md). The filter itself
+// only follows the stream the way a terminal's DEC parser does -- where each
+// sequence starts, where it ends, and what the terminal does with the bytes
+// in between -- and holds a sequence until its classifier can decide it.
 type TerminalQueryFilter struct {
 	w      io.Writer
 	state  queryFilterState
-	seqBuf []byte // accumulates current sequence
+	seqBuf []byte // the sequence being decided: held, so neither emitted nor dropped yet
 	outBuf []byte // reusable output buffer to reduce allocations
 	oscCmd int    // OSC command number being parsed
+
+	// closeOwed is set while the terminal downstream is still inside a
+	// sequence the filter emitted unfinished, which the input has ended with
+	// the ESC that starts seqBuf. That ESC is held, so the terminal hasn't
+	// seen the end yet; see endPassAtESC and settleClose.
+	closeOwed bool
 }
 
 type queryFilterState int
 
 const (
 	qfStateNormal        queryFilterState = iota
-	qfStateEsc                            // saw ESC
-	qfStateCSI                            // saw ESC [
-	qfStateCSIParam                       // parsing CSI parameters
+	qfStateEsc                            // holding ESC
+	qfStateEscInter                       // holding ESC and intermediates (0x20–0x2F)
+	qfStateEscOverBound                   // passing an ESC sequence the filter gave up on, to its final byte
+	qfStateCSI                            // holding ESC [ (CSI-entry)
+	qfStateCSIParam                       // holding ESC [ and a prefix or parameter bytes
+	qfStateCSIInter                       // holding a CSI head and its intermediates (0x20–0x2F)
+	qfStateCSIIgnore                      // passing a CSI a terminal ignores, to its final byte
+	qfStateCSIOverBound                   // passing a CSI past its bound, to its final byte
 	qfStateOSC                            // saw ESC ]
 	qfStateOSCParam                       // saw OSC number
 	qfStateOSCSemi                        // saw OSC number ;
@@ -77,12 +85,24 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// The most an ESC sequence with intermediates and a CSI head are held for,
+// framing included. The bound counts what is held before the final byte: a
+// final byte that arrives with the head full is still classified, and the next
+// byte that isn't one gives the head up, so it passes unclassified to its end.
+// Queries are a handful of bytes; one padded past its bound passes, which is a
+// stated limit of the design.
+const (
+	maxEscHeld = 8
+	maxCSIHeld = 32
+)
+
 // maxPendingBytes is the most the filter will ever be holding, and so the most
 // Pending can return. Every state that accumulates gives up at a bound of its
-// own: 32 bytes of CSI parameters, 32 of an OSC colour query, 256 of OSC
-// content, and 8 of an OSC number. The largest is the OSC content bound, plus
-// the byte that overshoots it and the ESC of a string terminator that turned
-// out not to be one; 260 covers that with room to spare.
+// own: 32 bytes of a CSI head, 8 of an ESC sequence with intermediates, 32 of
+// an OSC colour query, 256 of OSC content, and 8 of an OSC number. The largest
+// is the OSC content bound, plus the byte that overshoots it and the ESC of a
+// string terminator that turned out not to be one; 260 covers that with room
+// to spare.
 //
 // It matters because Pending is replayed to every joining writer ahead of the
 // ring: what the filter holds is output no reader has seen yet, and it is held
@@ -105,6 +125,8 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		// only at its terminator. Held back, it kept the cancel from the
 		// terminal: a session's last reset to a guest is a lone CAN when all
 		// it left open was a sequence, and nothing after it would push it out.
+		// When a close is owed, the held ESC going out is that close, so the
+		// cancel needs no second one.
 		f.seqBuf = append(f.seqBuf, b)
 		f.flushAndReset()
 		return
@@ -118,55 +140,14 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		}
 		f.outBuf = append(f.outBuf, b)
 
-	case qfStateEsc:
-		f.seqBuf = append(f.seqBuf, b)
-		switch b {
-		case '[': // CSI
-			f.state = qfStateCSI
-		case ']': // OSC
-			f.state = qfStateOSC
-			f.oscCmd = 0
-		default:
-			// Not a sequence we filter, output buffered
-			f.flushAndReset()
-		}
+	case qfStateEsc, qfStateEscInter:
+		f.escByte(b)
 
-	case qfStateCSI:
-		f.seqBuf = append(f.seqBuf, b)
-		if b >= '0' && b <= '9' {
-			f.state = qfStateCSIParam
-			return
-		}
-		if b == '>' || b == '?' || b == '=' {
-			f.state = qfStateCSIParam
-			return
-		}
-		// Check for immediate CSI queries
-		if b == 'c' {
-			// CSI c - Primary Device Attributes query - FILTER
-			f.state = qfStateNormal
-			f.seqBuf = f.seqBuf[:0]
-			return
-		}
-		// Other CSI sequence, not a query we filter
-		f.flushAndReset()
+	case qfStateCSI, qfStateCSIParam, qfStateCSIInter:
+		f.csiByte(b)
 
-	case qfStateCSIParam:
-		f.seqBuf = append(f.seqBuf, b)
-		if (b >= '0' && b <= '9') || b == ';' || b == '>' || b == '?' || b == '=' {
-			if len(f.seqBuf) > 32 {
-				f.flushAndReset()
-			}
-			return
-		}
-		// Final byte - check if it's a query
-		if f.isCSIQuery(b) {
-			f.state = qfStateNormal
-			f.seqBuf = f.seqBuf[:0]
-			return // Filter the query
-		}
-		// Not a query, output it
-		f.flushAndReset()
+	case qfStateEscOverBound, qfStateCSIIgnore, qfStateCSIOverBound:
+		f.passByte(b)
 
 	case qfStateOSC:
 		f.seqBuf = append(f.seqBuf, b)
@@ -271,8 +252,7 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		f.seqBuf = append(f.seqBuf, b)
 		if b == 0x07 { // BEL - end of OSC query
 			// This is a color query (OSC 10/11/12), filter it
-			f.state = qfStateNormal
-			f.seqBuf = f.seqBuf[:0]
+			f.drop()
 			return
 		}
 		if b == 0x1b { // ESC - possible ST
@@ -287,8 +267,7 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 		if b == '\\' { // ST (String Terminator)
 			f.seqBuf = append(f.seqBuf, b)
 			// This is a color query (OSC 10/11/12), filter it
-			f.state = qfStateNormal
-			f.seqBuf = f.seqBuf[:0]
+			f.drop()
 			return
 		}
 		// Ended by the ESC, same as OSC content above: what we have is an
@@ -302,69 +281,210 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 	}
 }
 
-// isCSIQuery checks if the final byte indicates a CSI query we should filter.
-func (f *TerminalQueryFilter) isCSIQuery(finalByte byte) bool {
-	// seqBuf contains: ESC [ params finalByte
-	// We need at least ESC [ finalByte (3 bytes)
-	n := len(f.seqBuf)
-	if n < 3 {
-		return false
+// escByte takes a byte after ESC, with or without intermediates. An ESC
+// sequence is ESC, then intermediates (0x20–0x2F), then a final byte
+// (0x30–0x7E), except that ESC [ starts a CSI and ESC ] an OSC instead.
+func (f *TerminalQueryFilter) escByte(b byte) {
+	if f.headControl(b) {
+		return
 	}
+	switch {
+	case b >= 0x80:
+		// A byte of 0x80 or more, which the design leaves uncovered, gives
+		// the head up as it does a CSI's: what is held goes out, and the rest
+		// passes to its final byte.
+		f.passFrom(b, qfStateEscOverBound)
+	case b <= 0x2f:
+		// An intermediate, which a terminal collects until the final byte.
+		// Flushing the head here instead let the final byte go out on its
+		// own when the ESC after it was a query: "ESC ( ESC [6n B" became
+		// "ESC ( B", and the B a charset designation.
+		f.hold(b, qfStateEscInter, maxEscHeld, qfStateEscOverBound)
+	case f.state == qfStateEsc && b == '[':
+		f.seqBuf = append(f.seqBuf, b)
+		f.state = qfStateCSI
+	case f.state == qfStateEsc && b == ']':
+		f.seqBuf = append(f.seqBuf, b)
+		f.state = qfStateOSC
+		f.oscCmd = 0
+	default:
+		f.seqBuf = append(f.seqBuf, b)
+		f.decide(escQuery(f.seqBuf))
+	}
+}
 
-	// Extract parameters (bytes between '[' and finalByte)
-	params := f.seqBuf[2 : n-1]
+// csiByte takes a byte of a CSI head: ESC [, then an optional prefix
+// (0x3C–0x3F), parameter bytes (0x30–0x3B), intermediates (0x20–0x2F), and a
+// final byte (0x40–0x7E). Out of that order a terminal ignores the CSI.
+func (f *TerminalQueryFilter) csiByte(b byte) {
+	if f.headControl(b) {
+		return
+	}
+	switch {
+	case b >= 0x40 && b <= 0x7e:
+		f.seqBuf = append(f.seqBuf, b)
+		f.decide(csiQuery(f.seqBuf))
+	case b >= 0x80 || f.csiIgnores(b):
+		// Out of order, the CSI puts a terminal in CSI-ignore, which
+		// dispatches nothing, so it is no query: what is held goes out, and
+		// the rest passes to the final byte, which CSI-ignore still waits
+		// for. A byte of 0x80 or more, which the design leaves uncovered, is
+		// given up on the same way.
+		f.passFrom(b, qfStateCSIIgnore)
+	case b <= 0x2f:
+		f.hold(b, qfStateCSIInter, maxCSIHeld, qfStateCSIOverBound)
+	default: // a prefix or parameter byte, 0x30–0x3F
+		f.hold(b, qfStateCSIParam, maxCSIHeld, qfStateCSIOverBound)
+	}
+}
 
-	switch finalByte {
-	case 'q':
-		// XTVERSION replies from guests can arrive after tmux has consumed
-		// the host's reply, so tmux treats them as shell input instead.
-		if len(params) == 1 && params[0] == '>' {
-			return true
-		}
-		if len(params) == 2 && params[0] == '>' && params[1] == '0' {
-			return true
-		}
-	case 't':
-		// tmux queries its terminal size on attachment. A guest answering a
-		// replayed query injects a late reply into the shared shell's input.
-		if len(params) == 2 && params[0] == '1' && (params[1] == '4' || params[1] == '8') {
-			return true
-		}
-	case 'n':
-		// CSI 5 n - Device Status Report
-		// CSI 6 n - Cursor Position Request
-		if len(params) == 1 && (params[0] == '5' || params[0] == '6') {
-			return true
-		}
-	case 'c':
-		// CSI c, CSI 0 c - Primary Device Attributes
-		// CSI > c, CSI > 0 c - Secondary Device Attributes
-		// CSI = c, CSI = 0 c - Tertiary Device Attributes
-		if len(params) == 0 {
-			return true
-		}
-		if len(params) == 1 && (params[0] == '0' || params[0] == '>' || params[0] == '=') {
-			return true
-		}
-		if len(params) == 2 && ((params[0] == '>' && params[1] == '0') || (params[0] == '=' && params[1] == '0')) {
-			return true
-		}
+// csiIgnores reports whether b, a byte from 0x20 to 0x3F, puts a terminal in
+// CSI-ignore from the current CSI state: a ':' straight after the '[', a
+// prefix byte after a parameter, or a parameter or prefix byte after an
+// intermediate.
+func (f *TerminalQueryFilter) csiIgnores(b byte) bool {
+	switch f.state {
+	case qfStateCSI:
+		return b == ':'
+	case qfStateCSIParam:
+		return b >= 0x3c && b <= 0x3f
+	case qfStateCSIInter:
+		return b >= 0x30 && b <= 0x3f
 	}
 	return false
 }
 
-// endStringAtESC closes an OSC that a non-ST ESC ended. The string's own bytes
-// go to outBuf; the trailing ESC stays held as the start of whatever sequence
-// comes next, which the caller then feeds the current byte to.
-func (f *TerminalQueryFilter) endStringAtESC() {
-	f.outBuf = append(f.outBuf, f.seqBuf[:len(f.seqBuf)-1]...)
+// headControl takes the bytes a terminal treats the same way in every ESC and
+// CSI state, and reports whether b was one of them. CAN and SUB never get
+// here; processByte cancels on them first.
+func (f *TerminalQueryFilter) headControl(b byte) bool {
+	switch {
+	case b == 0x1b:
+		// An ESC abandons the head, and the terminal executes nothing of it,
+		// so it is dropped rather than flushed. Flushed, it would splice onto
+		// whatever goes out next: with the query after it dropped,
+		// "ESC [6 ESC [6n hello" would reach the terminal as the CSI
+		// "ESC [6h" and the text "ello". This ESC starts a new sequence.
+		f.drop()
+		f.seqBuf = append(f.seqBuf, b)
+		f.state = qfStateEsc
+	case b == 0x7f:
+		// The terminal ignores DEL here, so it is dropped. It is never held,
+		// so it doesn't count toward the head's bound either.
+	case b < 0x20:
+		// The terminal executes a C0 where it stands and carries on with the
+		// head, so it goes out now and the head stays held. Taken for the
+		// head's final byte instead, it let "ESC [6 CR n" through whole, and
+		// a terminal still answers that.
+		f.settleClose()
+		f.outBuf = append(f.outBuf, b)
+	default:
+		return false
+	}
+	return true
+}
+
+// hold adds b, which doesn't end the head, and moves to state next. A head
+// that already holds bound bytes is given up on instead: it goes out with b,
+// and the rest passes in state over, so a query padded past the bound passes,
+// but the filter still knows where the sequence ends.
+func (f *TerminalQueryFilter) hold(b byte, next queryFilterState, bound int, over queryFilterState) {
+	if len(f.seqBuf) >= bound {
+		f.passFrom(b, over)
+		return
+	}
+	f.seqBuf = append(f.seqBuf, b)
+	f.state = next
+}
+
+// passFrom emits the held head and b, and passes the rest of the sequence in
+// state pass. The terminal is then inside a sequence the filter emitted
+// unfinished.
+func (f *TerminalQueryFilter) passFrom(b byte, pass queryFilterState) {
+	f.seqBuf = append(f.seqBuf, b)
+	f.flushAndReset()
+	f.state = pass
+}
+
+// passByte takes a byte of a sequence the filter emitted unfinished: an ESC
+// sequence or a CSI it gave up on, or a CSI a terminal ignores. Each byte goes
+// out as it comes, and the final byte ends the sequence.
+func (f *TerminalQueryFilter) passByte(b byte) {
+	if b == 0x1b {
+		f.endPassAtESC()
+		return
+	}
+	f.outBuf = append(f.outBuf, b)
+	final := b >= 0x40 && b <= 0x7e
+	if f.state == qfStateEscOverBound {
+		final = b >= 0x30 && b <= 0x7e
+	}
+	if final {
+		f.state = qfStateNormal
+	}
+}
+
+// endPassAtESC ends a sequence the filter emitted unfinished at an ESC in the
+// input. The ESC starts a new sequence, held like any other, so the terminal
+// hasn't seen the end of the emitted one, and the filter owes it a close
+// until the held sequence settles it (settleClose). Without the close, a
+// query dropped from behind an emitted head let whatever came next land
+// inside that head: "ESC [1$2 ESC [6n X" became "ESC [1$2 X", which a
+// terminal reads as one ignored CSI ending at the X.
+func (f *TerminalQueryFilter) endPassAtESC() {
+	f.closeOwed = true
 	f.seqBuf = append(f.seqBuf[:0], 0x1b)
 	f.state = qfStateEsc
 }
 
-// flushAndReset appends buffered bytes to outBuf and resets state.
+// decide ends the held sequence at its final byte, already held: a query is
+// dropped, and anything else goes out as it came in.
+func (f *TerminalQueryFilter) decide(query bool) {
+	if query {
+		f.drop()
+		return
+	}
+	f.flushAndReset()
+}
+
+// drop discards the held sequence: a query, or a head the input abandoned.
+func (f *TerminalQueryFilter) drop() {
+	f.seqBuf = f.seqBuf[:0]
+	f.state = qfStateNormal
+	f.settleClose()
+}
+
+// settleClose emits the close a sequence the filter emitted unfinished is
+// owed, when the held ESC that was to be it can't go out first: the held
+// sequence was dropped, or a C0 is due, which must not land inside a sequence
+// the input had already ended. The close is ESC CAN. The ESC ends the emitted
+// sequence the way the input's ESC did, and the CAN cancels the new escape,
+// leaving the terminal in ground with nothing else done; a bare CAN would
+// cancel the emitted sequence rather than end it, which discards a string.
+func (f *TerminalQueryFilter) settleClose() {
+	if f.closeOwed {
+		f.outBuf = append(f.outBuf, 0x1b, 0x18)
+		f.closeOwed = false
+	}
+}
+
+// endStringAtESC closes an OSC that a non-ST ESC ended. The string's own bytes
+// go to outBuf; the trailing ESC stays held as the start of whatever sequence
+// comes next, which the caller then feeds the current byte to. The string's
+// own ESC, going out, is any close that was owed.
+func (f *TerminalQueryFilter) endStringAtESC() {
+	f.outBuf = append(f.outBuf, f.seqBuf[:len(f.seqBuf)-1]...)
+	f.seqBuf = append(f.seqBuf[:0], 0x1b)
+	f.state = qfStateEsc
+	f.closeOwed = false
+}
+
+// flushAndReset appends buffered bytes to outBuf and resets state. Whatever is
+// held starts with the ESC that ended any sequence owed a close, so emitting
+// it is that close.
 func (f *TerminalQueryFilter) flushAndReset() {
 	f.outBuf = append(f.outBuf, f.seqBuf...)
 	f.state = qfStateNormal
 	f.seqBuf = f.seqBuf[:0]
+	f.closeOwed = false
 }
