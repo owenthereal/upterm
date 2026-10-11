@@ -49,9 +49,10 @@ type evidence struct {
 	signErr       *IdentityError // the first signer that failed to sign
 	// judged is the keys whose authentication attempt ended before the
 	// handshake did, in the order offered. Keys are offered one per attempt,
-	// and x/crypto asks for the next only once the last has failed, so a key
-	// whose attempt the handshake ended in the middle of, as the disconnect
-	// at MaxAuthTries does, isn't among them.
+	// and x/crypto asks for the next once the last has ended, so a key whose
+	// attempt the handshake ended in the middle of, as the disconnect at
+	// MaxAuthTries does, isn't among them. The AuthCallback says what else
+	// ends an attempt, and why that doesn't matter.
 	judged []ssh.PublicKey
 
 	mu         sync.Mutex
@@ -108,8 +109,17 @@ func clientConfig(user string, signers []ssh.Signer, checkHostKey ssh.HostKeyCal
 		AuthCallback: func(ctx *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
 			ev.serverVersion = string(ctx.Metadata.ServerVersion())
 			if offered > 0 {
-				// x/crypto asks again only once an attempt has failed, so the
-				// last key offered has been judged.
+				// x/crypto asks again once an attempt has failed, so the last
+				// key offered has been judged. It asks as well after a partial
+				// success, and after an attempt that ended without the relay's
+				// answer: an I/O error, no signature algorithm to agree on, a
+				// signer's error. None of that miscounts here. An I/O error
+				// ends the handshake with that error, never a refusal's text. A
+				// signer's error ends the offers. uptermd answers no attempt
+				// with a partial success. And the one key that could be counted
+				// without having been sent is one whose signature algorithm
+				// can't be agreed, which couldn't have authenticated to this
+				// relay anyway.
 				ev.judged = append(ev.judged, signers[offered-1].PublicKey())
 			}
 			if ev.signErr != nil || offered == len(tracked) {
@@ -206,7 +216,7 @@ const (
 	vWait           verdictKind = iota // wait (why), then attempt
 	vRetryNow                          // attempt at once without ev.selected: the session's node refused that key
 	vAmbiguous                         // the relay couldn't authenticate upstream: refused, or no session; the caller applies its round rules
-	vTooMany                           // the relay disconnected at MaxAuthTries: attempt at once without ev.judged, refused for the run or, if ambiguous, set aside as vAmbiguous's key is
+	vTooMany                           // the relay disconnected at MaxAuthTries: attempt at once without ev.judged, which are refused for the run or, if ambiguous, set aside as vAmbiguous's key is (the join waits for the session instead if one of them has joined before)
 	vStop                              // end the join with err
 	vHostKeyUnknown                    // the caller decides: ask the guest (before the terminal is taken) or stop
 )

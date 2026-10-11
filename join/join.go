@@ -460,7 +460,7 @@ type attempted struct {
 	v         verdict
 	exhausted bool            // no candidate key was left to offer
 	offered   []ssh.Signer    // the keys to offer, in order
-	judged    []ssh.PublicKey // the keys the relay judged, for vTooMany
+	judged    []ssh.PublicKey // the keys taken as judged by the relay (see clientConfig), for vTooMany
 	selected  ssh.PublicKey   // the key whose signature got in
 	hostKey   ssh.PublicKey   // the relay's key, for vHostKeyUnknown
 	cut       bool            // the first join's deadline ended it
