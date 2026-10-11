@@ -951,6 +951,45 @@ func TestASilentPeerIsLostNotLeft(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second)
 }
 
+// staysJoined runs cfg on relay until its session is ready, requires that the
+// session stay for hold, with no drop and no attempt after it, and then stops
+// the run, which ends having connected once.
+func staysJoined(t *testing.T, relay *fakeRelay, cfg Config, hold time.Duration) {
+	t.Helper()
+	rec := &recorder{}
+	withEvents(rec)(&cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJoinAsync(t, ctx, cfg)
+	require.Equal(t, Joined, recv(t, rec.held()).Kind)
+	require.Never(t, func() bool { return len(done) > 0 || relay.connections() > 1 || len(rec.kinds()) > 1 },
+		hold, 10*time.Millisecond, "the session didn't stay")
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+	require.Equal(t, 1, relay.connections())
+	require.Equal(t, []EventKind{Joined}, rec.kinds())
+}
+
+// A peer that sends nothing of its own is alive for as long as it answers the
+// keepalives: the probe is what keeps a quiet session from reading as a
+// silent one.
+func TestAQuietPeerThatAnswersKeepalivesIsKept(t *testing.T) {
+	relay := newFakeRelay(t, relayKnobs{}) // quiet, and answering keepalives
+	cfg := config(t, relay)
+	cfg.Timing.Liveness = liveness.Timing{Interval: 50 * time.Millisecond, Bound: 50 * time.Millisecond}
+	// Silence alone would end the session 100 ms in.
+	staysJoined(t, relay, cfg, 10*(cfg.Timing.Liveness.Interval+cfg.Timing.Liveness.Bound))
+}
+
+// An attempt's deadline bounds the dial, the handshake and the setup, and
+// not the session they lead to.
+func TestASessionOutlivesItsAttempt(t *testing.T) {
+	relay := newFakeRelay(t, relayKnobs{}) // quiet, and answering keepalives
+	cfg := config(t, relay)
+	cfg.Timing.Attempt = 200 * time.Millisecond
+	staysJoined(t, relay, cfg, 5*cfg.Timing.Attempt)
+}
+
 func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 	key := newSigner(t)
 	id := Identity{
