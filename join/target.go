@@ -20,9 +20,9 @@ var ErrNotATarget = errors.New("not a join target")
 type TargetError struct {
 	Input  string // the text, as given
 	Reason string // what is wrong with it
-	// Suggestion is the target Input's command reaches, when Input is one of
-	// the ssh commands upterm prints for guests; "" for anything else. It
-	// parses as a target.
+	// Suggestion is the target Input's command reaches, when Input, less any
+	// whitespace around it, is one of the ssh commands upterm prints for
+	// guests; "" for anything else. It parses as a target.
 	Suggestion string
 }
 
@@ -177,10 +177,10 @@ func notATarget(in, why string) *TargetError {
 
 func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
 
-// suggestTarget reads s as one of the ssh commands upterm prints for guests
-// and returns the target it reaches, or "" for any other text. It takes only
-// those shapes, and not a likeness of them, so that a suggestion is never a
-// guess:
+// suggestTarget reads s, less any whitespace around it, as one of the ssh
+// commands upterm prints for guests and returns the target it reaches, or ""
+// for any other text. It takes only those shapes, and not a likeness of them,
+// so that a suggestion is never a guess:
 //
 //	ssh ID@HOST
 //	ssh ID@HOST -p PORT       (or ssh -p PORT ID@HOST)
@@ -190,8 +190,10 @@ func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsCont
 // field, is the target: read as a target, the last field would be an ssh one,
 // and the session is not reached by ssh.
 func suggestTarget(s string) string {
-	// A word ends at a space and at no other whitespace, as in the commands
-	// upterm prints.
+	// Whitespace around the command is no part of it: the newline a
+	// triple-click takes with a terminal's line, say. Within it, a word ends
+	// at a space and at no other whitespace, as in the commands upterm prints.
+	s = strings.TrimSpace(s)
 	if strings.ContainsFunc(s, func(r rune) bool { return r != ' ' && isSpaceOrControl(r) }) {
 		return ""
 	}

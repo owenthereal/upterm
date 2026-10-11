@@ -146,10 +146,13 @@ func TestParseTargetRefusesWhitespaceAndControlCharacters(t *testing.T) {
 	}
 }
 
-// A guest who pastes the ssh command upterm printed is told which target it
-// reaches. The commands below are what the session's info prints, in the quoting
-// it uses for a shell, and ParseTarget reads each one as a refusal that carries
-// the target.
+// A guest who pastes an ssh command upterm printed is told which target it
+// reaches. The commands below are those the session's info prints, in the
+// quoting it uses for a shell, and the one `upterm proxy --help` and the
+// relay's welcome text give, along with what ssh reads the same and a guest
+// may have instead: the port first, the default port spelled out, extra
+// spaces, whitespace around the line. ParseTarget reads each one as a refusal
+// that carries the target.
 func TestParseTargetSuggestsTheTargetOfAPrintedSSHCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -164,6 +167,10 @@ func TestParseTargetSuggestsTheTargetOfAPrintedSSHCommand(t *testing.T) {
 		{"ssh to an IPv6 address", `ssh sid@::1`, "sid@[::1]"},
 		{"ssh to an IPv6 address and a port", `ssh sid@::1 -p 2222`, "sid@[::1]:2222"},
 		{"ssh with extra spaces", `ssh  sid@example.com   -p  2222 `, "sid@example.com:2222"},
+		// A triple-click takes the line's newline with it.
+		{"ssh with a trailing newline", "ssh sid@example.com\n", "sid@example.com"},
+		{"ssh with a trailing CRLF", "ssh sid@example.com -p 2222\r\n", "sid@example.com:2222"},
+		{"ssh between tabs", "\tssh sid@example.com\t", "sid@example.com"},
 
 		{"wss", `ssh -o ProxyCommand='upterm proxy '\''wss://sid@example.com'\''' sid@example.com:443`, "wss://sid@example.com"},
 		{"ws with a port", `ssh -o ProxyCommand='upterm proxy '\''ws://sid@example.com:8080'\''' sid@example.com:8080`, "ws://sid@example.com:8080"},
@@ -175,6 +182,7 @@ func TestParseTargetSuggestsTheTargetOfAPrintedSSHCommand(t *testing.T) {
 		{"wss with a %", `ssh -o ProxyCommand='upterm proxy '\''wss://s%%2541@example.com'\''' s%41@example.com:443`, "wss://s%2541@example.com"},
 		// The form `upterm proxy --help` and the relay's welcome text give.
 		{"wss as typed by hand", `ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com:443`, "wss://sid@example.com"},
+		{"wss with a trailing newline", "ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com:443\n", "wss://sid@example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseTarget(tc.in)
@@ -231,9 +239,9 @@ func TestParseTargetSuggestsNothingForOtherText(t *testing.T) {
 		`ssh -o ProxyCommand=upterm\ proxy\ wss://sid@example.com\;id sid@example.com:443`,
 		`ssh $HOME@example.com`, `ssh sid@$(id)`, `ssh sid@example.com; id`, "ssh sid@`id`", `ssh sid@*`, `ssh ~sid@example.com`,
 		`ssh "sid@example.com"`, `ssh sid@example.com\`, `ssh 'sid@example.com`,
-		// Whitespace other than the space upterm separates words with.
-		"ssh\tsid@example.com", "ssh sid@example.com\n", "ssh\u00a0sid@example.com",
-		"ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com:443\n",
+		// Whitespace within the command other than the space upterm separates
+		// words with.
+		"ssh\tsid@example.com", "ssh sid@example.com\n-p 2222", "ssh\u00a0sid@example.com",
 		"ssh -o ProxyCommand='upterm proxy wss://sid@example.com' sid@example.com\t:443",
 	} {
 		_, err := ParseTarget(in)
