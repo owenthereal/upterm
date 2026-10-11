@@ -63,7 +63,8 @@ type relayKnobs struct {
 	confirmRefusal     bool
 	// setupFails rejects the pty request.
 	setupFails bool
-	// stallSetup never answers the pty request.
+	// stallSetup never answers the pty request, and writes output, if any,
+	// while setup waits on it.
 	stallSetup bool
 	// output is written once the shell starts.
 	output string
@@ -77,6 +78,10 @@ type relayKnobs struct {
 	// silentAfterReady, after output, stops sending anything, keepalive
 	// replies included.
 	silentAfterReady bool
+	// rekeyAfter is the relay's RekeyThreshold: once it has sent or received
+	// that many bytes since the last key exchange, it starts another. Zero
+	// leaves x/crypto's default, which no test reaches.
+	rekeyAfter uint64
 }
 
 // connLog is what the relay saw on one connection.
@@ -140,6 +145,7 @@ func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer, seen *connLog) {
 	}
 
 	cfg := &ssh.ServerConfig{
+		Config:                  ssh.Config{RekeyThreshold: k.rekeyAfter},
 		ServerVersion:           cmp.Or(k.version, defaultRelayVersion),
 		MaxAuthTries:            k.maxAuthTries,
 		PublicKeyAuthAlgorithms: k.pubKeyAlgos,
@@ -234,6 +240,9 @@ func (k relayKnobs) session(ch ssh.Channel, reqs <-chan *ssh.Request, sconn *ssh
 				seen.pty(termsize.Size{Cols: int(pty.Cols), Rows: int(pty.Rows)})
 			}
 			if k.stallSetup {
+				if k.output != "" {
+					_, _ = ch.Write([]byte(k.output))
+				}
 				continue
 			}
 			_ = req.Reply(!k.setupFails, nil)

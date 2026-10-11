@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/upterm"
@@ -34,32 +35,51 @@ const firstRelayWithBanners = "0.34.0"
 
 // evidence is what one attempt saw on its way to an error or a session. The
 // auth, banner and signing callbacks write it on the goroutine that runs the
-// handshake, which is the attempt's own. The host key check writes it on
-// x/crypto's key exchange goroutine, and the attempt reads that only once the
-// handshake has returned, which it does only after the first key exchange,
-// and the check with it, has ended. Later key exchanges run the check again,
-// mid-session, which is why hostKeyErr is read only to explain a handshake
-// that failed.
+// handshake, which is the attempt's own, and only during the handshake. The
+// host key check is another matter: it runs on x/crypto's key exchange
+// goroutine, at the handshake and again at every key exchange after it,
+// mid-session included, so what it records is under mu, and read with
+// hostKeyVerdict.
 type evidence struct {
 	banner        string         // the last banner the relay sent while authenticating
-	hostKeyErr    error          // CheckHostKey's verdict; nil once accepted
 	serverVersion string         // the relay's SSH version line, from the AuthCallback
 	selected      ssh.PublicKey  // the key whose signature completed authentication
 	signErr       *IdentityError // the first signer that failed to sign
+
+	mu         sync.Mutex
+	hostKey    ssh.PublicKey // the relay's key at the last key exchange
+	hostKeyErr error         // CheckHostKey's verdict on it; nil once accepted
+}
+
+// checkedHostKey records CheckHostKey's verdict, err, on the relay's key.
+func (ev *evidence) checkedHostKey(key ssh.PublicKey, err error) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	ev.hostKey, ev.hostKeyErr = key, err
+}
+
+// hostKeyVerdict is the relay's key at the last key exchange, and
+// CheckHostKey's verdict on it. A refused key ends the connection, so no key
+// exchange follows a refusal: a verdict that isn't nil is the one that ended
+// it. Once a handshake has succeeded, which it does only with the key
+// accepted, a refusal can only come from a key exchange after it.
+func (ev *evidence) hostKeyVerdict() (ssh.PublicKey, error) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	return ev.hostKey, ev.hostKeyErr
 }
 
 // clientConfig is the ssh.ClientConfig of one attempt. Its callbacks fill ev,
 // which is all classifyConnect and classifySetup judge by. checkHostKey returns
 // nil to accept the relay's key, or an error that wraps ErrHostKeyUnknown or
-// ErrHostKeyChanged to say why it doesn't. Whatever it returns is kept in
-// ev.hostKeyErr and also refuses the key, which ends the handshake.
+// ErrHostKeyChanged to say why it doesn't. Whatever it returns is kept in ev
+// and also refuses the key, which ends the handshake, or, at a key exchange
+// after it, the connection.
 //
 // The AuthCallback keeps the relay's version line because it is the only place
 // x/crypto shows one to a client whose handshake then fails. It runs after the
 // first, empty authentication request has been answered, so a handshake that
 // ends before that leaves serverVersion empty, which counts as no evidence.
-// The host key check runs again at every key exchange, so ev.hostKeyErr is
-// only to be read to explain a handshake that failed.
 func clientConfig(user string, signers []ssh.Signer, checkHostKey ssh.HostKeyCallback, ev *evidence) *ssh.ClientConfig {
 	return &ssh.ClientConfig{
 		User:          user,
@@ -75,8 +95,9 @@ func clientConfig(user string, signers []ssh.Signer, checkHostKey ssh.HostKeyCal
 			return nil
 		},
 		HostKeyCallback: func(host string, remote net.Addr, key ssh.PublicKey) error {
-			ev.hostKeyErr = checkHostKey(host, remote, key)
-			return ev.hostKeyErr
+			err := checkHostKey(host, remote, key)
+			ev.checkedHostKey(key, err)
+			return err
 		},
 	}
 }
@@ -174,14 +195,11 @@ type verdict struct {
 // an I/O error in the middle of authentication included, is an unreachable
 // relay, which a join waits out.
 func classifyConnect(err error, ev *evidence) verdict {
-	if ev.hostKeyErr != nil {
-		switch {
-		case errors.Is(ev.hostKeyErr, ErrHostKeyUnknown):
-			return verdict{kind: vHostKeyUnknown, err: ev.hostKeyErr}
-		case errors.Is(ev.hostKeyErr, ErrHostKeyChanged):
-			return verdict{kind: vStop, err: &HostKeyError{Changed: true, Err: ev.hostKeyErr}}
+	if _, refusal := ev.hostKeyVerdict(); refusal != nil {
+		if errors.Is(refusal, ErrHostKeyUnknown) {
+			return verdict{kind: vHostKeyUnknown, err: refusal}
 		}
-		return verdict{kind: vStop, err: &HostKeyError{Err: ev.hostKeyErr}}
+		return verdict{kind: vStop, err: refusedHostKey(refusal)}
 	}
 
 	// The signer's own failure is the guest's, whatever the relay then said.
@@ -212,7 +230,14 @@ func classifyConnect(err error, ev *evidence) verdict {
 // classifySetup judges the error Terminal.Run returned for a handshake that
 // succeeded, by the text the relay rejected the session channel with. That text
 // is evidence in itself, whatever version sent it.
+//
+// A key exchange during setup that refused the relay's key comes first: the
+// refusal ended the connection, whatever error that then made for setup. The
+// terminal is taken by then, so an unknown key is not asked about either.
 func classifySetup(err error, ev *evidence) verdict {
+	if _, refusal := ev.hostKeyVerdict(); refusal != nil {
+		return verdict{kind: vStop, err: refusedHostKey(refusal)}
+	}
 	var rejected *ssh.OpenChannelError
 	if !errors.As(err, &rejected) {
 		return verdict{kind: vWait, why: Setup, err: err}
@@ -234,6 +259,13 @@ func classifySetup(err error, ev *evidence) verdict {
 		return verdict{kind: vStop, err: ErrUpstreamHostKey}
 	}
 	return verdict{kind: vWait, why: Setup, err: err}
+}
+
+// refusedHostKey is the error a join stops with once CheckHostKey has refused
+// the relay's key with err and nobody is to be asked about it: a changed key,
+// CheckHostKey's own failure, or an unknown key once the terminal is taken.
+func refusedHostKey(err error) *HostKeyError {
+	return &HostKeyError{Changed: errors.Is(err, ErrHostKeyChanged), Err: err}
 }
 
 // relayHasBanners reports whether serverVersion, a relay's SSH version line,

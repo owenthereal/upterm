@@ -64,7 +64,8 @@ type Config struct {
 	// Target.Host, host:port, and it runs again at every key exchange, not
 	// only the first. An unknown key goes to ConfirmHostKey, if the guest may
 	// still be asked; any other error, ErrHostKeyChanged or not, stops the
-	// join.
+	// join. A refusal at a key exchange during a session stops it too, rather
+	// than counting as a drop.
 	CheckHostKey ssh.HostKeyCallback
 	// ConfirmHostKey asks the guest about an unknown key, with no connection
 	// open, and records it if they accept. It returns promptly when ctx ends.
@@ -449,6 +450,9 @@ type sessionEnd struct {
 	ready   bool
 	readyAt time.Time
 	err     error // why the connection went: the liveness error, or the one it closed with
+	// hostKeyErr is CheckHostKey's refusal of the relay's key at a key
+	// exchange after the handshake, which ended the connection; nil if none.
+	hostKeyErr error
 }
 
 // attempt runs one attempt under its own deadline: the identity, the dial,
@@ -510,18 +514,12 @@ func (r *runner) attempt() (a attempted) {
 	lc := liveness.NewConn(conn)
 	// Nothing in the handshake watches actx, so it is closed under it.
 	stopClosing := context.AfterFunc(actx, func() { _ = lc.Close() })
-	// The relay's key, for a prompt. The callback runs again at every key
-	// exchange, so it is read only to explain a handshake that failed, as
-	// the evidence is.
-	var hostKey ssh.PublicKey
-	check := func(host string, remote net.Addr, key ssh.PublicKey) error {
-		hostKey = key
-		return r.cfg.CheckHostKey(host, remote, key)
-	}
-	sc, chans, reqs, err := ssh.NewClientConn(lc, r.cfg.Target.Host, clientConfig(r.cfg.Target.User, offered, check, ev))
+	sc, chans, reqs, err := ssh.NewClientConn(lc, r.cfg.Target.Host, clientConfig(r.cfg.Target.User, offered, r.cfg.CheckHostKey, ev))
 	if err != nil {
 		stopClosing()
 		_ = lc.Close()
+		// The relay's key, for a prompt.
+		hostKey, _ := ev.hostKeyVerdict()
 		return attempted{v: classifyConnect(err, ev), offered: offered, selected: ev.selected, hostKey: hostKey}
 	}
 	if !stopClosing() {
@@ -548,6 +546,10 @@ func (r *runner) attempt() (a attempted) {
 	if err != nil {
 		return attempted{v: classifySetup(err, ev), offered: offered, selected: ev.selected}
 	}
+	// The handshake succeeded, so a refusal here came from a key exchange
+	// after it. The verdict is recorded before x/crypto closes the connection
+	// over it, so one that ended the session is already here.
+	_, end.hostKeyErr = ev.hostKeyVerdict()
 	return attempted{session: end, offered: offered, selected: ev.selected}
 }
 
@@ -779,6 +781,17 @@ func (r *runner) ended(s *sessionEnd) step {
 		return finish(r.stopped())
 	case s.res.Reason == attach.Detached:
 		return finish(Outcome{Kind: Left})
+	case s.hostKeyErr != nil:
+		// A key exchange during the session refused the relay's key, and the
+		// connection went with it. That reads as a drop, but a rejoin would go
+		// past the refusal, so the run stops as a refusal at the handshake
+		// stops it, asking nobody now that the terminal is taken. It gives way
+		// to every other end. An exit status can only have arrived before the
+		// exchange that failed, under keys a trusted one set up, so it is how
+		// the session really ended; a stop or the guest leaving is what the
+		// guest asked for, as a stop outranks a refusal at the handshake. None
+		// of those joins again either.
+		return finish(failed(refusedHostKey(s.hostKeyErr)))
 	}
 
 	// Disconnected: lost, to be rejoined.

@@ -975,6 +975,69 @@ func TestARelayKeyNotTrustedEndsTheJoin(t *testing.T) {
 	})
 }
 
+// CheckHostKey runs again at every key exchange, and one after the handshake
+// can refuse the relay's key. The connection goes with it, which a session or
+// its setup sees only as the connection failing: the join stops there, as it
+// would at the handshake, rather than rejoining past the refusal, and with the
+// terminal taken it asks nobody about the key.
+func TestARelayKeyRefusedAtALaterKeyExchangeEndsTheJoin(t *testing.T) {
+	unknown := fmt.Errorf("relay.test is not in known_hosts: %w", ErrHostKeyUnknown)
+	changed := fmt.Errorf("relay.test has another key: %w", ErrHostKeyChanged)
+	for name, tc := range map[string]struct {
+		refusal error
+		// stallSetup holds setup at the pty request and sends the output
+		// meanwhile, so that the key exchange it sets off is what ends setup.
+		stallSetup bool
+	}{
+		"changed, during the session": {changed, false},
+		"unknown, during the session": {unknown, false},
+		"changed, during setup":       {changed, true},
+		"unknown, during setup":       {unknown, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The relay starts a key exchange once it has sent 16 KiB, which the
+			// handshake and the setup are far short of, and then sends 64 KiB.
+			// A rejoin would find a session that exits.
+			relay := newFakeRelay(t,
+				relayKnobs{rekeyAfter: 16 << 10, output: strings.Repeat("x", 64<<10), stallSetup: tc.stallSetup},
+				relayKnobs{exit: intp(0)})
+			confirm := &countingConfirm{accept: true}
+			cfg := config(t, relay, withConfirm(confirm), withWait())
+			cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
+			// The handshake's key exchange accepts the key, and the next refuses it.
+			var checks atomic.Int32
+			cfg.CheckHostKey = func(string, net.Addr, ssh.PublicKey) error {
+				if checks.Add(1) == 2 {
+					return tc.refusal
+				}
+				return nil
+			}
+			out := runJoin(t, cfg)
+			require.Equal(t, Failed, out.Kind, "%+v", out)
+			var hostKey *HostKeyError
+			require.ErrorAs(t, out.Err, &hostKey)
+			require.ErrorIs(t, out.Err, ErrHostKey)
+			require.ErrorIs(t, out.Err, tc.refusal)
+			require.Equal(t, errors.Is(tc.refusal, ErrHostKeyChanged), hostKey.Changed)
+			require.Equal(t, int32(2), checks.Load())
+			require.NotEmpty(t, relay.ptySizes(), "the key was refused before the handshake had succeeded")
+			require.Equal(t, 1, relay.connections(), "the join connected again")
+			require.Zero(t, confirm.calls(), "the guest was asked about the key with the terminal taken")
+		})
+	}
+}
+
+// An exit status can only have arrived before a key exchange that then
+// refused the relay's key, under keys that an exchange it trusted set up: it
+// is how the session ended.
+func TestAnExitStatusOutranksARelayKeyRefusedAfterIt(t *testing.T) {
+	r := newRunner(context.Background(), config(t, newFakeRelay(t, relayKnobs{})))
+	defer r.close()
+	refusal := fmt.Errorf("relay.test has another key: %w", ErrHostKeyChanged)
+	s := r.ended(&sessionEnd{res: attach.Result{Reason: attach.Exited, Status: 3}, hostKeyErr: refusal})
+	require.Equal(t, finish(Outcome{Kind: Exited, Status: 3}), s)
+}
+
 func TestTakingTheTerminalFailingEndsTheJoin(t *testing.T) {
 	cause := errors.New("stdin is not a terminal")
 	relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
