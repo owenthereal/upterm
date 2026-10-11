@@ -38,38 +38,36 @@ func TestRefusedOnlyOnADefiniteAnswer(t *testing.T) {
 	require.ErrorIs(t, v.err, ErrIdentity)
 }
 
-func TestTheDisconnectAtMaxAuthTriesRefusesOnlyTheKeysJudgedBeforeIt(t *testing.T) {
+func TestTheDisconnectAtMaxAuthTriesJudgesEveryKeyOffered(t *testing.T) {
 	keys := sevenSigners(t)
 
 	// The relay counts each refused key against MaxAuthTries, and not the
-	// first, empty request. It answers the first five; the sixth refusal is
-	// the one it disconnects at instead of answering, so that key wasn't
-	// judged, and the seventh was never offered.
+	// first, empty request. It answers the first five, and the sixth with
+	// the disconnect, in place of that key's refusal; the seventh was never
+	// offered.
 	ev, err := connect(t, relayKnobs{refuseAll: true, maxAuthTries: 6}, keys)
 	require.ErrorContains(t, err, textTooMany)
 	require.Equal(t, verdict{kind: vTooMany}, classifyConnect(err, ev))
-	require.Equal(t, fingerprintsOf(keys[:5]), fingerprints(ev.judged))
+	require.Equal(t, fingerprintsOf(keys[:6]), fingerprints(ev.offered))
 
 	// The disconnect is no more evidence than a refusal is from a relay that
 	// predates the no-host banner: before it, a session that isn't there
 	// turned every key away too.
 	ev, err = connect(t, relayKnobs{refuseAll: true, maxAuthTries: 6, version: oldRelay}, keys)
 	require.Equal(t, verdict{kind: vTooMany, ambiguous: true}, classifyConnect(err, ev))
-	require.Equal(t, fingerprintsOf(keys[:5]), fingerprints(ev.judged))
+	require.Equal(t, fingerprintsOf(keys[:6]), fingerprints(ev.offered))
 
-	// A relay that disconnects at the first refusal judges no key, and the
-	// next connection would end the same way: nothing definite, waited out.
+	// A relay that disconnects at the first refusal has judged the one key
+	// offered, and the next connection starts with the second.
 	ev, err = connect(t, relayKnobs{refuseAll: true, maxAuthTries: 1}, keys)
 	require.ErrorContains(t, err, textTooMany)
-	require.Empty(t, ev.judged)
-	v := classifyConnect(err, ev)
-	require.Equal(t, vWait, v.kind)
-	require.Equal(t, Unreachable, v.why)
+	require.Equal(t, verdict{kind: vTooMany}, classifyConnect(err, ev))
+	require.Equal(t, fingerprintsOf(keys[:1]), fingerprints(ev.offered))
 
-	// Every key refused short of MaxAuthTries: every one was judged.
+	// Every key refused short of MaxAuthTries: each offered once, in order.
 	ev, err = connect(t, relayKnobs{refuseAll: true}, keys[:3])
 	require.ErrorContains(t, err, textNoMethods)
-	require.Equal(t, fingerprintsOf(keys[:3]), fingerprints(ev.judged))
+	require.Equal(t, fingerprintsOf(keys[:3]), fingerprints(ev.offered))
 }
 
 func TestBannersClassify(t *testing.T) {
@@ -209,7 +207,7 @@ func TestClassifyConnectAppliesItsRulesInOrder(t *testing.T) {
 	tooMany := errors.New(`ssh: handshake failed: ssh: disconnect, reason 2: "too many authentication failures"`)
 	signErr := &IdentityError{Key: "SHA256:abc", Err: errors.New("the agent is gone")}
 	noHost := fmt.Sprintf(upterm.BannerNoHostFormat, "abc")
-	judged := []ssh.PublicKey{newSigner(t).PublicKey()}
+	offered := []ssh.PublicKey{newSigner(t).PublicKey()}
 
 	for _, tc := range []struct {
 		name string
@@ -227,11 +225,17 @@ func TestClassifyConnectAppliesItsRulesInOrder(t *testing.T) {
 			noMethods, &evidence{banner: noHost, serverVersion: "SSH-2.0-uptermd-0.37.0"},
 			verdict{kind: vWait, why: NoHost}},
 		{"a banner outranks the disconnect",
-			tooMany, &evidence{banner: upterm.BannerLookupFailed, serverVersion: "SSH-2.0-uptermd-0.37.0", judged: judged},
+			tooMany, &evidence{banner: upterm.BannerLookupFailed, serverVersion: "SSH-2.0-uptermd-0.37.0", offered: offered},
 			verdict{kind: vWait, why: RelayLookup}},
 		{"a failed signer outranks the disconnect",
-			tooMany, &evidence{signErr: signErr, serverVersion: "SSH-2.0-uptermd-0.37.0", judged: judged},
+			tooMany, &evidence{signErr: signErr, serverVersion: "SSH-2.0-uptermd-0.37.0", offered: offered},
 			verdict{kind: vWait, why: IdentityFailure}},
+		{"the disconnect judges the keys offered",
+			tooMany, &evidence{serverVersion: "SSH-2.0-uptermd-0.37.0", offered: offered},
+			verdict{kind: vTooMany}},
+		{"the disconnect with no key offered is no refusal",
+			tooMany, &evidence{serverVersion: "SSH-2.0-uptermd-0.37.0"},
+			verdict{kind: vWait, why: Unreachable}},
 		{"a banner that only starts like the lookup failure is no evidence",
 			noMethods, &evidence{banner: upterm.BannerLookupFailed + "more", serverVersion: "SSH-2.0-uptermd-0.37.0"},
 			verdict{kind: vStop}},

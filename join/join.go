@@ -284,8 +284,8 @@ type runner struct {
 	lastWhy WaitReason
 	lastErr error
 	// refused holds the keys a node turned away with evidence, by SHA256
-	// fingerprint: the session's node, or the entry node before it
-	// disconnected at MaxAuthTries. A session's authorized keys don't change
+	// fingerprint: the session's node, or the entry node on a connection it
+	// ended at MaxAuthTries. A session's authorized keys don't change
 	// while it runs, so they stay out for the run.
 	refused map[string]bool
 	// sitOut holds the keys an ambiguous refusal set aside for this round.
@@ -479,7 +479,7 @@ type attempted struct {
 	v         verdict
 	exhausted bool            // no candidate key was left to offer
 	offered   []ssh.Signer    // the keys to offer, in order
-	judged    []ssh.PublicKey // the keys taken as judged by the relay (see clientConfig), for vTooMany
+	judged    []ssh.PublicKey // for vTooMany, the keys the relay judged: every key offered on the connection (see classifyConnect)
 	selected  ssh.PublicKey   // the key whose signature got in
 	hostKey   ssh.PublicKey   // the relay's key, for vHostKeyUnknown
 	cut       bool            // the first join's deadline ended it
@@ -563,7 +563,7 @@ func (r *runner) attempt() (a attempted) {
 		_ = lc.Close()
 		// The relay's key, for a prompt.
 		hostKey, _ := ev.hostKeyVerdict()
-		return attempted{v: classifyConnect(err, ev), offered: offered, judged: ev.judged, selected: ev.selected, hostKey: hostKey}
+		return attempted{v: classifyConnect(err, ev), offered: offered, judged: ev.offered, selected: ev.selected, hostKey: hostKey}
 	}
 	if !stopClosing() {
 		// actx ended as the handshake finished, and the connection with it.
@@ -777,10 +777,10 @@ func (r *runner) next(a attempted) step {
 		if v.ambiguous {
 			return r.setAside(a.judged)
 		}
-		// With it, they are refused, and the keys it cut off get their turn at
-		// once. That answer is about keys, not the session, so a first join
-		// whose time runs out before the next attempt has its say keeps the
-		// reason it had.
+		// With it, they are refused, and the keys not yet offered get their
+		// turn at once. That answer is about keys, not the session, so a
+		// first join whose time runs out before the next attempt has its say
+		// keeps the reason it had.
 		for _, k := range a.judged {
 			r.refused[ssh.FingerprintSHA256(k)] = true
 		}

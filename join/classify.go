@@ -25,8 +25,9 @@ const (
 	textNoMethods = "no supported methods remain"
 
 	// textTooMany is the server's disconnect at MaxAuthTries. x/crypto's
-	// server sends it instead of answering the attempt that reached the
-	// limit, so that attempt's key is left without an answer.
+	// server (ssh/server.go, as of v0.57.0) counts a failed attempt and, if
+	// the count has reached the limit, sends this in place of that attempt's
+	// failure, as OpenSSH does: it is the refusal of the last key offered.
 	textTooMany = "too many authentication failures"
 )
 
@@ -47,13 +48,10 @@ type evidence struct {
 	serverVersion string         // the relay's SSH version line, from the AuthCallback
 	selected      ssh.PublicKey  // the key whose signature completed authentication
 	signErr       *IdentityError // the first signer that failed to sign
-	// judged is the keys whose authentication attempt ended before the
-	// handshake did, in the order offered. Keys are offered one per attempt,
-	// and x/crypto asks for the next once the last has ended, so a key whose
-	// attempt the handshake ended in the middle of, as the disconnect at
-	// MaxAuthTries does, isn't among them. The AuthCallback says what else
-	// ends an attempt, and why that doesn't matter.
-	judged []ssh.PublicKey
+	// offered is the keys the AuthCallback offered, one per authentication
+	// attempt, in order. classifyConnect says when that is the keys the
+	// relay judged.
+	offered []ssh.PublicKey
 
 	mu         sync.Mutex
 	hostKey    ssh.PublicKey // the relay's key at the last key exchange
@@ -88,8 +86,8 @@ func (ev *evidence) hostKeyVerdict() (ssh.PublicKey, error) {
 // The AuthCallback offers the keys, in order, one per authentication attempt,
 // so that ev knows which ones the relay judged. Offered all at once, in a
 // single ssh.PublicKeys, they would leave a disconnect at the relay's
-// MaxAuthTries saying nothing about which were refused, and a key behind
-// those it cut off would never be tried. Once every key has been offered it
+// MaxAuthTries saying nothing about which were refused, and a key past that
+// limit would never be tried. Once every key has been offered it
 // returns no method, and with Auth empty x/crypto ends the handshake: with
 // textNoMethods if the last attempt drew the relay's refusal. A key that
 // fails to sign ends the offers too, so that the signer's error, and not a
@@ -102,31 +100,17 @@ func (ev *evidence) hostKeyVerdict() (ssh.PublicKey, error) {
 // no evidence.
 func clientConfig(user string, signers []ssh.Signer, checkHostKey ssh.HostKeyCallback, ev *evidence) *ssh.ClientConfig {
 	tracked := track(signers, ev)
-	offered := 0
 	return &ssh.ClientConfig{
 		User:          user,
 		ClientVersion: upterm.JoinSSHClientVersion,
 		AuthCallback: func(ctx *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
 			ev.serverVersion = string(ctx.Metadata.ServerVersion())
-			if offered > 0 {
-				// x/crypto asks again once an attempt has failed, so the last
-				// key offered has been judged. It asks as well after a partial
-				// success, and after an attempt that ended without the relay's
-				// answer: an I/O error, no signature algorithm to agree on, a
-				// signer's error. None of that miscounts here. An I/O error
-				// ends the handshake with that error, never a refusal's text. A
-				// signer's error ends the offers. uptermd answers no attempt
-				// with a partial success. And the one key that could be counted
-				// without having been sent is one whose signature algorithm
-				// can't be agreed, which couldn't have authenticated to this
-				// relay anyway.
-				ev.judged = append(ev.judged, signers[offered-1].PublicKey())
-			}
-			if ev.signErr != nil || offered == len(tracked) {
+			next := len(ev.offered)
+			if ev.signErr != nil || next == len(tracked) {
 				return nil, nil
 			}
-			offered++
-			return ssh.PublicKeys(tracked[offered-1]), nil
+			ev.offered = append(ev.offered, signers[next].PublicKey())
+			return ssh.PublicKeys(tracked[next]), nil
 		},
 		BannerCallback: func(message string) error {
 			ev.banner = message
@@ -216,7 +200,7 @@ const (
 	vWait           verdictKind = iota // wait (why), then attempt
 	vRetryNow                          // attempt at once without ev.selected: the session's node refused that key
 	vAmbiguous                         // the relay couldn't authenticate upstream: refused, or no session; the caller applies its round rules
-	vTooMany                           // the relay disconnected at MaxAuthTries: attempt at once without ev.judged, which are refused for the run or, if ambiguous, set aside as vAmbiguous's key is (the join waits for the session instead if one of them has joined before)
+	vTooMany                           // the relay disconnected at MaxAuthTries: attempt at once without ev.offered, which it judged, and which are refused for the run or, if ambiguous, set aside as vAmbiguous's key is (the join waits for the session instead if one of them has joined before)
 	vStop                              // end the join with err
 	vHostKeyUnknown                    // the caller decides: ask the guest (before the terminal is taken) or stop
 )
@@ -261,12 +245,23 @@ func classifyConnect(err error, ev *evidence) verdict {
 	switch {
 	case strings.Contains(text, textNoMethods):
 		return verdict{kind: vStop, err: &RefusedError{Ambiguous: !relayHasBanners(ev.serverVersion)}}
-	case strings.Contains(text, textTooMany) && len(ev.judged) > 0:
-		// The relay refused the keys it judged before it reached MaxAuthTries.
-		// The key whose attempt the disconnect cut short, and those never
-		// offered, have had no answer, and get their turn on the next
-		// connection. A disconnect before any key was judged refuses none, and
-		// the next connection would end the same way, so it is waited out.
+	case strings.Contains(text, textTooMany) && len(ev.offered) > 0:
+		// The relay refused every key offered on this connection: the last
+		// with the disconnect, which it sends in place of that key's refusal
+		// (see textTooMany), and each before it with a refusal, since x/crypto
+		// asks the AuthCallback for another key only once an attempt has
+		// ended. It asks as well after a partial success, and after an
+		// attempt that ended without the relay's answer: an I/O error, no
+		// signature algorithm to agree on, a signer's error. None of that
+		// miscounts here. An I/O error ends the handshake with that error,
+		// never this text. A signer's error ends the offers, and outranks
+		// this rule above. uptermd answers no attempt with a partial success.
+		// And the one key that could be counted without having been sent is
+		// one whose signature algorithm can't be agreed, which couldn't have
+		// authenticated to this relay anyway. The keys not yet offered get
+		// their turn on the next connection. A disconnect before any key was
+		// offered refuses none, and the next connection would end the same
+		// way, so it is waited out.
 		return verdict{kind: vTooMany, ambiguous: !relayHasBanners(ev.serverVersion)}
 	}
 	return verdict{kind: vWait, why: Unreachable, err: err}
