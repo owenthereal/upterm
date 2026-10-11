@@ -142,7 +142,9 @@ type Config struct {
 type OutcomeKind int
 
 const (
-	// Exited: the session sent an exit status.
+	// Exited: an exit status arrived for this connection: the session's
+	// command ended, or a forced command's did, which ends only this guest's
+	// connection while the shared session may carry on.
 	Exited OutcomeKind = iota + 1
 	// Left: the guest left, with the escape sequence or by closing the
 	// terminal.
