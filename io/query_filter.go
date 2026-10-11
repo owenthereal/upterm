@@ -15,17 +15,19 @@ import (
 // -- where each sequence starts, where it ends, and what the terminal does
 // with the bytes in between -- and holds a sequence until its classifier can
 // decide it: an ESC sequence or a CSI to its final byte, an OSC to its
-// terminator. A DCS, APC, PM or SOS is passed as it streams, so a sixel or an
-// image is never buffered, and a well-formed tmux passthrough wrapper passes
-// byte for byte.
+// terminator, a DCS to its header's final byte. A DCS that is a query is then
+// dropped as it streams, to the string's end (drop mode), and one that isn't
+// is passed as it streams, as an APC, PM or SOS is. So a sixel or an image is
+// never buffered, nor is a query's payload, and a well-formed tmux passthrough
+// wrapper passes byte for byte.
 //
 // Terminals disagree on where a malformed string ends. A DEC parser ends one
 // at a CAN, a SUB or an ESC that isn't ST; kitty keeps any string open there,
-// and tmux a DCS, and each takes what follows as more of it. So an OSC the
-// filter is still holding when it ends one of those ways is dropped whole,
-// query or not: passed through, "ESC ]4;0; CAN ;1;? BEL" is a palette query to
-// kitty. What that costs is a malformed OSC's effect on a DEC terminal, such
-// as a title ended by a stray ESC.
+// and tmux a DCS, and each takes what follows as more of it. So an OSC or a
+// DCS header the filter is still holding when it ends one of those ways is
+// dropped whole, query or not: passed through, "ESC ]4;0; CAN ;1;? BEL" is a
+// palette query to kitty. What that costs is a malformed OSC's effect on a DEC
+// terminal, such as a title ended by a stray ESC.
 //
 // A sequence the filter has emitted before its end -- a string it passes, a
 // tmux wrapper among them, a CSI a terminal ignores, or one it gave up on past
@@ -49,8 +51,9 @@ type TerminalQueryFilter struct {
 	// settles it with ESC CAN, and flushAndReset when the held ESC goes out.
 	closeOwed bool
 
-	// wrapAt is how much of tmuxPrefix a DCS's first bytes have matched, in
-	// qfStateDCS. The bytes have gone out; only the count is kept.
+	// wrapAt is how much of tmuxPrefix a DCS has matched in qfStateDCS, its
+	// header's final 't' first. The bytes have gone out; only the count is
+	// kept.
 	wrapAt int
 }
 
@@ -70,8 +73,13 @@ const (
 	qfStateOSC                           // holding an OSC past its first ';'
 	qfStateOSCEsc                        // holding an OSC and an ESC: ST if '\' follows, else the OSC ended there
 	qfStateOSCOverBound                  // passing an OSC past its bound, to its end
-	qfStateDCS                           // passing a DCS whose first bytes may yet be tmuxPrefix
-	qfStateString                        // passing a DCS, APC, PM or SOS to its end
+	qfStateDCSEntry                      // holding ESC P (DCS-entry)
+	qfStateDCSParam                      // holding ESC P and a prefix or parameter bytes
+	qfStateDCSInter                      // holding a DCS header and its intermediates (0x20–0x2F)
+	qfStateDrop                          // dropping a query string to its end, holding the header that decided it
+	qfStateDropEsc                       // as qfStateDrop, holding an ESC too: ST if '\' follows, else the string ended there
+	qfStateDCS                           // passing a DCS whose header ended in 't', while its data may yet complete tmuxPrefix
+	qfStateString                        // passing a DCS, a DCS-ignore, an APC, PM or SOS to its end
 	qfStateWrapper                       // passing a tmux wrapper to its unescaped ST
 	qfStateWrapperEsc                    // holding an ESC inside a tmux wrapper, to see the byte it escapes
 )
@@ -110,15 +118,16 @@ func (f *TerminalQueryFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// The most an ESC sequence with intermediates and a CSI head are held for,
-// framing included. The bound counts what is held before the final byte: a
-// final byte that arrives with the head full is still classified, and the next
-// byte that isn't one gives the head up, so it passes unclassified to its end.
-// Queries are a handful of bytes; one padded past its bound passes, which the
-// filter accepts so that what it holds stays bounded.
+// The most an ESC sequence with intermediates, a CSI head and a DCS header are
+// held for, framing included. The bound counts what is held before the final
+// byte: a final byte that arrives with the head full is still classified, and
+// the next byte that isn't one gives the head up, so it passes unclassified to
+// its end. Queries are a handful of bytes; one padded past its bound passes,
+// which the filter accepts so that what it holds stays bounded.
 const (
 	maxEscHeld = 8
 	maxCSIHeld = 32
+	maxDCSHeld = 32
 )
 
 // The most an OSC is held for, counted in raw bytes from its ESC ], the
@@ -140,11 +149,13 @@ const tmuxPrefix = "tmux;"
 // maxPendingBytes is the most the filter will ever be holding, and so the most
 // Pending can return. Every state that accumulates gives up at a bound of its
 // own, counted in raw bytes with the sequence's framing included: 8 of an ESC
-// sequence with intermediates, 32 of a CSI head, 8 of an OSC number and 256 of
-// an OSC, introducer through payload. The largest is the OSC's 256. On top of
-// it comes the one ESC that Pending can return beyond a bound: an OSC held to
-// its bound can still be waiting to see whether the ESC that follows begins its
-// ST, and that ESC is not counted in the 256. So 256 + 1 = 257.
+// sequence with intermediates, 32 of a CSI head or a DCS header, 8 of an OSC
+// number and 256 of an OSC, introducer through payload. The largest is the
+// OSC's 256. On top of it comes the one ESC that Pending can return beyond a
+// bound: an OSC held to its bound can still be waiting to see whether the ESC
+// that follows begins its ST, and that ESC is not counted in the 256. So
+// 256 + 1 = 257. A string being dropped holds no more than the header that
+// decided it, final byte included, and an ESC, which is far below that.
 //
 // It matters because Pending is replayed to every joining writer after the
 // ring: what the filter holds is output no reader has seen yet, and it is held
@@ -154,24 +165,31 @@ const maxPendingBytes = 257
 // Pending returns the bytes that put a fresh filter in this one's state. Fed
 // everything this filter has written, then Pending(), a fresh filter ends in the
 // state this one is in: where it is in a sequence, the match so far against
-// "tmux;" at the start of a DCS, whether it is passing a sequence it gave up
-// on, and whether it owes a close. A joiner's filter takes its state from the
-// result (MultiWriter.Append), and a newly promoted primary is handed it raw
-// (hostSink.promote). What it returns depends on the state:
+// "tmux;" at the start of a DCS, whether it is dropping a string or passing a
+// sequence it gave up on, and whether it owes a close. A joiner's filter takes
+// its state from the result (MultiWriter.Append), and a newly promoted primary
+// is handed it raw (hostSink.promote). What it returns depends on the state:
 //
-//   - While deciding, the held bytes: a head, or an OSC to its terminator.
+//   - While deciding, the held bytes: a head, an OSC to its terminator, or a
+//     DCS header to its final byte.
+//   - In drop mode, the header that decided the drop, and the ESC held to see
+//     whether a '\' follows, if there is one. A joiner's filter fed the header
+//     drops the rest of the string as this one does, and one that joins
+//     between a terminator's ESC and its '\' still ends the string there.
 //   - In a pass state, where the head went out with the stream, an ESC held to
-//     see what the next byte makes of it, or nothing. A DCS, APC, PM or SOS, a
-//     tmux wrapper, a CSI the terminal ignores and a sequence past its bound
-//     are all in this state.
+//     see what the next byte makes of it, or nothing. A DCS, a DCS-ignore, an
+//     APC, PM or SOS, a tmux wrapper, a CSI the terminal ignores and a
+//     sequence past its bound are all in this state.
 //   - With a close owed, the held sequence that will settle it. It begins with
 //     the ESC that ended the emitted sequence, so the joiner's filter owes the
 //     same close.
 //
 // The result restores a parse state; it does not recover history. It never
-// contains a byte the filter dropped, since those are gone and are not coming
-// back, nor a C0 it forwarded, which went out ahead of the hold and would be
-// sent twice. It is a copy, and never longer than maxPendingBytes.
+// contains a byte the filter discarded, a dropped string's payload among them,
+// since those are gone and are not coming back, nor a C0 it forwarded, which
+// went out ahead of the hold and would be sent twice. A dropped string's
+// header is in it only as state, which a joiner's filter needs to drop the
+// rest. It is a copy, and never longer than maxPendingBytes.
 func (f *TerminalQueryFilter) Pending() []byte {
 	return slices.Clone(f.seqBuf)
 }
@@ -207,6 +225,12 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 	case qfStateOSCEsc:
 		f.oscEscByte(b)
 
+	case qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter:
+		f.dcsByte(b)
+
+	case qfStateDrop, qfStateDropEsc:
+		f.dropByte(b)
+
 	case qfStateWrapper, qfStateWrapperEsc:
 		f.wrapperByte(b)
 
@@ -227,13 +251,19 @@ func (f *TerminalQueryFilter) cancel(b byte) {
 		// goes as any OSC ended there does, and the cancel then cancels the
 		// ESC on its own.
 		f.endOSCAtESC()
-	case qfStateOSCNum, qfStateOSC:
-		// A held OSC is dropped whole, query or not, and none of it goes out
-		// with the cancel: kitty keeps a string open past a CAN or SUB, so
-		// "ESC ]4;0; CAN ;1;? BEL" reaches it as a palette query. That holds
-		// with a close owed too: kitty may have ended the emitted string
-		// already, at a BEL in a DCS, and would read the OSC's head as live.
-		// Only the OSC's own ESC goes out, ahead of the cancel, as the close.
+	case qfStateDropEsc:
+		// So did the string being dropped, which the ESC ended as it would
+		// any string, and the cancel cancels the ESC on its own here too.
+		f.seqBuf = append(f.seqBuf[:0], 0x1b)
+	case qfStateOSCNum, qfStateOSC, qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter, qfStateDrop:
+		// A held OSC or DCS header is dropped whole, query or not, and none of
+		// it goes out with the cancel: kitty keeps a string open past a CAN or
+		// SUB, so "ESC ]4;0; CAN ;1;? BEL" reaches it as a palette query. That
+		// holds with a close owed too: kitty may have ended the emitted string
+		// already, at a BEL in a DCS, and would read the held head as live.
+		// Only the head's own ESC goes out, ahead of the cancel, as the close.
+		// A string being dropped owes none, since nothing of it went out, so
+		// the cancel ends it and goes out alone.
 		keep := 0
 		if f.closeOwed {
 			keep = 1
@@ -283,11 +313,9 @@ func (f *TerminalQueryFilter) escByte(b byte) {
 		f.seqBuf = append(f.seqBuf, b)
 		f.state = qfStateOSCNum
 	case f.state == qfStateEsc && b == 'P':
-		// No DCS is classified, so its introducer goes out at once, and
-		// the DCS passes as it streams. Its first bytes are watched for a
-		// tmux wrapper, whose doubled ESCs would otherwise each end it.
-		f.passFrom(b, qfStateDCS)
-		f.wrapAt = 0
+		// A DCS is held with its header, to the final byte that decides it.
+		f.seqBuf = append(f.seqBuf, b)
+		f.state = qfStateDCSEntry
 	case f.state == qfStateEsc && (b == '_' || b == '^' || b == 'X'):
 		// An APC, PM or SOS goes out at once and passes as it streams.
 		f.passFrom(b, qfStateString)
@@ -421,8 +449,10 @@ func (f *TerminalQueryFilter) passByte(b byte) {
 			f.state = qfStateNormal
 		}
 	case qfStateDCS:
-		// tmux takes a DCS whose first bytes are tmuxPrefix for a wrapper;
-		// one byte off, and it is an ordinary DCS to its end.
+		// tmux takes a DCS for a wrapper when its header's final 't' and its
+		// first data bytes spell tmuxPrefix, whatever parameters or
+		// intermediates come before the 't'; one byte off, and it is an
+		// ordinary DCS to its end.
 		switch {
 		case b != tmuxPrefix[f.wrapAt]:
 			f.state = qfStateString
@@ -498,6 +528,111 @@ func (f *TerminalQueryFilter) endOSCAtESC() {
 	f.drop()
 	f.seqBuf = append(f.seqBuf, 0x1b)
 	f.state = qfStateEsc
+}
+
+// dcsByte takes a byte of a DCS header: ESC P, then the CSI's grammar, an
+// optional prefix (0x3C–0x3F), parameter bytes (0x30–0x39 and ';'),
+// intermediates (0x20–0x2F), and a final byte (0x40–0x7E), where dcsQuery
+// decides it. Out of that order, or with a ':' anywhere, a terminal puts the
+// DCS in DCS-ignore.
+//
+// The bytes the terminal ignores in a header are dropped: C0, DEL and
+// 0xA0–0xFF. They are never held, so they don't count toward the bound. Unlike
+// inside a CSI, a terminal executes no C0 here, so the filter doesn't forward
+// one either: forwarded, the CR in "ABC ESC P $ CR q m ESC \ X" would reach
+// the terminal, which never executed one, when the query around it is dropped.
+func (f *TerminalQueryFilter) dcsByte(b byte) {
+	switch {
+	case b >= 0x40 && b <= 0x7e:
+		f.seqBuf = append(f.seqBuf, b)
+		f.decideDCS()
+	case b == 0x1b:
+		// An ESC abandons the header, as it abandons a CSI head. The terminal
+		// never hooked the DCS, and the held string ended abnormally, so it is
+		// dropped whole, query or not, and a close owed from before it is
+		// settled as for any drop. This ESC starts a new sequence.
+		f.drop()
+		f.seqBuf = append(f.seqBuf, b)
+		f.state = qfStateEsc
+	case b < 0x20 || b == 0x7f || b >= 0xa0:
+		// Ignored, so dropped. CAN and SUB never get here; processByte
+		// cancels on them first.
+	case b >= 0x80 || f.dcsIgnores(b):
+		// A DCS-ignore dispatches nothing, so it is no query: what is held
+		// goes out, and the rest passes as a string. Unlike a CSI-ignore it
+		// doesn't end at a final-looking byte, only where any string ends, so
+		// a query after it still owes it a close. A byte of 0x80–0x9F, a C1
+		// control the filter doesn't act on, gives the header up the same way.
+		f.passFrom(b, qfStateString)
+	case b <= 0x2f:
+		f.hold(b, qfStateDCSInter, maxDCSHeld, qfStateString)
+	default: // a prefix or parameter byte, 0x30–0x3F
+		f.hold(b, qfStateDCSParam, maxDCSHeld, qfStateString)
+	}
+}
+
+// dcsIgnores reports whether b, a byte from 0x20 to 0x3F, puts a terminal in
+// DCS-ignore from the current header state: a ':' anywhere, since a DCS has no
+// sub-parameters, a prefix byte after a parameter, or a parameter or prefix
+// byte after an intermediate.
+func (f *TerminalQueryFilter) dcsIgnores(b byte) bool {
+	switch f.state {
+	case qfStateDCSEntry:
+		return b == ':'
+	case qfStateDCSParam:
+		return b == ':' || b >= 0x3c && b <= 0x3f
+	case qfStateDCSInter:
+		return b >= 0x30 && b <= 0x3f
+	}
+	return false
+}
+
+// decideDCS decides a DCS at its header's final byte, already held. A query
+// is dropped to the string's end, and anything else goes out with the
+// payload passing behind it.
+func (f *TerminalQueryFilter) decideDCS() {
+	if dcsQuery(f.seqBuf) {
+		// The header stays held, for Pending: a joiner's filter fed it drops
+		// the rest of the string as this one does. Nothing of the string has
+		// gone out, so it owes no close, but a close owed from before it is
+		// settled now, as for any drop.
+		f.settleClose()
+		f.state = qfStateDrop
+		return
+	}
+	final := f.seqBuf[len(f.seqBuf)-1]
+	f.flushAndReset()
+	f.state = qfStateString
+	if final == 't' {
+		// It may be a tmux wrapper's, ESC P tmux;, whose doubled ESCs would
+		// otherwise each end it, so its data is watched for the rest of
+		// tmuxPrefix.
+		f.state, f.wrapAt = qfStateDCS, 1
+	}
+}
+
+// dropByte takes a byte of a query string being dropped. Its payload is
+// discarded as it streams, until the string ends: a CAN or SUB ends it in
+// cancel, and an ESC ends it too, held to see the byte after it. A '\' makes
+// the ESC ST, which goes with the string; anything else starts a new sequence
+// at the ESC, as it does after any string. Nothing of the string went out, so
+// no close is owed either way.
+func (f *TerminalQueryFilter) dropByte(b byte) {
+	if f.state == qfStateDrop {
+		if b == 0x1b {
+			f.seqBuf = append(f.seqBuf, b)
+			f.state = qfStateDropEsc
+		}
+		return
+	}
+	if b == '\\' {
+		f.seqBuf = f.seqBuf[:0]
+		f.state = qfStateNormal
+		return
+	}
+	f.seqBuf = append(f.seqBuf[:0], 0x1b)
+	f.state = qfStateEsc
+	f.escByte(b)
 }
 
 // wrapperByte takes a byte of a tmux wrapper, which follows tmux's own DCS

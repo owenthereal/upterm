@@ -52,6 +52,22 @@ var (
 		"\x1b]133;A", "\x1b]7;file://host/tmp", "\x1b]777;notify;Title;Body", "\x1b]0;",
 		"\x1b]11;", "\x1b]20;?",
 	}
+
+	// dcsQueryExamples are family 15's requests, as complete headers: what
+	// dcsQuery decides on, without the payload that follows.
+	dcsQueryExamples = []string{
+		"\x1bP$q", "\x1bP+q", "\x1bP+Q", // DECRQSS, XTGETTCAP, XTGETXRES
+		"\x1bP1$q", "\x1bP0;1+q", "\x1bP;+Q", // whatever the parameters
+	}
+
+	// dcsPassExamples are the DCS counter-cases: headers near family 15 that
+	// ask nothing, the replies' own shapes among them.
+	dcsPassExamples = []string{
+		"\x1bPq", "\x1bP0;1;0q", "\x1bP+p", "\x1bPt", "\x1bP@", // sixel, XTSETTCAP, tmux, kitty's remote control
+		"\x1bP1$r", "\x1bP1+r", "\x1bP$Q", "\x1bP$t", // DECRPSS and XTGETTCAP's reply, and the neighbours
+		"\x1bP?$q", "\x1bP>+q", // a prefix, which no request names
+		"\x1bP$$q", "\x1bP $q", "\x1bP+$q", // two intermediates
+	}
 )
 
 func TestCSIQuery_Families(t *testing.T) {
@@ -144,10 +160,35 @@ func TestESCQuery(t *testing.T) {
 	}
 }
 
+func TestDCSQuery_Families(t *testing.T) {
+	for _, q := range dcsQueryExamples {
+		require.True(t, dcsQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range dcsPassExamples {
+		require.False(t, dcsQuery([]byte(c)), "%q", c)
+	}
+}
+
+// The DCS rules the examples don't pin down: a header out of order is a
+// DCS-ignore, which dispatches nothing, and only a whole header is decided.
+func TestDCSQuery_Boundaries(t *testing.T) {
+	require.True(t, dcsQuery([]byte("\x1bP"+strings.Repeat("9", 40)+"+q")), "a long parameter is still a parameter")
+	for _, c := range []string{
+		// A parameter after an intermediate, a ':', or a prefix after a
+		// parameter: out of order, so a DCS-ignore.
+		"\x1bP$1q", "\x1bP1:2+q", "\x1bP:+q", "\x1bP1?+q",
+		// Not a complete header.
+		"\x1bP", "\x1bP+", "\x1bP$", "\x1b[+q", "\x1b+q", "+q", "",
+	} {
+		require.False(t, dcsQuery([]byte(c)), "%q", c)
+	}
+}
+
 func TestClassifiersDoNotAllocate(t *testing.T) {
 	require.Zero(t, testing.AllocsPerRun(100, func() {
 		_ = csiQuery([]byte("\x1b[1;1;1;1;24;80*y"))
 		_ = oscQuery([]byte("\x1b]4;0;rgb:00/00/00;1;?"))
+		_ = dcsQuery([]byte("\x1bP0;1+q"))
 	}))
 }
 

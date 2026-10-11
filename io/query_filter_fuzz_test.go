@@ -14,23 +14,24 @@ import (
 // refAlphabet is the fuzz domain's alphabet: ESC and what follows one to start
 // a CSI, an OSC or a string, or to end a string as ST; digits and the other
 // parameter bytes, with ':'; the prefixes and the intermediates the families
-// name, and the ESC intermediates '(', '!' and '#'; the final byte of every
-// family, and B, h, l, H, J and G, which end common sequences that ask
-// nothing; BEL, CAN and SUB, which end sequences, CR and LF, which stand for
-// every other C0; DEL; and 'a' for text.
-const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!" +
-	"cnpqtmgSuxwvy|RZBhlHJG\x07\x18\x1a\r\n\x7fa"
+// name, '+' among them for family 15's DCS requests, and the ESC intermediates
+// '(', '!' and '#'; the final byte of every family, Q included for XTGETXRES,
+// and B, h, l, H, J and G, which end common sequences that ask nothing; BEL,
+// CAN and SUB, which end sequences, CR and LF, which stand for every other C0;
+// DEL; and 'a' for text.
+const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!+" +
+	"cnpqQtmgSuxwvy|RZBhlHJG\x07\x18\x1a\r\n\x7fa"
 
 // refDomainByte maps b into the fuzz domain: refAlphabet and the bytes
 // 0xA0–0xFF. A byte of either is itself, so UTF-8 in text and in an OSC, and
-// the high bytes a terminal ignores inside an ESC or CSI head, are fuzzed as
-// they come. Any other ASCII byte becomes the alphabet's byte of its class in
-// the DEC grammar, which every state parses as it would have parsed b, and
-// which no family tells apart from b: a C0 becomes CR, an intermediate SP, and
-// a final byte 'a'. So a seed whose text has letters outside the alphabet
-// keeps its structure, and its queries stay queries. Bytes 0x80–0x9F are
-// outside the domain (C1 introducers aren't covered) and no class stands for
-// them, so they are spread over the alphabet instead.
+// the high bytes a terminal ignores inside an ESC or CSI head or a DCS header,
+// are fuzzed as they come. Any other ASCII byte becomes the alphabet's byte of
+// its class in the DEC grammar, which every state parses as it would have
+// parsed b, and which no family tells apart from b: a C0 becomes CR, an
+// intermediate SP, and a final byte 'a'. So a seed whose text has letters
+// outside the alphabet keeps its structure, and its queries stay queries.
+// Bytes 0x80–0x9F are outside the domain (C1 introducers aren't covered) and
+// no class stands for them, so they are spread over the alphabet instead.
 func refDomainByte(b byte) byte {
 	switch {
 	case strings.IndexByte(refAlphabet, b) >= 0, b >= 0xa0:
@@ -51,10 +52,10 @@ func refDomainByte(b byte) byte {
 // the bytes after it still taken -- if it would take the input out of the
 // domain:
 //   - a byte the filter would hold past a bound: past 8 bytes of an ESC
-//     sequence with intermediates, 32 of a CSI head, 8 of an OSC's number or
-//     256 of an OSC. Past its bound a query passes, a limit the filter
-//     accepts, and a sequence isn't known to be a query until it ends, so
-//     every sequence is held to its bound;
+//     sequence with intermediates, 32 of a CSI head or a DCS header, 8 of an
+//     OSC's number or 256 of an OSC. Past its bound a query passes, a limit
+//     the filter accepts, and a sequence isn't known to be a query until it
+//     ends, so every sequence is held to its bound;
 //   - the ';' that would make a DCS a tmux wrapper (final byte 't', data from
 //     "mux;"), which the filter passes byte for byte, query or not.
 //
@@ -78,20 +79,22 @@ func refGenerate(seed []byte) []byte {
 
 // pastBound reports whether c, at offset at, would have the filter hold the
 // sequence being parsed past its bound. A bound counts raw bytes from the
-// sequence's ESC, as the filter holds them: of an ESC sequence or a CSI head,
-// what the parser collects, and not the C0 it executes or the DEL it ignores;
-// of an OSC, every byte up to its terminator, the control bytes it ignores
+// sequence's ESC, as the filter holds them: of an ESC sequence, a CSI head or
+// a DCS header, the introducer and what the parser collects, and not the C0 it
+// executes or ignores, or the DEL and the bytes 0xA0–0xFF it ignores; of an
+// OSC, every byte up to its terminator, the control bytes it ignores
 // included, but not one the escape state skipped before the ']'
 // (refParser.strHeld). The ';' that ends an OSC's number isn't counted against
-// the number's bound, and a byte that ends a sequence is never held past one.
-// The numbers are written out here, not read from the filter's constants.
+// the number's bound, and a byte that ends a sequence, a header's final byte
+// among them, is never held past one. The numbers are written out here, not
+// read from the filter's constants.
 func (p *refParser) pastBound(c byte, at int) bool {
 	t := refTable[c][p.state]
 	collects := t.action == raCollect || t.action == raParam
 	switch p.state {
 	case rsEscape, rsEscapeIntermediate:
 		return collects && 1+len(p.inter) >= 8
-	case rsCSIEntry, rsCSIParam, rsCSIIntermediate:
+	case rsCSIEntry, rsCSIParam, rsCSIIntermediate, rsDCSEntry, rsDCSParam, rsDCSIntermediate:
 		held := 2 + len(p.params) + len(p.inter)
 		if p.prefix != 0 {
 			held++
@@ -119,7 +122,7 @@ func (p *refParser) wraps(c byte) bool {
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
 // refAlphabet or 0xA0–0xFF, it holds no tmux wrapper, and no sequence in it
-// passes its bound; the rows that do are the five named below, which pin the
+// passes its bound; the rows that do are the six named below, which pin the
 // bounds themselves. refGenerate has to give every such row back unchanged.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
@@ -136,6 +139,7 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		"an over-bound CSI passes to its final byte",
 		"over-bound title closed with ESC CAN",
 		"ignored CRs in the number trip the number guard",
+		"an over-bound DCS header passes as a string",
 	}
 	identity, high := 0, 0
 	for _, c := range filterCases {
@@ -163,6 +167,12 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	}
 	require.NotZero(t, identity, "some rows are in the domain byte for byte")
 	require.NotZero(t, high, "and some of those have a byte from 0xA0 to 0xFF")
+
+	// The fuzz can only check what it can make: family 15's headers are in the
+	// alphabet as they are, so the DCS requests reach the filter as requests.
+	for _, q := range dcsQueryExamples {
+		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
+	}
 }
 
 // FuzzTerminalQueryFilter checks that, whatever refGenerate makes of the
@@ -225,10 +235,10 @@ func FuzzTerminalQueryFilter(f *testing.F) {
 
 // Every guest's output goes through Write, so once its buffers have grown it
 // allocates nothing, whatever the stream holds: text, a passed and a dropped
-// CSI, an OSC held to its end, and a DCS passed as it streams.
+// CSI, an OSC held to its end, a DCS passed as it streams, and one dropped.
 func TestTerminalQueryFilter_DoesNotAllocate(t *testing.T) {
 	f := NewTerminalQueryFilter(io.Discard)
-	chunk := []byte("text \x1b[1mbold\x1b[m \x1b[6n \x1b]0;title\x07 \x1b[?2026$p \x1bPq#0\x1b\\ more\r\n")
+	chunk := []byte("text \x1b[1mbold\x1b[m \x1b[6n \x1b]0;title\x07 \x1b[?2026$p \x1bPq#0\x1b\\ \x1bP+q544e\x1b\\ more\r\n")
 	_, _ = f.Write(chunk) // warm the reusable buffers
 	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = f.Write(chunk) }))
 }

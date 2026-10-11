@@ -28,10 +28,10 @@ import (
 //     output those bytes are continuation bytes far more often than
 //     introducers, so 0x80–0xFF print in ground and are payload in strings.
 //     The fuzz generator never produces 0x80–0x9F. It produces 0xA0–0xFF as
-//     they are, which Ghostty's table ignores in an ESC or CSI head, as here,
-//     and in an APC, PM or SOS, where this model keeps them as payload. A
-//     filter passes a string's payload as it came, so keeping them there
-//     only holds it to more.
+//     they are, which Ghostty's table ignores in an ESC or CSI head and a DCS
+//     header, as here, and in an APC, PM or SOS, where this model keeps them
+//     as payload. A filter passes a string's payload as it came, so keeping
+//     them there only holds it to more.
 //   - Ghostty's handler-level limits aren't modelled: it drops a CSI with ':'
 //     separators unless its final byte is 'm', a CSI or DCS with more than 24
 //     parameters, intermediates past four, and an OSC its own grammar doesn't
@@ -112,7 +112,9 @@ func (e refEvent) String() string {
 // still have been holding ev's string undecided when it ended: an OSC whose
 // number stayed within the 8-byte guard (numHeld <= 8) and whose whole string
 // stayed within the 256-byte bound (held <= 256). The filter holds no other
-// string: a DCS, APC, PM or SOS passes as it streams.
+// string to its end. It holds a DCS only to its header's final byte, and a
+// DCS that ends before that has no event under DEC, since it never hooked, so
+// there is nothing to remove. An APC, PM or SOS passes as it streams.
 //
 // It is computed from the event alone, independently of the filter.
 func refHeldAtEnd(ev refEvent) bool {
@@ -599,7 +601,7 @@ func (p *refParser) endString(c byte, at int) {
 
 // refQuery reports whether ev is a request in the query families. It is
 // written apart from io/query_classify.go, so a classifier bug can't hide
-// itself. Families 1–14 read the same under every mode.
+// itself. Families 1–15 read the same under every mode.
 func refQuery(mode refMode, ev refEvent) bool {
 	switch ev.kind {
 	case refESC:
@@ -608,6 +610,11 @@ func refQuery(mode refMode, ev refEvent) bool {
 		return refCSIQuery(ev)
 	case refOSC:
 		return refOSCQuery(ev.data)
+	case refDCS:
+		// 15: DECRQSS, XTGETTCAP and XTGETXRES, whatever the parameters. The
+		// header alone decides, and a rule that names no prefix requires none.
+		return ev.prefix == 0 && (ev.inter == "$" && ev.final == 'q' ||
+			ev.inter == "+" && (ev.final == 'q' || ev.final == 'Q'))
 	}
 	return false
 }
@@ -825,6 +832,10 @@ func TestRefParse_Conformance(t *testing.T) {
 	require.Equal(t, "#0\x07X", dcs.data)
 	require.Equal(t, byte(0x07), ev(refKitty, "\x1bPq#0\x07X\x1b\\")[0].end)
 
+	// A DCS header ignores C0, DEL and 0xA0–0xFF, and still hooks.
+	got = ev(refDEC, "\x1bP1\r\x7f\xa0;0+\nq#0\x1b\\")
+	require.Equal(t, refEvent{kind: refDCS, params: "1;0", inter: "+", final: 'q', data: "#0", end: '\\'}, refSemantic(got[0]))
+
 	// APC control bytes are payload, not ignored.
 	require.Equal(t, "\nGa=q", ev(refDEC, "\x1b_\nGa=q\x1b\\")[0].data)
 
@@ -920,10 +931,20 @@ func TestRefQuery_Families(t *testing.T) {
 		require.Len(t, evs, 1, "%q", q)
 		require.True(t, refQuery(refDEC, evs[0]), "%q", q)
 	}
+	// A DCS reports its event and then a lone ST, so the query is the first.
+	for _, q := range []string{"\x1bP$qm\x1b\\", "\x1bP+q544e\x1b\\", "\x1bP+Q616c\x1b\\", "\x1bP1$qm\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			evs := refParse(mode, []byte(q))
+			require.Equal(t, refDCS, evs[0].kind, "%q under %v", q, mode)
+			require.True(t, refQuery(mode, evs[0]), "%q under %v", q, mode)
+		}
+	}
 	for _, c := range []string{"\x1b[?6c", "\x1b[>4n", "\x1b[!p", "\x1b[2 q",
 		"\x1b[22;0t", "\x1b[>4;2m", "\x1b[3S", "\x1b[>1u", "\x1b[2*x",
 		"\x1b[38:2::255:0:0m", "\x1b(B", "\x1b]4;1;rgb:ff/00/00\x07",
-		"\x1b]52;c;SGVsbG8=\x07"} {
+		"\x1b]52;c;SGVsbG8=\x07", "\x1bP0;1;0q#0\x1b\\", "\x1bP+p78\x1b\\",
+		"\x1bP1$r0m\x1b\\", "\x1bP?$qm\x1b\\", "\x1bP$$qm\x1b\\", "\x1bP$Qm\x1b\\",
+		"\x1bP$1qm\x1b\\", "\x1bPtmux;\x1b\x1b[31m\x1b\\"} {
 		for _, e := range refParse(refDEC, []byte(c)) {
 			require.False(t, refQuery(refDEC, e), "%q", c)
 		}
@@ -958,6 +979,10 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		// held and is dropped. Only numHeld tells them apart.
 		{"\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b[6nhello", "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b\x18hello\x18"},
 		{"\x1b]0;" + strings.Repeat("\r", 9) + "t\x1b[6nhello", "hello\x18"},
+		{"\x1bP1\r;0q#0\x1b\\", "\x1bP1;0q#0\x1b\\\x18"},                      // ignored CR dropped from a passed header
+		{"ABC\x1bP$\rqm\x1b\\X", "ABCX\x18"},                                  // DCS query with a C0 in its header
+		{"\x1bP+q544e\x18X", "\x18X\x18"},                                     // drop ended by CAN
+		{"\x1bP$1qhidden\x1b[6nVISIBLE", "\x1bP$1qhidden\x1b\x18VISIBLE\x18"}, // DCS-ignore closed
 	} {
 		out := c.out
 		require.Empty(t, refCheck(c.in, func(string) string { return out }), "%q", c.in)

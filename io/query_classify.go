@@ -2,10 +2,10 @@ package io
 
 // This file is the only place that knows what a terminal query is. The filter
 // finds where each sequence starts and ends and hands its bytes to one
-// classifier per kind (csiQuery, escQuery and oscQuery here); it reads a
-// sequence's bytes for its grammar alone, and never decides by a final byte or
-// an OSC number whether the sequence is a query. A query is a sequence the
-// terminal answers on its input, which the host's PTY would take for
+// classifier per kind (csiQuery, escQuery, oscQuery and dcsQuery here); it
+// reads a sequence's bytes for its grammar alone, and never decides by a final
+// byte or an OSC number whether the sequence is a query. A query is a sequence
+// the terminal answers on its input, which the host's PTY would take for
 // keystrokes, so the filter drops it on the way to a guest. Everything else
 // must reach the guest unchanged.
 //
@@ -265,4 +265,40 @@ func oscQuery(seq []byte) bool {
 			return false
 		}
 	}
+}
+
+// dcsQuery reports whether header, a complete DCS header as held
+// (ESC 'P' prefix? params intermediates final, with no C0 or DEL inside), is
+// a request in family 15: DECRQSS ($ q), XTGETTCAP (+ q) or XTGETXRES (+ Q).
+// Parameters don't matter.
+//
+// The header is all that decides: what follows it is the request's payload
+// (the setting DECRQSS asks for, or XTGETTCAP's hex-encoded names), which the
+// terminal answers whatever it holds. A prefix, which no request names, or a
+// second intermediate matches no family, so the sixel `DCS 0;1;0 q`, XTSETTCAP
+// `DCS + p` and the replies' own shapes (`DCS 1 $ r`, `DCS 1 + r`) are not
+// requests. A header out of order, with a ':' or a parameter after an
+// intermediate, puts a terminal in DCS-ignore; it matches no family either.
+func dcsQuery(header []byte) bool {
+	if len(header) < 4 || header[0] != 0x1b || header[1] != 'P' {
+		return false
+	}
+	final := header[len(header)-1]
+	body := header[2 : len(header)-1]
+	n := 0
+	for n < len(body) && (body[n] >= '0' && body[n] <= '9' || body[n] == ';') {
+		n++
+	}
+	// What is left after the parameters must be the one intermediate. A
+	// prefix or a ':' stops the parameters early, so it is left over too.
+	if len(body)-n != 1 {
+		return false
+	}
+	switch body[n] {
+	case '$': // DECRQSS
+		return final == 'q'
+	case '+': // XTGETTCAP and XTGETXRES
+		return final == 'q' || final == 'Q'
+	}
+	return false
 }

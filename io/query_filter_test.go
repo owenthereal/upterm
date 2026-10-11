@@ -483,6 +483,18 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 			name:  "APC payload",
 			input: append([]byte("\x1b_G"), bytes.Repeat([]byte("a"), runLength)...),
 		},
+		{
+			name:  "DCS header",
+			input: append([]byte("\x1bP"), bytes.Repeat([]byte("1;"), runLength)...),
+		},
+		{
+			name:  "DCS header intermediates",
+			input: append([]byte("\x1bP1"), bytes.Repeat([]byte("+"), runLength)...),
+		},
+		{
+			name:  "dropped DCS payload",
+			input: append([]byte("\x1bP+q"), bytes.Repeat([]byte("544e"), runLength)...),
+		},
 	}
 
 	for _, tt := range tests {
@@ -507,7 +519,7 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 // a bound without the constant fails here, and so does a constant larger than
 // anything the filter ever holds.
 func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
-	largest := max(maxEscHeld, maxCSIHeld, maxOSCNumHeld, maxOSCHeld)
+	largest := max(maxEscHeld, maxCSIHeld, maxDCSHeld, maxOSCNumHeld, maxOSCHeld)
 	require.Equal(t, largest+1, maxPendingBytes, "the largest hold, plus one held ESC")
 
 	// 256 (the largest hold, an OSC with framing) + 1 held ESC. If the bounds
@@ -760,6 +772,46 @@ var oscStringCases = []filterCase{
 	{name: "DEL after a passed string's ESC", in: "\x1bX0\x1b\x7f\\", want: "\x1bX0\x1b\\"},
 }
 
+// DCS headers, held to their final byte and decided there: a query is dropped
+// to the string's end, and anything else goes out and passes as it streams.
+var dcsCases = []filterCase{
+	// Generated in init() from query_classify_test.go's examples: every
+	// dcsQueryExamples header, with a payload and ST, wrapped "a"+q+"b", wants
+	// "ab"; every dcsPassExamples header, with a payload and ST, wants itself.
+	{name: "DECRQSS", in: "a\x1bP$qm\x1b\\b", want: "ab"},
+	{name: "XTGETTCAP", in: "a\x1bP+q544e;524742\x1b\\b", want: "ab"},
+	{name: "XTGETXRES", in: "a\x1bP+Q616c6c6f77\x1b\\b", want: "ab"},
+	{name: "DCS header C0 dropped with the query", in: "ABC\x1bP$\rqm\x1b\\X", want: "ABCX"},
+	{name: "ignored C0 dropped from a passed header", in: "\x1bP1\r;0q#0\x1b\\", want: "\x1bP1;0q#0\x1b\\"},
+	{name: "DCS-ignore still closed", in: "\x1bP$1qhidden\x1b[6nVISIBLE", want: "\x1bP$1qhidden\x1b\x18VISIBLE"},
+	{name: "sixel passes", in: "\x1bP0;1;0q#0;2;0;0;0#0!10~\x1b\\", want: "\x1bP0;1;0q#0;2;0;0;0#0!10~\x1b\\"},
+	{name: "XTSETTCAP passes", in: "\x1bP+p78746572\x1b\\", want: "\x1bP+p78746572\x1b\\"},
+	{name: "drop ends at CAN", in: "\x1bP+q544e\x18X", want: "\x18X"},
+	{name: "drop ends at ESC-not-ST", in: "\x1bP+q544e\x1b[1mX", want: "\x1b[1mX"},
+	{name: "BEL inside a dropped DCS", in: "\x1bP+q544e\x07hello\x1b\\X", want: "X"},
+	// A header the input abandons or cancels while it is held is a held string
+	// that ends abnormally, so none of it goes out. With a close owed, the
+	// cancel carries the header's ESC out as the close.
+	{name: "an ESC abandons a held DCS header", in: "\x1bP+\x1b[6nX", want: "X"},
+	{name: "a held DCS header ended by CAN", in: "\x1bP1;\x18X", want: "\x18X"},
+	{name: "cancel with an obligation drops the held DCS header", in: "\x1bPq\x07\x1bP+\x18q544e\x1b\\X",
+		want: "\x1bPq\x07\x1b\x18q544e\x1b\\X", kitty: true},
+	// The drop owes nothing, since nothing of it went out, but a close owed
+	// from before it is settled as for any drop.
+	{name: "a DCS query after a passed DCS closes it", in: "\x1bPq#0\x1bP+q544e\x1b\\X", want: "\x1bPq#0\x1b\x18X"},
+	// The ESC that ends a drop starts a sequence of its own, held like any
+	// other, and goes out with a cancel as a lone ESC does.
+	{name: "a cancel after a drop's ESC", in: "\x1bP+q544e\x1b\x18X", want: "\x1b\x18X"},
+	{name: "a DEL after a drop's ESC", in: "\x1bP+q544e\x1b\x7f\\X", want: "\x1b\\X"},
+	// Bytes 0xA0–0xFF in a header are ignored, as DEL is; 0x80–0x9F give the
+	// header up, as they give up a CSI's, since C1 introducers aren't covered.
+	{name: "a high byte inside a DCS header", in: "a\x1bP+\xa0q544e\x1b\\b", want: "ab"},
+	{name: "a C1 byte gives a DCS header up", in: "\x1bP1\x85q#0\x1b[6nX", want: "\x1bP1\x85q#0\x1b\x18X"},
+	// Past its bound a header passes as a string, to the string's end.
+	{name: "an over-bound DCS header passes as a string", in: "\x1bP" + strings.Repeat("0", 31) + "q#0\x1b[6nX",
+		want: "\x1bP" + strings.Repeat("0", 31) + "q#0\x1b\x18X"},
+}
+
 func init() {
 	for _, q := range append(slices.Clone(csiQueryExamples), "\x1bZ") {
 		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "b", want: "ab"})
@@ -778,6 +830,56 @@ func init() {
 		oscStringCases = append(oscStringCases, filterCase{name: fmt.Sprintf("counter-case %q", c+"\x07"), in: c + "\x07", want: c + "\x07"})
 	}
 	filterCases = append(filterCases, oscStringCases...)
+
+	for _, q := range dcsQueryExamples {
+		dcsCases = append(dcsCases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "544e\x1b\\b", want: "ab"})
+	}
+	for _, c := range dcsPassExamples {
+		dcsCases = append(dcsCases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: c + "#0\x1b\\", want: c + "#0\x1b\\"})
+	}
+	filterCases = append(filterCases, dcsCases...)
+}
+
+// A DCS whose header isn't a query streams: its payload goes out during the
+// write that brings it, and nothing is held but an ESC that may begin ST, so
+// a sixel of any size costs the filter nothing. A query's payload is dropped
+// as it streams, and nothing is held but its header.
+func TestTerminalQueryFilter_StreamsADCSPayload(t *testing.T) {
+	const size, chunk = 64 << 10, 4 << 10
+	body := strings.Repeat("#0;2;0;0;0#0!10~-", size/16)[:size-1]
+
+	var out bytes.Buffer
+	f := NewTerminalQueryFilter(&out)
+	_, err := f.Write([]byte("\x1bPq"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1bPq", out.String(), "a header that isn't a query goes out at its final byte")
+
+	// The last write ends with ST's ESC, which is held until the '\'.
+	sixel := body + "\x1b"
+	for at := 0; at < len(sixel); at += chunk {
+		w := sixel[at:min(at+chunk, len(sixel))]
+		out.Reset()
+		_, err := f.Write([]byte(w))
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSuffix(w, "\x1b"), out.String(), "the write at %d", at)
+		require.LessOrEqual(t, len(f.Pending()), 1, "after the write at %d", at)
+	}
+	require.Equal(t, "\x1b", string(f.Pending()))
+	out.Reset()
+	_, err = f.Write([]byte("\\"))
+	require.NoError(t, err)
+	require.Equal(t, "\x1b\\", out.String())
+	require.Empty(t, f.Pending())
+
+	out.Reset()
+	query := "\x1bP+q" + body + "\x1b\\"
+	for at := 0; at < len(query); at += chunk {
+		_, err := f.Write([]byte(query[at:min(at+chunk, len(query))]))
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(f.Pending()), len("\x1bP+q\x1b"), "after the write at %d", at)
+	}
+	require.Zero(t, out.Len(), "a query of the same size is dropped whole")
+	require.Empty(t, f.Pending())
 }
 
 // Every exact-bytes case gives the same output whether it arrives in one
