@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,50 @@ func TestHostSinkPromoteHandsOverThePendingPartialRaw(t *testing.T) {
 	_, err = sink.Write([]byte("n"))
 	require.NoError(t, err)
 	require.Equal(t, "text\x1b[6n", string(ch.rec.bytes()))
+}
+
+// Promotion hands the filter's Pending to the new primary raw, ahead of the
+// live bytes it now takes unfiltered, so the primary's terminal sees what the
+// host wrote, byte for byte, whatever the filter was in the middle of when the
+// flip came: a sequence it was deciding, one it had passed on with a close
+// owed, or a string it had passed and was holding an ESC of. What it must not
+// see is a byte twice -- a C0 the filter already forwarded stays forwarded
+// once, and is no part of Pending.
+func TestHostSinkPromoteInEveryHeldState(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		prefix, rest string
+		want         string // "" is the raw input, prefix and rest as written
+	}{
+		{name: "a CSI held behind a passed DCS", prefix: "\x1bPq#0\x1b[6", rest: "nhello"},
+		{name: "an over-bound CSI", prefix: "\x1b[" + strings.Repeat("0", 31), rest: "mX"},
+		{name: "an OSC being held", prefix: "\x1b]0;t", rest: "\x07X"},
+		{name: "a CSI and a C0 the filter forwarded", prefix: "\x1b[6\r", rest: "n", want: "\r\x1b[6n"},
+		{name: "an ESC-intermediate head", prefix: "\x1b(", rest: "B"},
+		{name: "an ESC held after a passed DCS", prefix: "\x1bPq#0\x1b", rest: "\\X"},
+		{name: "an ESC held inside an OSC", prefix: "\x1b]0;t\x1b", rest: "\\X"},
+		{name: "an ESC held inside a tmux wrapper", prefix: "\x1bPtmux;\x1b", rest: "\x1b[31mX\x1b\\"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.want
+			if want == "" {
+				want = tc.prefix + tc.rest
+			}
+
+			ch := &slowChannel{}
+			sink := newHostSink(ch, nil, "s", discardLogger())
+			defer func() { _ = sink.Close() }()
+
+			_, err := sink.Write([]byte(tc.prefix))
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.True(t, sink.promote(ctx))
+			_, err = sink.Write([]byte(tc.rest))
+			require.NoError(t, err)
+			require.Equal(t, want, string(ch.rec.bytes()))
+		})
+	}
 }
 
 func TestHostSinkSecondaryFiltersLiveQueries(t *testing.T) {

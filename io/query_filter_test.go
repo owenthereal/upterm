@@ -463,6 +463,26 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 			name:  "OSC number",
 			input: append([]byte("\x1b]"), bytes.Repeat([]byte("0"), runLength)...),
 		},
+		{
+			name:  "ESC intermediates",
+			input: append([]byte("\x1b"), bytes.Repeat([]byte(" "), runLength)...),
+		},
+		{
+			name:  "CSI intermediates",
+			input: append([]byte("\x1b[1"), bytes.Repeat([]byte("$"), runLength)...),
+		},
+		{
+			name:  "OSC 4 run",
+			input: append([]byte("\x1b]4;"), bytes.Repeat([]byte("0;?;"), runLength)...),
+		},
+		{
+			name:  "passed DCS payload",
+			input: append([]byte("\x1bPq"), bytes.Repeat([]byte("#0"), runLength)...),
+		},
+		{
+			name:  "APC payload",
+			input: append([]byte("\x1b_G"), bytes.Repeat([]byte("a"), runLength)...),
+		},
 	}
 
 	for _, tt := range tests {
@@ -478,6 +498,39 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// maxPendingBytes is computed, not remembered: the largest any state holds
+// under the bounds, plus the one ESC that Pending adds beyond it, which a held
+// OSC keeps to see whether a backslash follows. Both halves are checked, the
+// sum from the bound constants and the hold from the filter itself, so raising
+// a bound without the constant fails here, and so does a constant larger than
+// anything the filter ever holds.
+func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
+	largest := max(maxEscHeld, maxCSIHeld, maxOSCNumHeld, maxOSCHeld)
+	require.Equal(t, largest+1, maxPendingBytes, "the largest hold, plus one held ESC")
+
+	// PR 1: 256 (the largest hold, an OSC with framing) + 1 held ESC. PR 2
+	// raises it to 259 for a wrapper's re-encoded inner ESCs. If the bounds
+	// change, change both this and the constant's comment.
+	require.Equal(t, 257, maxPendingBytes)
+
+	// The filter really does reach it: an OSC held to its bound, then an ESC.
+	// One more payload byte instead would have given the OSC up.
+	head := "\x1b]0;"
+	var out bytes.Buffer
+	f := NewTerminalQueryFilter(&out)
+	_, _ = f.Write([]byte(head + strings.Repeat("t", maxOSCHeld-len(head))))
+	require.Len(t, f.Pending(), maxOSCHeld, "an OSC held to its bound")
+	_, _ = f.Write([]byte("\x1b"))
+	require.Len(t, f.Pending(), maxPendingBytes, "and the ESC that may begin its ST")
+	require.Empty(t, out.String(), "nothing of it has gone out")
+
+	var gaveUp bytes.Buffer
+	g := NewTerminalQueryFilter(&gaveUp)
+	_, _ = g.Write([]byte(head + strings.Repeat("t", maxOSCHeld-len(head)+1)))
+	require.Empty(t, g.Pending(), "one byte past the bound, the OSC is given up on")
+	require.Len(t, gaveUp.String(), maxOSCHeld+1, "and goes out")
 }
 
 // errWriter is a writer that always returns an error
@@ -692,6 +745,33 @@ func TestTerminalQueryFilter_SplitWritesMatchWholeWrites(t *testing.T) {
 			require.Equal(t, c.want, filterAll(c.in), "whole")
 			require.Equal(t, c.want, filterBytewise(c.in), "byte by byte")
 		})
+	}
+}
+
+// continuationCheck is spec test 8: a joiner at any boundary ends where the
+// filter would. Filter A takes the first k bytes of in; a fresh filter B takes
+// what A emitted, then A.Pending(), then the rest. B's output must equal the
+// output of one filter fed all of in, which also holds B to re-filtering A's
+// output without changing it. k ranges over every boundary, including the one
+// between a terminator's ESC and its backslash.
+func continuationCheck(t *testing.T, in string) {
+	t.Helper()
+	whole := filterAll(in)
+	for k := 0; k <= len(in); k++ {
+		var outA, outB bytes.Buffer
+		a := NewTerminalQueryFilter(&outA)
+		_, _ = a.Write([]byte(in[:k]))
+		b := NewTerminalQueryFilter(&outB)
+		_, _ = b.Write(outA.Bytes())
+		_, _ = b.Write(a.Pending())
+		_, _ = b.Write([]byte(in[k:]))
+		require.Equal(t, whole, outB.String(), "split at %d of %q", k, in)
+	}
+}
+
+func TestTerminalQueryFilter_ContinuesAtEveryBoundary(t *testing.T) {
+	for _, c := range filterCases {
+		t.Run(c.name, func(t *testing.T) { continuationCheck(t, c.in) })
 	}
 }
 

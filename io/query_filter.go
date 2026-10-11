@@ -139,19 +139,39 @@ const tmuxPrefix = "tmux;"
 
 // maxPendingBytes is the most the filter will ever be holding, and so the most
 // Pending can return. Every state that accumulates gives up at a bound of its
-// own: 32 bytes of a CSI head, 8 of an ESC sequence with intermediates, 8 of an
-// OSC number and 256 of an OSC. The largest is the OSC bound, plus the ESC of a
-// string terminator that may turn out not to be one; 260 covers that with room
-// to spare.
+// own, counted in raw bytes with the sequence's framing included: 8 of an ESC
+// sequence with intermediates, 32 of a CSI head, 8 of an OSC number and 256 of
+// an OSC, introducer through payload. The largest is the OSC's 256. On top of
+// it comes the one ESC that Pending can return beyond a bound: an OSC held to
+// its bound can still be waiting to see whether the ESC that follows begins its
+// ST, and that ESC is not counted in the 256. So 256 + 1 = 257.
 //
 // It matters because Pending is replayed to every joining writer ahead of the
 // ring: what the filter holds is output no reader has seen yet, and it is held
 // outside the ring's byte budget.
-const maxPendingBytes = 260
+const maxPendingBytes = 257
 
-// Pending returns a copy of the bytes of an escape sequence the filter is
-// still holding because it has not yet seen the sequence's end. They are
-// not in the underlying writer yet. The result never exceeds maxPendingBytes.
+// Pending returns the bytes that put a fresh filter in this one's state. Fed
+// everything this filter has written, then Pending(), a fresh filter ends in the
+// state this one is in: where it is in a sequence, the match so far against
+// "tmux;" at the start of a DCS, whether it is passing a sequence it gave up
+// on, and whether it owes a close. A joiner's filter takes its state from the
+// result (MultiWriter.Append), and a newly promoted primary is handed it raw
+// (hostSink.promote). What it returns depends on the state:
+//
+//   - While deciding, the held bytes: a head, or an OSC to its terminator.
+//   - In a pass state, where the head went out with the stream, an ESC held to
+//     see what the next byte makes of it, or nothing. A DCS, APC, PM or SOS, a
+//     tmux wrapper, a CSI the terminal ignores and a sequence past its bound
+//     are all in this state.
+//   - With a close owed, the held sequence that will settle it. It begins with
+//     the ESC that ended the emitted sequence, so the joiner's filter owes the
+//     same close.
+//
+// The result restores a parse state; it does not recover history. It never
+// contains a byte the filter dropped, since those are gone and are not coming
+// back, nor a C0 it forwarded, which went out ahead of the hold and would be
+// sent twice. It is a copy, and never longer than maxPendingBytes.
 func (f *TerminalQueryFilter) Pending() []byte {
 	return slices.Clone(f.seqBuf)
 }
