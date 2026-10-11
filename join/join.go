@@ -103,7 +103,9 @@ type Config struct {
 	TakeTerminal func() error
 	// Events tells the guest how the join is going. It returns only once
 	// whatever it wrote has been written or has failed: Run starts no attempt
-	// and lets no session write while it is in progress. While the run goes
+	// and lets no session write while it is in progress. A Waiting call's time
+	// comes out of its wait, so the attempt is still due at Next, or follows
+	// at once if the call returns later than that. While the run goes
 	// on, calls are serial, each starting once the last has returned. Each
 	// runs on its own goroutine, so a write stuck on a terminal never keeps a
 	// stop from ending the run, nor a first join's deadline, which a Waiting
@@ -892,6 +894,12 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 	if r.firstJoin() {
 		delay = min(delay, left)
 	}
+	// The wait is due delay from now on both clocks, before the guest is told
+	// when, so the attempt comes at the time the line gives: however long the
+	// terminal takes over it, that comes out of the wait rather than being
+	// added to it, and a line that outlasts the wait is followed by the
+	// attempt at once.
+	until := due{mono: time.Now().Add(delay), wall: now.Add(delay)}
 
 	retry := make(chan struct{}, 1)
 	r.mu.Lock()
@@ -903,8 +911,8 @@ func (r *runner) wait(why WaitReason, err error) (Outcome, bool) {
 		r.mu.Unlock()
 	}()
 
-	e := Event{Kind: Waiting, Why: why, Err: err, Since: r.since, Next: now.Add(delay), Long: long, First: first}
-	if !r.emit(ctx, e) || waitFor(ctx, r.timing, delay, retry) != nil {
+	e := Event{Kind: Waiting, Why: why, Err: err, Since: r.since, Next: until.wall, Long: long, First: first}
+	if !r.emit(ctx, e) || waitFor(ctx, r.timing, until, retry) != nil {
 		if r.runCtx.Err() != nil {
 			return r.stopped(), false
 		}

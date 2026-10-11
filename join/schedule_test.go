@@ -82,9 +82,14 @@ func TestTheDefaultWallClockCarriesNoMonotonicReading(t *testing.T) {
 	require.WithinDuration(t, time.Now(), now, time.Minute)
 }
 
+// dueIn is a wait's due, delay from now on both of tm's clocks.
+func dueIn(tm Timing, delay time.Duration) due {
+	return due{mono: time.Now().Add(delay), wall: tm.Wall().Add(delay)}
+}
+
 func TestWaitAttemptsWhenTheWallClockJumps(t *testing.T) {
 	var jumped atomic.Bool
-	started := make(chan struct{})
+	looked := make(chan struct{})
 	var once sync.Once
 	base := time.Now().Round(0)
 	tm := Timing{WallCheck: 20 * time.Millisecond, Wall: func() time.Time {
@@ -92,15 +97,17 @@ func TestWaitAttemptsWhenTheWallClockJumps(t *testing.T) {
 		if jumped.Load() {
 			now = base.Add(time.Hour)
 		}
-		// The wait has read the clock for its target once this closes, so
-		// the jump below can only come after it.
-		once.Do(func() { close(started) })
+		// The wait has looked at the clock once, and found its target still
+		// ahead, by the time this closes, so the jump below can only come
+		// after it.
+		once.Do(func() { close(looked) })
 		return now
 	}}.orDefault()
+	until := due{mono: time.Now().Add(60 * time.Second), wall: base.Add(60 * time.Second)}
 	done := make(chan error, 1)
-	go func() { done <- waitFor(context.Background(), tm, 60*time.Second, nil) }()
+	go func() { done <- waitFor(context.Background(), tm, until, nil) }()
 	select {
-	case <-started:
+	case <-looked:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wait never read the wall clock")
 	}
@@ -117,15 +124,11 @@ func TestWaitAttemptsWhenTheWallClockJumps(t *testing.T) {
 
 func TestWaitIsNotLengthenedByAClockSteppedBack(t *testing.T) {
 	base := time.Now().Round(0)
-	var calls atomic.Int32
-	tm := Timing{WallCheck: 20 * time.Millisecond, Wall: func() time.Time {
-		if calls.Add(1) == 1 {
-			return base // when the wait starts
-		}
-		return base.Add(-time.Hour) // NTP stepped the clock back
-	}}.orDefault()
+	// NTP steps the clock back an hour as the wait begins.
+	tm := Timing{WallCheck: 20 * time.Millisecond, Wall: func() time.Time { return base.Add(-time.Hour) }}.orDefault()
 	start := time.Now()
-	require.NoError(t, waitFor(context.Background(), tm, 100*time.Millisecond, nil))
+	until := due{mono: start.Add(100 * time.Millisecond), wall: base.Add(100 * time.Millisecond)}
+	require.NoError(t, waitFor(context.Background(), tm, until, nil))
 	// The delay, and nowhere near the hour the wall clock now says is left.
 	took := time.Since(start)
 	require.GreaterOrEqual(t, took, 100*time.Millisecond)
@@ -133,10 +136,11 @@ func TestWaitIsNotLengthenedByAClockSteppedBack(t *testing.T) {
 }
 
 func TestWaitEndsEarlyWhenToldToRetry(t *testing.T) {
+	tm := Timing{}.orDefault()
 	retry := make(chan struct{}, 1)
 	retry <- struct{}{}
 	done := make(chan error, 1)
-	go func() { done <- waitFor(context.Background(), Timing{}.orDefault(), time.Hour, retry) }()
+	go func() { done <- waitFor(context.Background(), tm, dueIn(tm, time.Hour), retry) }()
 	select {
 	case err := <-done:
 		require.NoError(t, err)
@@ -146,11 +150,12 @@ func TestWaitEndsEarlyWhenToldToRetry(t *testing.T) {
 }
 
 func TestWaitEndsWithTheErrorOfAContextThatEnds(t *testing.T) {
+	tm := Timing{}.orDefault()
 	// The deadline arrives while the wait is sleeping.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- waitFor(ctx, Timing{}.orDefault(), time.Hour, nil) }()
+	go func() { done <- waitFor(ctx, tm, dueIn(tm, time.Hour), nil) }()
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -158,16 +163,32 @@ func TestWaitEndsWithTheErrorOfAContextThatEnds(t *testing.T) {
 		t.Fatal("a context that ended did not end the wait")
 	}
 
-	// The context is over before the wait starts, whatever the delay is.
+	// The context is over before the wait starts, whenever the wait is due.
 	cancelled, cancelNow := context.WithCancel(context.Background())
 	cancelNow()
 	for _, delay := range []time.Duration{time.Hour, 0, -time.Second} {
-		require.ErrorIs(t, waitFor(cancelled, Timing{}.orDefault(), delay, nil), context.Canceled, delay.String())
+		require.ErrorIs(t, waitFor(cancelled, tm, dueIn(tm, delay), nil), context.Canceled, delay.String())
 	}
 }
 
-func TestWaitWithNothingToWaitForReturnsAtOnce(t *testing.T) {
-	for _, delay := range []time.Duration{0, -time.Second} {
-		require.NoError(t, waitFor(context.Background(), Timing{}.orDefault(), delay, nil), delay.String())
+func TestAWaitAlreadyDueReturnsAtOnce(t *testing.T) {
+	// The status line before a wait can take longer than the wait. A wall
+	// clock looked at only every hour, and the other clock's target an hour
+	// away: only a wait that looks before it sleeps returns at once.
+	tm := Timing{WallCheck: time.Hour}.orDefault()
+	now, wall := time.Now(), tm.Wall()
+	for name, until := range map[string]due{
+		"now, on both clocks":          {mono: now, wall: wall},
+		"past, on the monotonic clock": {mono: now.Add(-time.Second), wall: wall.Add(time.Hour)},
+		"past, on the wall clock":      {mono: now.Add(time.Hour), wall: wall.Add(-time.Second)},
+	} {
+		done := make(chan error, 1)
+		go func() { done <- waitFor(context.Background(), tm, until, nil) }()
+		select {
+		case err := <-done:
+			require.NoError(t, err, name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("a wait due %s slept", name)
+		}
 	}
 }

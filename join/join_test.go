@@ -322,6 +322,87 @@ func TestAWallClockJumpDoesNotSlowTheSchedule(t *testing.T) {
 	require.LessOrEqual(t, next.Next.Sub(base.Add(time.Hour)), cfg.Timing.FastCap, "the wait after the jump left the fast tier")
 }
 
+// dialsOn makes cfg's Dial note the time of each attempt on the channel it
+// returns, which holds 64.
+func dialsOn(cfg *Config) <-chan time.Time {
+	dialed := make(chan time.Time, 64)
+	dial := cfg.Dial
+	cfg.Dial = func(ctx context.Context) (net.Conn, error) {
+		dialed <- time.Now()
+		return dial(ctx)
+	}
+	return dialed
+}
+
+func TestTheRetryComesWhenTheStatusLineSaid(t *testing.T) {
+	// The wait is 400 ms, and the terminal takes 200 ms over the Waiting line.
+	// The wall clock stands still, so the monotonic clock alone ends the wait.
+	const wait, hold = 400 * time.Millisecond, 200 * time.Millisecond
+	base := time.Now().Round(0)
+	rec := &recorder{gate: make(chan struct{})}
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec), withWait())
+	cfg.Timing.FastBase, cfg.Timing.FastCap = wait, wait
+	cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+	cfg.Timing.Wall = func() time.Time { return base }
+	dialed := dialsOn(&cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJoinAsync(t, ctx, cfg)
+	defer close(rec.gate)
+
+	recv(t, dialed) // the first attempt
+	line := recv(t, rec.held())
+	began := time.Now() // as the line began, after the wait did
+	require.Equal(t, Waiting, line.Kind)
+	require.True(t, line.Next.Equal(base.Add(wait)), "the line said %v", line.Next)
+	<-time.After(hold)
+	rec.gate <- struct{}{}
+	at := recv(t, dialed)
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+	// The attempt comes the wait after the line began, as the line said:
+	// neither the line's time later nor as soon as it is written. The bound
+	// is loose.
+	require.WithinDuration(t, began.Add(wait), at, hold/2, "the attempt came %v after the line began", at.Sub(began))
+}
+
+func TestAWallClockPastTheRetryDuringTheStatusLineAttemptsAtOnce(t *testing.T) {
+	base := time.Now().Round(0)
+	var jumped atomic.Bool
+	rec := &recorder{gate: make(chan struct{})}
+	cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withEvents(rec), withWait())
+	// An hour's wait, on a wall clock the wait looks at only as it starts and
+	// then an hour later: nothing but the time the line gave having passed by
+	// then can bring the attempt on.
+	cfg.Timing.FastBase, cfg.Timing.FastCap, cfg.Timing.WallCheck = time.Hour, time.Hour, time.Hour
+	cfg.Timing.Jitter = func(max time.Duration) time.Duration { return max }
+	cfg.Timing.Wall = func() time.Time {
+		if jumped.Load() {
+			return base.Add(2 * time.Hour)
+		}
+		return base
+	}
+	dialed := dialsOn(&cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runJoinAsync(t, ctx, cfg)
+	defer close(rec.gate)
+
+	recv(t, dialed) // the first attempt
+	line := recv(t, rec.held())
+	require.Equal(t, Waiting, line.Kind)
+	require.True(t, line.Next.Equal(base.Add(time.Hour)), "the line said %v", line.Next)
+	jumped.Store(true) // the lid opens two hours later, while the terminal takes the line
+	rec.gate <- struct{}{}
+	select {
+	case <-dialed: // the next attempt
+	case <-time.After(testTimeout):
+		t.Fatal("the line was written after the time it gave, and the wait went on")
+	}
+	cancel()
+	require.Equal(t, Stopped, recv(t, done).Kind)
+}
+
 func TestNoStatusLineAfterAStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

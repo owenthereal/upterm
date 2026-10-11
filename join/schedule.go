@@ -132,28 +132,32 @@ func (s *schedule) ready(d time.Duration) {
 	}
 }
 
-// waitFor sleeps for delay and returns nil once it is over, or once retry
+// due is when a wait is over: once the monotonic clock has reached mono, or
+// the wall clock wall, whichever comes first. Both are fixed before the guest
+// is told when the next attempt comes, which is wall.
+type due struct{ mono, wall time.Time }
+
+// waitFor sleeps until it is due and returns nil then, or once retry
 // delivers. It returns ctx.Err() if ctx ends first.
 //
-// The wait is over when the delay has passed on the monotonic clock or when
-// the wall clock has passed the time it was due, whichever comes first. The
-// monotonic clock stops while a laptop sleeps, so a timer armed before the lid
-// closed would fire late after it opened. Hence the wake-ups at least every
-// WallCheck, each of which looks at the wall clock. And hence the monotonic
-// deadline too: a wall clock stepped backwards must not make the wait longer
-// than the delay.
-func waitFor(ctx context.Context, t Timing, delay time.Duration, retry <-chan struct{}) error {
+// The monotonic clock stops while a laptop sleeps, so a timer armed before the
+// lid closed would fire late after it opened. Hence the wake-ups at least
+// every WallCheck, each of which looks at the wall clock. And hence the
+// monotonic target too: a wall clock stepped backwards must not make the wait
+// longer than it was meant to be. A wait that is due by the time it starts,
+// as one is when the status line before it took longer than the wait,
+// returns at once.
+func waitFor(ctx context.Context, t Timing, until due, retry <-chan struct{}) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if delay <= 0 {
+	t = t.orDefault()
+	over := func() bool { return !time.Now().Before(until.mono) || !t.Wall().Before(until.wall) }
+	if over() {
 		return nil
 	}
-	t = t.orDefault()
-	wallDue := t.Wall().Add(delay)
-	monoDue := time.Now().Add(delay)
 
-	timer := time.NewTimer(min(t.WallCheck, delay))
+	timer := time.NewTimer(min(t.WallCheck, time.Until(until.mono)))
 	defer timer.Stop()
 	for {
 		select {
@@ -163,9 +167,9 @@ func waitFor(ctx context.Context, t Timing, delay time.Duration, retry <-chan st
 			return nil
 		case <-timer.C:
 		}
-		if !time.Now().Before(monoDue) || !t.Wall().Before(wallDue) {
+		if over() {
 			return nil
 		}
-		timer.Reset(min(t.WallCheck, time.Until(monoDue)))
+		timer.Reset(min(t.WallCheck, time.Until(until.mono)))
 	}
 }
