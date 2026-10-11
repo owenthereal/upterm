@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 // DefaultReplayBytes bounds the replay ring handed to a joining writer.
@@ -34,6 +37,12 @@ type buffer struct {
 	queue [][]byte
 	max   int // cap in bytes
 	size  int // bytes currently held
+
+	// total counts every byte ever appended, so it is the stream offset of
+	// the next byte to arrive, and total-size that of the ring's first. A
+	// resize's boundary is kept as an offset because a position in the queue
+	// moves every time the ring is trimmed.
+	total uint64
 
 	// onEvict is handed every byte that leaves the ring, in stream order.
 	// What it feeds is state the replay can no longer reconstruct from the
@@ -64,6 +73,8 @@ func (c *buffer) Append(p []byte) {
 func (c *buffer) push(p []byte) [][]byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.total += uint64(len(p))
 
 	if c.max <= 0 {
 		// Nothing is kept, so everything handed over has already left.
@@ -130,13 +141,121 @@ func (c *buffer) Data() [][]byte {
 	return append(result, c.queue...)
 }
 
-// bufferWriter adapts the replay ring to io.Writer so a filter can sit in
-// front of it.
-type bufferWriter struct{ b *buffer }
+// End is the stream offset of the next byte the ring is handed.
+func (c *buffer) End() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
+}
 
-func (w bufferWriter) Write(p []byte) (int, error) {
-	w.b.Append(p)
+// Start is the stream offset of the ring's first byte, or, while it holds
+// none, of the next byte it is handed.
+func (c *buffer) Start() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total - uint64(c.size)
+}
+
+// Split returns what Data does, cut at the stream offset at: before runs from
+// the ring's first byte up to at, and from runs on from it. An offset the ring
+// has already evicted puts all of it in from.
+func (c *buffer) Split(at uint64) (before, from [][]byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var skip uint64
+	if first := c.total - uint64(c.size); at > first {
+		skip = at - first
+	}
+	for i, chunk := range c.queue {
+		if skip < uint64(len(chunk)) {
+			if skip > 0 {
+				before = append(before, chunk[:skip])
+			}
+			from = append(from, chunk[skip:])
+			return before, append(from, c.queue[i+1:]...)
+		}
+		before = append(before, chunk)
+		skip -= uint64(len(chunk))
+	}
+	return before, nil
+}
+
+// ringWriter adapts the replay ring to io.Writer so a filter can sit in front
+// of it. Only ever written to by the filter, under writeMu; see record.
+type ringWriter struct{ t *MultiWriter }
+
+func (w ringWriter) Write(p []byte) (int, error) {
+	w.t.record(p)
 	return len(p), nil
+}
+
+// redrawScanner reads the bytes entering the ring for vertical cursor
+// movement, which is what makes a stretch of them a redraw; see boundary. It
+// is no parser: it only has to find a CSI's final byte, and ESC M, so it keeps
+// only where it is in a sequence. That carries from one write to the next, so
+// a sequence the ring receives in two halves is still seen.
+//
+// A string sequence -- an OSC, a DCS -- needs no state of its own. Its payload
+// holds no ESC but the one that ends it, as a terminal reads it: ESC \ is its
+// terminator, and an ESC before anything else abandons it and opens a new
+// sequence, which is what this reads it as too. Read as text, then, the
+// payload is text, and a title that spells "[H" moves nothing.
+type redrawScanner struct{ state redrawState }
+
+type redrawState int
+
+const (
+	rsText redrawState = iota // outside any sequence
+	rsEsc                     // after an ESC
+	rsCSI                     // inside a CSI, before its final byte
+)
+
+// verticalFinals are the final bytes of the CSIs that move the cursor up or
+// down, or the screen under it, whatever their parameters: CUU, CUD, CNL,
+// CPL, CUP, HVP, VPA, SU, SD, and DECSTBM, which homes the cursor.
+//
+// Others that can move the cursor between rows stay plain on purpose: a
+// cursor restore (ESC 8, and CSI u, bare or with a kitty keyboard marker),
+// insert and delete line (CSI L, CSI M), VPR (CSI e), and leaving the
+// alternate screen (CSI ?1049l). Shells save and restore the cursor within
+// one row, around a right-aligned prompt part (ESC 7 ... ESC 8, CSI s ...
+// CSI u), and a program that redraws sends one of the sequences listed here,
+// a CUU or a CUP, in every stretch it writes after a resize. Counting these
+// would cost a shell's joiners its history and catch no redraw the list does
+// not.
+const verticalFinals = "ABEFHfdSTr"
+
+// scan reports whether p ends a sequence that moves the cursor vertically:
+// one of verticalFinals' CSIs, or ESC M, reverse index.
+func (s *redrawScanner) scan(p []byte) bool {
+	redraws := false
+	for _, b := range p {
+		switch {
+		case b == 0x1b:
+			// From anywhere: an ESC abandons a CSI, and ESC ESC starts over.
+			s.state = rsEsc
+		case b == 0x18 || b == 0x1a:
+			// CAN and SUB cancel whatever sequence is in progress.
+			s.state = rsText
+		case s.state == rsEsc:
+			switch b {
+			case '[':
+				s.state = rsCSI
+			case 'M':
+				redraws = true
+				s.state = rsText
+			default:
+				s.state = rsText
+			}
+		case s.state == rsCSI && b >= 0x40 && b <= 0x7e:
+			if strings.ContainsRune(verticalFinals, rune(b)) {
+				redraws = true
+			}
+			s.state = rsText
+		}
+	}
+	return redraws
 }
 
 // NewMultiWriter returns a fan-out whose replay ring holds the most recent
@@ -154,17 +273,18 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	// replay.
 	b.onEvict = func(p []byte) { _, _ = modes.Write(p) }
 
-	return &MultiWriter{
+	t := &MultiWriter{
 		writers: writers,
 		buffer:  b,
-		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
 		modes:   modes,
 	}
+	t.replay = NewTerminalQueryFilter(ringWriter{t: t})
+	return t
 }
 
-// ErrClosed is returned by Append once Shutdown has run. A guest that reaches
-// the door as the session is ending is refused rather than attached to a
-// fan-out nothing will flush again.
+// ErrClosed is returned by Append and AppendSized once Shutdown has run. A
+// guest that reaches the door as the session is ending is refused rather than
+// attached to a fan-out nothing will flush again.
 var ErrClosed = errors.New("multiwriter: closed to new writers")
 
 // Flusher is implemented by attached writers that deliver asynchronously and so
@@ -205,11 +325,56 @@ type MultiWriter struct {
 	// the ring's evictions rather than by Write; see NewMultiWriter.
 	modes *ModeTracker
 
+	// resized is the size the pty last reported, until the fan-out applies
+	// it; the zero size is none. sizeMu guards it and nothing else, and is
+	// never held across anything, so Resized never waits. See Resized.
+	sizeMu  sync.Mutex
+	resized termsize.Size
+
+	// boundaries are the sizes the ring was recorded at, oldest first. Each
+	// holds from its offset to the next one's, and the newest, whose size is
+	// the pty's as of the ring's newest byte, to the ring's end. Bytes before
+	// the oldest were recorded before any size was reported, or at a size the
+	// cap has since dropped: unsized says which. Empty is no size reported.
+	// Guarded by writeMu, and moved only by applyResize and prune; record
+	// marks the newest a redraw.
+	boundaries []boundary
+
+	// unsized is the stream offset before which the bytes were recorded at a
+	// size the cap has dropped. Any of them still in the ring fit no joiner.
+	// Guarded by writeMu.
+	unsized uint64
+
+	// scanner reads what enters the ring for vertical cursor movement, and
+	// leadRedraws is whether the bytes written before the first boundary had
+	// any. Guarded by writeMu.
+	scanner     redrawScanner
+	leadRedraws bool
+
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
 	closed bool
 }
+
+// boundary is a stream offset from which the ring was recorded at size, up to
+// the next boundary. redraws is whether the bytes entering the ring over that
+// stretch move the cursor vertically, which is what replaying them at another
+// size can garble. Plain output only wraps, and wraps afresh on whatever
+// terminal it is replayed onto. A redraw moves the cursor over lines as they
+// wrapped at the size it was drawn at, and on a terminal where they wrap
+// otherwise it lands on the wrong ones.
+type boundary struct {
+	offset  uint64
+	size    termsize.Size
+	redraws bool
+}
+
+// maxBoundaries caps the sizes the fan-out remembers, against a window
+// dragged across a screen with output between every step. Past it the oldest
+// is dropped, and the bytes recorded at it fit no joiner: they could have been
+// recorded at any size.
+const maxBoundaries = 64
 
 // Append attaches writers, handing each the replay buffer first so it starts
 // from recent output rather than mid-screen.
@@ -220,6 +385,9 @@ type MultiWriter struct {
 // them. Holding the fan-out lock here is only safe because attached guest
 // writers no longer block on I/O; under the old design it would have
 // reintroduced the deadlock #523 removed.
+//
+// This is the whole replay, whatever the size it was recorded at, which is
+// what a viewer wants. A joiner with a terminal is attached with AppendSized.
 func (t *MultiWriter) Append(writers ...io.Writer) error {
 	// Reject anything Remove could not later take back out, before it is
 	// attached and before it is written to.
@@ -232,44 +400,287 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	t.applyResize()
 	if t.closed {
 		return ErrClosed
 	}
 
 	for _, w := range writers {
-		// The snapshot describes the terminal as of the ring's first byte,
-		// so it has to go immediately in front of the ring and nowhere else:
-		// it can end mid-sequence, where the ring's own first bytes are the
-		// rest of that sequence.
-		if snap := t.modes.Snapshot(); len(snap) > 0 {
-			if _, err := w.Write(snap); err != nil {
-				return err
-			}
+		if err := t.replayTo(w, t.modes.Snapshot(), t.buffer.Data()); err != nil {
+			return err
 		}
-		for _, d := range t.buffer.Data() {
-			if _, err := w.Write(d); err != nil {
-				return err
-			}
-		}
+	}
+	t.attach(writers...)
 
-		// A partial escape sequence the filter is still holding is live output,
-		// not history: it is not in the ring yet, so the loop above never sees
-		// it. A joiner that misses it would see only the tail once the
-		// remainder arrives live, which is garbage on its terminal. Replaying
-		// the lead-in lets the joiner's own filter (or terminal) see the
-		// sequence whole.
-		if pending := t.replay.Pending(); len(pending) > 0 {
-			if _, err := w.Write(pending); err != nil {
-				return err
+	return nil
+}
+
+// AppendSized attaches w, whose terminal is size, handing it only the replay
+// that renders on it as it was drawn. A size that isn't Valid is a viewer's,
+// and AppendSized then does exactly what Append does.
+//
+// Plain output replays at any size: it only wraps, and wraps afresh on the
+// joiner's terminal. A redraw, output that moves the cursor vertically, does
+// not (see boundary), so the sizes matter only from the newest redraw back.
+// The joiner gets the longest stretch, back from the ring's end, in which
+// every redraw renders as drawn, behind the snapshot as of the stretch's
+// first byte. The newest redraw in it was recorded at a size that fits the
+// joiner, no wider and no taller, and from it back the size never shrank:
+// each earlier size, plain or not, fits the one after it, so every one fits
+// the joiner. Output recorded before a growth renders the same at the larger
+// size, because nothing in it wrapped at the smaller one. Output recorded
+// before a shrink does not: the command's repaint at the smaller size moves
+// the cursor relative to a screen on which the earlier lines wrapped, and
+// replayed onto a wider terminal, where they don't, it lands on top of them.
+// A redraw recorded wider or taller than the joiner would wrap and split on
+// its terminal, under the repaint its arrival brings once it shrinks the pty,
+// so the replay starts after it: with only that redraw in the ring's newest
+// stretch, the joiner gets the modes as they are now and none of the ring. A
+// pty that has never reported a size gives no answer, and the joiner gets what
+// Append gives it.
+//
+// Attaching is atomic with respect to a Write, as it is for Append.
+func (t *MultiWriter) AppendSized(size termsize.Size, w io.Writer) error {
+	if err := checkRemovable(w); err != nil {
+		return err
+	}
+
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.applyResize()
+	if t.closed {
+		return ErrClosed
+	}
+
+	snap, ring := t.sizedReplay(size)
+	if err := t.replayTo(w, snap, ring); err != nil {
+		return err
+	}
+	t.attach(w)
+
+	return nil
+}
+
+// sizedReplay is the snapshot and the ring bytes AppendSized hands a joiner
+// whose terminal is j. Called with writeMu held.
+func (t *MultiWriter) sizedReplay(j termsize.Size) ([]byte, [][]byte) {
+	if !j.Valid() || len(t.boundaries) == 0 {
+		return t.modes.Snapshot(), t.buffer.Data()
+	}
+
+	// An offset the ring has already evicted puts all of it in since, and the
+	// tracker already describes its first byte. The ring's end puts all of it
+	// in before, and the snapshot is then the modes as they are now.
+	before, since := t.buffer.Split(t.replayFrom(j))
+	if len(before) == 0 {
+		return t.modes.Snapshot(), since
+	}
+	return t.snapshotAfter(before), since
+}
+
+// replayFrom is the stream offset sizedReplay replays from: where the
+// earliest stretch the walk back from the ring's end takes begins. Called with
+// writeMu held, and with at least one boundary.
+//
+// Until the walk meets a redraw, it takes each stretch whatever its size. The
+// first redraw it meets has to fit j, and from there on the walk is
+// constrained: each earlier stretch, plain or not, has to fit the one after
+// it, since the redraw's cursor moves depend on how everything before it
+// wrapped. It stops before the first stretch that doesn't, and at bytes whose
+// size it doesn't know: those recorded at a size the cap dropped, whose flag
+// went with it, and those written before any size was reported, unless they
+// are plain and the walk is not constrained, the one case their size doesn't
+// matter.
+func (t *MultiWriter) replayFrom(j termsize.Size) uint64 {
+	from := t.buffer.End()
+	constrained := false
+	for k := len(t.boundaries) - 1; k >= 0; k-- {
+		b := t.boundaries[k]
+		switch {
+		case constrained:
+			if !fits(b.size, t.boundaries[k+1].size) {
+				return from
 			}
+		case b.redraws:
+			if !fits(b.size, j) {
+				return from
+			}
+			constrained = true
+		}
+		from = b.offset
+	}
+	if constrained || t.leadRedraws || t.unsized > t.buffer.Start() {
+		return from
+	}
+	return 0
+}
+
+// fits reports whether a redraw recorded at size renders on a terminal of j as
+// it was drawn: it is no wider and no taller. Asked of a recorded size and the
+// one after it, it reports that the size did not shrink between them.
+func fits(size, j termsize.Size) bool {
+	return size.Cols <= j.Cols && size.Rows <= j.Rows
+}
+
+// snapshotAfter is the snapshot as of the end of chunks, which run on from the
+// ring's first byte. It feeds a clone and never t.modes itself: the tracker
+// has to go on describing the ring's first byte for every joiner after this
+// one, and only restore may spend it.
+//
+// chunks can end inside an escape sequence, as the ring's first byte can
+// fall inside one. The clone then holds the sequence's head as its partial,
+// which its Snapshot replays last, so the head meets the tail that follows it
+// on the joiner's terminal. Called with writeMu held.
+func (t *MultiWriter) snapshotAfter(chunks [][]byte) []byte {
+	m := t.modes.Clone()
+	for _, c := range chunks {
+		_, _ = m.Write(c)
+	}
+	return m.Snapshot()
+}
+
+// replayTo hands w its replay: snap, the ring bytes it goes with, and the
+// lead-in the query filter is still holding. Called with writeMu held.
+func (t *MultiWriter) replayTo(w io.Writer, snap []byte, ring [][]byte) error {
+	// The snapshot describes the terminal as of ring's first byte, or as of
+	// whatever follows when ring is empty, so it has to go immediately in
+	// front of that and nowhere else: it can end mid-sequence, where the
+	// bytes after it are the rest of that sequence.
+	if len(snap) > 0 {
+		if _, err := w.Write(snap); err != nil {
+			return err
+		}
+	}
+	for _, d := range ring {
+		if _, err := w.Write(d); err != nil {
+			return err
 		}
 	}
 
+	// A partial escape sequence the filter is still holding is live output,
+	// not history: it is not in the ring yet, so the loop above never sees
+	// it. A joiner that misses it would see only the tail once the remainder
+	// arrives live, which is garbage on its terminal. Replaying the lead-in
+	// lets the joiner's own filter (or terminal) see the sequence whole.
+	if pending := t.replay.Pending(); len(pending) > 0 {
+		if _, err := w.Write(pending); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// attach makes writers members of the fan-out, once each has had its replay.
+// Called with writeMu held, which is what makes the replay and the attach one
+// step to a Write.
+func (t *MultiWriter) attach(writers ...io.Writer) {
 	t.membersMu.Lock()
 	defer t.membersMu.Unlock()
 	t.writers = append(t.writers, writers...)
+}
 
-	return nil
+// Resized tells the fan-out that the pty is now size. It never waits on
+// writeMu.
+//
+// It only records the size. The pty reports a resize from its Setsize, which
+// runs with a lock held: terminalWindows's, whose updates promise never to
+// block, or sharedPTY.mu, which sharedPTY.set holds while it applies a size
+// offered before the pty existed. Write holds writeMu for as long as a
+// synchronous primary writer takes, which for one whose terminal is stopped
+// is indefinitely. So the next Write or join to take writeMu applies it
+// instead, before it adds anything to the ring; see applyResize.
+//
+// A size that isn't Valid is ignored. Nothing is drawn at a geometry with no
+// columns or no rows, and recorded, it would overwrite a size still waiting to
+// be applied. The pty does take one: an ssh -tt guest whose stdin is not a
+// terminal asks for a 0x0 window.
+func (t *MultiWriter) Resized(size termsize.Size) {
+	if !size.Valid() {
+		return
+	}
+	t.sizeMu.Lock()
+	defer t.sizeMu.Unlock()
+	t.resized = size
+}
+
+// record appends p, what the replay filter passed, to the ring. If p moves the
+// cursor vertically, the stretch it lands in is a redraw: the newest
+// boundary's, or, before any size was reported, the bytes written before the
+// first. A sequence p only finishes counts where its final byte lands, since
+// that is where the cursor moves. Called with writeMu held, from Write, after
+// applyResize: everything in p is recorded at the newest boundary's size.
+func (t *MultiWriter) record(p []byte) {
+	if t.scanner.scan(p) {
+		if n := len(t.boundaries); n > 0 {
+			t.boundaries[n-1].redraws = true
+		} else {
+			t.leadRedraws = true
+		}
+	}
+	t.buffer.Append(p)
+}
+
+// applyResize applies the size Resized last recorded, if any. A size other
+// than the newest boundary's adds a boundary at the stream offset of the next
+// byte to enter the ring, everything from which is recorded at that size. An
+// equal size adds nothing, so a resize and a resize back with no write between
+// them make no boundary. Called with writeMu held, at the start of Write,
+// Append and AppendSized. A size applied at a join has nothing recorded at it
+// yet, so it weighs nothing in that join's replay.
+//
+// A newest boundary nothing was written after holds no bytes, so the new size
+// replaces it rather than following it: kept, it would be a size the walk back
+// could stop at with nothing recorded at it, and would cut a joiner's replay
+// off there. Two joins before the command writes anything leave one: the first
+// joiner's size is applied at the second's join, and the second's own size
+// follows before any output. Holding no bytes, it held no redraw either, so
+// the size that replaces it starts out plain, as any new boundary does.
+func (t *MultiWriter) applyResize() {
+	t.sizeMu.Lock()
+	size := t.resized
+	t.resized = termsize.Size{}
+	t.sizeMu.Unlock()
+
+	if size == (termsize.Size{}) || size == t.newestSize() {
+		return
+	}
+	end := t.buffer.End()
+	if n := len(t.boundaries); n > 0 && t.boundaries[n-1].offset == end {
+		t.boundaries = t.boundaries[:n-1]
+		if size == t.newestSize() {
+			return
+		}
+	}
+	t.boundaries = append(t.boundaries, boundary{offset: end, size: size})
+	if len(t.boundaries) > maxBoundaries {
+		t.boundaries = t.boundaries[1:]
+		t.unsized = t.boundaries[0].offset
+	}
+}
+
+// newestSize is the newest boundary's size, the pty's as of the ring's newest
+// byte, or the zero size if none has been reported. Called with writeMu held.
+func (t *MultiWriter) newestSize() termsize.Size {
+	if n := len(t.boundaries); n > 0 {
+		return t.boundaries[n-1].size
+	}
+	return termsize.Size{}
+}
+
+// prune forgets the sizes of bytes the ring has evicted. A boundary goes once
+// the next one starts at or before the ring's first byte; the one that covers
+// that byte stays, as the size it was recorded at. Its redraw flag stays with
+// it, and may have been set by bytes since evicted: that errs towards a redraw,
+// which costs a joiner some replay but never garbles it. Called with writeMu
+// held, after the ring is fed.
+func (t *MultiWriter) prune() {
+	first := t.buffer.Start()
+	i := 0
+	for i+1 < len(t.boundaries) && t.boundaries[i+1].offset <= first {
+		i++
+	}
+	t.boundaries = t.boundaries[i:]
 }
 
 // checkRemovable rejects a writer that Remove could not match.
@@ -353,7 +764,11 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	// Ahead of p, so a resize reported before p was written has p after its
+	// boundary.
+	t.applyResize()
 	_, _ = t.replay.Write(p)
+	t.prune()
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
@@ -480,8 +895,9 @@ type ResetTarget interface {
 // replay filter is still holding, which together are everything sent since.
 //
 // That spends the tracker: its snapshot no longer describes the ring's start.
-// So it runs once, from Shutdown, after which Append refuses every joiner and
-// nothing asks for a snapshot again. Called with writeMu held.
+// So it runs once, from Shutdown, after which Append and AppendSized refuse
+// every joiner and nothing asks for a snapshot again. Called with writeMu
+// held.
 func (t *MultiWriter) restore() []byte {
 	for _, d := range t.buffer.Data() {
 		_, _ = t.modes.Write(d)

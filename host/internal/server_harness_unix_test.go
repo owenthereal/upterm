@@ -159,7 +159,7 @@ func (h *hostHarness) stop(t *testing.T) time.Duration {
 func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io.Reader, *ssh.Session, error) {
 	t.Helper()
 
-	cfg := dialConfig{deadline: harnessTimeout}
+	cfg := dialConfig{deadline: harnessTimeout, guestCols: 80, guestRows: 24}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -191,7 +191,7 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 		return nil, nil, nil, err
 	}
 	t.Cleanup(func() { _ = sess.Close() })
-	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+	if err := sess.RequestPty("xterm", cfg.guestRows, cfg.guestCols, ssh.TerminalModes{}); err != nil {
 		return nil, nil, nil, err
 	}
 	guestInput, err := sess.StdinPipe()
@@ -301,6 +301,9 @@ type dialConfig struct {
 	// signers, when non-empty, replaces the harness's guest credential, so a
 	// test can offer a certificate of its own making.
 	signers []ssh.Signer
+	// guestCols and guestRows are the terminal a guest asks for its pty with,
+	// 80x24 unless a test says otherwise. The guest door only.
+	guestCols, guestRows int
 }
 
 // withRekeyThreshold forces key renegotiation early, so a test can watch what
@@ -313,6 +316,11 @@ func withRekeyThreshold(n uint64) dialOption {
 // the order given.
 func withGuestSigners(signers ...ssh.Signer) dialOption {
 	return func(c *dialConfig) { c.signers = signers }
+}
+
+// withGuestPty gives a guest a terminal of this size, in place of 80x24.
+func withGuestPty(cols, rows int) dialOption {
+	return func(c *dialConfig) { c.guestCols, c.guestRows = cols, rows }
 }
 
 // withDialDeadline replaces the harness's absolute connection deadline for one

@@ -23,8 +23,15 @@ var (
 	procSetInformationJobObject = modkernel32.NewProc("SetInformationJobObject")
 )
 
-// startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+// startPty starts a PTY for the given command on Windows using ConPTY.
+//
+// onResize is called with every size the pty applies: the initial size once,
+// before startPty returns, and each Setsize's size just before the resize, so
+// that the command's repaint is counted at it (the same size again included,
+// which the fan-out ignores). A resize that fails is followed by the size the
+// pty kept. Nil for a forced command's pty and for a pinned session's: see
+// command.Start.
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool, onResize func(termsize.Size)) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
@@ -57,14 +64,18 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	}
 
 	p := &pty{
-		cpty:   cpty,
-		handle: handle,
-		pid:    pid,
-		job:    job,
-		pinned: pinned,
+		cpty:     cpty,
+		handle:   handle,
+		pid:      pid,
+		job:      job,
+		pinned:   pinned,
+		onResize: onResize,
 	}
 	p.lastH.Store(int32(size.Rows))
 	p.lastW.Store(int32(size.Cols))
+	if onResize != nil {
+		onResize(size)
+	}
 	return p, nil
 }
 
@@ -72,7 +83,7 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 // The Unix one also sets SSH_TTY; a ConPTY has no device name to put in it, so
 // here it is left unset rather than made up.
 func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
-	return startPty(c, size, false)
+	return startPty(c, size, false, nil)
 }
 
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
@@ -84,6 +95,9 @@ type pty struct {
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
 	pinned              bool
+	// onResize hears of each size Setsize applies; see startPty. Nil reports
+	// nothing.
+	onResize func(termsize.Size)
 
 	// lastH, lastW are the geometry the ConPTY was last set to. Windows has no
 	// SIGWINCH, so Redraw nudges by resizing out and back, and it needs a size
@@ -111,7 +125,19 @@ func (p *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	// Reported before the resize, not after it, for the reason the Unix
+	// pty's Setsize gives: a console program repaints on the resize event,
+	// and a repaint that reached the fan-out ahead of the report would count
+	// as drawn at the old size. Put back if the resize fails, so the fan-out
+	// does not go on counting output at a size the program was never given.
+	before := termsize.Size{Cols: int(p.lastW.Load()), Rows: int(p.lastH.Load())}
+	if p.onResize != nil {
+		p.onResize(termsize.Size{Cols: w, Rows: h})
+	}
 	if err := p.cpty.Resize(w, h); err != nil {
+		if p.onResize != nil {
+			p.onResize(before)
+		}
 		return err
 	}
 	// Recorded only once the ConPTY is actually at this size: Redraw comes
@@ -145,6 +171,8 @@ func (p *pty) Redraw() error {
 	if h <= 0 || w <= 0 {
 		return nil
 	}
+	// The ConPTY directly, not Setsize: the round-trip ends where it began,
+	// so the geometry has not changed and onResize hears nothing of it.
 	if err := p.cpty.Resize(w+1, h); err != nil {
 		return err
 	}

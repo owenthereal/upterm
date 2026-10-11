@@ -294,17 +294,23 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 	// SIGWINCH is the nudge that makes the command speak: every attach sends
 	// one through Redraw, and so does every resize. A short sleep loop rather
 	// than one long sleep, because a shell runs a trap between foreground
-	// commands rather than interrupting one already running.
+	// commands rather than interrupting one already running. READY is drawn
+	// after moving the cursor home, as a full-screen program draws: a redraw.
 	h := startHost(t, &Server{AwaitInitialClient: true,
-		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf '\033[HREADY\n'; while :; do sleep 0.1; done`}})
 
 	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
 	readUntil(t, aOut, "READY")
 
 	// The smaller terminal takes the session down to its own size: the pty is
-	// sized to the smallest terminal watching it.
+	// sized to the smallest terminal watching it. The ring is a redraw
+	// recorded wider than B, so it is replayed none of it, and never sees the
+	// READY that A read. It reads on to the size the command prints once the
+	// pty has shrunk to it, which need not be the first size it reads: the
+	// nudge A's own arrival sent can be answered after B has joined.
 	_, bOut, bSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
-	readUntil(t, bOut, "READY")
+	got := readUntil(t, bOut, "24 80")
+	require.NotContains(t, got, "READY", "a terminal smaller than the pty must not be replayed its redraw")
 	readUntil(t, aOut, "24 80")
 
 	// And leaving gives it back. B's output is drained from here on, so its
@@ -326,15 +332,22 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 // twice this month, and the second is a charm implementation detail that an
 // upgrade could take away without saying so.
 func TestAGuestsArrivingSizeConstrainsTheSession(t *testing.T) {
+	// READY is a redraw, as in TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor.
 	h := startHost(t, &Server{AwaitInitialClient: true,
-		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf 'READY\n'; while :; do sleep 0.1; done`}})
+		Command: []string{"sh", "-c", `stty -echo -opost; trap 'stty size' WINCH; printf '\033[HREADY\n'; while :; do sleep 0.1; done`}})
 
 	_, aOut, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 100, rows: 30})
 	readUntil(t, aOut, "READY")
 
-	// The harness's guest asks for 80x24 and never resizes.
+	// The harness's guest asks for 80x24 and never resizes. The ring is a
+	// redraw recorded wider than the guest, so it is replayed none of it, and
+	// never sees the READY that A read. It reads on to the size the command
+	// prints once the pty has shrunk to it, which need not be the first size
+	// it reads: the nudge A's own arrival sent can be answered after the
+	// guest has joined.
 	_, gOut := h.connectGuest(t)
-	readUntil(t, gOut, "READY")
+	got := readUntil(t, gOut, "24 80")
+	require.NotContains(t, got, "READY", "a guest smaller than the pty must not be replayed its redraw")
 	readUntil(t, aOut, "24 80")
 }
 

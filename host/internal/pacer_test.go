@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/require"
 )
@@ -102,7 +103,7 @@ func newTestPacerWithContext(t *testing.T, ctx context.Context, stall time.Durat
 // way out.
 func attachPaced(t *testing.T, p *guestPacer, writers *uio.MultiWriter, sink *uio.AsyncWriter) {
 	t.Helper()
-	require.NoError(t, p.attach(sink, func() error { return attachGuestOutput(writers, sink) }))
+	require.NoError(t, p.attach(sink, func() error { return attachGuestOutput(writers, sink, termsize.Size{}) }))
 	t.Cleanup(func() {
 		writers.Remove(sink)
 		p.remove(sink)
@@ -506,7 +507,7 @@ func TestGuestPacerRegistersAGuestBeforeItCanReceiveOutput(t *testing.T) {
 
 	sink := stuckSink(t, nil)
 	require.NoError(t, p.attach(sink, func() error {
-		if err := attachGuestOutput(writers, sink); err != nil {
+		if err := attachGuestOutput(writers, sink, termsize.Size{}); err != nil {
 			return err
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -553,7 +554,7 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 		defer wg.Done()
 		aErr <- p.attach(a, func() error {
 			<-resume
-			return attachGuestOutput(writers, a)
+			return attachGuestOutput(writers, a, termsize.Size{})
 		})
 	}()
 	require.Eventually(t, func() bool { return registered(p) == 1 }, 2*time.Second, time.Millisecond,
@@ -563,7 +564,7 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bErr <- p.attach(b, func() error { return attachGuestOutput(writers, b) })
+		bErr <- p.attach(b, func() error { return attachGuestOutput(writers, b, termsize.Size{}) })
 	}()
 	select {
 	case err := <-bErr:
@@ -647,7 +648,9 @@ func TestGuestPacerDoesNotHoldAnAttachBehindAGatedWrite(t *testing.T) {
 		_ = joiner.Close()
 	})
 	attached := make(chan error, 1)
-	go func() { attached <- p.attach(joiner, func() error { return attachGuestOutput(writers, joiner) }) }()
+	go func() {
+		attached <- p.attach(joiner, func() error { return attachGuestOutput(writers, joiner, termsize.Size{}) })
+	}()
 	require.NoError(t, awaitErr(t, attached), "a guest's attach failed while a write was held")
 	requireHeld(t, p, done)
 
