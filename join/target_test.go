@@ -146,6 +146,43 @@ func TestParseTargetRefusesWhitespaceAndControlCharacters(t *testing.T) {
 	}
 }
 
+// url.Parse decodes the escapes in a URL's userinfo, and in its host those of
+// bytes past ASCII and of an IPv6 zone, so a part can hold what the text
+// doesn't. What an escape spells is held to the rule typed text is: each of
+// these spells whitespace or a control character in the session ID, the node
+// or the host.
+func TestParseTargetRefusesEscapedWhitespaceAndControlCharacters(t *testing.T) {
+	for _, bad := range []string{
+		"ssh://abc%0Adef@relay.test", "ssh://abc%09@relay.test", "ssh://ab%20c@relay.test", "ssh://abc%00@relay.test",
+		"wss://abc:no%0Ade@relay.test", "wss://abc:node%09@relay.test", "wss://abc:no%20de@relay.test", "ssh://abc:%00@relay.test",
+		"ssh://abc@relay%C2%A0.test", "ssh://abc@relay.test%C2%85", "wss://abc@relay%E2%80%83.test", "ssh://abc@[fe80::1%25en%200]",
+	} {
+		_, err := ParseTarget(bad)
+		require.ErrorIs(t, err, ErrNotATarget, "%q", bad)
+
+		var targetErr *TargetError
+		require.ErrorAs(t, err, &targetErr, "%q", bad)
+		require.Empty(t, targetErr.Suggestion, "%q is no command upterm prints", bad)
+	}
+}
+
+// No character of a session ID or a node needs an escape: an ID is letters
+// and digits, and a node is URL-safe base64. An escape can still spell one of
+// them, and the target is the one the character itself would give.
+func TestParseTargetDecodesAnEscapeThatSpellsAnOrdinaryCharacter(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want Target
+	}{
+		{"ssh://%61bc@relay.test", Target{"ssh", "abc", "relay.test:22"}},
+		{"wss://abc:bm9kZTE%3D@relay.test", Target{"wss", "abc:bm9kZTE=", "relay.test:443"}},
+	} {
+		got, err := ParseTarget(tc.in)
+		require.NoError(t, err, tc.in)
+		require.Equal(t, tc.want, got, tc.in)
+	}
+}
+
 // A guest who pastes an ssh command upterm printed is told which target it
 // reaches. The commands below are those the session's info prints, in the
 // quoting it uses for a shell, and the one `upterm proxy --help` and the
@@ -260,6 +297,7 @@ func TestTargetErrorText(t *testing.T) {
 		{"relay.test", `not a join target "relay.test": no USER@ before the host`},
 		{"ssh sid@example.com", `not a join target "ssh sid@example.com": whitespace or a control character`},
 		{"abc@relay.test\n", `not a join target "abc@relay.test\n": whitespace or a control character`},
+		{"ssh://abc%0Adef@relay.test", `not a join target "ssh://abc%0Adef@relay.test": an escaped whitespace or control character`},
 	} {
 		_, err := ParseTarget(tc.in)
 		require.EqualError(t, err, tc.want)

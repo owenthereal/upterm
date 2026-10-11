@@ -106,6 +106,13 @@ func parseURLTarget(s string) (Target, error) {
 	if node, ok := u.User.Password(); ok {
 		user += ":" + node
 	}
+	// url.Parse has decoded the escapes in the userinfo, and in the host those
+	// of bytes past ASCII and of an IPv6 zone, so the parts can hold what the
+	// text, checked above, doesn't: "ssh://abc%0Adef@relay.test" is the user
+	// "abc\ndef". What an escape spells belongs to no target either.
+	if strings.ContainsFunc(user, isSpaceOrControl) || strings.ContainsFunc(u.Host, isSpaceOrControl) {
+		return Target{}, notATarget(s, "an escaped whitespace or control character")
+	}
 	return newTarget(u.Scheme, user, u.Host, s)
 }
 
