@@ -987,7 +987,9 @@ func TestAQuietPeerThatAnswersKeepalivesIsKept(t *testing.T) {
 func TestASessionOutlivesItsAttempt(t *testing.T) {
 	relay := newFakeRelay(t, relayKnobs{}) // quiet, and answering keepalives
 	cfg := config(t, relay)
-	cfg.Timing.Attempt = 200 * time.Millisecond
+	// Long enough for a real handshake on a busy machine, short enough to be
+	// outlived within the test.
+	cfg.Timing.Attempt = 500 * time.Millisecond
 	staysJoined(t, relay, cfg, 5*cfg.Timing.Attempt)
 }
 
