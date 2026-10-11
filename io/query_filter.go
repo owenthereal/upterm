@@ -18,7 +18,7 @@ import (
 // in between -- and holds a sequence until its classifier can decide it: an
 // ESC sequence or a CSI to its final byte, an OSC to its terminator. A DCS,
 // APC, PM or SOS is passed as it streams, so a sixel or an image is never
-// buffered, and a tmux passthrough wrapper passes byte for byte.
+// buffered, and a well-formed tmux passthrough wrapper passes byte for byte.
 //
 // Terminals disagree on where a malformed string ends. A DEC parser ends one
 // at a CAN, a SUB or an ESC that isn't ST; kitty and tmux keep it open there,
@@ -29,14 +29,14 @@ import (
 // by a stray ESC.
 //
 // A sequence the filter has emitted before its end -- a string it passes, a
-// CSI a terminal ignores, or one it gave up on past its bound -- is always
-// closed (a tmux wrapper, which nothing ends early, needs none). The terminal
-// stays inside it until it sees the ESC that ended it in the input, and that
-// ESC starts a sequence the filter holds. If the held sequence passes, its
-// ESC is the close; if it is dropped, the filter sends ESC CAN in its place,
-// whose ESC ends the emitted sequence the way the input's did and whose CAN
-// cancels the escape it starts. Without the close, whatever came after a
-// dropped query landed inside the emitted sequence.
+// tmux wrapper among them, a CSI a terminal ignores, or one it gave up on past
+// its bound -- is always closed. The terminal stays inside it until it sees
+// the ESC that ended it in the input, and that ESC starts a sequence the
+// filter holds. If the held sequence passes, its ESC is the close; if it is
+// dropped, the filter sends ESC CAN in its place, whose ESC ends the emitted
+// sequence the way the input's did and whose CAN cancels the escape it
+// starts. Without the close, whatever came after a dropped query landed
+// inside the emitted sequence.
 type TerminalQueryFilter struct {
 	w      io.Writer
 	state  queryFilterState
@@ -179,9 +179,10 @@ func (f *TerminalQueryFilter) Pending() []byte {
 // processByte processes a single byte, appending non-filtered output to f.outBuf.
 func (f *TerminalQueryFilter) processByte(b byte) {
 	// CAN and SUB end every sequence but a tmux wrapper, which takes them as
-	// payload.
-	wrapper := f.state == qfStateWrapper || f.state == qfStateWrapperEsc
-	if (b == 0x18 || b == 0x1a) && f.state != qfStateNormal && !wrapper {
+	// payload. After an ESC in a wrapper one isn't payload: the ESC escapes
+	// neither an ESC nor a '\', so it has ended the wrapper (wrapperByte), and
+	// the cancel then cancels the ESC as it would any held one.
+	if (b == 0x18 || b == 0x1a) && f.state != qfStateNormal && f.state != qfStateWrapper {
 		f.cancel(b)
 		return
 	}
@@ -217,7 +218,8 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 
 // cancel takes a CAN or SUB, which ends a sequence from any state on the DEC
 // parser terminals implement; the terminal goes back to ground and executes
-// it. Inside a tmux wrapper they are payload instead, and never get here.
+// it. Inside a tmux wrapper they are payload instead, and never get here but
+// straight after an ESC, which they find held as the wrapper's close.
 func (f *TerminalQueryFilter) cancel(b byte) {
 	switch f.state {
 	case qfStateOSCEsc:
@@ -496,13 +498,24 @@ func (f *TerminalQueryFilter) endOSCAtESC() {
 }
 
 // wrapperByte takes a byte of a tmux wrapper, which follows tmux's own DCS
-// rules rather than the DEC parser's: an ESC escapes the byte after it, so
-// ESC ESC is one ESC of the wrapped sequence and only an unescaped ESC \ ends
-// the wrapper, and CAN and SUB are payload. PR 1 doesn't look inside: every
-// byte goes out as it came, and the ESC is held, as in a passed string, only
-// until the byte after it says what it escapes. Nothing in a wrapper ends it
-// early, so nothing in it opens a close. Read by the DEC rules instead, every
-// doubled ESC restarted a sequence and lost the first of the pair.
+// rules for the pairs a well-formed wrapper is made of: ESC ESC is one ESC of
+// the wrapped sequence, so a doubled ESC doesn't end the wrapper, and only an
+// unescaped ESC \ does. CAN and SUB are payload. The wrapped sequence isn't
+// classified: every byte goes out as it came, and the ESC is held, as in a
+// passed string, only until the byte after it says what it escapes. Read by
+// the DEC rules instead, every doubled ESC restarted a sequence and lost the
+// first of the pair.
+//
+// Any other byte after the ESC ends the wrapper there, as a DEC terminal ends
+// the DCS. The wrapper went out unfinished, so the ESC owes it a close, as one
+// that ends a passed string does: it is held as the start of a new sequence,
+// and the byte is parsed as that sequence's next. A well-formed wrapper never
+// has such a pair, since it doubles every ESC it wraps. Kept open, as tmux
+// keeps it, a malformed or interrupted wrapper, such as an image cut off by
+// Ctrl-C, let every query through until the next unescaped ST. A CAN or SUB
+// after the ESC never gets here: processByte cancels the held ESC on it, which
+// ends the wrapper the same way, and the ESC goes out with the cancel as the
+// close.
 func (f *TerminalQueryFilter) wrapperByte(b byte) {
 	if f.state == qfStateWrapper {
 		if b == 0x1b {
@@ -513,10 +526,18 @@ func (f *TerminalQueryFilter) wrapperByte(b byte) {
 		f.outBuf = append(f.outBuf, b)
 		return
 	}
-	f.seqBuf = append(f.seqBuf, b)
-	f.flushAndReset()
-	if b != '\\' {
+	switch b {
+	case 0x1b:
+		f.seqBuf = append(f.seqBuf, b)
+		f.flushAndReset()
 		f.state = qfStateWrapper
+	case '\\':
+		f.seqBuf = append(f.seqBuf, b)
+		f.flushAndReset()
+	default:
+		f.closeOwed = true
+		f.state = qfStateEsc
+		f.escByte(b)
 	}
 }
 

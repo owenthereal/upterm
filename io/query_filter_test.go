@@ -714,6 +714,15 @@ var oscStringCases = []filterCase{
 	{name: "tmux wrapper", in: "\x1bPtmux;\x1b\x1b[31mX\x1b\\", want: "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
 	{name: "wrapped kitty command", in: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\", want: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"},
 	{name: "tmux wrapper with CAN inside", in: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\", want: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\"},
+	// An ESC in a wrapper that escapes neither an ESC nor a '\' ends the
+	// wrapper, as it ends any DCS on a DEC terminal, and the filter owes the
+	// wrapper a close. Kept open there, a malformed or interrupted wrapper let
+	// every query through until the next unescaped ST.
+	{name: "a lone ESC ends a tmux wrapper", in: "\x1bPtmux;\x1b[6n\x1b\\", want: "\x1bPtmux;\x1b\x18\x1b\\"},
+	{name: "an interrupted wrapped image, then tmux attaching",
+		in:   "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b[?2026$p\x1b[c\x1b]11;?\x07prompt",
+		want: "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b\x18prompt"},
+	{name: "a non-query after a lone ESC in a wrapper closes it", in: "\x1bPtmux;\x1b[31mX", want: "\x1bPtmux;\x1b[31mX"},
 	{name: "CAN ends a passed DCS", in: "\x1bPq#0\x18X", want: "\x1bPq#0\x18X"},
 	{name: "SUB ends a passed DCS", in: "\x1bPq#0\x1aX", want: "\x1bPq#0\x1aX"},
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
