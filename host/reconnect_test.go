@@ -856,6 +856,7 @@ func TestGuestsAtTheDrop(t *testing.T) {
 		f.fwd.Redirect(closedAddr(t)) // hold the gap open
 		guest.requireJoined(t)
 		f.fwd.Cut()
+		f.awaitStatus(t, sessiondir.StatusReconnecting, 5*time.Second)
 		_ = guest.awaitEnd(t, 5*time.Second) // however it ends: the connection it was on is gone
 		require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, 5*time.Second, 10*time.Millisecond,
 			"the guest's forced command outlived the guest")
