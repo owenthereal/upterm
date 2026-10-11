@@ -44,6 +44,11 @@ func TestTerminalQueryFilter(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name:     "filters OSC 4 palette query",
+			input:    []byte("\x1b]4;1;?\x07"),
+			expected: nil,
+		},
+		{
 			name:     "passes OSC set (not query)",
 			input:    []byte("\x1b]11;rgb:ff/ff/ff\x07"),
 			expected: []byte("\x1b]11;rgb:ff/ff/ff\x07"),
@@ -187,11 +192,6 @@ func TestTerminalQueryFilter_PreservesNonQueryOSC(t *testing.T) {
 			expected: []byte("\x1b]52;c;SGVsbG8=\x07"),
 		},
 		{
-			name:     "OSC 4 palette query (not 10/11/12, should pass)",
-			input:    []byte("\x1b]4;1;?\x07"),
-			expected: []byte("\x1b]4;1;?\x07"),
-		},
-		{
 			name:     "OSC 777 notification",
 			input:    []byte("\x1b]777;notify;Title;Body\x07"),
 			expected: []byte("\x1b]777;notify;Title;Body\x07"),
@@ -219,6 +219,11 @@ func TestTerminalQueryFilter_PreservesNonQueryOSC(t *testing.T) {
 // position request reached every joiner whole -- and every joiner's terminal
 // answered the request into the shared pty, which is the one thing this filter
 // exists to prevent.
+//
+// An OSC that ends at such an ESC is dropped, not passed, query or not, since
+// kitty and tmux keep it open past the ESC. Passed, it was glued to whatever
+// followed the dropped query: "ESC ]11;? ESC [6n BEL" came out as
+// "ESC ]11;? BEL", a complete colour query.
 func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -228,7 +233,7 @@ func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
 		{
 			name:     "ESC not followed by backslash ends the OSC, and the query after it is filtered",
 			input:    []byte("\x1b]0;t\x1b[6n\x07"),
-			expected: []byte("\x1b]0;t\x07"),
+			expected: []byte("\x07"),
 		},
 		{
 			name:     "ESC followed by backslash is still ST",
@@ -238,7 +243,7 @@ func TestTerminalQueryFilter_ESCInsideAnOSCEndsIt(t *testing.T) {
 		{
 			name:     "the same inside an OSC colour query",
 			input:    []byte("\x1b]11;?\x1b[6n\x07"),
-			expected: []byte("\x1b]11;?\x07"),
+			expected: []byte("\x07"),
 		},
 	}
 
@@ -511,9 +516,10 @@ func TestTerminalQueryFilter_ErrorNotReturnedForFilteredContent(t *testing.T) {
 }
 
 // CAN and SUB cancel a sequence from any state on the DEC parser terminals
-// implement. A filter holding one -- an unterminated OSC, a query still
-// arriving -- passes what it holds straight through with the cancel, and the
-// terminal discards it. Holding on instead kept the cancel from the terminal:
+// implement. A filter holding a head -- a query still arriving -- passes it
+// straight through with the cancel, and the terminal discards it. A held OSC
+// is dropped instead, and only the cancel goes out: kitty would keep the
+// string open past the cancel. Holding on kept the cancel from the terminal:
 // the reset a session sends a guest last is a lone CAN when all the session
 // left open was a sequence, and nothing after it ever pushed it out.
 func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
@@ -521,11 +527,12 @@ func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			held string
+			out  string // what goes out ahead of the cancel
 		}{
-			{name: "an OSC", held: "\x1b]0;a title"},
-			{name: "an OSC colour query", held: "\x1b]10;?"},
-			{name: "a CSI query", held: "\x1b[6"},
-			{name: "an ESC", held: "\x1b"},
+			{name: "an OSC", held: "\x1b]0;a title", out: ""},
+			{name: "an OSC colour query", held: "\x1b]10;?", out: ""},
+			{name: "a CSI query", held: "\x1b[6", out: "\x1b[6"},
+			{name: "an ESC", held: "\x1b", out: "\x1b"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				var out bytes.Buffer
@@ -538,12 +545,12 @@ func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
 				// was left open: nothing after it would push it out.
 				_, err = f.Write([]byte(cancel))
 				require.NoError(t, err)
-				require.Equal(t, tc.held+cancel, out.String())
+				require.Equal(t, tc.out+cancel, out.String())
 				require.Empty(t, f.Pending())
 
 				_, err = f.Write([]byte("\x1b[?2004l"))
 				require.NoError(t, err)
-				require.Equal(t, tc.held+cancel+"\x1b[?2004l", out.String())
+				require.Equal(t, tc.out+cancel+"\x1b[?2004l", out.String())
 			})
 		}
 	}
@@ -618,6 +625,44 @@ var escCSICases = []filterCase{
 	{name: "a C1 byte still gives the head up", in: "\x1b[1\x85mX", want: "\x1b[1\x85mX"},
 }
 
+// OSCs held to their end, held strings that end abnormally, the close, and
+// the strings PR 1 passes opaquely: DCS, APC, PM, SOS and tmux wrappers.
+var oscStringCases = []filterCase{
+	// Generated in init() from Task 2's vars: every oscQueryExamples entry,
+	// terminated by BEL and by ST and wrapped "a"+q+"b", wants "ab"; every
+	// oscPassExamples entry, terminated by BEL, wants itself.
+	// Spec tests 2–3 (OSC rows).
+	{name: "OSC query, stray ESC, lone ESC", in: "\x1b]11;?\x1b\x1b[6n", want: ""},
+	{name: "title ended by a stray ESC is dropped", in: "\x1b]0;t\x1b\x1b[6nhello", want: "hello"},
+	{name: "C0 after a dropped title", in: "abc\x1b]0;t\x1b[6\rnX", want: "abc\rX"},
+	// Spec test 4.
+	{name: "title then a dropped query", in: "\x1b]0;newtitle\x1b[6n", want: ""},
+	{name: "no OSC glued back together", in: "\x1b]11;\x1b[6n?\x07", want: "?\x07"},
+	{name: "OSC query ended by ESC", in: "\x1b]11;?\x1b[6n\x07", want: "\x07"},
+	{name: "OSC query cancelled", in: "\x1b]10;?\x18", want: "\x18"},
+	{name: "palette query kitty would continue past CAN", in: "\x1b]4;0;\x18;1;?\x07", want: "\x18;1;?\x07", kitty: true},
+	{name: "over-bound title closed with ESC CAN", in: "\x1b]0;" + strings.Repeat("t", 300) + "\x1b[6nhello",
+		want: "\x1b]0;" + strings.Repeat("t", 300) + "\x1b\x18hello"},
+	{name: "ignored CRs in the number trip the number guard", in: "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b[6nhello",
+		want: "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b\x18hello"},
+	{name: "ignored CRs in the payload don't", in: "\x1b]0;" + strings.Repeat("\r", 9) + "t\x1b[6nhello", want: "hello"},
+	{name: "cancel with an obligation drops the held OSC (CAN)", in: "\x1bPq\x07\x1b]4;0;\x18;1;?\x07",
+		want: "\x1bPq\x07\x1b\x18;1;?\x07", kitty: true},
+	{name: "cancel with an obligation drops the held OSC (SUB)", in: "\x1bPq\x07\x1b]4;0;\x1a;1;?\x07",
+		want: "\x1bPq\x07\x1b\x1a;1;?\x07", kitty: true},
+	// Spec test 5.
+	{name: "query after a passed DCS", in: "\x1bP0;1;0q#0\x1b[6n\x1b\\", want: "\x1bP0;1;0q#0\x1b\x18\x1b\\"},
+	{name: "DCS-ignore closed too", in: "\x1bP$1qhidden\x1b[6nVISIBLE", want: "\x1bP$1qhidden\x1b\x18VISIBLE"},
+	{name: "tmux wrapper", in: "\x1bPtmux;\x1b\x1b[31mX\x1b\\", want: "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
+	{name: "wrapped kitty command", in: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\", want: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"},
+	{name: "tmux wrapper with CAN inside", in: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\", want: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\"},
+	{name: "CAN ends a passed DCS", in: "\x1bPq#0\x18X", want: "\x1bPq#0\x18X"},
+	{name: "SUB ends a passed DCS", in: "\x1bPq#0\x1aX", want: "\x1bPq#0\x1aX"},
+	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
+	{name: "BEL doesn't end an APC", in: "\x1b_Gx\x07Y\x1b\\", want: "\x1b_Gx\x07Y\x1b\\"},
+	{name: "PM and SOS pass", in: "\x1b^privacy\x1b\\\x1bXsos\x1b\\", want: "\x1b^privacy\x1b\\\x1bXsos\x1b\\"},
+}
+
 func init() {
 	for _, q := range append(slices.Clone(csiQueryExamples), "\x1bZ") {
 		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "b", want: "ab"})
@@ -626,6 +671,16 @@ func init() {
 		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: c, want: c})
 	}
 	filterCases = append(filterCases, escCSICases...)
+
+	for _, q := range oscQueryExamples {
+		for _, end := range []string{"\x07", "\x1b\\"} {
+			oscStringCases = append(oscStringCases, filterCase{name: fmt.Sprintf("query %q", q+end), in: "a" + q + end + "b", want: "ab"})
+		}
+	}
+	for _, c := range oscPassExamples {
+		oscStringCases = append(oscStringCases, filterCase{name: fmt.Sprintf("counter-case %q", c+"\x07"), in: c + "\x07", want: c + "\x07"})
+	}
+	filterCases = append(filterCases, oscStringCases...)
 }
 
 // Every exact-bytes case gives the same output whether it arrives in one
@@ -650,5 +705,43 @@ func TestTerminalQueryFilter_KittyRowsAskNothing(t *testing.T) {
 		for _, ev := range refParse(refKitty, []byte(c.want)) {
 			require.False(t, refQuery(refKitty, ev), "%s: %q asks %v under kitty", c.name, c.want, ev)
 		}
+	}
+}
+
+// A joiner's own filter re-filters what this one emitted, so filtering the
+// output again must change nothing. A cancel that carries a held ESC out
+// with it, or a close, has to read the second time as what settles the
+// obligation, not as the start of another.
+func TestTerminalQueryFilter_RefilteringIsStable(t *testing.T) {
+	ins := []string{"\x1bPq#0\x1b\x18"}
+	for _, c := range oscStringCases {
+		if strings.Contains(c.want, "\x1b\x18") || strings.Contains(c.want, "\x1b\x1a") {
+			ins = append(ins, c.in)
+		}
+	}
+	for _, in := range ins {
+		out := filterAll(in)
+		require.Equal(t, out, filterAll(out), "%q", in)
+	}
+}
+
+// What a shell, a prompt and an editor print every day -- semantic prompt
+// marks, hyperlinks, the working directory, colours, cursor shapes,
+// synchronized output, the kitty keyboard stack, the alternate screen and
+// bracketed paste -- reaches a guest byte for byte.
+func TestTerminalQueryFilter_EverydayOutputPasses(t *testing.T) {
+	const in = "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07\x1b]8;;https://example.com/?q=1&r=2\x1b\\link\x1b]8;;\x1b\\" +
+		"\x1b]7;file://host/tmp\x07\x1b[38:2::255:0:0mred\x1b[m\x1b[5 q\x1b[?2026hframe\x1b[?2026l" +
+		"\x1b[>1u\x1b[<u\x1b[?1049h\x1b[?1049l\x1b[?2004h"
+	require.Equal(t, in, filterAll(in), "whole")
+	require.Equal(t, in, filterBytewise(in), "byte by byte")
+}
+
+// Bytes 0x80–0xFF are text in ground and payload in an OSC, so UTF-8 passes
+// in both: only inside an ESC or CSI head does the filter drop a high byte.
+func TestTerminalQueryFilter_UTF8Passes(t *testing.T) {
+	for _, in := range []string{"Ü ünïcödé 🙂", "\x1b]0;Ü-title 🙂\x07"} {
+		require.Equal(t, in, filterAll(in), "whole: %q", in)
+		require.Equal(t, in, filterBytewise(in), "byte by byte: %q", in)
 	}
 }
