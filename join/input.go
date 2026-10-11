@@ -206,13 +206,12 @@ func (in *input) hand(v *view, chunk []byte) {
 	}
 }
 
-// control reads join's keys from chunk.
+// control reads join's keys from chunk. The keys before an escape sequence
+// that leaves count first, as they would in a read of their own, so that how
+// the reads happen to split what was typed never changes what it does; the
+// filter has dropped whatever followed the sequence.
 func (in *input) control(c *controls, chunk []byte) {
 	out, action := c.filter.Feed(chunk)
-	if action == attach.EscapeDetach {
-		in.send(c, keyLeave)
-		return
-	}
 	for _, b := range out {
 		var k waitKey
 		switch {
@@ -225,6 +224,9 @@ func (in *input) control(c *controls, chunk []byte) {
 		if k != 0 && !in.send(c, k) {
 			return
 		}
+	}
+	if action == attach.EscapeDetach {
+		in.send(c, keyLeave)
 	}
 }
 

@@ -94,6 +94,27 @@ func TestWaitKeys(t *testing.T) {
 	}
 }
 
+// Keys typed before "~." count whether they arrive in a read of their own or
+// in the same read as the escape: how the reads split them changes nothing.
+func TestKeysBeforeAnEscapeInTheSameReadCount(t *testing.T) {
+	for typed, want := range map[string][]waitKey{
+		"\x03\r~.": {keyStop, keyRetry, keyLeave},
+		"\r~.":     {keyRetry, keyLeave},
+	} {
+		pr, pw := io.Pipe()
+		in := newInput(pr, '~')
+		in.start()
+		t.Cleanup(func() {
+			in.stop()
+			_ = pw.Close()
+		})
+		go func() { _, _ = pw.Write([]byte(typed)) }() // one Write, read as one chunk
+		for _, k := range want {
+			require.Equal(t, k, <-in.keys(), "%q", typed)
+		}
+	}
+}
+
 func TestEOFDuringAWaitIsLeaving(t *testing.T) {
 	pr, pw := io.Pipe()
 	in := newInput(pr, '~')
