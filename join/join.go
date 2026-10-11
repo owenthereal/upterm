@@ -70,8 +70,15 @@ type Config struct {
 	// ConfirmHostKey asks the guest about an unknown key, with no connection
 	// open, and records it if they accept. It returns promptly when ctx ends.
 	// It is never called once TakeTerminal has run: from then on nothing
-	// prompts. Nil means an unknown key is never accepted. A "no", or an
-	// error, ends the join as Failed.
+	// prompts. A "no", or an error, ends the join as Failed. Nil means an
+	// unknown key is never accepted, and so that nothing can prompt:
+	// TakeTerminal runs as Run starts. Setting it holds the guest's keys back
+	// until a handshake first succeeds, so that a prompt has stdin to itself,
+	// and until then a first join's waits ignore Enter and the escape
+	// sequence, and Ctrl-C stops the join only by way of a signal. So a
+	// caller passes it only when a prompt is actually possible: when
+	// CheckHostKey can find the relay's key unknown and the guest can be
+	// asked.
 	ConfirmHostKey func(ctx context.Context, hostname string, key ssh.PublicKey) (accepted bool, err error)
 	// Terminal runs each session. Run sets Stdin, Pty.Size and OnReady on a
 	// copy for each session, and wraps its Stdout so that nothing reaches it
@@ -86,17 +93,23 @@ type Config struct {
 	// Size is measured afresh for each session's pty request. Nil keeps
 	// Terminal.Pty's.
 	Size func() termsize.Size
-	// Input is the guest's keys. Run reads it only once TakeTerminal has run,
-	// and then from one goroutine, which gives each key to the session that
-	// is ready or else to Run. From then until Run returns, Input is Run's. A
-	// Read can't be interrupted, so one in progress as Run returns may still
-	// take one more chunk, which is dropped, and then nothing reads Input. A
-	// caller that needs its input back after Run gives it a reader it can
-	// close or interrupt. Nil means no keys.
+	// Input is the guest's keys. Run reads it only once TakeTerminal has run:
+	// from the start when ConfirmHostKey is nil, and otherwise not until a
+	// handshake first succeeds, which is why a caller passes ConfirmHostKey
+	// only when a prompt is possible. One goroutine reads it, and gives each
+	// key to the session that is ready or else to Run. From then until Run
+	// returns, Input is Run's. A Read can't be interrupted, so one in
+	// progress as Run returns may still take one more chunk, which is
+	// dropped, and then nothing reads Input. A caller that needs its input
+	// back after Run gives it a reader it can close or interrupt. Nil means
+	// no keys.
 	Input io.Reader
-	// TakeTerminal runs once, when a handshake first succeeds: it is where
-	// the command puts the terminal in raw mode. Nil does nothing. An error
-	// ends the join as Failed, with that error.
+	// TakeTerminal runs once: as Run starts when ConfirmHostKey is nil, since
+	// nothing can prompt, and otherwise when a handshake first succeeds, even
+	// if that attempt's session then fails to start. It is where the command
+	// puts the terminal in raw mode, and from then on the guest's keys are
+	// Run's (see Input). Nil does nothing. An error ends the join as Failed,
+	// with that error.
 	TakeTerminal func() error
 	// Events tells the guest how the join is going. It returns only once
 	// whatever it wrote has been written or has failed: Run starts no attempt
@@ -395,6 +408,14 @@ func (r *runner) again(why WaitReason, err error) step {
 }
 
 func (r *runner) loop() Outcome {
+	if r.cfg.ConfirmHostKey == nil {
+		// Nothing can prompt, so the terminal is the run's from the start: a
+		// first join's waits answer Enter and the escape sequence too, and a
+		// guest with no signal to send, in a browser, can still stop it.
+		if err := r.takeTerminal(); err != nil {
+			return failed(err)
+		}
+	}
 	for {
 		if r.firstJoinOver() {
 			// The time ran out between attempts: after one that tried again at
@@ -528,17 +549,11 @@ func (r *runner) attempt() (a attempted) {
 	}
 	client := ssh.NewClient(sc, chans, reqs)
 
-	if !r.tookTerminal {
-		r.tookTerminal = true
-		if r.cfg.TakeTerminal != nil {
-			if err := r.cfg.TakeTerminal(); err != nil {
-				_ = client.Close()
-				return attempted{err: err}
-			}
-		}
-		if r.cfg.Input != nil {
-			r.in.start()
-		}
+	// A prompt can come only before the first handshake that succeeds, so the
+	// terminal is the run's from here, if it wasn't from the start.
+	if err := r.takeTerminal(); err != nil {
+		_ = client.Close()
+		return attempted{err: err}
 	}
 
 	end, err := r.session(client, lc, ev.selected, by)
@@ -550,6 +565,24 @@ func (r *runner) attempt() (a attempted) {
 	// over it, so one that ended the session is already here.
 	_, end.hostKeyErr = ev.hostKeyVerdict()
 	return attempted{session: end, offered: offered, selected: ev.selected}
+}
+
+// takeTerminal runs TakeTerminal, the first time it is called, and from then
+// on reads the guest's keys. Stdin is no prompt's after that.
+func (r *runner) takeTerminal() error {
+	if r.tookTerminal {
+		return nil
+	}
+	r.tookTerminal = true
+	if r.cfg.TakeTerminal != nil {
+		if err := r.cfg.TakeTerminal(); err != nil {
+			return err
+		}
+	}
+	if r.cfg.Input != nil {
+		r.in.start()
+	}
+	return nil
 }
 
 // candidates is signers without the keys that are refused or sitting out.

@@ -602,6 +602,16 @@ func TestCtrlCStopsEveryStalledPhase(t *testing.T) {
 			t.Fatal("Ctrl-C didn't stop the run")
 		}
 	}
+	t.Run("a stalled handshake on a first join", func(t *testing.T) {
+		// Nothing can prompt, so the keys are the run's before any handshake.
+		pr, pw := io.Pipe()
+		relay := newFakeRelay(t, relayKnobs{stallHandshake: true})
+		cfg := config(t, relay, withInput(pr), withWait())
+		cfg.Timing.Attempt = time.Hour // only Ctrl-C can end it
+		stopsWithin(t, cfg, pw, func() {
+			require.Eventually(t, func() bool { return relay.connections() == 1 }, testTimeout, time.Millisecond)
+		})
+	})
 	t.Run("a stalled handshake on a rejoin", func(t *testing.T) {
 		pr, pw := io.Pipe()
 		relay := newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{stallHandshake: true})
@@ -805,13 +815,38 @@ func TestPtySizeIsMeasuredForEachSession(t *testing.T) {
 	require.Equal(t, sizes, relay.ptySizes())
 }
 
-func TestTakeTerminalOnceAndNeverBeforeAHandshake(t *testing.T) {
-	took := 0
-	take := withTakeTerminal(func() error { took++; return nil })
-	runJoin(t, config(t, newFakeRelay(t, relayKnobs{refuseAll: true}), take))
-	require.Zero(t, took)
-	runJoin(t, config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{exit: intp(0)}), take))
-	require.Equal(t, 1, took)
+func TestTakeTerminalRunsOnce(t *testing.T) {
+	t.Run("after the first handshake, when a prompt can come", func(t *testing.T) {
+		took := 0
+		take := withTakeTerminal(func() error { took++; return nil })
+		prompt := withConfirm(&countingConfirm{accept: true})
+		runJoin(t, config(t, newFakeRelay(t, relayKnobs{refuseAll: true}), prompt, take))
+		require.Zero(t, took, "the terminal was taken on a run that no handshake got through")
+		runJoin(t, config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{exit: intp(0)}), prompt, take))
+		require.Equal(t, 1, took)
+	})
+	t.Run("as the run starts, when none can", func(t *testing.T) {
+		took := 0
+		take := withTakeTerminal(func() error { took++; return nil })
+		// A run that no handshake gets through still takes it, and before its
+		// first attempt.
+		cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true}), take)
+		tookByDial := -1 // took, as the first attempt dials
+		dial := cfg.Dial
+		cfg.Dial = func(ctx context.Context) (net.Conn, error) {
+			if tookByDial < 0 {
+				tookByDial = took
+			}
+			return dial(ctx)
+		}
+		require.ErrorIs(t, runJoin(t, cfg).Err, ErrKeysRefused)
+		require.Equal(t, 1, tookByDial, "the first attempt began with the terminal not taken")
+		require.Equal(t, 1, took)
+
+		took = 0
+		runJoin(t, config(t, newFakeRelay(t, relayKnobs{dropAfterReady: true}, relayKnobs{exit: intp(0)}), take))
+		require.Equal(t, 1, took)
+	})
 }
 
 func TestASilentPeerIsLostNotLeft(t *testing.T) { // liveness 50 ms + 50 ms
@@ -847,14 +882,28 @@ func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 	}
 }
 
-// waitingAfterADrop starts a run whose session drops and whose next attempt
-// is an hour away, and returns once the run is waiting, with the guest's
-// keyboard and the run's outcome. Only a key can end the wait. next is what
-// the relay does on the connections after the first; opts apply last.
-func waitingAfterADrop(t *testing.T, next relayKnobs, opts ...option) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
+// keyWait is a wait that only a key can end: the run's next attempt is an
+// hour away.
+type keyWait struct {
+	first     relayKnobs // what the relay does on the connection before the wait
+	firstJoin bool       // no session has been ready: the wait is a first join's
+}
+
+// keyWaits are the waits a key ends alike: one after a session drops, and
+// one in a first join, where nothing can prompt and so the keys are the run's
+// from the start.
+var keyWaits = map[string]keyWait{
+	"after a drop":    {first: relayKnobs{dropAfterReady: true}},
+	"on a first join": {first: relayKnobs{refuseAll: true, banner: noHostBanner}, firstJoin: true},
+}
+
+// start starts a run that waits as w says, and returns once it is waiting,
+// with the guest's keyboard and the run's outcome. next is what the relay
+// does on the connections after the first; opts apply last.
+func (w keyWait) start(t *testing.T, next relayKnobs, opts ...option) (keys *io.PipeWriter, relay *fakeRelay, done <-chan Outcome) {
 	t.Helper()
 	pr, pw := io.Pipe()
-	relay = newFakeRelay(t, relayKnobs{dropAfterReady: true}, next)
+	relay = newFakeRelay(t, w.first, next)
 	rec := &recorder{}
 	cfg := config(t, relay, withInput(pr), withEvents(rec), withWait())
 	cfg.Timing.Attempt = time.Hour // no attempt fails for being slow
@@ -864,57 +913,69 @@ func waitingAfterADrop(t *testing.T, next relayKnobs, opts ...option) (keys *io.
 		o(&cfg)
 	}
 	done = runJoinAsync(t, context.Background(), cfg)
-	rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && !e.First })
+	rec.await(t, done, func(e Event) bool { return e.Kind == Waiting && e.First == w.firstJoin })
 	return pw, relay, done
 }
 
 func TestEnterDuringAWaitAttemptsAtOnce(t *testing.T) {
-	keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)})
-	press(keys, "\r")
-	select {
-	case out := <-done:
-		require.Equal(t, Exited, out.Kind)
-	case <-time.After(testTimeout):
-		t.Fatal("Enter didn't cut the wait short")
-	}
-	require.Equal(t, 2, relay.connections())
-}
-
-func TestKeysBetweenSessionsEndTheRun(t *testing.T) {
-	for name, tc := range map[string]struct {
-		act  func(keys *io.PipeWriter)
-		want OutcomeKind
-	}{
-		"~. leaves":                      {func(keys *io.PipeWriter) { press(keys, "~.") }, Left},
-		"Ctrl-C stops":                   {func(keys *io.PipeWriter) { press(keys, "\x03") }, Stopped},
-		"the terminal going away leaves": {func(keys *io.PipeWriter) { _ = keys.Close() }, Left},
-	} {
+	for name, w := range keyWaits {
 		t.Run(name, func(t *testing.T) {
-			keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)})
-			tc.act(keys)
+			keys, relay, done := w.start(t, relayKnobs{exit: intp(0)})
+			press(keys, "\r")
 			select {
 			case out := <-done:
-				require.Equal(t, tc.want, out.Kind)
+				require.Equal(t, Exited, out.Kind)
 			case <-time.After(testTimeout):
-				t.Fatal("the key didn't end the wait")
+				t.Fatal("Enter didn't cut the wait short")
 			}
-			require.Equal(t, 1, relay.connections(), "the run attempted again")
+			require.Equal(t, 2, relay.connections())
+		})
+	}
+}
+
+func TestKeysDuringAWaitEndTheRun(t *testing.T) {
+	for wait, w := range keyWaits {
+		t.Run(wait, func(t *testing.T) {
+			for name, tc := range map[string]struct {
+				act  func(keys *io.PipeWriter)
+				want OutcomeKind
+			}{
+				"~. leaves":                      {func(keys *io.PipeWriter) { press(keys, "~.") }, Left},
+				"Ctrl-C stops":                   {func(keys *io.PipeWriter) { press(keys, "\x03") }, Stopped},
+				"the terminal going away leaves": {func(keys *io.PipeWriter) { _ = keys.Close() }, Left},
+			} {
+				t.Run(name, func(t *testing.T) {
+					keys, relay, done := w.start(t, relayKnobs{exit: intp(0)})
+					tc.act(keys)
+					select {
+					case out := <-done:
+						require.Equal(t, tc.want, out.Kind)
+					case <-time.After(testTimeout):
+						t.Fatal("the key didn't end the wait")
+					}
+					require.Equal(t, 1, relay.connections(), "the run attempted again")
+				})
+			}
 		})
 	}
 }
 
 // The keys join reads itself have the session's escape byte: there is no
 // other to set, so detaching works the same connected or not.
-func TestKeysBetweenSessionsTakeTheSessionsEscape(t *testing.T) {
-	keys, relay, done := waitingAfterADrop(t, relayKnobs{exit: intp(0)}, func(c *Config) { c.Terminal.Escape = '%' })
-	press(keys, "%.")
-	select {
-	case out := <-done:
-		require.Equal(t, Left, out.Kind)
-	case <-time.After(testTimeout):
-		t.Fatal("the session's escape sequence didn't leave the wait")
+func TestKeysDuringAWaitTakeTheSessionsEscape(t *testing.T) {
+	for name, w := range keyWaits {
+		t.Run(name, func(t *testing.T) {
+			keys, relay, done := w.start(t, relayKnobs{exit: intp(0)}, func(c *Config) { c.Terminal.Escape = '%' })
+			press(keys, "%.")
+			select {
+			case out := <-done:
+				require.Equal(t, Left, out.Kind)
+			case <-time.After(testTimeout):
+				t.Fatal("the session's escape sequence didn't leave the wait")
+			}
+			require.Equal(t, 1, relay.connections(), "the run attempted again")
+		})
 	}
-	require.Equal(t, 1, relay.connections(), "the run attempted again")
 }
 
 // Once Run has returned, Input is the caller's again. The Read in progress
@@ -1141,10 +1202,20 @@ func TestAnExitStatusOutranksARelayKeyRefusedAfterIt(t *testing.T) {
 
 func TestTakingTheTerminalFailingEndsTheJoin(t *testing.T) {
 	cause := errors.New("stdin is not a terminal")
-	relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
-	out := runJoin(t, config(t, relay, withTakeTerminal(func() error { return cause })))
-	require.Equal(t, Failed, out.Kind)
-	require.ErrorIs(t, out.Err, cause)
-	require.Empty(t, relay.ptySizes(), "a session was set up on a terminal that wasn't taken")
-	require.Equal(t, 1, relay.connections())
+	failing := withTakeTerminal(func() error { return cause })
+	t.Run("as the run starts", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
+		out := runJoin(t, config(t, relay, failing))
+		require.Equal(t, Failed, out.Kind)
+		require.ErrorIs(t, out.Err, cause)
+		require.Zero(t, relay.connections(), "the run attempted with a terminal that wasn't taken")
+	})
+	t.Run("after the first handshake", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{exit: intp(0)})
+		out := runJoin(t, config(t, relay, failing, withConfirm(&countingConfirm{accept: true})))
+		require.Equal(t, Failed, out.Kind)
+		require.ErrorIs(t, out.Err, cause)
+		require.Empty(t, relay.ptySizes(), "a session was set up on a terminal that wasn't taken")
+		require.Equal(t, 1, relay.connections())
+	})
 }
