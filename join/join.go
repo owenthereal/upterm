@@ -108,8 +108,10 @@ type Config struct {
 	// nothing can prompt, and otherwise when a handshake first succeeds, even
 	// if that attempt's session then fails to start. It is where the command
 	// puts the terminal in raw mode, and from then on the guest's keys are
-	// Run's (see Input). Nil does nothing. An error ends the join as Failed,
-	// with that error.
+	// Run's. So a caller passes ConfirmHostKey only when a prompt is actually
+	// possible: setting it delays this, and the guest's keys with it, until
+	// the first handshake. Nil does nothing. An error ends the join as
+	// Failed, with that error.
 	TakeTerminal func() error
 	// Events tells the guest how the join is going. It returns only once
 	// whatever it wrote has been written or has failed: Run starts no attempt

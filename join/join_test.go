@@ -32,8 +32,14 @@ func TestEveryOutcomeRow(t *testing.T) {
 	wantErr := func(target error) func(*testing.T, Outcome, *recorder) {
 		return func(t *testing.T, out Outcome, _ *recorder) { require.ErrorIs(t, out.Err, target) }
 	}
-	// The rows that end at the first join's deadline give it one short enough
-	// to wait for.
+	// A first join stops on its identity, and doesn't wait it out until its
+	// deadline, whose error would wrap the same one.
+	wantIdentity := func(t *testing.T, out Outcome, _ *recorder) {
+		require.IsType(t, &IdentityError{}, out.Err)
+		require.ErrorIs(t, out.Err, ErrIdentity)
+	}
+	// The rows that end at the first join's deadline, or would if the join
+	// went on where it should stop, give it one short enough to wait for.
 	timesOut := []option{withFirstJoin(300 * time.Millisecond)}
 	for name, tc := range map[string]struct {
 		scripts []relayKnobs
@@ -57,7 +63,7 @@ func TestEveryOutcomeRow(t *testing.T) {
 		"refused":                 {[]relayKnobs{{refuseAll: true}}, nil, wantErr(ErrKeysRefused)},
 		"changed relay key":       {[]relayKnobs{{hostKeyChanged: true}}, nil, wantErr(ErrHostKey)},
 		"upstream host key":       {[]relayKnobs{{rejectSession: upterm.UpstreamHostKeyMismatch}}, nil, wantErr(ErrUpstreamHostKey)},
-		"sign fails, first join":  {[]relayKnobs{{}}, []option{withSigners(failingSigner{newSigner(t)})}, wantErr(ErrIdentity)},
+		"sign fails, first join":  {[]relayKnobs{{}}, append([]option{withSigners(failingSigner{newSigner(t)})}, timesOut...), wantIdentity},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := &recorder{}
@@ -175,8 +181,11 @@ func TestTheFirstJoinDeadlineIsExact(t *testing.T) {
 	}
 	t.Run("--wait never fails", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		done := runJoinAsync(t, ctx, config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withWait()))
-		require.Never(t, func() bool { return len(done) > 0 }, time.Second, 50*time.Millisecond)
+		// A deadline the run would reach well within the second, were it not
+		// waiting.
+		cfg := config(t, newFakeRelay(t, relayKnobs{refuseAll: true, banner: noHostBanner}), withWait(), withFirstJoin(300*time.Millisecond))
+		done := runJoinAsync(t, ctx, cfg)
+		require.Never(t, func() bool { return len(done) > 0 }, time.Second, 50*time.Millisecond, "the run ended with --wait")
 		cancel()
 		require.Equal(t, Stopped, recv(t, done).Kind)
 	})
@@ -953,12 +962,16 @@ func TestAStalledAgentCostsAtMostTheAttempt(t *testing.T) {
 		},
 		Source: KeySource{Agent: 1},
 	}
-	cfg := config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id))
+	// The attempt's deadline comes first; the first join's would end a run
+	// that waited the failure out.
+	cfg := config(t, newFakeRelay(t, relayKnobs{}), withIdentity(id), withFirstJoin(300*time.Millisecond))
 	cfg.Timing.Attempt = 200 * time.Millisecond
 	start := time.Now()
 	select {
 	case out := <-runJoinAsync(t, context.Background(), cfg):
-		require.ErrorIs(t, out.Err, ErrIdentity) // a first join stops on it
+		// A first join stops on it, and not at its deadline.
+		require.IsType(t, &IdentityError{}, out.Err)
+		require.ErrorIs(t, out.Err, ErrIdentity)
 		// A loose ceiling: a signature nothing ends would take the test's
 		// whole timeout.
 		require.Less(t, time.Since(start), cfg.Timing.Attempt+2*time.Second)
