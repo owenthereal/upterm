@@ -1,0 +1,408 @@
+package join
+
+import (
+	"bytes"
+	"io"
+	"sync"
+
+	"github.com/owenthereal/upterm/attach"
+)
+
+// waitKey is a key the guest pressed while join, and not a session, had the
+// keyboard.
+type waitKey int
+
+const (
+	// keyRetry is Enter: attempt now instead of waiting.
+	keyRetry waitKey = iota + 1
+	// keyStop is Ctrl-C: stop, as the signal would have before the terminal
+	// was taken.
+	keyStop
+	// keyLeave is the escape sequence, or the terminal going away: leave.
+	keyLeave
+)
+
+// input is the one reader of the guest's keys once join has taken the
+// terminal. Each chunk it reads goes to exactly one place: the session whose
+// view is active, or join itself. A session is handed nothing until its view
+// is activated, which happens only once it is ready and the guest has been
+// told so. At every other time, waiting, attempting, setting up, the keys are
+// join's: Enter attempts at once, Ctrl-C stops, the escape sequence leaves,
+// and everything else is dropped. So nothing typed while join had the
+// keyboard ever reaches a session, and a Ctrl-C before a session is ready
+// stops join instead of going to a shell that isn't reading yet. One that
+// join hasn't acted on by the time the session's view is activated is
+// dropped instead (see take): it never stops a session the guest has been
+// told is ready.
+type input struct {
+	r      io.Reader
+	escape byte
+	keyc   chan key
+	once   sync.Once
+
+	// handing, when non-nil (tests only), receives once each time the reader
+	// starts handing a chunk to a view, before the hand-off completes. It is
+	// set before start.
+	handing chan struct{}
+	// controlling, when non-nil (tests only), is called each time the reader
+	// has found that a chunk is join's, before it reads a key from it. It is
+	// set before start.
+	controlling func()
+	// exited, when non-nil (tests only), closes as the reader returns. It is
+	// set before start.
+	exited chan struct{}
+
+	// stopped closes with stop: Run is over, and the reader delivers nothing
+	// more.
+	stopped  chan struct{}
+	stopOnce sync.Once
+
+	mu sync.Mutex
+	// current is the active view; nil while the keys are join's.
+	current *view
+	// last is the most recent view, which a new session supersedes.
+	last *view
+	// controls is the stretch of time the keys are join's; while a view is
+	// active, the one its activation ended.
+	controls *controls
+	// err is r's terminal error. It is set once, just before ended closes.
+	err   error
+	ended chan struct{}
+}
+
+// controls is one stretch of time in which the keys are join's: from start,
+// or from the close of the view that had them, until a view is activated.
+// Each begins at the start of a line with nothing pending, so that nothing
+// typed before a session, half an escape sequence say, combines with what is
+// typed after it. A key typed in one acts only while it lasts (see take).
+type controls struct {
+	// The reader's alone.
+	filter *attach.EscapeFilter
+	// cr says the last byte was '\r', so that a '\n' straight after it, as a
+	// terminal that sends Enter as CRLF does, is the same Enter and not a
+	// second one.
+	cr bool
+}
+
+func newControls(escape byte) *controls {
+	return &controls{filter: attach.NewEscapeFilter(escape, false)}
+}
+
+// key is one of join's keys, as the reader hands it over.
+type key struct {
+	waitKey
+	// c is the stretch of time it was typed in.
+	c *controls
+	// acted learns whether it acted. Buffered, so that take never waits on
+	// the reader.
+	acted chan bool
+}
+
+// newInput returns the reader of r. escape is the escape byte that, at the
+// start of a line and followed by '.', leaves; zero disables it.
+func newInput(r io.Reader, escape byte) *input {
+	return &input{
+		r:        r,
+		escape:   escape,
+		keyc:     make(chan key),
+		controls: newControls(escape),
+		ended:    make(chan struct{}),
+		stopped:  make(chan struct{}),
+	}
+}
+
+// start begins the one reader goroutine. It is called once, when join takes
+// the terminal: before then stdin belongs to the prompts. A second call does
+// nothing, so that r never has two readers.
+func (in *input) start() {
+	in.once.Do(func() { go in.read() })
+}
+
+// stop ends the reader as Run returns, once nothing takes join's keys and
+// every view is closed. From then on it delivers nothing, neither a key nor a
+// chunk: one it holds is dropped at once, and it reads no more. A Read can't
+// be interrupted, so one in progress may still take a chunk, which is
+// dropped, and the reader returns as that Read does. Stopping twice does
+// nothing.
+func (in *input) stop() {
+	in.stopOnce.Do(func() { close(in.stopped) })
+}
+
+func (in *input) isStopped() bool {
+	select {
+	case <-in.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// session creates a view for one session. It starts inactive: chunks keep
+// going to join's keys until it is activated, so that a session still being
+// set up, or whose Joined line is still being written, is handed nothing. A
+// view the caller hasn't closed is closed here: a new session supersedes the
+// last one, and two open views would leave it unclear whose the keys are.
+func (in *input) session() *view {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.last != nil {
+		in.last.closeLocked()
+	}
+	v := &view{
+		in:     in,
+		chunks: make(chan []byte),
+		done:   make(chan struct{}),
+	}
+	in.last = v
+	return v
+}
+
+// keys delivers join's keys, typed while no view was active: during waits,
+// attempts, setup and the Joined line. Each is to be given to take, which has
+// it act only if no view has been activated since it was typed. So a key
+// acts before a session's view is activated or not at all, however late it
+// is taken: one pressed before a session was ready never acts on it once it
+// is, nor on a wait after it. The reader waits for take before it reads on,
+// so whatever receives a key must take it.
+func (in *input) keys() <-chan key {
+	return in.keyc
+}
+
+// take runs act on k, unless a view has been activated since k was typed:
+// then k is dropped, and the rest of its chunk with it. act runs under mu,
+// which activate takes too, so a key acts before a view is activated or not
+// at all. act must not block, nor call into in.
+func (in *input) take(k key, act func(waitKey)) {
+	in.mu.Lock()
+	ok := in.current == nil && in.controls == k.c
+	if ok {
+		act(k.waitKey)
+	}
+	in.mu.Unlock()
+	k.acted <- ok
+}
+
+// read is the reader goroutine: the only caller of r.Read.
+func (in *input) read() {
+	if in.exited != nil {
+		defer close(in.exited)
+	}
+	buf := make([]byte, 4096)
+	for !in.isStopped() {
+		n, err := in.r.Read(buf)
+		if in.isStopped() {
+			// Run returned while this Read was in progress. What it took was
+			// typed for whoever has the input now, and join can't give it
+			// back: it is dropped.
+			return
+		}
+		if n > 0 {
+			in.route(buf[:n])
+		}
+		if err != nil {
+			in.end(err)
+			return
+		}
+	}
+}
+
+// route gives chunk to whoever has the keyboard as it is handed over: the
+// active view, or join.
+func (in *input) route(chunk []byte) {
+	in.mu.Lock()
+	v, c := in.current, in.controls
+	in.mu.Unlock()
+	if v != nil {
+		// A copy: the view keeps what a short Read leaves, and buf is read
+		// into again as soon as the hand-off completes.
+		in.hand(v, bytes.Clone(chunk))
+		return
+	}
+	if in.controlling != nil {
+		in.controlling()
+	}
+	in.control(c, chunk)
+}
+
+// hand gives chunk to v, or drops it if v closes first. It never goes
+// anywhere else: it was typed at a session, and the session is gone. Above
+// all it is not join's, whose Enter would attempt again.
+func (in *input) hand(v *view, chunk []byte) {
+	if in.handing != nil {
+		in.handing <- struct{}{}
+	}
+	select {
+	case v.chunks <- chunk:
+	case <-v.done:
+	case <-in.stopped:
+	}
+}
+
+// control reads join's keys from chunk. The keys before an escape sequence
+// that leaves count first, as they would in a read of their own, so that how
+// the reads happen to split what was typed never changes what it does; the
+// filter has dropped whatever followed the sequence. Once a key doesn't act,
+// the rest is dropped: a view has been activated since it was typed, or the
+// reader is stopped.
+func (in *input) control(c *controls, chunk []byte) {
+	out, action := c.filter.Feed(chunk)
+	for _, b := range out {
+		var k waitKey
+		switch {
+		case b == 0x03:
+			k = keyStop
+		case b == '\r', b == '\n' && !c.cr:
+			k = keyRetry
+		}
+		c.cr = b == '\r'
+		if k != 0 && !in.send(c, k) {
+			return
+		}
+	}
+	if action == attach.EscapeDetach {
+		in.send(c, keyLeave)
+	}
+}
+
+// send hands k, typed in c, to join, and reports whether it acted: false if
+// a view was activated before join took it, or if the reader was stopped
+// before join had it. Whether k acts is decided only as join takes it (see
+// take): a view activated after any check made here would find k acting on
+// its session. Join takes its keys as long as the run lasts, so waiting for
+// it never holds the reader for long.
+func (in *input) send(c *controls, k waitKey) bool {
+	acted := make(chan bool, 1)
+	select {
+	case in.keyc <- key{waitKey: k, c: c, acted: acted}:
+		return <-acted
+	case <-in.stopped:
+		return false
+	}
+}
+
+// end delivers r's terminal error, EOF or another: the terminal went away.
+// It sticks: every Read from then on returns it at once, active or not, so
+// that no later session waits for input that is gone. And join gets keyLeave
+// as soon as no view is active: at once if none is, or else when the active
+// view closes, whether or not its Read returned the error. A keyLeave that a
+// view's activation drops before join acts on it comes again as that view
+// closes.
+//
+// A Read that returned it proves nothing about the session. Terminal reads
+// Stdin through a goroutine that outlives a Read its ctx gave up on, and a
+// view stays active after its session has ended for another reason, through
+// the last of the output and the status line, until it is closed. A parked
+// read takes the error then and hands it to nobody, and join, told nothing,
+// would go on rejoining with a terminal that is gone. When the session did
+// take it, it has ended as the guest leaving, and join, having left, never
+// reads this keyLeave.
+func (in *input) end(err error) {
+	in.mu.Lock()
+	in.err = err
+	close(in.ended)
+	for {
+		v, c := in.current, in.controls
+		in.mu.Unlock()
+		if v != nil {
+			select {
+			case <-v.done:
+			case <-in.stopped:
+				return
+			}
+		} else if in.send(c, keyLeave) || in.isStopped() {
+			return
+		}
+		// v closed, or a view was activated before join acted on its
+		// keyLeave: see who has the keyboard now.
+		in.mu.Lock()
+	}
+}
+
+// view is one session's share of the input: its Terminal's Stdin.
+type view struct {
+	in *input
+	// chunks is where the reader hands a chunk over. Unbuffered, so that a
+	// chunk is either this view's or, if it closes first, nobody's.
+	chunks chan []byte
+	// done closes with Close; closed is under in.mu.
+	done   chan struct{}
+	closed bool
+	// rest is what a short Read left of the last chunk. Read's alone.
+	rest []byte
+}
+
+// activate routes every later chunk to v, until v is closed. It is called
+// once the session is ready and the guest has been told so, never before: a
+// Ctrl-C until then is join's. Activating a closed view does nothing.
+func (v *view) activate() {
+	in := v.in
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if v.closed || in.current == v {
+		return
+	}
+	// Only the last view can be open, so nothing else is active: the keys
+	// are join's, and stop being so now. A key typed before acts no more,
+	// however late join takes it (see take).
+	in.current = v
+}
+
+// Read blocks until an active v has a chunk, or v is closed (io.EOF). A p
+// shorter than the chunk leaves the rest for the next Read. Once r has
+// ended, Read returns its error, active or not, as soon as what v was handed
+// is delivered.
+//
+// Terminal reads Stdin through a goroutine that can outlive its Read, so a
+// Read in progress returns when v closes: a closed view would otherwise leave
+// that goroutine parked for good.
+func (v *view) Read(p []byte) (int, error) {
+	if len(v.rest) == 0 {
+		select {
+		case v.rest = <-v.chunks:
+		case <-v.done:
+		case <-v.in.ended:
+			if !v.isClosed() {
+				return 0, v.in.err
+			}
+		}
+	}
+	if v.isClosed() {
+		v.rest = nil
+		return 0, io.EOF
+	}
+	n := copy(p, v.rest)
+	v.rest = v.rest[n:]
+	return n, nil
+}
+
+// Close drops what v hasn't delivered and returns the keys to join, at the
+// start of a line. It is called once the session has returned, so nothing
+// still reads v but a goroutine whose read has been abandoned. Closing twice
+// does nothing.
+func (v *view) Close() error {
+	v.in.mu.Lock()
+	defer v.in.mu.Unlock()
+	v.closeLocked()
+	return nil
+}
+
+func (v *view) closeLocked() {
+	if v.closed {
+		return
+	}
+	v.closed = true
+	close(v.done)
+	if v.in.current == v {
+		v.in.current = nil
+		v.in.controls = newControls(v.in.escape)
+	}
+}
+
+func (v *view) isClosed() bool {
+	select {
+	case <-v.done:
+		return true
+	default:
+		return false
+	}
+}

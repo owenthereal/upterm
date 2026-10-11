@@ -88,6 +88,8 @@ jobs:
           check-latest: true
       - name: Vet
         run: make vet
+      - name: Join core builds for js/wasm
+        run: CGO_ENABLED=0 make wasm-check
 
   test-e2e:
     name: E2E Tests

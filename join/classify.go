@@ -1,0 +1,323 @@
+package join
+
+import (
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"sync"
+
+	"github.com/owenthereal/upterm/internal/version"
+	"github.com/owenthereal/upterm/upterm"
+	"golang.org/x/crypto/ssh"
+)
+
+// The texts of x/crypto's own errors that the classifier reads. They are not
+// part of its API, so the tests run the real client and server: an upgrade
+// that rewords one fails a test instead of quietly reclassifying a refusal as
+// an outage, or an outage as a refusal.
+const (
+	// textNoMethods ends the error of a client that tried every method and
+	// every key and was turned down. x/crypto returns it only when the last
+	// attempt drew a definitive failure from the server with no error pending.
+	// A network error inside an attempt is turned into a failed method, so
+	// having tried to authenticate and then failed proves nothing by itself.
+	textNoMethods = "no supported methods remain"
+
+	// textTooMany is the server's disconnect at MaxAuthTries. x/crypto's
+	// server (ssh/server.go, as of v0.57.0) counts a failed attempt and, if
+	// the count has reached the limit, sends this in place of that attempt's
+	// failure, as OpenSSH does: it is the refusal of the last key offered.
+	textTooMany = "too many authentication failures"
+)
+
+// firstRelayWithBanners is the first uptermd release whose relays send the
+// no-host banner. Before it a session that isn't there looks the same as a key
+// that was refused.
+const firstRelayWithBanners = "0.34.0"
+
+// evidence is what one attempt saw on its way to an error or a session. The
+// auth, banner and signing callbacks write it on the goroutine that runs the
+// handshake, which is the attempt's own, and only during the handshake. The
+// host key check is another matter: it runs on x/crypto's key exchange
+// goroutine, at the handshake and again at every key exchange after it,
+// mid-session included, so what it records is under mu, and read with
+// hostKeyVerdict.
+type evidence struct {
+	banner        string         // the last banner the relay sent while authenticating
+	serverVersion string         // the relay's SSH version line, from the AuthCallback
+	selected      ssh.PublicKey  // the key whose signature completed authentication
+	signErr       *IdentityError // the first signer that failed to sign
+	// offered is the keys the AuthCallback offered, one per authentication
+	// attempt, in order. classifyConnect says when that is the keys the
+	// relay judged.
+	offered []ssh.PublicKey
+
+	mu         sync.Mutex
+	hostKey    ssh.PublicKey // the relay's key at the last key exchange
+	hostKeyErr error         // CheckHostKey's verdict on it; nil once accepted
+}
+
+// checkedHostKey records CheckHostKey's verdict, err, on the relay's key.
+func (ev *evidence) checkedHostKey(key ssh.PublicKey, err error) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	ev.hostKey, ev.hostKeyErr = key, err
+}
+
+// hostKeyVerdict is the relay's key at the last key exchange, and
+// CheckHostKey's verdict on it. A refused key ends the connection, so no key
+// exchange follows a refusal: a verdict that isn't nil is the one that ended
+// it. Once a handshake has succeeded, which it does only with the key
+// accepted, a refusal can only come from a key exchange after it.
+func (ev *evidence) hostKeyVerdict() (ssh.PublicKey, error) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	return ev.hostKey, ev.hostKeyErr
+}
+
+// clientConfig is the ssh.ClientConfig of one attempt. Its callbacks fill ev,
+// which is all classifyConnect and classifySetup judge by. checkHostKey returns
+// nil to accept the relay's key, or an error that wraps ErrHostKeyUnknown or
+// ErrHostKeyChanged to say why it doesn't. Its verdict is kept in ev, and an
+// error also refuses the key, which ends the handshake, or, at a key exchange
+// after it, the connection.
+//
+// The AuthCallback offers the keys, in order, one per authentication attempt,
+// so that ev knows which ones the relay judged. Offered all at once, in a
+// single ssh.PublicKeys, they would leave a disconnect at the relay's
+// MaxAuthTries saying nothing about which were refused, and a key past that
+// limit would never be tried. Once every key has been offered it
+// returns no method, and with Auth empty x/crypto ends the handshake: with
+// textNoMethods if the last attempt drew the relay's refusal. A key that
+// fails to sign ends the offers too, so that the signer's error, and not a
+// later key's answer, is what the handshake ends with.
+//
+// The AuthCallback also keeps the relay's version line, because it is the
+// only place x/crypto shows one to a client whose handshake then fails. It
+// runs after the first, empty authentication request has been answered, so a
+// handshake that ends before that leaves serverVersion empty, which counts as
+// no evidence.
+func clientConfig(user string, signers []ssh.Signer, checkHostKey ssh.HostKeyCallback, ev *evidence) *ssh.ClientConfig {
+	tracked := track(signers, ev)
+	return &ssh.ClientConfig{
+		User:          user,
+		ClientVersion: upterm.JoinSSHClientVersion,
+		AuthCallback: func(ctx *ssh.ClientAuthContext) (ssh.AuthMethod, error) {
+			ev.serverVersion = string(ctx.Metadata.ServerVersion())
+			next := len(ev.offered)
+			if ev.signErr != nil || next == len(tracked) {
+				return nil, nil
+			}
+			ev.offered = append(ev.offered, signers[next].PublicKey())
+			return ssh.PublicKeys(tracked[next]), nil
+		},
+		BannerCallback: func(message string) error {
+			ev.banner = message
+			return nil
+		},
+		HostKeyCallback: func(host string, remote net.Addr, key ssh.PublicKey) error {
+			err := checkHostKey(host, remote, key)
+			ev.checkedHostKey(key, err)
+			return err
+		},
+	}
+}
+
+// track wraps signers so ev learns the selected key and any signing error.
+//
+// x/crypto signs only after the server has answered a key's query with PK_OK,
+// so the last signature that succeeded on a handshake that succeeded is the key
+// that got in. A signer's error is its own, never the relay's refusal; x/crypto
+// folds it into a failed method like any other.
+//
+// Each wrapper has exactly the interfaces its signer has, because x/crypto
+// chooses the signature algorithm from them: a key that is an AlgorithmSigner
+// or a MultiAlgorithmSigner signs RSA with SHA-2, and one wrapped as a plain
+// Signer can only sign it with SHA-1, which many servers refuse.
+func track(signers []ssh.Signer, ev *evidence) []ssh.Signer {
+	tracked := make([]ssh.Signer, len(signers))
+	for i, s := range signers {
+		base := trackedSigner{Signer: s, ev: ev}
+		switch inner := s.(type) {
+		case ssh.MultiAlgorithmSigner:
+			tracked[i] = trackedMultiAlgorithmSigner{
+				trackedAlgorithmSigner: trackedAlgorithmSigner{trackedSigner: base, inner: inner},
+				algorithms:             inner,
+			}
+		case ssh.AlgorithmSigner:
+			tracked[i] = trackedAlgorithmSigner{trackedSigner: base, inner: inner}
+		default:
+			tracked[i] = base
+		}
+	}
+	return tracked
+}
+
+// trackedSigner is a plain ssh.Signer that reports to ev.
+type trackedSigner struct {
+	ssh.Signer
+	ev *evidence
+}
+
+func (s trackedSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
+	return s.record(s.Signer.Sign(rand, data))
+}
+
+// record notes how a signature went and passes it on.
+func (s trackedSigner) record(sig *ssh.Signature, err error) (*ssh.Signature, error) {
+	if err != nil {
+		if s.ev.signErr == nil {
+			s.ev.signErr = &IdentityError{Key: ssh.FingerprintSHA256(s.PublicKey()), Err: err}
+		}
+		return nil, err
+	}
+	s.ev.selected = s.PublicKey()
+	return sig, nil
+}
+
+// trackedAlgorithmSigner is a tracked ssh.AlgorithmSigner.
+type trackedAlgorithmSigner struct {
+	trackedSigner
+	inner ssh.AlgorithmSigner
+}
+
+func (s trackedAlgorithmSigner) SignWithAlgorithm(rand io.Reader, data []byte, algorithm string) (*ssh.Signature, error) {
+	return s.record(s.inner.SignWithAlgorithm(rand, data, algorithm))
+}
+
+// trackedMultiAlgorithmSigner is a tracked ssh.MultiAlgorithmSigner.
+type trackedMultiAlgorithmSigner struct {
+	trackedAlgorithmSigner
+	algorithms ssh.MultiAlgorithmSigner
+}
+
+func (s trackedMultiAlgorithmSigner) Algorithms() []string { return s.algorithms.Algorithms() }
+
+type verdictKind int
+
+const (
+	vWait           verdictKind = iota // wait (why), then attempt
+	vRetryNow                          // attempt at once without ev.selected: the session's node refused that key
+	vAmbiguous                         // the relay couldn't authenticate upstream: refused, or no session; the caller applies its round rules
+	vTooMany                           // the relay disconnected at MaxAuthTries: attempt at once without ev.offered, which it judged, and which are refused for the run or, if ambiguous, set aside as vAmbiguous's key is (the join waits for the session instead if one of them has joined before)
+	vStop                              // end the join with err
+	vHostKeyUnknown                    // the caller decides: ask the guest (before the terminal is taken) or stop
+)
+
+// verdict is what an attempt's end means for the join.
+type verdict struct {
+	kind      verdictKind
+	why       WaitReason // for vWait
+	ambiguous bool       // for vTooMany: the relay's version is no evidence of a refusal
+	err       error      // the cause the verdict rests on; nil when kind and why say it all
+}
+
+// classifyConnect judges a dial or a handshake that failed. It never calls a
+// key refused without positive evidence: the relay's definite answer, from a
+// relay new enough that a missing session can't pass for one, and only of the
+// keys it answered. Anything else, an I/O error in the middle of
+// authentication included, is an unreachable relay, which a join waits out.
+func classifyConnect(err error, ev *evidence) verdict {
+	if _, refusal := ev.hostKeyVerdict(); refusal != nil {
+		if errors.Is(refusal, ErrHostKeyUnknown) {
+			return verdict{kind: vHostKeyUnknown, err: refusal}
+		}
+		return verdict{kind: vStop, err: refusedHostKey(refusal)}
+	}
+
+	// The signer's own failure is the guest's, whatever the relay then said.
+	if ev.signErr != nil {
+		return verdict{kind: vWait, why: IdentityFailure, err: ev.signErr}
+	}
+
+	switch {
+	case strings.HasPrefix(ev.banner, upterm.BannerNoHostPrefix):
+		return verdict{kind: vWait, why: NoHost}
+	case ev.banner == upterm.BannerLookupFailed:
+		return verdict{kind: vWait, why: RelayLookup}
+	}
+
+	var text string
+	if err != nil {
+		text = err.Error()
+	}
+	switch {
+	case strings.Contains(text, textNoMethods):
+		return verdict{kind: vStop, err: &RefusedError{Ambiguous: !relayHasBanners(ev.serverVersion)}}
+	case strings.Contains(text, textTooMany) && len(ev.offered) > 0:
+		// The relay refused every key offered on this connection: the last
+		// with the disconnect, which it sends in place of that key's refusal
+		// (see textTooMany), and each before it with a refusal, since x/crypto
+		// asks the AuthCallback for another key only once an attempt has
+		// ended. It asks as well after a partial success, and after an
+		// attempt that ended without the relay's answer: an I/O error, no
+		// signature algorithm to agree on, a signer's error. None of that
+		// miscounts here. An I/O error ends the handshake with that error,
+		// never this text. A signer's error ends the offers, and outranks
+		// this rule above. uptermd answers no attempt with a partial success.
+		// And the one key that could be counted without having been sent is
+		// one whose signature algorithm can't be agreed, which couldn't have
+		// authenticated to this relay anyway. The keys not yet offered get
+		// their turn on the next connection. A disconnect before any key was
+		// offered refuses none, and the next connection would end the same
+		// way, so it is waited out.
+		return verdict{kind: vTooMany, ambiguous: !relayHasBanners(ev.serverVersion)}
+	}
+	return verdict{kind: vWait, why: Unreachable, err: err}
+}
+
+// classifySetup judges the error Terminal.Run returned for a handshake that
+// succeeded, by the text the relay rejected the session channel with. That text
+// is evidence in itself, whatever version sent it.
+//
+// A key exchange during setup that refused the relay's key comes first: the
+// refusal ended the connection, whatever error that then made for setup. The
+// terminal is taken by then, so an unknown key is not asked about either.
+func classifySetup(err error, ev *evidence) verdict {
+	if _, refusal := ev.hostKeyVerdict(); refusal != nil {
+		return verdict{kind: vStop, err: refusedHostKey(refusal)}
+	}
+	var rejected *ssh.OpenChannelError
+	if !errors.As(err, &rejected) {
+		return verdict{kind: vWait, why: Setup, err: err}
+	}
+	switch rejected.Message {
+	case upterm.UpstreamKeyRefused:
+		return verdict{kind: vRetryNow, err: err}
+	case upterm.UpstreamAuthFailed:
+		// A node that predates the refined verdicts says this for a refusal and
+		// for a missing session alike.
+		return verdict{kind: vAmbiguous}
+	case upterm.UpstreamNoHost:
+		return verdict{kind: vWait, why: NoHost}
+	case upterm.UpstreamLookupFailed:
+		return verdict{kind: vWait, why: RelayLookup}
+	case upterm.UpstreamUnavailable:
+		return verdict{kind: vWait, why: Upstream}
+	case upterm.UpstreamHostKeyMismatch:
+		return verdict{kind: vStop, err: ErrUpstreamHostKey}
+	}
+	return verdict{kind: vWait, why: Setup, err: err}
+}
+
+// refusedHostKey is the error a join stops with once CheckHostKey has refused
+// the relay's key with err and nobody is to be asked about it: a changed key,
+// CheckHostKey's own failure, or an unknown key once the terminal is taken.
+func refusedHostKey(err error) *HostKeyError {
+	return &HostKeyError{Changed: errors.Is(err, ErrHostKeyChanged), Err: err}
+}
+
+// relayHasBanners reports whether serverVersion, a relay's SSH version line,
+// positively names an uptermd release that sends the no-host banner. Only
+// positive evidence counts: a dev build (0.0.0+dev), a line that doesn't parse,
+// another server's line and an empty one all say false, and a caller reads
+// false as ambiguous.
+func relayHasBanners(serverVersion string) bool {
+	v, err := version.ParseFromSSHVersion(serverVersion)
+	if err != nil {
+		return false
+	}
+	first, err := version.Parse(firstRelayWithBanners)
+	return err == nil && v.GreaterThanOrEqual(first)
+}
