@@ -72,8 +72,8 @@ func (ev *evidence) hostKeyVerdict() (ssh.PublicKey, error) {
 // clientConfig is the ssh.ClientConfig of one attempt. Its callbacks fill ev,
 // which is all classifyConnect and classifySetup judge by. checkHostKey returns
 // nil to accept the relay's key, or an error that wraps ErrHostKeyUnknown or
-// ErrHostKeyChanged to say why it doesn't. Whatever it returns is kept in ev
-// and also refuses the key, which ends the handshake, or, at a key exchange
+// ErrHostKeyChanged to say why it doesn't. Its verdict is kept in ev, and an
+// error also refuses the key, which ends the handshake, or, at a key exchange
 // after it, the connection.
 //
 // The AuthCallback keeps the relay's version line because it is the only place
