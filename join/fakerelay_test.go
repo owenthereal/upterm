@@ -25,6 +25,10 @@ import (
 // authentication is definitive.
 const defaultRelayVersion = "SSH-2.0-uptermd-0.37.0"
 
+// oldRelay is the version line of a relay that predates the no-host banner,
+// so that its refusals at authentication are no evidence.
+const oldRelay = "SSH-2.0-uptermd-0.33.2"
+
 // handshakeTimeout bounds a fixture's handshake, so a stalled one fails its
 // test instead of hanging the run.
 const handshakeTimeout = 10 * time.Second
@@ -87,6 +91,7 @@ type relayKnobs struct {
 // connLog is what the relay saw on one connection.
 type connLog struct {
 	mu      sync.Mutex
+	offered []ssh.PublicKey // each key the guest offered, in order
 	key     ssh.PublicKey   // the key that authenticated
 	ptys    []termsize.Size // the size of each pty request
 	windows []termsize.Size // the size of each window change
@@ -101,6 +106,12 @@ type connLog struct {
 func (l *connLog) inputEnded() chan struct{} {
 	l.inputOnce.Do(func() { l.inputEnd = make(chan struct{}) })
 	return l.inputEnd
+}
+
+func (l *connLog) offer(k ssh.PublicKey) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.offered = append(l.offered, k)
 }
 
 func (l *connLog) setKey(k ssh.PublicKey) {
@@ -149,7 +160,10 @@ func (k relayKnobs) serve(conn net.Conn, hostKey ssh.Signer, seen *connLog) {
 		ServerVersion:           cmp.Or(k.version, defaultRelayVersion),
 		MaxAuthTries:            k.maxAuthTries,
 		PublicKeyAuthAlgorithms: k.pubKeyAlgos,
+		// x/crypto's server keeps the answer for the last key it was asked
+		// about, so a key's query and then its signature run this once.
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			seen.offer(key)
 			if k.dropOnPublicKey {
 				_ = conn.Close()
 				return nil, errFixtureRefused
@@ -407,6 +421,25 @@ func sevenSigners(t *testing.T) []ssh.Signer {
 		signers[i] = newSigner(t)
 	}
 	return signers
+}
+
+// fingerprints names keys by their SHA256 fingerprints, so that keys can be
+// compared whatever type parsed them, and a mismatch reads as names.
+func fingerprints(keys []ssh.PublicKey) []string {
+	fps := make([]string, len(keys))
+	for i, k := range keys {
+		fps[i] = ssh.FingerprintSHA256(k)
+	}
+	return fps
+}
+
+// fingerprintsOf is fingerprints of the signers' keys.
+func fingerprintsOf(signers []ssh.Signer) []string {
+	keys := make([]ssh.PublicKey, len(signers))
+	for i, s := range signers {
+		keys[i] = s.PublicKey()
+	}
+	return fingerprints(keys)
 }
 
 // failingSigner is a signer whose Sign fails, as an agent's does once it is

@@ -17,7 +17,7 @@ func TestErrorsMatchTheirSentinel(t *testing.T) {
 		other    error
 	}{
 		{&RefusedError{}, ErrKeysRefused, ErrIdentity},
-		{&RefusedError{TooMany: true, Ambiguous: true}, ErrKeysRefused, ErrHostKey},
+		{&RefusedError{Ambiguous: true}, ErrKeysRefused, ErrHostKey},
 		{&IdentityError{Key: "SHA256:abc", Err: cause}, ErrIdentity, ErrKeysRefused},
 		{&HostKeyError{Changed: true, Err: ErrHostKeyChanged}, ErrHostKey, ErrUpstreamHostKey},
 		{&HostKeyError{Declined: true, Err: ErrHostKeyUnknown}, ErrHostKey, ErrIdentity},

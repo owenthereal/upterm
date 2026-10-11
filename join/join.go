@@ -277,9 +277,10 @@ type runner struct {
 	// over. Zero until it has one.
 	lastWhy WaitReason
 	lastErr error
-	// refused holds the keys the session's node turned away, by SHA256
-	// fingerprint. A session's authorized keys don't change while it runs,
-	// so they stay out for the run.
+	// refused holds the keys a node turned away with evidence, by SHA256
+	// fingerprint: the session's node, or the entry node before it
+	// disconnected at MaxAuthTries. A session's authorized keys don't change
+	// while it runs, so they stay out for the run.
 	refused map[string]bool
 	// sitOut holds the keys an ambiguous refusal set aside for this round.
 	// It empties when a session is ready, and when a rejoin's round runs out.
@@ -455,13 +456,14 @@ func (r *runner) timedOut(why WaitReason, err error) Outcome {
 // attempted is how one attempt ended.
 type attempted struct {
 	v         verdict
-	exhausted bool          // no candidate key was left to offer
-	offered   []ssh.Signer  // the keys offered
-	selected  ssh.PublicKey // the key whose signature got in
-	hostKey   ssh.PublicKey // the relay's key, for vHostKeyUnknown
-	cut       bool          // the first join's deadline ended it
-	err       error         // the run can't go on
-	session   *sessionEnd   // the session ran and returned a Result
+	exhausted bool            // no candidate key was left to offer
+	offered   []ssh.Signer    // the keys to offer, in order
+	judged    []ssh.PublicKey // the keys the relay judged, for vTooMany
+	selected  ssh.PublicKey   // the key whose signature got in
+	hostKey   ssh.PublicKey   // the relay's key, for vHostKeyUnknown
+	cut       bool            // the first join's deadline ended it
+	err       error           // the run can't go on
+	session   *sessionEnd     // the session ran and returned a Result
 }
 
 // sessionEnd is a session that ran.
@@ -540,7 +542,7 @@ func (r *runner) attempt() (a attempted) {
 		_ = lc.Close()
 		// The relay's key, for a prompt.
 		hostKey, _ := ev.hostKeyVerdict()
-		return attempted{v: classifyConnect(err, ev), offered: offered, selected: ev.selected, hostKey: hostKey}
+		return attempted{v: classifyConnect(err, ev), offered: offered, judged: ev.judged, selected: ev.selected, hostKey: hostKey}
 	}
 	if !stopClosing() {
 		// actx ended as the handshake finished, and the connection with it.
@@ -733,14 +735,21 @@ func (r *runner) next(a attempted) step {
 		if a.selected == nil {
 			return finish(failed(&RefusedError{}))
 		}
-		fp := ssh.FingerprintSHA256(a.selected)
-		if r.joinedWith[fp] {
-			return waitThen(NoHost, nil)
+		return r.setAside([]ssh.PublicKey{a.selected})
+	case vTooMany:
+		// The entry node disconnected at its MaxAuthTries. Without evidence,
+		// the keys it judged are set aside as an ambiguous refusal's key is.
+		if v.ambiguous {
+			return r.setAside(a.judged)
 		}
-		r.sitOut[fp] = true
-		// Refused, or no session: should a first join's time run out first,
-		// it is taken for no session, as a rejoin takes it.
-		return r.again(NoHost, nil)
+		// With it, they are refused, and the keys it cut off get their turn at
+		// once. That answer is about keys, not the session, so a first join
+		// whose time runs out before the next attempt has its say keeps the
+		// reason it had.
+		for _, k := range a.judged {
+			r.refused[ssh.FingerprintSHA256(k)] = true
+		}
+		return attemptNow
 	}
 
 	// vStop. A refusal at the entry node with no evidence that it was one
@@ -751,6 +760,24 @@ func (r *runner) next(a attempted) step {
 		return waitThen(NoHost, nil)
 	}
 	return finish(failed(v.err))
+}
+
+// setAside answers a refusal of keys that may have been a session that isn't
+// there. A key that has had a session ready in this run was let in before, so
+// the session is what is missing, and the join waits for it. Otherwise the
+// keys sit out the rest of the round, and the rest are tried at once.
+func (r *runner) setAside(keys []ssh.PublicKey) step {
+	for _, k := range keys {
+		if r.joinedWith[ssh.FingerprintSHA256(k)] {
+			return waitThen(NoHost, nil)
+		}
+	}
+	for _, k := range keys {
+		r.sitOut[ssh.FingerprintSHA256(k)] = true
+	}
+	// Refused, or no session: should a first join's time run out first, it
+	// is taken for no session, as a rejoin takes it.
+	return r.again(NoHost, nil)
 }
 
 func (r *runner) offeredJoined(offered []ssh.Signer) bool {

@@ -21,15 +21,11 @@ var (
 
 // RefusedError is a relay or a host turning the guest's keys away.
 type RefusedError struct {
-	TooMany   bool // the relay disconnected at MaxAuthTries
-	Ambiguous bool // no positive evidence the key itself was refused: an entry refusal without version evidence, or a round of UpstreamAuthFailed exhausted every key
+	Ambiguous bool // no positive evidence the key itself was refused: an entry refusal without version evidence, or a round of such refusals that left no key to offer
 }
 
 func (e *RefusedError) Error() string {
-	switch {
-	case e.TooMany:
-		return "keys refused: too many authentication attempts"
-	case e.Ambiguous:
+	if e.Ambiguous {
 		return "keys refused, though not necessarily the key itself"
 	}
 	return "keys refused"

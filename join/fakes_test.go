@@ -119,6 +119,14 @@ func (r *fakeRelay) authenticatedWith(i int) ssh.PublicKey {
 	return l.key
 }
 
+// offered is the fingerprint of each key offered on connection i, in order.
+func (r *fakeRelay) offered(i int) []string {
+	l := r.log(i)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return fingerprints(l.offered)
+}
+
 // connOpen reports whether join's side of connection i is still open. It is
 // join's side because the relay learns of a close only some time after it.
 func (r *fakeRelay) connOpen(i int) bool {

@@ -533,6 +533,81 @@ func TestAnEntryRefusalWithoutEvidenceWaitsOnARejoin(t *testing.T) {
 	}
 }
 
+func TestKeysPastTheRelaysMaxAuthTriesAreTried(t *testing.T) {
+	keys := sevenSigners(t)
+
+	t.Run("the last key is let in", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{allow: keys[6].PublicKey(), maxAuthTries: 6, exit: intp(0)})
+		rec := &recorder{}
+		out := runJoin(t, config(t, relay, withSigners(keys...), withEvents(rec)))
+		require.Equal(t, Exited, out.Kind)
+		require.Equal(t, 2, relay.connections())
+		// The second connection starts with the key the disconnect cut short,
+		// at once and with nothing said.
+		require.Equal(t, fingerprintsOf(keys[5:]), relay.offered(1))
+		require.Equal(t, keys[6].PublicKey().Marshal(), relay.authenticatedWith(1).Marshal())
+		require.Equal(t, []EventKind{Joined}, rec.kinds())
+	})
+
+	t.Run("every key refused", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{refuseAll: true, maxAuthTries: 6})
+		out := runJoin(t, config(t, relay, withSigners(keys...)))
+		var refused *RefusedError
+		require.ErrorAs(t, out.Err, &refused)
+		require.Equal(t, RefusedError{}, *refused)
+		// Each key judged once: five before the disconnect, then the one it
+		// cut short and the last.
+		require.Equal(t, 2, relay.connections())
+		require.Equal(t, fingerprintsOf(keys[:6]), relay.offered(0))
+		require.Equal(t, fingerprintsOf(keys[5:]), relay.offered(1))
+	})
+
+	t.Run("every key refused by a relay that is no evidence", func(t *testing.T) {
+		relay := newFakeRelay(t, relayKnobs{refuseAll: true, maxAuthTries: 6, version: oldRelay})
+		out := runJoin(t, config(t, relay, withSigners(keys...)))
+		var refused *RefusedError
+		require.ErrorAs(t, out.Err, &refused)
+		require.Equal(t, RefusedError{Ambiguous: true}, *refused)
+		require.Equal(t, 2, relay.connections())
+		require.Equal(t, fingerprintsOf(keys[5:]), relay.offered(1))
+	})
+}
+
+func TestKeysJudgedBeforeMaxAuthTriesAreRefusedOnlyOnEvidence(t *testing.T) {
+	for version, firstOnRejoin := range map[string]int{
+		// Refused for the run: the rejoin starts with the key the disconnect
+		// cut short.
+		defaultRelayVersion: 5,
+		// Set aside for the round, which the session being ready ended.
+		oldRelay: 0,
+	} {
+		keys := sevenSigners(t)
+		relay := newFakeRelay(t,
+			relayKnobs{version: version, allow: keys[6].PublicKey(), maxAuthTries: 6},      // five keys judged, the sixth cut short
+			relayKnobs{version: version, allow: keys[6].PublicKey(), dropAfterReady: true}, // the last key gets in; the host goes away
+			relayKnobs{version: version, exit: intp(0)})                                    // the rejoin: any key will do
+		out := runJoin(t, config(t, relay, withSigners(keys...)))
+		require.Equal(t, Exited, out.Kind, version)
+		require.Equal(t, 3, relay.connections(), version)
+		require.Equal(t, keys[firstOnRejoin].PublicKey().Marshal(), relay.authenticatedWith(2).Marshal(), version)
+	}
+}
+
+func TestAnAmbiguousMaxAuthTriesOfAKeyThatGotInIsNoSession(t *testing.T) {
+	keys := sevenSigners(t)
+	relay := newFakeRelay(t,
+		relayKnobs{version: oldRelay, dropAfterReady: true},             // the first key gets in; the host goes away
+		relayKnobs{version: oldRelay, refuseAll: true, maxAuthTries: 6}, // no banner: refused, or no session
+		relayKnobs{version: oldRelay, exit: intp(0)})                    // the host is back
+	rec := &recorder{}
+	out := runJoin(t, config(t, relay, withSigners(keys...), withEvents(rec)))
+	require.Equal(t, Exited, out.Kind)
+	require.Equal(t, []EventKind{Joined, Lost, Waiting, Waiting, Joined}, rec.kinds())
+	require.Equal(t, NoHost, rec.waits()[1].Why)
+	// No key sat out: the rejoin offered the first key again.
+	require.Equal(t, keys[0].PublicKey().Marshal(), relay.authenticatedWith(2).Marshal())
+}
+
 func TestNoPromptOnceTheTerminalIsTaken(t *testing.T) {
 	confirm := &countingConfirm{accept: true}
 	took := 0
