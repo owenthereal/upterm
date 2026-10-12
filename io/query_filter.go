@@ -120,6 +120,10 @@ const (
 	qfStateWrapDropEsc                   // as qfStateWrapDrop, holding a raw ESC whose pair is still to come
 	qfStateWrapper                       // passing a tmux wrapper to its unescaped ST
 	qfStateWrapperEsc                    // holding an ESC inside a passing tmux wrapper, to see the byte it escapes
+
+	// qfStateCount isn't a state. It counts them, kept last so a test can
+	// range over every state (TestTerminalQueryFilter_EveryStateIsInOneList).
+	qfStateCount
 )
 
 // NewTerminalQueryFilter creates a filter that removes terminal query
@@ -421,18 +425,17 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 // straight after a raw ESC, which has ended the wrapper. A string being
 // dropped, at the top or in a wrapper, takes them in dropEnd.
 func (f *TerminalQueryFilter) cancel(b byte) {
-	switch f.state {
-	case qfStateOSCEsc, qfStateAPCEsc, qfStateWrapMatchEsc:
+	switch {
+	case f.holdsStringEsc():
 		// The OSC, APC or DCS ended at its ESC already, a byte before the
 		// cancel, so it is dropped as any held string ended there is, and the
 		// cancel then cancels the ESC on its own.
 		f.restartAtESC()
-	case qfStateWrapLeadEsc, qfStateWrapHeadEsc:
+	case f.state == qfStateWrapLeadEsc, f.state == qfStateWrapHeadEsc:
 		// So did the wrapper, which a raw ESC that escapes neither an ESC nor
 		// a '\' ends, and it is dropped the same way.
 		f.restartWrapperAtESC()
-	case qfStateOSCNum, qfStateOSC, qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter,
-		qfStateAPCEntry, qfStateAPC, qfStateWrapMatch, qfStateWrapLead:
+	case f.holdsString(), f.holdsHeader(), f.state == qfStateWrapLead:
 		// A held OSC, DCS header or APC is dropped whole, query or not, and
 		// none of it goes out with the cancel: kitty keeps a string open past
 		// a CAN or SUB, so "ESC ]4;0; CAN ;1;? BEL" reaches it as a palette
@@ -1050,11 +1053,43 @@ func (f *TerminalQueryFilter) endsWrapperHold(b byte) bool {
 	case qfStateWrapHeadEsc:
 		return b != 0x1b || !f.inner.holdsString()
 	case qfStateWrapHead:
-		switch f.inner.state {
-		case qfStateOSCEsc, qfStateAPCEsc, qfStateWrapMatchEsc:
+		if f.inner.holdsStringEsc() {
 			return b != 0x1b
 		}
 		return b == 0x18 || b == 0x1a
+	}
+	return false
+}
+
+// holding reports whether the filter holds a sequence it hasn't decided yet:
+// a head, a DCS header, a string, or a string and the ESC that ended it.
+//
+// Every state is in exactly one of the lists the filter acts on: those four,
+// passing, Dropping, a tmux wrapper's own, or ground
+// (TestTerminalQueryFilter_EveryStateIsInOneList). innerByte reads an inner
+// machine through them, so a state in one is taken as the rest of its list
+// is, and a state added to none fails that test. innerByte once passed the
+// wrapper on a state its own lists missed, with whatever query it held.
+func (f *TerminalQueryFilter) holding() bool {
+	return f.holdsHead() || f.holdsHeader() || f.holdsString() || f.holdsStringEsc()
+}
+
+// holdsHead reports whether the filter holds an ESC sequence or a CSI head,
+// which an ESC abandons and a cancel sends out with it.
+func (f *TerminalQueryFilter) holdsHead() bool {
+	switch f.state {
+	case qfStateEsc, qfStateEscInter, qfStateCSI, qfStateCSIParam, qfStateCSIInter:
+		return true
+	}
+	return false
+}
+
+// holdsHeader reports whether the filter holds a DCS header, which an ESC
+// abandons and a cancel drops whole.
+func (f *TerminalQueryFilter) holdsHeader() bool {
+	switch f.state {
+	case qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter:
+		return true
 	}
 	return false
 }
@@ -1065,6 +1100,27 @@ func (f *TerminalQueryFilter) endsWrapperHold(b byte) bool {
 func (f *TerminalQueryFilter) holdsString() bool {
 	switch f.state {
 	case qfStateOSCNum, qfStateOSC, qfStateAPCEntry, qfStateAPC, qfStateWrapMatch:
+		return true
+	}
+	return false
+}
+
+// holdsStringEsc reports whether the filter holds such a string and the ESC
+// that ended it: cleanly if '\' follows, which makes the ESC ST, and
+// abnormally if anything else does.
+func (f *TerminalQueryFilter) holdsStringEsc() bool {
+	switch f.state {
+	case qfStateOSCEsc, qfStateAPCEsc, qfStateWrapMatchEsc:
+		return true
+	}
+	return false
+}
+
+// passing reports whether the filter is passing a sequence it emitted
+// unfinished, to its end (passByte).
+func (f *TerminalQueryFilter) passing() bool {
+	switch f.state {
+	case qfStateEscOverBound, qfStateCSIIgnore, qfStateCSIOverBound, qfStateOSCOverBound, qfStateString:
 		return true
 	}
 	return false
@@ -1095,8 +1151,8 @@ func (f *TerminalQueryFilter) holdsString() bool {
 func (f *TerminalQueryFilter) innerByte(b byte) {
 	in := f.inner
 	f.state = qfStateWrapHead
-	switch in.state {
-	case qfStateOSCEsc, qfStateAPCEsc, qfStateWrapMatchEsc:
+	switch {
+	case in.holdsStringEsc():
 		if b != '\\' {
 			// The inner string ended at the inner ESC before b, abnormally.
 			// If b is an inner ESC too, the stream from that ESC's second raw
@@ -1107,7 +1163,7 @@ func (f *TerminalQueryFilter) innerByte(b byte) {
 			}
 			return
 		}
-	case qfStateEsc, qfStateEscInter, qfStateCSI, qfStateCSIParam, qfStateCSIInter:
+	case in.holdsHead():
 		switch b {
 		case 0x1b:
 			f.restartWrapperAtESC()
@@ -1118,7 +1174,7 @@ func (f *TerminalQueryFilter) innerByte(b byte) {
 			f.passWrapper()
 			return
 		}
-	case qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter:
+	case in.holdsHeader():
 		switch b {
 		case 0x1b:
 			f.restartWrapperAtESC()
@@ -1145,20 +1201,16 @@ func (f *TerminalQueryFilter) innerByte(b byte) {
 		f.dropInner()
 	case in.state == qfStateNormal && len(in.outBuf) == n:
 		f.endWrapperHold()
-	default:
+	case in.state == qfStateNormal || in.passing():
 		f.passWrapper()
+	default:
+		// An inner machine reaches no other state here: it enters DropEsc
+		// only from Drop, which dropInner has taken, and no wrapper state,
+		// since it passes a wrapper inside the wrapper at its "tmux;". A
+		// state added to none of the lists (holding) would land here, so it
+		// drops the wrapper rather than pass whatever query it holds.
+		f.endWrapperHold()
 	}
-}
-
-// holding reports whether the filter holds a sequence it hasn't decided yet.
-func (f *TerminalQueryFilter) holding() bool {
-	switch f.state {
-	case qfStateEsc, qfStateEscInter, qfStateCSI, qfStateCSIParam, qfStateCSIInter,
-		qfStateOSCNum, qfStateOSC, qfStateOSCEsc, qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter,
-		qfStateAPCEntry, qfStateAPC, qfStateAPCEsc, qfStateWrapMatch, qfStateWrapMatchEsc:
-		return true
-	}
-	return false
 }
 
 // endWrapperAtST takes the outer ST of a wrapper still being decided, already
@@ -1176,8 +1228,7 @@ func (f *TerminalQueryFilter) endWrapperAtST() {
 		return
 	}
 	in := f.inner
-	switch in.state {
-	case qfStateOSCNum, qfStateOSC, qfStateAPCEntry, qfStateAPC, qfStateWrapMatch:
+	if in.holdsString() {
 		n := len(in.outBuf)
 		in.processByte(0x1b)
 		in.processByte('\\')

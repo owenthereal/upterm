@@ -64,11 +64,13 @@ func refDomainByte(b byte) byte {
 //     sequence isn't known to be a query until it ends, so every sequence is
 //     held to its bound;
 //   - a byte that would take a tmux wrapper past what the filter classifies
-//     (refWrapper): a wrapper nested inside one, a second inner sequence, or
-//     a raw byte past 256 from the wrapper's ESC P before its first inner
-//     sequence has ended. A wrapper passes byte for byte once that first
-//     sequence is no query, so a query nested in it or following that
-//     sequence passes, a limit the filter states.
+//     (refWrapper): a wrapper nested inside one, a second inner sequence in
+//     a wrapper whose first passed, or a raw byte past 256 from the
+//     wrapper's ESC P before its first inner sequence has ended. A wrapper
+//     passes byte for byte once that first sequence is no query, so a query
+//     nested in it or following that sequence passes, a limit the filter
+//     states. Once the first is dropped, the rest of the wrapper is ordinary
+//     output, classified whole, and stays in the domain.
 //
 // Nothing else is changed, so an input already in the domain comes back as it
 // was. Where a sequence starts and how much of it the filter holds is read
@@ -92,8 +94,9 @@ func refGenerate(seed []byte) []byte {
 // refWrapper follows a tmux wrapper through refGenerate the way the filter
 // decodes it, from the reference parser's events and a parser of its own over
 // the decoded stream, so that refGenerate keeps one in the domain only while
-// the filter classifies all of it: one wrapper, not nested, whose inner stream
-// is one sequence, within the wrapper's bound until that sequence has ended.
+// the filter classifies all of it: one wrapper, not nested, within the
+// wrapper's bound until its first inner sequence has ended, and, if that
+// sequence passes, with no second one.
 //
 // Raw bytes decode in pairs after an ESC: ESC ESC is one inner ESC, ESC \ is
 // the outer ST, and any other ESC x ends the wrapper, as a CAN or SUB does
@@ -102,13 +105,23 @@ func refGenerate(seed []byte) []byte {
 // the reference parser's to keep (pastBound): a DEC terminal ends the
 // wrapper's DCS at its first raw ESC and parses the inner sequence as it would
 // any other.
+//
+// How the first inner sequence ends decides the rest (inner1). If it passes,
+// the wrapper passes byte for byte, and a second inner sequence would pass
+// unclassified, so it is cut. If it is dropped, the rest of the wrapper is
+// ordinary output, which the filter reads from ground as a DEC terminal does,
+// so refWrapper lets the wrapper go (on goes false), and what follows is in
+// the domain as any output is. Which way it ends is read from the reference
+// parser and the oracle's own classification (refRemoves), never from the
+// filter.
 type refWrapper struct {
-	on      bool      // inside a wrapper, past its "tmux;"
+	on      bool      // inside a wrapper, past its "tmux;", whose first inner sequence hasn't been dropped
 	start   int       // offset of the wrapper's ESC P
 	esc     bool      // a raw ESC whose pair is still to come
 	begun   bool      // the first inner ESC has arrived
 	closing bool      // an inner ESC has ended the inner sequence's string, so only '\' completes it
-	ended   bool      // the inner sequence has ended
+	str     int       // the index in inner.events of the string that ESC ended, or -1 for a DCS-ignore, which reports none
+	ended   bool      // the inner sequence has ended and passed, so the wrapper passes byte for byte
 	inner   refParser // the decoded stream, from the first inner ESC
 	at      int       // the decoded stream's next offset
 }
@@ -153,38 +166,84 @@ func (w *refWrapper) takes(p *refParser, c byte, at int) bool {
 }
 
 // inner1 takes c, a byte of the decoded stream, and reports whether it keeps
-// the inner stream to one sequence. A decoded ESC begins the sequence, or
-// ends the string it is. After that ESC, '\' completes the string's ST, a
-// cancel cancels the ESC, and a control byte the escape state executes or
-// ignores leaves it waiting; anything else would begin a second sequence, as
-// would an ESC that abandons a head or follows the sequence's end.
+// the input in the domain. A decoded ESC begins the first inner sequence, or
+// ends the string it is, or abandons the head it is. After a string's ESC,
+// '\' completes the string's ST, a cancel cancels the ESC, and a control byte
+// the escape state executes or ignores leaves it waiting.
+//
+// Where the sequence ends, the oracle says whether the filter dropped it:
+//   - a string an inner ESC ended, at the byte after that ESC: if it is a
+//     query, or if it was held to its end (refHeldAtEnd) and c isn't the '\'
+//     that makes the ESC its ST (refRemoves);
+//   - a head or a DCS header an inner ESC abandons, always: the terminal
+//     discards it, and so does the filter;
+//   - a sequence that ends in ground: by refRemoves on the event it ended
+//     with, a cancel's abnormal. With no event, a cancel ended it, and it was
+//     dropped if the filter held it, an OSC (which DEC discards) or a DCS
+//     header (which never hooked), and passed if it was a head, which goes out
+//     with the cancel, or had already passed, a CSI-ignore or a DCS-ignore.
+//
+// A dropped sequence lets the wrapper go. One that passed leaves it passing,
+// so an ESC that would begin a second inner sequence is cut, as is one after
+// a CSI-ignore, which has passed already.
 func (w *refWrapper) inner1(c byte) bool {
+	prev, n := w.inner.state, len(w.inner.events)
 	switch {
 	case !w.begun:
 		w.begun = true
 	case w.ended:
-		if c == 0x1b {
-			return false
-		}
-		return true // in ground: text and controls, which start nothing
+		return c != 0x1b // in ground: text and controls, which start nothing
 	case w.closing:
+		if w.str >= 0 && refRemoves(w.inner.events[w.str], c != '\\') {
+			w.on = false
+			return true
+		}
 		waits := c != 0x1b && refTable[c][rsEscape].state == rsEscape
 		if c != '\\' && c != 0x18 && c != 0x1a && !waits {
 			return false
 		}
 		w.closing = waits
 	case c == 0x1b:
-		switch w.inner.state {
+		switch prev {
 		case rsOSCString, rsDCSPassthrough, rsDCSIgnore, rsSOSPMAPCString:
 			w.closing = true
-		default:
+		case rsCSIIgnore:
 			return false
+		default:
+			w.on = false
+			return true
 		}
 	}
 	w.inner.next(c, w.at)
 	w.at++
-	w.ended = !w.closing && w.inner.state == rsGround
+	switch {
+	case w.closing && c == 0x1b:
+		w.str = -1
+		if len(w.inner.events) > n {
+			w.str = n
+		}
+	case !w.closing && w.inner.state == rsGround:
+		if refFirstDropped(prev, w.inner.events[n:]) {
+			w.on = false
+		} else {
+			w.ended = true
+		}
+	}
 	return true
+}
+
+// refFirstDropped reports whether a wrapper's first inner sequence, which has
+// just ended in ground from state prev, reporting evs, was dropped: inner1's
+// last case.
+func refFirstDropped(prev refState, evs []refEvent) bool {
+	if len(evs) > 0 && evs[0].kind != refExecute {
+		return refRemoves(evs[0], evs[0].end == 0x18 || evs[0].end == 0x1a)
+	}
+	switch prev {
+	case rsOSCString, rsDCSEntry, rsDCSParam, rsDCSIntermediate:
+		return true
+	}
+	return false
 }
 
 // pastBound reports whether c, at offset at, would have the filter hold the
@@ -243,11 +302,11 @@ func (p *refParser) wraps(c byte) bool {
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
 // refAlphabet or 0xA0–0xFF, no sequence in it passes its bound, and every tmux
-// wrapper in it is one the filter classifies whole: not nested, and with one
-// inner sequence. The rows that aren't are named below: nine pin the bounds
-// themselves, and four a wrapper's second inner sequence or a nested one.
-// refGenerate has to give every other row back unchanged, single wrappers
-// included.
+// wrapper in it is one the filter classifies whole: not nested, and with no
+// second inner sequence unless its first was dropped. The rows that aren't are
+// named below: nine pin the bounds themselves, and one a nested wrapper.
+// refGenerate has to give every other row back unchanged, wrappers whose
+// first inner sequence is dropped and what follows it included.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
 // "a" + query + "b". refDomainByte maps that text within its class, so the
@@ -267,14 +326,12 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		"an over-bound wrapper passes",
 		"a cancel at a wrapper's bound",
 	}
-	// Past what the filter classifies in a wrapper: a nested wrapper, and an
-	// inner sequence after the first, which a dropped first one leaves to
-	// ordinary output but a passed one would carry through.
+	// Past what the filter classifies in a wrapper: a nested wrapper. An inner
+	// sequence after the first is in the domain when the first was dropped,
+	// which leaves the rest of the wrapper to ordinary output, as in the rows
+	// where an inner ESC ends or abandons the first.
 	wrapperLimits := []string{
 		"nested wrapper passes (stated limit)",
-		"wrapped DCS query ended by an inner ESC",
-		"inner drop ended by an inner ESC, after a complete pair",
-		"a nested header ending in t, ended by an ESC",
 	}
 	identity, high := 0, 0
 	for _, c := range filterCases {
@@ -312,11 +369,17 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	for _, q := range []string{"\x1b_Gi=1,a=q\x07X;\x1b\\", "\x1b_Gi=1,a=q;\x1b\\"} {
 		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
 	}
-	// And single wrappers, a wrapped query among them, whole.
+	// And single wrappers, a wrapped query among them, whole, and what follows
+	// a dropped first inner sequence, a second one among it.
 	for _, q := range []string{"\x1bPtmux;\x1b\x1b[6nX\x1b\\", "\x1bPtmux;\x1b\x1b_Ga=q;aaaa\x1b\x1b\\\x1b\\",
-		"\x1bPtmux;\x1b\x1bP+q544a\x18X\x1b\\"} {
+		"\x1bPtmux;\x1b\x1bP+q544a\x18X\x1b\\", "\x1bPtmux;\x1b\x1b[6n\x1b\x1b[1m\x1b\x1b[6n\x1b\\",
+		"\x1bPtmux;\x1b\x1b]0;t\x1b\x1b[1m\x1b\x1b]11;?\x07\x1b\\"} {
 		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
 	}
+	// A second inner sequence after one that passed is cut, and the raw ESC
+	// left unpaired then ends the wrapper, so what follows is ordinary output.
+	require.Equal(t, "\x1bPtmux;\x1b\x1b[1m\x1b[6n\x1b\\",
+		string(refGenerate([]byte("\x1bPtmux;\x1b\x1b[1m\x1b\x1b[6n\x1b\\"))))
 }
 
 // FuzzTerminalQueryFilter checks that, whatever refGenerate makes of the

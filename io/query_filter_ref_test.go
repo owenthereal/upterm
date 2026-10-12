@@ -799,8 +799,7 @@ func refCheck(in string, filter func(string) string) string {
 	innerST := refInnerST([]byte(x), evs)
 	for _, ev := range evs {
 		abnormal := ev.end == 0x1b && !innerST[ev.endAt] || ev.end == 0x18 || ev.end == 0x1a
-		policy := refHeldAtEnd(ev) && abnormal
-		if !refQuery(refDEC, ev) && !policy && !refNoEffect(ev) {
+		if !refRemoves(ev, abnormal) && !refNoEffect(ev) {
 			want = append(want, refSemantic(ev))
 		}
 	}
@@ -816,6 +815,13 @@ func refCheck(in string, filter func(string) string) string {
 		}
 	}
 	return ""
+}
+
+// refRemoves reports whether preservation takes ev out of the input's effects:
+// a query, or a string the filter holds to its end (refHeldAtEnd) that ended
+// abnormally, which it drops by policy.
+func refRemoves(ev refEvent, abnormal bool) bool {
+	return refQuery(refDEC, ev) || abnormal && refHeldAtEnd(ev)
 }
 
 // refInnerST returns the raw offsets at which a tmux wrapper's first inner
@@ -1228,6 +1234,12 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		{"\x1bP1tmux;\x1b\x1b[31mX\x1b\\", "\x1bP1tmux;\x1b\x1b[31mX\x1b\\\x18"}, // a header with a parameter
 		{"\x1bP$tmux;\x1b\x1b[6n\x1b\\", "\x1b\\\x18"},                           // a header with an intermediate
 		{"\x1bPtmux;\x1b(\x1b[6nX", "X\x18"},                                     // a lone ESC ( in a held wrapper
+		// An inner ESC that abandons a head drops it with the wrapper, and the
+		// rest, from the pair's second raw ESC, is ordinary output.
+		{"\x1bPtmux;\x1b\x1b(\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1b[6\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1bP+\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1b_Ga=q\x1b\x1b\\\x1b\\X", "\x1b\\X\x18"}, // a graphics query decided at its own ST
 		// A DCS whose header ends in t is held while it matches "mux;", so
 		// one that ends abnormally there is dropped by policy.
 		{"\x1bPtmu\x1b[1mX", "\x1b[1mX\x18"},

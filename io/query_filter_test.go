@@ -659,6 +659,42 @@ func TestTerminalQueryFilter_PendingReachesItsMaximumInAWrapper(t *testing.T) {
 	require.Equal(t, 259, maxPendingBytes)
 }
 
+// Every state is in exactly one of the lists the filter acts on: ground, a
+// held head, DCS header, string, or string and the ESC that ended it, which
+// together are holding, passing, Dropping, or a tmux wrapper's own. innerByte
+// reads an inner machine's state through them, and a state they missed used
+// to fall through to passing the wrapper, a query in it included. So a state
+// added to no list, or to two, fails here. A wrapper's own states are listed
+// by hand: the inner machine never enters them.
+func TestTerminalQueryFilter_EveryStateIsInOneList(t *testing.T) {
+	wrapper := []queryFilterState{qfStateWrapLead, qfStateWrapLeadEsc, qfStateWrapHead, qfStateWrapHeadEsc,
+		qfStateWrapper, qfStateWrapperEsc}
+	for s := range qfStateCount {
+		f := &TerminalQueryFilter{state: s}
+		var in []string
+		for _, l := range []struct {
+			name string
+			has  bool
+		}{
+			{"ground", s == qfStateNormal},
+			{"holdsHead", f.holdsHead()},
+			{"holdsHeader", f.holdsHeader()},
+			{"holdsString", f.holdsString()},
+			{"holdsStringEsc", f.holdsStringEsc()},
+			{"passing", f.passing()},
+			{"Dropping", f.Dropping()},
+			{"wrapper", slices.Contains(wrapper, s)},
+		} {
+			if l.has {
+				in = append(in, l.name)
+			}
+		}
+		require.Len(t, in, 1, "state %d is in %v", s, in)
+		require.Equal(t, f.holdsHead() || f.holdsHeader() || f.holdsString() || f.holdsStringEsc(), f.holding(),
+			"state %d: holding is the four kinds of hold", s)
+	}
+}
+
 // errWriter is a writer that always returns an error
 type errWriter struct {
 	err error
@@ -1066,6 +1102,18 @@ var wrapperCases = []filterCase{
 	// A first inner sequence that starts a wrapper is held while it matches,
 	// as at the top, so one that ends abnormally there is dropped.
 	{name: "a nested header ending in t, ended by an ESC", in: "\x1bPtmux;\x1b\x1bPtmu\x1b\x1b[6nX\x1b\\", want: "X\x1b\\"},
+	// An inner ESC that abandons a head or a DCS header drops it with the
+	// wrapper, and output resumes at the pair's second raw ESC, where a DEC
+	// terminal starts what follows: an SGR there passes, and a DSR after it
+	// is dropped. Taken for a restart of the inner sequence instead, the SGR
+	// decided the wrapper, which passed with the DSR in it.
+	{name: "an inner ESC abandons a wrapped ESC sequence", in: "\x1bPtmux;\x1b\x1b(\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", want: "\x1b[1m\x1b\\X"},
+	{name: "an inner ESC abandons a wrapped CSI head", in: "\x1bPtmux;\x1b\x1b[6\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", want: "\x1b[1m\x1b\\X"},
+	{name: "an inner ESC abandons a wrapped DCS header", in: "\x1bPtmux;\x1b\x1bP+\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", want: "\x1b[1m\x1b\\X"},
+	// A graphics command with no ';' is held to its end, here its own ST, and
+	// decided there: the query is dropped with the wrapper, and what follows
+	// goes out, the outer ST as a lone ST.
+	{name: "a wrapped graphics query held to its own ST", in: "\x1bPtmux;\x1b\x1b_Ga=q\x1b\x1b\\\x1b\\X", want: "\x1b\\X"},
 	// Found by the fuzz test: a held inner string that ends at its own ST,
 	// raw ESC ESC \, ends cleanly in the decoded stream, so one that is no
 	// query passes with the wrapper, though a DEC terminal ends it at the
