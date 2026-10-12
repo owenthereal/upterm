@@ -140,6 +140,18 @@ var CallbackTestCases = []FtestCase{
 	testHostSessionCreatedCallback,
 }
 
+// JoinTestCases contains upterm join's guest against real relays and hosts
+var JoinTestCases = []FtestCase{
+	testJoinRefusedAcrossNodesStops,
+	testJoinSecondKeyGetsInAcrossNodes,
+	testJoinExitsWithTheSessionsStatus,
+	testJoinAuthorizedUnauthorizedAndKeyless,
+	testJoinUnknownIDFailsAtTheDeadline,
+	testJoinWithASilentAgentAndAnAuthorizedFile,
+	testJoinRejoinNeverTrustsANewRelayKey,
+	testJoinForcedCommandEndsOnlyTheConnection,
+}
+
 // BackwardCompatibilityTestCases contains tests for backward compatibility scenarios
 var BackwardCompatibilityTestCases = []FtestCase{
 	testOldClientToNewConsulServer,
@@ -190,6 +202,10 @@ func (suite *FtestSuite) TestConnection() {
 
 func (suite *FtestSuite) TestCallbacks() {
 	suite.runTestCategory(CallbackTestCases)
+}
+
+func (suite *FtestSuite) TestJoin() {
+	suite.runTestCategory(JoinTestCases)
 }
 
 func (suite *FtestSuite) TestBackwardCompatibility() {

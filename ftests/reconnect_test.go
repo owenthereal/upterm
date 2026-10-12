@@ -81,6 +81,8 @@ func (suite *FtestSuite) TestReconnect() {
 		{"MovedToAnotherNodeAfterABlackhole", routing.ModeConsul, redialToAnotherNode((*testhelpers.Forwarder).Blackhole)},
 		{"NodeShutDownForADeploy", "", testRedialWhenANodeShutsDown},
 		{"TunnelBlackholed", "", testRedialAfterABlackhole},
+		// A guest on upterm join rejoins once the host has redialled.
+		{"JoinedGuestRejoinsAfterACut", "", testJoinRejoinsAfterTheHostsTunnelDrops},
 	}
 	for _, sc := range scenarios {
 		if sc.only != "" && sc.only != suite.mode {
