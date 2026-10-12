@@ -62,6 +62,7 @@ Environment Variables:
 * [upterm attach](upterm_attach.md)	 - Attach this terminal to a running session
 * [upterm config](upterm_config.md)	 - Manage upterm configuration
 * [upterm host](upterm_host.md)	 - Host a terminal session
+* [upterm join](upterm_join.md)	 - Join a session as a guest, and rejoin it after a drop
 * [upterm proxy](upterm_proxy.md)	 - Proxy a terminal session via WebSocket
 * [upterm session](upterm_session.md)	 - Display and manage terminal sessions
 * [upterm upgrade](upterm_upgrade.md)	 - Upgrade the CLI

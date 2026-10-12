@@ -108,6 +108,7 @@ Environment Variables:
 	rootCmd.AddCommand(attachCmd())
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(hostCmd())
+	rootCmd.AddCommand(joinCmd())
 	rootCmd.AddCommand(proxyCmd())
 	rootCmd.AddCommand(sessionCmd())
 	rootCmd.AddCommand(upgradeCmd())

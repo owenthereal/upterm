@@ -599,6 +599,53 @@ _upterm_host()
     noun_aliases=()
 }
 
+_upterm_join()
+{
+    last_command="upterm_join"
+
+    command_aliases=()
+
+    commands=()
+
+    flags=()
+    two_word_flags=()
+    local_nonpersistent_flags=()
+    flags_with_completion=()
+    flags_completion=()
+
+    flags+=("--escape-char=")
+    two_word_flags+=("--escape-char")
+    local_nonpersistent_flags+=("--escape-char")
+    local_nonpersistent_flags+=("--escape-char=")
+    flags+=("--help")
+    flags+=("-h")
+    local_nonpersistent_flags+=("--help")
+    local_nonpersistent_flags+=("-h")
+    flags+=("--known-hosts=")
+    two_word_flags+=("--known-hosts")
+    local_nonpersistent_flags+=("--known-hosts")
+    local_nonpersistent_flags+=("--known-hosts=")
+    flags+=("--private-key=")
+    two_word_flags+=("--private-key")
+    two_word_flags+=("-i")
+    local_nonpersistent_flags+=("--private-key")
+    local_nonpersistent_flags+=("--private-key=")
+    local_nonpersistent_flags+=("-i")
+    flags+=("--proxy=")
+    two_word_flags+=("--proxy")
+    local_nonpersistent_flags+=("--proxy")
+    local_nonpersistent_flags+=("--proxy=")
+    flags+=("--skip-host-key-check")
+    local_nonpersistent_flags+=("--skip-host-key-check")
+    flags+=("--wait")
+    local_nonpersistent_flags+=("--wait")
+    flags+=("--debug")
+
+    must_have_one_flag=()
+    must_have_one_noun=()
+    noun_aliases=()
+}
+
 _upterm_proxy()
 {
     last_command="upterm_proxy"
@@ -929,6 +976,7 @@ _upterm_root_command()
     commands+=("config")
     commands+=("help")
     commands+=("host")
+    commands+=("join")
     commands+=("proxy")
     commands+=("session")
     if [[ -z "${BASH_VERSION:-}" || "${BASH_VERSINFO[0]:-}" -gt 3 ]]; then
