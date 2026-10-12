@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// lineEndsCRLF is passphrasePrompt.crlf: with ICRNL, which echoOff sets,
+// the terminal's Enter is '\n' alone.
+const lineEndsCRLF = false
+
 // echoOff is passphrasePrompt.echoOff for the terminal f. It clears ECHO,
 // and keeps the line read whole and Ctrl-C a signal, as term.ReadPassword
 // does; in the cooked mode a prompt runs in, that changes nothing else. The

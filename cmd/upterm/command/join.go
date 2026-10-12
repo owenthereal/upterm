@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/join"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -34,12 +36,16 @@ type joinFlags struct {
 	proxy            string
 	escapeChar       string
 	wait             bool
+
+	// Set by resolveTarget, join's Args.
+	target join.Target
+	typed  string // the target as the guest typed it
 }
 
 func joinCmd() *cobra.Command {
 	var f joinFlags
 	cmd := &cobra.Command{
-		Use:   "join TARGET",
+		Use:   "join [flags] TARGET",
 		Short: "Join a session as a guest, and rejoin it after a drop",
 		Long: `Join a session as a guest, and rejoin it whenever the connection drops.
 
@@ -63,9 +69,16 @@ when stopped, and 255 when it can't join.`,
 
   # Wait for a host that hasn't connected yet, with no 30 s limit:
   upterm join --wait ID@uptermd.upterm.dev`,
-		Args: cobra.MinimumNArgs(1),
+		Args: f.resolveTarget,
 		RunE: f.run,
+		// Every failure, a flag's or a missing target's before RunE too, is
+		// told on one line of upterm join's own, which nothing repeats.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return joinFailure("upterm: " + err.Error())
+	})
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -73,6 +86,10 @@ when stopped, and 255 when it can't join.`,
 		os.Exit(1)
 	}
 	flags := cmd.Flags()
+	// join's flags stop at the first argument that isn't one, as ssh's do,
+	// so that an unquoted paste of an ssh command, -p and -o included,
+	// reaches resolveTarget whole.
+	flags.SetInterspersed(false)
 	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
 	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(homeDir), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
 	// Keep help and generated docs portable without changing the runtime
@@ -86,20 +103,66 @@ when stopped, and 255 when it can't join.`,
 	return cmd
 }
 
-func (f *joinFlags) run(c *cobra.Command, args []string) error {
-	// Cobra raises unknown flags and a missing target before this, and usage
-	// answers those. Every failure from here on is told on one line of
-	// upterm join's own, which nothing repeats.
-	c.SilenceUsage = true
-	c.SilenceErrors = true
-
-	// An unquoted paste of an ssh command arrives as several arguments, and
-	// is recognised only as the one text it was.
-	typed := strings.Join(args, " ")
-	target, err := join.ParseTarget(typed)
-	if err != nil {
-		return joinFailure(notATargetLine(typed, err))
+// resolveTarget is join's Args. It finds the target, and any of join's flags
+// typed after it, before root's PersistentPreRunE reads which flags were
+// supplied, so that those count as much as flags before it.
+//
+// An unquoted paste of an ssh command arrives as several arguments, and is
+// read as the one text it was (R6). A text refused with no suggestion, whose
+// first argument is a target by itself and a later one starts with "-", is
+// that target and join's flags after it: upterm join ID@host --wait.
+func (f *joinFlags) resolveTarget(c *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(c, args); err != nil {
+		return joinFailure("upterm: " + err.Error())
 	}
+	typed := pastedText(args)
+	target, err := join.ParseTarget(typed)
+	if err == nil {
+		f.target, f.typed = target, typed
+		return nil
+	}
+	var bad *join.TargetError
+	suggested := errors.As(err, &bad) && bad.Suggestion != ""
+	isFlag := func(arg string) bool { return strings.HasPrefix(arg, "-") }
+	if first, ferr := join.ParseTarget(args[0]); ferr == nil && !suggested && slices.ContainsFunc(args[1:], isFlag) {
+		flags := c.Flags()
+		if err := flags.Parse(args[1:]); err != nil {
+			return joinFailure("upterm: " + err.Error())
+		}
+		// Cobra looked for --help before the target only.
+		if help, _ := flags.GetBool("help"); help {
+			return pflag.ErrHelp
+		}
+		if flags.NArg() == 0 {
+			f.target, f.typed = first, args[0]
+			return nil
+		}
+	}
+	return joinFailure(notATargetLine(typed, err))
+}
+
+// pastedText is args as the one text a paste of a command was: joined with
+// spaces, each quoted as a shell needs to read it back as the same argument.
+// So the words the guest's shell split are the words the target parser
+// reads: the ws form's ProxyCommand is one argument that holds spaces and
+// quotes, which joined as it is would read as three words.
+func pastedText(args []string) string {
+	if len(args) == 1 {
+		return args[0]
+	}
+	const plain = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./_-"
+	words := make([]string, len(args))
+	for i, arg := range args {
+		words[i] = arg
+		if arg == "" || strings.ContainsFunc(arg, func(r rune) bool { return !strings.ContainsRune(plain, r) }) {
+			words[i] = quoteShellArg(arg)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+func (f *joinFlags) run(c *cobra.Command, _ []string) error {
+	target, typed := f.target, f.typed
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
 	if lt.pty == nil || !lt.rawMode {
 		return joinFailure(needsATerminal)
@@ -125,7 +188,7 @@ func (f *joinFlags) run(c *cobra.Command, args []string) error {
 		IdentitiesOnly: identitiesOnlyRequested(),
 		Files:          f.privateKeys,
 		AgentSocket:    os.Getenv("SSH_AUTH_SOCK"),
-		Passphrase:     passphrasePrompt{in: os.Stdin, out: st.writer(), echoOff: echoOff(os.Stdin)}.prompt,
+		Passphrase:     passphrasePrompt{in: os.Stdin, out: st.writer(), echoOff: echoOff(os.Stdin), crlf: lineEndsCRLF}.prompt,
 		OnSkip:         func(file string, err error) { _, _ = fmt.Fprintln(st.writer(), skipLine(file, err)) },
 		OnAgentSkip:    func(err error) { _, _ = fmt.Fprintln(st.writer(), agentSkipLine(err)) },
 	})
@@ -185,11 +248,8 @@ func (f *joinFlags) run(c *cobra.Command, args []string) error {
 		Events: st.event,
 		Wait:   f.wait,
 	})
-	raw.restore()
-	st.raw(false)
-
 	line, code := renderOutcome(out, target, identity.Source(), typed)
-	st.last(line)
+	finishJoin(raw.restore, st, line)
 	if code == 0 {
 		return nil
 	}
@@ -201,6 +261,17 @@ func (f *joinFlags) run(c *cobra.Command, args []string) error {
 func joinFailure(line string) error {
 	_, _ = fmt.Fprintln(os.Stderr, line)
 	return ExitCodeError{Code: exitJoinFailed}
+}
+
+// finishJoin is what upterm join does once join.Run has returned: the
+// guest's terminal put back as it was, then the run's last line. Nothing here
+// may wait on the status without a bound. A status line that a stop
+// abandoned may still hold it, writing to a terminal that stopped taking
+// output (join.Config.Events), and SIGINT and SIGTERM are caught, so only
+// kill -9 would end the wait. last waits within its bound (rule 10).
+func finishJoin(restore func(), st *joinStatus, line string) {
+	restore()
+	st.last(line)
 }
 
 // terminalSize is f's size, or the default size when it can't be measured.
@@ -336,6 +407,11 @@ type passphrasePrompt struct {
 	// echoOff turns the terminal's echo off, and returns what turns it back
 	// on: see join_echo_unix.go and join_echo_windows.go.
 	echoOff func() (restore func(), err error)
+	// crlf is the Windows console's line end: its line input hands a line
+	// over with the Enter as "\r\n", so '\r' is dropped and '\n' ends the
+	// line, which leaves nothing of it for the next read. Elsewhere either
+	// ends the line (see lineEndsCRLF).
+	crlf bool
 }
 
 // prompt asks for file's passphrase and reads one line with echo off. It
@@ -400,6 +476,8 @@ func (p passphrasePrompt) prompt(ctx context.Context, file string) ([]byte, erro
 				return line, nil
 			case r.err != nil:
 				return nil, r.err
+			case r.b == '\r' && p.crlf:
+				continue
 			case r.b == '\r' || r.b == '\n':
 				return line, nil
 			}

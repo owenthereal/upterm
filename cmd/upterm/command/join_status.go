@@ -34,10 +34,13 @@ const needsATerminal = "upterm: upterm join needs a terminal."
 // It isn't called status, the name the plan gives it, because this package
 // imports grpc's status package.
 type joinStatus struct {
-	mu      sync.Mutex
-	w       io.Writer
-	tty     bool // w is a terminal
-	rawMode bool // the terminal is in raw mode, where a line ends "\r\n"
+	mu  sync.Mutex
+	w   io.Writer
+	tty bool // w is a terminal
+	// rawMode says TakeTerminal has put the terminal in raw mode, where a
+	// line ends "\r\n". It stays set once Run returns, when only last
+	// writes, which doesn't read it.
+	rawMode bool
 	open    bool // an in-place waiting line has been written without its end
 	// joined says a session has been ready, so its output may have left the
 	// cursor anywhere on the line.
@@ -53,7 +56,8 @@ func newStatus(w io.Writer, tty bool, t join.Target, wait bool) *joinStatus {
 
 // raw sets the line ending: "\r\n" once TakeTerminal has put the terminal in
 // raw mode, where "\n" alone moves down without going back to the margin.
-// A file or a pipe keeps "\n" either way.
+// A file or a pipe keeps "\n" either way. It waits on the status's lock, so
+// nothing calls it once Run has returned (see finishJoin).
 func (s *joinStatus) raw(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

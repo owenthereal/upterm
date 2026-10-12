@@ -17,7 +17,7 @@ Exits with the session's status when one arrives, 0 when you leave (~.), 130
 when stopped, and 255 when it can't join.
 
 ```
-upterm join TARGET [flags]
+upterm join [flags] TARGET
 ```
 
 ### Examples

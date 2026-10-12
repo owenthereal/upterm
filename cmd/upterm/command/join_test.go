@@ -18,9 +18,12 @@ import (
 	"time"
 
 	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/host/api"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/liveness"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/join"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -200,6 +203,49 @@ func TestStatusEndsTheWaitingLineWhenAFirstJoinSucceeds(t *testing.T) {
 	require.True(t, strings.HasSuffix(b.String(), "next try in 1 s\r\n"), "%q", b.String())
 }
 
+// stuckWriter is a terminal that stopped taking output: a Write blocks until
+// the test ends.
+type stuckWriter struct {
+	entered chan struct{}
+	once    sync.Once
+	release chan struct{}
+}
+
+func (w *stuckWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+
+// A status line that join abandoned as it stopped may still be writing to a
+// terminal that stopped taking output, holding the status's lock
+// (join.Config.Events). What upterm join does once Run returns waits on it
+// no longer than the last line's bound, or a stop could never exit (rule 10).
+func TestFinishJoinDoesNotWaitOnAnAbandonedStatusLine(t *testing.T) {
+	w := &stuckWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(w.release) })
+	s := newStatus(w, true, mustTarget(t), false)
+	s.raw(true)
+	go s.event(waiting(join.NoHost, 1))
+	<-w.entered
+
+	restored, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		finishJoin(func() { close(restored) }, s, "upterm: stopped")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(logging.LogBound + time.Second):
+		t.Fatal("upterm join's exit waited on a status line that join abandoned")
+	}
+	select {
+	case <-restored:
+	default:
+		t.Fatal("the terminal wasn't restored")
+	}
+}
+
 func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) { // spec test 19 (the command's half), D11
 	type modeLog struct {
 		mu  sync.Mutex
@@ -277,12 +323,33 @@ func (c *countingReader) reads() int { c.mu.Lock(); defer c.mu.Unlock(); return 
 // Once the line is complete no read is pending, so whatever reads the
 // terminal next, another prompt or join itself, gets every key typed after
 // it.
+// The same holds on both platforms' line ends.
 func TestPassphrasePromptLeavesNoReadPending(t *testing.T) {
-	in := &countingReader{r: strings.NewReader("secret\nNEXT")}
-	p := passphrasePrompt{in: in, out: io.Discard, echoOff: func() (func(), error) { return func() {}, nil }}
-	_, err := p.prompt(context.Background(), "id")
+	for _, crlf := range []bool{false, true} {
+		src := strings.NewReader("secret\nNEXT")
+		in := &countingReader{r: src}
+		p := passphrasePrompt{in: in, out: io.Discard, echoOff: func() (func(), error) { return func() {}, nil }, crlf: crlf}
+		pass, err := p.prompt(context.Background(), "id")
+		require.NoError(t, err)
+		require.Equal(t, "secret", string(pass))
+		require.Never(t, func() bool { return in.reads() != len("secret\n") }, 50*time.Millisecond, time.Millisecond, "crlf=%v", crlf)
+		rest, _ := io.ReadAll(src)
+		require.Equal(t, "NEXT", string(rest), "crlf=%v", crlf)
+	}
+}
+
+// The Windows console, in the line input the prompt keeps, hands a line over
+// with its Enter as "\r\n". The prompt reads it to the '\n', so neither the
+// next prompt nor another try at the same key reads an empty passphrase from
+// what it left.
+func TestPassphrasePromptReadsTheConsoleLineToItsEnd(t *testing.T) {
+	in := strings.NewReader("a\r\nb\r\n")
+	p := passphrasePrompt{in: in, out: io.Discard, echoOff: func() (func(), error) { return func() {}, nil }, crlf: true}
+	first, err := p.prompt(context.Background(), "id")
 	require.NoError(t, err)
-	require.Never(t, func() bool { return in.reads() != len("secret\n") }, 50*time.Millisecond, time.Millisecond)
+	second, err := p.prompt(context.Background(), "id")
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, []string{string(first), string(second)})
 }
 
 // The prompt is today's, and the newline the guest's Enter didn't echo is
@@ -308,11 +375,72 @@ func TestJoinRefusesABadTargetAndANonTerminal(t *testing.T) {
 }
 
 // An unquoted paste of an ssh command arrives as several arguments, which
-// are read as one text so that the command it is can be recognised.
+// are read as one text so that the command it is can be recognised. join's
+// flags stop at the first argument, so the command's own flags, -p and -o,
+// arrive among them.
 func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
-	stderr, code := runRoot(t, "join", "ssh", "abc@relay.test")
+	// The commands as upterm prints them, and the arguments the guest's shell
+	// makes of each.
+	direct, err := buildSessionDetail(&api.GetSessionResponse{Host: "ssh://relay.test:2222", SshUser: "abc"})
+	require.NoError(t, err)
+	require.Equal(t, "ssh abc@relay.test -p 2222", direct.SSHCommand)
+	proxied, err := buildSessionDetail(&api.GetSessionResponse{Host: "wss://relay.test", SshUser: "abc"})
+	require.NoError(t, err)
+	require.Equal(t, `ssh -o ProxyCommand='upterm proxy '\''wss://abc@relay.test'\''' abc@relay.test:443`, proxied.SSHCommand)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"ssh", "abc@relay.test"}, "upterm: not a join target: ssh abc@relay.test. Did you mean upterm join abc@relay.test?\n"},
+		{[]string{"ssh", "abc@relay.test", "-p", "2222"}, "upterm: not a join target: ssh abc@relay.test -p 2222. Did you mean upterm join abc@relay.test:2222?\n"},
+		{
+			[]string{"ssh", "-o", "ProxyCommand=upterm proxy 'wss://abc@relay.test'", "abc@relay.test:443"},
+			`upterm: not a join target: ssh -o 'ProxyCommand=upterm proxy '\''wss://abc@relay.test'\''' abc@relay.test:443. Did you mean upterm join wss://abc@relay.test?` + "\n",
+		},
+	} {
+		stderr, code := runRoot(t, append([]string{"join"}, tc.args...)...)
+		require.Equal(t, 255, code, "%q", tc.args)
+		require.Equal(t, tc.want, stderr, "%q", tc.args)
+	}
+}
+
+// Flags after a target that stands alone are join's own, as in the help's
+// --proxy example. They are supplied flags as much as ones before it: the
+// environment doesn't override them, and -i there is as explicit as -i first.
+func TestJoinTakesItsFlagsAfterTheTarget(t *testing.T) {
+	t.Setenv("UPTERM_PROXY", "http://env.invalid:3128")
+	suppliedFlags = map[string]bool{}
+	stderr, code, cmd := runRootCmd(t, "join", "abc@relay.test", "--wait", "--proxy", "http://flag.invalid:3128", "-i", "/no/such/key")
 	require.Equal(t, 255, code)
-	require.Equal(t, "upterm: not a join target: ssh abc@relay.test. Did you mean upterm join abc@relay.test?\n", stderr)
+	require.Equal(t, "upterm: upterm join needs a terminal.\n", stderr) // past the target, in a pipe
+	require.True(t, suppliedFlags["wait"])
+	require.True(t, identitiesOnlyRequested())
+	proxy, err := cmd.Flags().GetString("proxy")
+	require.NoError(t, err)
+	require.Equal(t, "http://flag.invalid:3128", proxy)
+
+	// --help after the target is help, not a join.
+	stderr, code = runRoot(t, "join", "abc@relay.test", "--help")
+	require.Equal(t, 0, code)
+	require.Empty(t, stderr)
+}
+
+// A flag join doesn't have, or no target at all, is a failure to join: one
+// line of its own, and 255.
+func TestJoinFlagErrorsAreOneLine(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--bogus", "abc@relay.test"}, "upterm: unknown flag: --bogus\n"},
+		{[]string{"abc@relay.test", "-p", "2222"}, "upterm: unknown shorthand flag: 'p' in -p\n"},
+		{nil, "upterm: requires at least 1 arg(s), only received 0\n"},
+	} {
+		stderr, code := runRoot(t, append([]string{"join"}, tc.args...)...)
+		require.Equal(t, 255, code, "%q", tc.args)
+		require.Equal(t, tc.want, stderr, "%q", tc.args)
+	}
 }
 
 // runRoot runs Root() with args, stdin and stdout pipes, and returns what it
@@ -320,6 +448,13 @@ func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
 // and state directories are the test's own, so the developer's config file
 // sets no flag.
 func runRoot(t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	stderr, code, _ := runRootCmd(t, args...)
+	return stderr, code
+}
+
+// runRootCmd is runRoot, and the command that ran.
+func runRootCmd(t *testing.T, args ...string) (string, int, *cobra.Command) {
 	t.Helper()
 	withConfig(t, "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -354,7 +489,7 @@ func runRoot(t *testing.T, args ...string) (string, int) {
 		_ = logger.Close()
 	}
 	require.NoError(t, stderrW.Close())
-	return <-collected, exitStatus(err)
+	return <-collected, exitStatus(err), cmd
 }
 
 var relayAddr = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 22}
