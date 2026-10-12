@@ -25,6 +25,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/join"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -58,6 +59,56 @@ func TestBuildSessionDetailSSH(t *testing.T) {
 			detail, err := buildSessionDetail(&api.GetSessionResponse{Host: tt.host, SshUser: "sid"})
 			require.NoError(t, err)
 			require.Equal(t, tt.want, detail.SSHCommand)
+		})
+	}
+}
+
+// The join line names the same relay and user as the ssh line, with the
+// scheme's default port left out. A URL a shell would read as something else
+// is quoted: zsh aborts on an unquoted [::1] as a glob that matches nothing.
+func TestBuildSessionDetailJoinCommand(t *testing.T) { // spec test 17
+	for _, tc := range []struct {
+		host, user, want string
+		target           join.Target // what join makes of the advertised URL
+	}{
+		{"ssh://uptermd.upterm.dev:22", "abc", "upterm join ssh://abc@uptermd.upterm.dev",
+			join.Target{Scheme: "ssh", User: "abc", Host: "uptermd.upterm.dev:22"}},
+		{"ssh://relay.test:2222", "abc", "upterm join ssh://abc@relay.test:2222",
+			join.Target{Scheme: "ssh", User: "abc", Host: "relay.test:2222"}},
+		{"ssh://relay.test:443", "abc", "upterm join ssh://abc@relay.test:443",
+			join.Target{Scheme: "ssh", User: "abc", Host: "relay.test:443"}},
+		{"wss://uptermd.upterm.dev:443", "abc", "upterm join wss://abc@uptermd.upterm.dev",
+			join.Target{Scheme: "wss", User: "abc", Host: "uptermd.upterm.dev:443"}},
+		{"ws://relay.test:80", "abc", "upterm join ws://abc@relay.test",
+			join.Target{Scheme: "ws", User: "abc", Host: "relay.test:80"}},
+		{"ssh://relay.test:22", "abc:bm9kZTE=", "upterm join ssh://abc:bm9kZTE=@relay.test",
+			join.Target{Scheme: "ssh", User: "abc:bm9kZTE=", Host: "relay.test:22"}},
+		{"ssh://[::1]:2222", "abc", "upterm join 'ssh://abc@[::1]:2222'",
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:2222"}},
+		{"ssh://[::1]:22", "abc", "upterm join 'ssh://abc@[::1]'",
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:22"}},
+		{"wss://[2001:db8::1]:443", "abc", "upterm join 'wss://abc@[2001:db8::1]'",
+			join.Target{Scheme: "wss", User: "abc", Host: "[2001:db8::1]:443"}},
+		{"ssh://[::1]", "abc", "upterm join 'ssh://abc@[::1]'", // parseURL's missing-port branch
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:22"}},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			d, err := buildSessionDetail(&api.GetSessionResponse{SessionId: "abc", Host: tc.host, SshUser: tc.user})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.JoinCommand)
+
+			// What a guest pastes, with the shell's quotes taken off, is a
+			// target join accepts, for this session on this relay.
+			arg, ok := strings.CutPrefix(d.JoinCommand, "upterm join ")
+			require.True(t, ok)
+			if unquoted, ok := strings.CutPrefix(arg, "'"); ok {
+				arg, ok = strings.CutSuffix(unquoted, "'")
+				require.True(t, ok)
+				require.NotContains(t, arg, "'")
+			}
+			got, err := join.ParseTarget(arg)
+			require.NoError(t, err)
+			require.Equal(t, tc.target, got)
 		})
 	}
 }
@@ -680,6 +731,8 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 	require.Equal(t, sessiondir.StatusReady, got["status"])
 	require.Equal(t, "sid-1", got["sessionId"])
 	require.NotEmpty(t, got["sshCommand"], "a live session that answered carries its connect string")
+	require.Equal(t, "upterm join ssh://sid-1:MTI3LjAuMC4xOjIyMjI=@127.0.0.1:2222", got["joinCommand"],
+		"and the join command beside it, for the same user and relay")
 
 	_, live, err := lookup(context.Background(), "ready")
 	require.NoError(t, err)
@@ -747,6 +800,7 @@ func Test_lookup_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
 	require.Equal(t, sessiondir.StatusReady, got["status"])
 	require.NotEmpty(t, got["sshCommand"],
 		"the socket the record names answered, so the session is joinable from here too")
+	require.NotEmpty(t, got["joinCommand"])
 	require.Equal(t, d.AdminSocket(), got["adminSocket"],
 		"and the answer says where it was reached")
 	require.Equal(t, d.AttachSocket(), got["attachSocket"],
@@ -781,6 +835,7 @@ func Test_lookup_ReadyWithSocketAnsweringForAnotherSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, live, "an answer about another session is not this session's live detail")
 	require.Empty(t, info.SSHCommand, "and none of it may reach the caller by another route")
+	require.Empty(t, info.JoinCommand)
 	require.Equal(t, "sid-recorded", info.SessionID)
 }
 
@@ -847,6 +902,7 @@ func Test_lookup_Disconnected(t *testing.T) {
 		"a held name keeps the status its owner published")
 	require.NotContains(t, got, "sshCommand",
 		"a socket that answers for a disconnected session does not make it joinable")
+	require.NotContains(t, got, "joinCommand")
 
 	_, live, err := lookup(context.Background(), "disconnected")
 	require.NoError(t, err)
@@ -1145,7 +1201,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// joinable.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -2131,6 +2187,7 @@ func Test_lookup_Reconnecting(t *testing.T) {
 
 	got := lookupJSON(t, "reconnecting")
 	require.NotEmpty(t, got["sshCommand"])
+	require.NotEmpty(t, got["joinCommand"])
 	for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
 		require.Contains(t, got, key)
 	}

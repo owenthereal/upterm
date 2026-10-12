@@ -172,6 +172,7 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.Equal(t, "/var/log/upterm.log", info.LogPath)
 	require.Equal(t, 4242, info.Pid)
 	require.Equal(t, "ssh u@127.0.0.1 -p 2222", info.SSHCommand)
+	require.Equal(t, "upterm join ssh://u@127.0.0.1:2222", info.JoinCommand)
 	require.Equal(t, sessiondir.ReasonUnknown, info.Reason,
 		"reason is a key `session info -o json` always publishes; this shape has to match it")
 	require.Equal(t, joinStateFromDaemon, info.JoinStateSource,

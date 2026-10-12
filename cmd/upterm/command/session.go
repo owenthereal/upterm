@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	uptermctx "github.com/owenthereal/upterm/internal/context"
+	"github.com/owenthereal/upterm/join"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
@@ -774,6 +775,7 @@ type sessionInfo struct {
 	Command      string `json:"command,omitempty"`
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
+	JoinCommand  string `json:"joinCommand,omitempty"`
 	ClientCount  int    `json:"clientCount"`
 	// GuestCount counts currently connected guests, including forwarding but
 	// excluding the session's own terminals. Scripts asking whether a terminal
@@ -1083,6 +1085,7 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	info.Command = detail.Command
 	info.ForceCommand = detail.ForceCommand
 	info.SSHCommand = detail.SSHCommand
+	info.JoinCommand = detail.JoinCommand
 	info.ConnectedClients = detail.ConnectedClients
 	info.ClientCount = len(detail.ConnectedClients)
 	info.GuestCount = countGuests(sess.ConnectedClients)
@@ -1589,6 +1592,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		Command:          strings.Join(sess.Command, " "),
 		ForceCommand:     strings.Join(sess.ForceCommand, " "),
 		Host:             u.Scheme + "://" + hostPort,
+		JoinCommand:      joinCommand(scheme, user, host, port),
 		SSHCommand:       sshCmd,
 		SFTPEnabled:      sftpEnabled,
 		SFTPCommand:      sftpCmd,
@@ -1599,6 +1603,31 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		Open:             sess.GetOpen(),
 	}, nil
 }
+
+// joinCommand is the `upterm join` line for the relay and user the ssh line
+// names: the scheme's default port left out and an IPv6 literal in brackets,
+// as Target.Relay writes them. The URL is quoted only when a shell would read
+// it as something else; zsh aborts on an unquoted [::1] as a glob that matches
+// nothing. Empty when join wouldn't take the relay's URL.
+func joinCommand(scheme, user, host, port string) string {
+	// parseURL's missing-port branch leaves an IPv6 literal in its brackets.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	t, err := join.ParseTarget(scheme + "://" + user + "@" + net.JoinHostPort(host, port))
+	if err != nil {
+		return ""
+	}
+	target := t.Scheme + "://" + t.User + "@" + t.Relay()
+	if strings.ContainsFunc(target, func(r rune) bool { return !strings.ContainsRune(shellSafe, r) }) {
+		target = quoteShellArg(target)
+	}
+	return "upterm join " + target
+}
+
+// shellSafe holds the characters the advertised join URL may hold unquoted: a
+// shell takes each literally after the scheme the URL starts with.
+const shellSafe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@:/._=+-"
 
 func quoteShellArg(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
