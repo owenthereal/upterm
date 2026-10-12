@@ -569,7 +569,7 @@ func shareGated(t *testing.T, hostURL, hostNodeAddr string) *api.GetSessionRespo
 	return shareOpen(t, hostURL, hostNodeAddr, func(h *Host) { h.PermittedClientPublicKey = ClientPublicKeyContent })
 }
 
-// testJoinRefusedAcrossNodesStops is spec test 23: a guest whose key the host
+// testJoinRefusedAcrossNodesStops checks that a guest whose key the host
 // doesn't authorize stops refused, and doesn't wait, even with --wait. Where
 // the route has a hop, ssh on another node, the session's node states the
 // refusal (upterm-hop: key refused, which the entry node passes on as
@@ -593,8 +593,8 @@ func testJoinRefusedAcrossNodesStops(t *testing.T, hostURL, hostNodeAddr, client
 	}
 }
 
-// testJoinSecondKeyGetsInAcrossNodes is spec test 33: of a guest's two keys,
-// the first unauthorized, the second gets in. Through another node over ssh,
+// testJoinSecondKeyGetsInAcrossNodes checks that of a guest's two keys, the
+// first unauthorized, the second gets in. Through another node over ssh,
 // the entry node lets the first key through and the session's node refuses
 // it when the session opens, so the guest attempts again at once without it.
 func testJoinSecondKeyGetsInAcrossNodes(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
@@ -604,8 +604,8 @@ func testJoinSecondKeyGetsInAcrossNodes(t *testing.T, hostURL, hostNodeAddr, cli
 	g.typeUntil(t, "echo joined-$((1+1))", "joined-2")
 }
 
-// testJoinExitsWithTheSessionsStatus is spec test 25: the session's command
-// exits, and the guest's run ends with its status.
+// testJoinExitsWithTheSessionsStatus checks that when the session's command
+// exits, the guest's run ends with its status.
 func testJoinExitsWithTheSessionsStatus(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	g := joinGuest(t, clientJoinURL, shareOpen(t, hostURL, hostNodeAddr), guestOpts{})
 	g.waitEvent(t, join.Joined, false)
@@ -614,8 +614,8 @@ func testJoinExitsWithTheSessionsStatus(t *testing.T, hostURL, hostNodeAddr, cli
 	require.Equal(t, join.Outcome{Kind: join.Exited, Status: 7}, g.outcome(t, 5*time.Second))
 }
 
-// testJoinAuthorizedUnauthorizedAndKeyless is spec test 26: on a session with
-// an authorized key, that key joins and another is refused; on an open
+// testJoinAuthorizedUnauthorizedAndKeyless checks that on a session with an
+// authorized key, that key joins and another is refused; on an open
 // session, a guest with no key of its own joins with a generated one.
 func testJoinAuthorizedUnauthorizedAndKeyless(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	gated := shareGated(t, hostURL, hostNodeAddr)
@@ -629,9 +629,9 @@ func testJoinAuthorizedUnauthorizedAndKeyless(t *testing.T, hostURL, hostNodeAdd
 		waitEvent(t, join.Joined, false)
 }
 
-// testJoinUnknownIDFailsAtTheDeadline is spec test 29: a session ID no relay
-// knows waits as for a host that hasn't connected, and fails at the first
-// join's deadline. Every topology and protocol ends the same way on relays
+// testJoinUnknownIDFailsAtTheDeadline checks that a session ID no relay knows
+// waits as for a host that hasn't connected, and fails at the first join's
+// deadline. Every topology and protocol ends the same way on relays
 // that pass the next hop's verdict on: raw ssh into an embedded multi-node
 // relay used to get the next hop's "unable to authenticate", while ws there
 // always got the destination's banner (see TestBanner). The deadline is the
@@ -651,7 +651,7 @@ func testJoinUnknownIDFailsAtTheDeadline(t *testing.T, hostURL, hostNodeAddr, cl
 	require.Less(t, time.Since(start), timing.FirstJoin+time.Second)
 }
 
-// testJoinWithASilentAgentAndAnAuthorizedFile is spec test 34 end to end: an
+// testJoinWithASilentAgentAndAnAuthorizedFile checks, end to end, that an
 // agent that accepts a connection and never answers is skipped once its
 // listing's time is up, and the key file, which the session authorizes,
 // joins.
@@ -667,11 +667,12 @@ func testJoinWithASilentAgentAndAnAuthorizedFile(t *testing.T, hostURL, hostNode
 	joinGuest(t, clientJoinURL, session, guestOpts{identity: &id}).waitEvent(t, join.Joined, false)
 }
 
-// testJoinRejoinNeverTrustsANewRelayKey is spec test 30: a rejoin checks the
+// testJoinRejoinNeverTrustsANewRelayKey checks that a rejoin checks the
 // relay's key against known_hosts as a first join does, and never asks about
 // it: a key known_hosts no longer trusts stops the run, though a prompt was
-// possible before the first join. Its @cert-authority clause needs a relay
-// with an authority of its own: testJoinRejoinTrustsTheRelaysAuthority.
+// possible before the first join. A relay trusted through an
+// @cert-authority line needs an authority of its own:
+// testJoinRejoinTrustsTheRelaysAuthority.
 func testJoinRejoinNeverTrustsANewRelayKey(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	session := shareOpen(t, hostURL, hostNodeAddr)
 	relayLine := func(key string) string {
@@ -700,9 +701,9 @@ func testJoinRejoinNeverTrustsANewRelayKey(t *testing.T, hostURL, hostNodeAddr, 
 	require.Zero(t, g.confirmCalls())
 }
 
-// testJoinForcedCommandEndsOnlyTheConnection is spec test 31: a guest's
-// forced command starts again on each rejoin, and when it exits, the guest's
-// run ends with its status while the session carries on.
+// testJoinForcedCommandEndsOnlyTheConnection checks that a guest's forced
+// command starts again on each rejoin, and when it exits, the guest's run
+// ends with its status while the session carries on.
 func testJoinForcedCommandEndsOnlyTheConnection(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the forced command is a POSIX shell script")
@@ -723,8 +724,8 @@ func testJoinForcedCommandEndsOnlyTheConnection(t *testing.T, hostURL, hostNodeA
 	joinGuest(t, clientJoinURL, session, guestOpts{}).waitEvent(t, join.Joined, false)
 }
 
-// testJoinRejoinsAfterTheHostsTunnelDrops is spec test 24: the host's tunnel
-// drops, and the guest rejoins by itself once the host has redialled. The
+// testJoinRejoinsAfterTheHostsTunnelDrops checks that when the host's tunnel
+// drops, the guest rejoins by itself once the host has redialled. The
 // guest's terminal is put back, off the alternate screen, before it is told
 // the session was lost.
 func testJoinRejoinsAfterTheHostsTunnelDrops(t *testing.T, mode routing.Mode, protocol string) {
@@ -749,9 +750,9 @@ func testJoinRejoinsAfterTheHostsTunnelDrops(t *testing.T, mode routing.Mode, pr
 	g.typeUntil(t, "echo $((50+8))y", "58y")
 }
 
-// testJoinRejoinTrustsTheRelaysAuthority is spec test 30's @cert-authority
-// clause: a relay whose certificate a trusted authority signed is trusted on
-// the first join and again on the rejoin after a drop, and nobody is asked.
+// testJoinRejoinTrustsTheRelaysAuthority checks that a relay whose
+// certificate a trusted authority signed is trusted on the first join and
+// again on the rejoin after a drop, and nobody is asked.
 // The relay's certificate is signed by an authority of its own, and
 // known_hosts holds only that authority's line, so nothing but the authority
 // can trust the relay.

@@ -95,7 +95,7 @@ func TestAnEncryptedKeyNotInTheAgentAsksOnce(t *testing.T) {
 	require.Equal(t, 1, asked)
 }
 
-func TestAKeyIsGeneratedOnlyWhenThereIsNoKeyAtAll(t *testing.T) { // spec test 18
+func TestAKeyIsGeneratedOnlyWhenThereIsNoKeyAtAll(t *testing.T) {
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{})
 	require.NoError(t, err)
 	s1, r1, err := g.Signers(context.Background())
@@ -109,7 +109,7 @@ func TestAKeyIsGeneratedOnlyWhenThereIsNoKeyAtAll(t *testing.T) { // spec test 1
 	require.True(t, g.Source().Generated)
 }
 
-func TestFilesThatAllFailToLoadAreAnErrorNotAGeneratedKey(t *testing.T) { // spec test 18
+func TestFilesThatAllFailToLoadAreAnErrorNotAGeneratedKey(t *testing.T) {
 	bad := writeFile(t, "id_ed25519", "not a key")
 	_, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{Files: []string{bad}})
 	var ie *join.IdentityError
@@ -118,7 +118,7 @@ func TestFilesThatAllFailToLoadAreAnErrorNotAGeneratedKey(t *testing.T) { // spe
 	require.Contains(t, ie.Load[0], bad)
 }
 
-func TestAFileThatWontLoadIsSkippedNextToAGoodKey(t *testing.T) { // spec test 18 (the _sk case)
+func TestAFileThatWontLoadIsSkippedNextToAGoodKey(t *testing.T) { // an _sk key file x/crypto can't load, say
 	good, bad := newKeyFile(t), writeFile(t, "id_ed25519_sk", "not a key x/crypto can load")
 	var skipped []string
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{

@@ -104,7 +104,7 @@ func agentThatHangsOnSign(t *testing.T, s ssh.Signer) string {
 	return socket
 }
 
-func TestAgentKeysComeBeforeFilesAndNoKeyIsOfferedTwice(t *testing.T) { // spec test 18
+func TestAgentKeysComeBeforeFilesAndNoKeyIsOfferedTwice(t *testing.T) {
 	a, b := newKeyFile(t), newKeyFile(t)
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
 		AgentSocket: serveAgent(t, a.signer), Files: []string{b.path, a.path}, Passphrase: noPrompt(t)})
@@ -116,7 +116,7 @@ func TestAgentKeysComeBeforeFilesAndNoKeyIsOfferedTwice(t *testing.T) { // spec 
 	require.Equal(t, join.KeySource{Agent: 1, Files: 1}, g.Source())
 }
 
-func TestAnEncryptedKeyTheAgentHoldsNeedsNoPassphrase(t *testing.T) { // D4
+func TestAnEncryptedKeyTheAgentHoldsNeedsNoPassphrase(t *testing.T) {
 	enc := newEncryptedKeyFile(t, "secret")
 	for _, only := range []bool{false, true} { // the defaults, and -i
 		g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
@@ -180,6 +180,21 @@ func TestAMissingAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK wer
 	require.True(t, g.Source().Generated)
 }
 
+// launchd sets SSH_AUTH_SOCK on macOS whether or not the agent holds a key,
+// so an empty agent is the default there. With no key file either, the
+// guest has no key at all, and gets a generated one, as with no agent.
+func TestAnEmptyAgentWithNoFilesGivesAGeneratedKey(t *testing.T) {
+	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
+		AgentSocket: serveAgent(t),
+		OnAgentSkip: func(err error) { t.Errorf("the agent was skipped: %v", err) }})
+	require.NoError(t, err)
+	signers, release, err := g.Signers(context.Background())
+	require.NoError(t, err)
+	release()
+	require.Len(t, signers, 1)
+	require.Equal(t, join.KeySource{Generated: true}, g.Source())
+}
+
 func TestAStaleAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK were unset
 	good := newKeyFile(t)
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
@@ -193,7 +208,7 @@ func TestAStaleAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK were 
 	require.Equal(t, join.KeySource{Files: 1}, g.Source())
 }
 
-func TestASilentAgentCostsOnlyItsOwnBudget(t *testing.T) { // spec test 34
+func TestASilentAgentCostsOnlyItsOwnBudget(t *testing.T) { // an agent that accepts and never answers
 	good := newKeyFile(t)
 	var skippedAgent error
 	start := time.Now()
@@ -201,7 +216,8 @@ func TestASilentAgentCostsOnlyItsOwnBudget(t *testing.T) { // spec test 34
 		AgentSocket: silentAgent(t), AgentTimeout: 100 * time.Millisecond, Files: []string{good.path},
 		OnAgentSkip: func(err error) { skippedAgent = err }})
 	require.NoError(t, err) // the agent is skipped; the file key is offered
-	require.Less(t, time.Since(start), 100*time.Millisecond+50*time.Millisecond)
+	// Slack for -race on CI; without its budget, listing a silent agent never ends.
+	require.Less(t, time.Since(start), 100*time.Millisecond+250*time.Millisecond)
 	require.Error(t, skippedAgent)
 	signers, release, err := g.Signers(context.Background()) // the attempt's budget is untouched
 	require.NoError(t, err)
@@ -209,7 +225,7 @@ func TestASilentAgentCostsOnlyItsOwnBudget(t *testing.T) { // spec test 34
 	require.Equal(t, []string{fp(good)}, fingerprints(signers))
 }
 
-func TestASilentAgentWithNoFilesIsAnIdentityError(t *testing.T) { // spec test 37
+func TestASilentAgentWithNoFilesIsAnIdentityError(t *testing.T) {
 	_, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{AgentSocket: silentAgent(t), AgentTimeout: 100 * time.Millisecond})
 	var ie *join.IdentityError
 	require.ErrorAs(t, err, &ie)
@@ -235,12 +251,13 @@ func TestListingTheAgentEndsWithItsContext(t *testing.T) { // Ctrl-C (SIGINT) du
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(50 * time.Millisecond):
+	// Slack for -race on CI; a listing that ignores cancellation never ends.
+	case <-time.After(250 * time.Millisecond):
 		t.Fatal("listing the agent ignored cancellation")
 	}
 }
 
-func TestSigningOnARejoinIsReleasedWithTheAttempt(t *testing.T) { // spec rule 13
+func TestSigningOnARejoinIsReleasedWithTheAttempt(t *testing.T) {
 	key := newKeyFile(t)
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{AgentSocket: agentThatHangsOnSign(t, key.signer)})
 	require.NoError(t, err) // listing works
@@ -253,5 +270,6 @@ func TestSigningOnARejoinIsReleasedWithTheAttempt(t *testing.T) { // spec rule 1
 	start := time.Now()
 	_, err = signers[0].Sign(rand.Reader, []byte("data"))
 	require.Error(t, err)
-	require.Less(t, time.Since(start), 100*time.Millisecond+50*time.Millisecond)
+	// Slack for -race on CI; a signature the release doesn't end never returns.
+	require.Less(t, time.Since(start), 100*time.Millisecond+250*time.Millisecond)
 }
