@@ -24,7 +24,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/term"
 )
 
 // joinFlags are upterm join's flags, kept on the command rather than in
@@ -86,9 +85,11 @@ when stopped, and 255 when it can't join.`,
 		os.Exit(1)
 	}
 	flags := cmd.Flags()
-	// join's flags stop at the first argument that isn't one, as ssh's do,
-	// so that an unquoted paste of an ssh command, -p and -o included,
-	// reaches resolveTarget whole.
+	// join's flags stop at the first argument that isn't one, so that an
+	// unquoted paste of one of the ssh commands upterm prints for guests,
+	// its -p and -o included, reaches resolveTarget whole, which can then
+	// suggest the join target it reaches. resolveTarget still reads join's
+	// flags after a target that stands alone.
 	flags.SetInterspersed(false)
 	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
 	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(homeDir), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
@@ -108,7 +109,7 @@ when stopped, and 255 when it can't join.`,
 // supplied, so that those count as much as flags before it.
 //
 // An unquoted paste of an ssh command arrives as several arguments, and is
-// read as the one text it was (R6). A text refused with no suggestion, whose
+// read as the one text it was. A text refused with no suggestion, whose
 // first argument is a target by itself and a later one starts with "-", is
 // that target and join's flags after it: upterm join ID@host --wait.
 func (f *joinFlags) resolveTarget(c *cobra.Command, args []string) error {
@@ -178,7 +179,8 @@ func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
-	st := newStatus(os.Stderr, term.IsTerminal(int(os.Stderr.Fd())), target, f.wait)
+	st := statusOn(os.Stderr, target, f.wait)
+	passphrase, keys := f.prompts(st, os.Stdin, os.Stdout, connectionIsProxied(target.URL().String(), proxy))
 
 	// In cooked mode, before the relay is dialled: Ctrl-C here is SIGINT,
 	// which ends ctx.
@@ -188,7 +190,7 @@ func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 		IdentitiesOnly: identitiesOnlyRequested(),
 		Files:          f.privateKeys,
 		AgentSocket:    os.Getenv("SSH_AUTH_SOCK"),
-		Passphrase:     passphrasePrompt{in: os.Stdin, out: st.writer(), echoOff: echoOff(os.Stdin), crlf: lineEndsCRLF}.prompt,
+		Passphrase:     passphrase.prompt,
 		OnSkip:         func(file string, err error) { _, _ = fmt.Fprintln(st.writer(), skipLine(file, err)) },
 		OnAgentSkip:    func(err error) { _, _ = fmt.Fprintln(st.writer(), agentSkipLine(err)) },
 	})
@@ -201,12 +203,6 @@ func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(st.writer(), line)
 		return ExitCodeError{Code: code}
 	}
-
-	keys := newRelayKeys(host.KnownHosts{
-		File:    f.knownHosts,
-		Stdout:  st.writer(),
-		Proxied: connectionIsProxied(target.URL().String(), proxy),
-	}, f.skipHostKeyCheck, os.Stdin)
 
 	logger := slog.New(slog.DiscardHandler)
 	if l := uptermctx.Logger(c.Context()); l != nil {
@@ -256,6 +252,23 @@ func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 	return ExitCodeError{Code: code}
 }
 
+// prompts are upterm join's two questions, a key's passphrase and whether
+// to trust an unknown relay key, the second asked through the relay-key
+// seams it comes with. Each is asked where joinStatus.promptOut says, and
+// answered on stdin, once what was typed there before it is dropped.
+func (f *joinFlags) prompts(st *joinStatus, stdin *os.File, stdout io.Writer, proxied bool) (passphrasePrompt, *relayKeys) {
+	out := st.promptOut(stdout)
+	flush := func() error { return flushInput(stdin) }
+	kh := host.KnownHosts{File: f.knownHosts, Stdout: out, Proxied: proxied}
+	if f.skipHostKeyCheck {
+		// Nothing is asked. Recording a new key says so on a line of the
+		// status's, which can come once the terminal is raw.
+		kh.Stdout = st.writer()
+	}
+	passphrase := passphrasePrompt{in: stdin, out: out, echoOff: echoOff(stdin), flush: flush, crlf: lineEndsCRLF}
+	return passphrase, newRelayKeys(kh, f.skipHostKeyCheck, stdin, flush)
+}
+
 // joinFailure is a failure before anything else has been written: its line
 // on stderr, and 255.
 func joinFailure(line string) error {
@@ -268,7 +281,7 @@ func joinFailure(line string) error {
 // may wait on the status without a bound. A status line that a stop
 // abandoned may still hold it, writing to a terminal that stopped taking
 // output (join.Config.Events), and SIGINT and SIGTERM are caught, so only
-// kill -9 would end the wait. last waits within its bound (rule 10).
+// kill -9 would end the wait. last waits within its bound.
 func finishJoin(restore func(), st *joinStatus, line string) {
 	restore()
 	st.last(line)
@@ -284,7 +297,7 @@ func terminalSize(f *os.File) termsize.Size {
 }
 
 // takeTerminal is TakeTerminal's work on the guest's terminal: raw mode, and
-// then whatever was typed before it dropped (D6). Keys typed while the
+// then whatever was typed before it dropped. Keys typed while the
 // terminal was cooked, before the first join, belong to no session, and
 // would otherwise be the first that one read.
 func takeTerminal(raw *rawTerminal) error {
@@ -303,6 +316,8 @@ type relayKeys struct {
 	kh   host.KnownHosts
 	skip bool      // --skip-host-key-check: record an unknown key without asking
 	in   io.Reader // where the confirmation's answer is read
+	// flush drops what was typed on in before the question.
+	flush func() error
 
 	mu sync.Mutex
 	// remote is the address CheckHostKey was last given, which the
@@ -310,8 +325,8 @@ type relayKeys struct {
 	remote net.Addr
 }
 
-func newRelayKeys(kh host.KnownHosts, skip bool, in io.Reader) *relayKeys {
-	return &relayKeys{kh: kh, skip: skip, in: in}
+func newRelayKeys(kh host.KnownHosts, skip bool, in io.Reader, flush func() error) *relayKeys {
+	return &relayKeys{kh: kh, skip: skip, in: in, flush: flush}
 }
 
 // hostKeyRefusal is KnownHosts.Check's refusal as join's seam reports it:
@@ -355,7 +370,7 @@ func (r *relayKeys) check(hostname string, remote net.Addr, key ssh.PublicKey) e
 // when known_hosts could find the relay's key unknown, and nil when it can't,
 // or nothing is to be asked. join holds the guest's keys back until the
 // first handshake only while a prompt is possible, so that a first join's
-// waits answer Enter and ~. whenever they can (spec rule 4).
+// waits answer Enter and ~. whenever they can.
 func (r *relayKeys) confirmFor(hostname string) func(ctx context.Context, hostname string, key ssh.PublicKey) (bool, error) {
 	if r.skip || !r.couldBeUnknown(hostname) {
 		return nil
@@ -383,6 +398,13 @@ func (r *relayKeys) couldBeUnknown(hostname string) bool {
 	return errors.Is(r.kh.Check(hostname, &net.TCPAddr{}, key), host.ErrUnknownHostKey)
 }
 
+// confirm asks the guest whether to trust key. What was typed before the
+// question, while the agent was listed or the relay dialled, is dropped
+// first, as OpenSSH's prompts drop it, so that a line typed ahead can't
+// answer it. The guest's Enter, echoed, ends the line the question leaves
+// open; a question that ends without an answer, at a Ctrl-C or the end of
+// input, has its line ended here, so that what follows starts a line of
+// its own.
 func (r *relayKeys) confirm(ctx context.Context, hostname string, key ssh.PublicKey) (bool, error) {
 	r.mu.Lock()
 	remote := r.remote
@@ -390,7 +412,18 @@ func (r *relayKeys) confirm(ctx context.Context, hostname string, key ssh.Public
 	if remote == nil {
 		remote = unknownAddr{}
 	}
-	return r.kh.Confirm(ctx, r.in, hostname, remote, key)
+	// Confirm asks nothing once ctx has ended.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := r.flush(); err != nil {
+		return false, fmt.Errorf("unable to drop the keys typed before the question: %w", err)
+	}
+	accepted, err := r.kh.Confirm(ctx, r.in, hostname, remote, key)
+	if err != nil && (ctx.Err() != nil || errors.Is(err, io.EOF)) {
+		_, _ = io.WriteString(r.kh.Stdout, "\n")
+	}
+	return accepted, err
 }
 
 // unknownAddr stands for a relay address CheckHostKey wasn't given, which
@@ -400,13 +433,16 @@ type unknownAddr struct{}
 func (unknownAddr) Network() string { return "tcp" }
 func (unknownAddr) String() string  { return "unknown" }
 
-// passphrasePrompt is GuestIdentityOptions.Passphrase (D11).
+// passphrasePrompt is GuestIdentityOptions.Passphrase, a prompt on the
+// guest's terminal.
 type passphrasePrompt struct {
 	in  io.Reader
 	out io.Writer
 	// echoOff turns the terminal's echo off, and returns what turns it back
 	// on: see join_echo_unix.go and join_echo_windows.go.
 	echoOff func() (restore func(), err error)
+	// flush drops what was typed on in before the prompt.
+	flush func() error
 	// crlf is the Windows console's line end: its line input hands a line
 	// over with the Enter as "\r\n", so '\r' is dropped and '\n' ends the
 	// line, which leaves nothing of it for the next read. Elsewhere either
@@ -418,9 +454,12 @@ type passphrasePrompt struct {
 // owns the terminal's modes: it turns echo off itself before anything is
 // read, and back on, on its own goroutine, however it returns; so a cancel
 // can't race a change of mode. term.ReadPassword changes them inside the
-// read it blocks in, which is why it isn't used. Another goroutine does
-// nothing but read in a byte at a time, one when asked, so no read is
-// pending once the line is complete, and nothing typed after it is taken.
+// read it blocks in, which is why it isn't used. What was typed before the
+// prompt, while the agent was listed, say, is dropped before the first
+// read, as OpenSSH's readpassphrase drops it, so that a line typed ahead
+// isn't taken for the passphrase. Another goroutine does nothing but read
+// in a byte at a time, one when asked, so no read is pending once the line
+// is complete, and nothing typed after it is taken.
 //
 // Once ctx ends, prompt returns ctx's error at once. A read in flight then
 // is abandoned with the process, which a cancelled prompt is ending: a
@@ -436,6 +475,9 @@ func (p passphrasePrompt) prompt(ctx context.Context, file string) ([]byte, erro
 		return nil, err
 	}
 	defer restore()
+	if err := p.flush(); err != nil {
+		return nil, fmt.Errorf("unable to drop the keys typed before the prompt: %w", err)
+	}
 
 	type read struct {
 		b   byte

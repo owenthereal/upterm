@@ -12,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
@@ -68,8 +70,8 @@ func TestRenderEveryText(t *testing.T) {
 	require.Equal(t, "upterm: no host is connected for session abc right now; waiting (Ctrl-C to stop)",
 		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next}, tg, since, true))
 
-	// One row per remaining §7 line, the same way, through renderOutcome. The
-	// target as typed is what the -i PATH lines name.
+	// One row per line a run can end with, the same way, through
+	// renderOutcome. The target as typed is what the -i PATH lines name.
 	const typed = "ssh://abc@relay.test"
 	changedText, changed := changedKeyRefusal(t)
 	deadlineOnIdentity := &join.DeadlineError{Why: join.IdentityFailure, Err: refused}
@@ -95,7 +97,7 @@ func TestRenderEveryText(t *testing.T) {
 		{failedWith(&join.IdentityError{Key: "SHA256:k", Err: &host.AgentRefusedError{Key: "SHA256:k", Err: refused}}), join.KeySource{Agent: 1}, "upterm: your SSH agent couldn't sign with SHA256:k: agent refused operation"},
 		{failedWith(&join.IdentityError{Key: "SHA256:k", Err: &host.AgentUnavailableError{Socket: "/tmp/agent.sock", Err: errors.New("connection refused")}}), join.KeySource{Agent: 1}, "upterm: your SSH agent couldn't sign with SHA256:k: connection refused"},
 		{failedWith(&join.IdentityError{List: true, Err: errors.New("i/o timeout")}), join.KeySource{}, "upterm: couldn't list your SSH agent's keys: i/o timeout. Fix the agent, or pass a key with upterm join -i PATH ssh://abc@relay.test."},
-		// No key file loaded either; the agent is the line, as §7 has it.
+		// No key file loaded either; the agent's failure is the one told.
 		{failedWith(&join.IdentityError{List: true, Load: []string{"/k/id_rsa: bad"}, Err: errors.New("i/o timeout")}), join.KeySource{}, "upterm: couldn't list your SSH agent's keys: i/o timeout. Fix the agent, or pass a key with upterm join -i PATH ssh://abc@relay.test."},
 		{failedWith(&join.IdentityError{Load: []string{"/k/id_rsa: bad", "/k/id_ecdsa: worse"}}), join.KeySource{}, "upterm: couldn't load your SSH keys (/k/id_rsa: bad; /k/id_ecdsa: worse). Fix them, or pass a key with upterm join -i PATH ssh://abc@relay.test."},
 
@@ -109,7 +111,7 @@ func TestRenderEveryText(t *testing.T) {
 		{join.Outcome{Kind: join.Left}, join.KeySource{}, "upterm: left session abc"},
 		{join.Outcome{Kind: join.Stopped}, join.KeySource{}, "upterm: stopped"},
 
-		// Failures §7 has no line for (ruling R3): the error as it is.
+		// Failures with no line of their own: the error as it is.
 		{failedWith(deadlineOnIdentity), join.KeySource{}, "upterm: " + deadlineOnIdentity.Error()},
 		{failedWith(otherHostKey), join.KeySource{}, "upterm: " + otherHostKey.Error()},
 		{failedWith(errors.New("unable to set terminal to raw mode: bad file descriptor")), join.KeySource{}, "upterm: unable to set terminal to raw mode: bad file descriptor"},
@@ -148,7 +150,7 @@ func changedKeyRefusal(t *testing.T) (string, error) {
 	kh := host.KnownHosts{File: writeKnownHosts(t, knownhosts.Line([]string{"relay.test:22"}, pinned)), Stdout: io.Discard}
 	hostErr := kh.Check("relay.test:22", relayAddr, presented)
 	require.ErrorIs(t, hostErr, host.ErrHostKeyChanged)
-	err := newRelayKeys(kh, false, nil).check("relay.test:22", relayAddr, presented)
+	err := newRelayKeys(kh, false, nil, nil).check("relay.test:22", relayAddr, presented)
 	require.ErrorIs(t, err, join.ErrHostKeyChanged)
 	return hostErr.Error(), err
 }
@@ -170,7 +172,7 @@ func TestExitCodes(t *testing.T) {
 	}
 }
 
-func TestStatusPlainLinesWhenStderrIsNotATerminal(t *testing.T) { // Review Focus 3
+func TestStatusPlainLinesWhenStderrIsNotATerminal(t *testing.T) {
 	var b bytes.Buffer
 	s := newStatus(&b, false /* tty */, mustTarget(t), false)
 	s.event(waiting(join.NoHost, 1))
@@ -203,6 +205,118 @@ func TestStatusEndsTheWaitingLineWhenAFirstJoinSucceeds(t *testing.T) {
 	require.True(t, strings.HasSuffix(b.String(), "next try in 1 s\r\n"), "%q", b.String())
 }
 
+// A waiting line wider than the terminal wraps, and "\033[K" clears only the
+// row the cursor is on, its last: the rows above it would pile up, one set
+// at each attempt. So the rewrite goes up to the line's first row and clears
+// to the end of the screen, and only the newest line is left.
+func TestStatusRewritesAWrappedWaitingLineWhole(t *testing.T) {
+	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
+	now := since.Add(time.Minute)
+	wait := func(n int, long bool) join.Event {
+		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: long}
+	}
+	const (
+		long1 = "upterm: waiting for the host since 14:02:11; next try in 8 s. The session may have ended or moved; check with the host."
+		long2 = "upterm: waiting for the host since 14:02:11; next try in 4 s. The session may have ended or moved; check with the host."
+		short = "upterm: waiting for the host since 14:02:11; next try in 2 s"
+	)
+
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 40 }
+	s.event(wait(8, true))
+	s.event(wait(4, true))
+	require.Equal(t, "\r\033[K"+long1+"\r\033[2A\033[J"+long2, b.String())
+	require.Equal(t, wrapAt(long2, 40), screen(t, b.String(), 40))
+
+	// A line that fits after one that wrapped clears the rows the wrapped
+	// one took, and the next is rewritten as any line that fits is.
+	b.Reset()
+	s = newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 80 }
+	s.event(wait(8, true))
+	s.event(wait(2, false))
+	s.event(wait(2, false))
+	require.Equal(t, "\r\033[K"+long1+"\r\033[1A\033[J"+short+"\r\033[K"+short, b.String())
+	require.Equal(t, []string{short}, screen(t, b.String(), 80))
+}
+
+// wrapAt is line as a terminal width columns wide shows it.
+func wrapAt(line string, width int) []string {
+	var rows []string
+	for r := []rune(line); len(r) > 0; r = r[min(width, len(r)):] {
+		rows = append(rows, string(r[:min(width, len(r))]))
+	}
+	return rows
+}
+
+// screen is what a terminal width columns wide shows once out is written to
+// it, for the few of a terminal's controls the status writes: "\r", "\n",
+// cursor up ("\033[nA"), and clearing to the end of the row ("\033[K") or
+// of the screen ("\033[J"). Text wraps at the right margin, as it does on a
+// terminal with auto-wrap on, and trailing blanks are dropped.
+func screen(t *testing.T, out string, width int) []string {
+	t.Helper()
+	var rows [][]rune
+	row, col := 0, 0
+	reach := func() {
+		for len(rows) <= row {
+			rows = append(rows, nil)
+		}
+	}
+	for i := 0; i < len(out); {
+		r, size := utf8.DecodeRuneInString(out[i:])
+		i += size
+		switch r {
+		case '\r':
+			col = 0
+		case '\n':
+			row, col = row+1, 0
+		case '\033':
+			end := strings.IndexAny(out[i:], "AJK")
+			require.True(t, end > 0 && out[i] == '[', "an unexpected control in %q", out)
+			arg, final := out[i+1:i+end], out[i+end]
+			i += end + 1
+			reach()
+			switch final {
+			case 'A':
+				n := 1
+				if arg != "" {
+					var err error
+					n, err = strconv.Atoi(arg)
+					require.NoError(t, err)
+				}
+				row, col = max(0, row-n), min(col, width-1)
+			case 'K':
+				rows[row] = rows[row][:min(col, len(rows[row]))]
+			case 'J':
+				rows[row] = rows[row][:min(col, len(rows[row]))]
+				rows = rows[:row+1]
+			}
+		default:
+			if col == width {
+				row, col = row+1, 0
+			}
+			reach()
+			for len(rows[row]) <= col {
+				rows[row] = append(rows[row], ' ')
+			}
+			rows[row][col] = r
+			col++
+		}
+	}
+	var lines []string
+	for _, r := range rows {
+		lines = append(lines, strings.TrimRight(string(r), " "))
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
 // stuckWriter is a terminal that stopped taking output: a Write blocks until
 // the test ends.
 type stuckWriter struct {
@@ -220,7 +334,7 @@ func (w *stuckWriter) Write(p []byte) (int, error) {
 // A status line that join abandoned as it stopped may still be writing to a
 // terminal that stopped taking output, holding the status's lock
 // (join.Config.Events). What upterm join does once Run returns waits on it
-// no longer than the last line's bound, or a stop could never exit (rule 10).
+// no longer than the last line's bound, or a stop could never exit.
 func TestFinishJoinDoesNotWaitOnAnAbandonedStatusLine(t *testing.T) {
 	w := &stuckWriter{entered: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(func() { close(w.release) })
@@ -246,7 +360,9 @@ func TestFinishJoinDoesNotWaitOnAnAbandonedStatusLine(t *testing.T) {
 	}
 }
 
-func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) { // spec test 19 (the command's half), D11
+// A cancelled passphrase prompt returns at once, and however the prompt
+// ends, echo is back on and nothing touches the modes afterwards.
+func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) {
 	type modeLog struct {
 		mu  sync.Mutex
 		ops []string
@@ -260,7 +376,7 @@ func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) { // spec test 
 			log.ops = append(log.ops, "off")
 			log.mu.Unlock()
 			return func() { log.mu.Lock(); log.ops = append(log.ops, "on"); log.mu.Unlock() }, nil
-		}}
+		}, flush: noFlush}
 	}
 	final := func(log *modeLog) []string { log.mu.Lock(); defer log.mu.Unlock(); return slices.Clone(log.ops) }
 
@@ -286,7 +402,8 @@ func TestPassphrasePromptRestoresEchoOnEveryWayOut(t *testing.T) { // spec test 
 		select {
 		case err := <-done:
 			require.ErrorIs(t, err, context.Canceled)
-		case <-time.After(50 * time.Millisecond):
+		// Slack for -race on CI; a prompt that ignores cancellation never returns.
+		case <-time.After(250 * time.Millisecond):
 			t.Fatal("the passphrase prompt ignored cancellation")
 		}
 		time.Sleep(20 * time.Millisecond) // nothing may touch the modes afterwards
@@ -328,7 +445,7 @@ func TestPassphrasePromptLeavesNoReadPending(t *testing.T) {
 	for _, crlf := range []bool{false, true} {
 		src := strings.NewReader("secret\nNEXT")
 		in := &countingReader{r: src}
-		p := passphrasePrompt{in: in, out: io.Discard, echoOff: func() (func(), error) { return func() {}, nil }, crlf: crlf}
+		p := passphrasePrompt{in: in, out: io.Discard, echoOff: noEcho, flush: noFlush, crlf: crlf}
 		pass, err := p.prompt(context.Background(), "id")
 		require.NoError(t, err)
 		require.Equal(t, "secret", string(pass))
@@ -344,7 +461,7 @@ func TestPassphrasePromptLeavesNoReadPending(t *testing.T) {
 // what it left.
 func TestPassphrasePromptReadsTheConsoleLineToItsEnd(t *testing.T) {
 	in := strings.NewReader("a\r\nb\r\n")
-	p := passphrasePrompt{in: in, out: io.Discard, echoOff: func() (func(), error) { return func() {}, nil }, crlf: true}
+	p := passphrasePrompt{in: in, out: io.Discard, echoOff: noEcho, flush: noFlush, crlf: true}
 	first, err := p.prompt(context.Background(), "id")
 	require.NoError(t, err)
 	second, err := p.prompt(context.Background(), "id")
@@ -356,10 +473,108 @@ func TestPassphrasePromptReadsTheConsoleLineToItsEnd(t *testing.T) {
 // written for it.
 func TestPassphrasePromptAsksForTheFile(t *testing.T) {
 	var out bytes.Buffer
-	p := passphrasePrompt{in: strings.NewReader("secret\n"), out: &out, echoOff: func() (func(), error) { return func() {}, nil }}
+	p := passphrasePrompt{in: strings.NewReader("secret\n"), out: &out, echoOff: noEcho, flush: noFlush}
 	_, err := p.prompt(context.Background(), "/k/id_ed25519")
 	require.NoError(t, err)
 	require.Equal(t, "Enter passphrase for key '/k/id_ed25519': \n", out.String())
+}
+
+func noEcho() (func(), error) { return func() {}, nil }
+
+func noFlush() error { return nil }
+
+// opLog is the order in which things happened.
+type opLog struct {
+	mu  sync.Mutex
+	ops []string
+}
+
+func (l *opLog) add(op string) { l.mu.Lock(); defer l.mu.Unlock(); l.ops = append(l.ops, op) }
+
+func (l *opLog) list() []string { l.mu.Lock(); defer l.mu.Unlock(); return slices.Clone(l.ops) }
+
+// loggedReader logs each read of r.
+type loggedReader struct {
+	log *opLog
+	r   io.Reader
+}
+
+func (l loggedReader) Read(p []byte) (int, error) {
+	l.log.add("read")
+	return l.r.Read(p)
+}
+
+// A line typed while the agent was listed, or while the relay was dialled,
+// is dropped before a question reads its answer, so that it can't be taken
+// for a passphrase or answer the relay-key question.
+func TestPromptsDropWhatWasTypedBeforeThem(t *testing.T) {
+	flushedFirst := func(t *testing.T, log *opLog) {
+		t.Helper()
+		ops := log.list()
+		require.Contains(t, ops, "flush")
+		require.Contains(t, ops, "read")
+		require.Less(t, slices.Index(ops, "flush"), slices.Index(ops, "read"), "%q", ops)
+	}
+
+	log := &opLog{}
+	p := passphrasePrompt{
+		in: loggedReader{log, strings.NewReader("secret\n")}, out: io.Discard, echoOff: noEcho,
+		flush: func() error { log.add("flush"); return nil },
+	}
+	_, err := p.prompt(context.Background(), "id")
+	require.NoError(t, err)
+	flushedFirst(t, log)
+
+	log = &opLog{}
+	key := newPublicKey(t)
+	keys := newRelayKeys(host.KnownHosts{File: filepath.Join(t.TempDir(), "known_hosts"), Stdout: io.Discard}, false,
+		loggedReader{log, strings.NewReader("no\n")}, func() error { log.add("flush"); return nil })
+	require.ErrorIs(t, keys.check("relay.test:22", relayAddr, key), join.ErrHostKeyUnknown)
+	_, err = keys.confirmFor("relay.test:22")(context.Background(), "relay.test:22", key)
+	require.NoError(t, err)
+	flushedFirst(t, log)
+}
+
+// With stderr redirected, as in 2>join.log, both questions are asked on
+// stdout, the terminal the guest answers at: in the file, a passphrase
+// prompt, which turns echo off, would leave a join that looks hung. With
+// stderr a terminal, they are asked there. Either way the line saying that
+// --skip-host-key-check recorded a new key, which asks nothing, is a status
+// line, on stderr.
+func TestJoinAsksAtTheTerminalWhenStderrIsRedirected(t *testing.T) {
+	const relay = "relay.test:22"
+	key := newPublicKey(t)
+	for _, stderrTTY := range []bool{false, true} {
+		var stderr, stdout bytes.Buffer
+		st := newStatus(&stderr, stderrTTY, mustTarget(t), false)
+		f := &joinFlags{knownHosts: filepath.Join(t.TempDir(), "known_hosts")}
+		passphrase, keys := f.prompts(st, os.Stdin, &stdout, false)
+		// The answers: the terminal's modes and input are other tests'.
+		passphrase.in, passphrase.echoOff, passphrase.flush = strings.NewReader("secret\n"), noEcho, noFlush
+		keys.in, keys.flush = strings.NewReader("no\n"), noFlush
+
+		_, err := passphrase.prompt(context.Background(), "/k/id_ed25519")
+		require.NoError(t, err)
+		require.ErrorIs(t, keys.check(relay, relayAddr, key), join.ErrHostKeyUnknown)
+		_, err = keys.confirmFor(relay)(context.Background(), relay, key)
+		require.NoError(t, err)
+
+		asked, other := stdout.String(), stderr.String()
+		if stderrTTY {
+			asked, other = other, asked
+		}
+		require.Contains(t, asked, "Enter passphrase for key '/k/id_ed25519': ", "stderr a terminal: %v", stderrTTY)
+		require.Contains(t, asked, "Are you sure you want to continue connecting", "stderr a terminal: %v", stderrTTY)
+		require.Empty(t, other, "stderr a terminal: %v", stderrTTY)
+	}
+
+	var stderr, stdout bytes.Buffer
+	st := newStatus(&stderr, false, mustTarget(t), false)
+	f := &joinFlags{knownHosts: filepath.Join(t.TempDir(), "known_hosts"), skipHostKeyCheck: true}
+	_, keys := f.prompts(st, os.Stdin, &stdout, false)
+	require.NoError(t, keys.check(relay, relayAddr, key))
+	require.Contains(t, stderr.String(), "Permanently added")
+	require.Empty(t, stdout.String())
 }
 
 func TestJoinRefusesABadTargetAndANonTerminal(t *testing.T) {
@@ -512,7 +727,7 @@ func writeKnownHosts(t *testing.T, lines ...string) string {
 
 // The command lets join prompt about the relay's key only when known_hosts
 // could find it unknown: otherwise join takes the terminal as it starts, and
-// a first join's waits answer Enter and ~. (spec rule 4).
+// a first join's waits answer Enter and ~.
 func TestConfirmHostKeyOnlyWhenKnownHostsCouldAnswerUnknown(t *testing.T) {
 	key := newPublicKey(t)
 	authorized := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n")
@@ -537,7 +752,7 @@ func TestConfirmHostKeyOnlyWhenKnownHostsCouldAnswerUnknown(t *testing.T) {
 			if tc.lines != nil {
 				file = writeKnownHosts(t, tc.lines...)
 			}
-			confirm := newRelayKeys(host.KnownHosts{File: file, Stdout: io.Discard}, tc.skip, nil).confirmFor(relay)
+			confirm := newRelayKeys(host.KnownHosts{File: file, Stdout: io.Discard}, tc.skip, nil, nil).confirmFor(relay)
 			require.Equal(t, tc.prompt, confirm != nil)
 		})
 	}
@@ -549,7 +764,7 @@ func TestCheckHostKeyMapsKnownHostsAnswers(t *testing.T) {
 	pinned, other := newPublicKey(t), newPublicKey(t)
 	file := writeKnownHosts(t, knownhosts.Line([]string{"relay.test:22"}, pinned))
 	kh := host.KnownHosts{File: file, Stdout: io.Discard}
-	keys := newRelayKeys(kh, false, nil)
+	keys := newRelayKeys(kh, false, nil, nil)
 
 	require.NoError(t, keys.check("relay.test:22", relayAddr, pinned))
 
@@ -566,14 +781,14 @@ func TestCheckHostKeyMapsKnownHostsAnswers(t *testing.T) {
 }
 
 // --skip-host-key-check accepts a new relay key, as OpenSSH's accept-new
-// does, and never a changed one (spec test 30's middle clause; ruling R10).
+// does, and never a changed one.
 func TestSkipHostKeyCheckStillRefusesAChangedKey(t *testing.T) {
 	pinned, presented := newPublicKey(t), newPublicKey(t)
 	file := writeKnownHosts(t, knownhosts.Line([]string{"relay.test:22"}, pinned))
 	before, err := os.ReadFile(file)
 	require.NoError(t, err)
 	var announced bytes.Buffer
-	keys := newRelayKeys(host.KnownHosts{File: file, Stdout: &announced}, true, nil)
+	keys := newRelayKeys(host.KnownHosts{File: file, Stdout: &announced}, true, nil, nil)
 
 	err = keys.check("relay.test:22", relayAddr, presented)
 	require.ErrorIs(t, err, join.ErrHostKeyChanged)
@@ -593,7 +808,7 @@ func TestSkipHostKeyCheckRecordsANewKeyOnAStatusLine(t *testing.T) {
 	st := newStatus(&b, true, mustTarget(t), false)
 	st.event(waiting(join.Unreachable, 1))
 	st.raw(true)
-	keys := newRelayKeys(host.KnownHosts{File: file, Stdout: st.writer()}, true, nil)
+	keys := newRelayKeys(host.KnownHosts{File: file, Stdout: st.writer()}, true, nil, nil)
 
 	require.NoError(t, keys.check("relay.test:22", relayAddr, key))
 	require.NoError(t, host.KnownHosts{File: file}.Check("relay.test:22", relayAddr, key), "recorded")
@@ -610,7 +825,7 @@ func TestSkipHostKeyCheckRecordsANewKeyOnAStatusLine(t *testing.T) {
 func TestConfirmHostKeyShowsTheAddressCheckHostKeyWasGiven(t *testing.T) {
 	key := newPublicKey(t)
 	var out bytes.Buffer
-	keys := newRelayKeys(host.KnownHosts{File: filepath.Join(t.TempDir(), "known_hosts"), Stdout: &out}, false, strings.NewReader("no\n"))
+	keys := newRelayKeys(host.KnownHosts{File: filepath.Join(t.TempDir(), "known_hosts"), Stdout: &out}, false, strings.NewReader("no\n"), noFlush)
 	confirm := keys.confirmFor("relay.test:22")
 	require.NotNil(t, confirm)
 
@@ -619,4 +834,50 @@ func TestConfirmHostKeyShowsTheAddressCheckHostKeyWasGiven(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, accepted)
 	require.Contains(t, out.String(), "'relay.test (192.0.2.7)'")
+}
+
+// cancelOnRead is a guest who presses Ctrl-C, which ends ctx, rather than
+// answering: its first read cancels, and then waits on r.
+type cancelOnRead struct {
+	cancel context.CancelFunc
+	r      io.Reader
+}
+
+func (c cancelOnRead) Read(p []byte) (int, error) {
+	c.cancel()
+	return c.r.Read(p)
+}
+
+// The guest's Enter, echoed, ends the line the relay-key question leaves
+// open. A question that ends without an answer, at a Ctrl-C or the end of
+// input, has its line ended for it, so that what follows, the run's last
+// line, starts a line of its own.
+func TestAnUnansweredRelayKeyQuestionEndsItsLine(t *testing.T) {
+	const relay = "relay.test:22"
+	const question = "(yes/no/[fingerprint])? "
+	key := newPublicKey(t)
+	ask := func(ctx context.Context, in io.Reader) string {
+		var b bytes.Buffer
+		st := newStatus(&b, true, mustTarget(t), false)
+		keys := newRelayKeys(host.KnownHosts{File: filepath.Join(t.TempDir(), "known_hosts"), Stdout: st.promptOut(nil)}, false, in, noFlush)
+		require.ErrorIs(t, keys.check(relay, relayAddr, key), join.ErrHostKeyUnknown)
+		_, _ = keys.confirmFor(relay)(ctx, relay, key)
+		st.last("upterm: stopped")
+		return b.String()
+	}
+
+	// Answered: the echo of the guest's Enter, which this test doesn't
+	// write, is what ends the line, so nothing is added.
+	out := ask(context.Background(), strings.NewReader("no\n"))
+	require.True(t, strings.HasSuffix(out, question+"upterm: stopped\r\n"), "%q", out)
+
+	out = ask(context.Background(), strings.NewReader(""))
+	require.True(t, strings.HasSuffix(out, question+"\nupterm: stopped\r\n"), "%q", out)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	never, unblock := io.Pipe()
+	t.Cleanup(func() { _ = unblock.Close() })
+	out = ask(ctx, cancelOnRead{cancel, never})
+	require.True(t, strings.HasSuffix(out, question+"\nupterm: stopped\r\n"), "%q", out)
 }

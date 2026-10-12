@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/tty"
 	"github.com/owenthereal/upterm/join"
+	"golang.org/x/term"
 )
 
 // upterm join's own exit statuses. An exit status that arrives from the
@@ -27,21 +31,22 @@ const needsATerminal = "upterm: upterm join needs a terminal."
 // stderr, synchronously, so that Events returns once the line has been
 // written. On a terminal a waiting line is rewritten in place at each
 // attempt; anywhere else every event is a line of its own. What else upterm
-// join writes to stderr while it runs goes through it too (see writer), so
-// that no two writes interleave and every line ends as the terminal's mode
-// needs.
-//
-// It isn't called status, the name the plan gives it, because this package
-// imports grpc's status package.
+// join writes while it runs goes through it too (see writer and promptOut),
+// so that no two writes interleave and every line ends as the terminal's
+// mode needs.
 type joinStatus struct {
 	mu  sync.Mutex
 	w   io.Writer
 	tty bool // w is a terminal
+	// columns is the width of the terminal w is, measured as each waiting
+	// line is written, or 0 when it can't be. Nil never measures it.
+	columns func() int
 	// rawMode says TakeTerminal has put the terminal in raw mode, where a
 	// line ends "\r\n". It stays set once Run returns, when only last
 	// writes, which doesn't read it.
 	rawMode bool
 	open    bool // an in-place waiting line has been written without its end
+	rows    int  // the rows the open waiting line took: more than one when it wrapped
 	// joined says a session has been ready, so its output may have left the
 	// cursor anywhere on the line.
 	joined bool
@@ -52,6 +57,21 @@ type joinStatus struct {
 
 func newStatus(w io.Writer, tty bool, t join.Target, wait bool) *joinStatus {
 	return &joinStatus{w: w, tty: tty, t: t, wait: wait, now: time.Now}
+}
+
+// statusOn is the status on f, which is stderr: when f is a terminal, its
+// waiting lines are measured against its width as it is when each is
+// written.
+func statusOn(f *os.File, t join.Target, wait bool) *joinStatus {
+	s := newStatus(f, term.IsTerminal(int(f.Fd())), t, wait)
+	s.columns = func() int {
+		size, err := tty.Size(f)
+		if err != nil {
+			return 0
+		}
+		return size.Cols
+	}
+	return s
 }
 
 // raw sets the line ending: "\r\n" once TakeTerminal has put the terminal in
@@ -80,8 +100,8 @@ func (s *joinStatus) event(e join.Event) {
 		s.joined = true
 	}
 	if s.tty && e.Kind == join.Waiting {
-		_, _ = io.WriteString(s.w, "\r\033[K"+line)
-		s.open = true
+		_, _ = io.WriteString(s.w, s.rewind()+line)
+		s.open, s.rows = true, s.rowsOf(line)
 		return
 	}
 	// A first join says nothing, and still ends the waiting line, so that
@@ -90,6 +110,33 @@ func (s *joinStatus) event(e join.Event) {
 	if line != "" {
 		_, _ = io.WriteString(s.w, line+s.eol())
 	}
+}
+
+// rewind takes the cursor back to the start of the open waiting line and
+// clears it, so that the next one is written over it. "\033[K" clears only
+// the row the cursor is on, which for a line that wrapped is its last; so
+// the cursor goes up to the line's first row, and "\033[J" clears from there
+// to the end of the screen. The caller holds mu.
+func (s *joinStatus) rewind() string {
+	if s.open && s.rows > 1 {
+		return fmt.Sprintf("\r\033[%dA\033[J", s.rows-1)
+	}
+	return "\r\033[K"
+}
+
+// rowsOf is how many rows line takes on the terminal, at its width now: one
+// when it fits, and when the width isn't known. Each rune is taken to be one
+// column wide.
+func (s *joinStatus) rowsOf(line string) int {
+	cols := 0
+	if s.columns != nil {
+		cols = s.columns()
+	}
+	n := utf8.RuneCountInString(line)
+	if cols <= 0 || n <= cols {
+		return 1
+	}
+	return (n + cols - 1) / cols
 }
 
 // endLine ends an open waiting line, so that what follows starts a line of
@@ -101,14 +148,34 @@ func (s *joinStatus) endLine() {
 	}
 }
 
-// writer is stderr for what others write while upterm join runs: the
-// relay-key prompt and its "Permanently added" line, which --skip-host-key-check
-// writes from inside a handshake, after TakeTerminal too, and the passphrase
-// prompt. It ends an open waiting line first, and each of its lines as the
-// status's end.
-func (s *joinStatus) writer() io.Writer { return statusWriter{s} }
+// writer is stderr for what others write while upterm join runs: the lines
+// about skipped keys, the "Permanently added" line, which
+// --skip-host-key-check writes from inside a handshake, after TakeTerminal
+// too, and the prompts when stderr is a terminal (see promptOut). It ends an
+// open waiting line first, and each of its lines as the status's end.
+func (s *joinStatus) writer() io.Writer { return statusWriter{s, s.w} }
 
-type statusWriter struct{ s *joinStatus }
+// promptOut is where upterm join asks the guest something: a key's
+// passphrase, and whether to trust an unknown relay key. A question has to
+// reach the terminal its answer is typed at, so with stderr redirected, as
+// in 2>join.log, it goes to stdout, which upterm join requires to be a
+// terminal; in the file, a passphrase prompt, which turns echo off, would
+// leave a join that looks hung. Nothing else writes to stdout before the
+// first session, and every question comes before that, in cooked mode,
+// before TakeTerminal. When stderr is a terminal, a question is written
+// there like any other line.
+func (s *joinStatus) promptOut(stdout io.Writer) io.Writer {
+	if s.tty {
+		return s.writer()
+	}
+	return statusWriter{s, stdout}
+}
+
+// statusWriter writes to w under the status's lock, as writer describes.
+type statusWriter struct {
+	s *joinStatus
+	w io.Writer
+}
 
 func (w statusWriter) Write(p []byte) (int, error) {
 	w.s.mu.Lock()
@@ -118,7 +185,7 @@ func (w statusWriter) Write(p []byte) (int, error) {
 	if eol := w.s.eol(); eol != "\n" {
 		text = strings.ReplaceAll(text, "\n", eol)
 	}
-	if _, err := io.WriteString(w.s.w, text); err != nil {
+	if _, err := io.WriteString(w.w, text); err != nil {
 		return 0, err
 	}
 	return len(p), nil

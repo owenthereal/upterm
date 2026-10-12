@@ -3,6 +3,7 @@
 package command
 
 import (
+	"io"
 	"os"
 	"testing"
 
@@ -26,7 +27,9 @@ func takeTerminalFor(f *os.File) func() error {
 	return func() error { return takeTerminal(raw) }
 }
 
-func TestTakeTerminalFlushesTypedAheadInput(t *testing.T) { // Review Focus 5, D6
+// Keys typed while the terminal was cooked, before the first join, belong to
+// no session, so TakeTerminal drops them.
+func TestTakeTerminalFlushesTypedAheadInput(t *testing.T) {
 	ptmx, tty := openPty(t)
 	_, _ = ptmx.Write([]byte("typed-before-join\n"))
 	take := takeTerminalFor(tty) // raw.enter + flush
@@ -35,6 +38,27 @@ func TestTakeTerminalFlushesTypedAheadInput(t *testing.T) { // Review Focus 5, D
 	go func() { b := make([]byte, 64); n, _ := tty.Read(b); readable <- n }()
 	_, _ = ptmx.Write([]byte("x"))
 	require.Equal(t, 1, <-readable) // only what was typed after the flush
+}
+
+// Both questions drop what was typed at the guest's terminal before them,
+// in the cooked mode they are asked in.
+func TestPromptsFlushTheGuestsTerminal(t *testing.T) {
+	ptmx, tty := openPty(t)
+	st := newStatus(io.Discard, false, mustTarget(t), false)
+	passphrase, keys := (&joinFlags{}).prompts(st, tty, io.Discard, false)
+	for _, flush := range []func() error{passphrase.flush, keys.flush} {
+		_, _ = ptmx.Write([]byte("typed-ahead\n"))
+		// The line has reached the terminal's input queue.
+		ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
+		n, err := unix.Poll(ready, 5000)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		require.NoError(t, flush())
+		readable := make(chan string, 1)
+		go func() { b := make([]byte, 64); n, _ := tty.Read(b); readable <- string(b[:n]) }()
+		_, _ = ptmx.Write([]byte("x\n"))
+		require.Equal(t, "x\n", <-readable)
+	}
 }
 
 // The passphrase prompt turns echo off and nothing else, and its restore
