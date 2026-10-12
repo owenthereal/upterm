@@ -328,7 +328,14 @@ func (f *TerminalQueryFilter) Dropping() bool {
 //     SettleDrop returns raw "\x1b", n 0, done true. An inner ESC that ends
 //     the string by following a pending one resumes at the pending one's
 //     second raw ESC, so raw can be "\x1b\x1b".
+//
+// A filter that isn't Dropping, a fresh one or one SettleDrop has already
+// returned done for among them, has no string to settle: SettleDrop returns
+// 0, nil and true, and the stream resumes at p[0].
 func (f *TerminalQueryFilter) SettleDrop(p []byte) (n int, raw []byte, done bool) {
+	if !f.Dropping() {
+		return 0, nil, true
+	}
 	for i, b := range p {
 		back, ended := f.dropEnd(b)
 		if !ended {

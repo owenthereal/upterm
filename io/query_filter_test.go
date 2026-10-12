@@ -1259,6 +1259,39 @@ func TestTerminalQueryFilter_SettleDrop(t *testing.T) {
 	}
 }
 
+// A filter that isn't dropping has no string to settle, so SettleDrop takes
+// nothing from p and the stream resumes at p[0]: on a fresh filter, on one
+// holding a sequence it hasn't decided, and on one a SettleDrop has already
+// settled. Read as the rest of a wrapped drop instead, "x" came back as a
+// spurious ESC to write, and an ESC panicked on the inner machine a fresh
+// filter doesn't have.
+func TestTerminalQueryFilter_SettleDropWhenNotDropping(t *testing.T) {
+	for _, before := range []string{"", "\x1b[6", "\x1bP+q544e\x1b\\X"} {
+		for _, p := range []string{"x", "\x1b", "\x1b\\", "\x1b\x1b[6n", "\x18"} {
+			var out bytes.Buffer
+			f := NewTerminalQueryFilter(&out)
+			_, _ = f.Write([]byte(before))
+			emitted := out.Len()
+			n, raw, done := f.SettleDrop([]byte(p))
+			require.Zero(t, n, "%q|%q", before, p)
+			require.Nil(t, raw, "%q|%q", before, p)
+			require.True(t, done, "%q|%q", before, p)
+			require.Equal(t, emitted, out.Len(), "nothing goes out: %q|%q", before, p)
+		}
+	}
+
+	f := NewTerminalQueryFilter(io.Discard)
+	_, _ = f.Write([]byte("\x1bPtmux;\x1b\x1bP+q544e"))
+	_, _, done := f.SettleDrop([]byte("\x1b\x1b\\"))
+	require.True(t, done)
+	for _, p := range []string{"x", "\x1b"} {
+		n, raw, done := f.SettleDrop([]byte(p))
+		require.Zero(t, n, "%q after the drop was settled", p)
+		require.Nil(t, raw, "%q after the drop was settled", p)
+		require.True(t, done, "%q after the drop was settled", p)
+	}
+}
+
 // At every boundary of every exact-bytes case where the filter is dropping,
 // SettleDrop agrees with the filter's own drop: the stream it hands back,
 // raw and then p from n, is the input from a raw point no later than p's
