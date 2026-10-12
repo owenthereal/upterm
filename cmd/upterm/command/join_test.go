@@ -663,6 +663,8 @@ func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
 // environment doesn't override them, and -i there is as explicit as -i first.
 func TestJoinTakesItsFlagsAfterTheTarget(t *testing.T) {
 	t.Setenv("UPTERM_PROXY", "http://env.invalid:3128")
+	orig := suppliedFlags
+	t.Cleanup(func() { suppliedFlags = orig })
 	suppliedFlags = map[string]bool{}
 	stderr, code, cmd := runRootCmd(t, "join", "abc@relay.test", "--wait", "--proxy", "http://flag.invalid:3128", "-i", "/no/such/key")
 	require.Equal(t, 255, code)
