@@ -236,7 +236,8 @@ const maxPendingBytes = 259
 // sequence the wrapper carries, whether it is dropping a string or passing a
 // sequence it gave up on, and whether it owes a close. A joiner's filter takes
 // its state from the result (MultiWriter.Append), and a newly promoted primary
-// is handed it raw (hostSink.promote). What it returns depends on the state:
+// is handed it raw (hostSink.promote), unless the filter is Dropping, where
+// SettleDrop takes its place. What it returns depends on the state:
 //
 //   - While deciding, the held bytes: a head, an OSC to its terminator, a DCS
 //     header to its final byte, an APC's ESC _ before its first byte, or a
@@ -282,6 +283,68 @@ func (f *TerminalQueryFilter) Pending() []byte {
 	return slices.Clone(f.seqBuf)
 }
 
+// Dropping reports whether the filter is discarding a query string, at top
+// level or inside a tmux wrapper, that hasn't ended yet. Pending then holds
+// the head that decided the drop, which must not reach a terminal that would
+// answer it, so a sink promoted to primary now settles the drop with
+// SettleDrop rather than handing Pending over.
+func (f *TerminalQueryFilter) Dropping() bool {
+	switch f.state {
+	case qfStateDrop, qfStateDropEsc, qfStateWrapDrop, qfStateWrapDropEsc:
+		return true
+	}
+	return false
+}
+
+// SettleDrop is the handoff for a sink promoted to primary while Dropping.
+// The bytes already dropped can't be recovered, so the rest of that string
+// is no use to the new primary; everything after it is. SettleDrop consumes
+// from p only the rest of the string being dropped, and parses nothing
+// after the string's end: the byte after a restarting ESC is not looked at
+// as part of a new sequence. Nothing goes to the filter's writer.
+//
+//   - done reports whether the string ended within p. If not, n == len(p)
+//     and raw is nil: all of p was part of the drop, and the filter is still
+//     Dropping, for the next call.
+//   - When it did, the caller writes raw, then p[n:], unfiltered, and never
+//     uses the filter again.
+//   - The general rule: the stream resumes at a raw resume point. If that
+//     point is in p, it is p[n] and raw is nil. If it lies in bytes the
+//     filter carried from an earlier write, raw holds the carried raw bytes
+//     from that point on, and n is 0. Those are one or two raw ESCs, in a
+//     new slice the caller owns.
+//
+// Where it ended fixes the resume point:
+//   - at ST: just after the '\', so p[:n] ends with it;
+//   - at CAN or SUB: at that byte;
+//   - at an ESC that isn't ST: at that ESC. It's the carried byte when the
+//     filter held it from the last write, so raw is "\x1b" and p[0] is the
+//     byte after it.
+//   - inside a wrapper: after an inner ST or the outer ST, at a CAN or SUB,
+//     and at a lone raw ESC x, which ends the wrapper. An inner ESC that
+//     isn't ST resumes at the second raw ESC of its pair, which is carried
+//     when the pair completed in the last write. For example, promoted after
+//     "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b" and given "[6nhello\x1b\\",
+//     SettleDrop returns raw "\x1b", n 0, done true. An inner ESC that ends
+//     the string by following a pending one resumes at the pending one's
+//     second raw ESC, so raw can be "\x1b\x1b".
+func (f *TerminalQueryFilter) SettleDrop(p []byte) (n int, raw []byte, done bool) {
+	for i, b := range p {
+		back, ended := f.dropEnd(b)
+		if !ended {
+			continue
+		}
+		f.seqBuf = f.seqBuf[:0]
+		f.state = qfStateNormal
+		if at := i - back; at >= 0 {
+			return at, nil, true
+		}
+		// The resume point is back-i raw bytes before p, ESCs the drop held.
+		return 0, slices.Repeat([]byte{0x1b}, back-i), true
+	}
+	return len(p), nil, false
+}
+
 // processByte processes a single byte, appending non-filtered output to f.outBuf.
 func (f *TerminalQueryFilter) processByte(b byte) {
 	// CAN and SUB end every sequence but a tmux wrapper past its first inner
@@ -289,8 +352,10 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 	// in a wrapper one isn't: the ESC escapes neither an ESC nor a '\', so it
 	// has ended the wrapper, and the cancel then cancels the ESC as it would
 	// any held one. Before the first inner ESC one ends the wrapper (cancel).
+	// A string being dropped takes them in dropEnd, which decides where it
+	// ends.
 	if (b == 0x18 || b == 0x1a) && f.state != qfStateNormal && f.state != qfStateWrapper &&
-		f.state != qfStateWrapHead && f.state != qfStateWrapDrop {
+		f.state != qfStateWrapHead && !f.Dropping() {
 		f.cancel(b)
 		return
 	}
@@ -324,7 +389,7 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 	case qfStateAPCEsc:
 		f.apcEscByte(b)
 
-	case qfStateDrop, qfStateDropEsc:
+	case qfStateDrop, qfStateDropEsc, qfStateWrapDrop, qfStateWrapDropEsc:
 		f.dropByte(b)
 
 	case qfStateWrapMatch, qfStateWrapMatchEsc:
@@ -332,9 +397,6 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 
 	case qfStateWrapLead, qfStateWrapLeadEsc, qfStateWrapHead, qfStateWrapHeadEsc:
 		f.wrapHeldByte(b)
-
-	case qfStateWrapDrop, qfStateWrapDropEsc:
-		f.wrapDropByte(b)
 
 	case qfStateWrapper, qfStateWrapperEsc:
 		f.wrapperByte(b)
@@ -348,8 +410,9 @@ func (f *TerminalQueryFilter) processByte(b byte) {
 // cancel takes a CAN or SUB, which ends a sequence from any state on the DEC
 // parser terminals implement; the terminal goes back to ground and executes
 // it. Inside a tmux wrapper, from its first inner ESC on, they are bytes of
-// the stream it carries instead (wrapHeldByte, wrapDropByte, wrapperByte),
-// and get here only straight after a raw ESC, which has ended the wrapper.
+// the stream it carries instead (wrapHeldByte, wrapperByte), and get here only
+// straight after a raw ESC, which has ended the wrapper. A string being
+// dropped, at the top or in a wrapper, takes them in dropEnd.
 func (f *TerminalQueryFilter) cancel(b byte) {
 	switch f.state {
 	case qfStateOSCEsc, qfStateAPCEsc, qfStateWrapMatchEsc:
@@ -361,12 +424,8 @@ func (f *TerminalQueryFilter) cancel(b byte) {
 		// So did the wrapper, which a raw ESC that escapes neither an ESC nor
 		// a '\' ends, and it is dropped the same way.
 		f.restartWrapperAtESC()
-	case qfStateDropEsc, qfStateWrapDropEsc:
-		// So did the string being dropped, which the ESC ended as it would
-		// any string, and the cancel cancels the ESC on its own here too.
-		f.seqBuf = append(f.seqBuf[:0], 0x1b)
 	case qfStateOSCNum, qfStateOSC, qfStateDCSEntry, qfStateDCSParam, qfStateDCSInter,
-		qfStateAPCEntry, qfStateAPC, qfStateDrop, qfStateWrapMatch, qfStateWrapLead:
+		qfStateAPCEntry, qfStateAPC, qfStateWrapMatch, qfStateWrapLead:
 		// A held OSC, DCS header or APC is dropped whole, query or not, and
 		// none of it goes out with the cancel: kitty keeps a string open past
 		// a CAN or SUB, so "ESC ]4;0; CAN ;1;? BEL" reaches it as a palette
@@ -374,13 +433,12 @@ func (f *TerminalQueryFilter) cancel(b byte) {
 		// with a close owed too: kitty may have ended the emitted string
 		// already, at a BEL in a DCS, and would read the held head as live.
 		// Only the head's own ESC goes out, ahead of the cancel, as the close.
-		// A string being dropped owes none, since nothing of it went out, so
-		// the cancel ends it and goes out alone. So is a DCS held while it may
-		// be a tmux wrapper, and a wrapper before its first inner ESC, where a
-		// DEC terminal ends the DCS and prints what follows (Owen,
-		// 2026-10-11). Taken as the wrapper's payload instead, what followed
-		// was dropped with the wrapper when a query came after it: "ESC P
-		// tmux; CAN hello ESC ESC [6n ESC \" lost the hello.
+		// So is a DCS held while it may be a tmux wrapper, and a wrapper
+		// before its first inner ESC, where a DEC terminal ends the DCS and
+		// prints what follows (Owen, 2026-10-11). Taken as the wrapper's
+		// payload instead, what followed was dropped with the wrapper when a
+		// query came after it: "ESC P tmux; CAN hello ESC ESC [6n ESC \" lost
+		// the hello.
 		keep := 0
 		if f.closeOwed {
 			keep = 1
@@ -771,28 +829,107 @@ func (f *TerminalQueryFilter) apcEscByte(b byte) {
 	f.escByte(b)
 }
 
-// dropByte takes a byte of a query string being dropped. Its payload is
-// discarded as it streams, until the string ends: a CAN or SUB ends it in
-// cancel, and an ESC ends it too, held to see the byte after it. A '\' makes
-// the ESC ST, which goes with the string; anything else starts a new sequence
-// at the ESC, as it does after any string. Nothing of the string went out, so
-// no close is owed either way.
+// dropByte takes a raw byte of a query string being dropped, at the top or as
+// a tmux wrapper's first inner sequence. Its payload is discarded as it
+// streams, until dropEnd finds the string's end. The stream then resumes as
+// ordinary output, from ground, at the point dropEnd names: the bytes from
+// there on, the raw ESCs the drop held among them, are parsed afresh. Nothing
+// of the string went out, so no close is owed either way.
+//
+// Payload, nearly all of a string, is discarded before dropEnd is called: in
+// a drop with no ESC pending, raw or inner, any byte but an ESC, a CAN or a
+// SUB is payload, which is what dropEnd would say of it too.
 func (f *TerminalQueryFilter) dropByte(b byte) {
-	if f.state == qfStateDrop {
-		if b == 0x1b {
+	if b != 0x1b && b != 0x18 && b != 0x1a &&
+		(f.state == qfStateDrop || f.state == qfStateWrapDrop && f.inner.state == qfStateDrop) {
+		return
+	}
+	back, ended := f.dropEnd(b)
+	if !ended {
+		return
+	}
+	f.seqBuf = f.seqBuf[:0]
+	f.state = qfStateNormal
+	for range back {
+		f.processByte(0x1b)
+	}
+	if back >= 0 {
+		f.processByte(b)
+	}
+}
+
+// dropEnd takes b, the next raw byte of a query string being dropped, and
+// decides only whether the string ends at it. It parses nothing after the
+// end, so SettleDrop can hand the stream over from there untouched. While the
+// string goes on, b is part of it and the drop moves on, an ESC held to see
+// the byte after it. When it ends, back says where the stream resumes,
+// counted in raw bytes back from b: -1 is after b, 0 at b, and 1 or 2 at a
+// raw ESC before b, which the drop held.
+//
+// At the top, the resume point is:
+//   - for ST, ESC \: after the '\', which goes with the string;
+//   - for a CAN or SUB: at that byte, which goes out;
+//   - for an ESC followed by anything else: at the ESC, which starts a new
+//     sequence, as it does after any string.
+//
+// In a wrapper the inner end is read on decoded bytes, and the stream resumes
+// with no more decoding, at:
+//   - an inner ST, raw ESC ESC \: after the '\';
+//   - a CAN or SUB: at that byte;
+//   - an inner ESC that isn't ST, raw ESC ESC x: at the pair's second raw ESC,
+//     which a DEC terminal reads as starting what follows. If x is itself a
+//     raw ESC, paired by the next byte into a second inner ESC, that is two
+//     raw ESCs back from the byte that pairs it, and the stream from there is
+//     three ESCs;
+//   - the outer ST: after it, as it ends both;
+//   - a lone raw ESC x, which ends the wrapper: at that ESC.
+//
+// The inner machine holds the ESC that may begin the string's ST, as drop mode
+// does at the top. Pending carries it as the ESC ESC it arrived as, and a raw
+// ESC whose pair is still to come after it.
+func (f *TerminalQueryFilter) dropEnd(b byte) (back int, ended bool) {
+	switch f.state {
+	case qfStateDrop:
+		switch b {
+		case 0x1b:
 			f.seqBuf = append(f.seqBuf, b)
 			f.state = qfStateDropEsc
+		case 0x18, 0x1a:
+			return 0, true
 		}
-		return
+		return 0, false
+	case qfStateDropEsc:
+		if b == '\\' {
+			return -1, true
+		}
+		return 1, true
+	case qfStateWrapDrop:
+		switch {
+		case b == 0x1b:
+			f.seqBuf = append(f.seqBuf, b)
+			f.state = qfStateWrapDropEsc
+		case f.inner.state == qfStateDropEsc && b == '\\':
+			return -1, true
+		case f.inner.state == qfStateDropEsc:
+			return 1, true
+		case b == 0x18 || b == 0x1a:
+			return 0, true
+		}
+		return 0, false
 	}
-	if b == '\\' {
-		f.seqBuf = f.seqBuf[:0]
-		f.state = qfStateNormal
-		return
+	// qfStateWrapDropEsc: b is the byte after a raw ESC.
+	switch {
+	case b == '\\':
+		return -1, true
+	case b != 0x1b:
+		return 1, true
+	case f.inner.state == qfStateDropEsc:
+		return 2, true
 	}
-	f.seqBuf = append(f.seqBuf[:0], 0x1b)
-	f.state = qfStateEsc
-	f.escByte(b)
+	f.inner.processByte(b)
+	f.seqBuf = append(f.seqBuf, b)
+	f.state = qfStateWrapDrop
+	return 0, false
 }
 
 // wrapMatchByte takes a byte of a DCS whose header ended in 't', held while
@@ -938,7 +1075,7 @@ func (f *TerminalQueryFilter) holdsString() bool {
 //     no longer consulted, so a later inner sequence passes unclassified.
 //   - A query decided at its end is dropped with the wrapper's head, and the
 //     stream resumes as ordinary output after its last byte.
-//   - A query string goes on being dropped to its inner end (wrapDropByte).
+//   - A query string goes on being dropped to its inner end (dropByte).
 //   - A held inner string that ends abnormally, or a head an inner ESC
 //     abandons, is dropped as at the top, and the stream resumes at the
 //     second raw ESC of the inner ESC that ended it, as ordinary output: a
@@ -1128,64 +1265,6 @@ func (f *TerminalQueryFilter) dropInner() {
 		f.seqBuf = append(f.seqBuf, c)
 	}
 	f.state = qfStateWrapDrop
-}
-
-// wrapDropByte takes a raw byte of a wrapper whose first inner sequence is a
-// query string being dropped. Nothing of it goes out until the string's inner
-// end, read on decoded bytes, after which the stream resumes as ordinary
-// output from ground, with no more decoding, at a raw point that depends on
-// the end:
-//   - an inner ST, raw ESC ESC \: after the '\';
-//   - a CAN or SUB: at that byte, which goes out;
-//   - an inner ESC that isn't ST, raw ESC ESC x: at the second raw ESC, which
-//     a DEC terminal reads as starting what follows;
-//   - the outer ST: after it, as it ends both;
-//   - a lone raw ESC x, which ends the wrapper: at that ESC.
-//
-// The inner machine holds the ESC that may begin the string's ST, as drop mode
-// does at the top. Pending carries it as the ESC ESC it arrived as, and a raw
-// ESC whose pair is still to come after it.
-func (f *TerminalQueryFilter) wrapDropByte(b byte) {
-	if f.state == qfStateWrapDropEsc {
-		switch b {
-		case 0x1b:
-			if f.inner.state == qfStateDrop {
-				f.inner.processByte(b)
-				f.seqBuf = append(f.seqBuf, b)
-				f.state = qfStateWrapDrop
-				return
-			}
-			// An inner ESC after the pending one ended the string at the
-			// pending one, and the stream from its second raw ESC is three
-			// ESCs, which leave one held.
-			f.seqBuf = append(f.seqBuf[:0], 0x1b)
-			f.state = qfStateEsc
-		case '\\':
-			f.seqBuf = f.seqBuf[:0]
-			f.state = qfStateNormal
-		default:
-			f.seqBuf = append(f.seqBuf[:0], 0x1b)
-			f.state = qfStateEsc
-			f.escByte(b)
-		}
-		return
-	}
-	switch {
-	case b == 0x1b:
-		f.seqBuf = append(f.seqBuf, b)
-		f.state = qfStateWrapDropEsc
-	case f.inner.state == qfStateDropEsc && b == '\\':
-		f.seqBuf = f.seqBuf[:0]
-		f.state = qfStateNormal
-	case f.inner.state == qfStateDropEsc:
-		f.seqBuf = append(f.seqBuf[:0], 0x1b)
-		f.state = qfStateEsc
-		f.processByte(b)
-	case b == 0x18 || b == 0x1a:
-		f.seqBuf = f.seqBuf[:0]
-		f.state = qfStateNormal
-		f.outBuf = append(f.outBuf, b)
-	}
 }
 
 // wrapperByte takes a byte of a tmux wrapper that passes: its first inner

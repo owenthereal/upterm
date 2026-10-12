@@ -1205,6 +1205,99 @@ func TestTerminalQueryFilter_ContinuesAtEveryBoundary(t *testing.T) {
 	}
 }
 
+// SettleDrop hands back exactly where a dropped string ends, for every
+// resume point, at the top and in a wrapper: n into p, or the raw ESCs the
+// filter carried from the last write, which the stream resumes from.
+func TestTerminalQueryFilter_SettleDrop(t *testing.T) {
+	const wrapped = "\x1bPtmux;\x1b\x1bP+q544e"
+	for _, c := range []struct {
+		before, p string
+		n         int
+		raw       string
+		done      bool
+	}{
+		{"\x1bP+q54", "4e", 2, "", false},
+		{"\x1bP+q544e", "\x1b\\hello", 2, "", true}, // ST: after the '\'
+		{"\x1bP+q544e\x1b", "\\hello", 1, "", true},
+		{"\x1bP+q544e", "\x18hello", 0, "", true}, // CAN: at it
+		{"\x1bP+q544e", "\x1ahello", 0, "", true},
+		{"\x1bP+q544e", "xy\x1bZhello", 2, "", true}, // an ESC that isn't ST: at it
+		{"\x1bP+q544e\x1b", "Zhello", 0, "\x1b", true},
+		{"\x1bP+q544e\x1b", "\x1b[6n", 0, "\x1b", true},
+		{"\x1bP+q544e\x1b", "\x18hello", 0, "\x1b", true},
+		{"\x1bPtmux;\x1b\x1b_Ga=q;AAAA", "\x1b\x1b\\\x1b\\hello", 3, "", true}, // an inner ST
+		{"\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b", "\x1b\\\x1b\\hello", 2, "", true},
+		{"\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b", "\\\x1b\\hello", 1, "", true},
+		{wrapped, "\x18hello", 0, "", true}, // an inner CAN
+		{wrapped + "\x1b\x1b", "\x18hello", 0, "\x1b", true},
+		{wrapped, "\x1b\x1b[6n", 1, "", true}, // an inner ESC: at its pair's second raw ESC
+		{wrapped + "\x1b", "\x1b[6n", 0, "", true},
+		{wrapped + "\x1b\x1b", "[6nhello\x1b\\", 0, "\x1b", true},
+		{wrapped, "\x1b\\X", 2, "", true}, // the outer ST
+		{wrapped + "\x1b", "\\X", 1, "", true},
+		{wrapped, "\x1b[6n", 0, "", true}, // a lone raw ESC x: at that ESC
+		{wrapped + "\x1b", "[6n", 0, "\x1b", true},
+		{wrapped + "\x1b", "\x18X", 0, "\x1b", true},
+		{wrapped, "\x1b\x1b\x1b\x1b[6n", 1, "", true}, // an inner ESC after a pending one: at the pending one's
+		{wrapped + "\x1b\x1b", "\x1b\x1b[6n", 0, "\x1b", true},
+		{wrapped + "\x1b\x1b\x1b", "\x1b[6n", 0, "\x1b\x1b", true},
+	} {
+		var out bytes.Buffer
+		f := NewTerminalQueryFilter(&out)
+		_, _ = f.Write([]byte(c.before))
+		require.True(t, f.Dropping(), "%q", c.before)
+		n, raw, done := f.SettleDrop([]byte(c.p))
+		require.Equal(t, c.n, n, "%q|%q", c.before, c.p)
+		require.Equal(t, c.raw, string(raw), "%q|%q", c.before, c.p)
+		require.Equal(t, c.done, done, "%q|%q", c.before, c.p)
+		require.Equal(t, !c.done, f.Dropping(), "%q|%q", c.before, c.p)
+		require.Zero(t, out.Len(), "nothing of a drop goes out: %q|%q", c.before, c.p)
+	}
+}
+
+// At every boundary of every exact-bytes case where the filter is dropping,
+// SettleDrop agrees with the filter's own drop: the stream it hands back,
+// raw and then p from n, is the input from a raw point no later than p's
+// start, and filtered from ground it gives what the filter gives for the
+// input whole. So the resume point is neither inside the string nor past
+// anything after it.
+func TestTerminalQueryFilter_SettleDropResumesWhereTheFilterDoes(t *testing.T) {
+	settled := 0
+	for _, c := range filterCases {
+		whole := filterAll(c.in)
+		for k := 0; k <= len(c.in); k++ {
+			var out bytes.Buffer
+			f := NewTerminalQueryFilter(&out)
+			_, _ = f.Write([]byte(c.in[:k]))
+			if !f.Dropping() {
+				continue
+			}
+			settled++
+			emitted := out.Len()
+			p := []byte(c.in[k:])
+			n, raw, done := f.SettleDrop(p)
+			require.Equal(t, emitted, out.Len(), "%s: SettleDrop emitted, split at %d", c.name, k)
+			if !done {
+				require.Equal(t, len(p), n, "%s: split at %d", c.name, k)
+				require.Nil(t, raw, "%s: split at %d", c.name, k)
+				require.Equal(t, whole, out.String(), "%s: the input ends in the drop, split at %d", c.name, k)
+				continue
+			}
+			require.False(t, f.Dropping(), "%s: split at %d", c.name, k)
+			if len(raw) > 0 {
+				require.Zero(t, n, "%s: split at %d", c.name, k)
+				require.LessOrEqual(t, len(raw), k, "%s: split at %d", c.name, k)
+				require.Equal(t, c.in[k-len(raw):k], string(raw), "%s: raw is the input's own bytes, split at %d", c.name, k)
+			}
+			g := NewTerminalQueryFilter(&out)
+			_, _ = g.Write(raw)
+			_, _ = g.Write(p[n:])
+			require.Equal(t, whole, out.String(), "%s: resumed from ground, split at %d", c.name, k)
+		}
+	}
+	require.NotZero(t, settled)
+}
+
 // A row marked kitty is one whose output a kitty guest could read differently
 // from a DEC one; under kitty's string ends it still asks nothing. The filter's
 // output is parsed, not the row's want, so a filter that breaks the row fails
