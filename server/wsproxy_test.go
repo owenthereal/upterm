@@ -136,10 +136,17 @@ func (d *noDialer) DialContext(context.Context, *api.Identifier) (net.Conn, erro
 // session as its user.
 func openGuestWS(t *testing.T, h *wsHandler, session string) *websocket.Conn {
 	t.Helper()
+	return openGuestWSWithAuth(t, h, session, "")
+}
+
+// openGuestWSWithAuth is openGuestWS with user and pass as the guest's
+// basic-auth credentials, which embedded mode rejoins into one SSH user.
+func openGuestWSWithAuth(t *testing.T, h *wsHandler, user, pass string) *websocket.Conn {
+	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	header := http.Header{}
-	header.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(session+":")))
+	header.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
 	header.Add(upterm.HeaderUptermClientVersion, upterm.ClientSSHClientVersion)
 	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), header)
 	require.NoError(t, err)
@@ -189,7 +196,7 @@ func standInSSHProxy(t *testing.T) string {
 func Test_WebSocketProxy_UnresolvedGuestGoesToSSHProxy(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	c := openGuestWS(t, &wsHandler{
-		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), Logger: logger},
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: true, Logger: logger},
 		SessionManager: newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul)),
 		Logger:         logger,
 	}, "nosuchsession")
@@ -213,7 +220,7 @@ func Test_WebSocketProxy_UnreachableNodeGoesToSSHProxy(t *testing.T) {
 	user, err := sm.CreateSession(NewSession("session", unreachable, "host", nil, nil))
 	require.NoError(t, err)
 	c := openGuestWS(t, &wsHandler{
-		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), Logger: logger},
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), nodeAddrFromStore: true, Logger: logger},
 		SessionManager: sm,
 		Logger:         logger,
 	}, user)
@@ -221,6 +228,50 @@ func Test_WebSocketProxy_UnreachableNodeGoesToSSHProxy(t *testing.T) {
 	_, msg, err := c.ReadMessage()
 	require.NoError(t, err)
 	require.Equal(t, "from the SSH proxy", string(msg))
+}
+
+// standInNode listens as some other address would, greeting what it accepts
+// and counting it, so a test can tell which address a dial actually reached.
+func standInNode(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var accepted atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_, _ = conn.Write([]byte("from the address in the user"))
+			_ = conn.Close()
+		}
+	}()
+	return ln.Addr().String(), &accepted
+}
+
+// In embedded mode a guest's node address is whatever its own SSH user
+// carries, so it names no node the relay resolved. Fronting the SSH proxy, the
+// handler sends such a guest there and lets it decode that user itself, which
+// keeps one component deciding every guest's upstream.
+func Test_WebSocketProxy_EmbeddedGuestGoesToSSHProxy(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	elsewhere, accepted := standInNode(t)
+	sm, err := NewSessionManager(routing.ModeEmbedded)
+	require.NoError(t, err)
+
+	c := openGuestWSWithAuth(t, &wsHandler{
+		ConnDialer:     sshProxyDialer{sshProxyAddr: standInSSHProxy(t), Logger: logger},
+		SessionManager: sm,
+		Logger:         logger,
+	}, "session", base64.URLEncoding.EncodeToString([]byte(elsewhere)))
+
+	_, msg, err := c.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, "from the SSH proxy", string(msg))
+	require.Zero(t, accepted.Load(), "the address the guest's user named was dialed")
 }
 
 func scan(s *bufio.Scanner) string {
