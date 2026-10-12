@@ -1,6 +1,7 @@
 package io
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -827,13 +828,20 @@ func refCheck(in string, filter func(string) string) string {
 // inner sequence is read so: the filter classifies no other, and refGenerate
 // makes no wrapper with a second.
 //
+// A wrapper is tmux's notion, so it is read as tmux reads one: a DCS header
+// ending in t, then the raw bytes "mux;". tmux reads every byte of a DCS's
+// data, a DEL included, so a byte the DEC parser ignores there ends the match,
+// though the DEC data still spells "mux;". The raw data starts just after the
+// header's final byte, which the bookkeeping places at endAt - held + hdrHeld.
+//
 // Raw bytes decode in pairs after an ESC, from the wrapper's first raw ESC,
 // where its DCS ends: ESC ESC is an inner ESC, and any other pair ends the
 // wrapper, ESC \ as its ST and any other as a lone ESC.
 func refInnerST(in []byte, evs []refEvent) map[int]bool {
 	st := map[int]bool{}
 	for _, ev := range evs {
-		if ev.kind != refDCS || !refNoEffect(ev) || ev.end != 0x1b {
+		if ev.kind != refDCS || ev.final != 't' || ev.end != 0x1b ||
+			!bytes.HasPrefix(in[ev.endAt-ev.held+ev.hdrHeld:ev.endAt], []byte("mux;")) {
 			continue
 		}
 		escs := 0
@@ -1144,6 +1152,25 @@ func TestRefInnerST(t *testing.T) {
 	require.Empty(t, at("\x1bPtmux;\x1b]0;t\x1b\x1b\\"), "a wrapper a lone ESC ended")
 }
 
+// refInnerST reads a wrapper as tmux does: "mux;" is the four raw bytes after
+// the header's final byte. A byte the DEC parser ignores in it, which tmux
+// reads, ends the match though the DEC data still spells "mux;"; after it,
+// the byte is the wrapper's own, and before the introducer's second byte, no
+// part of the string.
+func TestRefInnerST_ReadsThePrefixAsTmuxDoes(t *testing.T) {
+	at := func(in string) []int {
+		var offs []int
+		for i := range refInnerST([]byte(in), refParse(refDEC, []byte(in))) {
+			offs = append(offs, i)
+		}
+		return offs
+	}
+	require.Empty(t, at("\x1bPtmux\x7f;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL before the ';'")
+	require.Empty(t, at("\x1bPtm\x7fux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL inside mux")
+	require.Equal(t, []int{14}, at("\x1bPtmux;\x7f\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL after the ';', a leading byte")
+	require.Equal(t, []int{14}, at("\x1b\rPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a CR the escape state executes")
+}
+
 // refCheck catches a splice: the filter's output loses text that the input
 // showed, though no query remains.
 func TestRefCheck_CatchesASplice(t *testing.T) {
@@ -1210,6 +1237,10 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		// decoded stream, and passes with the wrapper (refInnerST).
 		{"\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X", "\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X\x18"},
 		{"\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\", "\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\\x18"},
+		// tmux reads a DEL in "mux;" as a mismatch, so there is no wrapper,
+		// and a DCS ending in t that the first ESC of ESC ESC \ ends is held
+		// and dropped by policy (found by the fuzz test).
+		{"\x1bPtmux\x7f;\x1b\x1bPt\x1b\x1b\\", "\x1bPtmux\x7f;\x1b\x18\x1b\\\x18"},
 	} {
 		out := c.out
 		require.Empty(t, refCheck(c.in, func(string) string { return out }), "%q", c.in)

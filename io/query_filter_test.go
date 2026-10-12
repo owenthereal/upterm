@@ -1036,6 +1036,10 @@ var wrapperCases = []filterCase{
 	// string, ST ends it cleanly and passes it, and any other end drops it.
 	{name: "a header ending in t that isn't a wrapper passes", in: "\x1bPtmx;\x1b[6nX", want: "\x1bPtmx;\x1b\x18X"},
 	{name: "a DEL in the match isn't a wrapper", in: "\x1bPtm\x7fux;\x1b\x1b[6nX\x1b\\", want: "\x1bPtm\x7fux;\x1b\x18X\x1b\\"},
+	// Found by the fuzz test: with no wrapper, ESC ESC \ is no inner ST, so a
+	// DCS ending in t that the first ESC ends is a held string ended
+	// abnormally, and dropped, though a DEC terminal's data reads "mux;".
+	{name: "a DEL in the match, then a DCS ending in t ended by ESC ESC \\", in: "\x1bPtmux\x7f;\x1b\x1bPt\x1b\x1b\\", want: "\x1bPtmux\x7f;\x1b\x18\x1b\\"},
 	{name: "a DCS ending in t, ended by ST in the match, passes", in: "\x1bPtmu\x1b\\X", want: "\x1bPtmu\x1b\\X"},
 	{name: "a DCS ending in t, ended by an ESC in the match", in: "\x1bPtmu\x1b[1mX", want: "\x1b[1mX"},
 	{name: "a DCS ending in t, cancelled in the match", in: "\x1bPtm\x18X", want: "\x18X"},
