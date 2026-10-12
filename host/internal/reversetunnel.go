@@ -19,9 +19,9 @@ import (
 	"github.com/owenthereal/upterm/internal/httpproxy"
 	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/registration"
+	"github.com/owenthereal/upterm/internal/relaydial"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
-	"github.com/owenthereal/upterm/ws"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/protobuf/proto"
 )
@@ -300,7 +300,9 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 		HostKeyCallback: c.HostKeyCallback,
 	}
 
-	raw, addr, err := c.dial(ctx, user.Username)
+	// The host's username has no colon, so the dial splits it into a username
+	// and an empty password, as it always sent.
+	raw, addr, err := relaydial.Dial(ctx, c.Host, user.Username, false, c.ProxyURL)
 	if err != nil {
 		// The signers, not the auths built from them: auths holds one
 		// publickey method however many keys went into it, and it is the keys
@@ -466,28 +468,6 @@ func (c *ReverseTunnel) Establish(ctx context.Context) (*server.CreateSessionRes
 	c.sessionKeyRedial = reconnectSupported && sessResp.SessionKeyRedial
 
 	return sessResp, nil
-}
-
-// dial opens the connection the SSH transport runs over, under ctx, and returns
-// the address the host-key callback is shown for it: Host's host:port for
-// ssh://, and the same for ws://, whose port `upterm host` appends to portless
-// server URLs — known_hosts checking requires host:port and keys the entry as
-// [host]:443. Only the dial URL inside ws drops it.
-func (c *ReverseTunnel) dial(ctx context.Context, username string) (net.Conn, string, error) {
-	switch {
-	case isWSScheme(c.Host.Scheme):
-		u, _ := url.Parse(c.Host.String()) // clone
-		u.User = url.UserPassword(username, "")
-		conn, err := ws.NewWSConnContext(ctx, u, false, c.ProxyURL)
-		return conn, u.Host, err
-	case c.ProxyURL != nil:
-		conn, err := httpproxy.Dial(ctx, c.ProxyURL, c.Host.Host)
-		return conn, c.Host.Host, err
-	default:
-		var d net.Dialer
-		conn, err := d.DialContext(ctx, "tcp", c.Host.Host)
-		return conn, c.Host.Host, err
-	}
 }
 
 func createSession(client *ssh.Client, req *server.CreateSessionRequest) (*server.CreateSessionResponse, error) {

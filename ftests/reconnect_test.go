@@ -64,7 +64,8 @@ const (
 // ssh:// and ws://, one at a time, on relays of its own: the scenarios cut,
 // silence, restart and shut down relays, and the suite's ts1 and ts2 are
 // shared by tests running in parallel. A scenario that only one routing mode
-// can show runs in that mode's suite alone.
+// can show runs in that mode's suite alone. A scenario that needs a relay set
+// up differently from ts1 and ts2 runs here too, for the relay of its own.
 func (suite *FtestSuite) TestReconnect() {
 	scenarios := []struct {
 		name string
@@ -81,6 +82,10 @@ func (suite *FtestSuite) TestReconnect() {
 		{"MovedToAnotherNodeAfterABlackhole", routing.ModeConsul, redialToAnotherNode((*testhelpers.Forwarder).Blackhole)},
 		{"NodeShutDownForADeploy", "", testRedialWhenANodeShutsDown},
 		{"TunnelBlackholed", "", testRedialAfterABlackhole},
+		// A guest on upterm join rejoins once the host has redialled.
+		{"JoinedGuestRejoinsAfterACut", "", testJoinRejoinsAfterTheHostsTunnelDrops},
+		// On a relay whose certificate an authority of its own signed.
+		{"JoinedGuestTrustsTheRelaysAuthority", "", testJoinRejoinTrustsTheRelaysAuthority},
 	}
 	for _, sc := range scenarios {
 		if sc.only != "" && sc.only != suite.mode {
