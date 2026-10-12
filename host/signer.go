@@ -22,6 +22,11 @@ const (
 	errCannotDecodeEncryptedPrivateKeys = "cannot decode encrypted private keys"
 )
 
+var (
+	errNoPrivateKeyFiles   = errors.New("private-key was supplied but names no files")
+	errNamesMoreThanOneKey = errors.New("names more than one key; name a file with a single key")
+)
+
 type errDescryptingPrivateKey struct {
 	file string
 }
@@ -91,7 +96,7 @@ func SignersWith(opts SignerOptions) ([]ssh.Signer, func(), error) {
 // holds is offered unless an entry names it.
 func identitySigners(files []string, agentSocket string, prompt func(file string) ([]byte, error)) ([]ssh.Signer, func(), error) {
 	if len(files) == 0 {
-		return nil, nil, errors.New("private-key was supplied but names no files")
+		return nil, nil, errNoPrivateKeyFiles
 	}
 
 	ag := &lazyAgent{socket: agentSocket}
@@ -125,20 +130,9 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		return nil, fmt.Errorf("cannot read private key %s: %w", file, err)
 	}
 
-	// A public key selects the agent key it names, as an IdentityFile that
-	// names a .pub does in OpenSSH. It is the only way to pick one identity
-	// that exists nowhere but in an agent.
-	if pub, _, _, rest, err := ssh.ParseAuthorizedKey(pb); err == nil {
-		// One entry names one identity. Pointing it at a file of many —
-		// ~/.ssh/authorized_keys, say — would otherwise silently mean "the
-		// first key in it", which is a guess this has no business making.
-		// The test is whether another key *parses* out of what follows, not
-		// whether anything follows at all: a real .pub ends in a newline and
-		// may carry blank or `#` comment lines, and ParseAuthorizedKey skips
-		// exactly those before it looks for a key, so they leave a non-empty
-		// rest that yields no second key.
-		if _, _, _, _, err := ssh.ParseAuthorizedKey(rest); err == nil {
-			return nil, fmt.Errorf("%s names more than one key; name a file with a single key", file)
+	if pub, ok, err := publicKeyEntry(pb); ok {
+		if err != nil {
+			return nil, fmt.Errorf("%s %w", file, err)
 		}
 		s, err := ag.signerFor(pub)
 		if err != nil {
@@ -154,8 +148,7 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		// that is right here.
 		return ssh.NewSignerFromKey(key)
 	}
-	var missing *ssh.PassphraseMissingError
-	encrypted := errors.As(err, &missing) || strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys)
+	missing, encrypted := passphraseNeeded(err)
 	if !encrypted {
 		// Not encrypted, but still not a signer: x/crypto's OpenSSH key-type
 		// switch has no case for sk-ssh-ed25519@openssh.com or
@@ -204,6 +197,41 @@ func identitySigner(file string, ag *lazyAgent, prompt func(file string) ([]byte
 		return nil, err
 	}
 	return ssh.NewSignerFromKey(key)
+}
+
+// publicKeyEntry reads an identity entry that is a public key, not a private
+// one. ok is false when pb is no public key, and then err is nil.
+//
+// A public key selects the agent key it names, as an IdentityFile that names a
+// .pub does in OpenSSH. It is the only way to pick one identity that exists
+// nowhere but in an agent.
+func publicKeyEntry(pb []byte) (pub ssh.PublicKey, ok bool, err error) {
+	pub, _, _, rest, err := ssh.ParseAuthorizedKey(pb)
+	if err != nil {
+		return nil, false, nil
+	}
+	// One entry names one identity. Pointing it at a file of many —
+	// ~/.ssh/authorized_keys, say — would otherwise silently mean "the first
+	// key in it", which is a guess this has no business making. The test is
+	// whether another key *parses* out of what follows, not whether anything
+	// follows at all: a real .pub ends in a newline and may carry blank or `#`
+	// comment lines, and ParseAuthorizedKey skips exactly those before it
+	// looks for a key, so they leave a non-empty rest that yields no second
+	// key.
+	if _, _, _, _, err := ssh.ParseAuthorizedKey(rest); err == nil {
+		return nil, true, errNamesMoreThanOneKey
+	}
+	return pub, true, nil
+}
+
+// passphraseNeeded reports whether err, from ssh.ParseRawPrivateKey, says the
+// key is encrypted. missing is x/crypto's error when it says so, which carries
+// the public half of an openssh-format file; it is nil otherwise.
+func passphraseNeeded(err error) (missing *ssh.PassphraseMissingError, encrypted bool) {
+	if errors.As(err, &missing) {
+		return missing, true
+	}
+	return nil, err != nil && strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys)
 }
 
 // publicKeySelectorHint returns the parenthetical to append when a .pub
@@ -449,8 +477,7 @@ func readPrivateKeyFromFile(file string, promptForPassphrase func(file string) (
 		return key, err
 	}
 
-	var e *ssh.PassphraseMissingError
-	if !errors.As(err, &e) && !strings.Contains(err.Error(), errCannotDecodeEncryptedPrivateKeys) {
+	if _, encrypted := passphraseNeeded(err); !encrypted {
 		return nil, err
 	}
 
