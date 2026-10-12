@@ -378,6 +378,20 @@ func Test_autoAcceptingHostKeyCallbackValidatesKnownKeys(t *testing.T) {
 	assert.Contains(t, err.Error(), "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED")
 }
 
+// hostKeyCallbacks are upterm host's two callbacks, the prompting one and
+// --skip-host-key-check's.
+var hostKeyCallbacks = []struct {
+	name string
+	new  func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error)
+}{
+	{"prompting", func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
+		return NewPromptingHostKeyCallback(stdin, stdout, file, false)
+	}},
+	{"auto-accepting", func(_ io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
+		return NewAutoAcceptingHostKeyCallback(stdout, file)
+	}},
+}
+
 // Neither callback asks about, or records, a certificate that a key line
 // already decides.
 func Test_hostKeyCallbackJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t *testing.T) {
@@ -386,17 +400,6 @@ func Test_hostKeyCallbackJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t
 	pin := knownhosts.Line([]string{"relay.test"}, pinned) + "\n"
 	recorded := "@cert-authority relay.test " + string(ssh.MarshalAuthorizedKey(ca.PublicKey()))
 
-	callbacks := []struct {
-		name string
-		new  func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error)
-	}{
-		{"prompting", func(stdin io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
-			return NewPromptingHostKeyCallback(stdin, stdout, file, false)
-		}},
-		{"auto-accepting", func(_ io.Reader, stdout io.Writer, file string) (ssh.HostKeyCallback, error) {
-			return NewAutoAcceptingHostKeyCallback(stdout, file)
-		}},
-	}
 	for _, tc := range []struct {
 		name       string
 		knownHosts string
@@ -408,7 +411,7 @@ func Test_hostKeyCallbackJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t
 		{"the host's line names another key", pin, presented, ErrHostKeyChanged, pin},
 		{"no line names the host", "", presented, nil, recorded},
 	} {
-		for _, c := range callbacks {
+		for _, c := range hostKeyCallbacks {
 			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
 				file := writeKnownHosts(t, tc.knownHosts)
 				stdout := &bytes.Buffer{}
@@ -431,6 +434,28 @@ func Test_hostKeyCallbackJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t
 				}
 			})
 		}
+	}
+}
+
+func Test_hostKeyCallbackRefusesACertificateWhoseSignerIsRevoked(t *testing.T) {
+	ca := newSigner(t)
+	known := "@revoked * " + string(ssh.MarshalAuthorizedKey(ca.PublicKey()))
+
+	for _, c := range hostKeyCallbacks {
+		t.Run(c.name, func(t *testing.T) {
+			file := writeKnownHosts(t, known)
+			stdout := &bytes.Buffer{}
+			cb, err := c.new(strings.NewReader("yes\n"), stdout, file)
+			require.NoError(t, err)
+
+			err = cb("relay.test:22", fakeAddr, signHostCert(t, ca, newSigner(t).PublicKey(), "relay.test"))
+			var r *knownhosts.RevokedError
+			require.ErrorAs(t, err, &r)
+			content, err := os.ReadFile(file)
+			require.NoError(t, err)
+			require.Equal(t, known, string(content))
+			require.Empty(t, stdout.String(), "nothing is asked or announced")
+		})
 	}
 }
 

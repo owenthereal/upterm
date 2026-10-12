@@ -73,7 +73,8 @@ func (hostKeyChangedError) Unwrap() error   { return ErrHostKeyChanged }
 // @cert-authority line trusts key, an error wrapping ErrUnknownHostKey when no
 // line names it, and an error wrapping ErrHostKeyChanged when a line for
 // hostname names a different key. A certificate that no @cert-authority line
-// trusts is checked by its own key. Anything else is as knownhosts returns it.
+// trusts is checked by its own key, once its signer is found not revoked.
+// Anything else is as knownhosts returns it.
 func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) error {
 	cb, err := knownhosts.New(k.File)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -89,6 +90,15 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 		// key is checked as a plain key would be, as OpenSSH does. Unlike
 		// OpenSSH's, this check counts the host's @cert-authority lines too,
 		// so another authority for the host is a changed key.
+		//
+		// knownhosts checks a certificate's signer against @revoked lines
+		// only once an authority matches, and the check of the certificate's
+		// own key can't see the signer. Checking the signer as a plain key
+		// does: a revoked key is refused before any line is looked at.
+		var revoked *knownhosts.RevokedError
+		if serr := cb(hostname, remote, cert.SignatureKey); errors.As(serr, &revoked) {
+			return serr
+		}
 		err = cb(hostname, remote, cert.Key)
 	}
 	if err == nil {

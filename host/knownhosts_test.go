@@ -96,6 +96,26 @@ func TestCheckJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t *testing.T
 	}
 }
 
+func TestCheckRefusesACertificateWhoseSignerIsRevoked(t *testing.T) {
+	ca, own := newSigner(t), newSigner(t).PublicKey()
+	revoked := "@revoked * " + string(ssh.MarshalAuthorizedKey(ca.PublicKey()))
+
+	for _, tc := range []struct {
+		name       string
+		knownHosts string
+	}{
+		{"its own key is pinned", knownhosts.Line([]string{"relay.test"}, own) + "\n" + revoked},
+		{"no line names the host", revoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := signHostCert(t, ca, own, "relay.test")
+			err := KnownHosts{File: writeKnownHosts(t, tc.knownHosts)}.Check("relay.test:22", fakeAddr, cert)
+			var r *knownhosts.RevokedError
+			require.ErrorAs(t, err, &r)
+		})
+	}
+}
+
 func TestAMissingKnownHostsIsAnEmptyTrustStore(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "no-ssh-dir", ".ssh", "known_hosts")
 	key := newSigner(t).PublicKey()
