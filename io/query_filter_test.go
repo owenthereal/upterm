@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -515,6 +516,33 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 			name:  "APC query one byte past its bound",
 			input: []byte("\x1b_Ga=q," + strings.Repeat("i", 249) + ";AAAA\x1b"),
 		},
+		{
+			name:  "wrapper's leading bytes",
+			input: append([]byte("\x1bPtmux;"), bytes.Repeat([]byte("x"), runLength)...),
+		},
+		{
+			name:  "wrapped OSC being decided",
+			input: append([]byte("\x1bPtmux;\x1b\x1b]0;"), bytes.Repeat([]byte("t"), runLength)...),
+		},
+		{
+			name:  "wrapped escapes being decided",
+			input: append([]byte("\x1bPtmux;\x1b\x1b]0;"), bytes.Repeat([]byte{0x1b}, runLength)...),
+		},
+		{
+			name:  "dropped wrapped payload",
+			input: append([]byte("\x1bPtmux;\x1b\x1bP+q"), bytes.Repeat([]byte("544e"), runLength)...),
+		},
+		{
+			name:  "dropped wrapped payload of escapes",
+			input: append([]byte("\x1bPtmux;\x1b\x1bP+q"), bytes.Repeat([]byte{0x1b}, runLength)...),
+		},
+		{
+			// The ';' is the 256th raw byte, so it decides: the drop's saved
+			// head is the whole bound, and the inner ESC re-encoded and an
+			// unpaired raw ESC come on top.
+			name:  "wrapped graphics query decided at its bound",
+			input: []byte("\x1bPtmux;\x1b\x1b_Gi=" + strings.Repeat("0", 238) + ",a=q;\x1b\x1b\x1b"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -532,30 +560,53 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 	}
 }
 
-// maxPendingBytes is computed, not remembered: the largest any state holds
-// under the bounds, plus the one ESC that Pending adds beyond it, which a held
-// OSC or APC, or a dropped string, keeps to see whether a backslash follows.
-// Both halves are checked, the sum from the bound constants and the hold from
-// the filter itself, so raising a bound without the constant fails here, and
-// so does a constant larger than anything the filter ever holds.
+// maxPendingBytes is computed, not remembered: the most Pending returns in any
+// state, from the bounds. A head, an OSC or a graphics command held to its
+// bound can be followed by the ESC that may begin its ST, one more byte; a
+// dropped DCS keeps its header, final byte included, and that ESC; a wrapper
+// being decided holds its raw bytes, a held ESC among them, within its bound;
+// and a wrapper's inner drop adds to the head it saved the pending inner ESC
+// re-encoded (two bytes) and an unpaired raw ESC (one). Both halves are
+// checked, the maximum from the bound constants and the hold from the filter
+// itself, so raising a bound without the constant fails here, and so does a
+// constant larger than anything the filter ever holds.
 func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
-	largest := max(maxEscHeld, maxCSIHeld, maxDCSHeld, maxOSCNumHeld, maxOSCHeld, maxAPCHeld)
-	require.Equal(t, largest+1, maxPendingBytes, "the largest hold, plus one held ESC")
+	largest := max(
+		max(maxEscHeld, maxCSIHeld, maxOSCNumHeld, maxOSCHeld, maxAPCHeld)+1, // a hold, then an ESC
+		maxDCSHeld+2, // a dropped DCS: its header, the final byte, then an ESC
+		maxWrapHeld,  // a wrapper being decided, its held ESC within the bound
+		maxWrapHeld+2+1,
+	)
+	require.Equal(t, largest, maxPendingBytes, "the largest Pending any state returns")
 
-	// 256 (the largest hold, an OSC or an APC with framing) + 1 held ESC. If
-	// the bounds change, change both this and the constant's comment.
-	require.Equal(t, 257, maxPendingBytes)
+	// 256 (the largest hold: an OSC, an APC or a wrapper, with framing) + 2
+	// (an inner ESC re-encoded) + 1 (an unpaired raw ESC). If the bounds
+	// change, change both this and the constant's comment.
+	require.Equal(t, 259, maxPendingBytes)
 
-	// The filter really does reach it: an OSC held to its bound, then an ESC.
-	// One more payload byte instead would have given the OSC up.
+	// An OSC held to its bound, then an ESC, reaches 257. One more payload
+	// byte instead would have given the OSC up.
 	head := "\x1b]0;"
 	var out bytes.Buffer
 	f := NewTerminalQueryFilter(&out)
 	_, _ = f.Write([]byte(head + strings.Repeat("t", maxOSCHeld-len(head))))
 	require.Len(t, f.Pending(), maxOSCHeld, "an OSC held to its bound")
 	_, _ = f.Write([]byte("\x1b"))
-	require.Len(t, f.Pending(), maxPendingBytes, "and the ESC that may begin its ST")
+	require.Len(t, f.Pending(), maxOSCHeld+1, "and the ESC that may begin its ST")
 	require.Empty(t, out.String(), "nothing of it has gone out")
+
+	// A wrapper being decided is held to its bound, its held ESC within it,
+	// and the next raw byte, whatever it is, gives it up: the hold goes out,
+	// and the wrapper passes byte for byte.
+	wrap := "\x1bPtmux;\x1b\x1b]0;" + strings.Repeat("t", maxWrapHeld-len("\x1bPtmux;\x1b\x1b]0;")-1) + "\x1b"
+	var held bytes.Buffer
+	w := NewTerminalQueryFilter(&held)
+	_, _ = w.Write([]byte(wrap))
+	require.Len(t, w.Pending(), maxWrapHeld, "a wrapper held to its bound, an unpaired ESC last")
+	require.Empty(t, held.String(), "nothing of it has gone out")
+	_, _ = w.Write([]byte("\x1b"))
+	require.Empty(t, w.Pending(), "one byte past the bound, the wrapper is given up on")
+	require.Equal(t, wrap+"\x1b", held.String(), "and passes byte for byte")
 
 	var gaveUp bytes.Buffer
 	g := NewTerminalQueryFilter(&gaveUp)
@@ -563,15 +614,23 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 	require.Empty(t, g.Pending(), "one byte past the bound, the OSC is given up on")
 	require.Len(t, gaveUp.String(), maxOSCHeld+1, "and goes out")
 
-	// A dropped graphics query reaches it too. The ';' that decides counts
-	// toward the APC's bound, so a drop's head is at most the bound, and the
-	// ESC that may begin its payload's ST comes on top.
+	// So does a dropped graphics query. The ';' that decides counts toward
+	// the APC's bound, so a drop's head is at most the bound, and the ESC
+	// that may begin its payload's ST comes on top.
 	apc := "\x1b_Ga=q,"
 	var dropped bytes.Buffer
 	d := NewTerminalQueryFilter(&dropped)
 	_, _ = d.Write([]byte(apc + strings.Repeat("i", maxAPCHeld-len(apc)-1) + ";AAAA\x1b"))
-	require.Len(t, d.Pending(), maxPendingBytes, "a dropped APC's head at its bound, and an ESC")
+	require.Len(t, d.Pending(), maxAPCHeld+1, "a dropped APC's head at its bound, and an ESC")
 	require.Empty(t, dropped.String(), "nothing of it has gone out")
+
+	// A dropped DCS keeps its header to its bound, the final byte, and an ESC.
+	dcs := "\x1bP" + strings.Repeat("1", maxDCSHeld-len("\x1bP+")) + "+q"
+	var droppedDCS bytes.Buffer
+	c := NewTerminalQueryFilter(&droppedDCS)
+	_, _ = c.Write([]byte(dcs + "544e\x1b"))
+	require.Len(t, c.Pending(), maxDCSHeld+2, "a dropped DCS's header at its bound, its final byte, and an ESC")
+	require.Empty(t, droppedDCS.String(), "nothing of it has gone out")
 
 	// A ';' one byte later would be held past the bound, so the command is
 	// given up on there, unclassified, and passes.
@@ -581,6 +640,23 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 	_, _ = p.Write([]byte(in))
 	require.Empty(t, p.Pending(), "one byte past the bound, the APC is given up on")
 	require.Equal(t, in, passed.String(), "and goes out")
+}
+
+// The largest Pending of all is a wrapper's inner drop: the saved head at the
+// wrapper's bound, the pending inner ESC re-encoded, and an unpaired raw ESC
+// (Owen, 2026-10-11).
+func TestTerminalQueryFilter_PendingReachesItsMaximumInAWrapper(t *testing.T) {
+	// A wrapped kitty query whose deciding head is exactly 256 raw bytes.
+	h := "\x1bPtmux;\x1b\x1b_Gi=" + strings.Repeat("0", 238) + ",a=q;"
+	require.Len(t, h, 256)
+	f := NewTerminalQueryFilter(io.Discard)
+	for i, b := range []byte(h + "\x1b\x1b\x1b") {
+		_, _ = f.Write([]byte{b})
+		require.LessOrEqual(t, len(f.Pending()), maxPendingBytes, "after byte %d", i)
+	}
+	// The saved head, the pending inner ESC doubled, and an unpaired decoder ESC.
+	require.Len(t, f.Pending(), 259)
+	require.Equal(t, 259, maxPendingBytes)
 }
 
 // errWriter is a writer that always returns an error
@@ -663,12 +739,17 @@ type filterCase struct {
 	name     string
 	in, want string
 	kitty    bool // also assert no query under refKitty (refParse on the filter's output)
+
+	// limit marks a row whose input is past a stated limit, where a query can
+	// pass on purpose: it is checked for its bytes, splits and continuation,
+	// and not against the oracle.
+	limit bool
 }
 
-// filterCases is every exact-bytes case: escCSICases, oscStringCases, dcsCases
-// and apcCases, with the rows init() generates from the classifier tests'
-// examples. The split, continuation and oracle tests range over it, and it
-// seeds the fuzz test.
+// filterCases is every exact-bytes case: escCSICases, oscStringCases,
+// dcsCases, apcCases and wrapperCases, with the rows init() generates from the
+// classifier tests' examples. The split, continuation and oracle tests range
+// over it, and it seeds the fuzz test.
 var filterCases []filterCase
 
 // filterAll runs in through a fresh filter in one Write and returns what it
@@ -776,27 +857,30 @@ var oscStringCases = []filterCase{
 	{name: "tmux wrapper", in: "\x1bPtmux;\x1b\x1b[31mX\x1b\\", want: "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
 	{name: "wrapped kitty command", in: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\", want: "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"},
 	{name: "tmux wrapper with CAN inside", in: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\", want: "\x1bPtmux;\x1b\x1b[31m\x18X\x1b\\"},
-	// An ESC in a wrapper that escapes neither an ESC nor a '\' ends the
-	// wrapper, as it ends any DCS on a DEC terminal, and the filter owes the
-	// wrapper a close. Kept open there, a malformed or interrupted wrapper let
-	// every query through until the next unescaped ST.
-	{name: "a lone ESC ends a tmux wrapper", in: "\x1bPtmux;\x1b[6n\x1b\\", want: "\x1bPtmux;\x1b\x18\x1b\\"},
+	// An ESC in a passing wrapper that escapes neither an ESC nor a '\' ends
+	// the wrapper, as it ends any DCS on a DEC terminal, and the filter owes
+	// the wrapper a close. Kept open there, a malformed or interrupted wrapper
+	// let every query through until the next unescaped ST. Each of these
+	// wrappers passes because its first inner sequence, an SGR, is no query;
+	// the same lone ESC while the wrapper is still held drops it instead
+	// (wrapperCases).
+	{name: "a lone ESC ends a tmux wrapper", in: "\x1bPtmux;\x1b\x1b[1m\x1b[6n\x1b\\", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18\x1b\\"},
 	{name: "an interrupted wrapped image, then tmux attaching",
 		in:   "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b[?2026$p\x1b[c\x1b]11;?\x07prompt",
 		want: "\x1bPtmux;\x1b\x1b_Gf=100;AAAA\r\n$ \x1b\x18prompt"},
-	{name: "a non-query after a lone ESC in a wrapper closes it", in: "\x1bPtmux;\x1b[31mX", want: "\x1bPtmux;\x1b[31mX"},
+	{name: "a non-query after a lone ESC in a wrapper closes it", in: "\x1bPtmux;\x1b\x1b[1m\x1b[31mX", want: "\x1bPtmux;\x1b\x1b[1m\x1b[31mX"},
 	// A DEL or a high byte after a wrapper's ESC is dropped, as after any ESC,
 	// so nothing that goes out says the wrapper has ended. The close goes out
 	// at once instead, as before a C0. Owed until later, it left a joiner's
 	// filter inside the wrapper, where it took the held ESC for one escaping
 	// the next byte.
-	{name: "a DEL after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\x7f\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
-	{name: "a high byte after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\xa0\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
-	{name: "a DEL after a wrapper's ESC, then a doubled ESC", in: "\x1bPtmux;\x1b\x7f\x1b\x1b[6nX", want: "\x1bPtmux;\x1b\x18X"},
-	{name: "a DEL after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\x7f[1mX", want: "\x1bPtmux;\x1b\x18\x1b[1mX"},
-	{name: "a high byte after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\xff[1mX", want: "\x1bPtmux;\x1b\x18\x1b[1mX"},
-	{name: "a C0 after a wrapper's ESC settles the close first", in: "\x1bPtmux;\x1b\r[6nX", want: "\x1bPtmux;\x1b\x18\rX"},
-	{name: "an ESC sequence with an intermediate ends a wrapper", in: "\x1bPtmux;\x1b(BX", want: "\x1bPtmux;\x1b(BX"},
+	{name: "a DEL after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\x1b[1m\x1b\x7f\x1b[6nX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18X"},
+	{name: "a high byte after a wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\x1b[1m\x1b\xa0\x1b[6nX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18X"},
+	{name: "a DEL after a wrapper's ESC, then a doubled ESC", in: "\x1bPtmux;\x1b\x1b[1m\x1b\x7f\x1b\x1b[6nX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18X"},
+	{name: "a DEL after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\x1b[1m\x1b\x7f[1mX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18\x1b[1mX"},
+	{name: "a high byte after a wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\x1b[1m\x1b\xff[1mX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18\x1b[1mX"},
+	{name: "a C0 after a wrapper's ESC settles the close first", in: "\x1bPtmux;\x1b\x1b[1m\x1b\r[6nX", want: "\x1bPtmux;\x1b\x1b[1m\x1b\x18\rX"},
+	{name: "an ESC sequence with an intermediate ends a wrapper", in: "\x1bPtmux;\x1b\x1b[1m\x1b(BX", want: "\x1bPtmux;\x1b\x1b[1m\x1b(BX"},
 	{name: "CAN ends a passed DCS", in: "\x1bPq#0\x18X", want: "\x1bPq#0\x18X"},
 	{name: "SUB ends a passed DCS", in: "\x1bPq#0\x1aX", want: "\x1bPq#0\x1aX"},
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
@@ -893,6 +977,108 @@ var apcCases = []filterCase{
 		want: "\x1b_Ga=T," + strings.Repeat("i", 260) + ";AAAA\x1b\x18X"},
 }
 
+// tmux passthrough wrappers, ESC P tmux; then a sequence with each ESC doubled,
+// then ESC \. The wrapper is held while an inner machine, fed the decoded
+// stream, decides its first inner sequence: a query drops the wrapper's head
+// and that sequence, and the rest of the wrapper goes out as ordinary output;
+// anything else passes the wrapper byte for byte.
+var wrapperCases = []filterCase{
+	{name: "wrapped DSR", in: "\x1bPtmux;\x1b\x1b[6n\x1b\\", want: "\x1b\\"},
+	{name: "text after a wrapped query survives", in: "\x1bPtmux;\x1b\x1b[6nX\x1b\\", want: "X\x1b\\"},
+	{name: "wrapped kitty query", in: "\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b\\\x1b\\", want: "\x1b\\"},
+	{name: "wrapped SGR passes", in: "\x1bPtmux;\x1b\x1b[31mX\x1b\\", want: "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
+	// A query nested in a wrapper inside a wrapper is not suppressed, so a
+	// DEC terminal, which ends the outer DCS at its first ESC, still answers
+	// it: a stated limit, not held to the oracle.
+	{name: "nested wrapper passes (stated limit)",
+		in:    "\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b[6n\x1b\x1b\\\x1b\\",
+		want:  "\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b[6n\x1b\x1b\\\x1b\\",
+		limit: true},
+	{name: "leading inner bytes go with the dropped head", in: "\x1bPtmux;Y\x1b\x1b[6n\x1b\\", want: "\x1b\\"},
+	// Inner endings, read on decoded bytes (Owen, 2026-10-11).
+	{name: "wrapped DCS query ended by CAN", in: "\x1bPtmux;\x1b\x1bP+q544e\x18X\x1b\\", want: "\x18X\x1b\\"},
+	{name: "wrapped OSC query ended by BEL", in: "\x1bPtmux;\x1b\x1b]11;?\x07X\x1b\\", want: "X\x1b\\"},
+	{name: "wrapped DCS query ended by an inner ESC", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b[1mX\x1b\\", want: "\x1b[1mX\x1b\\"},
+	{name: "wrapped held OSC cancelled", in: "\x1bPtmux;\x1b\x1b]0;t\x18X\x1b\\", want: "\x18X\x1b\\"},
+	{name: "wrapped CSI head cancelled before deciding passes", in: "\x1bPtmux;\x1b\x1b[6\x18X\x1b\\", want: "\x1bPtmux;\x1b\x1b[6\x18X\x1b\\"},
+	// Continuation must carry the inner parser's pending ESC (Owen,
+	// 2026-10-11); continuationCheck splits it at every byte, including right
+	// after the complete pair.
+	{name: "inner drop ended by an inner ESC, after a complete pair", in: "\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b[31mX\x1b\\", want: "\x1b[31mX\x1b\\"},
+
+	// Before the first inner ESC, a CAN or SUB ends the wrapper, as it ends
+	// the DCS on a DEC terminal, which then prints what follows (Owen,
+	// 2026-10-11). The wrapper is held, so it is dropped whole, and the cancel
+	// goes out, as ESC and the cancel when a close is owed.
+	{name: "a CAN before the first inner ESC ends the wrapper", in: "\x1bPtmux;\x18hello\x1b\x1b[6n\x1b\\", want: "\x18hello\x1b\\"},
+	{name: "a SUB before the first inner ESC ends the wrapper", in: "\x1bPtmux;\x1ahello\x1b\x1b[6n\x1b\\", want: "\x1ahello\x1b\\"},
+	{name: "a leading CAN settles a close owed", in: "\x1bPq#0\x1bPtmux;\x18hello", want: "\x1bPq#0\x1b\x18hello", kitty: true},
+	// A lone ESC x, x neither ESC nor '\', ends the wrapper in every phase.
+	// While the wrapper is held, it is dropped, and the ESC starts a new
+	// sequence with x its next byte; during the first inner sequence's drop,
+	// output resumes at that ESC.
+	{name: "a lone ESC in the deciding hold", in: "\x1bPtmux;\x1b\x1b[6\x1b[1mX", want: "\x1b[1mX"},
+	{name: "a lone ESC during the inner drop", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b[6nX\x1b\\", want: "X\x1b\\"},
+	{name: "a lone ESC ends a held wrapper", in: "\x1bPtmux;\x1b[6n\x1b\\", want: "\x1b\\"},
+	{name: "a non-query after a lone ESC ends a held wrapper", in: "\x1bPtmux;\x1b[31mX", want: "\x1b[31mX"},
+	{name: "an ESC-intermediate head after a lone ESC in a held wrapper", in: "\x1bPtmux;\x1b(\x1b[6nX", want: "X"},
+	{name: "an ESC sequence with an intermediate ends a held wrapper", in: "\x1bPtmux;\x1b(BX", want: "\x1b(BX"},
+	{name: "a DEL after a held wrapper's ESC, then a query", in: "\x1bPtmux;\x1b\x7f\x1b[6nX", want: "X"},
+	{name: "a high byte after a held wrapper's ESC, then a non-query", in: "\x1bPtmux;\x1b\xff[1mX", want: "\x1b[1mX"},
+	{name: "a C0 after a held wrapper's ESC", in: "\x1bPtmux;\x1b\r[6nX", want: "\rX"},
+	{name: "a lone ESC in a held wrapper settles a close owed", in: "\x1bPq#0\x1bPtmux;\x1b\x7f\x1b[6nX", want: "\x1bPq#0\x1b\x18X"},
+	{name: "a lone ESC during the inner drop, after a pending inner ESC", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b\x1b[6nX", want: "X"},
+	// Any DCS header whose final byte is t starts a wrapper, whatever its
+	// parameters and intermediates, as tmux reads one.
+	{name: "a header with a parameter is a wrapper", in: "\x1bP1tmux;\x1b\x1b[31mX\x1b\\", want: "\x1bP1tmux;\x1b\x1b[31mX\x1b\\"},
+	{name: "a header with an intermediate is a wrapper", in: "\x1bP$tmux;\x1b\x1b[6n\x1b\\", want: "\x1b\\"},
+	// While "mux;" is matched, the DCS is held: a mismatch passes it as a
+	// string, ST ends it cleanly and passes it, and any other end drops it.
+	{name: "a header ending in t that isn't a wrapper passes", in: "\x1bPtmx;\x1b[6nX", want: "\x1bPtmx;\x1b\x18X"},
+	{name: "a DEL in the match isn't a wrapper", in: "\x1bPtm\x7fux;\x1b\x1b[6nX\x1b\\", want: "\x1bPtm\x7fux;\x1b\x18X\x1b\\"},
+	{name: "a DCS ending in t, ended by ST in the match, passes", in: "\x1bPtmu\x1b\\X", want: "\x1bPtmu\x1b\\X"},
+	{name: "a DCS ending in t, ended by an ESC in the match", in: "\x1bPtmu\x1b[1mX", want: "\x1b[1mX"},
+	{name: "a DCS ending in t, cancelled in the match", in: "\x1bPtm\x18X", want: "\x18X"},
+	// The outer ST ends a wrapper still deciding, and a DEC terminal reads it
+	// as the ST of the inner string it ends: a title passes, a colour query is
+	// dropped, and a head it abandons is dropped with the wrapper.
+	{name: "an empty wrapper passes", in: "\x1bPtmux;\x1b\\X", want: "\x1bPtmux;\x1b\\X"},
+	{name: "a wrapper with no inner ESC passes", in: "\x1bPtmux;hi\x1b\\X", want: "\x1bPtmux;hi\x1b\\X"},
+	{name: "a wrapped title ended by the outer ST passes", in: "\x1bPtmux;\x1b\x1b]0;t\x1b\\X", want: "\x1bPtmux;\x1b\x1b]0;t\x1b\\X"},
+	{name: "a wrapped colour query ended by the outer ST", in: "\x1bPtmux;\x1b\x1b]11;?\x1b\\X", want: "X"},
+	{name: "a wrapped graphics command ended by the outer ST passes", in: "\x1bPtmux;\x1b\x1b_Ga=T\x1b\\X", want: "\x1bPtmux;\x1b\x1b_Ga=T\x1b\\X"},
+	{name: "a wrapped head abandoned by the outer ST", in: "\x1bPtmux;\x1b\x1b[6\x1b\\X", want: "X"},
+	// A C0 the inner machine forwards from inside a head is executed by a DEC
+	// terminal, so it goes out when the head is dropped, after a close owed;
+	// when the head passes, it is already in place in the wrapper.
+	{name: "a C0 inside a wrapped query goes out", in: "\x1bPtmux;\x1b\x1b[6\rnX\x1b\\", want: "\rX\x1b\\"},
+	{name: "a C0 inside a wrapped non-query stays in place", in: "\x1bPtmux;\x1b\x1b[1\rmX\x1b\\", want: "\x1bPtmux;\x1b\x1b[1\rmX\x1b\\"},
+	{name: "a C0 inside a wrapped query, with a close owed", in: "\x1bPq#0\x1bPtmux;\x1b\x1b[6\rnX", want: "\x1bPq#0\x1b\x18\rX"},
+	// The inner drop's other ends: the outer ST, which ends both, and a
+	// cancel after a pending inner ESC, which cancels the ESC that ended it.
+	{name: "the outer ST ends an inner drop", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\\X", want: "X"},
+	{name: "the outer ST after a pending inner ESC", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b\x1b\\X", want: "X"},
+	{name: "a cancel after a pending inner ESC", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b\x18X", want: "\x1b\x18X"},
+	// A first inner sequence that starts a wrapper is held while it matches,
+	// as at the top, so one that ends abnormally there is dropped.
+	{name: "a nested header ending in t, ended by an ESC", in: "\x1bPtmux;\x1b\x1bPtmu\x1b\x1b[6nX\x1b\\", want: "X\x1b\\"},
+	// Found by the fuzz test: a held inner string that ends at its own ST,
+	// raw ESC ESC \, ends cleanly in the decoded stream, so one that is no
+	// query passes with the wrapper, though a DEC terminal ends it at the
+	// first raw ESC.
+	{name: "a wrapped DCS ending in t, ended by its own ST, passes", in: "\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\", want: "\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\"},
+	{name: "a wrapped title ended by its own ST passes", in: "\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X", want: "\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X"},
+	{name: "a wrapped graphics command ended by its own ST passes", in: "\x1bPtmux;\x1b\x1b_Ga=T\x1b\x1b\\\x1b\\X", want: "\x1bPtmux;\x1b\x1b_Ga=T\x1b\x1b\\\x1b\\X"},
+	// Found by the fuzz test: a byte that ends what a wrapper holds is taken
+	// as it would be within the bound, as at the top, so a cancel arriving
+	// with the bound full still drops a wrapped string the ESC before it
+	// ended.
+	{name: "a cancel at a wrapper's bound", in: "\x1bPtmux;\x1b\x1b]0;" + strings.Repeat("0", 242) + "\x1b\x1b\x18X", want: "\x1b\x18X"},
+	// Past its bound the hold goes out, and the wrapper passes byte for byte.
+	{name: "an over-bound wrapper passes", in: "\x1bPtmux;\x1b\x1b]0;" + strings.Repeat("t", 300) + "\x1b\x1b\\\x1b\\X",
+		want: "\x1bPtmux;\x1b\x1b]0;" + strings.Repeat("t", 300) + "\x1b\x1b\\\x1b\\X"},
+}
+
 func init() {
 	for _, q := range append(slices.Clone(csiQueryExamples), "\x1bZ") {
 		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "b", want: "ab"})
@@ -929,6 +1115,7 @@ func init() {
 		apcCases = append(apcCases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: "\x1b_G" + c + ";AAAA\x1b\\", want: "\x1b_G" + c + ";AAAA\x1b\\"})
 	}
 	filterCases = append(filterCases, apcCases...)
+	filterCases = append(filterCases, wrapperCases...)
 }
 
 // A DCS whose header isn't a query streams: its payload goes out during the
@@ -1038,9 +1225,14 @@ func TestTerminalQueryFilter_KittyRowsAskNothing(t *testing.T) {
 // domain leaves out included. A sequence past its bound passes unclassified,
 // so a query there is a stated limit, but a non-query must still reach the
 // terminal with the effect it had, and only these rows check that: the fuzz
-// never takes a sequence past its bound.
+// never takes a sequence past its bound. A row marked limit is left out: its
+// input is past a stated limit where a query passes on purpose, such as one
+// nested in a wrapper inside a wrapper.
 func TestTerminalQueryFilter_CasesPassTheOracle(t *testing.T) {
 	for _, c := range filterCases {
+		if c.limit {
+			continue
+		}
 		t.Run(c.name, func(t *testing.T) {
 			require.Empty(t, refCheck(c.in, filterAll))
 		})

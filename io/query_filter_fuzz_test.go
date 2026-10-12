@@ -63,8 +63,12 @@ func refDomainByte(b byte) byte {
 //     data. Past its bound a query passes, a limit the filter accepts, and a
 //     sequence isn't known to be a query until it ends, so every sequence is
 //     held to its bound;
-//   - the ';' that would make a DCS a tmux wrapper (final byte 't', data from
-//     "mux;"), which the filter passes byte for byte, query or not.
+//   - a byte that would take a tmux wrapper past what the filter classifies
+//     (refWrapper): a wrapper nested inside one, a second inner sequence, or
+//     a raw byte past 256 from the wrapper's ESC P before its first inner
+//     sequence has ended. A wrapper passes byte for byte once that first
+//     sequence is no query, so a query nested in it or following that
+//     sequence passes, a limit the filter states.
 //
 // Nothing else is changed, so an input already in the domain comes back as it
 // was. Where a sequence starts and how much of it the filter holds is read
@@ -73,15 +77,114 @@ func refDomainByte(b byte) byte {
 func refGenerate(seed []byte) []byte {
 	out := make([]byte, 0, len(seed))
 	p := refParser{mode: refDEC, semiAt: -1, stEvent: -1}
+	var w refWrapper
 	for _, b := range seed {
 		c := refDomainByte(b)
-		if p.pastBound(c, len(out)) || p.wraps(c) {
+		if p.pastBound(c, len(out)) || !w.takes(&p, c, len(out)) {
 			continue
 		}
 		p.next(c, len(out))
 		out = append(out, c)
 	}
 	return out
+}
+
+// refWrapper follows a tmux wrapper through refGenerate the way the filter
+// decodes it, from the reference parser's events and a parser of its own over
+// the decoded stream, so that refGenerate keeps one in the domain only while
+// the filter classifies all of it: one wrapper, not nested, whose inner stream
+// is one sequence, within the wrapper's bound until that sequence has ended.
+//
+// Raw bytes decode in pairs after an ESC: ESC ESC is one inner ESC, ESC \ is
+// the outer ST, and any other ESC x ends the wrapper, as a CAN or SUB does
+// before the first inner ESC. The first inner ESC starts the inner sequence,
+// and the bytes before it are leading payload. The sequence's own bounds are
+// the reference parser's to keep (pastBound): a DEC terminal ends the
+// wrapper's DCS at its first raw ESC and parses the inner sequence as it would
+// any other.
+type refWrapper struct {
+	on      bool      // inside a wrapper, past its "tmux;"
+	start   int       // offset of the wrapper's ESC P
+	esc     bool      // a raw ESC whose pair is still to come
+	begun   bool      // the first inner ESC has arrived
+	closing bool      // an inner ESC has ended the inner sequence's string, so only '\' completes it
+	ended   bool      // the inner sequence has ended
+	inner   refParser // the decoded stream, from the first inner ESC
+	at      int       // the decoded stream's next offset
+}
+
+// takes reports whether c, at offset at, keeps the input in the domain, and
+// follows the wrapper with it if so. p is the reference parser over the raw
+// stream, which hasn't seen c yet.
+func (w *refWrapper) takes(p *refParser, c byte, at int) bool {
+	if !w.on {
+		if p.wraps(c) {
+			*w = refWrapper{on: true, start: p.strAt}
+			w.inner = refParser{mode: refDEC, semiAt: -1, stEvent: -1}
+		}
+		return true
+	}
+	if p.wraps(c) || !w.ended && at-w.start >= 256 {
+		return false // a wrapper nested in this one, or past the bound
+	}
+	if w.esc {
+		switch c {
+		case 0x1b:
+			if !w.inner1(c) {
+				return false
+			}
+		case '\\':
+			w.on = false // the outer ST
+		default:
+			w.on = false // a lone ESC x ends the wrapper
+		}
+		w.esc = false
+		return true
+	}
+	switch {
+	case c == 0x1b:
+		w.esc = true
+	case !w.begun && (c == 0x18 || c == 0x1a):
+		w.on = false // a CAN or SUB before the first inner ESC ends the wrapper
+	case w.begun:
+		return w.inner1(c)
+	}
+	return true
+}
+
+// inner1 takes c, a byte of the decoded stream, and reports whether it keeps
+// the inner stream to one sequence. A decoded ESC begins the sequence, or
+// ends the string it is. After that ESC, '\' completes the string's ST, a
+// cancel cancels the ESC, and a control byte the escape state executes or
+// ignores leaves it waiting; anything else would begin a second sequence, as
+// would an ESC that abandons a head or follows the sequence's end.
+func (w *refWrapper) inner1(c byte) bool {
+	switch {
+	case !w.begun:
+		w.begun = true
+	case w.ended:
+		if c == 0x1b {
+			return false
+		}
+		return true // in ground: text and controls, which start nothing
+	case w.closing:
+		waits := c != 0x1b && refTable[c][rsEscape].state == rsEscape
+		if c != '\\' && c != 0x18 && c != 0x1a && !waits {
+			return false
+		}
+		w.closing = waits
+	case c == 0x1b:
+		switch w.inner.state {
+		case rsOSCString, rsDCSPassthrough, rsDCSIgnore, rsSOSPMAPCString:
+			w.closing = true
+		default:
+			return false
+		}
+	}
+	w.inner.next(c, w.at)
+	w.at++
+	w.ended = !w.closing && w.inner.state == rsGround
+	return true
 }
 
 // pastBound reports whether c, at offset at, would have the filter hold the
@@ -139,17 +242,19 @@ func (p *refParser) wraps(c byte) bool {
 
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
-// refAlphabet or 0xA0–0xFF, it holds no tmux wrapper, and no sequence in it
-// passes its bound; the rows that do are the seven named below, which pin the
-// bounds themselves. refGenerate has to give every such row back unchanged.
+// refAlphabet or 0xA0–0xFF, no sequence in it passes its bound, and every tmux
+// wrapper in it is one the filter classifies whole: not nested, and with one
+// inner sequence. The rows that aren't are named below: nine pin the bounds
+// themselves, and four a wrapper's second inner sequence or a nested one.
+// refGenerate has to give every other row back unchanged, single wrappers
+// included.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
 // "a" + query + "b". refDomainByte maps that text within its class, so the
 // caps must cut nothing from those either, and the seed reaches the checks
-// with the row's structure. The over-bound and wrapper rows must be cut. Rows
-// with a C1 byte, 0x80 to 0x9F, are left out: those map anywhere in the
-// alphabet. Every row out of the domain is pinned byte for byte by the
-// filterCases tests.
+// with the row's structure. The rows named below must be cut. Rows with a C1
+// byte, 0x80 to 0x9F, are left out: those map anywhere in the alphabet. Every
+// row out of the domain is pinned byte for byte by the filterCases tests.
 func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	overBound := []string{
 		"a drop after an over-bound head closes it",
@@ -159,6 +264,17 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		"ignored CRs in the number trip the number guard",
 		"an over-bound DCS header passes as a string",
 		"an over-bound APC passes as a string",
+		"an over-bound wrapper passes",
+		"a cancel at a wrapper's bound",
+	}
+	// Past what the filter classifies in a wrapper: a nested wrapper, and an
+	// inner sequence after the first, which a dropped first one leaves to
+	// ordinary output but a passed one would carry through.
+	wrapperLimits := []string{
+		"nested wrapper passes (stated limit)",
+		"wrapped DCS query ended by an inner ESC",
+		"inner drop ended by an inner ESC, after a complete pair",
+		"a nested header ending in t, ended by an ESC",
 	}
 	identity, high := 0, 0
 	for _, c := range filterCases {
@@ -171,7 +287,7 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		}
 		got := string(refGenerate([]byte(c.in)))
 		switch {
-		case slices.Contains(overBound, c.name) || strings.Contains(c.in, "tmux;"):
+		case slices.Contains(overBound, c.name) || slices.Contains(wrapperLimits, c.name):
 			require.NotEqual(t, string(mapped), got, "%s: out of the domain, so refGenerate cuts it", c.name)
 		case c1:
 		default:
@@ -194,6 +310,11 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	}
 	// And family 16's graphics query, latched at a BEL or decided at its ';'.
 	for _, q := range []string{"\x1b_Gi=1,a=q\x07X;\x1b\\", "\x1b_Gi=1,a=q;\x1b\\"} {
+		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
+	}
+	// And single wrappers, a wrapped query among them, whole.
+	for _, q := range []string{"\x1bPtmux;\x1b\x1b[6nX\x1b\\", "\x1bPtmux;\x1b\x1b_Ga=q;aaaa\x1b\x1b\\\x1b\\",
+		"\x1bPtmux;\x1b\x1bP+q544a\x18X\x1b\\"} {
 		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
 	}
 }
@@ -259,11 +380,14 @@ func FuzzTerminalQueryFilter(f *testing.F) {
 // Every guest's output goes through Write, so once its buffers have grown it
 // allocates nothing, whatever the stream holds: text, a passed and a dropped
 // CSI, an OSC held to its end, a DCS passed as it streams, and one dropped,
-// and a graphics command passed after its ';', and one dropped.
+// a graphics command passed after its ';', and one dropped, and a tmux
+// wrapper passed, and one whose wrapped query is dropped. The first wrapper
+// allocates the inner machine that decides them, once.
 func TestTerminalQueryFilter_DoesNotAllocate(t *testing.T) {
 	f := NewTerminalQueryFilter(io.Discard)
 	chunk := []byte("text \x1b[1mbold\x1b[m \x1b[6n \x1b]0;title\x07 \x1b[?2026$p \x1bPq#0\x1b\\ \x1bP+q544e\x1b\\ " +
-		"\x1b_Ga=T,f=100;AAAA\x1b\\ \x1b_Gi=1,a=q;AAAA\x1b\\ more\r\n")
+		"\x1b_Ga=T,f=100;AAAA\x1b\\ \x1b_Gi=1,a=q;AAAA\x1b\\ \x1bPtmux;\x1b\x1b[31mX\x1b\\ " +
+		"\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b\\\x1b\\ more\r\n")
 	_, _ = f.Write(chunk) // warm the reusable buffers
 	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = f.Write(chunk) }))
 }
