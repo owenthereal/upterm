@@ -340,7 +340,10 @@ func (f *TerminalQueryFilter) Dropping() bool {
 //
 // A filter that isn't Dropping, a fresh one or one SettleDrop has already
 // returned done for among them, has no string to settle: SettleDrop returns
-// 0, nil and true, and the stream resumes at p[0].
+// 0, nil and true, and the stream resumes at p[0]. It hands over nothing the
+// filter holds, though: Pending, if there is any, is still the caller's to give
+// the new primary raw, as hostSink.promote does when the filter isn't
+// Dropping, since it may be the lead-in of a query the primary should answer.
 func (f *TerminalQueryFilter) SettleDrop(p []byte) (n int, raw []byte, done bool) {
 	if !f.Dropping() {
 		return 0, nil, true

@@ -831,8 +831,11 @@ func refRemoves(ev refEvent, abnormal bool) bool {
 // would count the end abnormal. The filter reads the wrapped stream decoded,
 // though, where the string ends at its ST, cleanly, so it decides the string
 // there, and a string that is no query passes with the wrapper. Only the first
-// inner sequence is read so: the filter classifies no other, and refGenerate
-// makes no wrapper with a second.
+// inner sequence is read so: the filter classifies no other. refGenerate makes
+// no passing wrapper with a second, nor a nested one, but keeps what follows a
+// dropped first as ordinary output. Once that first has ended before the
+// second inner ESC, the ESC starts the next sequence rather than ending a
+// string, so a mark there never lands on an event's end.
 //
 // A wrapper is tmux's notion, so it is read as tmux reads one: a DCS header
 // ending in t, then the raw bytes "mux;". tmux reads every byte of a DCS's
