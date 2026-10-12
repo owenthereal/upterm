@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"io"
 	"net"
 	"os"
@@ -92,6 +93,36 @@ func TestCheckJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t *testing.T
 				return
 			}
 			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+// As in OpenSSH's warning, the fingerprint "sent by the remote host" is the
+// presented key's, and a certificate's is its own key's. "Offending" names the
+// line's key.
+func TestCheckWarnsOfAChangedKeyWithThePresentedKeysFingerprint(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	line, err := ssh.NewPublicKey(&rsaKey.PublicKey)
+	require.NoError(t, err)
+	ca, presented := newSigner(t), newSigner(t).PublicKey()
+	cert := signHostCert(t, ca, presented, "relay.test")
+
+	for _, tc := range []struct {
+		name       string
+		knownHosts string
+		key        ssh.PublicKey
+	}{
+		{"a plain key", knownhosts.Line([]string{"relay.test"}, line) + "\n", presented},
+		{"a certificate from an untrusted authority", knownhosts.Line([]string{"relay.test"}, line) + "\n", cert},
+		{"a certificate from another authority", "@cert-authority relay.test " + string(ssh.MarshalAuthorizedKey(line)), cert},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := writeKnownHosts(t, tc.knownHosts)
+			err := KnownHosts{File: file}.Check("relay.test:22", fakeAddr, tc.key)
+			require.ErrorIs(t, err, ErrHostKeyChanged)
+			require.Contains(t, err.Error(), "The fingerprint for the ED25519 key sent by the remote host is\n"+utils.FingerprintSHA256(presented)+".\n")
+			require.Contains(t, err.Error(), "Offending RSA key in "+file+":1")
 		})
 	}
 }

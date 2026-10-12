@@ -84,6 +84,8 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 		return err
 	}
 
+	// checked is the key that err is about: key, or a certificate's own key.
+	checked := key
 	err = cb(hostname, remote, key)
 	if cert, isCert := key.(*ssh.Certificate); isCert && err != nil && strings.HasPrefix(err.Error(), errNoAuthoritiesHostname) {
 		// No @cert-authority line trusts the certificate's signer, so its own
@@ -99,7 +101,8 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 		if serr := cb(hostname, remote, cert.SignatureKey); errors.As(serr, &revoked) {
 			return serr
 		}
-		err = cb(hostname, remote, cert.Key)
+		checked = cert.Key
+		err = cb(hostname, remote, checked)
 	}
 	if err == nil {
 		return nil
@@ -113,9 +116,9 @@ func (k KnownHosts) Check(hostname string, remote net.Addr, key ssh.PublicKey) e
 	// If kerr.Want is non-empty, there was a mismatch, which can signify a MITM attack
 	if len(kerr.Want) != 0 {
 		kk := kerr.Want[0] // TODO: take care of multiple key mismatches
-		fp := utils.FingerprintSHA256(kk.Key)
-		kt := keyType(kk.Key.Type())
-		return hostKeyChangedError(fmt.Sprintf(errKeyMismatch, kt, fp, kk.Filename, kt, kk.Filename, kk.Line))
+		return hostKeyChangedError(fmt.Sprintf(errKeyMismatch,
+			keyType(checked.Type()), utils.FingerprintSHA256(checked),
+			kk.Filename, keyType(kk.Key.Type()), kk.Filename, kk.Line))
 	}
 
 	return ErrUnknownHostKey
