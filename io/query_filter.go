@@ -203,8 +203,13 @@ const tmuxPrefix = "tmux;"
 // and a raw ESC whose pair is still to come. The next raw byte that would add
 // to the hold gives the wrapper up: what is held goes out, and the wrapper
 // passes byte for byte to its end, its inner sequence unclassified. A byte
-// that ends what is held, such as a cancel, is taken as it would be within
-// the bound (endsWrapperHold), as a byte that ends any sequence is.
+// that would decide the inner sequence adds to it, so it gives the wrapper up
+// too, though at the top a final byte that arrives with the head full is
+// still classified: held, a DCS header's final byte or a graphics command's
+// ';' would leave the head a drop saves past the bound, and Pending past
+// maxPendingBytes. Only a byte that ends what is held without adding to it,
+// such as a cancel or the outer ST, is taken as it would be within the bound
+// (endsWrapperHold).
 const maxWrapHeld = 256
 
 // maxPendingBytes is the most the filter will ever be holding, and so the most
@@ -783,10 +788,12 @@ func (f *TerminalQueryFilter) decideDCS() {
 // Every byte of the control data is held as payload, the control bytes and DEL
 // included, and counted toward the bound. The ';' decides the command, and
 // kitty, which ends any string at a BEL and takes control data without a ';',
-// decides it at a BEL too. So the control data before each BEL is decided as
-// kitty would read it: a query found there drops the command, and the bytes
-// after the BEL, which a DEC terminal reads as more control data, can't undo
-// that. A BEL that asks nothing is held as payload, as a DEC terminal takes it.
+// decides it at a BEL too. kitty reads only to the first BEL, and the control
+// data before it is decided as kitty reads it. Deciding at every later BEL as
+// well is a deliberate superset (spec rule 11). A query found at any BEL drops
+// the command, and the bytes after the BEL, which a DEC terminal reads as more
+// control data, can't undo that. A BEL that asks nothing is held as payload,
+// as a DEC terminal takes it.
 func (f *TerminalQueryFilter) apcByte(b byte) {
 	switch {
 	case b == 0x1b:

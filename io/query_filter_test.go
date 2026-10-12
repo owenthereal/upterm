@@ -596,8 +596,10 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 	require.Empty(t, out.String(), "nothing of it has gone out")
 
 	// A wrapper being decided is held to its bound, its held ESC within it,
-	// and the next raw byte, whatever it is, gives it up: the hold goes out,
-	// and the wrapper passes byte for byte.
+	// and the next raw byte that adds to the hold, here an ESC that pairs
+	// with the held one, gives it up: the hold goes out, and the wrapper
+	// passes byte for byte. A '\' there would be the outer ST instead, which
+	// ends what is held and is taken (endsWrapperHold).
 	wrap := "\x1bPtmux;\x1b\x1b]0;" + strings.Repeat("t", maxWrapHeld-len("\x1bPtmux;\x1b\x1b]0;")-1) + "\x1b"
 	var held bytes.Buffer
 	w := NewTerminalQueryFilter(&held)

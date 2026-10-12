@@ -34,8 +34,8 @@ var (
 // terminal, and OSC 10/11/12 and CSI 5n/6n reach a real terminal whose
 // replies reach the pty.
 //
-// A sink promoted while its filter is dropping a query string -- a DCS or a
-// kitty graphics query, at the top or wrapped for tmux -- settles the drop
+// A sink promoted while its filter is dropping a query string — a DCS or a
+// kitty graphics query, at the top or wrapped for tmux — settles the drop
 // first. The query's head was never delivered and its rest is no use without
 // it, so the new primary receives none of that query, and everything after
 // it, raw, from exactly where the string ends: a query that starts there
