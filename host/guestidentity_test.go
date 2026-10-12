@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/owenthereal/upterm/join"
@@ -146,4 +148,52 @@ func TestAnExplicitEntryThatWontLoadIsAnError(t *testing.T) { // -i: every entry
 		require.Len(t, ie.Load, 1)
 		require.True(t, strings.HasPrefix(ie.Load[0], bad+": "), ie.Load[0])
 	}
+}
+
+// staleAgentSocket is a socket file nobody listens on: an agent that exited
+// without removing it.
+func staleAgentSocket(t *testing.T) string {
+	t.Helper()
+	// Keep the socket path below macOS's Unix socket path limit.
+	dir, err := os.MkdirTemp("", "agent-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	require.NoError(t, err)
+	ln.SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
+	_, err = net.Dial("unix", socket)
+	require.True(t, errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, wsaeconnrefused),
+		"the socket file outlives its listener, and refuses: %v", err)
+	return socket
+}
+
+// A stale socket is no agent, on Windows too, where it refuses the dial with
+// WSAECONNREFUSED.
+func TestAStaleAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK were unset
+	good := newKeyFile(t)
+	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
+		AgentSocket: staleAgentSocket(t), Files: []string{good.path},
+		OnAgentSkip: func(err error) { t.Errorf("the agent was skipped: %v", err) }})
+	require.NoError(t, err)
+	signers, release, err := g.Signers(context.Background())
+	require.NoError(t, err)
+	release()
+	require.Equal(t, []string{fp(good)}, fingerprints(signers))
+	require.Equal(t, join.KeySource{Files: 1}, g.Source())
+}
+
+// A dial that finds nobody listening on the agent's socket is no agent, on
+// every platform: unix's ENOENT or ECONNREFUSED, and Windows' WSAECONNREFUSED,
+// which isn't the ECONNREFUSED Go makes up there. Any other failure is an
+// agent that failed.
+func TestADialNobodyListensOnIsNoAgent(t *testing.T) {
+	dialErr := func(errno syscall.Errno) error {
+		return &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", errno)}
+	}
+	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ECONNREFUSED, wsaeconnrefused} {
+		require.True(t, nobodyListens(dialErr(errno)), "%v", errno)
+	}
+	require.False(t, nobodyListens(dialErr(syscall.EACCES)))
 }
