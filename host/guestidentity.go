@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/owenthereal/upterm/join"
@@ -35,10 +36,11 @@ type GuestIdentityOptions struct {
 	// doesn't hold. Nil leaves such a file unloaded.
 	Passphrase func(ctx context.Context, file string) ([]byte, error)
 	// OnSkip is told about each key file that didn't load, when another key
-	// did: "skipping <file>: <error>". OnAgentSkip is told why the agent was
-	// skipped, when a key file loaded instead: "skipping the SSH agent:
-	// <error>". Both are called before NewGuestIdentity returns; nil is
-	// silent.
+	// did: "skipping <file>: <error>". OnAgentSkip is told why the agent
+	// failed or ran out of time listing its keys, when a key file loaded
+	// instead: "skipping the SSH agent: <error>". A socket nobody listens on
+	// is no agent, not one that failed, and isn't told. Both are called
+	// before NewGuestIdentity returns; nil is silent.
 	OnSkip      func(file string, err error)
 	OnAgentSkip func(err error)
 }
@@ -77,7 +79,8 @@ func (k guestKey) publicKey() ssh.PublicKey {
 //     half an encrypted openssh-format file carries;
 //  2. the agent's keys, listed over a connection of their own that is closed
 //     at AgentTimeout or when ctx ends, so that a silent agent never spends
-//     the first join's budget. An agent that fails is skipped for the run;
+//     the first join's budget. An agent that fails is skipped for the run,
+//     and a socket nobody listens on is no agent, as it is for OpenSSH;
 //  3. each file: the agent's key when the agent holds it, which needs no
 //     passphrase and lets a FIDO key sign, and otherwise the file's own key,
 //     decrypted with Passphrase if it must be.
@@ -89,9 +92,10 @@ func (k guestKey) publicKey() ssh.PublicKey {
 // is offered once either way.
 //
 // A key is generated only without IdentitiesOnly, when there is no agent key
-// (no socket, or an agent that holds none) and no file. An agent that failed,
-// with no file that loaded, is a *join.IdentityError with List set; files that
-// all failed to load, with no agent key, are one with Load set.
+// (no socket, one nobody listens on, or an agent that holds none) and no file.
+// An agent that failed, with no file that loaded, is a *join.IdentityError
+// with List set; files that all failed to load, with no agent key, are one
+// with Load set.
 func NewGuestIdentity(ctx context.Context, o GuestIdentityOptions) (*GuestIdentity, error) {
 	if o.IdentitiesOnly && len(o.Files) == 0 {
 		return nil, errNoPrivateKeyFiles
@@ -107,13 +111,13 @@ func NewGuestIdentity(ctx context.Context, o GuestIdentityOptions) (*GuestIdenti
 		}
 	}
 
-	ag := agentListing{socket: o.AgentSocket}
+	ag := agentListing{err: errAgentNotRunning}
 	if o.AgentSocket != "" {
 		timeout := o.AgentTimeout
 		if timeout <= 0 {
 			timeout = defaultAgentTimeout
 		}
-		ag.keys, ag.err = listAgentKeys(ctx, o.AgentSocket, timeout)
+		ag = listAgentKeys(ctx, o.AgentSocket, timeout)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -168,7 +172,7 @@ func NewGuestIdentity(ctx context.Context, o GuestIdentityOptions) (*GuestIdenti
 
 	if len(g.keys) == 0 {
 		switch {
-		case ag.err != nil:
+		case ag.failed:
 			return nil, &join.IdentityError{List: true, Load: loadLines(failed), Err: ag.err}
 		case len(failed) > 0:
 			return nil, &join.IdentityError{Load: loadLines(failed)}
@@ -181,7 +185,7 @@ func NewGuestIdentity(ctx context.Context, o GuestIdentityOptions) (*GuestIdenti
 		g.source.Generated = true
 	}
 
-	if ag.err != nil && o.OnAgentSkip != nil {
+	if ag.failed && o.OnAgentSkip != nil {
 		o.OnAgentSkip(ag.err)
 	}
 	if o.OnSkip != nil {
@@ -297,14 +301,17 @@ func readGuestKeyFile(file string) (*guestKeyFile, error) {
 	return k, nil
 }
 
-// agentListing is what listing the agent found: its keys, or why it was
-// skipped.
+// agentListing is what listing the agent found: its keys, or why there are
+// none to offer.
 type agentListing struct {
-	socket string
 	// keys are the listing's signers, for their public keys alone: their
 	// connection was closed once the listing was read.
 	keys []ssh.Signer
-	err  error
+	// err is why there is no agent to ask: SSH_AUTH_SOCK is unset, nobody
+	// listens on it, or the agent failed. failed says it was the last: the
+	// agent was reached, and failed or ran out of time listing its keys.
+	err    error
+	failed bool
 }
 
 // resolve is one key file's identity: the agent's key when the agent holds
@@ -343,10 +350,7 @@ func (ag agentListing) resolve(k *guestKeyFile, prompt func(file string) ([]byte
 // does.
 func (ag agentListing) missing(pub ssh.PublicKey) error {
 	fingerprint := utils.FingerprintSHA256(pub)
-	switch {
-	case ag.socket == "":
-		return fmt.Errorf("no SSH agent to look up %s in: SSH agent is not running", fingerprint)
-	case ag.err != nil:
+	if ag.err != nil {
 		return fmt.Errorf("no SSH agent to look up %s in: %w", fingerprint, ag.err)
 	}
 	return fmt.Errorf("the SSH agent does not hold %s", fingerprint)
@@ -356,10 +360,15 @@ func (ag agentListing) missing(pub ssh.PublicKey) error {
 // its own that is closed when the listing has been read, when ctx ends, or at
 // timeout, whichever is first. Only ctx's own end is ctx's error; a listing
 // that ran out of time says so.
-func listAgentKeys(ctx context.Context, socket string, timeout time.Duration) ([]ssh.Signer, error) {
+func listAgentKeys(ctx context.Context, socket string, timeout time.Duration) agentListing {
 	lctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := new(net.Dialer).DialContext(lctx, "unix", socket)
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
+		// Nobody listens on the socket, which is no agent at all, as it is
+		// for OpenSSH and upterm host: not an agent that failed.
+		return agentListing{err: err}
+	}
 	if err == nil {
 		stop := context.AfterFunc(lctx, func() { _ = conn.Close() })
 		var keys []ssh.Signer
@@ -367,11 +376,11 @@ func listAgentKeys(ctx context.Context, socket string, timeout time.Duration) ([
 		stop()
 		_ = conn.Close()
 		if err == nil {
-			return keys, nil
+			return agentListing{keys: keys}
 		}
 	}
 	if ctx.Err() == nil && lctx.Err() != nil {
-		return nil, fmt.Errorf("no answer within %v", timeout)
+		err = fmt.Errorf("no answer within %v", timeout)
 	}
-	return nil, err
+	return agentListing{err: err, failed: true}
 }

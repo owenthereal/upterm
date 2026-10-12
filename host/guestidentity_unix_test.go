@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,7 +107,7 @@ func agentThatHangsOnSign(t *testing.T, s ssh.Signer) string {
 func TestAgentKeysComeBeforeFilesAndNoKeyIsOfferedTwice(t *testing.T) { // spec test 18
 	a, b := newKeyFile(t), newKeyFile(t)
 	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
-		AgentSocket: serveAgent(t, a.signer), Files: []string{a.path, b.path}, Passphrase: noPrompt(t)})
+		AgentSocket: serveAgent(t, a.signer), Files: []string{b.path, a.path}, Passphrase: noPrompt(t)})
 	require.NoError(t, err)
 	signers, release, err := g.Signers(context.Background())
 	require.NoError(t, err)
@@ -144,6 +145,52 @@ func TestASelectorNamesOnlyThatAgentKey(t *testing.T) { // -i key.pub
 func TestAnExplicitEmptyListIsAnError(t *testing.T) {
 	_, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{IdentitiesOnly: true, AgentSocket: serveAgent(t, newKeyFile(t).signer)})
 	require.ErrorContains(t, err, "private-key was supplied but names no files")
+}
+
+// staleAgentSocket is a socket file nobody listens on: an agent that exited
+// without removing it.
+func staleAgentSocket(t *testing.T) string {
+	t.Helper()
+	// Keep the socket path below macOS's Unix socket path limit.
+	dir, err := os.MkdirTemp("", "agent-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	require.NoError(t, err)
+	ln.SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
+	_, err = net.Dial("unix", socket)
+	require.ErrorIs(t, err, syscall.ECONNREFUSED, "the socket file outlives its listener")
+	return socket
+}
+
+func TestAMissingAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK were unset
+	dir, err := os.MkdirTemp("", "agent-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
+		AgentSocket: filepath.Join(dir, "sock"),
+		OnAgentSkip: func(err error) { t.Errorf("the agent was skipped: %v", err) }})
+	require.NoError(t, err)
+	signers, release, err := g.Signers(context.Background())
+	require.NoError(t, err)
+	release()
+	require.Len(t, signers, 1)
+	require.True(t, g.Source().Generated)
+}
+
+func TestAStaleAgentSocketIsNoAgent(t *testing.T) { // as if SSH_AUTH_SOCK were unset
+	good := newKeyFile(t)
+	g, err := NewGuestIdentity(context.Background(), GuestIdentityOptions{
+		AgentSocket: staleAgentSocket(t), Files: []string{good.path},
+		OnAgentSkip: func(err error) { t.Errorf("the agent was skipped: %v", err) }})
+	require.NoError(t, err)
+	signers, release, err := g.Signers(context.Background())
+	require.NoError(t, err)
+	release()
+	require.Equal(t, []string{fp(good)}, fingerprints(signers))
+	require.Equal(t, join.KeySource{Files: 1}, g.Source())
 }
 
 func TestASilentAgentCostsOnlyItsOwnBudget(t *testing.T) { // spec test 34

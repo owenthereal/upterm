@@ -25,6 +25,7 @@ const (
 var (
 	errNoPrivateKeyFiles   = errors.New("private-key was supplied but names no files")
 	errNamesMoreThanOneKey = errors.New("names more than one key; name a file with a single key")
+	errAgentNotRunning     = errors.New("SSH agent is not running")
 )
 
 type errDescryptingPrivateKey struct {
@@ -344,7 +345,7 @@ type lazyAgent struct {
 
 func (a *lazyAgent) dial() {
 	if a.socket == "" {
-		a.err = errors.New("SSH agent is not running")
+		a.err = errAgentNotRunning
 		return
 	}
 	conn, err := net.Dial("unix", a.socket)
