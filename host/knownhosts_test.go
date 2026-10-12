@@ -67,6 +67,55 @@ func TestCheckReportsUnknownAndChangedKeys(t *testing.T) {
 	require.Contains(t, err.Error(), "REMOTE HOST IDENTIFICATION HAS CHANGED")
 }
 
+func TestCheckJudgesACertificateFromAnUntrustedAuthorityByItsOwnKey(t *testing.T) {
+	ca, otherCA := newSigner(t), newSigner(t)
+	pinned, presented := newSigner(t).PublicKey(), newSigner(t).PublicKey()
+	keyLine := knownhosts.Line([]string{"relay.test"}, pinned) + "\n"
+	authorityLine := "@cert-authority relay.test " + string(ssh.MarshalAuthorizedKey(otherCA.PublicKey()))
+
+	for _, tc := range []struct {
+		name       string
+		knownHosts string
+		key        ssh.PublicKey // the certificate's own key
+		want       error         // nil: trusted
+	}{
+		{"its own key is pinned", keyLine, pinned, nil},
+		{"the host's line names another key", keyLine, presented, ErrHostKeyChanged},
+		{"the host's line names another authority", authorityLine, presented, ErrHostKeyChanged},
+		{"no line names the host", knownhosts.Line([]string{"other.test"}, pinned) + "\n", presented, ErrUnknownHostKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := signHostCert(t, ca, tc.key, "relay.test")
+			err := KnownHosts{File: writeKnownHosts(t, tc.knownHosts)}.Check("relay.test:22", fakeAddr, cert)
+			if tc.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+func TestCheckRefusesACertificateWhoseSignerIsRevoked(t *testing.T) {
+	ca, own := newSigner(t), newSigner(t).PublicKey()
+	revoked := "@revoked * " + string(ssh.MarshalAuthorizedKey(ca.PublicKey()))
+
+	for _, tc := range []struct {
+		name       string
+		knownHosts string
+	}{
+		{"its own key is pinned", knownhosts.Line([]string{"relay.test"}, own) + "\n" + revoked},
+		{"no line names the host", revoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := signHostCert(t, ca, own, "relay.test")
+			err := KnownHosts{File: writeKnownHosts(t, tc.knownHosts)}.Check("relay.test:22", fakeAddr, cert)
+			var r *knownhosts.RevokedError
+			require.ErrorAs(t, err, &r)
+		})
+	}
+}
+
 func TestAMissingKnownHostsIsAnEmptyTrustStore(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "no-ssh-dir", ".ssh", "known_hosts")
 	key := newSigner(t).PublicKey()

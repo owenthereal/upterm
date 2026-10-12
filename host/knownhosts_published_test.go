@@ -80,21 +80,21 @@ func TestPublishedKnownHostsRefusesAnotherSigner(t *testing.T) {
 
 	cb := callbackFor(t, string(published))
 	err = cb("uptermd.upterm.dev:22", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}, certSigner.PublicKey())
-	require.Error(t, err, "an unpublished signer must not verify")
-	require.Contains(t, err.Error(), "could not read host-key confirmation from stdin",
-		"it must reach the prompt and fail there, not verify silently")
+	require.ErrorIs(t, err, ErrHostKeyChanged,
+		"an unpublished signer must be refused as a changed key, before any prompt")
 }
 
-// TestPlainKeyLineDoesNotAuthorizeTheCertificate is why the published file uses
-// @cert-authority: it pins the behaviour that makes an ssh-keyscan recipe
-// inadequate, so nobody 'simplifies' the file back to a plain key line.
-func TestPlainKeyLineDoesNotAuthorizeTheCertificate(t *testing.T) {
+// The relay signs its certificate with its own key, so the plain key line an
+// ssh-keyscan records for it verifies the certificate, as OpenSSH's does. The
+// published file still uses @cert-authority, which upterm 0.37.0 and earlier
+// need.
+func TestPlainKeyLineVerifiesTheRelaysCertificate(t *testing.T) {
 	cert := relayHostCert(t).(*ssh.Certificate)
-	plain := "uptermd.upterm.dev " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(cert.SignatureKey)))
+	plain := "uptermd.upterm.dev " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(cert.Key)))
 
 	cb := callbackFor(t, plain+"\n")
 	err := cb("uptermd.upterm.dev:22", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}, cert)
-	require.Error(t, err, "a plain key line must not verify a host certificate")
+	require.NoError(t, err, "a plain line holding the certificate's own key verifies it with no prompt")
 }
 
 func mustGenerateEd25519(t *testing.T) ed25519.PrivateKey {
