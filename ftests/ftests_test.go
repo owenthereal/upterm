@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -396,6 +397,16 @@ func listenOn(sshAddr, wsAddr string) func(*Server) {
 	return func(s *Server) { s.sshListenAddr, s.wsListenAddr = sshAddr, wsAddr }
 }
 
+// withHostCertAuthority has the relay's host certificate, for the relay's
+// key, signed by ca, a key of its own; without it the relay signs its
+// certificate with the key it certifies. ca is then also the key the relay
+// signs guests' certificates with: a host takes the signer of the relay's
+// host certificate for the authority that vouches for guests
+// (host/internal/relayauthority.go), and uptermd signs both with one key.
+func withHostCertAuthority(ca ssh.Signer) func(*Server) {
+	return func(s *Server) { s.hostCertAuthority = ca }
+}
+
 // rebindTimeout bounds the retries of a listen that failed.
 const rebindTimeout = 2 * time.Second
 
@@ -433,6 +444,10 @@ type Server struct {
 	// uptermd's --authorized-keys.
 	authorizedKeysFiles []string
 
+	// hostCertAuthority, when set, signs the relay's host certificate and its
+	// guests' certificates in place of the relay's own key.
+	hostCertAuthority ssh.Signer
+
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
 }
@@ -443,12 +458,23 @@ func (s *Server) start() error {
 		return fmt.Errorf("failed to create signers: %w", err)
 	}
 
+	// authorities sign the guests' certificates, and the host certificate
+	// too unless that has an authority of its own.
+	authorities := signers
+	if s.hostCertAuthority != nil {
+		authorities = []ssh.Signer{s.hostCertAuthority}
+	}
+
 	var hostSigners []ssh.Signer
 	for _, signer := range signers {
-		cs := server.HostCertSigner{
-			Hostnames: []string{"127.0.0.1"},
+		hostnames := []string{"127.0.0.1"}
+		var hostSigner ssh.Signer
+		if s.hostCertAuthority != nil {
+			hostSigner, err = certifiedBy(signer, s.hostCertAuthority, hostnames)
+		} else {
+			cs := server.HostCertSigner{Hostnames: hostnames}
+			hostSigner, err = cs.SignCert(signer)
 		}
-		hostSigner, err := cs.SignCert(signer)
 		if err != nil {
 			return fmt.Errorf("failed to sign host certificate: %w", err)
 		}
@@ -498,7 +524,7 @@ func (s *Server) start() error {
 	s.Server = &server.Server{
 		NodeAddr:            s.SSHAddr(), // node addr is hard coded to ssh addr
 		HostSigners:         hostSigners,
-		Signers:             signers,
+		Signers:             authorities,
 		NetworkProvider:     network,
 		MetricsProvider:     provider.NewDiscardProvider(),
 		SessionManager:      sm,
@@ -508,6 +534,22 @@ func (s *Server) start() error {
 	s.mu.Unlock()
 
 	return s.Server.ServeWithContext(context.Background(), s.sshln, s.wsln)
+}
+
+// certifiedBy is signer's host certificate for hostnames, as
+// server.HostCertSigner makes one, but signed by ca rather than by signer.
+func certifiedBy(signer, ca ssh.Signer, hostnames []string) (ssh.Signer, error) {
+	cert := &ssh.Certificate{
+		Key:             signer.PublicKey(),
+		CertType:        ssh.HostCert,
+		KeyId:           "uptermd",
+		ValidPrincipals: hostnames,
+		ValidBefore:     ssh.CertTimeInfinity,
+	}
+	if err := cert.SignCert(rand.Reader, ca); err != nil {
+		return nil, err
+	}
+	return ssh.NewCertSigner(cert, signer)
 }
 
 func (s *Server) SSHAddr() string {

@@ -36,17 +36,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// joinTiming paces the guests here. A first join gives up after 500 ms, which
-// testJoinUnknownIDFailsAtTheDeadline measures, and the waits between
-// attempts are short, so a guest rejoins within moments of a drop. An attempt
-// gets 2 s, an SSH handshake's budget under -race, as redialTiming's do. A
-// quiet connection is probed after 100 ms and given up on 100 ms later.
+// joinTiming paces the guests here. A first join has 5 s, room for the
+// handshakes a join through another node takes, two or three of them when
+// keys are refused, under -race on a loaded CI runner, and still within
+// joinWaitBound. The waits between attempts are short, so a guest rejoins
+// within moments of a drop. An attempt gets 2 s, an SSH handshake's budget
+// under -race, as redialTiming's do. Liveness is redialTiming's: no case
+// relies on it to notice a drop, since a cut closes both ends, and a shorter
+// one could drop a healthy connection under -race.
 var joinTiming = join.Timing{
-	FirstJoin: 500 * time.Millisecond,
+	FirstJoin: 5 * time.Second,
 	FastBase:  20 * time.Millisecond,
 	FastCap:   200 * time.Millisecond,
 	Attempt:   2 * time.Second,
-	Liveness:  liveness.Timing{Interval: 100 * time.Millisecond, Bound: 100 * time.Millisecond},
+	Liveness:  liveness.Timing{Interval: redialTiming.PingInterval, Bound: redialTiming.PingBound},
 }
 
 const (
@@ -69,6 +72,7 @@ type guestOpts struct {
 	knownHosts string
 	// confirm, when set, is ConfirmHostKey, and every call to it is counted.
 	confirm func(ctx context.Context, hostname string, key ssh.PublicKey) (bool, error)
+	timing  *join.Timing // default: joinTiming
 }
 
 // guestRun is a join.Run in progress. It dials the relay through a forwarder
@@ -130,6 +134,9 @@ func joinGuest(t *testing.T, clientJoinURL string, session *api.GetSessionRespon
 		Events: g.sink.event,
 		Wait:   o.wait,
 		Timing: joinTiming,
+	}
+	if o.timing != nil {
+		cfg.Timing = *o.timing
 	}
 	if o.confirm != nil {
 		cfg.ConfirmHostKey = func(ctx context.Context, hostname string, key ssh.PublicKey) (bool, error) {
@@ -207,8 +214,15 @@ func (g *guestRun) ready(t *testing.T) {
 // waitEvent waits for an event of kind k; for Joined, a rejoin's if rejoin.
 func (g *guestRun) waitEvent(t *testing.T, k join.EventKind, rejoin bool) {
 	t.Helper()
+	g.waitEventAfter(t, sinkMark{}, k, rejoin)
+}
+
+// waitEventAfter is waitEvent counting only the events after m, so that an
+// event from before a drop the test caused can't stand for one after it.
+func (g *guestRun) waitEventAfter(t *testing.T, m sinkMark, k join.EventKind, rejoin bool) {
+	t.Helper()
 	g.waitFor(t, fmt.Sprintf("an event %s", eventMarker(join.Event{Kind: k, Rejoin: rejoin})), func(_ string, events []join.Event) bool {
-		for _, e := range events {
+		for _, e := range events[m.events:] {
 			if e.Kind == k && e.Rejoin == rejoin {
 				return true
 			}
@@ -221,25 +235,30 @@ func (g *guestRun) waitEvent(t *testing.T, k join.EventKind, rejoin bool) {
 // testJoinForcedCommandEndsOnlyTheConnection prints as it starts.
 var instanceLine = regexp.MustCompile(`instance-\d+\r?\n`)
 
-// waitInstance returns the n-th "instance-<pid>" line in the output, once
-// there is one.
-func (g *guestRun) waitInstance(t *testing.T, n int) string {
+// waitInstance returns the first "instance-<pid>" line in the output after m,
+// once there is one.
+func (g *guestRun) waitInstance(t *testing.T, m sinkMark) string {
 	t.Helper()
 	var line string
-	g.waitFor(t, fmt.Sprintf("instance %d", n), func(out string, _ []join.Event) bool {
-		lines := instanceLine.FindAllString(out, -1)
-		if len(lines) < n {
-			return false
-		}
-		line = strings.TrimSpace(lines[n-1])
-		return true
+	g.waitFor(t, "an instance's line", func(out string, _ []join.Event) bool {
+		found := instanceLine.FindString(out[m.output:])
+		line = strings.TrimSpace(found)
+		return found != ""
 	})
 	return line
 }
 
+// mark is where the guest's terminal is now: what a wait for what follows
+// counts from.
+func (g *guestRun) mark() sinkMark { return g.sink.mark() }
+
 // cut drops the guest's connection to the relay, both ends, as a network
-// that went away would.
-func (g *guestRun) cut() { g.fwd.Cut() }
+// that went away would, and returns the mark taken just before it.
+func (g *guestRun) cut() sinkMark {
+	m := g.mark()
+	g.fwd.Cut()
+	return m
+}
 
 // outcome waits, at most within, for the run to end, and returns how it did.
 func (g *guestRun) outcome(t *testing.T, within time.Duration) join.Outcome {
@@ -361,6 +380,16 @@ func (s *syncSink) check(cond func(out string, events []join.Event) bool) (<-cha
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.changed, cond(s.buf.String(), s.events)
+}
+
+// sinkMark is a point in a sink: how many events, and how many bytes of
+// output, it held then.
+type sinkMark struct{ events, output int }
+
+func (s *syncSink) mark() sinkMark {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sinkMark{events: len(s.events), output: s.buf.Len()}
 }
 
 func (s *syncSink) String() string {
@@ -605,18 +634,21 @@ func testJoinAuthorizedUnauthorizedAndKeyless(t *testing.T, hostURL, hostNodeAdd
 // join's deadline. Every topology and protocol ends the same way on relays
 // that pass the next hop's verdict on: raw ssh into an embedded multi-node
 // relay used to get the next hop's "unable to authenticate", while ws there
-// always got the destination's banner (see TestBanner).
+// always got the destination's banner (see TestBanner). The deadline is the
+// thing under test, so it is 500 ms here rather than joinTiming's.
 func testJoinUnknownIDFailsAtTheDeadline(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	session := shareOpen(t, hostURL, hostNodeAddr)
 	bogus := proto.Clone(session).(*api.GetSessionResponse)
 	bogus.SshUser = strings.Replace(session.SshUser, session.SessionId, "nosuchsession", 1)
+	timing := joinTiming
+	timing.FirstJoin = 500 * time.Millisecond
 	start := time.Now()
-	out := joinGuest(t, clientJoinURL, bogus, guestOpts{}).outcome(t, 5*time.Second)
+	out := joinGuest(t, clientJoinURL, bogus, guestOpts{timing: &timing}).outcome(t, 5*time.Second)
 	require.Equal(t, join.Failed, out.Kind)
 	var dl *join.DeadlineError
 	require.ErrorAs(t, out.Err, &dl)
 	require.Equal(t, join.NoHost, dl.Why)
-	require.Less(t, time.Since(start), joinTiming.FirstJoin+time.Second)
+	require.Less(t, time.Since(start), timing.FirstJoin+time.Second)
 }
 
 // testJoinWithASilentAgentAndAnAuthorizedFile is spec test 34 end to end: an
@@ -638,8 +670,8 @@ func testJoinWithASilentAgentAndAnAuthorizedFile(t *testing.T, hostURL, hostNode
 // testJoinRejoinNeverTrustsANewRelayKey is spec test 30: a rejoin checks the
 // relay's key against known_hosts as a first join does, and never asks about
 // it: a key known_hosts no longer trusts stops the run, though a prompt was
-// possible before the first join. A key under a trusted @cert-authority line
-// rejoins.
+// possible before the first join. Its @cert-authority clause needs a relay
+// with an authority of its own: testJoinRejoinTrustsTheRelaysAuthority.
 func testJoinRejoinNeverTrustsANewRelayKey(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	session := shareOpen(t, hostURL, hostNodeAddr)
 	relayLine := func(key string) string {
@@ -666,16 +698,6 @@ func testJoinRejoinNeverTrustsANewRelayKey(t *testing.T, hostURL, hostNodeAddr, 
 	g.cut()
 	require.ErrorIs(t, g.outcome(t, 5*time.Second).Err, join.ErrHostKey)
 	require.Zero(t, g.confirmCalls())
-
-	// (c) a certificate under a trusted @cert-authority line joins and
-	// rejoins, without a prompt. The test relays sign their certificates
-	// with the key they certify, so the authority's key is that key.
-	kh = writeTempKnownHosts(t, "@cert-authority "+relayLine(ServerPublicKeyContent))
-	g = joinGuest(t, clientJoinURL, session, guestOpts{knownHosts: kh, confirm: autoYes})
-	g.waitEvent(t, join.Joined, false)
-	g.cut()
-	g.waitEvent(t, join.Joined, true)
-	require.Zero(t, g.confirmCalls())
 }
 
 // testJoinForcedCommandEndsOnlyTheConnection is spec test 31: a guest's
@@ -689,10 +711,10 @@ func testJoinForcedCommandEndsOnlyTheConnection(t *testing.T, hostURL, hostNodeA
 		h.ForceCommand = []string{"sh", "-c", `echo "instance-$$"; read x; exit 3`}
 	})
 	g := joinGuest(t, clientJoinURL, session, guestOpts{})
-	first := g.waitInstance(t, 1)
-	g.cut()
-	g.waitEvent(t, join.Joined, true)
-	require.NotEqual(t, first, g.waitInstance(t, 2), "a new instance on the rejoin")
+	first := g.waitInstance(t, sinkMark{})
+	m := g.cut()
+	g.waitEventAfter(t, m, join.Joined, true)
+	require.NotEqual(t, first, g.waitInstance(t, m), "a new instance on the rejoin")
 	// The instance's line came after the session had the keyboard, so this
 	// reaches its read.
 	g.send("\n")
@@ -716,12 +738,31 @@ func testJoinRejoinsAfterTheHostsTunnelDrops(t *testing.T, mode routing.Mode, pr
 	// The markers are computed, so the shell's echo of the typed line can't
 	// match them: the line shows "$((40+2))x", the output "42x".
 	g.typeUntil(t, `printf '\033[?1049h'; echo $((40+2))x`, "42x")
+	m := g.mark()
 	h.fwd.Cut() // the host's tunnel drops; the host redials the same relay
-	g.waitEvent(t, join.Joined, true)
-	out := g.output()
-	restore, lost := strings.LastIndex(out, "\x1b[?1049l"), strings.Index(out, "<LOST>")
+	g.waitEventAfter(t, m, join.Joined, true)
+	out := g.output()[m.output:]
+	restore, lost := strings.Index(out, "\x1b[?1049l"), strings.Index(out, "<LOST>")
 	require.GreaterOrEqual(t, restore, 0, "no mode restore at all: %q", out)
 	require.GreaterOrEqual(t, lost, 0, "no Lost marker: %q", out)
 	require.Less(t, restore, lost, "the terminal is put back before the status line: %q", out)
 	g.typeUntil(t, "echo $((50+8))y", "58y")
+}
+
+// testJoinRejoinTrustsTheRelaysAuthority is spec test 30's @cert-authority
+// clause: a relay whose certificate a trusted authority signed is trusted on
+// the first join and again on the rejoin after a drop, and nobody is asked.
+// The relay's certificate is signed by an authority of its own, and
+// known_hosts holds only that authority's line, so nothing but the authority
+// can trust the relay.
+func testJoinRejoinTrustsTheRelaysAuthority(t *testing.T, mode routing.Mode, protocol string) {
+	ca := newTestSigner(t)
+	relay := newRedialRelay(t, mode, withHostCertAuthority(ca))
+	joinURL := relay.joinURL(protocol)
+	session := shareOpen(t, joinURL, relay.NodeAddr())
+	kh := writeTempKnownHosts(t, "@cert-authority "+knownhosts.Line([]string{relayHostOf(joinURL)}, ca.PublicKey())+"\n")
+	g := joinGuest(t, joinURL, session, guestOpts{knownHosts: kh, confirm: autoYes})
+	g.waitEvent(t, join.Joined, false)
+	g.waitEventAfter(t, g.cut(), join.Joined, true)
+	require.Zero(t, g.confirmCalls())
 }
