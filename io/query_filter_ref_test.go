@@ -1,6 +1,7 @@
 package io
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -28,10 +29,10 @@ import (
 //     output those bytes are continuation bytes far more often than
 //     introducers, so 0x80–0xFF print in ground and are payload in strings.
 //     The fuzz generator never produces 0x80–0x9F. It produces 0xA0–0xFF as
-//     they are, which Ghostty's table ignores in an ESC or CSI head, as here,
-//     and in an APC, PM or SOS, where this model keeps them as payload. A
-//     filter passes a string's payload as it came, so keeping them there
-//     only holds it to more.
+//     they are, which Ghostty's table ignores in an ESC or CSI head and a DCS
+//     header, as here, and in an APC, PM or SOS, where this model keeps them
+//     as payload. A filter passes a string's payload as it came, so keeping
+//     them there only holds it to more.
 //   - Ghostty's handler-level limits aren't modelled: it drops a CSI with ':'
 //     separators unless its final byte is 'm', a CSI or DCS with more than 24
 //     parameters, intermediates past four, and an OSC its own grammar doesn't
@@ -90,6 +91,8 @@ type refEvent struct {
 	// it.
 	held    int // strings: from the introducer through the payload
 	numHeld int // OSC: from the introducer up to, not including, the first ';' or the end
+	hdrHeld int // DCS: from the introducer through the header's final byte
+	endAt   int // strings: offset of the byte that ended it
 }
 
 func (e refEvent) String() string {
@@ -109,14 +112,48 @@ func (e refEvent) String() string {
 }
 
 // refHeldAtEnd reports whether the filter, under its bounds, would
-// still have been holding ev's string undecided when it ended: an OSC whose
-// number stayed within the 8-byte guard (numHeld <= 8) and whose whole string
-// stayed within the 256-byte bound (held <= 256). The filter holds no other
-// string: a DCS, APC, PM or SOS passes as it streams.
+// still have been holding ev's string undecided when it ended:
+//   - an OSC whose number stayed within the 8-byte guard (numHeld <= 8) and
+//     whose whole string stayed within the 256-byte bound (held <= 256);
+//   - an APC that ended before its first byte, which says whether it is a
+//     graphics command;
+//   - a graphics command, an APC whose payload starts with G, whose control
+//     data reached neither a ';' nor a BEL that asks (refAPCLatches) within
+//     256 raw bytes, framing included. Held to its end, the whole string is
+//     within that bound (held <= 256), so neither may appear in it at all;
+//   - a DCS whose header, held within its 32-byte bound, ends in t, and
+//     whose data is still a proper prefix of "mux;": until the rest of
+//     "mux;" arrives the filter can't tell it from a tmux wrapper, so it
+//     holds it. Every data byte must have been one the parser collected: a
+//     DEL there, which DEC ignores, is a byte tmux reads, so it ends the
+//     match, and the filter passes the DCS.
+//
+// The filter holds no other string to its end. It holds any other DCS only to
+// its header's final byte, and a DCS that ends before that has no event under
+// DEC, since it never hooked, so there is nothing to remove. A tmux wrapper's
+// own DCS has no effect (refNoEffect). Any other APC, and a PM or SOS, passes
+// as it streams.
 //
 // It is computed from the event alone, independently of the filter.
 func refHeldAtEnd(ev refEvent) bool {
-	return ev.kind == refOSC && ev.numHeld <= 8 && ev.held <= 256
+	switch ev.kind {
+	case refOSC:
+		return ev.numHeld <= 8 && ev.held <= 256
+	case refDCS:
+		header := 2 + len(ev.params) + len(ev.inter) // ESC P, then what the header collected before its final byte
+		if ev.prefix != 0 {
+			header++
+		}
+		return ev.final == 't' && header <= 32 && len(ev.data) < len("mux;") &&
+			strings.HasPrefix("mux;", ev.data) && ev.held-ev.hdrHeld == len(ev.data)
+	case refAPC:
+		if ev.data == "" {
+			return true
+		}
+		control, ok := strings.CutPrefix(ev.data, "G")
+		return ok && ev.held <= 256 && !strings.Contains(control, ";") && !refAPCLatches(control)
+	}
+	return false
 }
 
 // refState is Ghostty's Parser.State, in its order.
@@ -505,7 +542,7 @@ func (p *refParser) apply(c byte, at int, t refTransition) {
 	}
 	p.do(t.action, c, at)
 	if changed {
-		p.enter(t.state, c)
+		p.enter(t.state, c, at)
 	}
 	p.state = t.state
 }
@@ -552,7 +589,7 @@ func (p *refParser) do(a refAction, c byte, at int) {
 	}
 }
 
-func (p *refParser) enter(s refState, c byte) {
+func (p *refParser) enter(s refState, c byte, at int) {
 	switch s {
 	case rsEscape, rsCSIEntry:
 		p.clear()
@@ -563,6 +600,7 @@ func (p *refParser) enter(s refState, c byte) {
 		p.beginString(refOSC)
 	case rsDCSPassthrough: // dcs_hook
 		p.str.prefix, p.str.params, p.str.inter, p.str.final = p.prefix, string(p.params), string(p.inter), c
+		p.str.hdrHeld = p.strHeld(at) + 1
 	case rsSOSPMAPCString: // apc_start
 		p.beginString(map[byte]refKind{'X': refSOS, '^': refPM, '_': refAPC}[c])
 	}
@@ -584,7 +622,7 @@ func (p *refParser) strHeld(end int) int {
 
 func (p *refParser) endString(c byte, at int) {
 	ev := p.str
-	ev.data, ev.end, ev.held = string(p.data), c, p.strHeld(at)
+	ev.data, ev.end, ev.held, ev.endAt = string(p.data), c, p.strHeld(at), at
 	if ev.kind == refOSC {
 		ev.numHeld = ev.held
 		if p.semiAt >= 0 {
@@ -599,7 +637,8 @@ func (p *refParser) endString(c byte, at int) {
 
 // refQuery reports whether ev is a request in the query families. It is
 // written apart from io/query_classify.go, so a classifier bug can't hide
-// itself. Families 1–14 read the same under every mode.
+// itself. Families 1–16 read the same under every mode; the modes differ in
+// where a string ends, which the event already reflects.
 func refQuery(mode refMode, ev refEvent) bool {
 	switch ev.kind {
 	case refESC:
@@ -608,8 +647,48 @@ func refQuery(mode refMode, ev refEvent) bool {
 		return refCSIQuery(ev)
 	case refOSC:
 		return refOSCQuery(ev.data)
+	case refDCS:
+		// 15: DECRQSS, XTGETTCAP and XTGETXRES, whatever the parameters. The
+		// header alone decides, and a rule that names no prefix requires none.
+		return ev.prefix == 0 && (ev.inter == "$" && ev.final == 'q' ||
+			ev.inter == "+" && (ev.final == 'q' || ev.final == 'Q'))
+	case refAPC:
+		return refAPCQuery(ev.data)
 	}
 	return false
+}
+
+// refAPCQuery is family 16, kitty's graphics query: an APC whose payload
+// starts with G, and whose control data -- the rest of the payload up to its
+// first ';', or all of it -- has the pair a=q. So does one where only a prefix
+// of the control data, ending just before a BEL, has it (refAPCLatches): kitty
+// ends a string at a BEL, so that prefix is all it reads. Under refKitty the
+// payload has already ended at its first BEL, and holds none.
+func refAPCQuery(data string) bool {
+	rest, ok := strings.CutPrefix(data, "G")
+	if !ok {
+		return false
+	}
+	control, _, _ := strings.Cut(rest, ";")
+	return refGraphicsAsks(control) || refAPCLatches(control)
+}
+
+// refAPCLatches reports whether a prefix of a graphics command's control data
+// that ends just before a BEL asks: the BEL latch.
+func refAPCLatches(control string) bool {
+	for i := range len(control) {
+		if control[i] == 0x07 && refGraphicsAsks(control[:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// refGraphicsAsks reports whether control, split on ',' into key=value pairs,
+// has the pair a=q. Every other byte, a control byte included, is part of the
+// pair it falls in, as the terminal hands it to the graphics handler.
+func refGraphicsAsks(control string) bool {
+	return slices.Contains(strings.Split(control, ","), "a=q")
 }
 
 // refCSIQuery is families 1 and 3–10. A rule that names no prefix or
@@ -629,7 +708,7 @@ func refCSIQuery(ev refEvent) bool {
 	case f == 't' && plain && slices.Contains([]int{11, 13, 14, 15, 16, 18, 19, 20, 21}, first): // 6: window reports
 	case (f == 'm' || f == 'g') && in == "" && pre == '?': // 7: XTQMODKEYS, XTQFMTKEYS
 	case f == 'S' && in == "" && pre == '?': // 8: XTSMGRAPHICS, every action
-	case f == 'u' && in == "" && pre == '?' && count == 0: // 9: kitty keyboard
+	case f == 'u' && in == "" && pre == '?': // 9: kitty keyboard, whatever the parameters
 	case f == 'x' && plain && (first == 0 || first == 1): // 10: DECREQTPARM
 	case pre == 0 && (in == "$" && f == 'w' || in == "&" && f == 'u' || in == `"` && f == 'v' ||
 		in == "*" && f == 'y' || in == "#" && f == '|' || in == "'" && f == '|'): // 10: DECRQPSR, DECRQUPSS, DECRQDE, DECRQCRA, XTREPORTSGR, DECRQLP
@@ -702,8 +781,9 @@ func refOSCQuery(data string) bool {
 // the filter is fed it too, so what it held resolves the way it resolves it.
 // Preservation then compares the DEC events of the input and the output,
 // less the input's queries and the strings the filter drops by policy (a
-// held string that ends abnormally), and less what has no effect on either
-// side (refNoEffect).
+// held string that ends abnormally, where a tmux wrapper's first inner string
+// that ends at its own ST ends cleanly: refInnerST), and less what has no
+// effect on either side (refNoEffect).
 func refCheck(in string, filter func(string) string) string {
 	x := in + "\x18"
 	out := filter(x)
@@ -715,9 +795,11 @@ func refCheck(in string, filter func(string) string) string {
 		}
 	}
 	var want, got []refEvent
-	for _, ev := range refParse(refDEC, []byte(x)) {
-		policy := refHeldAtEnd(ev) && (ev.end == 0x1b || ev.end == 0x18 || ev.end == 0x1a)
-		if !refQuery(refDEC, ev) && !policy && !refNoEffect(ev) {
+	evs := refParse(refDEC, []byte(x))
+	innerST := refInnerST([]byte(x), evs)
+	for _, ev := range evs {
+		abnormal := ev.end == 0x1b && !innerST[ev.endAt] || ev.end == 0x18 || ev.end == 0x1a
+		if !refRemoves(ev, abnormal) && !refNoEffect(ev) {
 			want = append(want, refSemantic(ev))
 		}
 	}
@@ -733,6 +815,62 @@ func refCheck(in string, filter func(string) string) string {
 		}
 	}
 	return ""
+}
+
+// refRemoves reports whether preservation takes ev out of the input's effects:
+// a query, or a string the filter holds to its end (refHeldAtEnd) that ended
+// abnormally, which it drops by policy.
+func refRemoves(ev refEvent, abnormal bool) bool {
+	return refQuery(refDEC, ev) || abnormal && refHeldAtEnd(ev)
+}
+
+// refInnerST returns the raw offsets at which a tmux wrapper's first inner
+// sequence, when it is a string, ends at its own ST: the first ESC of the raw
+// ESC ESC \ that the wrapper's second inner ESC and a '\' make. A DEC
+// terminal ends the string at that ESC, which to it isn't ST, so refCheck
+// would count the end abnormal. The filter reads the wrapped stream decoded,
+// though, where the string ends at its ST, cleanly, so it decides the string
+// there, and a string that is no query passes with the wrapper. Only the first
+// inner sequence is read so: the filter classifies no other. refGenerate makes
+// no passing wrapper with a second, nor a nested one, but keeps what follows a
+// dropped first as ordinary output. Once that first has ended before the
+// second inner ESC, the ESC starts the next sequence rather than ending a
+// string, so a mark there never lands on an event's end.
+//
+// A wrapper is tmux's notion, so it is read as tmux reads one: a DCS header
+// ending in t, then the raw bytes "mux;". tmux reads every byte of a DCS's
+// data, a DEL included, so a byte the DEC parser ignores there ends the match,
+// though the DEC data still spells "mux;". The raw data starts just after the
+// header's final byte, which the bookkeeping places at endAt - held + hdrHeld.
+//
+// Raw bytes decode in pairs after an ESC, from the wrapper's first raw ESC,
+// where its DCS ends: ESC ESC is an inner ESC, and any other pair ends the
+// wrapper, ESC \ as its ST and any other as a lone ESC.
+func refInnerST(in []byte, evs []refEvent) map[int]bool {
+	st := map[int]bool{}
+	for _, ev := range evs {
+		if ev.kind != refDCS || ev.final != 't' || ev.end != 0x1b ||
+			!bytes.HasPrefix(in[ev.endAt-ev.held+ev.hdrHeld:ev.endAt], []byte("mux;")) {
+			continue
+		}
+		escs := 0
+		for i := ev.endAt; i+1 < len(in); i++ {
+			if in[i] != 0x1b {
+				continue
+			}
+			if in[i+1] != 0x1b {
+				break
+			}
+			if escs++; escs == 2 {
+				if i+2 < len(in) && in[i+2] == '\\' {
+					st[i] = true
+				}
+				break
+			}
+			i++
+		}
+	}
+	return st
 }
 
 // refNoEffect reports whether ev leaves a DEC terminal as it was, so that
@@ -770,7 +908,7 @@ func refNoEffect(ev refEvent) bool {
 // that drops a held string ended abnormally, which refCheck reads before
 // this: kitty keeps such a string open.
 func refSemantic(ev refEvent) refEvent {
-	ev.held, ev.numHeld = 0, 0
+	ev.held, ev.numHeld, ev.hdrHeld, ev.endAt = 0, 0, 0, 0
 	if ev.end == 0x1b {
 		ev.end = '\\'
 	}
@@ -824,6 +962,10 @@ func TestRefParse_Conformance(t *testing.T) {
 	require.Equal(t, byte('q'), dcs.final)
 	require.Equal(t, "#0\x07X", dcs.data)
 	require.Equal(t, byte(0x07), ev(refKitty, "\x1bPq#0\x07X\x1b\\")[0].end)
+
+	// A DCS header ignores C0, DEL and 0xA0–0xFF, and still hooks.
+	got = ev(refDEC, "\x1bP1\r\x7f\xa0;0+\nq#0\x1b\\")
+	require.Equal(t, refEvent{kind: refDCS, params: "1;0", inter: "+", final: 'q', data: "#0", end: '\\'}, refSemantic(got[0]))
 
 	// APC control bytes are payload, not ignored.
 	require.Equal(t, "\nGa=q", ev(refDEC, "\x1b_\nGa=q\x1b\\")[0].data)
@@ -913,21 +1055,129 @@ func TestRefParse_StringEnds(t *testing.T) {
 
 func TestRefQuery_Families(t *testing.T) {
 	for _, q := range []string{"\x1b[?2026$p", "\x1b[06n", "\x1b[0;1c", "\x1b[;c",
-		"\x1b[?996n", "\x1b[14;2t", "\x1b[?4m", "\x1b[?1;3;256S", "\x1b[?u",
+		"\x1b[?996n", "\x1b[14;2t", "\x1b[?4m", "\x1b[?1;3;256S", "\x1b[?u", "\x1b[?1u",
 		"\x1b[01x", "\x1bZ", "\x1b]11;?\x07", "\x1b]4;0;rgb:0/0/0;1;?\x07",
 		"\x1b]52;c;?\x07", "\x1b]50;?\x07", "\x1b]60\x07"} {
 		evs := refParse(refDEC, []byte(q))
 		require.Len(t, evs, 1, "%q", q)
 		require.True(t, refQuery(refDEC, evs[0]), "%q", q)
 	}
+	// A DCS reports its event and then a lone ST, so the query is the first.
+	for _, q := range []string{"\x1bP$qm\x1b\\", "\x1bP+q544e\x1b\\", "\x1bP+Q616c\x1b\\", "\x1bP1$qm\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			evs := refParse(mode, []byte(q))
+			require.Equal(t, refDCS, evs[0].kind, "%q under %v", q, mode)
+			require.True(t, refQuery(mode, evs[0]), "%q under %v", q, mode)
+		}
+	}
+	// So does an APC, and a graphics query reads the same under every mode,
+	// latched at a BEL included: kitty ends the string at the BEL, and the
+	// other two find the pair before it.
+	for _, q := range []string{"\x1b_Ga=q\x1b\\", "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\",
+		"\x1b_Gi=1,a=q\x07X;\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			evs := refParse(mode, []byte(q))
+			require.Equal(t, refAPC, evs[0].kind, "%q under %v", q, mode)
+			require.True(t, refQuery(mode, evs[0]), "%q under %v", q, mode)
+		}
+	}
+	// A later BEL latches too, under DEC and tmux. kitty has ended the string
+	// at the first BEL, where nothing asks, and reads the rest as text.
+	later := "\x1b_Gi=1\x07,a=q\x07X;\x1b\\"
+	require.True(t, refQuery(refDEC, refParse(refDEC, []byte(later))[0]))
+	require.True(t, refQuery(refTmux, refParse(refTmux, []byte(later))[0]))
+	for _, e := range refParse(refKitty, []byte(later)) {
+		require.False(t, refQuery(refKitty, e), "%v", e)
+	}
 	for _, c := range []string{"\x1b[?6c", "\x1b[>4n", "\x1b[!p", "\x1b[2 q",
 		"\x1b[22;0t", "\x1b[>4;2m", "\x1b[3S", "\x1b[>1u", "\x1b[2*x",
 		"\x1b[38:2::255:0:0m", "\x1b(B", "\x1b]4;1;rgb:ff/00/00\x07",
-		"\x1b]52;c;SGVsbG8=\x07"} {
+		"\x1b]52;c;SGVsbG8=\x07", "\x1bP0;1;0q#0\x1b\\", "\x1bP+p78\x1b\\",
+		"\x1bP1$r0m\x1b\\", "\x1bP?$qm\x1b\\", "\x1bP$$qm\x1b\\", "\x1bP$Qm\x1b\\",
+		"\x1bP$1qm\x1b\\", "\x1bPtmux;\x1b\x1b[31m\x1b\\"} {
 		for _, e := range refParse(refDEC, []byte(c)) {
 			require.False(t, refQuery(refDEC, e), "%q", c)
 		}
 	}
+	// Graphics commands that ask nothing under any mode: a transmit, a pair
+	// after the ';' (payload), a control byte in the pair, a BEL whose prefix
+	// asks nothing, and APCs that aren't graphics commands at all.
+	for _, c := range []string{"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\", "\x1b_Ga=T;a=q\x1b\\", "\x1b_Ga=q\r\x1b\\",
+		"\x1b_Gi=1\x07a=q;\x1b\\", "\x1b_\nGa=q\x1b\\", "\x1b_ Ga=q\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			for _, e := range refParse(mode, []byte(c)) {
+				require.False(t, refQuery(mode, e), "%q under %v", c, mode)
+			}
+		}
+	}
+}
+
+// refHeldAtEnd's APC arm at its edges: an APC is held until its first byte,
+// and a graphics command until a ';' or a BEL that asks decides it, within 256
+// raw bytes from its ESC.
+func TestRefHeldAtEnd_APC(t *testing.T) {
+	held := func(in string) bool { return refHeldAtEnd(refParse(refDEC, []byte(in))[0]) }
+	require.True(t, held("\x1b_\x18"), "an empty APC")
+	require.True(t, held("\x1b_Gi=1\x07a=T\x18"), "a BEL that asks nothing")
+	require.True(t, held("\x1b_G"+strings.Repeat("i", 253)+"\x18"), "256 raw bytes")
+	require.False(t, held("\x1b_G"+strings.Repeat("i", 254)+"\x18"), "257 raw bytes")
+	require.False(t, held("\x1b_Ga=T;\x18"), "decided at its ';'")
+	require.False(t, held("\x1b_Gi=1,a=q\x07\x18"), "decided at a BEL")
+	require.False(t, held("\x1b_x\x18"), "not a graphics command")
+	require.False(t, held("\x1b^\x18"), "a PM")
+}
+
+// refHeldAtEnd's DCS arm at its edges: a DCS whose header ends in t is held
+// while its data may yet spell "mux;", and only then.
+func TestRefHeldAtEnd_DCS(t *testing.T) {
+	held := func(in string) bool { return refHeldAtEnd(refParse(refDEC, []byte(in))[0]) }
+	require.True(t, held("\x1bPt\x18"), "no data yet")
+	require.True(t, held("\x1bPtmu\x1b[m"), "a prefix of mux;")
+	require.True(t, held("\x1bP1$tmux\x18"), "parameters and intermediates")
+	require.True(t, held("\x1bP"+strings.Repeat("1", 30)+"tm\x18"), "a header at its bound")
+	require.False(t, held("\x1bP"+strings.Repeat("1", 31)+"tm\x18"), "a header past its bound")
+	require.False(t, held("\x1bPtmx\x18"), "not a prefix")
+	require.False(t, held("\x1bPtm\x7fu\x18"), "a DEL, which tmux reads")
+	require.False(t, held("\x1bPtmu\r\x18"), "a C0, which ends the match")
+	require.False(t, held("\x1bPqmu\x18"), "a header that doesn't end in t")
+}
+
+// refInnerST finds where a wrapper's first inner string ends at its own ST,
+// and nowhere else: not at an inner ESC that isn't ST, nor at a later inner
+// sequence's ST, nor outside a wrapper.
+func TestRefInnerST(t *testing.T) {
+	at := func(in string) []int {
+		var offs []int
+		for i := range refInnerST([]byte(in), refParse(refDEC, []byte(in))) {
+			offs = append(offs, i)
+		}
+		return offs
+	}
+	require.Equal(t, []int{13}, at("\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "the title's ST")
+	require.Equal(t, []int{14}, at("\x1bPtmux;Y\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "after a leading byte")
+	require.Empty(t, at("\x1bPtmux;\x1b\x1b]0;t\x1b\x1b[m\x1b\\"), "an inner ESC that isn't ST")
+	require.Empty(t, at("\x1bPtmux;\x1b\x1b[1m\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a second inner sequence")
+	require.Empty(t, at("\x1b]0;t\x1b\x1b\\"), "no wrapper")
+	require.Empty(t, at("\x1bPtmux;\x1b]0;t\x1b\x1b\\"), "a wrapper a lone ESC ended")
+}
+
+// refInnerST reads a wrapper as tmux does: "mux;" is the four raw bytes after
+// the header's final byte. A byte the DEC parser ignores in it, which tmux
+// reads, ends the match though the DEC data still spells "mux;"; after it,
+// the byte is the wrapper's own, and before the introducer's second byte, no
+// part of the string.
+func TestRefInnerST_ReadsThePrefixAsTmuxDoes(t *testing.T) {
+	at := func(in string) []int {
+		var offs []int
+		for i := range refInnerST([]byte(in), refParse(refDEC, []byte(in))) {
+			offs = append(offs, i)
+		}
+		return offs
+	}
+	require.Empty(t, at("\x1bPtmux\x7f;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL before the ';'")
+	require.Empty(t, at("\x1bPtm\x7fux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL inside mux")
+	require.Equal(t, []int{14}, at("\x1bPtmux;\x7f\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a DEL after the ';', a leading byte")
+	require.Equal(t, []int{14}, at("\x1b\rPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\"), "a CR the escape state executes")
 }
 
 // refCheck catches a splice: the filter's output loses text that the input
@@ -958,6 +1208,54 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		// held and is dropped. Only numHeld tells them apart.
 		{"\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b[6nhello", "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b\x18hello\x18"},
 		{"\x1b]0;" + strings.Repeat("\r", 9) + "t\x1b[6nhello", "hello\x18"},
+		{"\x1bP1\r;0q#0\x1b\\", "\x1bP1;0q#0\x1b\\\x18"},                         // ignored CR dropped from a passed header
+		{"ABC\x1bP$\rqm\x1b\\X", "ABCX\x18"},                                     // DCS query with a C0 in its header
+		{"\x1bP+q544e\x18X", "\x18X\x18"},                                        // drop ended by CAN
+		{"\x1bP$1qhidden\x1b[6nVISIBLE", "\x1bP$1qhidden\x1b\x18VISIBLE\x18"},    // DCS-ignore closed
+		{"\x1b_Ga=T\x18X", "\x18X\x18"},                                          // held APC cancelled: policy drop
+		{"\x1b_Gi=1,a=q\x07X;\x1b\\", "\x18"},                                    // query latched at a BEL
+		{"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\", "\x1b_Ga=T,f=100,i=1;AAAA\x1b\\\x18"}, // transmit passes
+		{"\x1b_\nGa=q\x1b\\", "\x1b_\nGa=q\x1b\\\x18"},                           // not a G command
+		// tmux wrappers: the wrapper's own DCS has no effect, and a DEC
+		// terminal ends it at its first ESC and reads the rest live.
+		{"\x1bPtmux;\x1b\x1b[6n\x1b\\", "\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b[6nX\x1b\\", "X\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b\\\x1b\\", "\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b[31mX\x1b\\", "\x1bPtmux;\x1b\x1b[31mX\x1b\\\x18"},
+		{"\x1bPtmux;Y\x1b\x1b[6n\x1b\\", "\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1bP+q544e\x18X\x1b\\", "\x18X\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b]11;?\x07X\x1b\\", "X\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b[1mX\x1b\\", "\x1b[1mX\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b]0;t\x18X\x1b\\", "\x18X\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b[6\x18X\x1b\\", "\x1bPtmux;\x1b\x1b[6\x18X\x1b\\\x18"},
+		{"\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b[31mX\x1b\\", "\x1b[31mX\x1b\\\x18"},
+		{"\x1bPtmux;\x18hello\x1b\x1b[6n\x1b\\", "\x18hello\x1b\\\x18"},          // a leading CAN ends the wrapper
+		{"\x1bPtmux;\x1ahello\x1b\x1b[6n\x1b\\", "\x1ahello\x1b\\\x18"},          // and a leading SUB
+		{"\x1bPq#0\x1bPtmux;\x18hello", "\x1bPq#0\x1b\x18hello\x18"},             // with a close owed
+		{"\x1bPtmux;\x1b\x1b[6\x1b[1mX", "\x1b[1mX\x18"},                         // a lone ESC in the deciding hold
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b[6nX\x1b\\", "X\x1b\\\x18"},               // a lone ESC during the inner drop
+		{"\x1bP1tmux;\x1b\x1b[31mX\x1b\\", "\x1bP1tmux;\x1b\x1b[31mX\x1b\\\x18"}, // a header with a parameter
+		{"\x1bP$tmux;\x1b\x1b[6n\x1b\\", "\x1b\\\x18"},                           // a header with an intermediate
+		{"\x1bPtmux;\x1b(\x1b[6nX", "X\x18"},                                     // a lone ESC ( in a held wrapper
+		// An inner ESC that abandons a head drops it with the wrapper, and the
+		// rest, from the pair's second raw ESC, is ordinary output.
+		{"\x1bPtmux;\x1b\x1b(\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1b[6\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1bP+\x1b\x1b[1m\x1b\x1b[6n\x1b\\X", "\x1b[1m\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1b_Ga=q\x1b\x1b\\\x1b\\X", "\x1b\\X\x18"}, // a graphics query decided at its own ST
+		// A DCS whose header ends in t is held while it matches "mux;", so
+		// one that ends abnormally there is dropped by policy.
+		{"\x1bPtmu\x1b[1mX", "\x1b[1mX\x18"},
+		{"\x1bPtm\x18X", "\x18X\x18"},
+		{"\x1bPtmu\x1b\\X", "\x1bPtmu\x1b\\X\x18"},
+		// A held inner string that ends at its own ST ends cleanly in the
+		// decoded stream, and passes with the wrapper (refInnerST).
+		{"\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X", "\x1bPtmux;\x1b\x1b]0;t\x1b\x1b\\\x1b\\X\x18"},
+		{"\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\", "\x1bPtmux;\x1b\x1bPtm\x1b\x1b\\\x18"},
+		// tmux reads a DEL in "mux;" as a mismatch, so there is no wrapper,
+		// and a DCS ending in t that the first ESC of ESC ESC \ ends is held
+		// and dropped by policy (found by the fuzz test).
+		{"\x1bPtmux\x7f;\x1b\x1bPt\x1b\x1b\\", "\x1bPtmux\x7f;\x1b\x18\x1b\\\x18"},
 	} {
 		out := c.out
 		require.Empty(t, refCheck(c.in, func(string) string { return out }), "%q", c.in)

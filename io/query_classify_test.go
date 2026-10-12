@@ -21,7 +21,7 @@ var (
 		"\x1b[18t", "\x1b[19t", "\x1b[20t", "\x1b[21t", // 6
 		"\x1b[?4m", "\x1b[?1g", // 7
 		"\x1b[?1;1;0S", "\x1b[?2;1;0S", "\x1b[?1;3;256S", // 8, setters too
-		"\x1b[?u", // 9
+		"\x1b[?u", "\x1b[?0u", "\x1b[?1u", "\x1b[?1;2u", "\x1b[?;u", // 9, whatever the parameters
 		"\x1b[x", "\x1b[0x", "\x1b[1x", "\x1b[01x", "\x1b[1$w", "\x1b[&u", "\x1b[\"v",
 		"\x1b[1;1;1;1;24;80*y", "\x1b[1;1;24;80#|", "\x1b[1'|", "\x1b[#R", "\x1b[#S", // 10
 	}
@@ -34,7 +34,7 @@ var (
 		"\x1b[8;24;80t", "\x1b[22;0t", "\x1b[23;0t", "\x1b[>0t", "\x1b[>4;2m", "\x1b[1m",
 		"\x1b[38:2::255:0:0m", "\x1b[6:1n", "\x1b[3S", "\x1b[>1u", "\x1b[<u", "\x1b[=1;1u",
 		"\x1b[u", "\x1b[2x", "\x1b[2*x", "\x1b[#{", "\x1b[132$|", "\x1b[1#Q", "\x1b[2J",
-		"\x1b[10;20H", "\x1b[1$ p",
+		"\x1b[10;20H", "\x1b[1$ p", "\x1b[?1:2u",
 	}
 
 	// oscQueryExamples are requests, by family number (11 to 14).
@@ -51,6 +51,36 @@ var (
 		"\x1b]50;fixed", "\x1b]0;My Title", "\x1b]0;?", "\x1b]8;;https://example.com/?q=1",
 		"\x1b]133;A", "\x1b]7;file://host/tmp", "\x1b]777;notify;Title;Body", "\x1b]0;",
 		"\x1b]11;", "\x1b]20;?",
+	}
+
+	// dcsQueryExamples are family 15's requests, as complete headers: what
+	// dcsQuery decides on, without the payload that follows.
+	dcsQueryExamples = []string{
+		"\x1bP$q", "\x1bP+q", "\x1bP+Q", // DECRQSS, XTGETTCAP, XTGETXRES
+		"\x1bP1$q", "\x1bP0;1+q", "\x1bP;+Q", // whatever the parameters
+	}
+
+	// dcsPassExamples are the DCS counter-cases: headers near family 15 that
+	// ask nothing, the replies' own shapes among them.
+	dcsPassExamples = []string{
+		"\x1bPq", "\x1bP0;1;0q", "\x1bP+p", "\x1bPt", "\x1bP@", // sixel, XTSETTCAP, tmux, kitty's remote control
+		"\x1bP1$r", "\x1bP1+r", "\x1bP$Q", "\x1bP$t", // DECRPSS and XTGETTCAP's reply, and the neighbours
+		"\x1bP?$q", "\x1bP>+q", // a prefix, which no request names
+		"\x1bP$$q", "\x1bP $q", "\x1bP+$q", // two intermediates
+	}
+
+	// apcQueryExamples are family 16's requests, as a kitty graphics command's
+	// control data: what apcQuery decides on, the bytes after "ESC _ G" up to
+	// its ';' or its end.
+	apcQueryExamples = []string{
+		"a=q", "i=31,s=1,v=1,a=q,t=d,f=24", "i=1,a=q", "a=q,i=1", // wherever the pair falls
+	}
+
+	// apcPassExamples are the graphics counter-cases: commands that ask
+	// nothing, and pairs near a=q.
+	apcPassExamples = []string{
+		"a=T,f=100,i=1", "a=t,i=1", "a=p,i=1", "a=d", "f=100", "", // transmit, display, delete
+		"a=Q", "A=q", "a=qq", "aa=q", "q=a", "a=", "a", "i=q",
 	}
 )
 
@@ -82,8 +112,8 @@ func TestCSIQuery_Boundaries(t *testing.T) {
 	for _, c := range []string{
 		// A number saturates, rather than wrapping round to one a family wants.
 		"\x1b[" + nines + "t", "\x1b[" + nines + "x", "\x1b[" + nines + "n",
-		// "No parameters" means none, not zero or empty.
-		"\x1b[?0u", "\x1b[?;u", "\x1b[#0R", "\x1b[#0S",
+		// Family 10's `# R` and `# S` take no parameters: none, not zero.
+		"\x1b[#0R", "\x1b[#0S",
 		// Two intermediates match no family, whichever they are.
 		"\x1b[?2026$$p", "\x1b[?2026$ p", "\x1b[1$$w", "\x1b[ $w",
 		// Sub-parameters match no family, however well the rest fits.
@@ -144,10 +174,68 @@ func TestESCQuery(t *testing.T) {
 	}
 }
 
+func TestDCSQuery_Families(t *testing.T) {
+	for _, q := range dcsQueryExamples {
+		require.True(t, dcsQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range dcsPassExamples {
+		require.False(t, dcsQuery([]byte(c)), "%q", c)
+	}
+}
+
+// The DCS rules the examples don't pin down: a header out of order is a
+// DCS-ignore, which dispatches nothing, and only a whole header is decided.
+func TestDCSQuery_Boundaries(t *testing.T) {
+	require.True(t, dcsQuery([]byte("\x1bP"+strings.Repeat("9", 40)+"+q")), "a long parameter is still a parameter")
+	for _, c := range []string{
+		// A parameter after an intermediate, a ':', or a prefix after a
+		// parameter: out of order, so a DCS-ignore.
+		"\x1bP$1q", "\x1bP1:2+q", "\x1bP:+q", "\x1bP1?+q",
+		// Not a complete header.
+		"\x1bP", "\x1bP+", "\x1bP$", "\x1b[+q", "\x1b+q", "+q", "",
+	} {
+		require.False(t, dcsQuery([]byte(c)), "%q", c)
+	}
+}
+
+func TestAPCQuery_Families(t *testing.T) {
+	for _, q := range apcQueryExamples {
+		require.True(t, apcQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range apcPassExamples {
+		require.False(t, apcQuery([]byte(c)), "%q", c)
+	}
+}
+
+// The graphics rules the examples don't pin down: a pair is exactly a=q,
+// whatever is around it, and a control byte is part of the pair it falls in.
+func TestAPCQuery_Boundaries(t *testing.T) {
+	for _, q := range []string{
+		"a=T,a=q", "a=q,a=T", // any a=q pair asks, wherever it falls
+		",a=q", "a=q,", ",,a=q,,", // empty pairs around it are nothing
+		"i=1\x07,a=q", // a BEL in an earlier pair stays in that pair
+	} {
+		require.True(t, apcQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range []string{
+		// Control bytes are part of the pair, as the terminal hands them to
+		// the handler: a value of "q\r" is not q.
+		"a=q\r", "\na=q", "a=\x07q", "a\x7f=q", "a=q\x07X",
+		// So a BEL doesn't split pairs: this is the key i, whose value runs on.
+		"i=1\x07a=q",
+		// Nor does a space or any other byte but ','.
+		"a =q", " a=q", "a= q", "a=q ", "i=1;a=q", "a==q", "a=q=",
+	} {
+		require.False(t, apcQuery([]byte(c)), "%q", c)
+	}
+}
+
 func TestClassifiersDoNotAllocate(t *testing.T) {
 	require.Zero(t, testing.AllocsPerRun(100, func() {
 		_ = csiQuery([]byte("\x1b[1;1;1;1;24;80*y"))
 		_ = oscQuery([]byte("\x1b]4;0;rgb:00/00/00;1;?"))
+		_ = dcsQuery([]byte("\x1bP0;1+q"))
+		_ = apcQuery([]byte("i=31,s=1,v=1,a=q,t=d,f=24"))
 	}))
 }
 

@@ -89,7 +89,9 @@ func TestHostSinkPromoteInEveryHeldState(t *testing.T) {
 		{name: "an ESC-intermediate head", prefix: "\x1b(", rest: "B"},
 		{name: "an ESC held after a passed DCS", prefix: "\x1bPq#0\x1b", rest: "\\X"},
 		{name: "an ESC held inside an OSC", prefix: "\x1b]0;t\x1b", rest: "\\X"},
-		{name: "an ESC held inside a tmux wrapper", prefix: "\x1bPtmux;\x1b", rest: "\x1b[31mX\x1b\\"},
+		// The inner SGR passes the wrapper, so the ESC is held by a passing
+		// wrapper, not by one still being decided.
+		{name: "an ESC held inside a tmux wrapper", prefix: "\x1bPtmux;\x1b\x1b[1m\x1b", rest: "\x1b[31mX\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := tc.want
@@ -111,6 +113,159 @@ func TestHostSinkPromoteInEveryHeldState(t *testing.T) {
 			require.Equal(t, want, string(ch.rec.bytes()))
 		})
 	}
+}
+
+func TestHostSinkPromoteAtEveryBoundaryOfADroppedQuery(t *testing.T) {
+	in := "\x1bP+q544e\x1b\\hello"
+	headerEnd := len("\x1bP+q") // classified once 'q' arrives
+	for k := 0; k <= len(in); k++ {
+		ch := &slowChannel{}
+		sink := newHostSink(ch, nil, "s", discardLogger())
+		_, err := sink.Write([]byte(in[:k]))
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		require.True(t, sink.promote(ctx))
+		cancel()
+		_, err = sink.Write([]byte(in[k:]))
+		require.NoError(t, err)
+		got := string(ch.rec.bytes())
+		if k < headerEnd {
+			// Still deciding: the new primary gets the query whole, and answers it.
+			require.Equal(t, in, got, "k=%d", k)
+		} else {
+			// Dropping (the terminator's ESC included) or past the query: none of
+			// the query, and hello intact.
+			require.Equal(t, "hello", got, "k=%d", k)
+		}
+		_ = sink.Close()
+	}
+}
+
+// promotedAt promotes a secondary once it has been written the first k bytes
+// of in, writes it the rest, and returns everything its channel received:
+// what the secondary delivered before the flip, and what the new primary got
+// after it.
+func promotedAt(t *testing.T, in string, k int) string {
+	t.Helper()
+	ch := &slowChannel{}
+	sink := newHostSink(ch, nil, "s", discardLogger())
+	defer func() { _ = sink.Close() }()
+	_, err := sink.Write([]byte(in[:k]))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, sink.promote(ctx), "k=%d", k)
+	_, err = sink.Write([]byte(in[k:]))
+	require.NoError(t, err)
+	return string(ch.rec.bytes())
+}
+
+// A query that restarts at a dropped string's end reaches a primary promoted
+// at any boundary inside the drop whole, from the ESC that ends the string:
+// the primary is the one to answer it. Promoted before the string is
+// classified, it gets the input whole; promoted after the secondary has
+// dropped the restarted query too, it gets what the secondary left of it.
+func TestHostSinkPromoteAtEveryBoundaryOfARestartedDrop(t *testing.T) {
+	in := "\x1bP+q544e\x1bZhello"
+	for k := 0; k <= len(in); k++ {
+		want := "hello" // the secondary dropped ESC Z before the flip
+		switch {
+		case k < len("\x1bP+q"):
+			want = in
+		case k <= len("\x1bP+q544e\x1b"): // up to and including the restarting ESC
+			want = "\x1bZhello"
+		}
+		require.Equal(t, want, promotedAt(t, in, k), "k=%d", k)
+	}
+
+	// Wrapped, the inner header completes at index 11, and the pair at 16 and
+	// 17 decodes to the inner ESC that ends the drop. The stream resumes at
+	// the pair's second raw ESC: carried from the last write at k == 18, and
+	// at k == 19 and 20 the secondary has resumed and holds ESC [ or ESC [6
+	// undecided, which promotion hands over raw.
+	in = "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b[6nhello\x1b\\"
+	for k := 0; k <= len(in); k++ {
+		want := "hello\x1b\\" // the secondary dropped the DSR before the flip
+		switch {
+		case k < 12:
+			want = in
+		case k <= 20:
+			want = "\x1b[6nhello\x1b\\"
+		}
+		require.Equal(t, want, promotedAt(t, in, k), "k=%d", k)
+	}
+}
+
+// The same over wrapped strings, ESCs doubled. A wrapped query reaches the new
+// primary whole before it is classified, and not at all from then on, while
+// the wrapper's raw remainder does. A wrapper that passes reaches it whole
+// wherever the flip lands.
+func TestHostSinkPromoteAtEveryBoundaryOfAWrappedString(t *testing.T) {
+	in := "\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b\\\x1b\\hello"
+	classified := len("\x1bPtmux;\x1b\x1b_Ga=q;")
+	for k := 0; k <= len(in); k++ {
+		want := "\x1b\\hello"
+		if k < classified {
+			want = in
+		}
+		require.Equal(t, want, promotedAt(t, in, k), "k=%d", k)
+	}
+
+	in = "\x1bPtmux;\x1b\x1b[31mX\x1b\\"
+	for k := 0; k <= len(in); k++ {
+		require.Equal(t, in, promotedAt(t, in, k), "k=%d", k)
+	}
+}
+
+// A query that restarts at the drop's end must reach the new primary whole:
+// it is answering queries now. Owen's case: ST and CAN endings can't catch a
+// handoff that parses past the end.
+func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
+	for _, c := range []struct{ before, after, want string }{
+		{"\x1bP+q544e", "\x1bZhello", "\x1bZhello"}, // the restarting ESC in this write
+		{"\x1bP+q544e\x1b", "Zhello", "\x1bZhello"}, // the restarting ESC held from the last write
+		{"\x1bP+q544e", "\x1b[6nhello", "\x1b[6nhello"},
+		{"\x1bP+q544e", "\x18hello", "\x18hello"}, // CAN goes raw
+		{"\x1bP+q544e", "\x1b\\hello", "hello"},   // ST is part of the drop
+		{"\x1bP+q544e\x1b", "\\hello", "hello"},
+		// Inside a wrapper, the resume point carried from the last write
+		// (Owen, 2026-10-11).
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b", "[6nhello\x1b\\", "\x1b[6nhello\x1b\\"},
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b", "\x1b[6nhello\x1b\\", "\x1b[6nhello\x1b\\"},
+		// A lone raw ESC x ends the wrapper during its inner drop, and the
+		// stream resumes at that ESC, in this write or carried from the last.
+		{"\x1bPtmux;\x1b\x1bP+q544e", "\x1b[6nhello", "\x1b[6nhello"},
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b", "[6nhello", "\x1b[6nhello"},
+		// An inner ESC after a pending one ends the string at the pending one,
+		// so the stream resumes at that pair's second raw ESC, two raw ESCs
+		// back: both carried, or one.
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b\x1b", "\x1b[6nhello", "\x1b\x1b\x1b[6nhello"},
+		{"\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b", "\x1b\x1b[6nhello", "\x1b\x1b\x1b[6nhello"},
+		{"\x1bP+q54", "4e", ""}, // still dropping when the write ends...
+	} {
+		ch := &slowChannel{}
+		sink := newHostSink(ch, nil, "s", discardLogger())
+		_, err := sink.Write([]byte(c.before))
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		require.True(t, sink.promote(ctx))
+		cancel()
+		_, err = sink.Write([]byte(c.after))
+		require.NoError(t, err)
+		require.Equal(t, c.want, string(ch.rec.bytes()), "%q|%q", c.before, c.after)
+		_ = sink.Close()
+	}
+	// ...and settles on a later write.
+	ch := &slowChannel{}
+	sink := newHostSink(ch, nil, "s", discardLogger())
+	defer func() { _ = sink.Close() }()
+	_, _ = sink.Write([]byte("\x1bP+q54"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, sink.promote(ctx))
+	_, _ = sink.Write([]byte("4e"))
+	_, _ = sink.Write([]byte("\x1bZhi"))
+	require.Equal(t, "\x1bZhi", string(ch.rec.bytes()))
 }
 
 func TestHostSinkSecondaryFiltersLiveQueries(t *testing.T) {
@@ -177,6 +332,44 @@ func TestHostSinkPromoteBoundsThePendingWriteByTheWatchdog(t *testing.T) {
 	start := time.Now()
 	require.False(t, sink.promote(ctx), "a hand-over that cannot be delivered must not promote")
 	require.Less(t, time.Since(start), 2*time.Second, "promotion must be bounded by the stall watchdog, not by ctx")
+	select {
+	case <-ch.closed:
+	default:
+		t.Fatal("the watchdog did not disconnect the client")
+	}
+}
+
+// A sink promoted mid-drop hands nothing over, so its promotion can't stall,
+// but the write that settles the drop goes raw from the string's end: that is
+// a primary's write like any other, and the watchdog bounds it.
+func TestHostSinkPromoteBoundsTheSettlingWriteByTheWatchdog(t *testing.T) {
+	orig := primaryStallTimeout
+	primaryStallTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { primaryStallTimeout = orig })
+
+	ch := newDisconnectingChannel()
+	defer ch.disconnect() // releases a write the watchdog left parked
+	sink := newHostSink(ch, ch.disconnect, "s", discardLogger())
+	defer func() { _ = sink.Close() }()
+
+	// Dropped by the filter, so nothing reaches the channel and Flush is instant.
+	_, err := sink.Write([]byte("\x1bP+q54"))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.True(t, sink.promote(ctx))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := sink.Write([]byte("4e\x18hello"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err, "a settling write the channel never took must fail")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the settling write was not bounded by the stall watchdog")
+	}
 	select {
 	case <-ch.closed:
 	default:

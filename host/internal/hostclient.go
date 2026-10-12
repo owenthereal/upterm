@@ -34,6 +34,13 @@ var (
 // terminal, and OSC 10/11/12 and CSI 5n/6n reach a real terminal whose
 // replies reach the pty.
 //
+// A sink promoted while its filter is dropping a query string — a DCS or a
+// kitty graphics query, at the top or wrapped for tmux — settles the drop
+// first. The query's head was never delivered and its rest is no use without
+// it, so the new primary receives none of that query, and everything after
+// it, raw, from exactly where the string ends: a query that starts there
+// reaches it whole, to answer.
+//
 // There is no demotion. MultiWriter.Write holds writeMu across the fan-out,
 // so while the primary's write is blocked that lock is held, and swapping the
 // writer would need it: the swap would deadlock. A primary leaves by being
@@ -51,6 +58,10 @@ type hostSink struct {
 	async   *uio.AsyncWriter
 	filter  *uio.TerminalQueryFilter
 	direct  *uio.StallWriter
+
+	// settling is set, under mu, while a sink promoted mid-drop discards the
+	// rest of the query string its filter was dropping (settle).
+	settling bool
 
 	// attached is set once the fan-out has accepted this sink, and is what
 	// Close consults before disconnecting; see the comment there.
@@ -108,10 +119,37 @@ func (s *hostSink) markAttached() { s.attached.Store(true) }
 func (s *hostSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.primary.Load() {
-		return s.direct.Write(p)
+	switch {
+	case !s.primary.Load():
+		return s.async.Write(p)
+	case s.settling:
+		return s.settle(p)
 	}
-	return s.async.Write(p)
+	return s.direct.Write(p)
+}
+
+// settle takes a write for a primary promoted mid-drop. The filter consumes
+// only the rest of the dropped string, emitting none of it, and says where the
+// stream resumes. From there on everything goes out raw, and the filter is
+// done with. Every byte the primary receives goes through the stall writer,
+// so the watchdog bounds this write as it does any other primary's.
+func (s *hostSink) settle(p []byte) (int, error) {
+	n, raw, done := s.filter.SettleDrop(p)
+	if !done {
+		return len(p), nil
+	}
+	s.settling = false
+	if len(raw) > 0 {
+		if _, err := s.direct.Write(raw); err != nil {
+			return len(p), err
+		}
+	}
+	if n < len(p) {
+		if _, err := s.direct.Write(p[n:]); err != nil {
+			return len(p), err
+		}
+	}
+	return len(p), nil
 }
 
 // Flush implements uio.Flusher for MultiWriter.Shutdown. A primary is
@@ -153,6 +191,11 @@ func (s *hostSink) isPrimary() bool { return s.primary.Load() }
 // write boundary: otherwise the drain goroutine and the direct path would
 // interleave halves of two writes on one channel. A sink that cannot drain in
 // time stays secondary and reports false.
+//
+// What the filter holds at the flip is handed to the new primary raw, unless
+// the filter is dropping a query string. Then the primary receives none of
+// that query, and everything after it, raw: the sink is left settling, and
+// its writes go raw from where the string ends.
 func (s *hostSink) promote(ctx context.Context) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,16 +221,24 @@ func (s *hostSink) promote(ctx context.Context) bool {
 	if s.async.Err() != nil || s.async.Closed() {
 		return false
 	}
-	// The filter may be holding the lead-in of a sequence it has not yet
-	// classified. Live output for the primary is unfiltered, so hand it over
-	// raw: if it is a query, the primary is exactly who should answer it.
+	// The filter may be dropping a query string. Its Pending is then the
+	// head that decided the drop, which must not reach a terminal that would
+	// answer it, and the rest of the string is no use without the head. So
+	// nothing is handed over, and Write settles the drop: it discards the rest
+	// of the string and goes raw from its end.
+	//
+	// Otherwise the filter may be holding the lead-in of a sequence it has not
+	// yet classified. Live output for the primary is unfiltered, so hand it
+	// over raw: if it is a query, the primary is exactly who should answer it.
 	//
 	// Through the stall writer, never straight to the channel: the queue
 	// being empty says nothing about the channel's window, and a write that
 	// parks here with mu held would park the whole fan-out with it. Under
 	// the watchdog it is bounded the way every primary write is — by a
 	// disconnect — which fails this write and this promotion.
-	if pending := s.filter.Pending(); len(pending) > 0 {
+	if s.filter.Dropping() {
+		s.settling = true
+	} else if pending := s.filter.Pending(); len(pending) > 0 {
 		if _, err := s.direct.Write(pending); err != nil {
 			return false
 		}

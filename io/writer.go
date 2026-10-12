@@ -256,8 +256,10 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 		// not history: it is not in the ring yet, so the loop above never sees
 		// it. A joiner that misses it would see only the tail once the
 		// remainder arrives live, which is garbage on its terminal. Replaying
-		// the lead-in lets the joiner's own filter (or terminal) see the
-		// sequence whole.
+		// the lead-in lets the joiner's own filter see the sequence whole. Only
+		// a filter may take it: in drop mode it is the head of a dropped query,
+		// whose rest never comes, so a terminal fed it would answer it or wait
+		// inside it.
 		if pending := t.replay.Pending(); len(pending) > 0 {
 			if _, err := w.Write(pending); err != nil {
 				return err
@@ -476,8 +478,11 @@ type ResetTarget interface {
 
 // restore is what puts a terminal that watched the whole stream back where it
 // started. The tracker describes the terminal as of the ring's first byte, so
-// it is first brought up to date with the ring, and with the sequence the
-// replay filter is still holding, which together are everything sent since.
+// it is first brought up to date with the ring and with the sequence the
+// replay filter is still holding, which together are everything sent since,
+// but for one held in drop mode: the head of a query being dropped, which was
+// never sent. Fed it, the tracker sits inside a string, so the reset gains a
+// CAN, which the terminal, never having seen the head, ignores in ground.
 //
 // That spends the tracker: its snapshot no longer describes the ring's start.
 // So it runs once, from Shutdown, after which Append refuses every joiner and
