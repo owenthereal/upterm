@@ -109,16 +109,34 @@ func (e refEvent) String() string {
 }
 
 // refHeldAtEnd reports whether the filter, under its bounds, would
-// still have been holding ev's string undecided when it ended: an OSC whose
-// number stayed within the 8-byte guard (numHeld <= 8) and whose whole string
-// stayed within the 256-byte bound (held <= 256). The filter holds no other
-// string to its end. It holds a DCS only to its header's final byte, and a
-// DCS that ends before that has no event under DEC, since it never hooked, so
-// there is nothing to remove. An APC, PM or SOS passes as it streams.
+// still have been holding ev's string undecided when it ended:
+//   - an OSC whose number stayed within the 8-byte guard (numHeld <= 8) and
+//     whose whole string stayed within the 256-byte bound (held <= 256);
+//   - an APC that ended before its first byte, which says whether it is a
+//     graphics command;
+//   - a graphics command, an APC whose payload starts with G, whose control
+//     data reached neither a ';' nor a BEL that asks (refAPCLatches) within
+//     256 raw bytes, framing included. Held to its end, the whole string is
+//     within that bound (held <= 256), so neither may appear in it at all.
+//
+// The filter holds no other string to its end. It holds a DCS only to its
+// header's final byte, and a DCS that ends before that has no event under
+// DEC, since it never hooked, so there is nothing to remove. Any other APC,
+// and a PM or SOS, passes as it streams.
 //
 // It is computed from the event alone, independently of the filter.
 func refHeldAtEnd(ev refEvent) bool {
-	return ev.kind == refOSC && ev.numHeld <= 8 && ev.held <= 256
+	switch ev.kind {
+	case refOSC:
+		return ev.numHeld <= 8 && ev.held <= 256
+	case refAPC:
+		if ev.data == "" {
+			return true
+		}
+		control, ok := strings.CutPrefix(ev.data, "G")
+		return ok && ev.held <= 256 && !strings.Contains(control, ";") && !refAPCLatches(control)
+	}
+	return false
 }
 
 // refState is Ghostty's Parser.State, in its order.
@@ -601,7 +619,8 @@ func (p *refParser) endString(c byte, at int) {
 
 // refQuery reports whether ev is a request in the query families. It is
 // written apart from io/query_classify.go, so a classifier bug can't hide
-// itself. Families 1–15 read the same under every mode.
+// itself. Families 1–16 read the same under every mode; the modes differ in
+// where a string ends, which the event already reflects.
 func refQuery(mode refMode, ev refEvent) bool {
 	switch ev.kind {
 	case refESC:
@@ -615,8 +634,43 @@ func refQuery(mode refMode, ev refEvent) bool {
 		// header alone decides, and a rule that names no prefix requires none.
 		return ev.prefix == 0 && (ev.inter == "$" && ev.final == 'q' ||
 			ev.inter == "+" && (ev.final == 'q' || ev.final == 'Q'))
+	case refAPC:
+		return refAPCQuery(ev.data)
 	}
 	return false
+}
+
+// refAPCQuery is family 16, kitty's graphics query: an APC whose payload
+// starts with G, and whose control data -- the rest of the payload up to its
+// first ';', or all of it -- has the pair a=q. So does one where only a prefix
+// of the control data, ending just before a BEL, has it (refAPCLatches): kitty
+// ends a string at a BEL, so that prefix is all it reads. Under refKitty the
+// payload has already ended at its first BEL, and holds none.
+func refAPCQuery(data string) bool {
+	rest, ok := strings.CutPrefix(data, "G")
+	if !ok {
+		return false
+	}
+	control, _, _ := strings.Cut(rest, ";")
+	return refGraphicsAsks(control) || refAPCLatches(control)
+}
+
+// refAPCLatches reports whether a prefix of a graphics command's control data
+// that ends just before a BEL asks: the BEL latch.
+func refAPCLatches(control string) bool {
+	for i := range len(control) {
+		if control[i] == 0x07 && refGraphicsAsks(control[:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// refGraphicsAsks reports whether control, split on ',' into key=value pairs,
+// has the pair a=q. Every other byte, a control byte included, is part of the
+// pair it falls in, as the terminal hands it to the graphics handler.
+func refGraphicsAsks(control string) bool {
+	return slices.Contains(strings.Split(control, ","), "a=q")
 }
 
 // refCSIQuery is families 1 and 3–10. A rule that names no prefix or
@@ -939,6 +993,25 @@ func TestRefQuery_Families(t *testing.T) {
 			require.True(t, refQuery(mode, evs[0]), "%q under %v", q, mode)
 		}
 	}
+	// So does an APC, and a graphics query reads the same under every mode,
+	// latched at a BEL included: kitty ends the string at the BEL, and the
+	// other two find the pair before it.
+	for _, q := range []string{"\x1b_Ga=q\x1b\\", "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\",
+		"\x1b_Gi=1,a=q\x07X;\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			evs := refParse(mode, []byte(q))
+			require.Equal(t, refAPC, evs[0].kind, "%q under %v", q, mode)
+			require.True(t, refQuery(mode, evs[0]), "%q under %v", q, mode)
+		}
+	}
+	// A later BEL latches too, under DEC and tmux. kitty has ended the string
+	// at the first BEL, where nothing asks, and reads the rest as text.
+	later := "\x1b_Gi=1\x07,a=q\x07X;\x1b\\"
+	require.True(t, refQuery(refDEC, refParse(refDEC, []byte(later))[0]))
+	require.True(t, refQuery(refTmux, refParse(refTmux, []byte(later))[0]))
+	for _, e := range refParse(refKitty, []byte(later)) {
+		require.False(t, refQuery(refKitty, e), "%v", e)
+	}
 	for _, c := range []string{"\x1b[?6c", "\x1b[>4n", "\x1b[!p", "\x1b[2 q",
 		"\x1b[22;0t", "\x1b[>4;2m", "\x1b[3S", "\x1b[>1u", "\x1b[2*x",
 		"\x1b[38:2::255:0:0m", "\x1b(B", "\x1b]4;1;rgb:ff/00/00\x07",
@@ -949,6 +1022,32 @@ func TestRefQuery_Families(t *testing.T) {
 			require.False(t, refQuery(refDEC, e), "%q", c)
 		}
 	}
+	// Graphics commands that ask nothing under any mode: a transmit, a pair
+	// after the ';' (payload), a control byte in the pair, a BEL whose prefix
+	// asks nothing, and APCs that aren't graphics commands at all.
+	for _, c := range []string{"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\", "\x1b_Ga=T;a=q\x1b\\", "\x1b_Ga=q\r\x1b\\",
+		"\x1b_Gi=1\x07a=q;\x1b\\", "\x1b_\nGa=q\x1b\\", "\x1b_ Ga=q\x1b\\"} {
+		for _, mode := range []refMode{refDEC, refKitty, refTmux} {
+			for _, e := range refParse(mode, []byte(c)) {
+				require.False(t, refQuery(mode, e), "%q under %v", c, mode)
+			}
+		}
+	}
+}
+
+// refHeldAtEnd's APC arm at its edges: an APC is held until its first byte,
+// and a graphics command until a ';' or a BEL that asks decides it, within 256
+// raw bytes from its ESC.
+func TestRefHeldAtEnd_APC(t *testing.T) {
+	held := func(in string) bool { return refHeldAtEnd(refParse(refDEC, []byte(in))[0]) }
+	require.True(t, held("\x1b_\x18"), "an empty APC")
+	require.True(t, held("\x1b_Gi=1\x07a=T\x18"), "a BEL that asks nothing")
+	require.True(t, held("\x1b_G"+strings.Repeat("i", 253)+"\x18"), "256 raw bytes")
+	require.False(t, held("\x1b_G"+strings.Repeat("i", 254)+"\x18"), "257 raw bytes")
+	require.False(t, held("\x1b_Ga=T;\x18"), "decided at its ';'")
+	require.False(t, held("\x1b_Gi=1,a=q\x07\x18"), "decided at a BEL")
+	require.False(t, held("\x1b_x\x18"), "not a graphics command")
+	require.False(t, held("\x1b^\x18"), "a PM")
 }
 
 // refCheck catches a splice: the filter's output loses text that the input
@@ -979,10 +1078,14 @@ func TestRefCheck_AcceptsKnownTransformations(t *testing.T) {
 		// held and is dropped. Only numHeld tells them apart.
 		{"\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b[6nhello", "\x1b]0" + strings.Repeat("\r", 9) + ";t\x1b\x18hello\x18"},
 		{"\x1b]0;" + strings.Repeat("\r", 9) + "t\x1b[6nhello", "hello\x18"},
-		{"\x1bP1\r;0q#0\x1b\\", "\x1bP1;0q#0\x1b\\\x18"},                      // ignored CR dropped from a passed header
-		{"ABC\x1bP$\rqm\x1b\\X", "ABCX\x18"},                                  // DCS query with a C0 in its header
-		{"\x1bP+q544e\x18X", "\x18X\x18"},                                     // drop ended by CAN
-		{"\x1bP$1qhidden\x1b[6nVISIBLE", "\x1bP$1qhidden\x1b\x18VISIBLE\x18"}, // DCS-ignore closed
+		{"\x1bP1\r;0q#0\x1b\\", "\x1bP1;0q#0\x1b\\\x18"},                         // ignored CR dropped from a passed header
+		{"ABC\x1bP$\rqm\x1b\\X", "ABCX\x18"},                                     // DCS query with a C0 in its header
+		{"\x1bP+q544e\x18X", "\x18X\x18"},                                        // drop ended by CAN
+		{"\x1bP$1qhidden\x1b[6nVISIBLE", "\x1bP$1qhidden\x1b\x18VISIBLE\x18"},    // DCS-ignore closed
+		{"\x1b_Ga=T\x18X", "\x18X\x18"},                                          // held APC cancelled: policy drop
+		{"\x1b_Gi=1,a=q\x07X;\x1b\\", "\x18"},                                    // query latched at a BEL
+		{"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\", "\x1b_Ga=T,f=100,i=1;AAAA\x1b\\\x18"}, // transmit passes
+		{"\x1b_\nGa=q\x1b\\", "\x1b_\nGa=q\x1b\\\x18"},                           // not a G command
 	} {
 		out := c.out
 		require.Empty(t, refCheck(c.in, func(string) string { return out }), "%q", c.in)

@@ -495,6 +495,26 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 			name:  "dropped DCS payload",
 			input: append([]byte("\x1bP+q"), bytes.Repeat([]byte("544e"), runLength)...),
 		},
+		{
+			name:  "APC control data of BELs that ask nothing",
+			input: append([]byte("\x1b_G"), bytes.Repeat([]byte("i=1\x07"), runLength)...),
+		},
+		{
+			name:  "dropped APC payload",
+			input: append([]byte("\x1b_Ga=q;"), bytes.Repeat([]byte("AAAA"), runLength)...),
+		},
+		{
+			// The ';' is the 256th byte, so it decides: the drop's head is
+			// the whole bound, and the payload's last ESC comes on top.
+			name:  "APC query decided at its bound",
+			input: []byte("\x1b_Ga=q," + strings.Repeat("i", 248) + ";AAAA\x1b"),
+		},
+		{
+			// The ';' would be the 257th byte, so the command is given up on
+			// before it decides; a drop's head here would pass the bound.
+			name:  "APC query one byte past its bound",
+			input: []byte("\x1b_Ga=q," + strings.Repeat("i", 249) + ";AAAA\x1b"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -514,16 +534,16 @@ func TestTerminalQueryFilter_PendingNeverExceedsTheBound(t *testing.T) {
 
 // maxPendingBytes is computed, not remembered: the largest any state holds
 // under the bounds, plus the one ESC that Pending adds beyond it, which a held
-// OSC keeps to see whether a backslash follows. Both halves are checked, the
-// sum from the bound constants and the hold from the filter itself, so raising
-// a bound without the constant fails here, and so does a constant larger than
-// anything the filter ever holds.
+// OSC or APC, or a dropped string, keeps to see whether a backslash follows.
+// Both halves are checked, the sum from the bound constants and the hold from
+// the filter itself, so raising a bound without the constant fails here, and
+// so does a constant larger than anything the filter ever holds.
 func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
-	largest := max(maxEscHeld, maxCSIHeld, maxDCSHeld, maxOSCNumHeld, maxOSCHeld)
+	largest := max(maxEscHeld, maxCSIHeld, maxDCSHeld, maxOSCNumHeld, maxOSCHeld, maxAPCHeld)
 	require.Equal(t, largest+1, maxPendingBytes, "the largest hold, plus one held ESC")
 
-	// 256 (the largest hold, an OSC with framing) + 1 held ESC. If the bounds
-	// change, change both this and the constant's comment.
+	// 256 (the largest hold, an OSC or an APC with framing) + 1 held ESC. If
+	// the bounds change, change both this and the constant's comment.
 	require.Equal(t, 257, maxPendingBytes)
 
 	// The filter really does reach it: an OSC held to its bound, then an ESC.
@@ -542,6 +562,25 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 	_, _ = g.Write([]byte(head + strings.Repeat("t", maxOSCHeld-len(head)+1)))
 	require.Empty(t, g.Pending(), "one byte past the bound, the OSC is given up on")
 	require.Len(t, gaveUp.String(), maxOSCHeld+1, "and goes out")
+
+	// A dropped graphics query reaches it too. The ';' that decides counts
+	// toward the APC's bound, so a drop's head is at most the bound, and the
+	// ESC that may begin its payload's ST comes on top.
+	apc := "\x1b_Ga=q,"
+	var dropped bytes.Buffer
+	d := NewTerminalQueryFilter(&dropped)
+	_, _ = d.Write([]byte(apc + strings.Repeat("i", maxAPCHeld-len(apc)-1) + ";AAAA\x1b"))
+	require.Len(t, d.Pending(), maxPendingBytes, "a dropped APC's head at its bound, and an ESC")
+	require.Empty(t, dropped.String(), "nothing of it has gone out")
+
+	// A ';' one byte later would be held past the bound, so the command is
+	// given up on there, unclassified, and passes.
+	var passed bytes.Buffer
+	p := NewTerminalQueryFilter(&passed)
+	in := apc + strings.Repeat("i", maxAPCHeld-len(apc)) + ";AAAA"
+	_, _ = p.Write([]byte(in))
+	require.Empty(t, p.Pending(), "one byte past the bound, the APC is given up on")
+	require.Equal(t, in, passed.String(), "and goes out")
 }
 
 // errWriter is a writer that always returns an error
@@ -623,12 +662,13 @@ func TestTerminalQueryFilter_CancelEndsAHeldSequence(t *testing.T) {
 type filterCase struct {
 	name     string
 	in, want string
-	kitty    bool // also assert no query under refKitty (refParse on want)
+	kitty    bool // also assert no query under refKitty (refParse on the filter's output)
 }
 
-// filterCases is every exact-bytes case: escCSICases and oscStringCases, with
-// the rows init() generates from the classifier tests' examples. The split,
-// continuation and oracle tests range over it, and it seeds the fuzz test.
+// filterCases is every exact-bytes case: escCSICases, oscStringCases, dcsCases
+// and apcCases, with the rows init() generates from the classifier tests'
+// examples. The split, continuation and oracle tests range over it, and it
+// seeds the fuzz test.
 var filterCases []filterCase
 
 // filterAll runs in through a fresh filter in one Write and returns what it
@@ -762,9 +802,10 @@ var oscStringCases = []filterCase{
 	{name: "BEL doesn't end a DCS", in: "\x1bPq#0\x07X\x1b\\", want: "\x1bPq#0\x07X\x1b\\"},
 	{name: "BEL doesn't end an APC", in: "\x1b_Gx\x07Y\x1b\\", want: "\x1b_Gx\x07Y\x1b\\"},
 	// Past a BEL the string is still open, so a query dropped after it still
-	// owes the string a close.
+	// owes the string a close. The APC is past its ';', so it has gone out: a
+	// graphics command still held there is dropped instead (apcCases).
 	{name: "a drop after a BEL in a DCS closes it", in: "\x1bPq#0\x07\x1b[6nX", want: "\x1bPq#0\x07\x1b\x18X"},
-	{name: "a drop after a BEL in an APC closes it", in: "\x1b_G\x07\x1b[6nX", want: "\x1b_G\x07\x1b\x18X"},
+	{name: "a drop after a BEL in an APC closes it", in: "\x1b_Ga=T;\x07\x1b[6nX", want: "\x1b_Ga=T;\x07\x1b\x18X"},
 	{name: "PM and SOS pass", in: "\x1b^privacy\x1b\\\x1bXsos\x1b\\", want: "\x1b^privacy\x1b\\\x1bXsos\x1b\\"},
 	// Found by the fuzz test: the DEL after the ESC that ends a passed string
 	// is dropped, as after any ESC, and ESC \ then passes as the close. The
@@ -812,6 +853,46 @@ var dcsCases = []filterCase{
 		want: "\x1bP" + strings.Repeat("0", 31) + "q#0\x1b\x18X"},
 }
 
+// APCs: a kitty graphics command (APC G) held to its ';' or its end and
+// decided there, or at a BEL before it; any other APC passes as it streams.
+var apcCases = []filterCase{
+	// Generated in init() from query_classify_test.go's examples: every
+	// apcQueryExamples entry, as the control data of a command with a payload
+	// and of one ended at a BEL, wrapped "a"+q+"b", wants "ab"; every
+	// apcPassExamples entry, with a payload, wants itself.
+	{name: "kitty graphics query", in: "a\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\b", want: "ab"},
+	{name: "query with no payload", in: "a\x1b_Ga=q\x1b\\b", want: "ab"},
+	{name: "query found at a BEL", in: "\x1b_Gi=1,a=q\x07X;\x1b\\", want: "", kitty: true},
+	{name: "transmit passes", in: "\x1b_Ga=T,f=100,i=1;AAAA\x1b\\", want: "\x1b_Ga=T,f=100,i=1;AAAA\x1b\\"},
+	{name: "a control byte before G", in: "\x1b_\nGa=q\x1b\\", want: "\x1b_\nGa=q\x1b\\"},
+	{name: "held APC ended by CAN", in: "\x1b_Ga=T\x18X", want: "\x18X"},
+	// Every BEL decides on what came before it, and one that asks nothing is
+	// payload, as a DEC terminal takes it.
+	{name: "a later BEL latches too", in: "a\x1b_Gi=1\x07,a=q\x07X;\x1b\\b", want: "ab"},
+	{name: "a BEL that asks nothing is held as payload", in: "\x1b_Gi=1\x07a=q;AAAA\x1b\\", want: "\x1b_Gi=1\x07a=q;AAAA\x1b\\"},
+	{name: "a control byte is part of its pair", in: "\x1b_Ga=q\r;AAAA\x1b\\", want: "\x1b_Ga=q\r;AAAA\x1b\\"},
+	// An APC held when it ends abnormally is dropped whole, before its first
+	// byte too, and the cancel never carries its head out: kitty would keep
+	// it open, and read the ",a=q" after the CAN as more control data.
+	{name: "a held APC ended by an ESC after a BEL", in: "\x1b_G\x07\x1b[6nX", want: "X"},
+	{name: "a held APC ended by an ESC that isn't ST", in: "\x1b_Ga=T\x1b[1mX", want: "\x1b[1mX"},
+	{name: "an empty APC ended by CAN", in: "\x1b_\x18X", want: "\x18X"},
+	{name: "an empty APC ended by an ESC that isn't ST", in: "\x1b_\x1b[6nX", want: "X"},
+	{name: "an empty APC ended by ST passes", in: "\x1b_\x1b\\X", want: "\x1b_\x1b\\X"},
+	{name: "a held APC cancelled", in: "\x1b_Gi=1\x18,a=q;\x1b\\X", want: "\x18,a=q;\x1b\\X", kitty: true},
+	{name: "cancel with an obligation drops the held APC", in: "\x1bPq\x07\x1b_Gi=1\x18,a=q;\x1b\\X",
+		want: "\x1bPq\x07\x1b\x18,a=q;\x1b\\X", kitty: true},
+	// A query is dropped to the string's end, and settles a close owed from
+	// before it, as a DCS query does.
+	{name: "an APC query after a passed DCS closes it", in: "\x1bPq#0\x1b_Ga=q;AAAA\x1b\\X", want: "\x1bPq#0\x1b\x18X"},
+	{name: "an APC query's drop ends at an ESC that isn't ST", in: "\x1b_Ga=q;AAAA\x1b[1mX", want: "\x1b[1mX"},
+	// The ';' that decides counts toward the 256-byte bound, here its last
+	// byte; past the bound a command passes as a string, to the string's end.
+	{name: "a query decided at its bound", in: "a\x1b_Ga=q," + strings.Repeat("i", 248) + ";AAAA\x1b\\b", want: "ab"},
+	{name: "an over-bound APC passes as a string", in: "\x1b_Ga=T," + strings.Repeat("i", 260) + ";AAAA\x1b[6nX",
+		want: "\x1b_Ga=T," + strings.Repeat("i", 260) + ";AAAA\x1b\x18X"},
+}
+
 func init() {
 	for _, q := range append(slices.Clone(csiQueryExamples), "\x1bZ") {
 		escCSICases = append(escCSICases, filterCase{name: fmt.Sprintf("query %q", q), in: "a" + q + "b", want: "ab"})
@@ -838,6 +919,16 @@ func init() {
 		dcsCases = append(dcsCases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: c + "#0\x1b\\", want: c + "#0\x1b\\"})
 	}
 	filterCases = append(filterCases, dcsCases...)
+
+	for _, q := range apcQueryExamples {
+		apcCases = append(apcCases,
+			filterCase{name: fmt.Sprintf("query %q", q), in: "a\x1b_G" + q + ";AAAA\x1b\\b", want: "ab"},
+			filterCase{name: fmt.Sprintf("query %q at a BEL", q), in: "a\x1b_G" + q + "\x07X;AAAA\x1b\\b", want: "ab"})
+	}
+	for _, c := range apcPassExamples {
+		apcCases = append(apcCases, filterCase{name: fmt.Sprintf("counter-case %q", c), in: "\x1b_G" + c + ";AAAA\x1b\\", want: "\x1b_G" + c + ";AAAA\x1b\\"})
+	}
+	filterCases = append(filterCases, apcCases...)
 }
 
 // A DCS whose header isn't a query streams: its payload goes out during the
@@ -928,14 +1019,17 @@ func TestTerminalQueryFilter_ContinuesAtEveryBoundary(t *testing.T) {
 }
 
 // A row marked kitty is one whose output a kitty guest could read differently
-// from a DEC one; under kitty's string ends it still asks nothing.
+// from a DEC one; under kitty's string ends it still asks nothing. The filter's
+// output is parsed, not the row's want, so a filter that breaks the row fails
+// here too.
 func TestTerminalQueryFilter_KittyRowsAskNothing(t *testing.T) {
 	for _, c := range filterCases {
 		if !c.kitty {
 			continue
 		}
-		for _, ev := range refParse(refKitty, []byte(c.want)) {
-			require.False(t, refQuery(refKitty, ev), "%s: %q asks %v under kitty", c.name, c.want, ev)
+		out := filterAll(c.in)
+		for _, ev := range refParse(refKitty, []byte(out)) {
+			require.False(t, refQuery(refKitty, ev), "%s: %q asks %v under kitty", c.name, out, ev)
 		}
 	}
 }

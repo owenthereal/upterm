@@ -2,19 +2,19 @@ package io
 
 // This file is the only place that knows what a terminal query is. The filter
 // finds where each sequence starts and ends and hands its bytes to one
-// classifier per kind (csiQuery, escQuery, oscQuery and dcsQuery here); it
-// reads a sequence's bytes for its grammar alone, and never decides by a final
-// byte or an OSC number whether the sequence is a query. A query is a sequence
-// the terminal answers on its input, which the host's PTY would take for
-// keystrokes, so the filter drops it on the way to a guest. Everything else
-// must reach the guest unchanged.
+// classifier per kind (csiQuery, escQuery, oscQuery, dcsQuery and apcQuery
+// here); it reads a sequence's bytes for its grammar alone, and never decides
+// by a final byte, an OSC number or a graphics key whether the sequence is a
+// query. A query is a sequence the terminal answers on its input, which the
+// host's PTY would take for keystrokes, so the filter drops it on the way to a
+// guest. Everything else must reach the guest unchanged.
 //
 // The families come from xterm's Control Sequences (ctlseqs) and kitty's
-// keyboard protocol. The comments below number them, name the sequences each
-// one asks with (DA, DSR, DECRQM and so on), and give the counter-cases each
-// must let through. The classifiers are pure functions over the bytes the
-// filter held, and none of them allocates: the filter calls them from Write,
-// which makes no allocations in steady state.
+// keyboard and graphics protocols. The comments below number them, name the
+// sequences each one asks with (DA, DSR, DECRQM and so on), and give the
+// counter-cases each must let through. The classifiers are pure functions
+// over the bytes the filter held, and none of them allocates: the filter calls
+// them from Write, which makes no allocations in steady state.
 
 // maxQueryNumber is where a number saturates. No family looks at a value near
 // it, so a run of digits long enough to overflow an int can only land on a
@@ -299,6 +299,31 @@ func dcsQuery(header []byte) bool {
 		return final == 'q'
 	case '+': // XTGETTCAP and XTGETXRES
 		return final == 'q' || final == 'Q'
+	}
+	return false
+}
+
+// apcQuery reports whether control, the bytes of a kitty graphics command
+// after "ESC _ G" up to (not including) its ';' or its end, has key 'a' with
+// value 'q'. Keys are comma-separated key=value pairs; control bytes in it
+// are part of the value, as the terminal hands them to the handler.
+//
+// This is family 16, kitty's graphics query (a=q), which asks the terminal
+// whether it can show images. Any a=q pair counts, wherever it falls. A pair
+// is that one exactly: "a=Q", "a =q" and "a=q CR" are not it, nor is
+// "i=1 BEL a=q", which is one pair, whose key is i. `APC G a=T,f=100,i=1;…`
+// transmits an image and asks nothing. The filter calls this at the ';' or
+// the string's end, and before that at every BEL, on the bytes before the BEL,
+// since kitty ends the string there.
+func apcQuery(control []byte) bool {
+	start := 0
+	for i := 0; i <= len(control); i++ {
+		if i == len(control) || control[i] == ',' {
+			if string(control[start:i]) == "a=q" {
+				return true
+			}
+			start = i + 1
+		}
 	}
 	return false
 }

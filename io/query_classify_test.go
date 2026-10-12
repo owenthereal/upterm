@@ -68,6 +68,20 @@ var (
 		"\x1bP?$q", "\x1bP>+q", // a prefix, which no request names
 		"\x1bP$$q", "\x1bP $q", "\x1bP+$q", // two intermediates
 	}
+
+	// apcQueryExamples are family 16's requests, as a kitty graphics command's
+	// control data: what apcQuery decides on, the bytes after "ESC _ G" up to
+	// its ';' or its end.
+	apcQueryExamples = []string{
+		"a=q", "i=31,s=1,v=1,a=q,t=d,f=24", "i=1,a=q", "a=q,i=1", // wherever the pair falls
+	}
+
+	// apcPassExamples are the graphics counter-cases: commands that ask
+	// nothing, and pairs near a=q.
+	apcPassExamples = []string{
+		"a=T,f=100,i=1", "a=t,i=1", "a=p,i=1", "a=d", "f=100", "", // transmit, display, delete
+		"a=Q", "A=q", "a=qq", "aa=q", "q=a", "a=", "a", "i=q",
+	}
 )
 
 func TestCSIQuery_Families(t *testing.T) {
@@ -184,11 +198,44 @@ func TestDCSQuery_Boundaries(t *testing.T) {
 	}
 }
 
+func TestAPCQuery_Families(t *testing.T) {
+	for _, q := range apcQueryExamples {
+		require.True(t, apcQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range apcPassExamples {
+		require.False(t, apcQuery([]byte(c)), "%q", c)
+	}
+}
+
+// The graphics rules the examples don't pin down: a pair is exactly a=q,
+// whatever is around it, and a control byte is part of the pair it falls in.
+func TestAPCQuery_Boundaries(t *testing.T) {
+	for _, q := range []string{
+		"a=T,a=q", "a=q,a=T", // any a=q pair asks, wherever it falls
+		",a=q", "a=q,", ",,a=q,,", // empty pairs around it are nothing
+		"i=1\x07,a=q", // a BEL in an earlier pair stays in that pair
+	} {
+		require.True(t, apcQuery([]byte(q)), "%q", q)
+	}
+	for _, c := range []string{
+		// Control bytes are part of the pair, as the terminal hands them to
+		// the handler: a value of "q\r" is not q.
+		"a=q\r", "\na=q", "a=\x07q", "a\x7f=q", "a=q\x07X",
+		// So a BEL doesn't split pairs: this is the key i, whose value runs on.
+		"i=1\x07a=q",
+		// Nor does a space or any other byte but ','.
+		"a =q", " a=q", "a= q", "a=q ", "i=1;a=q", "a==q", "a=q=",
+	} {
+		require.False(t, apcQuery([]byte(c)), "%q", c)
+	}
+}
+
 func TestClassifiersDoNotAllocate(t *testing.T) {
 	require.Zero(t, testing.AllocsPerRun(100, func() {
 		_ = csiQuery([]byte("\x1b[1;1;1;1;24;80*y"))
 		_ = oscQuery([]byte("\x1b]4;0;rgb:00/00/00;1;?"))
 		_ = dcsQuery([]byte("\x1bP0;1+q"))
+		_ = apcQuery([]byte("i=31,s=1,v=1,a=q,t=d,f=24"))
 	}))
 }
 

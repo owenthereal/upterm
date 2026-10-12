@@ -18,17 +18,23 @@ import (
 // '(', '!' and '#'; the final byte of every family, Q included for XTGETXRES,
 // and B, h, l, H, J and G, which end common sequences that ask nothing; BEL,
 // CAN and SUB, which end sequences, CR and LF, which stand for every other C0;
-// DEL; and 'a' for text.
-const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!+" +
-	"cnpqQtmgSuxwvy|RZBhlHJG\x07\x18\x1a\r\n\x7fa"
+// DEL; and 'a' for text. Family 16's graphics commands are spelled from it
+// too: G starts one, '=' and ',' join and separate its key=value pairs, 'i' is
+// a key that asks nothing, and a=q asks, so "i=1,a=q" is in the domain as it
+// is.
+const refAlphabet = "\x1b[]P_^X\\0123456789;:?>=<$#*'&\" (!+," +
+	"cnpqQtmgSuxwvy|RZBhlHJGi\x07\x18\x1a\r\n\x7fa"
 
 // refDomainByte maps b into the fuzz domain: refAlphabet and the bytes
 // 0xA0–0xFF. A byte of either is itself, so UTF-8 in text and in an OSC, and
 // the high bytes a terminal ignores inside an ESC or CSI head or a DCS header,
 // are fuzzed as they come. Any other ASCII byte becomes the alphabet's byte of
 // its class in the DEC grammar, which every state parses as it would have
-// parsed b, and which no family tells apart from b: a C0 becomes CR, an
-// intermediate SP, and a final byte 'a'. So a seed whose text has letters
+// parsed b: a C0 becomes CR, an intermediate SP, and a final byte 'a'. No
+// family tells CR or SP apart from the bytes they stand for, and only family
+// 16 tells 'a' apart, as the key that asks: a graphics pair whose key is
+// mapped to 'a' can come to ask (f=q becomes a=q), but no pair stops asking,
+// since a, = and q are in the alphabet. So a seed whose text has letters
 // outside the alphabet keeps its structure, and its queries stay queries.
 // Bytes 0x80–0x9F are outside the domain (C1 introducers aren't covered) and
 // no class stands for them, so they are spread over the alphabet instead.
@@ -53,9 +59,10 @@ func refDomainByte(b byte) byte {
 // domain:
 //   - a byte the filter would hold past a bound: past 8 bytes of an ESC
 //     sequence with intermediates, 32 of a CSI head or a DCS header, 8 of an
-//     OSC's number or 256 of an OSC. Past its bound a query passes, a limit
-//     the filter accepts, and a sequence isn't known to be a query until it
-//     ends, so every sequence is held to its bound;
+//     OSC's number, 256 of an OSC or 256 of a graphics command's control
+//     data. Past its bound a query passes, a limit the filter accepts, and a
+//     sequence isn't known to be a query until it ends, so every sequence is
+//     held to its bound;
 //   - the ';' that would make a DCS a tmux wrapper (final byte 't', data from
 //     "mux;"), which the filter passes byte for byte, query or not.
 //
@@ -86,8 +93,13 @@ func refGenerate(seed []byte) []byte {
 // included, but not one the escape state skipped before the ']'
 // (refParser.strHeld). The ';' that ends an OSC's number isn't counted against
 // the number's bound, and a byte that ends a sequence, a header's final byte
-// among them, is never held past one. The numbers are written out here, not
-// read from the filter's constants.
+// among them, is never held past one. A graphics command (an APC whose payload
+// starts with G) is held, counted the same way as an OSC, until a ';' or a
+// BEL that asks (refAPCLatches) decides it, and the ';' or BEL is held with
+// it, so it counts toward the bound: past it, the filter gives the command up
+// before it decides. A byte that ends the string, an ESC, CAN or SUB, is never
+// held past it. The numbers are written out here, not read from the filter's
+// constants.
 func (p *refParser) pastBound(c byte, at int) bool {
 	t := refTable[c][p.state]
 	collects := t.action == raCollect || t.action == raParam
@@ -109,6 +121,12 @@ func (p *refParser) pastBound(c byte, at int) bool {
 			return held >= 8
 		}
 		return held >= 256
+	case rsSOSPMAPCString:
+		if p.str.kind != refAPC || t.state != rsSOSPMAPCString || p.strHeld(at) < 256 {
+			return false
+		}
+		control, ok := strings.CutPrefix(string(p.data), "G")
+		return ok && !strings.Contains(control, ";") && !refAPCLatches(control)
 	}
 	return false
 }
@@ -122,7 +140,7 @@ func (p *refParser) wraps(c byte) bool {
 // The fuzz seeds test what their rows say only if refGenerate leaves them
 // alone. A filterCases row is in the domain when every byte of it is in
 // refAlphabet or 0xA0–0xFF, it holds no tmux wrapper, and no sequence in it
-// passes its bound; the rows that do are the six named below, which pin the
+// passes its bound; the rows that do are the seven named below, which pin the
 // bounds themselves. refGenerate has to give every such row back unchanged.
 //
 // Most rows are outside the alphabet only for their text, such as the 'b' in
@@ -140,6 +158,7 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 		"over-bound title closed with ESC CAN",
 		"ignored CRs in the number trip the number guard",
 		"an over-bound DCS header passes as a string",
+		"an over-bound APC passes as a string",
 	}
 	identity, high := 0, 0
 	for _, c := range filterCases {
@@ -171,6 +190,10 @@ func TestRefGenerate_KeepsInDomainSeeds(t *testing.T) {
 	// The fuzz can only check what it can make: family 15's headers are in the
 	// alphabet as they are, so the DCS requests reach the filter as requests.
 	for _, q := range dcsQueryExamples {
+		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
+	}
+	// And family 16's graphics query, latched at a BEL or decided at its ';'.
+	for _, q := range []string{"\x1b_Gi=1,a=q\x07X;\x1b\\", "\x1b_Gi=1,a=q;\x1b\\"} {
 		require.Equal(t, q, string(refGenerate([]byte(q))), "%q", q)
 	}
 }
@@ -235,10 +258,12 @@ func FuzzTerminalQueryFilter(f *testing.F) {
 
 // Every guest's output goes through Write, so once its buffers have grown it
 // allocates nothing, whatever the stream holds: text, a passed and a dropped
-// CSI, an OSC held to its end, a DCS passed as it streams, and one dropped.
+// CSI, an OSC held to its end, a DCS passed as it streams, and one dropped,
+// and a graphics command passed after its ';', and one dropped.
 func TestTerminalQueryFilter_DoesNotAllocate(t *testing.T) {
 	f := NewTerminalQueryFilter(io.Discard)
-	chunk := []byte("text \x1b[1mbold\x1b[m \x1b[6n \x1b]0;title\x07 \x1b[?2026$p \x1bPq#0\x1b\\ \x1bP+q544e\x1b\\ more\r\n")
+	chunk := []byte("text \x1b[1mbold\x1b[m \x1b[6n \x1b]0;title\x07 \x1b[?2026$p \x1bPq#0\x1b\\ \x1bP+q544e\x1b\\ " +
+		"\x1b_Ga=T,f=100;AAAA\x1b\\ \x1b_Gi=1,a=q;AAAA\x1b\\ more\r\n")
 	_, _ = f.Write(chunk) // warm the reusable buffers
 	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = f.Write(chunk) }))
 }
