@@ -20,6 +20,7 @@ import (
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -385,12 +386,147 @@ func TestAGuestIsToldTheSessionsStatusBeforeTheTunnelCloses(t *testing.T) {
 	}
 }
 
+// A guest's handler waits for the close it sent with the status to be answered
+// for no longer than guestFlushTimeout. A relay that never passes the status
+// on, or a guest that never answers, does not keep the handler, and with it
+// the guest's place in the session, for as long as its connection lasts.
+func TestAGuestsHandlerStopsWaitingForAnAnswerThatNeverComes(t *testing.T) {
+	srv := &Server{Command: readsALine("READY", 7)}
+	h := startHost(t, srv)
+	left := srv.EventEmitter.On(upterm.EventClientLeft)
+	defer srv.EventEmitter.Off(upterm.EventClientLeft, left)
+	relay := newRelayStandIn(t, h.addr)
+
+	viaRelay := *h
+	viaRelay.addr = relay.ln.Addr().String()
+	in, out, _ := viaRelay.connectGuestSession(t)
+	readUntil(t, out, "READY")
+
+	// From here nothing the host sends reaches the guest, so nothing answers
+	// its close; and the tunnel stays up, so nothing else ends the wait.
+	relay.latency.Store(int64(24 * time.Hour))
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+
+	budget := guestFlushTimeout + 2*time.Second
+	select {
+	case <-left:
+	case <-time.After(budget):
+		t.Fatalf("the guest's handler was still waiting for its close to be answered after %s", budget)
+	}
+	select {
+	case <-h.stopped:
+	case <-time.After(budget):
+		t.Fatalf("the session had not ended %s after its guest's handler", budget)
+	}
+}
+
+// The session's end waits for its guests' handlers for no longer than
+// guestFlushTimeout. One stuck sending its guest the status -- the guest's
+// socket has stopped taking bytes, so the write never returns -- does not hold
+// the session, or the tunnel behind it, open; the tunnel's close then releases
+// the handler.
+func TestSessionEndStopsWaitingForAGuestItCannotSendTheStatusTo(t *testing.T) {
+	stall := &stallingListener{stalled: make(chan struct{})}
+	srv := &Server{Command: readsALine("READY", 7)}
+	h := startHostBehind(t, srv, stall.wrap)
+	t.Cleanup(stall.closeConns)
+	left := srv.EventEmitter.On(upterm.EventClientLeft)
+	defer srv.EventEmitter.Off(upterm.EventClientLeft, left)
+
+	in, out, _ := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+
+	stall.stall()
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+
+	// The command's last output can't reach the guest either, so its flush
+	// runs to its own bound before the session's end begins.
+	budget := outputDrainTimeout + 2*guestFlushTimeout + 2*time.Second
+	select {
+	case <-h.stopped:
+	case <-time.After(budget):
+		t.Fatalf("the session had not ended %s after its command, waiting on a guest it could not send the status to", budget)
+	}
+
+	stall.closeConns()
+	select {
+	case <-left:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the guest's handler was not released by its connection's close")
+	}
+}
+
+// stallingListener is the host's side of its guests' connections, with a
+// switch that stops the host's writes getting through: a guest whose socket
+// has stopped taking bytes, so that whatever the host writes to it blocks until
+// the connection is closed.
+type stallingListener struct {
+	net.Listener
+	stalled   chan struct{}
+	stallOnce sync.Once
+
+	mu    sync.Mutex
+	conns []net.Conn
+}
+
+func (l *stallingListener) wrap(ln net.Listener) net.Listener {
+	l.Listener = ln
+	return l
+}
+
+func (l *stallingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	sc := &stallingConn{Conn: c, stalled: l.stalled, closed: make(chan struct{})}
+	l.mu.Lock()
+	l.conns = append(l.conns, sc)
+	l.mu.Unlock()
+	return sc, nil
+}
+
+func (l *stallingListener) stall() { l.stallOnce.Do(func() { close(l.stalled) }) }
+
+func (l *stallingListener) closeConns() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.conns {
+		_ = c.Close()
+	}
+}
+
+type stallingConn struct {
+	net.Conn
+	stalled   <-chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *stallingConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.stalled:
+		<-c.closed
+		return 0, net.ErrClosed
+	default:
+		return c.Conn.Write(p)
+	}
+}
+
+func (c *stallingConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
 // relayStandIn carries guests to a host as the relay does over the host's
 // tunnel: it takes what the host writes at once and passes it on after
 // latency, and closing the tunnel drops whatever it has not passed on yet.
 type relayStandIn struct {
 	ln      net.Listener
 	latency atomic.Int64 // nanoseconds, host to guest
+	done    chan struct{}
 
 	mu     sync.Mutex
 	conns  []net.Conn
@@ -402,7 +538,7 @@ func newRelayStandIn(t *testing.T, hostAddr string) *relayStandIn {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	r := &relayStandIn{ln: ln}
+	r := &relayStandIn{ln: ln, done: make(chan struct{})}
 	t.Cleanup(r.closeTunnel)
 	go func() {
 		for {
@@ -436,7 +572,11 @@ func (r *relayStandIn) relay(host, guest net.Conn) {
 	go func() {
 		defer func() { _ = guest.Close() }()
 		for p := range pieces {
-			time.Sleep(time.Until(p.due))
+			select {
+			case <-time.After(time.Until(p.due)):
+			case <-r.done:
+				return
+			}
 			if _, err := guest.Write(p.b); err != nil {
 				return
 			}
@@ -473,6 +613,9 @@ func (r *relayStandIn) track(conns ...net.Conn) bool {
 func (r *relayStandIn) closeTunnel() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.closed {
+		close(r.done)
+	}
 	r.closed = true
 	_ = r.ln.Close()
 	for _, c := range r.conns {
