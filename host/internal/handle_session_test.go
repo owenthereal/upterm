@@ -335,7 +335,6 @@ func TestGuestHandlersRefuseARegistrationOnceWaitHasReturned(t *testing.T) {
 
 		_, ok = handlers.begin()
 		assert.False(t, ok, "a handler registered after wait found none running would go unwaited for")
-		assert.False(t, handlers.admits())
 	})
 	t.Run("gave up", func(t *testing.T) {
 		var handlers guestHandlers
@@ -348,18 +347,60 @@ func TestGuestHandlersRefuseARegistrationOnceWaitHasReturned(t *testing.T) {
 	})
 }
 
-// The door admits a subsystem -- SFTP -- without registering it, and refuses
-// one, as it does a shell, once the session's end has stopped waiting.
-func TestTheDoorAdmitsASubsystemUntilTheSessionStopsWaiting(t *testing.T) {
-	guest := &fakeGuestSession{ctx: fakeGuestContext{sessionID: "sftp"}}
+// A subsystem the door serves -- SFTP -- is admitted with the session's end
+// as a shell is, and holds the session's end until its handler starts, but no
+// longer: an SFTP session in progress is not waited for. Once the session's
+// end has stopped waiting, a subsystem is refused, as a shell is; and one the
+// door doesn't serve is refused without being admitted, since charm would
+// refuse it after the admission and nothing would ever take that.
+func TestTheDoorHoldsASubsystemOnlyUntilItsHandlerStarts(t *testing.T) {
 	h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}}
+	started, release := make(chan struct{}), make(chan struct{})
+	sftp := h.startAdmitted(func(gssh.Session) {
+		close(started)
+		<-release
+	})
+	h.subsystems = map[string]gssh.SubsystemHandler{"sftp": sftp}
+	asking := func(name string) *subsystemGuest {
+		return &subsystemGuest{fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "sftp"}}, subsystem: name}
+	}
 
+	assert.False(t, h.admitGuest(asking("no-such-subsystem"), "subsystem"), "a subsystem the door doesn't serve was admitted")
+	guest := asking("sftp")
 	require.True(t, h.admitGuest(guest, "subsystem"))
-	require.True(t, h.sharedGuests.wait(0), "a subsystem was registered for the session's end to wait on")
 
-	assert.False(t, h.admitGuest(guest, "subsystem"))
-	assert.False(t, h.admitGuest(guest, "shell"))
+	waited := make(chan bool, 1)
+	go func() { waited <- h.sharedGuests.wait(10 * time.Second) }()
+	select {
+	case <-waited:
+		t.Fatal("the session's end did not wait for an admitted subsystem to start")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	go sftp(guest)
+	<-started
+	select {
+	case ok := <-waited:
+		assert.True(t, ok)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session's end went on waiting for a subsystem that had started")
+	}
+	assert.False(t, h.admitGuest(asking("sftp"), "subsystem"), "a subsystem was admitted after the session's end stopped waiting")
+	assert.False(t, h.admitGuest(asking("sftp"), "shell"))
+	close(release)
+
+	h.sharedGuests.mu.Lock()
+	defer h.sharedGuests.mu.Unlock()
+	assert.Empty(t, h.sharedGuests.admitted, "the door holds an admission its subsystem has taken")
 }
+
+// subsystemGuest is a fakeGuestSession that asked for a subsystem.
+type subsystemGuest struct {
+	fakeGuestSession
+	subsystem string
+}
+
+func (g *subsystemGuest) Subsystem() string { return g.subsystem }
 
 // The door forgets each admission once the session's handler has taken it. A
 // guest can keep one connection open and open session after session on it, so

@@ -276,13 +276,18 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			Logger:         s.Logger,
 		}
 
-		// Set up subsystem handlers (SFTP)
+		// Set up subsystem handlers (SFTP). The door admits a subsystem with
+		// the session's end, as it does a shell (see admitGuest), and SFTP
+		// hands that admission back as it starts: an SFTP session in progress
+		// is not waited for, and is cut off when the session ends, as it
+		// always was.
 		var subsystemHandlers map[string]gssh.SubsystemHandler
 		if !s.SFTPDisabled {
 			subsystemHandlers = map[string]gssh.SubsystemHandler{
-				"sftp": sh.HandleSFTP,
+				"sftp": sh.startAdmitted(sh.HandleSFTP),
 			}
 		}
+		sh.subsystems = subsystemHandlers
 
 		server := gssh.Server{
 			HostSigners:      ss,
@@ -544,13 +549,6 @@ func (t *guestHandlers) begin() (finish func(), ok bool) {
 	}, true
 }
 
-// admits reports whether begin would still register a handler.
-func (t *guestHandlers) admits() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return !t.sealed
-}
-
 // wait blocks until no handler is running, or until timeout, reporting
 // whether none was. A handler that registers while it waits is waited for as
 // well as those already running. Whichever way it returns, it seals the set
@@ -636,18 +634,39 @@ func (h *sessionHandler) guestTracker() *guestHandlers {
 // its status. Once the session's end has finished waiting, the request is
 // refused instead.
 //
-// A subsystem -- SFTP -- is refused from then on too, and otherwise admitted
-// without being waited for. A handler with no trackers -- a test's -- admits
-// everything.
+// A subsystem is admitted the same way, and its handler hands the admission
+// back as it starts (see startAdmitted), so the session's end waits only for
+// that: charm accepts the request before the handler starts, and a tunnel
+// closed in between would cut off a subsystem the door had just accepted. One
+// the door doesn't serve is refused here, before it is admitted: charm would
+// refuse it after this says yes, and nothing would ever take the admission. A
+// handler with no trackers -- a test's -- admits everything.
 func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
 	handlers := h.guestTracker()
 	if handlers == nil {
 		return true
 	}
-	if requestType != "shell" && requestType != "exec" {
-		return handlers.admits()
+	if requestType == "subsystem" && !h.servesSubsystem(sess.Subsystem()) {
+		return false
 	}
 	return handlers.admit(sess)
+}
+
+// servesSubsystem reports whether the door has a handler for the named
+// subsystem, by the lookup charm makes: the name, then "default".
+func (h *sessionHandler) servesSubsystem(name string) bool {
+	return h.subsystems[name] != nil || h.subsystems["default"] != nil
+}
+
+// startAdmitted wraps a subsystem's handler so that it hands back, as it
+// starts, the admission the door made for its session (see admitGuest).
+func (h *sessionHandler) startAdmitted(handle gssh.SubsystemHandler) gssh.SubsystemHandler {
+	return func(sess gssh.Session) {
+		if finish := h.takeAdmission(sess); finish != nil {
+			finish()
+		}
+		handle(sess)
+	}
 }
 
 // takeAdmission returns what the door kept for sess's handler when it
@@ -886,6 +905,10 @@ type sessionHandler struct {
 
 	// SFTP configuration
 	sftpPermissionChecker sftp.PermissionChecker // Optional: prompts user for SFTP permissions
+
+	// subsystems are the guest door's subsystem handlers, by name, so that
+	// admitGuest refuses one the door doesn't serve. Nil in a test's handler.
+	subsystems map[string]gssh.SubsystemHandler
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
