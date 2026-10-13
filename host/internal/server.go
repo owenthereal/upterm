@@ -476,10 +476,11 @@ var forceCommandStopGrace = time.Second
 // forceCommandStopBound is how long a session that is ending waits for its
 // forced commands' teardowns, given their hangup and later grace: terminate's
 // worst case, then the drain of what they wrote on the way out, then a guest's
-// flush. Past it the session ends anyway -- a guest that has stopped reading
-// holds its handler in a write nothing else releases.
+// flush, then the wait for the close sent with its status to be answered. Past
+// it the session ends anyway -- a guest that has stopped reading holds its
+// handler in a write nothing else releases.
 func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
-	return hangup + 3*grace + forceCommandDrainTimeout + guestFlushTimeout
+	return hangup + 3*grace + forceCommandDrainTimeout + 2*guestFlushTimeout
 }
 
 // guestHandlers tracks guests' handlers still running, so a session that is
