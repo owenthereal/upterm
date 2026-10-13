@@ -92,8 +92,12 @@ Below are some notable highlights:
 ### Joining with `upterm join`
 
 `upterm join` takes the connect string on the host's `➤ Join:` line. If the
-connection drops, it puts your terminal back as it was, says why it's waiting,
-and rejoins on its own: Enter retries at once, and Ctrl-C stops. `~.` leaves.
+connection drops, it resets most terminal modes the session had set (the
+alternate screen and mouse reporting, for example), says why it's waiting, and
+rejoins on its own: Enter retries at once, and Ctrl-C stops. `~.` leaves.
+
+A forced command (`upterm host --force-command`) starts again on each rejoin,
+so don't use `upterm join` with one whose effects mustn't repeat.
 
 It offers keys as `ssh` does: the agent's, then the default key files, and it
 generates one only when you have none. Unlike `ssh`, it doesn't read
@@ -267,9 +271,11 @@ not across a restart.
 
 Guests connected at the drop are disconnected. A guest who joined with
 `upterm join` rejoins on its own once the host is back, and says it's waiting
-and when it tries next until then. A plain `ssh` guest rejoins with the same
-command; one who tries during the gap is told `no host is connected for session
-… right now`.
+and when it tries next until then. If the connect string changed, as in the
+note above, it keeps waiting on the old one and, after 5 minutes, adds that the
+session may have ended or moved: stop it with Ctrl-C and join the new one. A
+plain `ssh` guest rejoins with the same command; one who tries during the gap
+is told `no host is connected for session … right now`.
 
 For machines without upterm, this script rejoins an interactive session
 automatically and leaves the terminal usable after a drop. Save it as
@@ -362,7 +368,7 @@ upterm host --proxy http://proxy.example.com:3128 -- bash
 
 Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
 
-Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm join` or `upterm proxy`.
 
 ### Debug GitHub Actions
 
