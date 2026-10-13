@@ -118,7 +118,7 @@ func (s *joinStatus) event(e join.Event) {
 		// line, which goes on being rewritten below it.
 		var hint string
 		if e.Long && !s.hinted {
-			hint, s.hinted = longWaitLine(e, now)+s.eol(), true
+			hint, s.hinted = longWaitLine+s.eol(), true
 		}
 		if s.tty {
 			_, _ = io.WriteString(s.w, s.rewind()+hint+line)
@@ -267,11 +267,10 @@ func nextTryLine(e join.Event, now time.Time) string {
 	return fmt.Sprintf("upterm: next try in %d s", nextIn(e, now))
 }
 
-// longWaitLine is said once an outage has lasted join's Timing.LongAfter,
-// counted in the minutes since it began.
-func longWaitLine(e join.Event, now time.Time) string {
-	return fmt.Sprintf("upterm: still waiting after %d min; the session may have ended or moved. Check with the host.", int(now.Sub(e.Since).Minutes()))
-}
+// longWaitLine is said once an outage has lasted join's Timing.LongAfter. It
+// names no duration: Since is a wall-clock time, which a stepped clock would
+// make wrong, and the waiting line below it says since when.
+const longWaitLine = "upterm: still waiting; the session may have ended or moved. Check with the host."
 
 // nextIn is the whole seconds from now to e's next attempt.
 func nextIn(e join.Event, now time.Time) int {

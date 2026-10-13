@@ -335,7 +335,7 @@ func TestStatusTellsALongWaitOnce(t *testing.T) {
 		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: true}
 	}
 	const (
-		hint = "upterm: still waiting after 5 min; the session may have ended or moved. Check with the host."
+		hint = "upterm: still waiting; the session may have ended or moved. Check with the host."
 		w60  = "upterm: waiting for the host since 14:02:11; next try in 60 s"
 		w59  = "upterm: waiting for the host since 14:02:11; next try in 59 s"
 	)
@@ -368,6 +368,14 @@ func TestStatusTellsALongWaitOnce(t *testing.T) {
 	s.now = func() time.Time { return now }
 	outage(s)
 	require.Equal(t, hint+"\n"+w60+"\n"+w59+"\n"+w60+"\n", b.String())
+
+	// The hint names no duration: Since is a wall-clock time, and a clock
+	// stepped back during the outage would make one negative.
+	b.Reset()
+	s = newStatus(&b, false, mustTarget(t), false)
+	s.now = func() time.Time { return since.Add(-10 * time.Minute) }
+	s.event(join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: since, Long: true})
+	require.True(t, strings.HasPrefix(b.String(), hint+"\n"), "%q", b.String())
 }
 
 // wrapAt is line as a terminal width columns wide shows it.
