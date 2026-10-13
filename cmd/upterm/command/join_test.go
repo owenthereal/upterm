@@ -243,6 +243,44 @@ func TestStatusRewritesAWrappedWaitingLineWhole(t *testing.T) {
 	require.Equal(t, []string{short}, screen(t, b.String(), 80))
 }
 
+// A wrapped waiting line's rewrite never clears what is above it, whichever
+// way the terminal's width changed between the two writes (see rewind).
+func TestStatusRewriteNeverClearsAboveTheWaitingLine(t *testing.T) {
+	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
+	now := since.Add(time.Minute)
+	wait := func(n int) join.Event {
+		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: true}
+	}
+	const (
+		above = "$ upterm join ssh://abc@relay.test"
+		long1 = "upterm: waiting for the host since 14:02:11; next try in 8 s. The session may have ended or moved; check with the host."
+		long2 = "upterm: waiting for the host since 14:02:11; next try in 4 s. The session may have ended or moved; check with the host."
+	)
+	rewrite := func(from, to int) string {
+		var b bytes.Buffer
+		b.WriteString(above + "\n")
+		width := from
+		s := newStatus(&b, true, mustTarget(t), false)
+		s.now = func() time.Time { return now }
+		s.columns = func() int { return width }
+		s.event(wait(8))
+		width = to
+		s.event(wait(4))
+		return b.String()
+	}
+
+	// Three rows at 40 columns, two once the terminal widens to 80 and
+	// reflows it.
+	out := rewrite(40, 80)
+	// The reflowed screen is what the output so far shows at 80 columns.
+	require.Equal(t, append([]string{above}, wrapAt(long2, 80)...), screen(t, out, 80))
+	require.Equal(t, above+"\n\r\033[K"+long1+"\r\033[1A\033[J"+long2, out)
+
+	// Two rows at 80; narrowed to 40 they stay two on a terminal that
+	// doesn't reflow, so the rewrite goes up one, not two.
+	require.Equal(t, above+"\n\r\033[K"+long1+"\r\033[1A\033[J"+long2, rewrite(80, 40))
+}
+
 // wrapAt is line as a terminal width columns wide shows it.
 func wrapAt(line string, width int) []string {
 	var rows []string
@@ -625,6 +663,8 @@ func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
 // environment doesn't override them, and -i there is as explicit as -i first.
 func TestJoinTakesItsFlagsAfterTheTarget(t *testing.T) {
 	t.Setenv("UPTERM_PROXY", "http://env.invalid:3128")
+	orig := suppliedFlags
+	t.Cleanup(func() { suppliedFlags = orig })
 	suppliedFlags = map[string]bool{}
 	stderr, code, cmd := runRootCmd(t, "join", "abc@relay.test", "--wait", "--proxy", "http://flag.invalid:3128", "-i", "/no/such/key")
 	require.Equal(t, 255, code)

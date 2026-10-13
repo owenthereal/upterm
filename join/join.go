@@ -106,9 +106,11 @@ type Config struct {
 	// handshake first succeeds, which is why a caller passes ConfirmHostKey
 	// only when a prompt is possible. One goroutine reads it, and gives each
 	// key to the session that is ready or else to Run. From then until Run
-	// returns, Input is Run's. A Read can't be interrupted, so one in
-	// progress as Run returns may still take one more chunk, which is
-	// dropped, and then nothing reads Input. A caller that needs its input
+	// returns, Input is Run's. Keys that arrive while a session's Joined
+	// event is being delivered go to Run, not the session, which has the
+	// keyboard only once Events has returned. A Read can't be interrupted,
+	// so one in progress as Run returns may still take one more chunk, which
+	// is dropped, and then nothing reads Input. A caller that needs its input
 	// back after Run gives it a reader it can close or interrupt. Nil means
 	// no keys.
 	Input io.Reader

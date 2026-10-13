@@ -27,11 +27,23 @@ func takeTerminalFor(f *os.File) func() error {
 	return func() error { return takeTerminal(raw) }
 }
 
+// typeLine types line at the pty's keyboard, and returns once it has reached
+// tty's input queue: pty input is asynchronous on Linux, so a flush straight
+// after the write can run before the line arrives, which then outlives it.
+func typeLine(t *testing.T, ptmx, tty *os.File, line string) {
+	t.Helper()
+	_, _ = ptmx.Write([]byte(line))
+	ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
+	n, err := unix.Poll(ready, 5000)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
 // Keys typed while the terminal was cooked, before the first join, belong to
 // no session, so TakeTerminal drops them.
 func TestTakeTerminalFlushesTypedAheadInput(t *testing.T) {
 	ptmx, tty := openPty(t)
-	_, _ = ptmx.Write([]byte("typed-before-join\n"))
+	typeLine(t, ptmx, tty, "typed-before-join\n")
 	take := takeTerminalFor(tty) // raw.enter + flush
 	require.NoError(t, take())
 	readable := make(chan int, 1)
@@ -47,12 +59,7 @@ func TestPromptsFlushTheGuestsTerminal(t *testing.T) {
 	st := newStatus(io.Discard, false, mustTarget(t), false)
 	passphrase, keys := (&joinFlags{}).prompts(st, tty, io.Discard, false)
 	for _, flush := range []func() error{passphrase.flush, keys.flush} {
-		_, _ = ptmx.Write([]byte("typed-ahead\n"))
-		// The line has reached the terminal's input queue.
-		ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
-		n, err := unix.Poll(ready, 5000)
-		require.NoError(t, err)
-		require.Equal(t, 1, n)
+		typeLine(t, ptmx, tty, "typed-ahead\n")
 		require.NoError(t, flush())
 		readable := make(chan string, 1)
 		go func() { b := make([]byte, 64); n, _ := tty.Read(b); readable <- string(b[:n]) }()

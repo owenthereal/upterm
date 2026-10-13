@@ -364,7 +364,7 @@ func listAgentKeys(ctx context.Context, socket string, timeout time.Duration) ag
 	lctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := new(net.Dialer).DialContext(lctx, "unix", socket)
-	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
+	if nobodyListens(err) {
 		// Nobody listens on the socket, which is no agent at all, as it is
 		// for OpenSSH and upterm host: not an agent that failed.
 		return agentListing{err: err}
@@ -383,4 +383,17 @@ func listAgentKeys(ctx context.Context, socket string, timeout time.Duration) ag
 		err = fmt.Errorf("no answer within %v", timeout)
 	}
 	return agentListing{err: err, failed: true}
+}
+
+// wsaeconnrefused is Windows' WSAECONNREFUSED, with which a socket file
+// nobody listens on refuses a connection there: syscall.ECONNREFUSED is a
+// value Go makes up on Windows, which no connection returns. No unix errno
+// is this large, so matching it elsewhere does nothing.
+const wsaeconnrefused = syscall.Errno(10061)
+
+// nobodyListens says err, from dialling the agent's socket, means nobody
+// listens on it: the socket is missing, or its agent exited without
+// removing it.
+func nobodyListens(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, wsaeconnrefused)
 }

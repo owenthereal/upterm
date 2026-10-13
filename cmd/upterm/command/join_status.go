@@ -39,14 +39,16 @@ type joinStatus struct {
 	w   io.Writer
 	tty bool // w is a terminal
 	// columns is the width of the terminal w is, measured as each waiting
-	// line is written, or 0 when it can't be. Nil never measures it.
+	// line is written and as the next rewrites it, or 0 when it can't be. Nil
+	// never measures it.
 	columns func() int
 	// rawMode says TakeTerminal has put the terminal in raw mode, where a
 	// line ends "\r\n". It stays set once Run returns, when only last
 	// writes, which doesn't read it.
 	rawMode bool
-	open    bool // an in-place waiting line has been written without its end
-	rows    int  // the rows the open waiting line took: more than one when it wrapped
+	open    bool   // an in-place waiting line has been written without its end
+	line    string // the open waiting line
+	rows    int    // the rows it took as it was written: more than one when it wrapped
 	// joined says a session has been ready, so its output may have left the
 	// cursor anywhere on the line.
 	joined bool
@@ -61,7 +63,7 @@ func newStatus(w io.Writer, tty bool, t join.Target, wait bool) *joinStatus {
 
 // statusOn is the status on f, which is stderr: when f is a terminal, its
 // waiting lines are measured against its width as it is when each is
-// written.
+// written, and again when the next rewrites it.
 func statusOn(f *os.File, t join.Target, wait bool) *joinStatus {
 	s := newStatus(f, term.IsTerminal(int(f.Fd())), t, wait)
 	s.columns = func() int {
@@ -101,7 +103,7 @@ func (s *joinStatus) event(e join.Event) {
 	}
 	if s.tty && e.Kind == join.Waiting {
 		_, _ = io.WriteString(s.w, s.rewind()+line)
-		s.open, s.rows = true, s.rowsOf(line)
+		s.open, s.line, s.rows = true, line, s.rowsOf(line)
 		return
 	}
 	// A first join says nothing, and still ends the waiting line, so that
@@ -116,10 +118,19 @@ func (s *joinStatus) event(e join.Event) {
 // clears it, so that the next one is written over it. "\033[K" clears only
 // the row the cursor is on, which for a line that wrapped is its last; so
 // the cursor goes up to the line's first row, and "\033[J" clears from there
-// to the end of the screen. The caller holds mu.
+// to the end of the screen.
+//
+// It goes up the fewer of the rows the line took as it was written and the
+// rows it takes at the terminal's width now, so that it never clears what is
+// above the line. A terminal that widened since may have reflowed the line
+// onto fewer rows, its cursor still at the end; one that narrowed without
+// reflowing still shows it on the rows it took. Where that is too few, part
+// of the old line stays above the new one. The caller holds mu.
 func (s *joinStatus) rewind() string {
-	if s.open && s.rows > 1 {
-		return fmt.Sprintf("\r\033[%dA\033[J", s.rows-1)
+	if s.open {
+		if up := min(s.rows, s.rowsOf(s.line)) - 1; up > 0 {
+			return fmt.Sprintf("\r\033[%dA\033[J", up)
+		}
 	}
 	return "\r\033[K"
 }
