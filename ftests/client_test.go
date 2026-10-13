@@ -604,13 +604,13 @@ func setupAdminSocket(t *testing.T) string {
 }
 
 // keyRefusal is what a guest joining at clientJoinURL is told when the session
-// shared at hostShareURL refuses its key. Over ssh at another node, that node
-// completes the guest's handshake and carries it on to the session's node,
-// which refuses the key and says so; the guest hears that verdict when it opens
-// its session. Otherwise the guest's handshake is with the session's node
-// itself, which a ws entry dials directly, and fails to authenticate.
+// shared at hostShareURL refuses its key. Where the entry node completes the
+// handshake and carries the connection on, the session's node refuses the key
+// and says so, and the guest hears that verdict when it opens its session.
+// Otherwise the guest's handshake is with the node that holds the authorized
+// keys, and it fails to authenticate.
 func keyRefusal(hostShareURL, clientJoinURL string) string {
-	if mustParseURL(clientJoinURL).Scheme == "ssh" && hostShareURL != clientJoinURL {
+	if entryNodeCompletesHandshake(hostShareURL, clientJoinURL) {
 		return upterm.UpstreamKeyRefused
 	}
 	return "unable to authenticate"

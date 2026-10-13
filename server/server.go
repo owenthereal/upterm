@@ -550,7 +550,12 @@ func (s *Server) ServeWithContext(ctx context.Context, sshln net.Listener, wsln 
 				// which provides a consistent authentication mechanism.
 				cd = sshProxyDialer{
 					sshProxyAddr: sshln.Addr().String(),
-					Logger:       s.Logger.With("component", "ws-sshproxy-dialer"),
+					// Only Consul mode resolves a guest's node from the
+					// session store, so only there does an identifier's
+					// NodeAddr name a relay node. Embedded mode takes it from
+					// the guest's own SSH user.
+					nodeAddrFromStore: s.SessionManager.GetRoutingMode() == routing.ModeConsul,
+					Logger:            s.Logger.With("component", "ws-sshproxy-dialer"),
 				}
 			}
 			ws := &webSocketProxy{
@@ -645,7 +650,12 @@ type connDialer interface {
 
 type sshProxyDialer struct {
 	sshProxyAddr string
-	Logger       *slog.Logger
+	// nodeAddrFromStore says that a guest identifier's NodeAddr was resolved
+	// from the session store, so it names a relay node and may be dialed
+	// directly. Where it is not set, a guest's upstream goes to this node's SSH
+	// proxy, which resolves the guest's own SSH user itself.
+	nodeAddrFromStore bool
+	Logger            *slog.Logger
 }
 
 func (d sshProxyDialer) Dial(id *api.Identifier) (net.Conn, error) {
@@ -661,12 +671,15 @@ func (d sshProxyDialer) DialContext(ctx context.Context, id *api.Identifier) (ne
 		d.Logger.With("host", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing sshproxy sshd")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
-	// A guest with no node goes to this node's SSHProxy, which authorizes the
-	// guest's user itself. The WebSocket proxy sends one here when it can't
-	// resolve the user, so the refusal can say why, and in Consul mode when
-	// the resolved node won't take the dial, so the route can be refreshed.
-	if id.NodeAddr == "" {
-		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr).Info("dialing this node's sshproxy for a guest with no node")
+	// A guest whose node this dialer cannot place goes to this node's SSHProxy,
+	// which authorizes the guest's user itself. That is a guest with no node:
+	// the WebSocket proxy sends one here when it can't resolve the user, so the
+	// refusal can say why, and in Consul mode when the resolved node won't take
+	// the dial, so the route can be refreshed. It is also every guest of a mode
+	// that resolves no node at all, where the address rides in the guest's own
+	// SSH user and the SSHProxy is the component that decodes it.
+	if id.NodeAddr == "" || !d.nodeAddrFromStore {
+		d.Logger.With("session", id.Id, "sshproxy_addr", d.sshProxyAddr, "node_addr_from_store", d.nodeAddrFromStore).Info("dialing this node's sshproxy for a guest")
 		return dialer.DialContext(ctx, "tcp", d.sshProxyAddr)
 	}
 
