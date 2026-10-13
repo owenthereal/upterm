@@ -125,7 +125,7 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 			require.NoError(t, writers.Shutdown(t.Context()))
 
 			guest := &exitRecordingGuest{
-				fakeGuestSession: fakeGuestSession{ctx: &admittingContext{fakeGuestContext: fakeGuestContext{sessionID: "late"}}, winCh: make(chan gssh.Window), out: io.Discard},
+				fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "late"}, winCh: make(chan gssh.Window), out: io.Discard},
 				exited:           make(chan int, 1),
 			}
 			h := &sessionHandler{
@@ -186,8 +186,7 @@ func (g *exitRecordingGuest) Exit(code int) error {
 }
 
 // admittingContext is a fakeGuestContext that keeps what is set on it, as a
-// connection's context does: where the door's admission leaves the
-// registration it made for the handler.
+// connection's context does, so that a test can see nothing is left there.
 type admittingContext struct {
 	fakeGuestContext
 
@@ -277,7 +276,7 @@ func TestGuestHandlersRefuseARegistrationOnceWaitHasReturned(t *testing.T) {
 // The door admits a subsystem -- SFTP -- without registering it, and refuses
 // one, as it does a shell, once the session's end has stopped waiting.
 func TestTheDoorAdmitsASubsystemUntilTheSessionStopsWaiting(t *testing.T) {
-	guest := &fakeGuestSession{ctx: &admittingContext{fakeGuestContext: fakeGuestContext{sessionID: "sftp"}}}
+	guest := &fakeGuestSession{ctx: fakeGuestContext{sessionID: "sftp"}}
 	h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}}
 
 	require.True(t, h.admitGuest(guest, "subsystem"))
@@ -285,4 +284,48 @@ func TestTheDoorAdmitsASubsystemUntilTheSessionStopsWaiting(t *testing.T) {
 
 	assert.False(t, h.admitGuest(guest, "subsystem"))
 	assert.False(t, h.admitGuest(guest, "shell"))
+}
+
+// The door forgets each admission once the session's handler has taken it. A
+// guest can keep one connection open and open session after session on it, so
+// an admission left behind -- or a key left in the connection's context, which
+// charm's SetValue can only overwrite -- would grow for as long as the
+// connection lasts.
+func TestTheDoorForgetsEachAdmissionOnceItsHandlerHasTakenIt(t *testing.T) {
+	// One connection's context, shared by every session on it, as charm's is.
+	conn := &admittingContext{fakeGuestContext: fakeGuestContext{sessionID: "one-connection"}}
+	h := &sessionHandler{
+		kind:              kindGuest,
+		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		keepAliveDuration: time.Hour,
+		ctx:               t.Context(),
+		logger:            discardLogger(),
+		forceCommands:     &guestHandlers{},
+		sharedGuests:      &guestHandlers{},
+	}
+
+	for range 50 {
+		// Each session's input ends at once, so its handler runs to its end.
+		guest := &fakeGuestSession{ctx: conn, winCh: make(chan gssh.Window), out: io.Discard}
+		require.True(t, h.admitGuest(guest, "shell"))
+		done := make(chan struct{})
+		go func() { defer close(done); h.HandleSession(guest) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a session's handler did not return")
+		}
+	}
+
+	conn.mu.Lock()
+	left := len(conn.values)
+	conn.mu.Unlock()
+	assert.Zero(t, left, "the connection's context holds an entry for sessions that have ended")
+	h.sharedGuests.mu.Lock()
+	kept := len(h.sharedGuests.admitted)
+	h.sharedGuests.mu.Unlock()
+	assert.Zero(t, kept, "the door holds admissions its handlers have taken")
+	assert.True(t, h.sharedGuests.wait(0), "a handler that ended is still registered")
 }

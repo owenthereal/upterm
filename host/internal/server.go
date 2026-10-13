@@ -506,6 +506,9 @@ type guestHandlers struct {
 	// sealed is set by wait as it returns, under mu, so that nothing joins a
 	// set it has finished waiting for.
 	sealed bool
+	// admitted holds, for each session admit has registered and whose
+	// handler has not yet taken it, what marks that handler finished.
+	admitted map[gssh.Session]func()
 }
 
 // begin registers a handler, returning what marks it finished, or false once
@@ -570,10 +573,46 @@ func (t *guestHandlers) wait(timeout time.Duration) bool {
 	}
 }
 
-// admissionKey is where admitGuest leaves the finish of the registration it
-// made for a session, for that session's handler to take. Keyed by the
-// session itself: a connection's context is shared by every session on it.
-type admissionKey struct{ sess gssh.Session }
+// admit registers sess's handler, as begin does, and keeps what marks it
+// finished for that handler to take: the door admits a session before its
+// handler runs (see admitGuest). Kept here, keyed by charm's session, rather
+// than in the connection's context, which every session on the connection
+// shares and whose entries charm can only overwrite: a guest that opens
+// session after session on one connection would grow it for as long as the
+// connection lasted.
+func (t *guestHandlers) admit(sess gssh.Session) bool {
+	finish, ok := t.begin()
+	if !ok {
+		return false
+	}
+	t.mu.Lock()
+	if t.admitted == nil {
+		t.admitted = map[gssh.Session]func(){}
+	}
+	t.admitted[sess] = finish
+	t.mu.Unlock()
+	return true
+}
+
+// take returns what admit kept for sess and forgets it, or nil for a session
+// admit did not register -- a test's -- which nothing waits for.
+func (t *guestHandlers) take(sess gssh.Session) func() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	finish := t.admitted[sess]
+	delete(t.admitted, sess)
+	return finish
+}
+
+// guestTracker is what the door registers this session's guests with: the
+// forced commands' tracker when there is one, the shared command's
+// otherwise. Nil in a test's handler.
+func (h *sessionHandler) guestTracker() *guestHandlers {
+	if len(h.forceCommand) > 0 {
+		return h.forceCommands
+	}
+	return h.sharedGuests
+}
 
 // admitGuest is the guest door's SessionRequestCallback, which charm calls
 // before it answers a session's shell, exec or subsystem request. A shell's or
@@ -588,38 +627,35 @@ type admissionKey struct{ sess gssh.Session }
 // without being waited for. A handler with no trackers -- a test's -- admits
 // everything.
 func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
-	handlers := h.sharedGuests
-	if len(h.forceCommand) > 0 {
-		handlers = h.forceCommands
-	}
+	handlers := h.guestTracker()
 	if handlers == nil {
 		return true
 	}
 	if requestType != "shell" && requestType != "exec" {
 		return handlers.admits()
 	}
-	finish, ok := handlers.begin()
-	if !ok {
-		return false
-	}
-	sess.Context().SetValue(admissionKey{sess}, finish)
-	return true
+	return handlers.admit(sess)
 }
 
-// takeAdmission returns the finish admitGuest left for sess's handler, or nil
-// for a session the door did not admit -- a test's -- which nothing waits for.
-func takeAdmission(sess gssh.Session) func() {
+// takeAdmission returns what the door kept for sess's handler when it
+// admitted sess, and forgets it, or nil for a session it did not admit.
+//
+// Every session the door admits reaches here: once the callback has said
+// yes, charm checks that there is a handler, which the door always has, marks
+// the session handled, replies -- ignoring a reply that fails -- and starts
+// the handler unconditionally (charm.land/ssh v0.4.3 session.go:261-296), and
+// taking the admission is the first thing the handler does.
+func (h *sessionHandler) takeAdmission(sess gssh.Session) func() {
+	handlers := h.guestTracker()
+	if handlers == nil {
+		return nil
+	}
 	// The door's handler is given the session charm admitted wrapped, so
 	// that its output goes straight to the channel; the key is charm's own.
 	if raw, ok := sess.(*rawSession); ok {
 		sess = raw.Session
 	}
-	key := admissionKey{sess}
-	finish, _ := sess.Context().Value(key).(func())
-	if finish != nil {
-		sess.Context().SetValue(key, nil)
-	}
-	return finish
+	return handlers.take(sess)
 }
 
 const (
@@ -844,7 +880,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// admitGuest). Finished last, after the guest's status and the wait for
 	// it to be answered.
 	if h.kind == kindGuest {
-		if finish := takeAdmission(sess); finish != nil {
+		if finish := h.takeAdmission(sess); finish != nil {
 			defer finish()
 		}
 	}
