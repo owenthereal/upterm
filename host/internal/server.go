@@ -1381,9 +1381,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// yet passed on: a status written and not yet delivered was lost as surely
 	// as one never written. So a guest's handler waits, bounded, for the close
 	// Exit sent to be answered. Whatever terminates the guest's SSH on the far
-	// side of the tunnel -- the relay, or the guest itself -- answers it only
-	// once it has read everything sent before it, the status included, and the
-	// relay goes on to deliver what it has read when the tunnel is gone.
+	// side of the tunnel answers it only once it has read everything sent
+	// before it, the status included: x/crypto answers a CLOSE from the read
+	// loop that has already queued the requests ahead of it (channel.go:460-464
+	// at v0.57.0). That is the relay, which goes on to deliver what it has read
+	// once the tunnel is gone -- TestSSHForwardTransportCloseDrainsBufferedData
+	// in server/ pins it -- or, for a ws guest of a relay with no SSH listener,
+	// which pipes it through raw, the guest itself.
 	if h.kind == kindGuest && h.ctx.Err() != nil {
 		awaitChannelClosed(winCh, guestFlushTimeout)
 	}
