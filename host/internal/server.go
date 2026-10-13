@@ -489,8 +489,8 @@ func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
 //
 // Not a sync.WaitGroup: a guest can reach the door while the session is ending,
 // and a WaitGroup may not be added to from zero while it is being waited on.
-// The door stays open until the waits are done, so that such a guest is told
-// how the session ended rather than refused, and wait covers its handler too.
+// The door stays open until the waits are done, so that such a guest is sent
+// an exit status rather than refused, and wait covers its handler too.
 type guestHandlers struct {
 	mu      sync.Mutex
 	running map[chan struct{}]struct{}
