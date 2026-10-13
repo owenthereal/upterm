@@ -52,23 +52,26 @@ func TestRenderEveryText(t *testing.T) {
 	next := since.Add(8 * time.Second)
 	refused := errors.New("agent refused operation")
 	for want, e := range map[string]join.Event{
-		"upterm: waiting for the host since 14:02:11; next try in 8 s":                                                             {Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next},
-		"upterm: can't reach relay.test since 14:02:11 (dial tcp: refused); next try in 8 s":                                       {Kind: join.Waiting, Why: join.Unreachable, Err: errors.New("dial tcp: refused"), Since: since, Next: next},
-		"upterm: the relay can't look up sessions since 14:02:11; next try in 8 s":                                                 {Kind: join.Waiting, Why: join.RelayLookup, Since: since, Next: next},
-		"upterm: the relay can't reach the host since 14:02:11; next try in 8 s":                                                   {Kind: join.Waiting, Why: join.Upstream, Since: since, Next: next},
-		"upterm: your SSH agent can't sign since 14:02:11 (agent refused operation); next try in 8 s":                              {Kind: join.Waiting, Why: join.IdentityFailure, Err: &join.IdentityError{Key: "SHA256:k", Err: &host.AgentRefusedError{Key: "SHA256:k", Err: refused}}, Since: since, Next: next},
-		"upterm: can't start the session since 14:02:11 (shell request refused); next try in 8 s":                                  {Kind: join.Waiting, Why: join.Setup, Err: errors.New("shell request refused"), Since: since, Next: next},
-		"upterm: waiting for the host since 14:02:11; next try in 8 s. The session may have ended or moved; check with the host.":  {Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next, Long: true},
-		"upterm: no host is connected for session abc right now; retrying for 30 s (Ctrl-C to stop)":                               {Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next},
-		"upterm: rejoined session abc after 1m12s":                                                                                 {Kind: join.Joined, Rejoin: true, Down: 72 * time.Second},
-		"upterm: lost the connection to session abc (no bytes from the peer for 30s); rejoining. Enter retries now, Ctrl-C stops.": {Kind: join.Lost, Err: fmt.Errorf("%w for %s", liveness.ErrSilent, 30*time.Second)},
+		"upterm: waiting for the host since 14:02:11; next try in 8 s":                                              {Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next},
+		"upterm: can't reach relay.test since 14:02:11 (dial tcp: refused); next try in 8 s":                        {Kind: join.Waiting, Why: join.Unreachable, Err: errors.New("dial tcp: refused"), Since: since, Next: next},
+		"upterm: the relay can't look up sessions since 14:02:11; next try in 8 s":                                  {Kind: join.Waiting, Why: join.RelayLookup, Since: since, Next: next},
+		"upterm: the relay can't reach the host since 14:02:11; next try in 8 s":                                    {Kind: join.Waiting, Why: join.Upstream, Since: since, Next: next},
+		"upterm: your SSH agent can't sign since 14:02:11 (agent refused operation); next try in 8 s":               {Kind: join.Waiting, Why: join.IdentityFailure, Err: &join.IdentityError{Key: "SHA256:k", Err: &host.AgentRefusedError{Key: "SHA256:k", Err: refused}}, Since: since, Next: next},
+		"upterm: can't start the session since 14:02:11 (shell request refused); next try in 8 s":                   {Kind: join.Waiting, Why: join.Setup, Err: errors.New("shell request refused"), Since: since, Next: next},
+		"upterm: session abc has no host yet; retrying for 30 s":                                                    {Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next},
+		"upterm: rejoined after 1m12s":                                                                              {Kind: join.Joined, Rejoin: true, Down: 72 * time.Second},
+		"upterm: lost the connection (no bytes from the peer for 30s); rejoining. Enter retries now, Ctrl-C stops.": {Kind: join.Lost, Err: fmt.Errorf("%w for %s", liveness.ErrSilent, 30*time.Second)},
 		// A first join is quiet, as ssh is.
 		"": {Kind: join.Joined},
 	} {
 		require.Equal(t, want, renderEvent(e, tg, next.Add(-8*time.Second), false), want)
 	}
-	require.Equal(t, "upterm: no host is connected for session abc right now; waiting (Ctrl-C to stop)",
+	require.Equal(t, "upterm: session abc has no host yet; waiting",
 		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next}, tg, since, true))
+	// A long wait's line is the same line: its hint is a line of its own,
+	// written once (see TestStatusTellsALongWaitOnce).
+	require.Equal(t, "upterm: waiting for the host since 14:02:11; next try in 8 s",
+		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next, Long: true}, tg, since, false))
 
 	// One row per line a run can end with, the same way, through
 	// renderOutcome. The target as typed is what the -i PATH lines name.
@@ -107,8 +110,10 @@ func TestRenderEveryText(t *testing.T) {
 		{failedWith(&join.HostKeyError{Changed: true, Err: changed}), join.KeySource{}, changedText},
 		{failedWith(join.ErrUpstreamHostKey), join.KeySource{}, "upterm: the relay couldn't verify the host of session abc."},
 
-		{join.Outcome{Kind: join.Exited, Status: 7}, join.KeySource{}, "upterm: connection to session abc ended (status 7)"},
-		{join.Outcome{Kind: join.Left}, join.KeySource{}, "upterm: left session abc"},
+		// The status is the exit code's, not the line's.
+		{join.Outcome{Kind: join.Exited, Status: 7}, join.KeySource{}, "upterm: connection to the session ended"},
+		{join.Outcome{Kind: join.Exited}, join.KeySource{}, "upterm: connection to the session ended"},
+		{join.Outcome{Kind: join.Left}, join.KeySource{}, "upterm: left the session"},
 		{join.Outcome{Kind: join.Stopped}, join.KeySource{}, "upterm: stopped"},
 
 		// Failures with no line of their own: the error as it is.
@@ -122,25 +127,16 @@ func TestRenderEveryText(t *testing.T) {
 
 	// The lines the command writes itself, before it joins.
 	for want, got := range map[string]string{
-		"upterm: skipping /k/id_ed25519_sk: unsupported key type":                                              skipLine("/k/id_ed25519_sk", errors.New("unsupported key type")),
-		"upterm: skipping the SSH agent: i/o timeout":                                                          agentSkipLine(errors.New("i/o timeout")),
-		"upterm: upterm join needs a terminal.":                                                                needsATerminal,
-		"upterm: not a join target: https://abc@relay.test. Use ssh://ID@host, wss://ID@host or ID@host.":      notATargetLine("https://abc@relay.test", parseErr(t, "https://abc@relay.test")),
-		"upterm: not a join target: ssh abc@relay.test -p 2222. Did you mean upterm join abc@relay.test:2222?": notATargetLine("ssh abc@relay.test -p 2222", parseErr(t, "ssh abc@relay.test -p 2222")),
-		"upterm: not a join target: ssh abc@relay.test. Did you mean upterm join abc@relay.test?":              notATargetLine("ssh abc@relay.test", parseErr(t, "ssh abc@relay.test")),
+		"upterm: skipping /k/id_ed25519_sk: unsupported key type":                                         skipLine("/k/id_ed25519_sk", errors.New("unsupported key type")),
+		"upterm: skipping the SSH agent: i/o timeout":                                                     agentSkipLine(errors.New("i/o timeout")),
+		"upterm: upterm join needs a terminal.":                                                           needsATerminal,
+		"upterm: not a join target: https://abc@relay.test. Use ssh://ID@host, wss://ID@host or ID@host.": notATargetLine("https://abc@relay.test"),
 	} {
 		require.Equal(t, want, got)
 	}
 }
 
 func failedWith(err error) join.Outcome { return join.Outcome{Kind: join.Failed, Err: err} }
-
-func parseErr(t *testing.T, s string) error {
-	t.Helper()
-	_, err := join.ParseTarget(s)
-	require.Error(t, err)
-	return err
-}
 
 // changedKeyRefusal is the host package's own text for a relay whose known_hosts
 // line names another key, and what the CheckHostKey seam returns for it.
@@ -190,7 +186,7 @@ func TestStatusRewritesTheWaitingLineInPlaceOnATerminal(t *testing.T) {
 	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: time.Second})
 	out := b.String()
 	require.Equal(t, 2, strings.Count(out, "\r\033[K"))
-	require.Contains(t, out, "next try in 2 s\r\nupterm: rejoined session")
+	require.Contains(t, out, "next try in 2 s\r\nupterm: rejoined after")
 	require.True(t, strings.HasSuffix(out, "\r\n"))
 }
 
@@ -213,11 +209,14 @@ func TestStatusRewritesAWrappedWaitingLineWhole(t *testing.T) {
 	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
 	now := since.Add(time.Minute)
 	wait := func(n int, long bool) join.Event {
-		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: long}
+		if long {
+			return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: errRefused, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
+		}
+		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
 	}
 	const (
-		long1 = "upterm: waiting for the host since 14:02:11; next try in 8 s. The session may have ended or moved; check with the host."
-		long2 = "upterm: waiting for the host since 14:02:11; next try in 4 s. The session may have ended or moved; check with the host."
+		long1 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 8 s"
+		long2 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 4 s"
 		short = "upterm: waiting for the host since 14:02:11; next try in 2 s"
 	)
 
@@ -249,12 +248,12 @@ func TestStatusRewriteNeverClearsAboveTheWaitingLine(t *testing.T) {
 	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
 	now := since.Add(time.Minute)
 	wait := func(n int) join.Event {
-		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: true}
+		return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: errRefused, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
 	}
 	const (
 		above = "$ upterm join ssh://abc@relay.test"
-		long1 = "upterm: waiting for the host since 14:02:11; next try in 8 s. The session may have ended or moved; check with the host."
-		long2 = "upterm: waiting for the host since 14:02:11; next try in 4 s. The session may have ended or moved; check with the host."
+		long1 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 8 s"
+		long2 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 4 s"
 	)
 	rewrite := func(from, to int) string {
 		var b bytes.Buffer
@@ -279,6 +278,96 @@ func TestStatusRewriteNeverClearsAboveTheWaitingLine(t *testing.T) {
 	// Two rows at 80; narrowed to 40 they stay two on a terminal that
 	// doesn't reflow, so the rewrite goes up one, not two.
 	require.Equal(t, above+"\n\r\033[K"+long1+"\r\033[1A\033[J"+long2, rewrite(80, 40))
+}
+
+// errRefused makes a waiting line too long for 80 columns.
+var errRefused = errors.New("dial tcp 192.0.2.1:22: connect: connection refused")
+
+// Straight after a drop, nothing has tried the relay yet: the waiting line
+// says only when the next try is, and the drop's line above it says why the
+// connection went. The tries after it say what stopped them, and so does the
+// first after the next drop.
+func TestStatusSaysOnlyWhenTheNextTryIsAfterADrop(t *testing.T) {
+	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
+	now := since.Add(time.Minute)
+	wait := func(n int, err error) join.Event {
+		return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: err, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
+	}
+	const (
+		lost    = "upterm: lost the connection (EOF); rejoining. Enter retries now, Ctrl-C stops."
+		first   = "upterm: next try in 1 s"
+		refused = "upterm: can't reach relay.test since 14:02:11 (connection refused); next try in 2 s"
+	)
+	drop := func(s *joinStatus) {
+		s.event(join.Event{Kind: join.Lost, Err: io.EOF})
+		s.event(wait(1, io.EOF))
+		s.event(wait(2, errors.New("connection refused")))
+	}
+
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.raw(true)
+	drop(s)
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+refused, b.String())
+
+	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 3 * time.Second})
+	b.Reset()
+	drop(s)
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+refused, b.String())
+
+	// Anywhere but a terminal, each is a line of its own.
+	b.Reset()
+	s = newStatus(&b, false, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	drop(s)
+	require.Equal(t, lost+"\n"+first+"\n"+refused+"\n", b.String())
+}
+
+// Once a wait has lasted long enough that the session may have ended or
+// moved, that is said once, on a line of its own above the waiting line,
+// which goes on being rewritten below it. A later outage that lasts as long
+// says it again.
+func TestStatusTellsALongWaitOnce(t *testing.T) {
+	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
+	now := since.Add(5*time.Minute + 30*time.Second)
+	wait := func(n int) join.Event {
+		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: true}
+	}
+	const (
+		hint = "upterm: still waiting after 5 min; the session may have ended or moved. Check with the host."
+		w60  = "upterm: waiting for the host since 14:02:11; next try in 60 s"
+		w59  = "upterm: waiting for the host since 14:02:11; next try in 59 s"
+	)
+	outage := func(s *joinStatus) {
+		s.event(wait(60))
+		s.event(wait(59))
+		s.event(wait(60))
+	}
+
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 40 }
+	s.raw(true)
+	outage(s)
+	require.Equal(t, "\r\033[K"+hint+"\r\n"+w60+"\r\033[1A\033[J"+w59+"\r\033[1A\033[J"+w60, b.String())
+	// The hint wraps, and the rewrites below it leave it whole.
+	require.Equal(t, append(wrapAt(hint, 40), wrapAt(w60, 40)...), screen(t, b.String(), 40))
+
+	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 6 * time.Minute})
+	b.Reset()
+	s.event(join.Event{Kind: join.Lost, Err: io.EOF})
+	s.event(wait(60))
+	s.event(wait(59))
+	require.Equal(t, 1, strings.Count(b.String(), hint), "%q", b.String())
+
+	// Anywhere but a terminal, the same: once per outage.
+	b.Reset()
+	s = newStatus(&b, false, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	outage(s)
+	require.Equal(t, hint+"\n"+w60+"\n"+w59+"\n"+w60+"\n", b.String())
 }
 
 // wrapAt is line as a terminal width columns wide shows it.
@@ -630,8 +719,9 @@ func TestJoinRefusesABadTargetAndANonTerminal(t *testing.T) {
 // An unquoted paste of an ssh command arrives as several arguments, which
 // are read as one text so that the command it is can be recognised. join's
 // flags stop at the first argument, so the command's own flags, -p and -o,
-// arrive among them.
-func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
+// arrive among them. A command upterm prints for guests joins the target it
+// reaches, which is then the target as typed, for the lines that repeat it.
+func TestJoinJoinsTheTargetOfAPastedSSHCommand(t *testing.T) {
 	// The commands as upterm prints them, and the arguments the guest's shell
 	// makes of each.
 	direct, err := buildSessionDetail(&api.GetSessionResponse{Host: "ssh://relay.test:2222", SshUser: "abc"})
@@ -645,17 +735,28 @@ func TestJoinSuggestsTheTargetOfAPastedSSHCommand(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"ssh", "abc@relay.test"}, "upterm: not a join target: ssh abc@relay.test. Did you mean upterm join abc@relay.test?\n"},
-		{[]string{"ssh", "abc@relay.test", "-p", "2222"}, "upterm: not a join target: ssh abc@relay.test -p 2222. Did you mean upterm join abc@relay.test:2222?\n"},
-		{
-			[]string{"ssh", "-o", "ProxyCommand=upterm proxy 'wss://abc@relay.test'", "abc@relay.test:443"},
-			`upterm: not a join target: ssh -o 'ProxyCommand=upterm proxy '\''wss://abc@relay.test'\''' abc@relay.test:443. Did you mean upterm join wss://abc@relay.test?` + "\n",
-		},
+		{[]string{"ssh", "abc@relay.test"}, "abc@relay.test"},
+		{[]string{"ssh", "abc@relay.test", "-p", "2222"}, "abc@relay.test:2222"},
+		{[]string{"ssh", "-p", "2222", "abc@relay.test"}, "abc@relay.test:2222"},
+		{[]string{"ssh", "-o", "ProxyCommand=upterm proxy 'wss://abc@relay.test'", "abc@relay.test:443"}, "wss://abc@relay.test"},
 	} {
+		var f joinFlags
+		require.NoError(t, f.resolveTarget(joinCmd(), tc.args), "%q", tc.args)
+		require.Equal(t, tc.want, f.typed, "%q", tc.args)
+		want, err := join.ParseTarget(tc.want)
+		require.NoError(t, err)
+		require.Equal(t, want, f.target, "%q", tc.args)
+
+		// Past the target: in a pipe, that is the terminal check.
 		stderr, code := runRoot(t, append([]string{"join"}, tc.args...)...)
 		require.Equal(t, 255, code, "%q", tc.args)
-		require.Equal(t, tc.want, stderr, "%q", tc.args)
+		require.Equal(t, "upterm: upterm join needs a terminal.\n", stderr, "%q", tc.args)
 	}
+
+	// Any other ssh command is refused: join would ignore its options.
+	stderr, code := runRoot(t, "join", "ssh", "-i", "/k/id_ed25519", "abc@relay.test")
+	require.Equal(t, 255, code)
+	require.Equal(t, "upterm: not a join target: ssh -i /k/id_ed25519 abc@relay.test. Use ssh://ID@host, wss://ID@host or ID@host.\n", stderr)
 }
 
 // Flags after a target that stands alone are join's own, as in the help's
