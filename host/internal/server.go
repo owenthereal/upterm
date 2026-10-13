@@ -935,7 +935,8 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// runs, since the window-change loop sets it to nil once it has seen the
 	// channel close. A guest that has already gone returns at once.
 	if h.kind == kindGuest {
-		defer func() { awaitChannelClosed(winCh, guestFlushTimeout) }()
+		closed := channelClosed(sess)
+		defer func() { awaitChannelClosed(closed, winCh, guestFlushTimeout) }()
 	}
 
 	// A local client may be a viewer: a backgrounded host that displays the
@@ -944,10 +945,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// a guest with no terminal has nothing to show the session on.
 	if !isPty && h.kind == kindGuest {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
-		// Not waited on: with no pty there is no window-change channel to
-		// learn the close from, so the deferred wait above returns at once,
-		// and a session that ends within a round trip of this can still cut
-		// the status off.
 		_ = sess.Exit(1)
 		// Exit closes the channel. Without returning, the rest of the handler
 		// ran against a dead session: it attached it to the shared output
@@ -1539,20 +1536,33 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	}
 }
 
+// channelClosed is what closes once sess's channel has been closed from the
+// far side (see rawSession), or nil for a session the door did not build -- a
+// test's -- which has only its window-change channel to say so.
+func channelClosed(sess gssh.Session) <-chan struct{} {
+	if raw, ok := sess.(*rawSession); ok {
+		return raw.closed
+	}
+	return nil
+}
+
 // awaitChannelClosed waits, up to timeout, for a session's channel to be
-// closed from the far side, which charm reports by closing the session's
-// window-change channel once the channel's request loop has ended. It drains
-// that channel as it waits: charm delivers a window change from inside the
-// request loop, so one nobody reads would park the loop, and the close with
-// it. A nil winCh is a channel already seen closed.
-func awaitChannelClosed(winCh <-chan gssh.Window, timeout time.Duration) {
-	if winCh == nil {
+// closed from the far side: for closed to close, or for winCh to, which charm
+// does for a session with a pty as the channel's request loop ends. It drains
+// winCh as it waits: charm delivers a window change from inside the request
+// loop, so one nobody reads would park the loop, and the close with it. A nil
+// winCh is one already seen closed, or a session with no pty; with closed nil
+// too, there is nothing to wait for.
+func awaitChannelClosed(closed <-chan struct{}, winCh <-chan gssh.Window, timeout time.Duration) {
+	if closed == nil && winCh == nil {
 		return
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
 		select {
+		case <-closed:
+			return
 		case _, ok := <-winCh:
 			if !ok {
 				return

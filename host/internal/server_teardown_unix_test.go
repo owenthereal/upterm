@@ -426,6 +426,50 @@ func TestAForcedCommandsStatusOutlivesASessionThatEndsRightAfterIt(t *testing.T)
 	}
 }
 
+// A guest without a pty is told it needs one before the tunnel closes, even
+// when the session ends right after: a plain `ssh host command`, which asks
+// for no pty, gets its status 1 rather than a channel closed without one. The
+// end of the channel's request loop is what says its close was answered, and
+// that comes with or without a pty.
+func TestAGuestWithoutAPtyIsToldBeforeTheTunnelCloses(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 7)})
+	relay := newRelayStandIn(t, h.addr)
+	go func() {
+		<-h.stopped
+		relay.closeTunnel()
+	}()
+	// The guest that ends the session, directly.
+	in, out, _ := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+	go func() { _, _ = io.Copy(io.Discard, out) }()
+
+	viaRelay := *h
+	viaRelay.addr = relay.ln.Addr().String()
+	sess, err := viaRelay.guestClient(t).NewSession()
+	require.NoError(t, err)
+
+	relay.latency.Store(int64(500 * time.Millisecond))
+	before := relay.fromHost.Load()
+	started := make(chan error, 1)
+	go func() { started <- sess.Shell() }()
+	// The host has admitted the shell, and turned it away, once its reply
+	// reaches the relay; the session then ends within the round trip.
+	require.Eventually(t, func() bool { return relay.fromHost.Load() > before },
+		harnessTimeout, time.Millisecond, "the host never answered the shell request")
+	_, err = io.WriteString(in, "go\n")
+	require.NoError(t, err)
+
+	select {
+	case err := <-started:
+		require.NoError(t, err, "the guest never heard its shell was accepted")
+	case <-time.After(harnessTimeout):
+		t.Fatal("the guest's shell request was never answered")
+	}
+	var exitErr *ssh.ExitError
+	require.ErrorAs(t, sess.Wait(), &exitErr, "the guest was never sent its status")
+	assert.Equal(t, 1, exitErr.ExitStatus())
+}
+
 // A guest's handler waits for the close it sent with the status to be answered
 // for no longer than guestFlushTimeout. A relay that never passes the status
 // on, or a guest that never answers, does not keep the handler, and with it
@@ -596,9 +640,10 @@ func (c *stallingConn) Close() error {
 // tunnel: it takes what the host writes at once and passes it on after
 // latency, and closing the tunnel drops whatever it has not passed on yet.
 type relayStandIn struct {
-	ln      net.Listener
-	latency atomic.Int64 // nanoseconds, host to guest
-	done    chan struct{}
+	ln       net.Listener
+	latency  atomic.Int64 // nanoseconds, host to guest
+	fromHost atomic.Int64 // bytes read from the host so far
+	done     chan struct{}
 
 	mu     sync.Mutex
 	conns  []net.Conn
@@ -659,6 +704,7 @@ func (r *relayStandIn) relay(host, guest net.Conn) {
 	for {
 		n, err := host.Read(buf)
 		if n > 0 {
+			r.fromHost.Add(int64(n))
 			pieces <- piece{bytes.Clone(buf[:n]), time.Now().Add(time.Duration(r.latency.Load()))}
 		}
 		if err != nil {

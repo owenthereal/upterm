@@ -11,13 +11,19 @@ import (
 // breaking cursor positioning in programs such as GNU Screen (#288, #278).
 func rawSessionHandler(srv *gssh.Server, conn *ssh.ServerConn, newChan ssh.NewChannel, ctx gssh.Context) {
 	channel := &sessionChannel{NewChannel: newChan}
+	// DefaultSessionHandler runs the channel's request loop and returns when
+	// it ends, which x/crypto makes happen only when the far side's CLOSE
+	// arrives or the connection goes: the moment the channel is closed from
+	// the far side, for a session with a pty or without one.
+	closed := make(chan struct{})
+	defer close(closed)
 	// These are the fields DefaultSessionHandler reads in charm.land/ssh v0.4.3;
 	// recheck them when upgrading the dependency. Build this configuration per
 	// channel so the captured output cannot leak to another session on the same
 	// connection, and do not copy the running server's mutexes.
 	sessionServer := &gssh.Server{
 		Handler: func(sess gssh.Session) {
-			srv.Handler(&rawSession{Session: sess, channel: channel.channel})
+			srv.Handler(&rawSession{Session: sess, channel: channel.channel, closed: closed})
 		},
 		PtyCallback:            srv.PtyCallback,
 		PtyHandler:             srv.PtyHandler,
@@ -42,6 +48,10 @@ func (c *sessionChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
 type rawSession struct {
 	gssh.Session
 	channel ssh.Channel
+	// closed closes once the channel has been closed from the far side: the
+	// close the session's Exit sent has been answered, or the connection has
+	// gone.
+	closed <-chan struct{}
 }
 
 func (s *rawSession) Write(p []byte) (int, error) {
