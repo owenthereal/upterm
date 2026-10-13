@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,13 +105,13 @@ func (c fakeGuestContext) Value(key any) any {
 	return nil
 }
 
-// A guest that reaches the door as the session ends is sent a status at once
-// -- the fan-out has closed to it, or its forced command would only be hung up
-// again -- and its handler then waits, as every guest's does, for that to be
-// answered before it returns: the session's end waits for the handler, and the
-// tunnel closes behind it. Returning straight after Exit let the tunnel close
-// on a status still in transit, and an `upterm join` rejoining in that window
-// waited for a host that was never coming back.
+// A guest whose shell the door accepted as the session ended is sent a status
+// at once -- the fan-out has closed to it, or its forced command would only be
+// hung up again -- and its handler then waits, as every guest's does, for that
+// to be answered before it returns: the session's end waits for the handler,
+// and the tunnel closes behind it. Returning straight after Exit let the
+// tunnel close on a status still in transit, and an `upterm join` rejoining in
+// that window waited for a host that was never coming back.
 func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 	for _, forced := range []bool{false, true} {
 		name := "shared command"
@@ -124,7 +125,7 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 			require.NoError(t, writers.Shutdown(t.Context()))
 
 			guest := &exitRecordingGuest{
-				fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "late"}, winCh: make(chan gssh.Window), out: io.Discard},
+				fakeGuestSession: fakeGuestSession{ctx: &admittingContext{fakeGuestContext: fakeGuestContext{sessionID: "late"}}, winCh: make(chan gssh.Window), out: io.Discard},
 				exited:           make(chan int, 1),
 			}
 			h := &sessionHandler{
@@ -144,6 +145,8 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 				waitedOn = h.forceCommands
 			}
 
+			// The door admits the shell before the handler runs.
+			require.True(t, h.admitGuest(guest, "shell"))
 			done := make(chan struct{})
 			go func() { defer close(done); h.HandleSession(guest) }()
 
@@ -182,20 +185,51 @@ func (g *exitRecordingGuest) Exit(code int) error {
 	return nil
 }
 
+// admittingContext is a fakeGuestContext that keeps what is set on it, as a
+// connection's context does: where the door's admission leaves the
+// registration it made for the handler.
+type admittingContext struct {
+	fakeGuestContext
+
+	mu     sync.Mutex
+	values map[any]any
+}
+
+func (c *admittingContext) SetValue(key, value any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.values == nil {
+		c.values = map[any]any{}
+	}
+	c.values[key] = value
+}
+
+func (c *admittingContext) Value(key any) any {
+	c.mu.Lock()
+	v, ok := c.values[key]
+	c.mu.Unlock()
+	if ok {
+		return v
+	}
+	return c.fakeGuestContext.Value(key)
+}
+
 // The session's end waits for the guests' handlers that register while it
 // waits, as well as those already there: a guest can reach the door while
 // the session is ending -- the door stays open until the waits are done, so it
-// is told rather than refused -- and its status is no less cut off by the
-// tunnel's close than an earlier guest's.
+// is sent a status rather than refused -- and its status is no less cut off by
+// the tunnel's close than an earlier guest's.
 func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
 	var handlers guestHandlers
-	first := handlers.begin()
+	first, ok := handlers.begin()
+	require.True(t, ok)
 	waited := make(chan bool, 1)
 	go func() { waited <- handlers.wait(10 * time.Second) }()
 	// Long enough for wait to be waiting on the first before the second
 	// arrives.
 	time.Sleep(100 * time.Millisecond)
-	second := handlers.begin()
+	second, ok := handlers.begin()
+	require.True(t, ok, "a handler registering while wait waits was refused")
 
 	first()
 	select {
@@ -211,4 +245,44 @@ func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("wait did not return once every handler had finished")
 	}
+}
+
+// Once wait has returned, the set is sealed: a handler that would register
+// after it is refused, since nothing would wait for it. The seal is part of
+// finding none running, under the same lock, so nothing registers between
+// the two; and a wait that gave up seals the set too.
+func TestGuestHandlersRefuseARegistrationOnceWaitHasReturned(t *testing.T) {
+	t.Run("found none running", func(t *testing.T) {
+		var handlers guestHandlers
+		finish, ok := handlers.begin()
+		require.True(t, ok)
+		finish()
+		require.True(t, handlers.wait(time.Second))
+
+		_, ok = handlers.begin()
+		assert.False(t, ok, "a handler registered after wait found none running would go unwaited for")
+		assert.False(t, handlers.admits())
+	})
+	t.Run("gave up", func(t *testing.T) {
+		var handlers guestHandlers
+		_, ok := handlers.begin()
+		require.True(t, ok)
+		require.False(t, handlers.wait(10*time.Millisecond))
+
+		_, ok = handlers.begin()
+		assert.False(t, ok, "a handler registered after wait gave up would go unwaited for")
+	})
+}
+
+// The door admits a subsystem -- SFTP -- without registering it, and refuses
+// one, as it does a shell, once the session's end has stopped waiting.
+func TestTheDoorAdmitsASubsystemUntilTheSessionStopsWaiting(t *testing.T) {
+	guest := &fakeGuestSession{ctx: &admittingContext{fakeGuestContext: fakeGuestContext{sessionID: "sftp"}}}
+	h := &sessionHandler{kind: kindGuest, sharedGuests: &guestHandlers{}}
+
+	require.True(t, h.admitGuest(guest, "subsystem"))
+	require.True(t, h.sharedGuests.wait(0), "a subsystem was registered for the session's end to wait on")
+
+	assert.False(t, h.admitGuest(guest, "subsystem"))
+	assert.False(t, h.admitGuest(guest, "shell"))
 }

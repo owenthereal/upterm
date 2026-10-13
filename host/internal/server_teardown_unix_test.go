@@ -458,6 +458,34 @@ func TestSessionEndStopsWaitingForAGuestItCannotSendTheStatusTo(t *testing.T) {
 	}
 }
 
+// Once the session's end has finished waiting for its guests, the door
+// refuses a guest's shell rather than accepting it: nothing is left to wait
+// for its status, and the tunnel is about to close on it. The guest's client
+// sees its shell fail to start, not a session that ends without a status.
+func TestTheDoorRefusesAShellOnceTheSessionHasStoppedWaitingForGuests(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 7)})
+	late := h.guestClient(t)
+
+	in, out, _ := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+	go func() { _, _ = io.Copy(io.Discard, out) }()
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+	select {
+	case <-h.stopped:
+	case <-time.After(harnessTimeout):
+		t.Fatal("the session did not end")
+	}
+
+	// The late guest's connection outlived the door, as one does until the
+	// tunnel closes; its session is opened only now.
+	sess, err := late.NewSession()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sess.Close() })
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	assert.Error(t, sess.Shell(), "the door accepted a shell once nothing would wait for its status")
+}
+
 // stallingListener is the host's side of its guests' connections, with a
 // switch that stops the host's writes getting through: a guest whose socket
 // has stopped taking bytes, so that whatever the host writes to it blocks until

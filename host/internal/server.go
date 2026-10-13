@@ -315,6 +315,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards),
 			},
 			SubsystemHandlers: subsystemHandlers,
+			// Admits a guest's shell with the session's end, or refuses it
+			// once that has stopped waiting for guests.
+			SessionRequestCallback: sh.admitGuest,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.Error("connection failed", "error", err)
 			},
@@ -489,17 +492,32 @@ func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
 //
 // Not a sync.WaitGroup: a guest can reach the door while the session is ending,
 // and a WaitGroup may not be added to from zero while it is being waited on.
-// The door stays open until the waits are done, so that such a guest is sent
-// an exit status rather than refused, and wait covers its handler too.
+// The door stays open until the waits are done, and what a guest gets depends
+// on when its shell or exec request arrives, since that is when the door
+// registers its handler (see admitGuest). Before the session's end has
+// finished waiting, it is admitted and waited for: it is sent an exit status
+// -- 0, if it arrived too late for the command's -- and then the bounded wait
+// for that to be answered. After, wait has sealed the set, and the request is
+// refused: the guest's client sees its shell fail to start, rather than a
+// session that ends without a status.
 type guestHandlers struct {
 	mu      sync.Mutex
 	running map[chan struct{}]struct{}
+	// sealed is set by wait as it returns, under mu, so that nothing joins a
+	// set it has finished waiting for.
+	sealed bool
 }
 
-// begin registers a handler, returning what marks it finished.
-func (t *guestHandlers) begin() (finish func()) {
+// begin registers a handler, returning what marks it finished, or false once
+// a wait has returned: that wait was the session's end's one look at these
+// handlers, and one registered after it would go unwaited for.
+func (t *guestHandlers) begin() (finish func(), ok bool) {
 	done := make(chan struct{})
 	t.mu.Lock()
+	if t.sealed {
+		t.mu.Unlock()
+		return nil, false
+	}
 	if t.running == nil {
 		t.running = map[chan struct{}]struct{}{}
 	}
@@ -510,12 +528,21 @@ func (t *guestHandlers) begin() (finish func()) {
 		delete(t.running, done)
 		t.mu.Unlock()
 		close(done)
-	}
+	}, true
+}
+
+// admits reports whether begin would still register a handler.
+func (t *guestHandlers) admits() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.sealed
 }
 
 // wait blocks until no handler is running, or until timeout, reporting
 // whether none was. A handler that registers while it waits is waited for as
-// well as those already running.
+// well as those already running. Whichever way it returns, it seals the set
+// first, under the lock begin takes: finding none running and refusing the
+// next registration are one step, so no handler can slip in between them.
 func (t *guestHandlers) wait(timeout time.Duration) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -526,16 +553,73 @@ func (t *guestHandlers) wait(timeout time.Duration) bool {
 			next = done
 			break
 		}
-		t.mu.Unlock()
 		if next == nil {
+			t.sealed = true
+			t.mu.Unlock()
 			return true
 		}
+		t.mu.Unlock()
 		select {
 		case <-next:
 		case <-deadline.C:
+			t.mu.Lock()
+			t.sealed = true
+			t.mu.Unlock()
 			return false
 		}
 	}
+}
+
+// admissionKey is where admitGuest leaves the finish of the registration it
+// made for a session, for that session's handler to take. Keyed by the
+// session itself: a connection's context is shared by every session on it.
+type admissionKey struct{ sess gssh.Session }
+
+// admitGuest is the guest door's SessionRequestCallback, which charm calls
+// before it answers a session's shell, exec or subsystem request. A shell's or
+// exec's handler is registered with the session's end here, before the guest
+// is told its session started, rather than in the handler, which runs only
+// after: registered there, a guest whose request arrived just as the session's
+// end finished waiting would have been accepted with nothing left to wait for
+// its status. Once the session's end has finished waiting, the request is
+// refused instead.
+//
+// A subsystem -- SFTP -- is refused from then on too, and otherwise admitted
+// without being waited for. A handler with no trackers -- a test's -- admits
+// everything.
+func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
+	handlers := h.sharedGuests
+	if len(h.forceCommand) > 0 {
+		handlers = h.forceCommands
+	}
+	if handlers == nil {
+		return true
+	}
+	if requestType != "shell" && requestType != "exec" {
+		return handlers.admits()
+	}
+	finish, ok := handlers.begin()
+	if !ok {
+		return false
+	}
+	sess.Context().SetValue(admissionKey{sess}, finish)
+	return true
+}
+
+// takeAdmission returns the finish admitGuest left for sess's handler, or nil
+// for a session the door did not admit -- a test's -- which nothing waits for.
+func takeAdmission(sess gssh.Session) func() {
+	// The door's handler is given the session charm admitted wrapped, so
+	// that its output goes straight to the channel; the key is charm's own.
+	if raw, ok := sess.(*rawSession); ok {
+		sess = raw.Session
+	}
+	key := admissionKey{sess}
+	finish, _ := sess.Context().Value(key).(func())
+	if finish != nil {
+		sess.Context().SetValue(key, nil)
+	}
+	return finish
 }
 
 const (
@@ -756,6 +840,15 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
+	// The door registered this guest's handler as it accepted the shell (see
+	// admitGuest). Finished last, after the guest's status and the wait for
+	// it to be answered.
+	if h.kind == kindGuest {
+		if finish := takeAdmission(sess); finish != nil {
+			defer finish()
+		}
+	}
+
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
 	if h.kind == kindHost {
 		id := clientEventID(sessionID)
@@ -837,17 +930,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	guestOutput := io.Writer(sess)
 
 	if h.kind == kindGuest && len(h.forceCommand) > 0 {
-		// Registered before the command starts: a session that is ending
-		// waits, bounded, for every teardown registered by then.
-		if h.forceCommands != nil {
-			defer h.forceCommands.begin()()
-		}
 		if h.ctx.Err() != nil {
 			// The session is already tearing down. This guest arrived a moment
 			// too late, which is not its error, and a command started now
-			// would only be hung up again. Its status is still owed the wait
-			// every guest's gets as the session ends: see the end of
-			// HandleSession.
+			// would only be hung up again. Its shell was accepted before the
+			// session's end stopped waiting for guests, so it is sent 0 and
+			// the wait every guest's status gets as the session ends: see the
+			// end of HandleSession. One that arrives after that is refused at
+			// its request (see admitGuest).
 			_ = sess.Exit(0)
 			awaitChannelClosed(winCh, guestFlushTimeout)
 			return
@@ -1099,12 +1189,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 			guestOutput = sink
 		} else {
-			// Registered for the rest of the handler, which ends with the
-			// guest's exit status.
-			if h.sharedGuests != nil {
-				defer h.sharedGuests.begin()()
-			}
-
 			// Wrap SSH session with TerminalQueryFilter to filter out terminal query
 			// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
 			// they reach the client. This prevents client terminals from responding
@@ -1124,11 +1208,14 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			if err := h.attachGuest(sink); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This guest arrived a
-					// moment too late, which is not its error. The fan-out
-					// closes only as the session ends, so its status is owed
-					// the wait every guest's gets then -- whether or not the
-					// session's context has been cancelled yet: see the end of
-					// HandleSession.
+					// moment too late, which is not its error. Its shell was
+					// accepted before the session's end stopped waiting for
+					// guests, so it is sent 0 and the wait every guest's status
+					// gets as the session ends -- whether or not the session's
+					// context has been cancelled yet, since the fan-out closes
+					// only as the session ends: see the end of HandleSession.
+					// One that arrives after that is refused at its request
+					// (see admitGuest).
 					_ = sess.Exit(0)
 					awaitChannelClosed(winCh, guestFlushTimeout)
 				} else {
