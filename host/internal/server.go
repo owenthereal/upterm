@@ -384,11 +384,16 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 				s.Logger.Warn("gave up waiting for forced commands to end", "bound", bound)
 			}
 			// And the shared command's guests are each sent the session's
-			// status, as the session's last notice to a client, and bounded as
-			// one. Only one of the two waits has anyone to wait for: with a
-			// forced command, every guest has one.
-			if !sh.sharedGuests.wait(guestFlushTimeout) {
-				s.Logger.Warn("gave up waiting for guests to be sent the session's status", "bound", guestFlushTimeout)
+			// status, as the session's last notice to a client. Each handler
+			// waits up to guestFlushTimeout for its close to be answered, after
+			// unwinding and sending the status, which take time of their own,
+			// so the wait for them allows twice that, as forceCommandStopBound
+			// does for a forced command's guest: one the size of the close
+			// wait alone gave up on a guest whose answer took just under it.
+			// Only one of the two waits has anyone to wait for: with a forced
+			// command, every guest has one.
+			if bound := 2 * guestFlushTimeout; !sh.sharedGuests.wait(bound) {
+				s.Logger.Warn("gave up waiting for guests to be sent the session's status", "bound", bound)
 			}
 
 			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
@@ -898,12 +903,43 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	alive := func() bool { return sess.Context().Err() == nil }
 
 	ptyReq, winCh, isPty := sess.Pty()
+
+	// However a guest's handler ends, the Exit it sends is waited on, bounded,
+	// until the close that follows it is answered. A session that is ending
+	// closes its tunnel once its guests' handlers have returned, and the tunnel
+	// takes with it whatever the relay has not yet passed on: a status written
+	// and not yet delivered was lost as surely as one never written -- and the
+	// session can end within a round trip of any guest's Exit, not only of one
+	// it sent because it was ending. Whatever terminates the guest's SSH on the
+	// far side of the tunnel answers the close only once it has read
+	// everything sent before it, the status included: x/crypto answers a CLOSE
+	// from the read loop that has already queued the requests ahead of it
+	// (channel.go:460-464 at v0.57.0). That is the relay, which goes on to
+	// deliver what it has read once the tunnel is gone --
+	// TestSSHForwardTransportCloseDrainsBufferedData in server/ pins it -- or,
+	// for a ws guest of a relay with no SSH listener, which pipes it through
+	// raw, the guest itself.
+	//
+	// Deferred here, so that it runs after everything the handler defers below
+	// -- the guest's sink leaves the fan-out and the client-left event goes out
+	// before the wait, not a round trip after it -- and before the admission's
+	// finish above, which the session's end waits on. winCh is read when it
+	// runs, since the window-change loop sets it to nil once it has seen the
+	// channel close. A guest that has already gone returns at once.
+	if h.kind == kindGuest {
+		defer func() { awaitChannelClosed(winCh, guestFlushTimeout) }()
+	}
+
 	// A local client may be a viewer: a backgrounded host that displays the
 	// session without owning a terminal. It gets no window-change channel,
 	// which the loop below is content with. A guest still needs a pty, because
 	// a guest with no terminal has nothing to show the session on.
 	if !isPty && h.kind == kindGuest {
 		_, _ = io.WriteString(sess, "PTY is required.\n")
+		// Not waited on: with no pty there is no window-change channel to
+		// learn the close from, so the deferred wait above returns at once,
+		// and a session that ends within a round trip of this can still cut
+		// the status off.
 		_ = sess.Exit(1)
 		// Exit closes the channel. Without returning, the rest of the handler
 		// ran against a dead session: it attached it to the shared output
@@ -971,11 +1007,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			// too late, which is not its error, and a command started now
 			// would only be hung up again. Its shell was accepted before the
 			// session's end stopped waiting for guests, so it is sent 0 and
-			// the wait every guest's status gets as the session ends: see the
-			// end of HandleSession. One that arrives after that is refused at
-			// its request (see admitGuest).
+			// the wait every guest's status gets (see the top of
+			// HandleSession). One that arrives after that is refused at its
+			// request (see admitGuest).
 			_ = sess.Exit(0)
-			awaitChannelClosed(winCh, guestFlushTimeout)
 			return
 		}
 
@@ -1247,13 +1282,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// moment too late, which is not its error. Its shell was
 					// accepted before the session's end stopped waiting for
 					// guests, so it is sent 0 and the wait every guest's status
-					// gets as the session ends -- whether or not the session's
-					// context has been cancelled yet, since the fan-out closes
-					// only as the session ends: see the end of HandleSession.
-					// One that arrives after that is refused at its request
-					// (see admitGuest).
+					// gets (see the top of HandleSession). One that arrives
+					// after that is refused at its request (see admitGuest).
 					_ = sess.Exit(0)
-					awaitChannelClosed(winCh, guestFlushTimeout)
 				} else {
 					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
 					_ = sess.Exit(1)
@@ -1497,22 +1528,6 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		_ = sess.Exit(1)
 	default:
 		_ = sess.Exit(0)
-	}
-
-	// A session that is ending closes its tunnel once its guests' handlers
-	// have returned, and the tunnel takes with it whatever the relay has not
-	// yet passed on: a status written and not yet delivered was lost as surely
-	// as one never written. So a guest's handler waits, bounded, for the close
-	// Exit sent to be answered. Whatever terminates the guest's SSH on the far
-	// side of the tunnel answers it only once it has read everything sent
-	// before it, the status included: x/crypto answers a CLOSE from the read
-	// loop that has already queued the requests ahead of it (channel.go:460-464
-	// at v0.57.0). That is the relay, which goes on to deliver what it has read
-	// once the tunnel is gone -- TestSSHForwardTransportCloseDrainsBufferedData
-	// in server/ pins it -- or, for a ws guest of a relay with no SSH listener,
-	// which pipes it through raw, the guest itself.
-	if h.kind == kindGuest && h.ctx.Err() != nil {
-		awaitChannelClosed(winCh, guestFlushTimeout)
 	}
 }
 

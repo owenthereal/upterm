@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -173,6 +175,70 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 	}
 }
 
+// A guest turned away mid-session -- its forced command fails to start, or its
+// output can't be attached -- is sent 1, and its handler waits for that to be
+// answered as every guest's does: the session may end within the round trip,
+// and its tunnel would then close on the status.
+func TestAGuestTurnedAwayWaitsForItsCloseToBeAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(h *sessionHandler)
+	}{
+		{"forced command fails to start", func(h *sessionHandler) {
+			h.forceCommand = []string{filepath.Join(t.TempDir(), "no-such-command")}
+		}},
+		{"output can't be attached", func(h *sessionHandler) {
+			// A replay larger than a guest's buffer overflows it as it is
+			// handed over.
+			h.writers = uio.NewMultiWriter(2 * uio.DefaultGuestBufferSize)
+			_, err := h.writers.Write(bytes.Repeat([]byte("x"), uio.DefaultGuestBufferSize+1))
+			require.NoError(t, err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guest := &exitRecordingGuest{
+				fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "turned-away"}, winCh: make(chan gssh.Window), out: io.Discard},
+				exited:           make(chan int, 1),
+			}
+			h := &sessionHandler{
+				kind:              kindGuest,
+				writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+				eventEmmiter:      emitter.New(1),
+				terminals:         newTerminalWindows(discardLogger()),
+				keepAliveDuration: time.Hour,
+				ctx:               t.Context(),
+				logger:            discardLogger(),
+				forceCommands:     &guestHandlers{},
+				sharedGuests:      &guestHandlers{},
+			}
+			tc.setup(h)
+			require.True(t, h.admitGuest(guest, "shell"))
+			done := make(chan struct{})
+			go func() { defer close(done); h.HandleSession(guest) }()
+
+			select {
+			case code := <-guest.exited:
+				assert.Equal(t, 1, code)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the guest was never sent a status")
+			}
+			select {
+			case <-done:
+				t.Fatal("the handler returned before its close was answered")
+			case <-time.After(200 * time.Millisecond):
+			}
+			assert.False(t, h.guestTracker().wait(0), "the session's end would not wait for the handler")
+
+			close(guest.winCh) // the far side answers the close
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the handler did not return once its close was answered")
+			}
+		})
+	}
+}
+
 // exitRecordingGuest is a fakeGuestSession that reports the status it is
 // sent.
 type exitRecordingGuest struct {
@@ -307,8 +373,11 @@ func TestTheDoorForgetsEachAdmissionOnceItsHandlerHasTakenIt(t *testing.T) {
 	}
 
 	for range 50 {
-		// Each session's input ends at once, so its handler runs to its end.
-		guest := &fakeGuestSession{ctx: conn, winCh: make(chan gssh.Window), out: io.Discard}
+		// Each session's input ends at once, so its handler runs to its end,
+		// and its channel is already closed, so nothing is left to wait for.
+		winCh := make(chan gssh.Window)
+		close(winCh)
+		guest := &fakeGuestSession{ctx: conn, winCh: winCh, out: io.Discard}
 		require.True(t, h.admitGuest(guest, "shell"))
 		done := make(chan struct{})
 		go func() { defer close(done); h.HandleSession(guest) }()

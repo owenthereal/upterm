@@ -386,6 +386,46 @@ func TestAGuestIsToldTheSessionsStatusBeforeTheTunnelCloses(t *testing.T) {
 	}
 }
 
+// A forced command's guest whose command exits while the session is still
+// live is told its status before the tunnel closes, even when the session ends
+// right after: the status is still on its way through the relay then, and the
+// session's end found nobody left to wait for once the handler had returned
+// straight after sending it.
+func TestAForcedCommandsStatusOutlivesASessionThatEndsRightAfterIt(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "forced-exited")
+	h := startHost(t, &Server{
+		// The session ends as soon as the guest's forced command has exited.
+		Command:      []string{"sh", "-c", `while [ ! -e "$0" ]; do sleep 0.01; done`, marker},
+		ForceCommand: []string{"sh", "-c", `printf READY; IFS= read -r line; : > "$0"; exit 5`, marker},
+	})
+	relay := newRelayStandIn(t, h.addr)
+	go func() {
+		<-h.stopped
+		relay.closeTunnel()
+	}()
+
+	viaRelay := *h
+	viaRelay.addr = relay.ln.Addr().String()
+	in, out, sess := viaRelay.connectGuestSession(t)
+	readUntil(t, out, "READY")
+
+	relay.latency.Store(int64(500 * time.Millisecond))
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+	go func() { _, _ = io.Copy(io.Discard, out) }()
+
+	exited := make(chan error, 1)
+	go func() { exited <- sess.Wait() }()
+	select {
+	case err := <-exited:
+		var exitErr *ssh.ExitError
+		require.ErrorAs(t, err, &exitErr, "the guest was never sent its forced command's status")
+		assert.Equal(t, 5, exitErr.ExitStatus())
+	case <-time.After(harnessTimeout):
+		t.Fatal("the guest's session never ended")
+	}
+}
+
 // A guest's handler waits for the close it sent with the status to be answered
 // for no longer than guestFlushTimeout. A relay that never passes the status
 // on, or a guest that never answers, does not keep the handler, and with it
@@ -421,11 +461,11 @@ func TestAGuestsHandlerStopsWaitingForAnAnswerThatNeverComes(t *testing.T) {
 	}
 }
 
-// The session's end waits for its guests' handlers for no longer than
-// guestFlushTimeout. One stuck sending its guest the status -- the guest's
-// socket has stopped taking bytes, so the write never returns -- does not hold
-// the session, or the tunnel behind it, open; the tunnel's close then releases
-// the handler.
+// The session's end waits for its guests' handlers for its whole bound,
+// 2*guestFlushTimeout, and no longer. One stuck sending its guest the status
+// -- the guest's socket has stopped taking bytes, so the write never returns
+// -- does not hold the session, or the tunnel behind it, open; the tunnel's
+// close then releases the handler.
 func TestSessionEndStopsWaitingForAGuestItCannotSendTheStatusTo(t *testing.T) {
 	stall := &stallingListener{stalled: make(chan struct{})}
 	srv := &Server{Command: readsALine("READY", 7)}
@@ -438,17 +478,21 @@ func TestSessionEndStopsWaitingForAGuestItCannotSendTheStatusTo(t *testing.T) {
 	readUntil(t, out, "READY")
 
 	stall.stall()
+	start := time.Now()
 	_, err := io.WriteString(in, "go\n")
 	require.NoError(t, err)
 
 	// The command's last output can't reach the guest either, so its flush
-	// runs to its own bound before the session's end begins.
-	budget := outputDrainTimeout + 2*guestFlushTimeout + 2*time.Second
+	// runs to its own bound, guestFlushTimeout, before the session's end
+	// begins; then the session waits its bound for the guest's handler.
+	flushAndWait := guestFlushTimeout + 2*guestFlushTimeout
+	budget := outputDrainTimeout + flushAndWait + 2*time.Second
 	select {
 	case <-h.stopped:
 	case <-time.After(budget):
 		t.Fatalf("the session had not ended %s after its command, waiting on a guest it could not send the status to", budget)
 	}
+	assert.GreaterOrEqual(t, time.Since(start), flushAndWait, "the session's end gave up on its guest's handler before its bound")
 
 	stall.closeConns()
 	select {
