@@ -167,6 +167,8 @@ type FtestSuite struct {
 }
 
 func (suite *FtestSuite) SetupSuite() {
+	testRoutingMode = suite.mode
+
 	// Setup key pairs
 	remove, err := setupKeyPairs()
 	suite.Require().NoError(err)
@@ -227,14 +229,13 @@ func (suite *FtestSuite) TestBanner() {
 		}{{"singleNode", suite.ts1}, {"multiNodes", suite.ts2}} {
 			suite.T().Run(protocol+"/"+topo.name, func(t *testing.T) {
 				joinURL := protocol + "://" + suite.getServerAddr(protocol, topo.join)
-				// A WebSocket entry node dials the node the user names, whose SSH
-				// proxy sends the banner, and in Consul mode an SSH entry node
-				// looks the session up itself and sends its own. In embedded
-				// mode an SSH entry node doesn't check a remote session: it
-				// completes the guest's handshake and carries it on to the node
-				// the user names, which sends the entry node the banner, and the
-				// entry node tells the guest when it opens its session.
-				if suite.mode == routing.ModeEmbedded && protocol == "ssh" && topo.name == "multiNodes" {
+				// In Consul mode an entry node looks the session up itself and
+				// sends its own banner. In embedded mode it doesn't check a
+				// remote session: it completes the guest's handshake, whichever
+				// protocol the guest arrived by, and carries it on to the node
+				// the user names, which sends the entry node the banner, and
+				// the entry node tells the guest when it opens its session.
+				if suite.mode == routing.ModeEmbedded && topo.name == "multiNodes" {
 					testClientToldOfMissingSessionThroughAnotherNode(t, suite.ts1.NodeAddr(), joinURL)
 					return
 				}
@@ -311,6 +312,29 @@ func mustParseURL(urlStr string) *url.URL {
 		panic(fmt.Sprintf("failed to parse URL %s: %v", urlStr, err))
 	}
 	return u
+}
+
+// testRoutingMode is the mode of the suite that is running, for the few
+// expectations that depend on it and are checked by a shared test case, which
+// is handed URLs and not the suite. TestEmbedded and TestConsul each run to
+// completion before the other starts, and each sets this in SetupSuite.
+var testRoutingMode routing.Mode
+
+// entryNodeCompletesHandshake reports whether the node a guest joins at
+// completes the guest's handshake itself and carries the connection on to the
+// session's node, so that node's verdict reaches the guest when it opens its
+// session rather than while authenticating.
+//
+// It does so whenever the guest joins somewhere other than the session's own
+// node, with one exception: in Consul mode the store resolves the session's
+// node, so a ws entry dials that node directly and the guest's handshake is
+// with it. In embedded mode nothing but the guest's own user names the node, so
+// a ws entry hands the connection to its own SSH proxy, as an ssh entry does.
+func entryNodeCompletesHandshake(hostShareURL, clientJoinURL string) bool {
+	if hostShareURL == clientJoinURL {
+		return false
+	}
+	return testRoutingMode != routing.ModeConsul || mustParseURL(clientJoinURL).Scheme != "ws"
 }
 
 func funcName(i interface{}) string {

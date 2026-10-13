@@ -571,12 +571,12 @@ func shareGated(t *testing.T, hostURL, hostNodeAddr string) *api.GetSessionRespo
 
 // testJoinRefusedAcrossNodesStops checks that a guest whose key the host
 // doesn't authorize stops refused, and doesn't wait, even with --wait. Where
-// the route has a hop, ssh on another node, the session's node states the
-// refusal (upterm-hop: key refused, which the entry node passes on as
-// "upstream refused the key"), and so it is definitive. Elsewhere the guest's
-// handshake is with the session's node itself, which refuses the key while
-// authenticating, and a dev build's version line is no evidence that the
-// refusal was of the key rather than of a missing session.
+// the entry node completes the handshake and the route has a hop, the session's
+// node states the refusal (upterm-hop: key refused, which the entry node passes
+// on as "upstream refused the key"), and so it is definitive. Otherwise the
+// guest's handshake is with the node that holds the authorized keys, which
+// refuses the key while authenticating, and a dev build's version line is no
+// evidence that the refusal was of the key rather than of a missing session.
 func testJoinRefusedAcrossNodesStops(t *testing.T, hostURL, hostNodeAddr, clientJoinURL string) {
 	g := joinGuest(t, clientJoinURL, shareGated(t, hostURL, hostNodeAddr),
 		guestOpts{signers: []ssh.Signer{newTestSigner(t)}, wait: true})
@@ -586,7 +586,7 @@ func testJoinRefusedAcrossNodesStops(t *testing.T, hostURL, hostNodeAddr, client
 	require.NotContains(t, g.kinds(), join.Waiting)
 	var refused *join.RefusedError
 	require.ErrorAs(t, out.Err, &refused)
-	if clientJoinURL != hostURL && strings.HasPrefix(clientJoinURL, "ssh://") {
+	if entryNodeCompletesHandshake(hostURL, clientJoinURL) {
 		require.False(t, refused.Ambiguous, "the session's node stated the refusal")
 	} else {
 		require.True(t, refused.Ambiguous, "a refusal at authentication, from a relay whose version is no evidence")
