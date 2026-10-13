@@ -22,7 +22,7 @@ func proxyCmd() *cobra.Command {
   upterm host --server wss://uptermd.upterm.dev -- YOUR_COMMAND
 
   # Client connects to the host session via WebSocket:
-  ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN:uptermd.uptermd.dev:443`,
+  ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443`,
 		RunE: proxyRunE,
 	}
 
