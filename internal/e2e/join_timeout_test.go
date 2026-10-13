@@ -189,7 +189,9 @@ func TestAttachReportsJoinTimeoutWithoutClaimingCommandExit(t *testing.T) {
 	out, err := term.Capture(h.ctx)
 	require.NoError(t, err)
 	require.Contains(t, out, "upterm: no guest joined within the join timeout; session ended")
-	require.Contains(t, out, "upterm: session "+h.name+" ended (status 0)")
+	// A status of 0 isn't told.
+	require.Contains(t, out, "upterm: session "+h.name+" ended")
+	require.NotContains(t, out, "ended (status")
 	require.NotContains(t, out, "command exited")
 
 	ended := h.endedInfo()

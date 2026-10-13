@@ -52,6 +52,12 @@ type joinStatus struct {
 	// joined says a session has been ready, so its output may have left the
 	// cursor anywhere on the line.
 	joined bool
+	// dropped says the last line was a drop's, so the waiting line that
+	// follows it, which no attempt has tried yet, says only when the next is.
+	dropped bool
+	// hinted says this outage's long wait has been told, which a session
+	// being ready again resets.
+	hinted bool
 	t      join.Target
 	wait   bool // --wait, which a first join's no-host line says
 	now    func() time.Time
@@ -95,16 +101,31 @@ func (s *joinStatus) eol() string {
 
 // event is join.Config.Events.
 func (s *joinStatus) event(e join.Event) {
-	line := renderEvent(e, s.t, s.now(), s.wait)
+	now := s.now()
+	line := renderEvent(e, s.t, now, s.wait)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e.Kind == join.Joined {
-		s.joined = true
-	}
-	if s.tty && e.Kind == join.Waiting {
-		_, _ = io.WriteString(s.w, s.rewind()+line)
-		s.open, s.line, s.rows = true, line, s.rowsOf(line)
-		return
+	switch e.Kind {
+	case join.Joined:
+		s.joined, s.dropped, s.hinted = true, false, false
+	case join.Lost:
+		s.dropped = true
+	case join.Waiting:
+		if s.dropped {
+			line, s.dropped = nextTryLine(e, now), false
+		}
+		// A long wait is told once, on a line of its own above the waiting
+		// line, which goes on being rewritten below it.
+		var hint string
+		if e.Long && !s.hinted {
+			hint, s.hinted = longWaitLine+s.eol(), true
+		}
+		if s.tty {
+			_, _ = io.WriteString(s.w, s.rewind()+hint+line)
+			s.open, s.line, s.rows = true, line, s.rowsOf(line)
+			return
+		}
+		_, _ = io.WriteString(s.w, hint)
 	}
 	// A first join says nothing, and still ends the waiting line, so that
 	// the session's output starts at the margin.
@@ -231,29 +252,41 @@ func renderEvent(e join.Event, t join.Target, now time.Time, wait bool) string {
 		if !e.Rejoin {
 			return ""
 		}
-		return fmt.Sprintf("upterm: rejoined session %s after %s", t.SessionID(), e.Down.Round(time.Second))
+		return fmt.Sprintf("upterm: rejoined after %s", e.Down.Round(time.Second))
 	case join.Lost:
-		return fmt.Sprintf("upterm: lost the connection to session %s (%v); rejoining. Enter retries now, Ctrl-C stops.", t.SessionID(), e.Err)
+		return fmt.Sprintf("upterm: lost the connection (%v); rejoining. Enter retries now, Ctrl-C stops.", e.Err)
 	case join.Waiting:
-		line := waitingLine(e, t, now, wait)
-		if e.Long {
-			line += ". The session may have ended or moved; check with the host."
-		}
-		return line
+		return waitingLine(e, t, now, wait)
 	}
 	return ""
 }
 
+// nextTryLine is the waiting line straight after a drop, before any attempt
+// has said what stops a rejoin.
+func nextTryLine(e join.Event, now time.Time) string {
+	return fmt.Sprintf("upterm: next try in %d s", nextIn(e, now))
+}
+
+// longWaitLine is said once an outage has lasted join's Timing.LongAfter. It
+// names no duration: Since is a wall-clock time, which a stepped clock would
+// make wrong, and the waiting line below it says since when.
+const longWaitLine = "upterm: still waiting; the session may have ended or moved. Check with the host."
+
+// nextIn is the whole seconds from now to e's next attempt.
+func nextIn(e join.Event, now time.Time) int {
+	return max(0, int(math.Ceil(e.Next.Sub(now).Seconds())))
+}
+
 func waitingLine(e join.Event, t join.Target, now time.Time, wait bool) string {
 	since := e.Since.Local().Format("15:04:05")
-	next := max(0, int(math.Ceil(e.Next.Sub(now).Seconds())))
+	next := nextIn(e, now)
 	switch e.Why {
 	case join.NoHost:
 		switch {
 		case e.First && wait:
-			return fmt.Sprintf("upterm: no host is connected for session %s right now; waiting (Ctrl-C to stop)", t.SessionID())
+			return fmt.Sprintf("upterm: session %s has no host yet; waiting", t.SessionID())
 		case e.First:
-			return fmt.Sprintf("upterm: no host is connected for session %s right now; retrying for 30 s (Ctrl-C to stop)", t.SessionID())
+			return fmt.Sprintf("upterm: session %s has no host yet; retrying for 30 s", t.SessionID())
 		}
 		return fmt.Sprintf("upterm: waiting for the host since %s; next try in %d s", since, next)
 	case join.Unreachable:
@@ -275,9 +308,11 @@ func waitingLine(e join.Event, t join.Target, now time.Time, wait bool) string {
 func renderOutcome(o join.Outcome, t join.Target, src join.KeySource, typed string) (line string, code int) {
 	switch o.Kind {
 	case join.Exited:
-		return fmt.Sprintf("upterm: connection to session %s ended (status %d)", t.SessionID(), o.Status), o.Status
+		// The status is the exit code's: the guest's $? has it, as ssh
+		// leaves it there.
+		return "upterm: connection to the session ended", o.Status
 	case join.Left:
-		return fmt.Sprintf("upterm: left session %s", t.SessionID()), 0
+		return "upterm: left the session", 0
 	case join.Stopped:
 		return "upterm: stopped", exitJoinStopped
 	}
@@ -385,12 +420,7 @@ func agentSkipLine(err error) string {
 	return fmt.Sprintf("upterm: skipping the SSH agent: %v", err)
 }
 
-// notATargetLine refuses typed, naming the target it reaches when it is an
-// ssh command upterm printed.
-func notATargetLine(typed string, err error) string {
-	var bad *join.TargetError
-	if errors.As(err, &bad) && bad.Suggestion != "" {
-		return fmt.Sprintf("upterm: not a join target: %s. Did you mean upterm join %s?", typed, bad.Suggestion)
-	}
+// notATargetLine refuses typed.
+func notATargetLine(typed string) string {
 	return fmt.Sprintf("upterm: not a join target: %s. Use ssh://ID@host, wss://ID@host or ID@host.", typed)
 }

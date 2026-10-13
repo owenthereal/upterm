@@ -188,6 +188,15 @@ func TestAttachExitError(t *testing.T) {
 	require.Equal(t, exitDisconnected, ec.Code)
 }
 
+// An attachment ends with one line. The session's status is in it only when
+// it isn't 0, as upterm host's own line is (see spawned.go).
+func TestAttachEndLine(t *testing.T) {
+	require.Equal(t, "upterm: detached from session s; the session continues", attachEndLine("s", attach.Result{Reason: attach.Detached}))
+	require.Equal(t, "upterm: session s ended", attachEndLine("s", attach.Result{Reason: attach.Exited}))
+	require.Equal(t, "upterm: session s ended (status 3)", attachEndLine("s", attach.Result{Reason: attach.Exited, Status: 3}))
+	require.Contains(t, attachEndLine("s", attach.Result{Reason: attach.Disconnected}), "upterm: disconnected from session s (see ")
+}
+
 // TestAttachRunERejectsABadEscapeCharAsACouldNotAttach pins the exit code and
 // the shape of the complaint, which parseEscapeChar's own test cannot: the
 // flag parsed, so this is not a usage error, and a script gets 255 like every

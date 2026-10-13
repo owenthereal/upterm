@@ -47,6 +47,11 @@ func joinCmd() *cobra.Command {
 		Use:   "join [flags] TARGET",
 		Short: "Join a session as a guest, and rejoin it after a drop",
 		Long: `Join a session as a guest, and rejoin it whenever the connection drops.
+TARGET is the connect string on the host's ➤ Join: line.
+
+In a session, ~. at the start of a line leaves (or --escape-char), and on
+Unix ~^Z suspends upterm join; fg resumes it. While it waits to rejoin,
+Enter retries at once and Ctrl-C stops.
 
 upterm join doesn't read ~/.ssh/config: per-host IdentityFile, User and
 ProxyJump don't apply, the target can't be a host alias, and FIDO keys work
@@ -109,9 +114,13 @@ when stopped, and 255 when it can't join.`,
 // supplied, so that those count as much as flags before it.
 //
 // An unquoted paste of an ssh command arrives as several arguments, and is
-// read as the one text it was. A text refused with no suggestion, whose
-// first argument is a target by itself and a later one starts with "-", is
-// that target and join's flags after it: upterm join ID@host --wait.
+// read as the one text it was. One of the ssh commands upterm prints for
+// guests is the target it reaches, which is then the target as typed, so
+// that a line suggesting -i repeats the target rather than the command. Any
+// other ssh command is refused, since join would ignore its options. A
+// refused text whose first argument is a target by itself and a later one
+// starts with "-" is that target and join's flags after it: upterm join
+// ID@host --wait.
 func (f *joinFlags) resolveTarget(c *cobra.Command, args []string) error {
 	if err := cobra.MinimumNArgs(1)(c, args); err != nil {
 		return joinFailure("upterm: " + err.Error())
@@ -123,9 +132,15 @@ func (f *joinFlags) resolveTarget(c *cobra.Command, args []string) error {
 		return nil
 	}
 	var bad *join.TargetError
-	suggested := errors.As(err, &bad) && bad.Suggestion != ""
+	if errors.As(err, &bad) && bad.Suggestion != "" {
+		// A suggestion parses as a target (join.TargetError).
+		if target, err := join.ParseTarget(bad.Suggestion); err == nil {
+			f.target, f.typed = target, bad.Suggestion
+			return nil
+		}
+	}
 	isFlag := func(arg string) bool { return strings.HasPrefix(arg, "-") }
-	if first, ferr := join.ParseTarget(args[0]); ferr == nil && !suggested && slices.ContainsFunc(args[1:], isFlag) {
+	if first, ferr := join.ParseTarget(args[0]); ferr == nil && slices.ContainsFunc(args[1:], isFlag) {
 		flags := c.Flags()
 		if err := flags.Parse(args[1:]); err != nil {
 			return joinFailure("upterm: " + err.Error())
@@ -139,7 +154,7 @@ func (f *joinFlags) resolveTarget(c *cobra.Command, args []string) error {
 			return nil
 		}
 	}
-	return joinFailure(notATargetLine(typed, err))
+	return joinFailure(notATargetLine(typed))
 }
 
 // pastedText is args as the one text a paste of a command was: joined with

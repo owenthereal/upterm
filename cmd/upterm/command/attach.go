@@ -251,20 +251,28 @@ func attachRunE(c *cobra.Command, args []string) error {
 
 	// After raw mode, so it lands at a column of its own — and bounded,
 	// because stderr may be the terminal that just stopped.
-	var msg string
-	switch res.Reason {
-	case attach.Detached:
-		msg = fmt.Sprintf("upterm: detached from session %s; the session continues", name)
-	case attach.Exited:
-		msg = fmt.Sprintf("upterm: session %s ended (status %d)", name, res.Status)
-	case attach.Disconnected:
-		msg = fmt.Sprintf("upterm: disconnected from session %s (see %s); reattach with 'upterm attach %s'", name, utils.UptermLogFilePath(), name)
-	}
-	logging.WriteWithin(os.Stderr, logging.LogBound, "\r\n"+msg+"\r\n")
+	logging.WriteWithin(os.Stderr, logging.LogBound, "\r\n"+attachEndLine(name, res)+"\r\n")
 	// The line above is the whole account of how this ended; the status
 	// returned below is for a script, not for a reader.
 	c.SilenceErrors = true
 	return attachExitError(name, res)
+}
+
+// attachEndLine is how an attachment ended, as its last line. A status of 0
+// isn't told, as upterm host's own line doesn't tell it (see spawned.go).
+func attachEndLine(name string, res attach.Result) string {
+	switch res.Reason {
+	case attach.Detached:
+		return fmt.Sprintf("upterm: detached from session %s; the session continues", name)
+	case attach.Exited:
+		if res.Status == 0 {
+			return fmt.Sprintf("upterm: session %s ended", name)
+		}
+		return fmt.Sprintf("upterm: session %s ended (status %d)", name, res.Status)
+	case attach.Disconnected:
+		return fmt.Sprintf("upterm: disconnected from session %s (see %s); reattach with 'upterm attach %s'", name, utils.UptermLogFilePath(), name)
+	}
+	return ""
 }
 
 func firstArg(args []string) string {
