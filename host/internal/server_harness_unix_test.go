@@ -63,7 +63,15 @@ type hostHarness struct {
 func startHost(t *testing.T, srv *Server) *hostHarness {
 	t.Helper()
 
-	return startHostWith(t, srv, true)
+	return startHostWith(t, srv, true, nil)
+}
+
+// startHostBehind is startHost with the guest door's listener wrapped, so a
+// test can stand something between the host and its guests' connections.
+func startHostBehind(t *testing.T, srv *Server, wrap func(net.Listener) net.Listener) *hostHarness {
+	t.Helper()
+
+	return startHostWith(t, srv, true, wrap)
 }
 
 // startHostNoRelayAuthority is startHost for a test about the nil authority --
@@ -71,10 +79,10 @@ func startHost(t *testing.T, srv *Server) *hostHarness {
 func startHostNoRelayAuthority(t *testing.T, srv *Server) *hostHarness {
 	t.Helper()
 
-	return startHostWith(t, srv, false)
+	return startHostWith(t, srv, false, nil)
 }
 
-func startHostWith(t *testing.T, srv *Server, setAuthority bool) *hostHarness {
+func startHostWith(t *testing.T, srv *Server, setAuthority bool, wrap func(net.Listener) net.Listener) *hostHarness {
 	t.Helper()
 
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -109,6 +117,10 @@ func startHostWith(t *testing.T, srv *Server, setAuthority bool) *hostHarness {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+	served := ln
+	if wrap != nil {
+		served = wrap(ln)
+	}
 
 	hostLn, err := net.Listen("unix", filepath.Join(shortTempDir(t), "a.sock"))
 	require.NoError(t, err)
@@ -119,7 +131,7 @@ func startHostWith(t *testing.T, srv *Server, setAuthority bool) *hostHarness {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		done <- srv.ServeWithContext(ctx, ln, hostLn)
+		done <- srv.ServeWithContext(ctx, served, hostLn)
 	}()
 	t.Cleanup(func() {
 		cancel()
