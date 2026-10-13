@@ -244,7 +244,8 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	sessCtx, cancel := context.WithCancel(sessionContext(ctx))
 	sh := sessionHandler{
 		forceCommand:          s.ForceCommand,
-		forceCommands:         &forceCommandTeardowns{},
+		forceCommands:         &guestHandlers{},
+		sharedGuests:          &guestHandlers{},
 		forceCommandHangup:    hangupGrace,
 		forceCommandGrace:     forceCommandStopGrace,
 		commandEnv:            s.CommandEnv,
@@ -379,6 +380,13 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			if bound := forceCommandStopBound(sh.forceCommandHangup, sh.forceCommandGrace); !sh.forceCommands.wait(bound) {
 				s.Logger.Warn("gave up waiting for forced commands to end", "bound", bound)
 			}
+			// And the shared command's guests are each sent the session's
+			// status, as the session's last notice to a client, and bounded as
+			// one. Only one of the two waits has anyone to wait for: with a
+			// forced command, every guest has one.
+			if !sh.sharedGuests.wait(guestFlushTimeout) {
+				s.Logger.Warn("gave up waiting for guests to be sent the session's status", "bound", guestFlushTimeout)
+			}
 
 			// shut down ssh server. sessCtx, not ctx: Shutdown waits on its
 			// connection WaitGroup until the context it is given is done, and
@@ -474,22 +482,21 @@ func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
 	return hangup + 3*grace + forceCommandDrainTimeout + guestFlushTimeout
 }
 
-// forceCommandTeardowns tracks the guests' forced commands still running, so a
-// session that is ending can wait for them: each is hung up and sends its guest
-// a reset once it has gone, and in production the tunnel closes behind the
-// session, which would cut them off first.
+// guestHandlers tracks guests' handlers still running, so a session that is
+// ending can wait for them: in production the tunnel closes behind the
+// session, and would cut off what they still have to send their guests.
 //
 // Not a sync.WaitGroup: a guest can reach the door while the session is ending,
 // and a WaitGroup may not be added to from zero while it is being waited on.
-// wait covers the teardowns registered when it is called, which every guest
+// wait covers the handlers registered when it is called, which every guest
 // that can still be sent anything has.
-type forceCommandTeardowns struct {
+type guestHandlers struct {
 	mu      sync.Mutex
 	running map[chan struct{}]struct{}
 }
 
-// begin registers a forced command, returning what marks it finished.
-func (t *forceCommandTeardowns) begin() (finish func()) {
+// begin registers a handler, returning what marks it finished.
+func (t *guestHandlers) begin() (finish func()) {
 	done := make(chan struct{})
 	t.mu.Lock()
 	if t.running == nil {
@@ -505,9 +512,9 @@ func (t *forceCommandTeardowns) begin() (finish func()) {
 	}
 }
 
-// wait blocks until every forced command registered so far has finished, or
-// until timeout, reporting whether they all did.
-func (t *forceCommandTeardowns) wait(timeout time.Duration) bool {
+// wait blocks until every handler registered so far has finished, or until
+// timeout, reporting whether they all did.
+func (t *guestHandlers) wait(timeout time.Duration) bool {
 	t.mu.Lock()
 	pending := make([]chan struct{}, 0, len(t.running))
 	for done := range t.running {
@@ -725,9 +732,13 @@ type sessionHandler struct {
 	hostClients *hostClients
 
 	// forceCommands is what the session's end waits on for the forced
-	// commands' teardowns. Shared by every guest's handler; nil in a test's
-	// handler, which waits for nothing.
-	forceCommands *forceCommandTeardowns
+	// commands' teardowns: each is hung up and sends its guest a reset once
+	// it has gone. Shared by every guest's handler; nil in a test's handler,
+	// which waits for nothing.
+	forceCommands *guestHandlers
+	// sharedGuests is the same for the shared command's guests, each of which
+	// is sent the session's status. Nil in a test's handler.
+	sharedGuests *guestHandlers
 	// forceCommandHangup and forceCommandGrace bound a forced command's
 	// teardown: hangupGrace and forceCommandStopGrace, read once when the
 	// session starts. A handler can outlive its session -- one whose guest
@@ -1081,6 +1092,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 			guestOutput = sink
 		} else {
+			// Registered for the rest of the handler, which ends with the
+			// guest's exit status.
+			if h.sharedGuests != nil {
+				defer h.sharedGuests.begin()()
+			}
+
 			// Wrap SSH session with TerminalQueryFilter to filter out terminal query
 			// sequences (like OSC 10/11 color queries, CSI 6n cursor position) before
 			// they reach the client. This prevents client terminals from responding
@@ -1345,6 +1362,42 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		_ = sess.Exit(1)
 	default:
 		_ = sess.Exit(0)
+	}
+
+	// A session that is ending closes its tunnel once its guests' handlers
+	// have returned, and the tunnel takes with it whatever the relay has not
+	// yet passed on: a status written and not yet delivered was lost as surely
+	// as one never written. So a guest's handler waits, bounded, for the close
+	// Exit sent to be answered. Whatever terminates the guest's SSH on the far
+	// side of the tunnel -- the relay, or the guest itself -- answers it only
+	// once it has read everything sent before it, the status included, and the
+	// relay goes on to deliver what it has read when the tunnel is gone.
+	if h.kind == kindGuest && h.ctx.Err() != nil {
+		awaitChannelClosed(winCh, guestFlushTimeout)
+	}
+}
+
+// awaitChannelClosed waits, up to timeout, for a session's channel to be
+// closed from the far side, which charm reports by closing the session's
+// window-change channel once the channel's request loop has ended. It drains
+// that channel as it waits: charm delivers a window change from inside the
+// request loop, so one nobody reads would park the loop, and the close with
+// it. A nil winCh is a channel already seen closed.
+func awaitChannelClosed(winCh <-chan gssh.Window, timeout time.Duration) {
+	if winCh == nil {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-winCh:
+			if !ok {
+				return
+			}
+		case <-timer.C:
+			return
+		}
 	}
 }
 

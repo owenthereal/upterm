@@ -3,13 +3,16 @@
 package internal
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -339,5 +342,140 @@ func TestAForcedCommandsResetIsBounded(t *testing.T) {
 	case <-time.After(guestFlushTimeout + 5*time.Second):
 		_ = guest.Close()
 		t.Fatal("the handler waited on a guest that stopped taking output")
+	}
+}
+
+// A guest is told how the session ended before the tunnel closes behind it.
+// The host closes its tunnel once ServeWithContext has returned, and that
+// takes every guest's connection with it, along with whatever the relay has
+// not yet passed on. A guest whose status had not reached it by then saw its
+// channel close without one: a plain ssh guest exited 255, "remote command
+// exited without exit status", and `upterm join` took it for a drop and waited
+// for a host that was never coming back.
+func TestAGuestIsToldTheSessionsStatusBeforeTheTunnelCloses(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 7)})
+	relay := newRelayStandIn(t, h.addr)
+	go func() {
+		<-h.stopped
+		relay.closeTunnel()
+	}()
+
+	viaRelay := *h
+	viaRelay.addr = relay.ln.Addr().String()
+	in, out, sess := viaRelay.connectGuestSession(t)
+	readUntil(t, out, "READY")
+
+	// From here the relay is slow to pass on what the host sends, so a host
+	// that closes the tunnel as soon as its guests' handlers have written
+	// their status still cuts it off.
+	relay.latency.Store(int64(250 * time.Millisecond))
+	_, err := io.WriteString(in, "go\n")
+	require.NoError(t, err)
+	go func() { _, _ = io.Copy(io.Discard, out) }()
+
+	exited := make(chan error, 1)
+	go func() { exited <- sess.Wait() }()
+	select {
+	case err := <-exited:
+		var exitErr *ssh.ExitError
+		require.ErrorAs(t, err, &exitErr, "the guest was never sent the session's status")
+		assert.Equal(t, 7, exitErr.ExitStatus())
+	case <-time.After(harnessTimeout):
+		t.Fatal("the guest's session never ended")
+	}
+}
+
+// relayStandIn carries guests to a host as the relay does over the host's
+// tunnel: it takes what the host writes at once and passes it on after
+// latency, and closing the tunnel drops whatever it has not passed on yet.
+type relayStandIn struct {
+	ln      net.Listener
+	latency atomic.Int64 // nanoseconds, host to guest
+
+	mu     sync.Mutex
+	conns  []net.Conn
+	closed bool
+}
+
+func newRelayStandIn(t *testing.T, hostAddr string) *relayStandIn {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	r := &relayStandIn{ln: ln}
+	t.Cleanup(r.closeTunnel)
+	go func() {
+		for {
+			guest, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			host, err := net.Dial("tcp", hostAddr)
+			if err != nil {
+				_ = guest.Close()
+				continue
+			}
+			if !r.track(guest, host) {
+				return
+			}
+			go func() { _, _ = io.Copy(host, guest) }()
+			go r.relay(host, guest)
+		}
+	}()
+	return r
+}
+
+// relay reads what the host sends as soon as it is sent, and delivers each
+// piece to the guest once latency has passed since it arrived.
+func (r *relayStandIn) relay(host, guest net.Conn) {
+	type piece struct {
+		b   []byte
+		due time.Time
+	}
+	pieces := make(chan piece, 1024)
+	go func() {
+		defer func() { _ = guest.Close() }()
+		for p := range pieces {
+			time.Sleep(time.Until(p.due))
+			if _, err := guest.Write(p.b); err != nil {
+				return
+			}
+		}
+	}()
+	defer close(pieces)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := host.Read(buf)
+		if n > 0 {
+			pieces <- piece{bytes.Clone(buf[:n]), time.Now().Add(time.Duration(r.latency.Load()))}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (r *relayStandIn) track(conns ...net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		return false
+	}
+	r.conns = append(r.conns, conns...)
+	return true
+}
+
+// closeTunnel is the host closing its tunnel: every guest's connection goes,
+// and nothing still in transit is delivered.
+func (r *relayStandIn) closeTunnel() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	_ = r.ln.Close()
+	for _, c := range r.conns {
+		_ = c.Close()
 	}
 }
