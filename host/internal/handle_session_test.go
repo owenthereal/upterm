@@ -150,7 +150,7 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 			select {
 			case code := <-guest.exited:
 				assert.Equal(t, 0, code)
-			case <-time.After(harnessTimeout):
+			case <-time.After(10 * time.Second):
 				t.Fatal("the late guest was never sent a status")
 			}
 			select {
@@ -163,7 +163,7 @@ func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
 			close(guest.winCh) // the far side answers the close
 			select {
 			case <-done:
-			case <-time.After(harnessTimeout):
+			case <-time.After(10 * time.Second):
 				t.Fatal("the late guest's handler did not return once its close was answered")
 			}
 		})
@@ -191,7 +191,7 @@ func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
 	var handlers guestHandlers
 	first := handlers.begin()
 	waited := make(chan bool, 1)
-	go func() { waited <- handlers.wait(harnessTimeout) }()
+	go func() { waited <- handlers.wait(10 * time.Second) }()
 	// Long enough for wait to be waiting on the first before the second
 	// arrives.
 	time.Sleep(100 * time.Millisecond)
@@ -208,7 +208,7 @@ func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
 	select {
 	case ok := <-waited:
 		assert.True(t, ok)
-	case <-time.After(harnessTimeout):
+	case <-time.After(10 * time.Second):
 		t.Fatal("wait did not return once every handler had finished")
 	}
 }
