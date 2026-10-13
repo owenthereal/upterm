@@ -65,13 +65,19 @@ go install ./cmd/upterm/...
    upterm host
    ```
 
-1. Host retrieves and shares the SSH connection string:
+1. Host retrieves and shares the connection string:
 
    ```console
    upterm session current
    ```
 
-1. Client connects using the shared string:
+1. Client joins using the shared string, and rejoins on its own if the connection drops:
+
+   ```console
+   upterm join ssh://TOKEN@uptermd.upterm.dev
+   ```
+
+   Or with plain `ssh` (no install needed):
 
    ```console
    ssh TOKEN@uptermd.upterm.dev
@@ -82,6 +88,22 @@ go install ./cmd/upterm/...
 Dive into more commands and advanced usage in the [documentation](docs/upterm.md).
 To reach agents running in [Herdr](https://github.com/herdrdev/herdr) at home from a phone or another laptop, see [Reach your Herdr agents from anywhere](guides/herdr.md).
 Below are some notable highlights:
+
+### Joining with `upterm join`
+
+`upterm join` takes the connect string on the host's `➤ Join:` line. If the
+connection drops, it resets most terminal modes the session had set (the
+alternate screen and mouse reporting, for example), says why it's waiting, and
+rejoins on its own: Enter retries at once, and Ctrl-C stops. `~.` leaves.
+
+A forced command (`upterm host --force-command`) starts again on each rejoin,
+so don't use `upterm join` with one whose effects mustn't repeat.
+
+It offers keys as `ssh` does: the agent's, then the default key files, and it
+generates one only when you have none. Unlike `ssh`, it doesn't read
+`~/.ssh/config`: per-host `IdentityFile`, `User` and `ProxyJump` don't apply,
+the target can't be a host alias, and FIDO keys work only through the agent.
+Use `-i`, or plain `ssh`, for those.
 
 ### Command Execution
 
@@ -168,6 +190,8 @@ This mirrors functionality provided by tmate:
 upterm host --force-command 'tmux attach -t pair-programming' -- tmux new -t pair-programming
 ```
 
+A forced command starts again each time `upterm join` rejoins; nothing the previous one did is undone.
+
 Each guest's forced command runs on a pty of its own, with `SSH_TTY`, `SSH_CONNECTION` and `SSH_CLIENT` set as sshd sets them, so a program that copies over OSC 52 when it runs over SSH copies to the guest's clipboard. `--hide-client-ip` leaves out the two that carry the guest's address.
 
 ### Running Without a Terminal
@@ -237,7 +261,7 @@ Type `~.` at the start of a line to detach; the session keeps running, and `upte
 
 If the host's connection to the server drops — a Wi-Fi switch, a laptop
 waking up, a server deploy — `upterm host` reconnects on its own and keeps the
-same session ID, so the same `ssh` command works again once it's back. While it
+same session ID, so the same connect string works again once it's back. While it
 retries, `upterm session info` shows `reconnecting`, why, and when it tries
 next. Nothing on the host stops: the command, its terminal and a local
 `upterm attach` carry on. The ID lasts as long as the `upterm host` process,
@@ -245,11 +269,17 @@ not across a restart.
 
 (On a self-hosted relay with several nodes and no Consul, a host that comes back on another node gets a new connect string; `upterm session info` shows it.)
 
-Guests connected at the drop are disconnected, and rejoin with the same
-command; one who tries during the gap is told `no host is connected for session
-… right now`. To rejoin an interactive session automatically, and leave the
-terminal usable after a drop, save this as `upterm-rejoin` and run it in place
-of `ssh`, with the same arguments:
+Guests connected at the drop are disconnected. A guest who joined with
+`upterm join` rejoins on its own once the host is back, and says it's waiting
+and when it tries next until then. If the connect string changed, as in the
+note above, it keeps waiting on the old one and, after 5 minutes, adds that the
+session may have ended or moved: stop it with Ctrl-C and join the new one. A
+plain `ssh` guest rejoins with the same command; one who tries during the gap
+is told `no host is connected for session … right now`.
+
+For machines without upterm, this script rejoins an interactive session
+automatically and leaves the terminal usable after a drop. Save it as
+`upterm-rejoin` and run it in place of `ssh`, with the same arguments:
 
 ```bash
 #!/usr/bin/env bash
@@ -319,6 +349,12 @@ upterm host --server wss://uptermd.upterm.dev -- bash
 Clients can connect to the host session via WebSocket as well:
 
 ```console
+upterm join wss://TOKEN@uptermd.upterm.dev
+```
+
+Or with `ssh`, through `upterm proxy`:
+
+```console
 ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443
 ```
 
@@ -332,7 +368,7 @@ upterm host --proxy http://proxy.example.com:3128 -- bash
 
 Without `--proxy`, `ws://` and `wss://` connections already use `HTTPS_PROXY`/`HTTP_PROXY`, but `ssh://` connections go direct. Many corporate proxies only allow `CONNECT` to port 443; in that case, use `--server wss://uptermd.upterm.dev` as well.
 
-Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm proxy`.
+Like other flags, `--proxy` can be set with `UPTERM_PROXY` or as `proxy` in the config file, which keeps proxy credentials off the command line. Clients behind a proxy pass the same flag to `upterm join` or `upterm proxy`.
 
 ### Debug GitHub Actions
 

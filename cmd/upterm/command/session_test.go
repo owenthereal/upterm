@@ -25,6 +25,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/join"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -60,6 +61,117 @@ func TestBuildSessionDetailSSH(t *testing.T) {
 			require.Equal(t, tt.want, detail.SSHCommand)
 		})
 	}
+}
+
+// The join line names the same relay and user as the ssh line, with the
+// scheme's default port left out. A relay behind a path, query or fragment
+// gets none: join takes no such URL. A URL a shell would read as something
+// else is quoted: zsh aborts on an unquoted [::1] as a glob that matches
+// nothing. Double quotes, which cmd.exe understands and single quotes it
+// passes through, unless the URL holds a character they don't keep literal.
+func TestBuildSessionDetailJoinCommand(t *testing.T) { // spec test 17
+	for _, tc := range []struct {
+		host, user, want string
+		target           join.Target // what join makes of the advertised URL
+	}{
+		{"ssh://uptermd.upterm.dev:22", "abc", "upterm join ssh://abc@uptermd.upterm.dev",
+			join.Target{Scheme: "ssh", User: "abc", Host: "uptermd.upterm.dev:22"}},
+		{"ssh://relay.test:2222", "abc", "upterm join ssh://abc@relay.test:2222",
+			join.Target{Scheme: "ssh", User: "abc", Host: "relay.test:2222"}},
+		{"ssh://relay.test:443", "abc", "upterm join ssh://abc@relay.test:443",
+			join.Target{Scheme: "ssh", User: "abc", Host: "relay.test:443"}},
+		{"wss://uptermd.upterm.dev:443", "abc", "upterm join wss://abc@uptermd.upterm.dev",
+			join.Target{Scheme: "wss", User: "abc", Host: "uptermd.upterm.dev:443"}},
+		{"wss://relay.test:8443", "abc", "upterm join wss://abc@relay.test:8443",
+			join.Target{Scheme: "wss", User: "abc", Host: "relay.test:8443"}},
+		{"wss://relay.test:80", "abc", "upterm join wss://abc@relay.test:80",
+			join.Target{Scheme: "wss", User: "abc", Host: "relay.test:80"}},
+		{"ws://relay.test:80", "abc", "upterm join ws://abc@relay.test",
+			join.Target{Scheme: "ws", User: "abc", Host: "relay.test:80"}},
+		{"ws://relay.test:8080", "abc", "upterm join ws://abc@relay.test:8080",
+			join.Target{Scheme: "ws", User: "abc", Host: "relay.test:8080"}},
+		{"ws://relay.test:443", "abc", "upterm join ws://abc@relay.test:443",
+			join.Target{Scheme: "ws", User: "abc", Host: "relay.test:443"}},
+		{"wss://relay.test/", "abc", "upterm join wss://abc@relay.test",
+			join.Target{Scheme: "wss", User: "abc", Host: "relay.test:443"}},
+		{"ssh://relay.test:22", "abc:bm9kZTE=", "upterm join ssh://abc:bm9kZTE=@relay.test",
+			join.Target{Scheme: "ssh", User: "abc:bm9kZTE=", Host: "relay.test:22"}},
+		{"ssh://relay.test:22", "abc:bm9kZQ==", "upterm join ssh://abc:bm9kZQ==@relay.test",
+			join.Target{Scheme: "ssh", User: "abc:bm9kZQ==", Host: "relay.test:22"}},
+		{"ssh://relay.test:22", "", "upterm join ssh://abc:MTI3LjAuMC4xOjIyMjI=@relay.test", // an older relay's response
+			join.Target{Scheme: "ssh", User: "abc:MTI3LjAuMC4xOjIyMjI=", Host: "relay.test:22"}},
+		{"ssh://[::1]:2222", "abc", `upterm join "ssh://abc@[::1]:2222"`,
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:2222"}},
+		{"ssh://[::1]:22", "abc", `upterm join "ssh://abc@[::1]"`,
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:22"}},
+		{"wss://[2001:db8::1]:443", "abc", `upterm join "wss://abc@[2001:db8::1]"`,
+			join.Target{Scheme: "wss", User: "abc", Host: "[2001:db8::1]:443"}},
+		{"ssh://[::1]", "abc", `upterm join "ssh://abc@[::1]"`, // parseURL's missing-port branch
+			join.Target{Scheme: "ssh", User: "abc", Host: "[::1]:22"}},
+		{"ssh://[fe80::1%25en0]:22", "abc", `upterm join "ssh://abc@[fe80::1%25en0]"`,
+			join.Target{Scheme: "ssh", User: "abc", Host: "[fe80::1%en0]:22"}},
+		{"wss://[fe80::1%25en0]:8443", "abc", `upterm join "wss://abc@[fe80::1%25en0]:8443"`,
+			join.Target{Scheme: "wss", User: "abc", Host: "[fe80::1%en0]:8443"}},
+		{"ssh://[fe80::1%25en0]", "abc", `upterm join "ssh://abc@[fe80::1%25en0]"`,
+			join.Target{Scheme: "ssh", User: "abc", Host: "[fe80::1%en0]:22"}},
+		{"ssh://relay.test:22", "a$b", `upterm join 'ssh://a$b@relay.test'`, // no double quotes around a $
+			join.Target{Scheme: "ssh", User: "a$b", Host: "relay.test:22"}},
+		{"wss://example.com/ws-uptermd/", "abc", "", join.Target{}},
+		{"wss://example.com/ws?a=1&b=2", "abc", "", join.Target{}},
+		{"wss://example.com/a%2Fb/team%20space/%25", "abc", "", join.Target{}},
+		{"wss://example.com#ws", "abc", "", join.Target{}},
+	} {
+		t.Run(tc.host+" "+tc.user, func(t *testing.T) {
+			d, err := buildSessionDetail(&api.GetSessionResponse{
+				SessionId: "abc", Host: tc.host, SshUser: tc.user, NodeAddr: "127.0.0.1:2222",
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.JoinCommand)
+			if tc.want == "" {
+				return
+			}
+
+			// What a guest pastes reaches join as one argument, a target it
+			// accepts for this session on this relay.
+			for _, shellName := range []string{"sh", "bash", "zsh"} {
+				t.Run(shellName, func(t *testing.T) {
+					args := captureJoinArgs(t, shellName, d.JoinCommand)
+					require.Len(t, args, 2, "command: %s", d.JoinCommand)
+					require.Equal(t, "join", args[0])
+					got, err := join.ParseTarget(args[1])
+					require.NoError(t, err)
+					require.Equal(t, tc.target, got)
+				})
+			}
+		})
+	}
+}
+
+// captureJoinArgs runs the displayed join command through a real shell, with
+// a stand-in upterm that records its argv.
+func captureJoinArgs(t *testing.T, shellName, command string) []string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	shell, err := exec.LookPath(shellName)
+	if err != nil {
+		t.Skipf("%s is not installed", shellName)
+	}
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "upterm"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\" > \"$UPTERM_TEST_ARGS\"\n"), 0o700))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shell, "-c", command)
+	cmd.Env = append(os.Environ(),
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "UPTERM_TEST_ARGS="+argsFile)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "command: %s\noutput: %s", command, output)
+	args, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	return strings.Split(strings.TrimSuffix(string(args), "\x00"), "\x00")
 }
 
 // An open session -- anyone with its ID can join, and nobody was asked -- says
@@ -680,6 +792,8 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 	require.Equal(t, sessiondir.StatusReady, got["status"])
 	require.Equal(t, "sid-1", got["sessionId"])
 	require.NotEmpty(t, got["sshCommand"], "a live session that answered carries its connect string")
+	require.Equal(t, "upterm join ssh://sid-1:MTI3LjAuMC4xOjIyMjI=@127.0.0.1:2222", got["joinCommand"],
+		"and the join command beside it, for the same user and relay")
 
 	_, live, err := lookup(context.Background(), "ready")
 	require.NoError(t, err)
@@ -747,6 +861,7 @@ func Test_lookup_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
 	require.Equal(t, sessiondir.StatusReady, got["status"])
 	require.NotEmpty(t, got["sshCommand"],
 		"the socket the record names answered, so the session is joinable from here too")
+	require.NotEmpty(t, got["joinCommand"])
 	require.Equal(t, d.AdminSocket(), got["adminSocket"],
 		"and the answer says where it was reached")
 	require.Equal(t, d.AttachSocket(), got["attachSocket"],
@@ -781,6 +896,7 @@ func Test_lookup_ReadyWithSocketAnsweringForAnotherSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, live, "an answer about another session is not this session's live detail")
 	require.Empty(t, info.SSHCommand, "and none of it may reach the caller by another route")
+	require.Empty(t, info.JoinCommand)
 	require.Equal(t, "sid-recorded", info.SessionID)
 }
 
@@ -847,6 +963,7 @@ func Test_lookup_Disconnected(t *testing.T) {
 		"a held name keeps the status its owner published")
 	require.NotContains(t, got, "sshCommand",
 		"a socket that answers for a disconnected session does not make it joinable")
+	require.NotContains(t, got, "joinCommand")
 
 	_, live, err := lookup(context.Background(), "disconnected")
 	require.NoError(t, err)
@@ -1145,7 +1262,7 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// joinable.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
@@ -2131,6 +2248,7 @@ func Test_lookup_Reconnecting(t *testing.T) {
 
 	got := lookupJSON(t, "reconnecting")
 	require.NotEmpty(t, got["sshCommand"])
+	require.NotEmpty(t, got["joinCommand"])
 	for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
 		require.Contains(t, got, key)
 	}

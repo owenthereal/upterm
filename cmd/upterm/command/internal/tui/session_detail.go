@@ -64,6 +64,7 @@ type SessionDetail struct {
 	Command          string
 	ForceCommand     string
 	Host             string
+	JoinCommand      string // upterm join, for guests who have upterm
 	SSHCommand       string
 	SFTPEnabled      bool   // Whether SFTP/SCP is enabled
 	SFTPCommand      string // SFTP command
@@ -335,10 +336,13 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 
 	// SFTP and SCP commands (only shown if SFTP is enabled)
 	sftp := detail.SFTPEnabled && detail.SFTPCommand != ""
-	if detail.SSHCommand != "" || sftp {
+	if detail.JoinCommand != "" || detail.SSHCommand != "" || sftp {
 		b.WriteString("\n")
 	}
 
+	// Join first: it's the front door, and the ssh line under it serves
+	// guests without upterm.
+	writeCommand("➤ Join:", detail.JoinCommand)
 	writeCommand("➤ SSH:", detail.SSHCommand)
 	if sftp {
 		writeCommand("➤ SFTP:", detail.SFTPCommand)

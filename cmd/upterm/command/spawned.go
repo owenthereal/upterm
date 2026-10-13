@@ -340,6 +340,7 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 			info.Command = detail.Command
 			info.ForceCommand = detail.ForceCommand
 			info.SSHCommand = detail.SSHCommand
+			info.JoinCommand = detail.JoinCommand
 			info.Open = detail.Open
 		}
 	}

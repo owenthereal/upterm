@@ -231,6 +231,29 @@ func Test_FormatSessionDetail_withoutALiveAnswer(t *testing.T) {
 	assert.Contains(t, live, "SSH:")
 }
 
+// The join line is the front door, so it comes first, and the ssh line under it
+// serves guests without upterm. A join line alone still opens the commands
+// with a blank line.
+func TestJoinLinePrintsAboveSSH(t *testing.T) {
+	detail := SessionDetail{
+		SessionID:   "abc",
+		Host:        "ssh://h:22",
+		JoinCommand: "upterm join ssh://abc@h",
+		SSHCommand:  "ssh abc@h",
+	}
+	assert.Equal(t, "Session: abc\n\n"+
+		row("Host:", "ssh://h:22")+
+		"\n➤ Join:\n    upterm join ssh://abc@h\n"+
+		"➤ SSH:\n    ssh abc@h\n",
+		renderSessionDetail(detail, 80))
+
+	detail.SSHCommand = ""
+	assert.Equal(t, "Session: abc\n\n"+
+		row("Host:", "ssh://h:22")+
+		"\n➤ Join:\n    upterm join ssh://abc@h\n",
+		renderSessionDetail(detail, 80))
+}
+
 // pinClock fixes what the status row calls "now", so whether a next attempt is
 // still ahead does not depend on when the test runs.
 func pinClock(t *testing.T, at time.Time) {
