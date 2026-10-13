@@ -488,8 +488,8 @@ func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
 //
 // Not a sync.WaitGroup: a guest can reach the door while the session is ending,
 // and a WaitGroup may not be added to from zero while it is being waited on.
-// wait covers the handlers registered when it is called, which every guest
-// that can still be sent anything has.
+// The door stays open until the waits are done, so that such a guest is told
+// how the session ended rather than refused, and wait covers its handler too.
 type guestHandlers struct {
 	mu      sync.Mutex
 	running map[chan struct{}]struct{}
@@ -512,26 +512,29 @@ func (t *guestHandlers) begin() (finish func()) {
 	}
 }
 
-// wait blocks until every handler registered so far has finished, or until
-// timeout, reporting whether they all did.
+// wait blocks until no handler is running, or until timeout, reporting
+// whether none was. A handler that registers while it waits is waited for as
+// well as those already running.
 func (t *guestHandlers) wait(timeout time.Duration) bool {
-	t.mu.Lock()
-	pending := make([]chan struct{}, 0, len(t.running))
-	for done := range t.running {
-		pending = append(pending, done)
-	}
-	t.mu.Unlock()
-
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	for _, done := range pending {
+	for {
+		t.mu.Lock()
+		var next chan struct{}
+		for done := range t.running {
+			next = done
+			break
+		}
+		t.mu.Unlock()
+		if next == nil {
+			return true
+		}
 		select {
-		case <-done:
+		case <-next:
 		case <-deadline.C:
 			return false
 		}
 	}
-	return true
 }
 
 const (

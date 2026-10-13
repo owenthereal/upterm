@@ -8,6 +8,7 @@ import (
 	gssh "charm.land/ssh"
 	"github.com/olebedev/emitter"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -100,4 +101,35 @@ func (c fakeGuestContext) Value(key any) any {
 		return c.sessionID
 	}
 	return nil
+}
+
+// The session's end waits for the guests' handlers that register while it
+// waits, as well as those already there: a guest can reach the door while
+// the session is ending -- the door stays open until the waits are done, so it
+// is told rather than refused -- and its status is no less cut off by the
+// tunnel's close than an earlier guest's.
+func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
+	var handlers guestHandlers
+	first := handlers.begin()
+	waited := make(chan bool, 1)
+	go func() { waited <- handlers.wait(harnessTimeout) }()
+	// Long enough for wait to be waiting on the first before the second
+	// arrives.
+	time.Sleep(100 * time.Millisecond)
+	second := handlers.begin()
+
+	first()
+	select {
+	case <-waited:
+		t.Fatal("wait returned with a handler that registered while it waited still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	second()
+	select {
+	case ok := <-waited:
+		assert.True(t, ok)
+	case <-time.After(harnessTimeout):
+		t.Fatal("wait did not return once every handler had finished")
+	}
 }
