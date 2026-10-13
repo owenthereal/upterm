@@ -844,8 +844,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		if h.ctx.Err() != nil {
 			// The session is already tearing down. This guest arrived a moment
 			// too late, which is not its error, and a command started now
-			// would only be hung up again.
+			// would only be hung up again. Its status is still owed the wait
+			// every guest's gets as the session ends: see the end of
+			// HandleSession.
 			_ = sess.Exit(0)
+			awaitChannelClosed(winCh, guestFlushTimeout)
 			return
 		}
 
@@ -1120,8 +1123,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			if err := h.attachGuest(sink); err != nil {
 				if errors.Is(err, uio.ErrClosed) {
 					// The session is already tearing down. This guest arrived a
-					// moment too late, which is not its error.
+					// moment too late, which is not its error. The fan-out
+					// closes only as the session ends, so its status is owed
+					// the wait every guest's gets then -- whether or not the
+					// session's context has been cancelled yet: see the end of
+					// HandleSession.
 					_ = sess.Exit(0)
+					awaitChannelClosed(winCh, guestFlushTimeout)
 				} else {
 					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
 					_ = sess.Exit(1)

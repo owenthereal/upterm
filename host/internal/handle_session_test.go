@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -100,6 +101,84 @@ func (c fakeGuestContext) Value(key any) any {
 	if key == gssh.ContextKeySessionID {
 		return c.sessionID
 	}
+	return nil
+}
+
+// A guest that reaches the door as the session ends is sent a status at once
+// -- the fan-out has closed to it, or its forced command would only be hung up
+// again -- and its handler then waits, as every guest's does, for that to be
+// answered before it returns: the session's end waits for the handler, and the
+// tunnel closes behind it. Returning straight after Exit let the tunnel close
+// on a status still in transit, and an `upterm join` rejoining in that window
+// waited for a host that was never coming back.
+func TestALateGuestWaitsForItsCloseToBeAnswered(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		name := "shared command"
+		if forced {
+			name = "forced command"
+		}
+		t.Run(name, func(t *testing.T) {
+			ending, cancel := context.WithCancel(t.Context())
+			cancel()
+			writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+			require.NoError(t, writers.Shutdown(t.Context()))
+
+			guest := &exitRecordingGuest{
+				fakeGuestSession: fakeGuestSession{ctx: fakeGuestContext{sessionID: "late"}, winCh: make(chan gssh.Window), out: io.Discard},
+				exited:           make(chan int, 1),
+			}
+			h := &sessionHandler{
+				kind:              kindGuest,
+				writers:           writers,
+				eventEmmiter:      emitter.New(1),
+				terminals:         newTerminalWindows(discardLogger()),
+				keepAliveDuration: time.Hour,
+				ctx:               ending,
+				logger:            discardLogger(),
+				forceCommands:     &guestHandlers{},
+				sharedGuests:      &guestHandlers{},
+			}
+			waitedOn := h.sharedGuests
+			if forced {
+				h.forceCommand = []string{"true"}
+				waitedOn = h.forceCommands
+			}
+
+			done := make(chan struct{})
+			go func() { defer close(done); h.HandleSession(guest) }()
+
+			select {
+			case code := <-guest.exited:
+				assert.Equal(t, 0, code)
+			case <-time.After(harnessTimeout):
+				t.Fatal("the late guest was never sent a status")
+			}
+			select {
+			case <-done:
+				t.Fatal("the late guest's handler returned before its close was answered")
+			case <-time.After(200 * time.Millisecond):
+			}
+			assert.False(t, waitedOn.wait(0), "the session's end would not wait for the late guest's handler")
+
+			close(guest.winCh) // the far side answers the close
+			select {
+			case <-done:
+			case <-time.After(harnessTimeout):
+				t.Fatal("the late guest's handler did not return once its close was answered")
+			}
+		})
+	}
+}
+
+// exitRecordingGuest is a fakeGuestSession that reports the status it is
+// sent.
+type exitRecordingGuest struct {
+	fakeGuestSession
+	exited chan int
+}
+
+func (g *exitRecordingGuest) Exit(code int) error {
+	g.exited <- code
 	return nil
 }
 
