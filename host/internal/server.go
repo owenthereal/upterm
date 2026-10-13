@@ -514,6 +514,11 @@ type guestHandlers struct {
 	// admitted holds, for each session admit has registered and whose
 	// handler has not yet taken it, what marks that handler finished.
 	admitted map[gssh.Session]func()
+
+	// onWait, if set, is called each time wait has found a handler running
+	// and is about to wait on it. Nil in production; a test uses it to know
+	// that wait has looked.
+	onWait func()
 }
 
 // begin registers a handler, returning what marks it finished, or false once
@@ -567,6 +572,9 @@ func (t *guestHandlers) wait(timeout time.Duration) bool {
 			return true
 		}
 		t.mu.Unlock()
+		if t.onWait != nil {
+			t.onWait()
+		}
 		select {
 		case <-next:
 		case <-deadline.C:

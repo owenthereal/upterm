@@ -285,22 +285,31 @@ func (c *admittingContext) Value(key any) any {
 // is sent a status rather than refused -- and its status is no less cut off by
 // the tunnel's close than an earlier guest's.
 func TestGuestHandlersWaitCoversHandlersRegisteredWhileItWaits(t *testing.T) {
-	var handlers guestHandlers
+	looked := make(chan struct{}, 8)
+	handlers := guestHandlers{onWait: func() { looked <- struct{}{} }}
+	lookedOnce := func(what string) {
+		t.Helper()
+		select {
+		case <-looked:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("wait never %s", what)
+		}
+	}
 	first, ok := handlers.begin()
 	require.True(t, ok)
 	waited := make(chan bool, 1)
 	go func() { waited <- handlers.wait(10 * time.Second) }()
-	// Long enough for wait to be waiting on the first before the second
-	// arrives.
-	time.Sleep(100 * time.Millisecond)
+	lookedOnce("began waiting on the first handler")
+
 	second, ok := handlers.begin()
 	require.True(t, ok, "a handler registering while wait waits was refused")
-
 	first()
 	select {
 	case <-waited:
 		t.Fatal("wait returned with a handler that registered while it waited still running")
-	case <-time.After(200 * time.Millisecond):
+	case <-looked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("wait neither returned nor waited on the second handler")
 	}
 
 	second()
