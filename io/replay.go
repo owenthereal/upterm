@@ -77,6 +77,13 @@ var (
 // most the ring, then Pending, together well under DefaultGuestBufferSize.
 var errRenderTooLong = errors.New("multiwriter: the render is longer than DefaultReplayBytes")
 
+// errHandoffOutOfRange keeps every byte reaching the joiner once whatever the
+// replayer reports: a handoff point past the end of what it was offered would
+// leave the bytes before it in neither the render nor the gap, and a last
+// event past the last offered would attach the joiner past a resize it was
+// never fed.
+var errHandoffOutOfRange = errors.New("multiwriter: the replay's handoff is past what it was offered")
+
 // SetReplayer installs r, and fallback, which is told why each join that
 // fell back did (never called with the fan-out's locks held). Once, before
 // any join.
@@ -191,8 +198,12 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 
 	// Nothing past a resize whose outcome isn't known: the bytes after it
 	// were laid out at a size the emulation can't know yet, and feeding the
-	// event afterwards can't repair them (spec J3).
-	e0, below := t.offerBound()
+	// event afterwards can't repair them (spec J3). Nor any committed event
+	// after it by Seq, even one at its offset (PF-9).
+	e0, below := end, uint64(math.MaxUint64)
+	if offset, seq, ok := t.sizes.firstUnresolved(); ok {
+		e0, below = min(end, offset), seq
+	}
 	sizes = upTo(sizes, e0, below)
 	chunks, _ := t.buffer.Range(start, e0)
 	j.offeredEnd, j.offeredSeq = e0, sizes[len(sizes)-1].Seq
@@ -246,6 +257,9 @@ func (j *join) rerender() error {
 		}
 		j.render = render
 		j.h, j.lastSeq = j.em.Handoff()
+		if j.h > j.offeredEnd || j.lastSeq > j.offeredSeq {
+			return errHandoffOutOfRange
+		}
 		return nil
 	})
 }
@@ -381,23 +395,25 @@ func (j *join) unofferedAt(offset uint64) bool {
 // offer takes what the emulation hasn't been offered of the stream: the bytes
 // since offeredEnd, and the committed events after offeredSeq, the last
 // offered rather than the last passed, so an event still in the emulation's
-// tail is never offered twice (spec A9). Like the capture, it stops at the
-// first unresolved event. An unknown size among the events is the end of
-// the emulation (spec A1). Called with writeMu held.
+// tail is never offered twice (spec A9). hold runs it only once no event is
+// unresolved, so it offers everything to End: the bound at the first
+// unresolved event, by offset and by Seq, is the capture's to decide. An
+// unknown size among the events is the end of the emulation (spec A1).
+// Called with writeMu held.
 func (j *join) offer() (chunks [][]byte, sizes []SizeEvent, err error) {
 	t := j.t
-	end, below := t.offerBound()
-	sizes = upTo(t.sizes.after(j.offeredSeq), end, below)
+	sizes = t.sizes.after(j.offeredSeq)
 	for _, e := range sizes {
 		if !e.Size.Valid() {
 			return nil, nil, ErrReplayCoverage
 		}
 	}
+	end := t.buffer.End()
 	chunks, ok := t.buffer.Range(j.offeredEnd, end)
 	if !ok {
 		return nil, nil, ErrReplayGapEvicted
 	}
-	j.offeredEnd, j.heldBack = end, end < t.buffer.End()
+	j.offeredEnd, j.heldBack = end, false
 	if len(sizes) > 0 {
 		j.offeredSeq = sizes[len(sizes)-1].Seq
 	}
@@ -428,8 +444,8 @@ func (j *join) attach(gap [][]byte) error {
 	return nil
 }
 
-// wait waits outside writeMu for ch, the join's ctx or its deadline, which
-// ever comes first; the next hold decides what it means.
+// wait waits outside writeMu for ch, the join's ctx, Shutdown or its
+// deadline, whichever comes first; the next hold decides what it means.
 func (j *join) wait(what joinWait, ch <-chan struct{}) {
 	if testHookJoinWaits != nil {
 		testHookJoinWaits(what)
@@ -439,19 +455,9 @@ func (j *join) wait(what joinWait, ch <-chan struct{}) {
 	select {
 	case <-ch:
 	case <-j.ctx.Done():
+	case <-j.t.closing:
 	case <-timer.C:
 	}
-}
-
-// offerBound is how far a join may offer its emulation the stream now: to
-// End, or to the first event whose outcome isn't known, and only the events
-// below its Seq. Called with writeMu held.
-func (t *MultiWriter) offerBound() (end, below uint64) {
-	end, below = t.buffer.End(), math.MaxUint64
-	if offset, seq, ok := t.sizes.firstUnresolved(); ok {
-		end, below = min(end, offset), seq
-	}
-	return end, below
 }
 
 // upTo returns the leading events of sizes, which are in Seq order, at or
@@ -465,8 +471,9 @@ func upTo(sizes []SizeEvent, end, below uint64) []SizeEvent {
 	return sizes
 }
 
-// acquire takes the emulation permit: ctx's error once ctx is done, or
-// ErrReplayDeadline once the deadline passes, while it waits.
+// acquire takes the emulation permit: ErrClosed once Shutdown runs, ctx's
+// error once ctx is done, or ErrReplayDeadline once the deadline passes,
+// while it waits.
 func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
 	select {
 	case t.permit <- struct{}{}:
@@ -481,6 +488,8 @@ func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
 	select {
 	case t.permit <- struct{}{}:
 		return nil
+	case <-t.closing:
+		return ErrClosed
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:

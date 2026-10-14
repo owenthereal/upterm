@@ -212,6 +212,7 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 		buffer:  &buffer{max: replayBytes},
 		modes:   NewModeTracker(),
 		permit:  make(chan struct{}, 1),
+		closing: make(chan struct{}),
 	}
 	t.replay = NewTerminalQueryFilter(bufferWriter{b: t.buffer})
 
@@ -291,6 +292,11 @@ type MultiWriter struct {
 
 	// permit lets one join's emulation run at a time; see AppendSized.
 	permit chan struct{}
+
+	// closing is closed by Shutdown's first call, once closed is set, so a
+	// join parked outside writeMu wakes to be refused rather than sleeping
+	// out its deadline.
+	closing chan struct{}
 
 	// changed is notified by every Write and ResizeEnd, for a join whose
 	// emulation needs more of the stream than there is yet to wait on,
@@ -532,6 +538,9 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
 	first := !t.closed
 	t.closed = true
+	if first {
+		close(t.closing)
+	}
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
 	copy(writers, t.writers)

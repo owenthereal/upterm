@@ -31,6 +31,9 @@ type fakeReplayer struct {
 	start   func(n int, ctx context.Context, deadline time.Time, c *Capture) error
 	feed    func(n int, chunks [][]byte, sizes []SizeEvent) error
 	handoff func()
+	// skew, when set, moves the handoff point Handoff reports, but not the
+	// one Render is as of: a replayer at odds with itself.
+	skew func(h, lastSeq uint64) (uint64, uint64)
 	// render, when set, makes the render from the handoff point and the
 	// bytes consumed up to it.
 	render func(h uint64, consumed []byte) ([]byte, error)
@@ -134,6 +137,9 @@ func (e *fakeEmulation) Feed(chunks [][]byte, sizes []SizeEvent) error {
 func (e *fakeEmulation) Handoff() (uint64, uint64) {
 	if e.r.handoff != nil {
 		e.r.handoff()
+	}
+	if e.r.skew != nil {
+		return e.r.skew(e.point())
 	}
 	return e.point()
 }
@@ -1040,6 +1046,173 @@ func TestAppendSizedFallsBackOnAnOverlongRender(t *testing.T) {
 	}
 }
 
+// Exactly once is io's guarantee whatever the replayer does. A handoff point
+// past what the emulation was offered would leave bytes in neither the
+// render nor the gap, and a last event past the last offered would attach
+// the joiner past a resize never fed. Either falls back.
+func TestAppendSizedFallsBackOnAHandoffPastWhatWasOffered(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gated func(w *MultiWriter)
+		skew  func(h, lastSeq uint64) (uint64, uint64)
+		raw   string
+	}{
+		{
+			name:  "a byte past the offered end",
+			gated: func(w *MultiWriter) { writeString(w, "BC") },
+			skew:  func(h, lastSeq uint64) (uint64, uint64) { return h + 1, lastSeq },
+			raw:   "ABC",
+		},
+		{
+			name:  "an event past the last offered",
+			gated: func(w *MultiWriter) { resize(w, at45x30); writeString(w, "X") },
+			skew:  func(h, lastSeq uint64) (uint64, uint64) { return h, lastSeq + 1 },
+			raw:   "AX",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			r := &fakeReplayer{start: parkedStart(entered, gate), skew: tc.skew}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			resize(w, at80x24)
+			writeString(w, "A")
+
+			var joiner recordingWriter
+			done := joinAsync(w, t.Context(), far(), &joiner)
+			within(t, entered, "Start")
+			tc.gated(w)
+			close(gate)
+
+			require.NoError(t, within(t, done, "the join"))
+			require.Equal(t, []error{errHandoffOutOfRange}, fallbacks.all())
+			require.Equal(t, tc.raw, string(joiner.bytes()), "today's replay")
+		})
+	}
+}
+
+// Shutdown wakes a join parked outside writeMu, whatever it waits for: it
+// returns ErrClosed at once and attaches nothing, rather than sleeping out
+// its deadline holding the permit, or waking to a Start that can only end
+// in ErrClosed.
+func TestShutdownWakesAParkedJoin(t *testing.T) {
+	shutdown := func(t *testing.T, w *MultiWriter) {
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, w.Shutdown(ctx))
+	}
+	closedAtOnce := func(t *testing.T, done <-chan error) {
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrClosed)
+		case <-time.After(50 * time.Millisecond):
+			t.Fatal("a parked join slept through Shutdown")
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		wait  joinWait
+		steer func(r *fakeReplayer, w *MultiWriter)
+	}{
+		{"waiting on a resize", waitResize, func(r *fakeReplayer, w *MultiWriter) {
+			r.start = func(int, context.Context, time.Time, *Capture) error {
+				w.ResizeBegin(at45x30) // never ended
+				return nil
+			}
+		}},
+		{"waiting for output", waitOutput, func(r *fakeReplayer, w *MultiWriter) {
+			r.start = func(int, context.Context, time.Time, *Capture) error {
+				seq := w.ResizeBegin(at45x30)
+				w.ResizeEnd(seq, true)
+				r.leaveInTail(seq, true)
+				return nil
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			waits := joinWaits(t)
+			r := &fakeReplayer{}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			tc.steer(r, w)
+			resize(w, at80x24)
+			writeString(w, "A")
+
+			var joiner recordingWriter
+			done := joinAsync(w, t.Context(), far(), &joiner)
+			require.Equal(t, tc.wait, within(t, waits, "the wait"))
+			shutdown(t, w)
+			closedAtOnce(t, done)
+			require.Empty(t, joiner.bytes())
+			require.Zero(t, attachedTimes(w, &joiner))
+			require.Empty(t, fallbacks.all())
+			require.Zero(t, len(w.permit), "the permit was given back")
+		})
+	}
+
+	t.Run("waiting for the permit", func(t *testing.T) {
+		waits := joinWaits(t)
+		entered, gate := make(chan *Capture, 1), make(chan struct{})
+		r := &fakeReplayer{start: parkedStart(entered, gate)}
+		w, fallbacks := joinable(DefaultReplayBytes, r)
+		resize(w, at80x24)
+		writeString(w, "A")
+
+		var a, b recordingWriter
+		doneA := joinAsync(w, t.Context(), far(), &a)
+		within(t, entered, "A's Start")
+		doneB := joinAsync(w, t.Context(), far(), &b)
+		require.Equal(t, waitPermit, within(t, waits, "B's wait"))
+		shutdown(t, w)
+		closedAtOnce(t, doneB)
+		require.Equal(t, 1, r.starts(), "B never started")
+
+		close(gate)
+		require.ErrorIs(t, within(t, doneA, "A"), ErrClosed)
+		require.Zero(t, len(w.permit), "the permit was given back")
+		require.Empty(t, a.bytes())
+		require.Empty(t, b.bytes())
+		require.Zero(t, attachedTimes(w, &a)+attachedTimes(w, &b))
+		require.Empty(t, fallbacks.all())
+	})
+}
+
+// PF-9, where it is decided: the capture takes only committed events below
+// the first unresolved one's Seq, whatever their offsets. A resize begun and
+// committed while an earlier one waits for its ioctl lands at the same
+// offset, after it, and is offered only once the earlier one's outcome is
+// known, after it if it committed.
+func TestCaptureTakesNoEventPastAnUnresolvedOne(t *testing.T) {
+	for _, applied := range []bool{true, false} {
+		t.Run(fmt.Sprintf("applied=%t", applied), func(t *testing.T) {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			r := &fakeReplayer{start: parkedStart(entered, gate)}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			resize(w, at80x24)
+			writeString(w, "A")
+			first := w.ResizeBegin(at45x30)
+			resize(w, at100x40)
+			writeString(w, "X") // both at 1, the first unresolved
+
+			var joiner recordingWriter
+			done := joinAsync(w, t.Context(), far(), &joiner)
+			c := within(t, entered, "Start")
+			require.Equal(t, uint64(1), c.End)
+			require.Equal(t, []SizeEvent{{Seq: 1, Offset: 0, Size: at80x24}}, c.Sizes, "nothing after the unresolved event")
+
+			w.ResizeEnd(first, applied)
+			close(gate)
+			require.NoError(t, within(t, done, "the join"))
+			fed := []SizeEvent{{Seq: first + 1, Offset: 1, Size: at100x40}}
+			if applied {
+				fed = append([]SizeEvent{{Seq: first, Offset: 1, Size: at45x30}}, fed...)
+			}
+			require.Equal(t, []fedCall{{chunks: "X", sizes: fed}}, r.feeds())
+			require.Equal(t, "<AX>", string(joiner.bytes()))
+			require.Empty(t, fallbacks.all())
+		})
+	}
+}
+
 // streamChunk is the k'th of a stream's 4 KiB pieces, numbered, so that a
 // joiner's copy shows any byte of it missing or repeated.
 func streamChunk(k uint64) []byte {
@@ -1069,6 +1242,10 @@ func streamBytes(from, to uint64) []byte {
 // Feed takes 5 ms; the join either attaches with every byte once
 // (checked by sequence numbers in the chunks) or falls back at the
 // deadline, within deadline + 50 ms.
+//
+// The bound is on the decision, the sink's first byte: the release's own
+// hold, writing up to the whole ring into the sink, is outside the deadline
+// (spec §6.2).
 func TestAppendSizedUnderStreamingOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1116,18 +1293,18 @@ func TestAppendSizedUnderStreamingOutput(t *testing.T) {
 			within(t, streaming, "the stream")
 
 			deadline := time.Now().Add(300 * time.Millisecond)
-			var joiner recordingWriter
+			var joiner firstWriteSink
 			err := w.AppendSized(t.Context(), deadline, at80x24, &joiner)
-			returned := time.Now()
 			close(stop)
 			end := <-total
 			require.NoError(t, err)
-			require.False(t, returned.After(deadline.Add(50*time.Millisecond)),
-				"returned %v after the deadline", returned.Sub(deadline))
+			decided := joiner.firstWrite()
+			require.False(t, decided.After(deadline.Add(50*time.Millisecond)),
+				"decided %v after the deadline", decided.Sub(deadline))
 
 			got := joiner.bytes()
 			errs := fallbacks.all()
-			t.Logf("fell back: %v; %d catch-ups; %d KiB streamed", errs, len(r.feeds()), end>>10)
+			t.Logf("fell back: %v; %d catch-ups; %d KiB streamed; decided %v after the deadline", errs, len(r.feeds()), end>>10, decided.Sub(deadline))
 			if len(errs) == 0 {
 				require.False(t, tc.tail, "attached with the resize never applied")
 				require.NotEmpty(t, r.feeds(), "attached without catching up on the resize")
@@ -1143,6 +1320,29 @@ func TestAppendSizedUnderStreamingOutput(t *testing.T) {
 			require.True(t, bytes.Equal(streamBytes(end-uint64(len(got)), end), got), "today's replay, then live output, once each")
 		})
 	}
+}
+
+// firstWriteSink records when it is first written to: when a join's outcome
+// was decided, before the release's own writes.
+type firstWriteSink struct {
+	recordingWriter
+	mu    sync.Mutex
+	first time.Time
+}
+
+func (s *firstWriteSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	if s.first.IsZero() {
+		s.first = time.Now()
+	}
+	s.mu.Unlock()
+	return s.recordingWriter.Write(p)
+}
+
+func (s *firstWriteSink) firstWrite() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.first
 }
 
 // stormSink is a joiner's terminal in the rejoin storm. Its first bytes are
