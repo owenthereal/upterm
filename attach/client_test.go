@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -55,6 +56,23 @@ func runAsync(t *testing.T, ctx context.Context, c *Client) <-chan Result {
 		done <- res
 	}()
 	return done
+}
+
+// A failure to attach is printed after "upterm: ", as upterm attach's line,
+// the foreground host's or join's, so it carries no package prefix of its
+// own (D1): the dialer's text already says what failed.
+func TestClientErrorsCarryNoPackagePrefix(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	dialErr := errors.New("dial unix /run/u/s/attach.sock: connect: no such file or directory")
+	c := &Client{Socket: "/run/u/s/attach.sock", Stdout: io.Discard, HostKeys: []ssh.PublicKey{signer.PublicKey()},
+		dial: func(context.Context, string) (net.Conn, error) { return nil, dialErr }}
+
+	_, err = c.Run(context.Background())
+	require.ErrorIs(t, err, dialErr)
+	require.EqualError(t, err, dialErr.Error())
 }
 
 // fakeDoor is a charm ssh server on a unix socket whose handler is the test's.

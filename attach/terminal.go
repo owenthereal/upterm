@@ -157,7 +157,7 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		}
 	}()
 	if t.Stdout == nil {
-		return Result{}, errors.New("attach: Stdout is required")
+		return Result{}, errors.New("stdout is required")
 	}
 	logger := t.Logger
 	if logger == nil {
@@ -186,7 +186,7 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return Result{}, fmt.Errorf("attach: %w", err)
+		return Result{}, fmt.Errorf("opening the session: %w", err)
 	}
 	defer func() { _ = sess.Close() }()
 
@@ -196,12 +196,12 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 			size = termsize.Default
 		}
 		if err := sess.RequestPty(t.Pty.Term, size.Rows, size.Cols, ssh.TerminalModes{}); err != nil {
-			return Result{}, fmt.Errorf("attach: pty request: %w", err)
+			return Result{}, fmt.Errorf("pty request: %w", err)
 		}
 	}
 	if t.DeclareInteractive {
 		if err := sess.Setenv(upterm.AttachInteractiveEnvVar, "1"); err != nil {
-			return Result{}, fmt.Errorf("attach: %w", err)
+			return Result{}, fmt.Errorf("setenv %s: %w", upterm.AttachInteractiveEnvVar, err)
 		}
 	}
 	// Always a pipe, even with no Stdin: leaving Session.Stdin nil makes
@@ -217,13 +217,13 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		return Result{}, err
 	}
 	if err := sess.Shell(); err != nil {
-		return Result{}, fmt.Errorf("attach: %w", err)
+		return Result{}, fmt.Errorf("starting the shell: %w", err)
 	}
 	if !setup.Stop() || time.Now().After(setupBy) {
 		// The shell was confirmed just as setupBy passed. Whether the timer
 		// has run is a matter of scheduling, and this fails either way: the
 		// connection is closed on the way out, as for any error.
-		return Result{}, errors.New("attach: the shell started after the setup deadline")
+		return Result{}, errors.New("the shell started after the setup deadline")
 	}
 	if t.OnReady != nil {
 		t.OnReady()

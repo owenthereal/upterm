@@ -74,7 +74,7 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 // binds that socket only once the tunnel is up, so a dial in that window fails
 // against a path the user never typed.
 func TestAttachFailure(t *testing.T) {
-	dialErr := errors.New("attach: dial unix /run/u/t1/attach.sock: connect: no such file or directory")
+	dialErr := errors.New("dial unix /run/u/t1/attach.sock: connect: no such file or directory")
 
 	err := attachFailure("t1", sessiondir.StatusStarting, dialErr)
 	require.ErrorContains(t, err, "t1")
@@ -89,7 +89,7 @@ func TestAttachFailure(t *testing.T) {
 	// The one failure the starting window must not swallow: something
 	// answered the socket and it was not the session. "Try again in a
 	// moment" would send the user back to it.
-	mismatch := fmt.Errorf("attach: ssh: handshake failed: %w", attach.ErrHostKeyMismatch)
+	mismatch := fmt.Errorf("ssh: handshake failed: %w", attach.ErrHostKeyMismatch)
 	err = attachFailure("t1", sessiondir.StatusStarting, mismatch)
 	require.ErrorIs(t, err, attach.ErrHostKeyMismatch)
 	require.NotContains(t, err.Error(), "still starting")
