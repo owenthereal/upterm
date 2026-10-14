@@ -1005,3 +1005,173 @@ func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
 	defer cancel()
 	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
 }
+
+// ringStream is n bytes of the stream starting at offset at. No two adjacent
+// offsets hold the same byte, so a range that is off by one in either
+// direction reads back different.
+func ringStream(at, n int) []byte {
+	p := make([]byte, n)
+	for i := range p {
+		o := at + i
+		p[i] = byte(o*131 + o>>8)
+	}
+	return p
+}
+
+// ringCase is a ring and the sizes it is written in.
+type ringCase struct {
+	name   string
+	max    int
+	writes []int
+	chunks int // the fewest chunks the ring is left holding; 0 for no minimum
+}
+
+// ringCases cover the ways bytes enter and leave the ring: a ring evicting
+// part of its head chunk on every write; one whose writes close chunks, so
+// that a range spans several; one handed a write larger than itself, an empty
+// one and one exactly its size; and one that keeps nothing.
+var ringCases = []ringCase{
+	{"64 bytes in 16-byte writes", 64, []int{16, 16, 16, 16, 16, 16, 16, 16, 16}, 1},
+	{"chunks", 10000, []int{1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500}, 4},
+	{"large and empty writes", 64, []int{0, 16, 16, 100, 5, 0, 64, 65, 3}, 1},
+	{"nothing kept", 0, []int{16, 8, 0, 16}, 0},
+}
+
+// A ring of 64 bytes written 16 at a time: End and Start follow every write,
+// and Range hands back exactly the bytes written over [from, to) for any range
+// the ring still holds. It refuses one it does not, rather than return what is
+// left of it.
+func TestRingOffsetsAndRange(t *testing.T) {
+	for _, tc := range ringCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &buffer{max: tc.max}
+			var written []byte
+			for _, n := range tc.writes {
+				// What a caller holds from before the write is the ring's own
+				// bytes and must read the same after it: the tail chunk is
+				// grown in place and the head is trimmed, neither of which
+				// may reach what has been handed out.
+				held, ok := b.Range(b.Start(), b.End())
+				require.True(t, ok)
+				heldWant := bytes.Clone(written[b.Start():])
+
+				p := ringStream(len(written), n)
+				b.Append(p)
+				written = append(written, p...)
+
+				require.Equal(t, string(heldWant), string(bytes.Join(held, nil)), "bytes handed out before a write of %d", n)
+				requireRing(t, b, written)
+			}
+			require.GreaterOrEqual(t, len(b.Data()), tc.chunks, "the chunks the ring ends with")
+		})
+	}
+}
+
+// requireRing checks b against written, every byte ever appended to it.
+func requireRing(t *testing.T, b *buffer, written []byte) {
+	t.Helper()
+
+	end := uint64(len(written))
+	start := end
+	if b.max > 0 {
+		start = end - uint64(min(len(written), b.max))
+	}
+	require.Equal(t, end, b.End(), "End")
+	require.Equal(t, start, b.Start(), "Start")
+
+	// Every range at the bounds, at each chunk's edges and at a spread in
+	// between, which is every range the 64-byte ring holds and a sample of the
+	// larger one's.
+	offsets := []uint64{start, end}
+	if start < end {
+		offsets = append(offsets, start+1, end-1)
+	}
+	at := start
+	for _, c := range b.Data() {
+		at += uint64(len(c))
+		offsets = append(offsets, at, at-min(at, 1), min(at+1, end))
+	}
+	step := max(1, (end-start)/32)
+	for o := start; o < end; o += step {
+		offsets = append(offsets, o)
+	}
+
+	for _, from := range offsets {
+		for _, to := range offsets {
+			if from > to {
+				chunks, ok := b.Range(from, to)
+				require.False(t, ok, "Range(%d, %d) runs backwards", from, to)
+				require.Nil(t, chunks)
+				continue
+			}
+			chunks, ok := b.Range(from, to)
+			require.True(t, ok, "Range(%d, %d) of [%d, %d)", from, to, start, end)
+			if from == to {
+				require.Nil(t, chunks, "an empty Range(%d, %d)", from, to)
+				continue
+			}
+			require.Equal(t, string(written[from:to]), string(bytes.Join(chunks, nil)), "Range(%d, %d)", from, to)
+			for _, c := range chunks {
+				require.NotEmpty(t, c, "Range(%d, %d) hands out an empty chunk", from, to)
+				// What a caller appends to a chunk it was handed must not
+				// land on the ring's bytes after the range.
+				_ = append(c, 0xff, 0xff, 0xff)
+			}
+		}
+	}
+	got, ok := b.Range(start, end)
+	require.True(t, ok)
+	require.Equal(t, string(written[start:]), string(bytes.Join(got, nil)), "the ring after appends to the chunks Range handed out")
+
+	// Outside the ring: before its first byte, or past its last.
+	if start > 0 {
+		for _, r := range [][2]uint64{{start - 1, end}, {start - 1, start - 1}, {0, start}} {
+			chunks, ok := b.Range(r[0], r[1])
+			require.False(t, ok, "Range(%d, %d) starts before Start %d", r[0], r[1], start)
+			require.Nil(t, chunks)
+		}
+	}
+	for _, r := range [][2]uint64{{start, end + 1}, {end + 1, end + 1}, {end, end + 1}} {
+		chunks, ok := b.Range(r[0], r[1])
+		require.False(t, ok, "Range(%d, %d) ends after End %d", r[0], r[1], end)
+		require.Nil(t, chunks)
+	}
+}
+
+// Everything that leaves the ring is handed to onEvict with the stream offset
+// of its first byte, in order and with nothing between one span and the next:
+// together the spans are exactly the stream's bytes before Start, and each is
+// delivered before the Append that pushed it out returns.
+func TestRingEvictsWithOffsets(t *testing.T) {
+	type span struct {
+		offset uint64
+		data   []byte
+	}
+
+	for _, tc := range ringCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &buffer{max: tc.max}
+			var evicted []span
+			b.onEvict = func(offset uint64, p []byte) {
+				evicted = append(evicted, span{offset, bytes.Clone(p)})
+			}
+
+			var written []byte
+			for _, n := range tc.writes {
+				p := ringStream(len(written), n)
+				b.Append(p)
+				written = append(written, p...)
+
+				var next uint64
+				var got []byte
+				for _, e := range evicted {
+					require.Equal(t, next, e.offset, "a span's offset follows the one before it")
+					next += uint64(len(e.data))
+					got = append(got, e.data...)
+				}
+				require.Equal(t, b.Start(), next, "the spans end where the ring begins, after a write of %d", n)
+				require.Equal(t, string(written[:next]), string(got))
+			}
+		})
+	}
+}

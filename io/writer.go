@@ -35,16 +35,23 @@ type buffer struct {
 	max   int // cap in bytes
 	size  int // bytes currently held
 
-	// onEvict is handed every byte that leaves the ring, in stream order.
-	// What it feeds is state the replay can no longer reconstruct from the
-	// ring itself; see NewMultiWriter.
-	onEvict func([]byte)
+	// total counts every byte ever appended, so it is the stream offset of
+	// the next byte to arrive, and total-size that of the ring's first. A
+	// position in the stream is kept as an offset because a position in the
+	// queue moves every time the ring is trimmed.
+	total uint64
+
+	// onEvict is handed every byte that leaves the ring, in stream order,
+	// with the stream offset of the first of them. What it feeds is state the
+	// replay can no longer reconstruct from the ring itself; see
+	// NewMultiWriter.
+	onEvict func(offset uint64, p []byte)
 }
 
 // Append copies p into the ring and hands whatever that pushed out to
 // onEvict, in stream order, before returning.
 func (c *buffer) Append(p []byte) {
-	evicted := c.push(p)
+	evicted, offset := c.push(p)
 	if c.onEvict == nil {
 		return
 	}
@@ -55,22 +62,27 @@ func (c *buffer) Append(p []byte) {
 	// handed over are read before this returns and not retained, so the ones
 	// that alias p are safe.
 	for _, e := range evicted {
-		c.onEvict(e)
+		c.onEvict(offset, e)
+		offset += uint64(len(e))
 	}
 }
 
 // push does Append's bookkeeping and returns the evicted bytes for it to
-// deliver.
-func (c *buffer) push(p []byte) [][]byte {
+// deliver, with the stream offset of the first. They are contiguous and begin
+// at the ring's first byte as it was before p, because the stream leaves in
+// the order it arrived: a write larger than the ring sends its own prefix out
+// behind everything already queued.
+func (c *buffer) push(p []byte) (evicted [][]byte, offset uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	offset = c.total - uint64(c.size)
+	c.total += uint64(len(p))
+
 	if c.max <= 0 {
 		// Nothing is kept, so everything handed over has already left.
-		return [][]byte{p}
+		return [][]byte{p}, offset
 	}
-
-	var evicted [][]byte
 
 	// A single write larger than the ring keeps only its tail. Everything
 	// queued is older than the prefix being dropped, so it leaves first.
@@ -117,7 +129,7 @@ func (c *buffer) push(p []byte) [][]byte {
 		c.size -= len(head)
 	}
 
-	return evicted
+	return evicted, offset
 }
 
 func (c *buffer) Data() [][]byte {
@@ -128,6 +140,59 @@ func (c *buffer) Data() [][]byte {
 	// followed by the real ones.
 	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
+}
+
+// End is the stream offset of the next byte the ring is handed.
+func (c *buffer) End() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
+}
+
+// Start is the stream offset of the ring's first byte, which is End when the
+// ring is empty.
+func (c *buffer) Start() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total - uint64(c.size)
+}
+
+// Range returns the ring's chunks from stream offset from to to, sliced to
+// exactly that range. ok is false if from is before Start or to is after End,
+// and for a range that runs backwards. An empty range is nil, true.
+//
+// The slices are the ring's own, not copies, and are immutable once handed
+// out: the ring only ever appends after what it has returned and trims in
+// front of it, so what a caller holds stays what it was. Each is capped at its
+// length, so that a caller appending to one reallocates rather than writing
+// over the bytes that follow it in the ring.
+func (c *buffer) Range(from, to uint64) (chunks [][]byte, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	start := c.total - uint64(c.size)
+	if from < start || to > c.total || from > to {
+		return nil, false
+	}
+
+	skip, take := from-start, to-from
+	for _, chunk := range c.queue {
+		if take == 0 {
+			break
+		}
+		if skip >= uint64(len(chunk)) {
+			skip -= uint64(len(chunk))
+			continue
+		}
+		part := chunk[skip:]
+		skip = 0
+		if uint64(len(part)) > take {
+			part = part[:take]
+		}
+		chunks = append(chunks, part[:len(part):len(part)])
+		take -= uint64(len(part))
+	}
+	return chunks, true
 }
 
 // bufferWriter adapts the replay ring to io.Writer so a filter can sit in
@@ -152,7 +217,7 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	// the state after the ring, and any mode set inside the ring window was
 	// applied twice: once by the snapshot, far too early, and again by the
 	// replay.
-	b.onEvict = func(p []byte) { _, _ = modes.Write(p) }
+	b.onEvict = func(_ uint64, p []byte) { _, _ = modes.Write(p) }
 
 	return &MultiWriter{
 		writers: writers,
