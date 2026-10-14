@@ -532,8 +532,17 @@ func TestPerRunConfigNamesTheFile(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "output: json\n")
 	_, stderr, code := runCLI(t, "session", "info", "nosuch")
-	require.Equal(t, 4, code) // the value still applies; the lookup fails as before
+	require.Equal(t, 4, code) // the lookup fails, with the value or without it
 	require.Contains(t, stderr, "upterm: the output key in "+utils.UptermConfigFilePath()+" is deprecated; pass --output. It will be ignored starting in "+perRunIgnoredFrom+".\n")
+
+	// A config value alone still applies: without it, set would have nothing
+	// to set (exit 1), not a name to look up.
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "")
+	require.NoError(t, os.Unsetenv("UPTERM_JOIN_TIMEOUT"))
+	withConfig(t, "join-timeout: 5m\n")
+	_, stderr, code = runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code, stderr)
+	require.Contains(t, stderr, "upterm: the join-timeout key in "+utils.UptermConfigFilePath()+" is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n")
 }
 
 // Each value env and config hold is one line, the one that applies and the

@@ -153,6 +153,7 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 			return nil
 		}
 	}
-	// No "attach:" prefix: Run wraps the handshake's error with one already.
+	// No prefix: Run returns the handshake's error as it is, which x/crypto
+	// already starts with "ssh: handshake failed:".
 	return fmt.Errorf("%w (it presented %s)", ErrHostKeyMismatch, ssh.FingerprintSHA256(key))
 }

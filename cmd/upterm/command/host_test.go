@@ -817,9 +817,11 @@ func inProcessDaemons(t *testing.T, command []string) {
 	}
 }
 
-// The root's pre-run and the daemon's spawn both find the log unopenable,
-// and share one warning (B2): upterm host says so once.
-func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
+// inProcessHostEnv is runCLI's `upterm host` with inProcessDaemons, kept
+// to the test: no config, a home with no keys, no agent, and short XDG
+// roots, the directory it returns.
+func inProcessHostEnv(t *testing.T) string {
+	t.Helper()
 	withConfig(t, "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -830,6 +832,31 @@ func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
+	return dir
+}
+
+// A daemon that fails with several errors says so on one line (D1): the
+// parent gets the failure as text, which Exit can't split, so it never
+// carries multierror's "N errors occurred" list.
+func TestADaemonsSeveralErrorsAreOneLine(t *testing.T) {
+	inProcessHostEnv(t)
+	inProcessDaemons(t, []string{"true"})
+	const alice, bob = "https://127.0.0.1:1/alice", "https://127.0.0.1:1/bob"
+
+	_, stderr, code := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1",
+		"--authorized-user", alice, "--authorized-user", bob, "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, 1, strings.Count(stderr, "\n"), stderr)
+	require.True(t, strings.HasPrefix(stderr, "upterm: session "), stderr)
+	require.Contains(t, stderr, "could not start: error reading user keys: "+alice+": ")
+	require.Contains(t, stderr, "; error reading user keys: "+bob+": ")
+	require.NotContains(t, stderr, "errors occurred")
+}
+
+// The root's pre-run and the daemon's spawn both find the log unopenable,
+// and share one warning (B2): upterm host says so once.
+func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
+	dir := inProcessHostEnv(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "upterm"), nil, 0o600)) // a file where the dir goes
 
 	inProcessDaemons(t, []string{"true"})

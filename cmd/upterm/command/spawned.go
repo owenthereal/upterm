@@ -259,7 +259,8 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		}
 		// Preserve the foreground host's command-exit message; attach uses a
 		// generic session status. The line is the whole story, so the error
-		// carries only the script exit code and host.go silences cobra.
+		// carries only the script exit code: an ExitCodeError with no
+		// message, for which Exit prints nothing.
 		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+commandExitedMessage(s.name, out.res.Status)+"\r\n")
 		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:
