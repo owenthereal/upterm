@@ -270,6 +270,10 @@ type MultiWriter struct {
 	// the ring's evictions rather than by Write; see NewMultiWriter.
 	modes *ModeTracker
 
+	// sizes records the size the pty was at for each byte of the ring. Its
+	// reports are never under writeMu, and its log always is; see sizeLog.
+	sizes sizeLog
+
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
@@ -420,7 +424,12 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	// The size log is brought up to date ahead of p, so a resize reported
+	// before p reached the fan-out counts for p, and pruned behind it, once
+	// the ring has taken p and evicted what p pushed out.
+	t.applyResize()
 	_, _ = t.replay.Write(p)
+	t.sizes.prune(t.buffer.Start())
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
