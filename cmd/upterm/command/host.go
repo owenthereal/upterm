@@ -364,14 +364,75 @@ func validateSessionNameFlag(name string) error {
 	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
 }
 
-func validateShareRequiredFlags(c *cobra.Command, args []string) error {
-	var result error
-	if flagJoinTimeout < 0 {
-		result = multierror.Append(result, fmt.Errorf("--join-timeout cannot be negative; use 0 to wait forever"))
+// validateJoinTimeout, validateReadOnlyForwarding and validateServer are the
+// checks host makes on its flags' values before it runs. config edit calls
+// them on the values the config file sets, so a file it accepts is one host
+// accepts.
+func validateJoinTimeout(d time.Duration) error {
+	if d < 0 {
+		return errors.New("--join-timeout cannot be negative; use 0 to wait forever")
+	}
+	return nil
+}
+
+func validateReadOnlyForwarding(readOnly, forwarding bool) error {
+	if readOnly && forwarding {
+		return errors.New("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host")
+	}
+	return nil
+}
+
+// validateServer checks a server address: ssh, ws or wss, and a port for ssh.
+func validateServer(raw string) error {
+	if raw == "" {
+		return errors.New("missing flag --server")
 	}
 
-	if flagReadOnly && flagAllowLocalTCPForwarding {
-		result = multierror.Append(result, fmt.Errorf("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host"))
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("error parsing server URL: %w", err)
+	}
+
+	switch u.Scheme {
+	case "ssh":
+		if _, _, err := net.SplitHostPort(u.Host); err != nil {
+			return err
+		}
+	case "ws", "wss":
+	default:
+		return fmt.Errorf("unsupported server protocol %s", u.Scheme)
+	}
+	return nil
+}
+
+// withDefaultPort is a ws or wss server address with its scheme's port when it
+// has none: known_hosts keys the server as host:port, so the URL must carry
+// one. ws.NewWSConn drops it again from the dial URL so the Host header stays
+// "host", not "host:443".
+func withDefaultPort(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Port() != "" {
+		return raw
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Host += ":80"
+	case "wss":
+		u.Host += ":443"
+	default:
+		return raw
+	}
+	return u.String()
+}
+
+func validateShareRequiredFlags(c *cobra.Command, args []string) error {
+	var result error
+	if err := validateJoinTimeout(flagJoinTimeout); err != nil {
+		result = multierror.Append(result, err)
+	}
+
+	if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
+		result = multierror.Append(result, err)
 	}
 
 	if err := validateSessionNameFlag(flagName); err != nil {
@@ -388,38 +449,10 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, fmt.Errorf("invalid output format %q: must be 'json'", flagHostOutput))
 	}
 
-	if flagServer == "" {
-		result = multierror.Append(result, fmt.Errorf("missing flag --server"))
+	if err := validateServer(flagServer); err != nil {
+		result = multierror.Append(result, err)
 	} else {
-		u, err := url.Parse(flagServer)
-		if err != nil {
-			result = multierror.Append(result, fmt.Errorf("error parsing server URL: %w", err))
-		}
-
-		if u != nil {
-			if u.Scheme != "ssh" && u.Scheme != "ws" && u.Scheme != "wss" {
-				result = multierror.Append(result, fmt.Errorf("unsupported server protocol %s", u.Scheme))
-			}
-
-			if u.Scheme == "ssh" {
-				_, _, err := net.SplitHostPort(u.Host)
-				if err != nil {
-					result = multierror.Append(result, err)
-				}
-			}
-
-			// set default ports for ws or wss: known_hosts keys the server as
-			// host:port, so the URL must carry one. ws.NewWSConn drops it again
-			// from the dial URL so the Host header stays "host", not "host:443".
-			if u.Scheme == "ws" && u.Port() == "" {
-				u.Host = u.Host + ":80"
-				flagServer = u.String()
-			}
-			if u.Scheme == "wss" && u.Port() == "" {
-				u.Host = u.Host + ":443"
-				flagServer = u.String()
-			}
-		}
+		flagServer = withDefaultPort(flagServer)
 	}
 
 	if err := homeDefaultError(); err != nil {
