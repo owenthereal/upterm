@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,19 +117,9 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withGitHub(t, tc.base)
-			quietStdout(t)
-			// Install would replace whatever upterm is on PATH; it must
-			// not be reached, and could not find one if it were.
-			t.Setenv("PATH", t.TempDir())
+			withRunningBinary(t, aStandaloneBinary(t))
 
-			logger, err := logging.New(logging.File(filepath.Join(t.TempDir(), "upterm.log")))
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = logger.Close() })
-
-			cmd := upgradeCmd()
-			cmd.SetContext(uptermctx.WithLogger(context.Background(), logger))
-
-			err = cmd.RunE(cmd, tc.args)
+			err := runUpgrade(t, tc.args)
 			require.Error(t, err)
 			if tc.prefix {
 				require.True(t, strings.HasPrefix(err.Error(), tc.want), "got %q, want it to start with %q", err, tc.want)
@@ -140,6 +131,92 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Whose binary it is, and whether it can be replaced, is settled before
+// anything is looked up or downloaded.
+func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upgrade asked GitHub for %s", r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(github.Close)
+
+	// stops runs upgrade, for the latest release and for a pinned one, with
+	// binary as the running upterm, and expects want from both.
+	stops := func(t *testing.T, binary func() (string, error), want string) {
+		t.Helper()
+
+		withGitHub(t, github.URL)
+		withRunningBinaryFunc(t, binary)
+
+		require.EqualError(t, runUpgrade(t, nil), want)
+		require.EqualError(t, runUpgrade(t, []string{"0.37.0"}), want)
+	}
+
+	t.Run("installed by Homebrew", func(t *testing.T) {
+		bin := filepath.Join(t.TempDir(), "Cellar", "upterm", "0.38.0", "bin", "upterm")
+		require.NoError(t, os.MkdirAll(filepath.Dir(bin), 0o755))
+		require.NoError(t, os.WriteFile(bin, nil, 0o755))
+
+		stops(t, func() (string, error) { return bin, nil },
+			"this upterm was installed by Homebrew; upgrade it with brew upgrade upterm")
+	})
+
+	t.Run("in a directory it can't write", func(t *testing.T) {
+		bin := filepath.Join(readOnlyDir(t), "upterm")
+
+		stops(t, func() (string, error) { return bin, nil }, unwritableLine(bin))
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		stops(t, func() (string, error) { return "", errors.New("no such file") },
+			"can't find the running upterm: no such file")
+	})
+}
+
+// aStandaloneBinary is a file nothing owns, in a directory the test can
+// write: what a binary put there by hand looks like.
+func aStandaloneBinary(t *testing.T) string {
+	t.Helper()
+
+	bin := filepath.Join(t.TempDir(), "upterm")
+	require.NoError(t, os.WriteFile(bin, nil, 0o755))
+
+	return bin
+}
+
+// withRunningBinary makes upgrade take path for the binary it replaces, so
+// no test can reach the test binary.
+func withRunningBinary(t *testing.T, path string) {
+	t.Helper()
+
+	withRunningBinaryFunc(t, func() (string, error) { return path, nil })
+}
+
+// withRunningBinaryFunc is withRunningBinary for a binary that can't be found.
+func withRunningBinaryFunc(t *testing.T, f func() (string, error)) {
+	t.Helper()
+
+	orig := runningBinary
+	t.Cleanup(func() { runningBinary = orig })
+	runningBinary = f
+}
+
+// runUpgrade runs the command with args and returns its error.
+func runUpgrade(t *testing.T, args []string) error {
+	t.Helper()
+
+	quietStdout(t)
+
+	logger, err := logging.New(logging.File(filepath.Join(t.TempDir(), "upterm.log")))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Close() })
+
+	cmd := upgradeCmd()
+	cmd.SetContext(uptermctx.WithLogger(context.Background(), logger))
+
+	return cmd.RunE(cmd, args)
 }
 
 // githubAnswering is the base URL of a GitHub that answers every request

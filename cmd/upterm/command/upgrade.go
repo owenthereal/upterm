@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +43,19 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	logger := uptermctx.Logger(c.Context())
 	if logger == nil {
 		return fmt.Errorf("logger not available")
+	}
+
+	// The binary to replace, and whether upterm may replace it, are settled
+	// before anything is looked up or downloaded.
+	target, err := runningBinary()
+	if err != nil {
+		return fmt.Errorf("can't find the running upterm: %w", err)
+	}
+	if o, ok := confirmedOwner(target, systemProbes); ok {
+		return errors.New(o.refusal())
+	}
+	if !writableDir(target) {
+		return errors.New(unwritableLine(target))
 	}
 
 	term.HideCursor()
@@ -103,8 +117,8 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	// install it
-	if err := m.Install(tarball); err != nil {
+	// install it in the running binary's directory, not wherever PATH finds an upterm
+	if err := m.InstallTo(tarball, filepath.Dir(target)); err != nil {
 		return fmt.Errorf("error installing: %s", err)
 	}
 
