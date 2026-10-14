@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -75,6 +76,9 @@ when stopped, and 255 when it can't join.`,
   upterm join --wait ID@uptermd.upterm.dev`,
 		Args: f.resolveTarget,
 		RunE: f.run,
+		// Config errors, which PersistentPreRunE finds before RunE, as well
+		// as the failures joinFailure and the join outcomes carry (D2a).
+		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitJoinFailed)},
 	}
 	// Every failure, a flag's or a missing target's before RunE too, is told
 	// on one line of upterm join's own, and returns only its status, for

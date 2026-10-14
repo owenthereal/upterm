@@ -386,6 +386,20 @@ func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
 	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0")
 }
 
+// Ctrl-C at the accept prompt, as the foreground host meets it: answered
+// INTERRUPTED, and what run returns exits 130 with nothing said.
+func TestSpawnedSessionInterruptedIsSilent130(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserInterruptedError{} }
+	dec := d.startup(t, "s")
+	err := s.run(context.Background())
+	require.Equal(t, api.Accept_INTERRUPTED, <-dec)
+	require.Equal(t, exitInterrupted, Exit(nil, mapUserAction(nil, err), &stderr))
+	require.Empty(t, stderr.String())
+}
+
 func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer

@@ -288,3 +288,56 @@ func TestHostWithoutATerminalOrAcceptIsOneLine(t *testing.T) {
 	require.Equal(t, 1, code)
 	require.Equal(t, "upterm: upterm host needs a terminal to ask before starting; pass --accept to start without asking\n", stderr)
 }
+
+// Every way upterm fails in a command takes that command's failure code
+// (D2a): a usage error before RunE, a flag, and a config error before it too,
+// not just what RunE returns.
+func TestUsageAndConfigErrorsTakeTheCommandsFailureCode(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{"attach", "a", "b"}, 255},
+		{[]string{"attach", "--bogus"}, 255},
+		{[]string{"join", "--bogus", "x@y"}, 255},
+		{[]string{"session", "wait"}, 125},
+		{[]string{"session", "wait", "--bogus", "x"}, 125},
+		{[]string{"session", "info", "--bogus"}, 1},
+	} {
+		_, _, code := runCLI(t, tc.args...)
+		require.Equal(t, tc.want, code, tc.args)
+	}
+
+	// A config error is found by PersistentPreRunE, before RunE.
+	withConfig(t, "bogus-key: 1\n")
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{"join", "x@y"}, 255},
+		{[]string{"attach", "x"}, 255},
+		{[]string{"session", "wait", "x"}, 125},
+		{[]string{"session", "info"}, 1},
+	} {
+		_, stderr, code := runCLI(t, tc.args...)
+		require.Equal(t, tc.want, code, tc.args)
+		require.Contains(t, stderr, "unknown config key", tc.args)
+	}
+}
+
+// Ctrl-C at the accept prompt says nothing and exits 130 (D2a); the TUI's own
+// last frame is the only word on it.
+func TestInterruptedAtTheAcceptPromptIsSilent130(t *testing.T) {
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	err := mapUserAction(cmd, UserInterruptedError{})
+	require.Equal(t, 130, Exit(cmd, err, &stderr))
+	require.Empty(t, stderr.String())
+
+	// However the daemon's or the parent's error wraps it.
+	err = mapUserAction(cmd, fmt.Errorf("session s: %w", UserInterruptedError{}))
+	require.Equal(t, 130, Exit(cmd, err, &stderr))
+	require.Empty(t, stderr.String())
+}

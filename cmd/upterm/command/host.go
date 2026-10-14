@@ -54,6 +54,10 @@ func (e UserDiscardedError) Unwrap() error {
 	return host.ErrSessionAbandoned
 }
 
+// exitInterrupted is what Ctrl-C at the accept prompt exits with (D2a): 128
+// plus SIGINT, which is also how the relay-key prompt ends, by the signal.
+const exitInterrupted = 130
+
 // UserInterruptedError represents a user's Ctrl+C interruption
 type UserInterruptedError struct{}
 
@@ -618,11 +622,11 @@ func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
 
 // mapUserAction turns a UserDiscardedError or UserInterruptedError from a
 // run attempt into the exit shareRunE reports, on either path: a decline is
-// a clean exit (nothing printed, status 0), and an interruption is Reported,
-// so that Exit prints nothing for it — a session the operator declined or
-// interrupted at the prompt is not a fault, and must not read as one in the
-// daemon's log or the foreground's stderr. Anything else is returned
-// unchanged.
+// a clean exit (nothing printed, status 0), and an interruption is Reported
+// with status 130, so that Exit prints nothing for it — a session the
+// operator declined or interrupted at the prompt is not a fault, and must not
+// read as one in the daemon's log or the foreground's stderr. Anything else is
+// returned unchanged.
 func mapUserAction(_ *cobra.Command, err error) error {
 	var userDiscardedErr UserDiscardedError
 	if errors.As(err, &userDiscardedErr) {
@@ -631,7 +635,7 @@ func mapUserAction(_ *cobra.Command, err error) error {
 
 	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
-		return Reported{Err: userInterruptedErr}
+		return Reported{Err: ExitCodeError{Code: exitInterrupted, Err: userInterruptedErr}}
 	}
 
 	return err
