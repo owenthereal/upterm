@@ -23,8 +23,12 @@ var (
 	procSetInformationJobObject = modkernel32.NewProc("SetInformationJobObject")
 )
 
-// startPty starts a PTY for the given command on Windows using ConPTY
-func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+// startPty starts a PTY for the given command on Windows using ConPTY.
+//
+// r hears of the pty's size: once at start, before startPty returns, and for
+// each Setsize that changes it; see sizeReporter. Nil reports nothing, as a
+// forced command's pty does (startSessionPty).
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool, r sizeReporter) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
@@ -62,9 +66,11 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 		pid:    pid,
 		job:    job,
 		pinned: pinned,
+		report: r,
 	}
 	p.lastH.Store(int32(size.Rows))
 	p.lastW.Store(int32(size.Cols))
+	reportStart(r, size, pinned)
 	return p, nil
 }
 
@@ -72,7 +78,7 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 // The Unix one also sets SSH_TTY; a ConPTY has no device name to put in it, so
 // here it is left unset rather than made up.
 func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
-	return startPty(c, size, false)
+	return startPty(c, size, false, nil)
 }
 
 // Pty is a wrapper of the ConPTY that provides a read/write mutex.
@@ -84,10 +90,14 @@ type pty struct {
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
 	pinned              bool
+	// report hears of each resize Setsize makes, in two steps; see startPty.
+	// Nil reports nothing.
+	report sizeReporter
 
 	// lastH, lastW are the geometry the ConPTY was last set to. Windows has no
 	// SIGWINCH, so Redraw nudges by resizing out and back, and it needs a size
-	// to come back to. Atomic rather than guarded by the lock below, because
+	// to come back to; and Setsize compares a resize with it, to report only
+	// a change. Atomic rather than guarded by the lock below, because
 	// Setsize runs under the read lock, which does not exclude another Setsize.
 	lastH, lastW atomic.Int32
 
@@ -111,7 +121,30 @@ func (p *pty) Setsize(h, w int) error {
 		return nil
 	}
 
-	if err := p.cpty.Resize(w, h); err != nil {
+	report := p.report
+	if report != nil && int(p.lastH.Load()) == h && int(p.lastW.Load()) == w {
+		// A resize to the size the ConPTY has changes nothing, so there is
+		// nothing to report: the fan-out takes every ResizeBegin for a real
+		// change, and a same-size one would reset the region it is weighing.
+		report = nil
+	}
+
+	// Begun before the resize, not after it: a console program repaints on
+	// the resize event, and a repaint that reached the fan-out ahead of the
+	// report would count as drawn at the old size, and a joiner at the new
+	// one would be replayed without it. See the Unix pty's Setsize.
+	var seq uint64
+	if report != nil {
+		seq = report.ResizeBegin(termsize.Size{Cols: w, Rows: h})
+	}
+	err := p.cpty.Resize(w, h)
+	if report != nil {
+		// A failed resize is ended, not undone with a report of the old
+		// size: the bytes that followed are the old size's, and the fan-out
+		// drops the event.
+		report.ResizeEnd(seq, err == nil)
+	}
+	if err != nil {
 		return err
 	}
 	// Recorded only once the ConPTY is actually at this size: Redraw comes
@@ -145,6 +178,11 @@ func (p *pty) Redraw() error {
 	if h <= 0 || w <= 0 {
 		return nil
 	}
+	// The ConPTY directly, not Setsize, and reported to no one: the round-trip
+	// ends at the size it started from, so the size has not changed, and
+	// ConPTY repaints at that final size rather than at the one column wider
+	// it passes through. Reporting the intermediate size would only stamp a
+	// repaint's bytes with a size the command ends up not having.
 	if err := p.cpty.Resize(w+1, h); err != nil {
 		return err
 	}

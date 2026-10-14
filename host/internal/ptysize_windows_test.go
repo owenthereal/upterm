@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/conpty"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +50,7 @@ func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	// Composed into the command line as `cmd /c "mode con"`: the argument has
 	// a space in it, so it is quoted, and cmd strips the surrounding quotes
 	// before running what is inside them.
-	p, err := startPty(exec.Command("cmd", "/c", "mode con"), termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(exec.Command("cmd", "/c", "mode con"), termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
 
@@ -64,6 +65,7 @@ func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 		exec.Command("cmd", "/c", "ping -n 3 127.0.0.1 >nul & mode con"),
 		termsize.Size{Cols: 132, Rows: 43},
 		true,
+		nil,
 	)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
@@ -85,6 +87,7 @@ func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 		exec.Command("cmd", "/c", "ping -n 3 127.0.0.1 >nul & mode con"),
 		termsize.Size{Cols: 132, Rows: 43},
 		false,
+		nil,
 	)
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
@@ -174,4 +177,183 @@ func awaitModeCon(t *testing.T, p PTY, out *ptyOutput) (rows, cols int) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// sizeCall is one call the fan-out would have heard from the pty.
+type sizeCall struct {
+	Kind    string        // "begin", "end" or "pinned"
+	Size    termsize.Size // begin and pinned: the size reported
+	Seq     uint64        // begin: the Seq handed out; end: the Seq it closes
+	Applied bool          // end: the outcome
+	// Before is, for a begin, the size the ConPTY had when it was reported.
+	// Zero for the report startPty makes before there is a pty to ask.
+	Before termsize.Size
+}
+
+// sizeRecorder is a sizeReporter that writes down what it hears, and for each
+// ResizeBegin asks the ConPTY what size it has at that moment: a report made
+// before the resize sees the old size, one made after it the new.
+type sizeRecorder struct {
+	mu    sync.Mutex
+	calls []sizeCall
+	seq   uint64
+	cpty  *conpty.ConPty // once there is one
+}
+
+func (r *sizeRecorder) ResizeBegin(size termsize.Size) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	c := sizeCall{Kind: "begin", Size: size, Seq: r.seq}
+	if r.cpty != nil {
+		// What the ConPTY was last told, which ConPty.Resize updates only
+		// once ResizePseudoConsole has succeeded.
+		w, h, err := r.cpty.Size()
+		if err == nil {
+			c.Before = termsize.Size{Cols: w, Rows: h}
+		}
+	}
+	r.calls = append(r.calls, c)
+	return r.seq
+}
+
+func (r *sizeRecorder) ResizeEnd(seq uint64, applied bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sizeCall{Kind: "end", Seq: seq, Applied: applied})
+}
+
+func (r *sizeRecorder) Pinned(size termsize.Size) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sizeCall{Kind: "pinned", Size: size})
+}
+
+func (r *sizeRecorder) got() []sizeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]sizeCall(nil), r.calls...)
+}
+
+// TestConPTYReportsEachResizeInTwoSteps is the Windows twin of
+// ptysize_unix_test.go's TestPtyReportsEachResizeInTwoSteps: a ResizeBegin
+// before each ConPTY resize and a ResizeEnd after it, for a resize that
+// changes the size and for nothing else. Redraw is the case the Unix pty has
+// no form of: its resize out and back ends at the size it started from, so it
+// reports nothing, and ConPTY repaints at the final size.
+//
+// The Unix test also fails the ioctl and checks the report is ended as not
+// applied. There is no hook to fail a ConPTY resize, so that case has no
+// counterpart here.
+func TestConPTYReportsEachResizeInTwoSteps(t *testing.T) {
+	var (
+		initial = termsize.Size{Cols: 80, Rows: 24}
+		resized = termsize.Size{Cols: 45, Rows: 30}
+	)
+	// Outlives each case by far; the cleanup's Kill ends it.
+	longRunning := func() *exec.Cmd { return exec.Command("cmd", "/c", "ping -n 30 127.0.0.1 >nul") }
+	start := func(t *testing.T, size termsize.Size, pinned bool) (*pty, *sizeRecorder) {
+		t.Helper()
+		rec := &sizeRecorder{}
+		p, err := startPty(longRunning(), size, pinned, rec)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = p.Kill(); _ = p.Close() })
+		readPtyInBackground(p)
+		f := p.(*pty)
+		rec.mu.Lock()
+		rec.cpty = f.cpty
+		rec.mu.Unlock()
+		return f, rec
+	}
+	winsize := func(t *testing.T, p *pty) termsize.Size {
+		t.Helper()
+		w, h, err := p.cpty.Size()
+		require.NoError(t, err)
+		return termsize.Size{Cols: w, Rows: h}
+	}
+
+	t.Run("start reports the initial size, begun and ended, before startPty returns", func(t *testing.T) {
+		_, rec := start(t, initial, false)
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+		}, rec.got())
+	})
+
+	t.Run("start reports the size the pty opened at, not the one asked for", func(t *testing.T) {
+		_, rec := start(t, termsize.Size{}, false)
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: termsize.Default, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+		}, rec.got())
+	})
+
+	t.Run("a resize is begun before the ConPTY is resized and ended after it", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, resized, winsize(t, p))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+			// The recorder asked the ConPTY for its size inside ResizeBegin,
+			// and it still had the old one: the report came before the resize.
+			{Kind: "begin", Size: resized, Seq: 2, Before: initial},
+			{Kind: "end", Seq: 2, Applied: true},
+		}, rec.got())
+	})
+
+	// The tracker takes every ResizeBegin for a real size change: a same-size
+	// report would reset the region its candidate is weighing, over bytes
+	// that were never at another size.
+	t.Run("a resize to the size the pty has reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		opening := rec.got()
+
+		require.NoError(t, p.Setsize(24, 80))
+		require.Equal(t, opening, rec.got(), "the size it opened at")
+
+		require.NoError(t, p.Setsize(30, 45))
+		applied := rec.got()
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, applied, rec.got(), "the size a Setsize gave it")
+		require.Equal(t, resized, winsize(t, p))
+	})
+
+	t.Run("a redraw reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		require.NoError(t, p.Setsize(30, 45))
+		applied := rec.got()
+
+		require.NoError(t, p.Redraw())
+		require.Equal(t, applied, rec.got(), "ConPTY repaints at the final size, which is the one it had")
+		require.Equal(t, resized, winsize(t, p))
+	})
+
+	t.Run("a closed pty reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		opening := rec.got()
+		require.NoError(t, p.Close())
+
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, opening, rec.got())
+	})
+
+	t.Run("a pinned pty reports Pinned once and nothing on Setsize or Redraw", func(t *testing.T) {
+		p, rec := start(t, initial, true)
+		require.Equal(t, []sizeCall{{Kind: "pinned", Size: initial}}, rec.got())
+
+		require.NoError(t, p.Setsize(30, 45))
+		require.NoError(t, p.Setsize(24, 80))
+		require.NoError(t, p.Redraw())
+		require.Equal(t, []sizeCall{{Kind: "pinned", Size: initial}}, rec.got())
+		require.Equal(t, initial, winsize(t, p))
+	})
+
+	t.Run("no reporter reports nothing", func(t *testing.T) {
+		p, err := startPty(longRunning(), initial, false, nil)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		readPtyInBackground(p)
+		require.NoError(t, p.Setsize(30, 45))
+	})
 }

@@ -55,7 +55,7 @@ func TestExitCodeExecExitStatus(t *testing.T) {
 // stuck. Here nothing but Kill is sent.
 func TestPtyKillDoesNotWaitOnTheLock(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
-	ptmx, err := startPty(cmd, termsize.Size{}, false)
+	ptmx, err := startPty(cmd, termsize.Size{}, false, nil)
 	require.NoError(t, err)
 	p := ptmx.(*pty)
 
