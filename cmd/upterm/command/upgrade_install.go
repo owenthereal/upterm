@@ -13,6 +13,11 @@ import (
 	"golang.org/x/term"
 )
 
+// maxBinarySize is the most upgrade will write for the binary, in bytes. It
+// is far above any real build, and keeps an archive that claims otherwise from
+// filling the disk.
+const maxBinarySize = 256 << 20
+
 // renameFile is os.Rename; a var so a test can fail one rename.
 var renameFile = os.Rename
 
@@ -28,9 +33,11 @@ func binaryName(goos string) string {
 // installBinary takes the upterm binary at the root of the .tar.gz archive,
 // writes it beside target as target+".new" and renames it over target. No
 // other file in the archive is written, and whatever target is called, that
-// is the file replaced. A failure leaves target as it was, with nothing left
-// beside it. On Windows target is set aside as target+".old" first, since
-// that is allowed while it runs; see replaceRunning.
+// is the file replaced. The archive is read to its end first, so a damaged one
+// replaces nothing. A failure leaves target as it was, with nothing left
+// beside it, except on Windows when target can't be put back after being set
+// aside as target+".old" (the rename that does so is allowed while it runs);
+// see replaceRunning.
 func installBinary(archive, target, goos string) (err error) {
 	tmp := target + ".new"
 	defer func() {
@@ -51,7 +58,7 @@ func installBinary(archive, target, goos string) (err error) {
 }
 
 // extractBinary writes the file named name at the root of the .tar.gz archive
-// to dst.
+// to dst, and reads the rest of the archive.
 func extractBinary(archive, name, dst string) error {
 	f, err := os.Open(archive)
 	if err != nil {
@@ -75,14 +82,30 @@ func extractBinary(archive, name, dst string) error {
 			return fmt.Errorf("reading the archive: %w", err)
 		}
 
-		if h.Name == name && h.Typeflag == tar.TypeReg {
-			return writeExecutable(dst, tr)
+		if h.Name != name || h.Typeflag != tar.TypeReg {
+			continue
 		}
+
+		// The entry's reader yields no more than its header says.
+		if h.Size > maxBinarySize {
+			return fmt.Errorf("%s in the archive is over %d MiB", name, maxBinarySize>>20)
+		}
+		if err := writeExecutable(dst, tr); err != nil {
+			return err
+		}
+
+		// The tar reader stops at the end of the entry, but gzip checks its
+		// checksum and length only at the end of the stream.
+		if _, err := io.Copy(io.Discard, gz); err != nil {
+			return fmt.Errorf("reading the archive: %w", err)
+		}
+
+		return nil
 	}
 }
 
 // writeExecutable creates path, which must not exist or is replaced, with
-// mode 0755 whatever the umask, and fills it from r. A file left by an
+// mode 0755 whatever the umask, fills it from r and syncs it. A file left by an
 // interrupted install is removed first, so nothing is written through it.
 func writeExecutable(path string, r io.Reader) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -97,6 +120,11 @@ func writeExecutable(path string, r io.Reader) error {
 	err = f.Chmod(0o755)
 	if err == nil {
 		_, err = io.Copy(f, archiveReader{r})
+	}
+	// On disk before it is renamed into place, so a crash can't leave the
+	// name pointing at a file that never got its contents.
+	if err == nil {
+		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr

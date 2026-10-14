@@ -19,8 +19,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// tarFile is one entry of a test archive.
-type tarFile struct{ name, content string }
+// tarFile is one entry of a test archive: a regular file unless kind says
+// otherwise, in which case link is what it points to.
+type tarFile struct {
+	name, content string
+	kind          byte
+	link          string
+}
 
 // tarballOf writes a .tar.gz holding files, in order, and returns its path.
 func tarballOf(t *testing.T, files ...tarFile) string {
@@ -33,11 +38,16 @@ func tarballOf(t *testing.T, files ...tarFile) string {
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)
 	for _, file := range files {
+		kind := file.kind
+		if kind == 0 {
+			kind = tar.TypeReg
+		}
 		require.NoError(t, tw.WriteHeader(&tar.Header{
 			Name:     file.name,
 			Mode:     0o755,
 			Size:     int64(len(file.content)),
-			Typeflag: tar.TypeReg,
+			Typeflag: kind,
+			Linkname: file.link,
 		}))
 		_, err := tw.Write([]byte(file.content))
 		require.NoError(t, err)
@@ -49,11 +59,47 @@ func tarballOf(t *testing.T, files ...tarFile) string {
 	return path
 }
 
+// tarballDeclaring writes a .tar.gz whose one file, name, claims to be size
+// bytes and is cut off after its header, and returns its path.
+func tarballDeclaring(t *testing.T, name string, size int64) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "archive.tar.gz")
+	f, err := os.Create(path)
+	require.NoError(t, err)
+
+	gz := gzip.NewWriter(f)
+	require.NoError(t, tar.NewWriter(gz).WriteHeader(&tar.Header{
+		Name: name, Mode: 0o755, Size: size, Typeflag: tar.TypeReg,
+	}))
+	require.NoError(t, gz.Close())
+	require.NoError(t, f.Close())
+
+	return path
+}
+
+// badTrailer is the .tar.gz at path with the CRC-32 in its gzip trailer
+// changed, so everything before it is a valid archive and the whole of it is
+// not.
+func badTrailer(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	// The trailer is the CRC-32 and then the length, four bytes each.
+	data[len(data)-8] ^= 0xff
+
+	bad := filepath.Join(t.TempDir(), "bad.tar.gz")
+	require.NoError(t, os.WriteFile(bad, data, 0o644))
+
+	return bad
+}
+
 // tarball writes a .tar.gz holding one file, name, and returns its path.
 func tarball(t *testing.T, name, content string) string {
 	t.Helper()
 
-	return tarballOf(t, tarFile{name, content})
+	return tarballOf(t, tarFile{name: name, content: content})
 }
 
 // fileNames is what dir holds.
@@ -149,12 +195,12 @@ func TestInstallTakesOnlyTheBinaryAtTheRoot(t *testing.T) {
 			require.NoError(t, os.WriteFile(target, []byte("old"), 0o755))
 
 			archive := tarballOf(t,
-				tarFile{"LICENSE", "license"},
-				tarFile{"README.md", "readme"},
-				tarFile{"etc/man/man1/upterm.1", "man"},
-				tarFile{"sub/" + tc.binary, "decoy"},
-				tarFile{tc.binary, "new"},
-				tarFile{"docs/upterm.md", "docs"},
+				tarFile{name: "LICENSE", content: "license"},
+				tarFile{name: "README.md", content: "readme"},
+				tarFile{name: "etc/man/man1/upterm.1", content: "man"},
+				tarFile{name: "sub/" + tc.binary, content: "decoy"},
+				tarFile{name: tc.binary, content: "new"},
+				tarFile{name: "docs/upterm.md", content: "docs"},
 			)
 			require.NoError(t, installBinary(archive, target, tc.goos))
 
@@ -200,6 +246,28 @@ func TestAFailedInstallLeavesTheOldBinaryAndNothingElse(t *testing.T) {
 			{"no binary in it", func(t *testing.T) string { return tarball(t, "LICENSE", "x") }, "the archive has no " + tc.binary + " at its root"},
 			{"the binary only in a directory", func(t *testing.T) string { return tarball(t, "upterm_x/"+tc.binary, "x") }, "the archive has no " + tc.binary + " at its root"},
 			{"another system's binary", func(t *testing.T) string { return tarball(t, other, "x") }, "the archive has no " + tc.binary + " at its root"},
+			// A name that is not a file is not the binary, however it is named.
+			{"a symlink named for the binary", func(t *testing.T) string {
+				return tarballOf(t, tarFile{name: tc.binary, kind: tar.TypeSymlink, link: "/bin/sh"})
+			}, "the archive has no " + tc.binary + " at its root"},
+			{"a hard link named for the binary", func(t *testing.T) string {
+				return tarballOf(t, tarFile{name: "LICENSE", content: "x"}, tarFile{name: tc.binary, kind: tar.TypeLink, link: "LICENSE"})
+			}, "the archive has no " + tc.binary + " at its root"},
+			{"a directory named for the binary", func(t *testing.T) string {
+				return tarballOf(t, tarFile{name: tc.binary, kind: tar.TypeDir})
+			}, "the archive has no " + tc.binary + " at its root"},
+			// The binary comes whole and first; what is wrong is further on, in
+			// the checksum that closes the stream.
+			{"a wrong checksum after the binary", func(t *testing.T) string {
+				return badTrailer(t, tarballOf(t,
+					tarFile{name: tc.binary, content: "new"},
+					tarFile{name: "LICENSE", content: "license"},
+					tarFile{name: "docs/upterm.md", content: "docs"},
+				))
+			}, "reading the archive: gzip: invalid checksum"},
+			{"a binary over the size limit", func(t *testing.T) string {
+				return tarballDeclaring(t, tc.binary, maxBinarySize+1)
+			}, tc.binary + " in the archive is over 256 MiB"},
 			{"not an archive", func(t *testing.T) string {
 				p := filepath.Join(t.TempDir(), "x.tar.gz")
 				require.NoError(t, os.WriteFile(p, []byte("not a tarball"), 0o644))
