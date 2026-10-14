@@ -854,7 +854,7 @@ func TestADaemonsSeveralErrorsAreOneLine(t *testing.T) {
 }
 
 // The root's pre-run and the daemon's spawn both find the log unopenable,
-// and share one warning (B2): upterm host says so once.
+// and share one warning: upterm host says so once.
 func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	dir := inProcessHostEnv(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "upterm"), nil, 0o600)) // a file where the dir goes
@@ -874,8 +874,8 @@ func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
 }
 
-// UPTERM_NAME still names the session in this release, and upterm host
-// says once that it won't from perRunIgnoredFrom.
+// UPTERM_NAME still names the session before v0.40, and upterm host says
+// once that it will be ignored from perRunIgnoredFrom.
 func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
 	withConfig(t, "")
 	home := t.TempDir()

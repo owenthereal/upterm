@@ -168,7 +168,7 @@ func TestSpawnedSessionNamesTheLogWhenTheSpawnFails(t *testing.T) {
 }
 
 // A spawn that can't open the log warns once in a run, however often it
-// spawns again (a name retry), and the session goes on (B2). The root's
+// spawns again (a name retry), and the session goes on. The root's
 // pre-run shares the warning: TestHostWithoutItsLogWarnsOnce.
 func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -188,7 +188,7 @@ func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
 	require.Equal(t, "upterm: warning: can't open the log file /var/log/upterm.log: permission denied; logging is off\n", stderr.String())
 }
 
-// A session whose spawn couldn't open the log points no line at it (B2):
+// A session whose spawn couldn't open the log points no line at it:
 // nothing of the session is in it. With the log, the lines still do.
 func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
 	for _, logOff := range []bool{false, true} {

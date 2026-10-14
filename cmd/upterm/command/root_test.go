@@ -495,7 +495,7 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 
 // Exactly these flags are per-run; every other flag stays bound, host's
 // --join-timeout included (CI sets it).
-func TestPerRunFlagsAreD8asList(t *testing.T) {
+func TestPerRunFlagsAreExactlyTheRunsOwnChoices(t *testing.T) {
 	var got []string
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
@@ -579,9 +579,11 @@ func TestPerRunWarningsAreTheParentsOnly(t *testing.T) {
 	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
 }
 
-// A CLI-only flag is never bound. Its name stays a known config key, which
-// another command may own, so `output:` in a config neither sets it nor fails
-// it.
+// A CLI-only flag is never bound to env or config: an `output:` key or
+// UPTERM_OUTPUT meant for another command would otherwise change or break a
+// command that never asked for it. The name stays a known config key, which
+// another command may own, so `output:` in a config neither sets the flag nor
+// fails the run.
 func TestCLIOnlyFlagsIgnoreEnvAndConfig(t *testing.T) {
 	withConfig(t, "output: json\n")
 	cmd := &cobra.Command{Use: "probe", RunE: func(*cobra.Command, []string) error { return nil }}

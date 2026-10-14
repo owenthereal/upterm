@@ -49,7 +49,7 @@ type spawnedSession struct {
 	attachClient clientFunc  // nil with --detach
 	logger       *slog.Logger
 	logWarning   *logWarning // the run's, shared by every spawn in it
-	logOff       bool        // the spawn couldn't open logPath (B2)
+	logOff       bool        // the spawn couldn't open logPath
 }
 
 // loggedTo is the log the daemon's output went to, or "" when the spawn
@@ -77,7 +77,7 @@ type clientOutcome struct {
 
 func (s *spawnedSession) run(ctx context.Context) error {
 	// A log the spawn can't open is warned about, and the daemon starts
-	// without it (B2): nothing of this session is in it to point at.
+	// without it: nothing of this session is in it to point at.
 	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath, logOff: func(err error) {
 		s.logOff = true
 		s.logWarning.warn(s.logPath, err)

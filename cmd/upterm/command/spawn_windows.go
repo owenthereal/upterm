@@ -52,7 +52,7 @@ type spawnOptions struct {
 	name       string
 	logPath    string
 	// logOff, if set, is told why the log couldn't be opened; the child
-	// then starts with its stdout and stderr on the null device (B2).
+	// then starts with its stdout and stderr on the null device.
 	logOff func(err error)
 }
 
@@ -63,8 +63,7 @@ type spawnOptions struct {
 // console (a window closing reaches nothing in it), with stdin from NUL and
 // stdout and stderr appended to the log — anything it prints outside its
 // logger, a panic above all, has to land somewhere a person can find. A log
-// that can't be opened doesn't stop it: logOff is told, and they go to NUL
-// (B2).
+// that can't be opened doesn't stop it: logOff is told, and they go to NUL.
 //
 // The channel is an AF_UNIX socket rather than the socketpair Unix inherits,
 // because Windows has neither socketpair nor ExtraFiles. That difference is

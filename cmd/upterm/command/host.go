@@ -333,8 +333,10 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 	return err
 }
 
-// nameInUseError is the line for a name a running session holds, and is
-// still sessiondir.ErrNameInUse, which runWithGeneratedNameRetry redraws on.
+// nameInUseError is the error for a name a running session holds; its message
+// says to attach to that session or pick another --name. It unwraps to
+// sessiondir.ErrNameInUse, which runWithGeneratedNameRetry redraws on for a
+// generated name (an explicit --name is reported as is).
 type nameInUseError struct {
 	name string
 }

@@ -9,24 +9,24 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// Which flags env and config can set. One namespace serves every
-// command, so a value meant for one run of one command (host's --name, say)
-// reached every run of every command with a flag of that name.
+// The annotations below mark flags that env and config shouldn't set. One
+// namespace serves every command, so a value meant for one run of one command
+// (host's --name, say) reached every run of every command with a flag of that
+// name.
 const (
-	annotationPerRun  = "upterm/per-run"  // env/config still applies in this release, with a warning
+	annotationPerRun  = "upterm/per-run"  // env/config still applies until v0.40, with a warning
 	annotationCLIOnly = "upterm/cli-only" // never bound to env or config
 )
 
 // perRunIgnoredFrom is the release from which per-run values from env or
-// config are ignored. That is v0.40: v0.39.0 introduces the warnings, and the
-// next minor ignores the values.
+// config are ignored. Until then they still apply and draw a warning.
 const perRunIgnoredFrom = "v0.40"
 
 // perRun marks flags of fs as per-run.
 func perRun(fs *pflag.FlagSet, names ...string) {
 	for _, name := range names {
-		// Only errors on an unknown flag name; TestPerRunFlagsAreD8asList
-		// pins the list.
+		// Only errors on an unknown flag name; the test of the per-run flags,
+		// TestPerRunFlagsAreExactlyTheRunsOwnChoices, pins the list.
 		_ = fs.SetAnnotation(name, annotationPerRun, []string{"true"})
 	}
 }

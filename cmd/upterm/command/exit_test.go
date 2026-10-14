@@ -259,8 +259,8 @@ func TestVersionHelpAndCompletionIgnoreABadConfig(t *testing.T) {
 	require.Contains(t, stderr, "upterm: failed to read config file")
 }
 
-// A log file that can't be opened turns logging off with one warning, and
-// fails nothing.
+// A log file that can't be opened turns logging off with one warning and fails
+// nothing: a command that doesn't need the log, version here, still runs.
 func TestAnUnopenableLogFileWarnsAndGoesOn(t *testing.T) {
 	withConfig(t, "")
 	state := t.TempDir()
@@ -409,8 +409,8 @@ func TestUsageAndConfigErrorsTakeTheCommandsFailureCode(t *testing.T) {
 	}
 }
 
-// Arguments a command doesn't take are a usage error, with its failure
-// code, where they used to be ignored.
+// Arguments a command doesn't take are a usage error, with its failure code:
+// an argument silently ignored hides a mistake in the command line.
 func TestExtraArgumentsAreUsageErrors(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")

@@ -168,7 +168,8 @@ const annotationConfig = "upterm/config"
 
 // readsConfig is false for a command annotated upterm/config=none (version,
 // upgrade), for cobra's help, completion and its subcommands, and
-// __complete; true otherwise. Flags don't decide it.
+// __complete; true otherwise. Whether a command has flags doesn't decide it:
+// completion bash has --no-descriptions and still reads no config.
 func readsConfig(cmd *cobra.Command) bool {
 	if cmd.Annotations[annotationConfig] == "none" {
 		return false
@@ -189,7 +190,7 @@ func readsConfig(cmd *cobra.Command) bool {
 
 // logWarning says that the log file can't be opened, and logging is off.
 // The root's pre-run opens the log, and so does each spawn of upterm host's
-// daemon (B2), so it is said once, by whichever finds it first, and only by
+// daemon, so it is said once, by whichever finds it first, and only by
 // the parent: the daemon's stderr is that log, or the null device.
 type logWarning struct {
 	w    io.Writer
@@ -331,7 +332,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	v.SetEnvPrefix("UPTERM")
 
 	// applied records a value env or config gave flag, and for a per-run
-	// flag, the values it still takes from them in this release.
+	// flag, the values it still takes from them until v0.40.
 	applied := func(flag *pflag.Flag, inConfig bool) {
 		supplied[flag.Name] = true
 		if hasAnnotation(flag, annotationPerRun) {

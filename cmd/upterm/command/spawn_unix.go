@@ -32,7 +32,7 @@ type spawnOptions struct {
 	name       string
 	logPath    string
 	// logOff, if set, is told why the log couldn't be opened; the child
-	// then starts with its stdout and stderr on the null device (B2).
+	// then starts with its stdout and stderr on the null device.
 	logOff func(err error)
 }
 
@@ -44,7 +44,7 @@ type spawnOptions struct {
 // /dev/null and stdout and stderr appended to the log — anything it prints
 // outside its logger, a panic above all, has to land somewhere a person can
 // find. A log that can't be opened doesn't stop it: logOff is told, and
-// they go to /dev/null (B2). The channel is a socketpair rather than a pipe
+// they go to /dev/null. The channel is a socketpair rather than a pipe
 // because both sides write, and because the child sees EOF the moment the
 // parent's end is gone, whichever way it went.
 //

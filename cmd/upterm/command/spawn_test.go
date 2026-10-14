@@ -133,7 +133,7 @@ func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
 	requirePlatformReports(t, log)
 }
 
-// A log that can't be opened doesn't stop the daemon (B2): its stdout and
+// A log that can't be opened doesn't stop the daemon: its stdout and
 // stderr go to the null device, and the spawn says why, once.
 func TestSpawnDaemonStartsWithoutItsLog(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state")
