@@ -299,28 +299,28 @@ func TestNoHomeFailsOnlyWhatNeedsIt(t *testing.T) {
 	require.Equal(t, "", host.PersistentFlags().Lookup("known-hosts").Value.String())
 	require.Equal(t, "~/.ssh/known_hosts", host.PersistentFlags().Lookup("known-hosts").DefValue)
 
+	// Only --known-hosts needs it. -i's default with no home is a home with
+	// no keys: the agent's, then a generated one.
 	_, homeErr := os.UserHomeDir()
 	require.Error(t, homeErr)
-	want := func(flag string) string {
-		return fmt.Sprintf("upterm: can't find your home directory for the default %s: %v; pass %s\n", flag, homeErr, flag)
-	}
+	want := fmt.Sprintf("upterm: can't find your home directory for the default --known-hosts: %v; pass --known-hosts\n", homeErr)
 	_, stderr, code := runCLI(t, "host", "--", "true")
 	require.Equal(t, 1, code)
-	require.Equal(t, want("--private-key")+want("--known-hosts"), stderr)
+	require.Equal(t, want, stderr)
 	_, stderr, code = runCLI(t, "join", "abc@relay.test")
 	require.Equal(t, 255, code)
-	require.Equal(t, want("--private-key")+want("--known-hosts"), stderr)
+	require.Equal(t, want, stderr)
 
-	// Supplied, from any origin, they're not needed: each run goes on to
-	// the terminal it doesn't have.
-	dir := t.TempDir()
-	t.Setenv("UPTERM_KNOWN_HOSTS", filepath.Join(dir, "known_hosts"))
-	_, stderr, code = runCLI(t, "host", "-i", filepath.Join(dir, "id_ed25519"), "--", "true")
-	require.Equal(t, 1, code)
-	require.Equal(t, "upterm: upterm host needs a terminal to ask before starting; pass --accept to start without asking\n", stderr)
-	_, stderr, code = runCLI(t, "join", "-i", filepath.Join(dir, "id_ed25519"), "abc@relay.test")
+	// Supplied, from any origin, it isn't needed: each run goes on to the
+	// terminal it doesn't have.
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	_, stderr, code = runCLI(t, "join", "--known-hosts", knownHosts, "abc@relay.test")
 	require.Equal(t, 255, code)
 	require.Equal(t, "upterm: upterm join needs a terminal.\n", stderr)
+	t.Setenv("UPTERM_KNOWN_HOSTS", knownHosts)
+	_, stderr, code = runCLI(t, "host", "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: upterm host needs a terminal to ask before starting; pass --accept to start without asking\n", stderr)
 }
 
 // cmd/gendoc writes a man page for every command Root has, and completion

@@ -167,9 +167,9 @@ func TestSpawnedSessionNamesTheLogWhenTheSpawnFails(t *testing.T) {
 	})
 }
 
-// A spawn that can't open the log warns, once in a run whatever spawns again
-// (a name retry) and not at all once the root's pre-run has, and the session
-// goes on (B2).
+// A spawn that can't open the log warns once in a run, however often it
+// spawns again (a name retry), and the session goes on (B2). The root's
+// pre-run shares the warning: TestHostWithoutItsLogWarnsOnce.
 func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	warning := &logWarning{w: &stderr}
@@ -186,6 +186,50 @@ func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
 		require.NoError(t, s.run(context.Background()))
 	}
 	require.Equal(t, "upterm: warning: can't open the log file /var/log/upterm.log: permission denied; logging is off\n", stderr.String())
+}
+
+// A session whose spawn couldn't open the log points no line at it (B2):
+// nothing of the session is in it. With the log, the lines still do.
+func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
+	for _, logOff := range []bool{false, true} {
+		see := " (see /var/log/upterm.log)"
+		if logOff {
+			see = ""
+		}
+		spawnFor := func() (spawnFunc, *scriptedDaemon) {
+			spawn, d := newScriptedDaemon(t)
+			if !logOff {
+				return spawn, d
+			}
+			return func(opts spawnOptions) (net.Conn, *os.Process, error) {
+				opts.logOff(&fs.PathError{Op: "open", Path: opts.logPath, Err: errors.New("permission denied")})
+				return spawn(opts)
+			}, d
+		}
+
+		// The command couldn't start.
+		spawn, d := spawnFor()
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		go func() { d.await().Failed("exec: no such file", false, false) }()
+		require.EqualError(t, s.run(context.Background()), "session s could not start: exec: no such file"+see, "log off: %v", logOff)
+
+		// The local terminal was disconnected.
+		spawn, d = spawnFor()
+		attached := make(chan string, 1)
+		result := make(chan attach.Result, 1)
+		stdout.Reset()
+		stderr.Reset()
+		s = newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
+		d.startup(t, "s")
+		go func() {
+			<-attached
+			d.start()
+			result <- attach.Result{Reason: attach.Disconnected}
+		}()
+		_ = s.run(context.Background())
+		require.Contains(t, stderr.String(), "upterm: the local terminal was disconnected from session s"+see+"; the session continues", "log off: %v", logOff)
+	}
 }
 
 func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {

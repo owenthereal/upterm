@@ -768,6 +768,27 @@ func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
 func runHostInProcess(t *testing.T, argv ...string) error {
 	t.Helper()
 
+	var command []string
+	for i, a := range argv {
+		if a == "--" {
+			command = argv[i+1:]
+			break
+		}
+	}
+	inProcessDaemons(t, command)
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs(argv)
+	return root.Execute()
+}
+
+// inProcessDaemons is runHostInProcess's daemon: hostSpawn, until the test
+// ends, starts one in a goroutine of this process, hosting command.
+func inProcessDaemons(t *testing.T, command []string) {
+	t.Helper()
+
 	orig := hostSpawn
 	t.Cleanup(func() { hostSpawn = orig })
 
@@ -776,14 +797,6 @@ func runHostInProcess(t *testing.T, argv ...string) error {
 	// variables the next test is about to write.
 	var daemons sync.WaitGroup
 	t.Cleanup(daemons.Wait)
-
-	var command []string
-	for i, a := range argv {
-		if a == "--" {
-			command = argv[i+1:]
-			break
-		}
-	}
 
 	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
 		opts, err := parseHostOptions(command)
@@ -800,12 +813,36 @@ func runHostInProcess(t *testing.T, argv ...string) error {
 		}()
 		return b, nil, nil
 	}
+}
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs(argv)
-	return root.Execute()
+// The root's pre-run and the daemon's spawn both find the log unopenable,
+// and share one warning (B2): upterm host says so once.
+func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
+	withConfig(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir, err := os.MkdirTemp("", "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "upterm"), nil, 0o600)) // a file where the dir goes
+
+	inProcessDaemons(t, []string{"true"})
+	inProcess := hostSpawn
+	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
+		// What spawnDaemon does with a log it can't open.
+		_, err := os.OpenFile(so.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		require.Error(t, err)
+		so.logOff(err)
+		return inProcess(so)
+	}
+
+	_, stderr, _ := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--", "true")
+	require.Equal(t, 1, strings.Count(stderr, "upterm: warning: can't open the log file"), stderr)
+	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
 }
 
 // Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps

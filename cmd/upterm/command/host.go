@@ -397,7 +397,7 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := homeDefaultErrors(); err != nil {
+	if err := homeDefaultError(); err != nil {
 		result = multierror.Append(result, err)
 	}
 
@@ -790,25 +790,23 @@ func homeDefault(rel ...string) (string, error) {
 	return filepath.Join(append([]string{home}, rel...)...), nil
 }
 
-// homeDefaultErrors fails a run of host or join that relies on the default
-// -i or --known-hosts when there is no home directory to find it in
-// (D11.3): one error for each of them not supplied from any origin.
-func homeDefaultErrors() error {
-	_, err := homeDefault()
-	if err == nil {
+// homeDefaultError fails a run of host or join that relies on the default
+// --known-hosts, not supplied from any origin, when there is no home
+// directory to find it in (D11.3). -i's default needs none: see
+// defaultPrivateKeys.
+func homeDefaultError() error {
+	if suppliedFlags["known-hosts"] {
 		return nil
 	}
-	var result error
-	for _, flag := range []string{"private-key", "known-hosts"} {
-		if !suppliedFlags[flag] {
-			result = multierror.Append(result, fmt.Errorf("can't find your home directory for the default --%s: %w; pass --%s", flag, err, flag))
-		}
+	if _, err := homeDefault(); err != nil {
+		return fmt.Errorf("can't find your home directory for the default --known-hosts: %w; pass --known-hosts", err)
 	}
-	return result
+	return nil
 }
 
 // defaultPrivateKeys is the files that exist of OpenSSH's default
-// identities, or none with no home directory.
+// identities. With no home directory there are none, as in a home with no
+// keys: the agent's keys and a generated one are used as ever.
 func defaultPrivateKeys() []string {
 	sshDir, err := homeDefault(".ssh")
 	if err != nil {

@@ -179,7 +179,7 @@ func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 	target, typed := f.target, f.typed
 	// Checked before the terminal, as host checks it: like a flag's error,
 	// passing the flag fixes it. Exit prints it, with join's 255.
-	if err := homeDefaultErrors(); err != nil {
+	if err := homeDefaultError(); err != nil {
 		return err
 	}
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))

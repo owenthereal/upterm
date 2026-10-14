@@ -115,12 +115,13 @@ func suspendLocalTerminal(raw *rawTerminal, stdout *os.File, stop func(unless fu
 
 // localDisconnectMessage is what upterm host prints when the daemon
 // disconnected its own terminal. The session continues; the reason is in the
-// log, and the way back is upterm attach.
+// log, when there is one (logPath isn't ""), and the way back is upterm
+// attach.
 func localDisconnectMessage(name, logPath string, res attach.Result) string {
 	if res.Reason != attach.Disconnected {
 		return ""
 	}
-	return fmt.Sprintf("upterm: the local terminal was disconnected from session %s (see %s); the session continues; reattach with 'upterm attach %s'", name, logPath, name)
+	return fmt.Sprintf("upterm: the local terminal was disconnected from session %s%s; the session continues; reattach with 'upterm attach %s'", name, seeLog(" (see %s)", logPath), name)
 }
 
 // shouldNotifyClient reports whether a client arriving or leaving is worth a
