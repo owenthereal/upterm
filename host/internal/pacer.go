@@ -58,10 +58,13 @@ type guestPacer struct {
 	w   io.Writer
 	ctx context.Context
 
-	// attachMu makes a guest's registration and its Append one transaction,
-	// serialised across guests; see attach. Nothing on the write path takes
+	// attachSlot makes a guest's registration and its Append one transaction,
+	// serialised across guests; see attach. A one-slot channel rather than a
+	// mutex, so that a guest waiting its turn stops waiting when it leaves:
+	// the Append can be a join reconstructing the screen, which holds the
+	// slot for as long as its budget allows. Nothing on the write path takes
 	// it, so pacing never waits on a join.
-	attachMu sync.Mutex
+	attachSlot chan struct{}
 
 	mu       sync.Mutex
 	guests   []pacedSink // registration order
@@ -80,7 +83,7 @@ type guestPacer struct {
 // newGuestPacer returns a pacer writing to w. Pacing stops for good once ctx
 // ends: a session being stopped must not wait on a slow guest.
 func newGuestPacer(ctx context.Context, w io.Writer) *guestPacer {
-	return &guestPacer{w: w, ctx: ctx, changed: make(chan struct{})}
+	return &guestPacer{w: w, ctx: ctx, attachSlot: make(chan struct{}, 1), changed: make(chan struct{})}
 }
 
 // Write waits until the pacing guest's backlog is below the low mark, then
@@ -91,7 +94,9 @@ func (p *guestPacer) Write(b []byte) (int, error) {
 }
 
 // attach registers s, then runs appendFn, which attaches s to the fan-out,
-// and unregisters s if that fails.
+// and unregisters s if that fails. It waits its turn on ctx, the joiner's:
+// a guest that leaves while another attaches is refused with ctx's error,
+// registered nowhere, and its sink is the caller's to release.
 //
 // Registering first is what bounds a new guest's exposure. Append publishes
 // the sink to the fan-out before it returns, so registering afterwards would
@@ -103,14 +108,18 @@ func (p *guestPacer) Write(b []byte) (int, error) {
 // Append, and so into the replay, or waits on writeMu, which Append holds,
 // and lands after it.
 //
-// attachMu is what keeps that true when guests join together. Without it, a
-// guest registered but descheduled before its Append would be the pacer with
-// an empty queue, holding the gate open while a later guest attached and took
-// output unpaced until it overflowed. With it, registration order is
+// attachSlot is what keeps that true when guests join together. Without it,
+// a guest registered but descheduled before its Append would be the pacer
+// with an empty queue, holding the gate open while a later guest attached and
+// took output unpaced until it overflowed. With it, registration order is
 // attachment order, and no guest attaches ahead of an earlier registered one.
-func (p *guestPacer) attach(s pacedSink, appendFn func() error) error {
-	p.attachMu.Lock()
-	defer p.attachMu.Unlock()
+func (p *guestPacer) attach(ctx context.Context, s pacedSink, appendFn func() error) error {
+	select {
+	case p.attachSlot <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.attachSlot }()
 	p.mu.Lock()
 	p.guests = append(p.guests, s)
 	p.changedLocked()

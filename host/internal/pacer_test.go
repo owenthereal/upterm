@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/require"
 )
@@ -102,7 +103,7 @@ func newTestPacerWithContext(t *testing.T, ctx context.Context, stall time.Durat
 // way out.
 func attachPaced(t *testing.T, p *guestPacer, writers *uio.MultiWriter, sink *uio.AsyncWriter) {
 	t.Helper()
-	require.NoError(t, p.attach(sink, func() error { return attachGuestOutput(writers, sink) }))
+	require.NoError(t, p.attach(t.Context(), sink, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}) }))
 	t.Cleanup(func() {
 		writers.Remove(sink)
 		p.remove(sink)
@@ -459,7 +460,7 @@ func TestGuestPacerHandsOverWhenThePacerLeaves(t *testing.T) {
 func TestGuestPacerProgressAtTheDeadlineCancelsTheAbort(t *testing.T) {
 	p, _ := newTestPacer(t, 50*time.Millisecond)
 	fake := newFakePaced(2 * pacingLowWater)
-	require.NoError(t, p.attach(fake, func() error { return nil }))
+	require.NoError(t, p.attach(t.Context(), fake, func() error { return nil }))
 
 	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
 	requireHeld(t, p, done)
@@ -505,8 +506,8 @@ func TestGuestPacerRegistersAGuestBeforeItCanReceiveOutput(t *testing.T) {
 		"the producer never got going")
 
 	sink := stuckSink(t, nil)
-	require.NoError(t, p.attach(sink, func() error {
-		if err := attachGuestOutput(writers, sink); err != nil {
+	require.NoError(t, p.attach(t.Context(), sink, func() error {
+		if err := attachGuestOutput(t.Context(), time.Time{}, writers, sink, termsize.Size{}); err != nil {
 			return err
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -551,9 +552,9 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		aErr <- p.attach(a, func() error {
+		aErr <- p.attach(t.Context(), a, func() error {
 			<-resume
-			return attachGuestOutput(writers, a)
+			return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
 		})
 	}()
 	require.Eventually(t, func() bool { return registered(p) == 1 }, 2*time.Second, time.Millisecond,
@@ -563,7 +564,7 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bErr <- p.attach(b, func() error { return attachGuestOutput(writers, b) })
+		bErr <- p.attach(t.Context(), b, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, b, termsize.Size{}) })
 	}()
 	select {
 	case err := <-bErr:
@@ -583,6 +584,69 @@ func TestGuestPacerSerialisesAttachments(t *testing.T) {
 	requireReturns(t, done, 2*time.Second)
 }
 
+// A guest waiting at the gate for another's attach stops waiting when it
+// leaves: refused with its context's error, registered nowhere, its Append
+// never run. The attach ahead of it keeps the gate, and the next one waits
+// for it as before. An attach can hold the gate for a join's whole budget,
+// emulating, and a guest that left behind it would otherwise wait it out.
+func TestGuestPacerGateWaitsOnTheJoinersContext(t *testing.T) {
+	p, writers := newTestPacer(t, time.Minute)
+	a := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	b := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	c := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	t.Cleanup(func() {
+		writers.Remove(a, c)
+		p.remove(a)
+		p.remove(c)
+		_ = a.Close()
+		_ = b.Close()
+		_ = c.Close()
+	})
+
+	inside, release := make(chan struct{}), make(chan struct{})
+	aErr := make(chan error, 1)
+	go func() {
+		aErr <- p.attach(t.Context(), a, func() error {
+			close(inside)
+			<-release
+			return attachGuestOutput(t.Context(), time.Time{}, writers, a, termsize.Size{})
+		})
+	}()
+	select {
+	case <-inside:
+	case <-time.After(2 * time.Second):
+		t.Fatal("A never took the gate")
+	}
+
+	left, leave := context.WithCancel(t.Context())
+	var bRan atomic.Bool
+	bErr := make(chan error, 1)
+	go func() {
+		bErr <- p.attach(left, b, func() error {
+			bRan.Store(true)
+			return nil
+		})
+	}()
+	leave()
+	require.ErrorIs(t, awaitErr(t, bErr), context.Canceled, "B kept waiting after it left")
+	require.False(t, bRan.Load(), "B attached after it left")
+	require.Equal(t, 1, registered(p), "B was registered after it left")
+
+	cErr := make(chan error, 1)
+	go func() {
+		cErr <- p.attach(t.Context(), c, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, c, termsize.Size{}) })
+	}()
+	select {
+	case err := <-cErr:
+		t.Fatalf("C's attach returned (%v) while A held the gate", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, awaitErr(t, aErr))
+	require.NoError(t, awaitErr(t, cErr))
+	require.Equal(t, 2, registered(p))
+}
+
 // A failed Append takes its registration back out, or a guest that never
 // joined would pace the session from then on. The sink is refused without
 // being closed, unlike attachGuestOutput's refusal: a closed sink is skipped
@@ -594,7 +658,7 @@ func TestGuestPacerRollsBackAFailedAttach(t *testing.T) {
 	require.NoError(t, err)
 
 	refuse := func() error { return uio.ErrClosed }
-	require.ErrorIs(t, p.attach(sink, refuse), uio.ErrClosed)
+	require.ErrorIs(t, p.attach(t.Context(), sink, refuse), uio.ErrClosed)
 	require.Zero(t, registered(p), "a failed attach left its guest registered")
 
 	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
@@ -602,7 +666,7 @@ func TestGuestPacerRollsBackAFailedAttach(t *testing.T) {
 
 	// And the transaction's lock went with it.
 	again := make(chan error, 1)
-	go func() { again <- p.attach(sink, refuse) }()
+	go func() { again <- p.attach(t.Context(), sink, refuse) }()
 	require.ErrorIs(t, awaitErr(t, again), uio.ErrClosed)
 }
 
@@ -647,7 +711,9 @@ func TestGuestPacerDoesNotHoldAnAttachBehindAGatedWrite(t *testing.T) {
 		_ = joiner.Close()
 	})
 	attached := make(chan error, 1)
-	go func() { attached <- p.attach(joiner, func() error { return attachGuestOutput(writers, joiner) }) }()
+	go func() {
+		attached <- p.attach(t.Context(), joiner, func() error { return attachGuestOutput(t.Context(), time.Time{}, writers, joiner, termsize.Size{}) })
+	}()
 	require.NoError(t, awaitErr(t, attached), "a guest's attach failed while a write was held")
 	requireHeld(t, p, done)
 
