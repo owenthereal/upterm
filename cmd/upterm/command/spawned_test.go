@@ -482,6 +482,20 @@ func TestSpawnedSessionInterruptedIsSilent130(t *testing.T) {
 	require.Empty(t, stderr.String())
 }
 
+// SIGTERM at the accept prompt: the daemon is told the session is not to
+// start, and what run returns exits 143 with nothing said.
+func TestSpawnedSessionTerminatedAtThePromptIsSilent143(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserTerminatedError{} }
+	dec := d.startup(t, "s")
+	err := s.run(context.Background())
+	require.Equal(t, api.Accept_INTERRUPTED, <-dec)
+	require.Equal(t, 143, Exit(nil, mapUserAction(nil, err), &stderr))
+	require.Empty(t, stderr.String())
+}
+
 func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer

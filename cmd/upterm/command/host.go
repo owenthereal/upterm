@@ -54,9 +54,28 @@ func (e UserDiscardedError) Unwrap() error {
 	return host.ErrSessionAbandoned
 }
 
-// exitInterrupted is what Ctrl-C at the accept prompt exits with (D2a): 128
-// plus SIGINT, which is also how the relay-key prompt ends, by the signal.
-const exitInterrupted = 130
+// What the accept prompt exits with when it ends on a signal (D2a): 128 plus
+// the signal, as if the signal had ended the process, which is also how the
+// relay-key prompt ends.
+const (
+	exitInterrupted = 130 // SIGINT, or Ctrl-C at the prompt
+	exitTerminated  = 143 // SIGTERM
+)
+
+// UserTerminatedError is the accept prompt ending without an answer: SIGTERM
+// quits the program bubbletea runs it in, with no error.
+type UserTerminatedError struct{}
+
+func (e UserTerminatedError) Error() string {
+	return "terminated at the prompt"
+}
+
+// Unwrap makes a termination an abandoned startup rather than a failed one,
+// for the same reason UserInterruptedError.Unwrap does: the session was never
+// accepted, so nothing failed.
+func (e UserTerminatedError) Unwrap() error {
+	return host.ErrSessionAbandoned
+}
 
 // UserInterruptedError represents a user's Ctrl+C interruption
 type UserInterruptedError struct{}
@@ -620,13 +639,13 @@ func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
 	}
 }
 
-// mapUserAction turns a UserDiscardedError or UserInterruptedError from a
-// run attempt into the exit shareRunE reports, on either path: a decline is
-// a clean exit (nothing printed, status 0), and an interruption is Reported
-// with status 130, so that Exit prints nothing for it — a session the
-// operator declined or interrupted at the prompt is not a fault, and must not
-// read as one in the daemon's log or the foreground's stderr. Anything else is
-// returned unchanged.
+// mapUserAction turns a UserDiscardedError, UserInterruptedError or
+// UserTerminatedError from a run attempt into the exit shareRunE reports, on
+// either path: a decline is a clean exit (nothing printed, status 0), and an
+// interruption or termination is Reported with status 130 or 143, so that
+// Exit prints nothing for it — a session the operator declined or interrupted
+// at the prompt is not a fault, and must not read as one in the daemon's log
+// or the foreground's stderr. Anything else is returned unchanged.
 func mapUserAction(_ *cobra.Command, err error) error {
 	var userDiscardedErr UserDiscardedError
 	if errors.As(err, &userDiscardedErr) {
@@ -636,6 +655,11 @@ func mapUserAction(_ *cobra.Command, err error) error {
 	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
 		return Reported{Err: ExitCodeError{Code: exitInterrupted, Err: userInterruptedErr}}
+	}
+
+	var userTerminatedErr UserTerminatedError
+	if errors.As(err, &userTerminatedErr) {
+		return Reported{Err: ExitCodeError{Code: exitTerminated, Err: userTerminatedErr}}
 	}
 
 	return err
@@ -756,7 +780,19 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	model := tui.NewHostSessionModel(detail, false)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
-	finalModel, err := p.Run()
+	return confirmationOutcome(p.Run())
+}
+
+// confirmationOutcome is what displaySession makes of how the prompt ended:
+// the final model and the error Program.Run returned.
+//
+// A prompt that ended without an answer never starts the session. SIGINT is
+// an error wrapping tea.ErrInterrupted, which is the operator's Ctrl-C all the
+// same; SIGTERM is no error at all, only a model still undecided.
+func confirmationOutcome(finalModel tea.Model, err error) error {
+	if errors.Is(err, tea.ErrInterrupted) {
+		return UserInterruptedError{}
+	}
 	if err != nil {
 		return fmt.Errorf("session confirmation failed: %w", err)
 	}
@@ -775,6 +811,8 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 		return UserDiscardedError{}
 	case tui.HostSessionConfirmInterrupted:
 		return UserInterruptedError{}
+	case tui.HostSessionConfirmUndecided:
+		return UserTerminatedError{}
 	default:
 		return fmt.Errorf("unknown confirmation result: %d", sessionModel.Result())
 	}

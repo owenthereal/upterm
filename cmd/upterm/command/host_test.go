@@ -17,10 +17,12 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/go-cmp/cmp"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -1205,4 +1207,66 @@ func Test_hostCmd_emptyPrivateKeyEnvPreservesAnExplicitValue(t *testing.T) {
 		t.Setenv("UPTERM_PRIVATE_KEY", "")
 		require.ErrorContains(t, runHostCmd(t, "--private-key", missing), "cannot read private key "+missing)
 	})
+}
+
+// promptOutcome runs the accept prompt in a program with no terminal and no
+// signal handler, sends it msgs, and returns what displaySession makes of how
+// it ended. A signal is the message bubbletea turns it into, tea.QuitMsg for
+// SIGTERM and tea.InterruptMsg for SIGINT; the test process is never
+// signalled.
+func promptOutcome(t *testing.T, msgs ...tea.Msg) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p := tea.NewProgram(tui.NewHostSessionModel(tui.SessionDetail{}, false),
+		tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutSignalHandler())
+	go func() {
+		for _, m := range msgs {
+			p.Send(m)
+		}
+	}()
+	return confirmationOutcome(p.Run())
+}
+
+// A prompt that ends without an answer never starts the session (D2a), and a
+// signal says nothing: SIGINT is 130 and SIGTERM 143, as if the signal had
+// ended the process.
+func TestASignalAtTheAcceptPromptNeverStartsTheSession(t *testing.T) {
+	for name, tc := range map[string]struct {
+		msg  tea.Msg
+		want int
+	}{
+		"SIGTERM": {tea.QuitMsg{}, 143},
+		"SIGINT":  {tea.InterruptMsg{}, 130},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := promptOutcome(t, tc.msg)
+			require.Error(t, err, "nil would start the session")
+			var stderr strings.Builder
+			cmd := &cobra.Command{}
+			require.Equal(t, tc.want, Exit(cmd, mapUserAction(cmd, err), &stderr))
+			require.Empty(t, stderr.String())
+		})
+	}
+}
+
+func TestTheAcceptPromptsAnswers(t *testing.T) {
+	require.NoError(t, promptOutcome(t, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}))
+
+	err := promptOutcome(t, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	require.ErrorAs(t, err, new(UserDiscardedError))
+
+	err = promptOutcome(t, tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.ErrorAs(t, err, new(UserInterruptedError))
+}
+
+// Whatever else ends the program is a failure, told as one: only an interrupt
+// is the operator's own word.
+func TestConfirmationOutcomeOfAProgramKilled(t *testing.T) {
+	// What Program.Run returns for a SIGINT.
+	err := confirmationOutcome(nil, fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrInterrupted))
+	require.ErrorAs(t, err, new(UserInterruptedError))
+
+	err = confirmationOutcome(nil, fmt.Errorf("%w: %w", tea.ErrProgramKilled, context.Canceled))
+	require.EqualError(t, err, "session confirmation failed: program was killed: context canceled")
 }
