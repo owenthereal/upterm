@@ -177,18 +177,18 @@ func configEditRunE(c *cobra.Command, args []string) error {
 
 // editorCommand is the command that opens path in the user's editor: $VISUAL
 // (for full-screen editors), then $EDITOR (for line editors), then the
-// platform's default. The variable may carry arguments, as in code --wait;
-// editorArgs splits it.
+// platform's default; a variable that is blank counts as unset. The variable
+// may carry arguments, as in code --wait; editorWords splits it.
 func editorCommand(getenv func(string) string, path string) (*exec.Cmd, error) {
 	variable, line := "", defaultEditor()
 	for _, name := range []string{"VISUAL", "EDITOR"} {
-		if s := getenv(name); s != "" {
+		if s := getenv(name); strings.TrimSpace(s) != "" {
 			variable, line = name, s
 			break
 		}
 	}
 
-	words, err := editorArgs(line)
+	words, err := editorWords(line)
 	if err != nil {
 		return nil, fmt.Errorf("can't read $%s: %w", variable, err)
 	}
@@ -196,6 +196,19 @@ func editorCommand(getenv func(string) string, path string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("$%s names no program", variable)
 	}
 	return exec.Command(words[0], append(words[1:], path)...), nil
+}
+
+// editorWords is the program and arguments an editor variable holds. A value
+// that names a file is that program whole: an unquoted path with spaces in it,
+// such as /Applications/Sublime Text.app/Contents/SharedSupport/bin/subl or
+// C:\Program Files\Notepad++\notepad++.exe, split at the spaces would name a
+// program that isn't there. Anything else, a quoted path or a path with
+// arguments, is split by editorArgs.
+func editorWords(line string) ([]string, error) {
+	if fi, err := os.Stat(line); err == nil && !fi.IsDir() {
+		return []string{line}, nil
+	}
+	return editorArgs(line)
 }
 
 // defaultEditor is the editor when neither $VISUAL nor $EDITOR is set.

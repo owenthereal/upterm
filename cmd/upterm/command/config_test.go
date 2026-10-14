@@ -134,14 +134,71 @@ func TestWithNoEditorSetTheDefaultOpensTheFile(t *testing.T) {
 	require.Equal(t, "/c/config.yaml", cmd.Args[1])
 }
 
-func TestAnEditorThatNamesNoProgramIsRefused(t *testing.T) {
-	_, err := editorCommand(func(k string) string {
+// A value that is blank counts as unset, so it neither shadows the next
+// variable nor is run.
+func TestABlankVariableCountsAsUnset(t *testing.T) {
+	env := map[string]string{"VISUAL": "  ", "EDITOR": "ed"}
+	cmd, err := editorCommand(func(k string) string { return env[k] }, "/c/config.yaml")
+	require.NoError(t, err)
+	require.Equal(t, []string{"ed", "/c/config.yaml"}, cmd.Args)
+
+	env["EDITOR"] = "\t "
+	cmd, err = editorCommand(func(k string) string { return env[k] }, "/c/config.yaml")
+	require.NoError(t, err)
+	require.Len(t, cmd.Args, 2, "the default editor")
+	require.Equal(t, "/c/config.yaml", cmd.Args[1])
+}
+
+// writeFileWithSpace makes a file whose path has a space in it, in a temp dir.
+func writeFileWithSpace(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "my editor")
+	require.NoError(t, os.WriteFile(path, nil, 0o700))
+	return path
+}
+
+// An unquoted path with spaces in it, as the environment-variables dialog on
+// Windows and a shell's export of a path in an app bundle leave it, is the
+// program whole: split at the spaces it would name a program that isn't there.
+func TestAnUnquotedEditorPathWithSpacesRunsWhole(t *testing.T) {
+	editor := writeFileWithSpace(t)
+	cmd, err := editorCommand(func(k string) string {
 		if k == "EDITOR" {
-			return "  "
+			return editor
 		}
 		return ""
 	}, "/c/config.yaml")
-	require.EqualError(t, err, "$EDITOR names no program")
+	require.NoError(t, err)
+	require.Equal(t, []string{editor, "/c/config.yaml"}, cmd.Args)
+}
+
+// With an argument after it, or in quotes, the value is not a file, and is
+// split as it always was.
+func TestAnEditorPathWithSpacesAndAnArgumentIsSplit(t *testing.T) {
+	editor := writeFileWithSpace(t)
+	cmd, err := editorCommand(func(k string) string {
+		if k == "EDITOR" {
+			return editor + " --wait"
+		}
+		return ""
+	}, "/c/config.yaml")
+	require.NoError(t, err)
+	require.NotEqual(t, editor, cmd.Args[0])
+	require.Equal(t, []string{"--wait", "/c/config.yaml"}, cmd.Args[len(cmd.Args)-2:])
+}
+
+// A directory is not an editor: the value is split as always.
+func TestADirectoryIsNotAnEditorWhole(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my dir")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	cmd, err := editorCommand(func(k string) string {
+		if k == "EDITOR" {
+			return dir
+		}
+		return ""
+	}, "/c/config.yaml")
+	require.NoError(t, err)
+	require.NotEqual(t, dir, cmd.Args[0])
 }
 
 func TestConfigViewKeepsWhatHomebrewChecks(t *testing.T) {

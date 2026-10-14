@@ -44,6 +44,18 @@ func TestAnEditorWithAnUnclosedQuoteIsRefused(t *testing.T) {
 	require.ErrorContains(t, err, "$EDITOR")
 }
 
+// A value that is not blank but names nothing, a comment, is refused rather
+// than run as an empty program.
+func TestAnEditorThatNamesNoProgramIsRefused(t *testing.T) {
+	_, err := editorCommand(func(k string) string {
+		if k == "EDITOR" {
+			return "# nothing"
+		}
+		return ""
+	}, "/c/config.yaml")
+	require.EqualError(t, err, "$EDITOR names no program")
+}
+
 // writeEditor writes an executable shell script and returns its path.
 func writeEditor(t *testing.T, name, body string) string {
 	t.Helper()
@@ -107,4 +119,18 @@ func TestConfigEditReportsAnEditorThatWillNotStart(t *testing.T) {
 	_, stderr, code := runCLI(t, "config", "edit")
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr, "upterm: failed to open editor: ")
+}
+
+// An editor that exits with a failure is reported as that, and the file isn't
+// checked: the editor may not have finished with it.
+func TestConfigEditDoesNotCheckTheFileAfterAFailingEditor(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	restoreHostFlags(t)
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", writeEditor(t, "fail", "for f; do :; done\necho 'bogus-key: 1' >> \"$f\"\nexit 1\n"))
+
+	_, stderr, code := runCLI(t, "config", "edit")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: failed to open editor: exit status 1\n", stderr)
 }
