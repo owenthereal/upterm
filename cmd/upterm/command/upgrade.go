@@ -71,7 +71,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		releases, err := m.LatestReleases()
 		if err != nil {
 			logger.Error("error fetching releases", "error", err)
-			return fmt.Errorf("error fetching releases: %w", err)
+			return err
 		}
 
 		// no updates
