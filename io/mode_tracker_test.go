@@ -918,3 +918,81 @@ func Test_csiNumberReadsTheProtocolsWidth(t *testing.T) {
 	require.Empty(t, m.Snapshot(), "a pop past any depth empties the stack")
 	require.Empty(t, m.Restore())
 }
+
+// A tracker's clone is fed bytes the original is not, and the original bytes
+// the clone is not, each from the state they shared. Neither may reach the
+// other: the original goes on describing the ring's first byte for every
+// joiner after, and a clone is only as good as the state it was taken at.
+//
+// The parser writes into its slices in place -- it rewrites a key stack's top
+// entry and modifyOtherKeys, and reuses the arrays behind the sequence it is
+// inside -- so a copy that shares one carries each side's writes into the
+// other. Each case is one of them, and expects each tracker to end up where a
+// fresh tracker fed the same bytes would: the clone's and the original's
+// alike, fed one after the other and fed a byte at a time in turn, because a
+// shared array is only wrong for whichever side reads it second.
+func TestCloneIsIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		base  string // fed before the clone is taken
+		clone string // fed to the clone only
+		orig  string // fed to the original only
+	}{
+		{"mode map", "\x1b[?2004h\x1b[?25l", "\x1b[?2004l\x1b[?1004h", "\x1b[?25h\x1b[?1000h"},
+		// A set rewrites the top entry of whichever screen's stack is showing.
+		{"kitty key stacks", "\x1b[>1u\x1b[?1049h\x1b[>2u", "\x1b[=5u\x1b[?1049l\x1b[=6u", "\x1b[=3u\x1b[?1049l\x1b[=7u"},
+		{"modifyOtherKeys", "\x1b[>4;1m", "\x1b[>4;2m", "\x1b[>4;3m"},
+		// Both are left inside a sequence, so each Snapshot ends with its
+		// partial; a clone that ends the title and opens another writes over
+		// the head of the one the original is still holding. It ends the title
+		// at once: any text first would grow the partial past the array's
+		// capacity, and the clone would be on an array of its own.
+		{"partial", "\x1b]0;the-title", "\a\x1b[?2004h\x1b]2;c", "-and-more"},
+		// The parameters of a CSI the original and the clone each complete
+		// differently.
+		{"CSI parameters", "\x1b[?100", "0h", "4h"},
+	} {
+		for _, interleaved := range []bool{false, true} {
+			name := tc.name + "/in turn"
+			if interleaved {
+				name = tc.name + "/a byte at a time"
+			}
+			t.Run(name, func(t *testing.T) {
+				fresh := func(feeds ...string) *ModeTracker {
+					m := NewModeTracker()
+					for _, f := range feeds {
+						_, err := m.Write([]byte(f))
+						require.NoError(t, err)
+					}
+					return m
+				}
+
+				m := fresh(tc.base)
+				c := m.Clone()
+				require.Equal(t, string(m.Snapshot()), string(c.Snapshot()), "a clone starts where the original is")
+				require.Equal(t, string(m.Restore()), string(c.Restore()), "a clone starts where the original is")
+
+				if interleaved {
+					for i := 0; i < max(len(tc.clone), len(tc.orig)); i++ {
+						if i < len(tc.clone) {
+							_, _ = c.Write([]byte{tc.clone[i]})
+						}
+						if i < len(tc.orig) {
+							_, _ = m.Write([]byte{tc.orig[i]})
+						}
+					}
+				} else {
+					_, _ = c.Write([]byte(tc.clone))
+					_, _ = m.Write([]byte(tc.orig))
+				}
+
+				wantC, wantM := fresh(tc.base, tc.clone), fresh(tc.base, tc.orig)
+				require.NotEqual(t, string(wantM.Snapshot()), string(wantC.Snapshot()), "the case feeds them differently")
+				require.Equal(t, string(wantM.Snapshot()), string(m.Snapshot()), "the original's snapshot")
+				require.Equal(t, string(wantM.Restore()), string(m.Restore()), "the original's restore")
+				require.Equal(t, string(wantC.Snapshot()), string(c.Snapshot()), "the clone's snapshot")
+				require.Equal(t, string(wantC.Restore()), string(c.Restore()), "the clone's restore")
+			})
+		}
+	}
+}
