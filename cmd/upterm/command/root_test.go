@@ -474,14 +474,20 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 		})
 	}
 
-	// Every other command must refuse, rather than silently dropping a
-	// requested authorization restriction. Use `version` rather than
-	// `host --help`: cobra short-circuits --help without running
-	// PersistentPreRunE, so a help invocation would never reach ingestion.
+	// version reads no config (P7), so it doesn't fail on one either.
 	root2 := Root()
 	root2.SetOut(io.Discard)
 	root2.SetErr(io.Discard)
 	root2.SetArgs([]string{"version"})
-	err := root2.Execute()
-	assert.ErrorContains(t, err, "failed to read config file")
+	assert.NoError(t, root2.Execute())
+
+	// A command that reads it must refuse, rather than silently dropping a
+	// requested authorization restriction. Not `host --help`: cobra
+	// short-circuits --help without running PersistentPreRunE, so a help
+	// invocation would never reach ingestion.
+	root3 := Root()
+	root3.SetOut(io.Discard)
+	root3.SetErr(io.Discard)
+	root3.SetArgs([]string{"session", "list"})
+	assert.ErrorContains(t, root3.Execute(), "failed to read config file")
 }

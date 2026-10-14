@@ -160,16 +160,10 @@ background and this command prints how to reach it.`,
 		RunE:    shareRunE,
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("error getting user home directory", "error", err)
-		os.Exit(1)
-	}
-
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
-	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
+	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), "Specify a file containing known keys for remote hosts (required).")
 	// Keep help and generated docs portable without changing the runtime defaults.
 	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
 	cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
@@ -403,6 +397,10 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		}
 	}
 
+	if err := homeDefaultErrors(); err != nil {
+		result = multierror.Append(result, err)
+	}
+
 	return result
 }
 
@@ -584,6 +582,7 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
 		}
 	}
+	warning := logWarningFor(c.Context())
 	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
 		s := &spawnedSession{
 			name:         name,
@@ -598,6 +597,7 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			display:      display,
 			attachClient: attachClient,
 			logger:       logger,
+			logWarning:   warning,
 		}
 		return s.run(c.Context())
 	})
@@ -780,7 +780,40 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	}
 }
 
-func defaultPrivateKeys(homeDir string) []string {
+// homeDefault returns HOME-based defaults, or "" and the reason when HOME
+// is unavailable. Construction never exits.
+func homeDefault(rel ...string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(append([]string{home}, rel...)...), nil
+}
+
+// homeDefaultErrors fails a run of host or join that relies on the default
+// -i or --known-hosts when there is no home directory to find it in
+// (D11.3): one error for each of them not supplied from any origin.
+func homeDefaultErrors() error {
+	_, err := homeDefault()
+	if err == nil {
+		return nil
+	}
+	var result error
+	for _, flag := range []string{"private-key", "known-hosts"} {
+		if !suppliedFlags[flag] {
+			result = multierror.Append(result, fmt.Errorf("can't find your home directory for the default --%s: %w; pass --%s", flag, err, flag))
+		}
+	}
+	return result
+}
+
+// defaultPrivateKeys is the files that exist of OpenSSH's default
+// identities, or none with no home directory.
+func defaultPrivateKeys() []string {
+	sshDir, err := homeDefault(".ssh")
+	if err != nil {
+		return nil
+	}
 	var pks []string
 	for _, f := range []string{
 		"id_ed25519",
@@ -790,7 +823,7 @@ func defaultPrivateKeys(homeDir string) []string {
 		"id_dsa",
 		"id_rsa",
 	} {
-		pk := filepath.Join(homeDir, ".ssh", f)
+		pk := filepath.Join(sshDir, f)
 		if _, err := os.Stat(pk); os.IsNotExist(err) {
 			continue
 		}
@@ -801,8 +834,10 @@ func defaultPrivateKeys(homeDir string) []string {
 	return pks
 }
 
-func defaultKnownHost(homeDir string) string {
-	return filepath.Join(homeDir, ".ssh", "known_hosts")
+// defaultKnownHost is ~/.ssh/known_hosts, or "" with no home directory.
+func defaultKnownHost() string {
+	kh, _ := homeDefault(".ssh", "known_hosts")
+	return kh
 }
 
 // legacyUserFlags maps the hidden per-provider flags onto the reference

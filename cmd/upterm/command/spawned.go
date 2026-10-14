@@ -48,6 +48,7 @@ type spawnedSession struct {
 	display      displayFunc // shows the session and reports the operator's decision
 	attachClient clientFunc  // nil with --detach
 	logger       *slog.Logger
+	logWarning   *logWarning // the run's, shared by every spawn in it
 }
 
 type clientOutcome struct {
@@ -56,9 +57,15 @@ type clientOutcome struct {
 }
 
 func (s *spawnedSession) run(ctx context.Context) error {
-	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath})
+	// A log the spawn can't open is warned about, and the daemon starts
+	// without it (B2): nothing of this run is in it to point at.
+	logged := true
+	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath, logOff: func(err error) {
+		logged = false
+		s.logWarning.warn(s.logPath, err)
+	}})
 	if err != nil {
-		if _, statErr := os.Stat(s.logPath); statErr == nil {
+		if _, statErr := os.Stat(s.logPath); statErr == nil && logged {
 			return fmt.Errorf("could not start the session daemon: %w (see %s)", err, s.logPath)
 		}
 		return fmt.Errorf("could not start the session daemon: %w", err)

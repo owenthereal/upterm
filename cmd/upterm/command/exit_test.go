@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -239,6 +240,87 @@ func TestRootAndGroupsReadNoConfig(t *testing.T) {
 	_, stderr, code = runCLI(t, "session", "list")
 	require.Equal(t, 1, code)
 	require.Contains(t, stderr, `upterm: unknown config key "bogus-key"`)
+}
+
+// A command that reads no config never fails on it (D11.1, P7): version,
+// cobra's help and completion, and __complete, which tab completion runs.
+// What decides it is declared, not whether the command has flags: completion
+// bash has --no-descriptions.
+func TestVersionHelpAndCompletionIgnoreABadConfig(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "authorized-user: [unclosed\n")
+	for _, args := range [][]string{{"version"}, {"help", "host"}, {"completion", "bash"}, {"completion", "bash", "--no-descriptions"}, {"__complete", "session", "info", ""}} {
+		_, stderr, code := runCLI(t, args...)
+		require.Equal(t, 0, code, args)
+		require.NotContains(t, stderr, "failed to read config file", args)
+	}
+	_, stderr, code := runCLI(t, "session", "info", "x")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "upterm: failed to read config file")
+}
+
+// A log file that can't be opened turns logging off with one warning, and
+// fails nothing (D11.1).
+func TestAnUnopenableLogFileWarnsAndGoesOn(t *testing.T) {
+	withConfig(t, "")
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	require.NoError(t, os.WriteFile(filepath.Join(state, "upterm"), nil, 0o600)) // a file where the dir goes
+	stdout, stderr, code := runCLI(t, "version")
+	require.Equal(t, 0, code)
+	require.Contains(t, stdout, "Upterm version")
+	require.Contains(t, stderr, "upterm: warning: can't open the log file")
+	require.Equal(t, 1, strings.Count(stderr, "\n"))
+
+	// The daemon says nothing: the parent has, and its stderr is the log.
+	t.Setenv(daemonHandoffEnv, "3")
+	_, stderr, code = runCLI(t, "version")
+	require.Equal(t, 0, code)
+	require.Empty(t, stderr)
+}
+
+// With no home directory, building the commands never exits; only a run
+// that relies on a default from it fails, naming the flag to pass (D11.3).
+func TestNoHomeFailsOnlyWhatNeedsIt(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	_, _, code := runCLI(t, "version")
+	require.Equal(t, 0, code)
+	_, _, code = runCLI(t, "--help")
+	require.Equal(t, 0, code)
+
+	// The defaults are empty, never a relative .ssh/ path; the help still
+	// shows where they'd be.
+	host, _, err := Root().Find([]string{"host"})
+	require.NoError(t, err)
+	require.Equal(t, "[]", host.PersistentFlags().Lookup("private-key").Value.String())
+	require.Equal(t, "", host.PersistentFlags().Lookup("known-hosts").Value.String())
+	require.Equal(t, "~/.ssh/known_hosts", host.PersistentFlags().Lookup("known-hosts").DefValue)
+
+	_, homeErr := os.UserHomeDir()
+	require.Error(t, homeErr)
+	want := func(flag string) string {
+		return fmt.Sprintf("upterm: can't find your home directory for the default %s: %v; pass %s\n", flag, homeErr, flag)
+	}
+	_, stderr, code := runCLI(t, "host", "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, want("--private-key")+want("--known-hosts"), stderr)
+	_, stderr, code = runCLI(t, "join", "abc@relay.test")
+	require.Equal(t, 255, code)
+	require.Equal(t, want("--private-key")+want("--known-hosts"), stderr)
+
+	// Supplied, from any origin, they're not needed: each run goes on to
+	// the terminal it doesn't have.
+	dir := t.TempDir()
+	t.Setenv("UPTERM_KNOWN_HOSTS", filepath.Join(dir, "known_hosts"))
+	_, stderr, code = runCLI(t, "host", "-i", filepath.Join(dir, "id_ed25519"), "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: upterm host needs a terminal to ask before starting; pass --accept to start without asking\n", stderr)
+	_, stderr, code = runCLI(t, "join", "-i", filepath.Join(dir, "id_ed25519"), "abc@relay.test")
+	require.Equal(t, 255, code)
+	require.Equal(t, "upterm: upterm join needs a terminal.\n", stderr)
 }
 
 // cmd/gendoc writes a man page for every command Root has, and completion

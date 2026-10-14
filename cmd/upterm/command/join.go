@@ -87,11 +87,6 @@ when stopped, and 255 when it can't join.`,
 		return joinFailure("upterm: " + err.Error())
 	})
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("error getting user home directory", "error", err)
-		os.Exit(1)
-	}
 	flags := cmd.Flags()
 	// join's flags stop at the first argument that isn't one, so that an
 	// unquoted paste of one of the ssh commands upterm prints for guests,
@@ -99,8 +94,8 @@ when stopped, and 255 when it can't join.`,
 	// suggest the join target it reaches. resolveTarget still reads join's
 	// flags after a target that stands alone.
 	flags.SetInterspersed(false)
-	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
-	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(homeDir), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
+	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
+	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
 	// Keep help and generated docs portable without changing the runtime
 	// defaults, as upterm host does.
 	flags.Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
@@ -182,6 +177,11 @@ func pastedText(args []string) string {
 
 func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 	target, typed := f.target, f.typed
+	// Checked before the terminal, as host checks it: like a flag's error,
+	// passing the flag fixes it. Exit prints it, with join's 255.
+	if err := homeDefaultErrors(); err != nil {
+		return err
+	}
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
 	if lt.pty == nil || !lt.rawMode {
 		return joinFailure(needsATerminal)

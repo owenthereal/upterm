@@ -31,6 +31,9 @@ type spawnOptions struct {
 	env        []string
 	name       string
 	logPath    string
+	// logOff, if set, is told why the log couldn't be opened; the child
+	// then starts with its stdout and stderr on the null device (B2).
+	logOff func(err error)
 }
 
 // spawnDaemon starts the daemon and returns the parent's end of the
@@ -40,9 +43,10 @@ type spawnOptions struct {
 // own (Setsid: a terminal hangup reaches nothing in it), with stdin from
 // /dev/null and stdout and stderr appended to the log — anything it prints
 // outside its logger, a panic above all, has to land somewhere a person can
-// find. The channel is a socketpair rather than a pipe because both sides
-// write, and because the child sees EOF the moment the parent's end is
-// gone, whichever way it went.
+// find. A log that can't be opened doesn't stop it: logOff is told, and
+// they go to /dev/null (B2). The channel is a socketpair rather than a pipe
+// because both sides write, and because the child sees EOF the moment the
+// parent's end is gone, whichever way it went.
 //
 // Both ends are marked close-on-exec before the fork. ExtraFiles clears the
 // flag on the child's copy of its own end, and nothing else; the parent's
@@ -105,18 +109,22 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	defer func() { _ = devnull.Close() }()
 	logFile, err := os.OpenFile(opts.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("open log: %w", err)
+		if opts.logOff != nil {
+			opts.logOff(err)
+		}
+	} else {
+		defer func() { _ = logFile.Close() }()
 	}
-	defer func() { _ = logFile.Close() }()
 
 	cmd := exec.Command(executable, args...)
 	cmd.Env = append(append([]string{}, env...),
 		daemonFDEnv+"="+strconv.Itoa(3), // ExtraFiles[0]
 		daemonNameEnv+"="+opts.name)
 	cmd.Stdin = devnull
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	if logFile != nil { // otherwise exec's null device
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	cmd.ExtraFiles = []*os.File{childFile}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -128,6 +136,14 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	// daemon is meant to outlive this process.
 	go func() { _ = cmd.Wait() }()
 	return conn, cmd.Process, nil
+}
+
+// isDaemonProcess reports whether this process is the session daemon:
+// UPTERM_DAEMON_FD (Unix) or UPTERM_DAEMON_SOCKET (Windows) is set. Only
+// until bootstrapConn unsets it, which is after the root's pre-run.
+func isDaemonProcess() bool {
+	_, ok := os.LookupEnv(daemonFDEnv)
+	return ok
 }
 
 // bootstrapConn returns the channel this process inherited, and the name it

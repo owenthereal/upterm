@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/logging"
@@ -97,26 +99,34 @@ Environment Variables:
 				return nil
 			}
 
-			// Bind all flags to environment variables with UPTERM_ prefix
+			// Bind all flags to environment variables with UPTERM_ prefix. A
+			// config or env error fails only a command that reads config
+			// (D11.1), and never `upterm config`, which repairs the file.
 			supplied, err := bindFlagsToEnv(cmd)
-			if err != nil && !isConfigCommand(cmd) {
+			if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
 				return err
 			}
 			suppliedFlags = supplied
 
 			debug, _ := cmd.Flags().GetBool("debug")
 
-			logOptions := []logging.Option{logging.File(utils.UptermLogFilePath())}
+			logPath := utils.UptermLogFilePath()
+			logOptions := []logging.Option{logging.File(logPath)}
 			if debug {
 				logOptions = append(logOptions, logging.Debug())
 			}
 
+			// A log file that can't be opened fails nothing either: logging
+			// is off for the run, with one warning.
+			warning := &logWarning{w: cmd.ErrOrStderr()}
 			logger, err := logging.New(logOptions...)
 			if err != nil {
-				return err
+				warning.warn(logPath, err)
+				logger = logging.Must(logging.Discard())
 			}
 
-			cmd.SetContext(uptermctx.WithLogger(cmd.Context(), logger))
+			ctx := uptermctx.WithLogger(cmd.Context(), logger)
+			cmd.SetContext(context.WithValue(ctx, logWarningKey{}, warning))
 
 			return nil
 		},
@@ -150,6 +160,74 @@ Environment Variables:
 	}
 
 	return rootCmd
+}
+
+// annotationConfig set to "none" on a command says it reads no config.
+const annotationConfig = "upterm/config"
+
+// readsConfig is false for a command annotated upterm/config=none (version,
+// upgrade), for cobra's help, completion and its subcommands, and
+// __complete; true otherwise. Flags don't decide it (P7).
+func readsConfig(cmd *cobra.Command) bool {
+	if cmd.Annotations[annotationConfig] == "none" {
+		return false
+	}
+	// cobra's commands, by their place: a child of the root, or under one.
+	top := cmd
+	for top.HasParent() && top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	if top.HasParent() {
+		switch top.Name() {
+		case "help", "completion", cobra.ShellCompRequestCmd:
+			return false
+		}
+	}
+	return true
+}
+
+// logWarning says that the log file can't be opened, and logging is off.
+// The root's pre-run opens the log, and so does each spawn of upterm host's
+// daemon (B2), so it is said once, by whichever finds it first, and only by
+// the parent: the daemon's stderr is that log, or the null device.
+type logWarning struct {
+	w    io.Writer
+	once sync.Once
+}
+
+func (l *logWarning) warn(path string, err error) {
+	if isDaemonProcess() {
+		return
+	}
+	l.once.Do(func() {
+		_, _ = fmt.Fprintf(l.w, "upterm: warning: can't open the log file %s: %v; logging is off\n", path, logOpenReason(path, err))
+	})
+}
+
+// logWarningKey holds the run's *logWarning in the command's context.
+type logWarningKey struct{}
+
+// logWarningFor is the run's logWarning, which the root's pre-run put in
+// ctx, or one of its own on stderr.
+func logWarningFor(ctx context.Context) *logWarning {
+	if l, ok := ctx.Value(logWarningKey{}).(*logWarning); ok {
+		return l
+	}
+	return &logWarning{w: os.Stderr}
+}
+
+// logOpenReason is what the system said about opening path: the
+// *fs.PathError under logging's or the spawn's wrapping, without the path
+// when it is the log's own, which the warning names already.
+func logOpenReason(path string, err error) error {
+	var pe *fs.PathError
+	if !errors.As(err, &pe) {
+		return err
+	}
+	if pe.Path == path {
+		return pe.Err
+	}
+	return pe
 }
 
 // reportUnknownCommands makes the root or a group runnable (P6), only to
@@ -186,7 +264,8 @@ func reportUnknownCommands(c *cobra.Command) {
 // known flag, a config key with no value, or a value that a flag rejects all
 // abort the command rather than silently ignoring the problem. Callers
 // should let every command fail this way except `upterm config ...`, which
-// must stay reachable to repair the file (see isConfigCommand).
+// must stay reachable to repair the file (see isConfigCommand), and those
+// that read no config (see readsConfig).
 func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	supplied := make(map[string]bool)
 
