@@ -133,8 +133,11 @@ func (s *store) GetRelease(version string) (*update.Release, error) {
 	r, res, err := githubClient().Repositories.GetReleaseByTag(ctx, s.Owner, s.Repo, "v"+version)
 	if err != nil {
 		// res is nil when the request never got an answer.
-		if res != nil && res.StatusCode == http.StatusNotFound {
+		switch {
+		case res != nil && res.StatusCode == http.StatusNotFound:
 			return nil, update.ErrNotFound
+		case res != nil && res.StatusCode >= http.StatusBadRequest:
+			return nil, fmt.Errorf("GitHub returned an error for v%s: %w", version, err)
 		}
 
 		return nil, fmt.Errorf("can't reach GitHub to look up v%s: %w", version, err)
@@ -147,8 +150,12 @@ func (s *store) LatestReleases() ([]*update.Release, error) {
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
 
-	r, _, err := githubClient().Repositories.GetLatestRelease(ctx, s.Owner, s.Repo)
+	r, res, err := githubClient().Repositories.GetLatestRelease(ctx, s.Owner, s.Repo)
 	if err != nil {
+		if res != nil && res.StatusCode >= http.StatusBadRequest {
+			return nil, fmt.Errorf("GitHub returned an error for the latest release: %w", err)
+		}
+
 		return nil, fmt.Errorf("can't reach GitHub to look up the latest release: %w", err)
 	}
 

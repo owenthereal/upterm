@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -89,19 +90,29 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 
 	noArchiveWant := fmt.Sprintf("release v0.38.0 has no upterm archive for this system (%s)", currentPlatform().assetName())
 
+	const rateLimited = `{"message":"API rate limit exceeded for 1.2.3.4."}`
+
 	for _, tc := range []struct {
 		name   string
 		base   string
 		args   []string
 		want   string
-		prefix bool // want is the start of the message, not all of it
+		prefix bool   // want is the start of the message, not all of it
+		not    string // the message doesn't contain this
 	}{
-		{"offline, pinned", offline.URL, []string{"0.37.0"}, "can't reach GitHub to look up v0.37.0: ", true},
-		{"offline, latest", offline.URL, nil, "can't reach GitHub to look up the latest release: ", true},
-		{"unknown version", github.URL, []string{"9.9.9"}, "release v9.9.9 not found", false},
-		{"unknown version typed with a v", github.URL, []string{"v9.9.9"}, "release v9.9.9 not found", false},
-		{"pinned release without our archive", github.URL, []string{"0.38.0"}, noArchiveWant, false},
-		{"latest release without our archive", github.URL, nil, noArchiveWant, false},
+		{"offline, pinned", offline.URL, []string{"0.37.0"}, "can't reach GitHub to look up v0.37.0: ", true, ""},
+		{"offline, latest", offline.URL, nil, "can't reach GitHub to look up the latest release: ", true, ""},
+		// GitHub answered with an error status: it was reached.
+		{"rate limited, pinned", githubAnswering(t, http.StatusForbidden, rateLimited), []string{"0.37.0"}, "GitHub returned an error for v0.37.0: ", true, "can't reach"},
+		{"server error, latest", githubAnswering(t, http.StatusInternalServerError, `{"message":"Server Error"}`), nil, "GitHub returned an error for the latest release: ", true, "can't reach"},
+		{"no latest release", githubAnswering(t, http.StatusNotFound, `{"message":"Not Found"}`), nil, "GitHub returned an error for the latest release: ", true, "can't reach"},
+		// An answer that can't be read is not an error status.
+		{"unreadable answer, pinned", githubAnswering(t, http.StatusOK, "not json"), []string{"0.37.0"}, "can't reach GitHub to look up v0.37.0: ", true, ""},
+		{"unreadable answer, latest", githubAnswering(t, http.StatusOK, "not json"), nil, "can't reach GitHub to look up the latest release: ", true, ""},
+		{"unknown version", github.URL, []string{"9.9.9"}, "release v9.9.9 not found", false, ""},
+		{"unknown version typed with a v", github.URL, []string{"v9.9.9"}, "release v9.9.9 not found", false, ""},
+		{"pinned release without our archive", github.URL, []string{"0.38.0"}, noArchiveWant, false, ""},
+		{"latest release without our archive", github.URL, nil, noArchiveWant, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withGitHub(t, tc.base)
@@ -124,8 +135,26 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 			} else {
 				require.EqualError(t, err, tc.want)
 			}
+			if tc.not != "" {
+				require.NotContains(t, err.Error(), tc.not)
+			}
 		})
 	}
+}
+
+// githubAnswering is the base URL of a GitHub that answers every request
+// with status and body.
+func githubAnswering(t *testing.T, status int, body string) string {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv.URL
 }
 
 // quietStdout sends os.Stdout to the null device for the test: upgrade hides
