@@ -55,7 +55,7 @@ func reportDaemonFailure(conn net.Conn, err error) {
 }
 
 // failureText is err as the daemon tells its parent, which prints it on
-// one line after "session NAME could not start:" (D1). The parent gets
+// one line after "session NAME could not start:". The parent gets
 // text, which Exit can't split, so each error a multierror collects is
 // joined here as Exit would print it, never as its "N errors occurred" list.
 func failureText(err error) string {

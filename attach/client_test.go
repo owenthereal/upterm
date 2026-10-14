@@ -60,7 +60,7 @@ func runAsync(t *testing.T, ctx context.Context, c *Client) <-chan Result {
 
 // A failure to attach is printed after "upterm: ", as upterm attach's line,
 // the foreground host's or join's, so it carries no package prefix of its
-// own (D1): the dialer's text already says what failed.
+// own: the dialer's text already says what failed.
 func TestClientErrorsCarryNoPackagePrefix(t *testing.T) {
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)

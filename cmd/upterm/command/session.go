@@ -240,7 +240,7 @@ as in the example below, then run 'upterm session wait NAME'.`,
   upterm host --detach --accept --name build -- make
   upterm session wait build`,
 		Args: cobra.ExactArgs(1),
-		// Usage and config errors too, not only what RunE returns (D2a).
+		// Usage and config errors exit with it too, not only what RunE returns.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(waitUnavailableCode)},
 		RunE: func(c *cobra.Command, args []string) error {
 			code, err := waitSession(c.Context(), args[0], os.Stdout)

@@ -835,7 +835,7 @@ func inProcessHostEnv(t *testing.T) string {
 	return dir
 }
 
-// A daemon that fails with several errors says so on one line (D1): the
+// A daemon that fails with several errors says so on one line: the
 // parent gets the failure as text, which Exit can't split, so it never
 // carries multierror's "N errors occurred" list.
 func TestADaemonsSeveralErrorsAreOneLine(t *testing.T) {
@@ -874,7 +874,7 @@ func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
 }
 
-// UPTERM_NAME still names the session in this release (D8a), and upterm host
+// UPTERM_NAME still names the session in this release, and upterm host
 // says once that it won't from perRunIgnoredFrom.
 func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
 	withConfig(t, "")
@@ -1133,7 +1133,7 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 	}
 }
 
-// No failure prints the usage (D1). A session that did not happen, or a
+// No failure prints the usage. A session that did not happen, or a
 // hosted command that exited non-zero, is not the user mistyping a flag:
 // printing the usage block after `exit 2` buried the one line that says what
 // happened under thirty lines of flags, which is what `upterm host -- bash`
@@ -1279,7 +1279,7 @@ func promptOutcome(t *testing.T, msgs ...tea.Msg) error {
 	return confirmationOutcome(p.Run())
 }
 
-// A prompt that ends without an answer never starts the session (D2a), and a
+// A prompt that ends without an answer never starts the session, and a
 // signal says nothing: SIGINT is 130 and SIGTERM 143, as if the signal had
 // ended the process.
 func TestASignalAtTheAcceptPromptNeverStartsTheSession(t *testing.T) {

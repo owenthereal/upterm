@@ -86,7 +86,7 @@ Environment Variables:
   # Set flags via environment variables:
   $ UPTERM_HIDE_CLIENT_IP=true upterm host`,
 		// For every command: cobra checks the root's. Exit prints each error
-		// once, as one line, and never the usage (D1); cobra would print
+		// once, as one line, and never the usage; cobra would print
 		// "Error: ...", often the usage block too, and then main its own copy.
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -100,8 +100,8 @@ Environment Variables:
 			}
 
 			// Bind all flags to environment variables with UPTERM_ prefix. A
-			// config or env error fails only a command that reads config
-			// (D11.1), and never `upterm config`, which repairs the file.
+			// config or env error fails only a command that reads config, and never
+			// `upterm config`, which repairs the file.
 			supplied, deps, err := bindFlagsToEnv(cmd)
 			if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
 				return err
@@ -168,7 +168,7 @@ const annotationConfig = "upterm/config"
 
 // readsConfig is false for a command annotated upterm/config=none (version,
 // upgrade), for cobra's help, completion and its subcommands, and
-// __complete; true otherwise. Flags don't decide it (P7).
+// __complete; true otherwise. Flags don't decide it.
 func readsConfig(cmd *cobra.Command) bool {
 	if cmd.Annotations[annotationConfig] == "none" {
 		return false
@@ -231,7 +231,7 @@ func logOpenReason(path string, err error) error {
 	return pe
 }
 
-// reportUnknownCommands makes the root or a group runnable (P6), only to
+// reportUnknownCommands makes the root or a group runnable, only to
 // answer what follows it: nothing prints the help, as cobra does for a
 // command it can't run; anything else is unknownCommandError. Left to
 // cobra, a typo under a group printed the group's help and exited 0, and an
@@ -249,7 +249,7 @@ func reportUnknownCommands(c *cobra.Command) {
 // bindFlagsToEnv binds cmd's flags to the config file and environment
 // variables, and reports which flags were supplied from any origin
 // (command line, environment, or config file) in the returned map, and the
-// per-run values it applied from env or config in deps (D8a). A CLI-only
+// per-run values it applied from env or config in deps. A CLI-only
 // flag is never bound.
 //
 // Configuration priority (highest to lowest):
@@ -331,7 +331,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprec
 	v.SetEnvPrefix("UPTERM")
 
 	// applied records a value env or config gave flag, and for a per-run
-	// flag, the values it still takes from them (D8a, release N).
+	// flag, the values it still takes from them in this release.
 	applied := func(flag *pflag.Flag, inConfig bool) {
 		supplied[flag.Name] = true
 		if hasAnnotation(flag, annotationPerRun) {

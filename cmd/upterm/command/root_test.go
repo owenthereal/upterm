@@ -475,7 +475,7 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 		})
 	}
 
-	// version reads no config (P7), so it doesn't fail on one either.
+	// version reads no config, so it doesn't fail on one either.
 	root2 := Root()
 	root2.SetOut(io.Discard)
 	root2.SetErr(io.Discard)
@@ -493,7 +493,7 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	assert.ErrorContains(t, root3.Execute(), "failed to read config file")
 }
 
-// The per-run flags are D8a's list; every other flag stays bound, host's
+// Exactly these flags are per-run; every other flag stays bound, host's
 // --join-timeout included (CI sets it).
 func TestPerRunFlagsAreD8asList(t *testing.T) {
 	var got []string
@@ -564,7 +564,7 @@ func TestPerRunWarnsOncePerValue(t *testing.T) {
 }
 
 // The daemon re-parses the same argv, env and config, and applies the same
-// values; only the parent warns, since the daemon's stderr is the log (D8a).
+// values; only the parent warns, since the daemon's stderr is the log.
 func TestPerRunWarningsAreTheParentsOnly(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
@@ -579,9 +579,9 @@ func TestPerRunWarningsAreTheParentsOnly(t *testing.T) {
 	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
 }
 
-// A CLI-only flag (D8a: the flags this pass introduces) is never bound. Its
-// name stays a known config key, which another command may own, so
-// `output:` in a config neither sets it nor fails it.
+// A CLI-only flag is never bound. Its name stays a known config key, which
+// another command may own, so `output:` in a config neither sets it nor fails
+// it.
 func TestCLIOnlyFlagsIgnoreEnvAndConfig(t *testing.T) {
 	withConfig(t, "output: json\n")
 	cmd := &cobra.Command{Use: "probe", RunE: func(*cobra.Command, []string) error { return nil }}

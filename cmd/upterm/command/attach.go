@@ -31,7 +31,7 @@ var flagEscapeChar string
 
 // ExitCodeError carries an exit status for Exit to use. With an Err, Exit
 // prints it as upterm's one line and exits with Code; with none, Code is the
-// whole outcome and nothing is printed (D1 case 2).
+// whole outcome and nothing is printed.
 type ExitCodeError struct {
 	Code int
 	Err  error
@@ -74,7 +74,7 @@ the log for which); 255 if it could not attach.`,
   upterm attach build-shell --escape-char none`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: attachRunE,
-		// Usage and config errors too, not only what RunE returns (D2a).
+		// Usage and config errors exit with it too, not only what RunE returns.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},
 	}
 	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")

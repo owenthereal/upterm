@@ -77,7 +77,7 @@ when stopped, and 255 when it can't join.`,
 		Args: f.resolveTarget,
 		RunE: f.run,
 		// Config errors, which PersistentPreRunE finds before RunE, as well
-		// as the failures joinFailure and the join outcomes carry (D2a).
+		// as the failures joinFailure and the join outcomes carry.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitJoinFailed)},
 	}
 	// Every failure, a flag's or a missing target's before RunE too, is told

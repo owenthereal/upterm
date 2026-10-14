@@ -150,7 +150,7 @@ func TestAStatusOnlyOutcomePrintsNothing(t *testing.T) {
 	require.Empty(t, stderr)
 }
 
-// A diagnostic the command printed itself (D1 case 3) isn't printed again:
+// A diagnostic the command printed itself isn't printed again:
 // its status is the ExitCodeError it wraps, or the command's failure code.
 func TestAReportedDiagnosticPrintsNothingMore(t *testing.T) {
 	var stderr bytes.Buffer
@@ -161,7 +161,7 @@ func TestAReportedDiagnosticPrintsNothingMore(t *testing.T) {
 	require.Empty(t, stderr.String())
 }
 
-// A command declares the status its own failures exit with (D2a); an error
+// A command declares the status its own failures exit with; an error
 // with no status of its own takes it.
 func TestAnErrorTakesTheCommandsFailureCode(t *testing.T) {
 	var stderr bytes.Buffer
@@ -242,7 +242,7 @@ func TestRootAndGroupsReadNoConfig(t *testing.T) {
 	require.Contains(t, stderr, `upterm: unknown config key "bogus-key"`)
 }
 
-// A command that reads no config never fails on it (D11.1, P7): version,
+// A command that reads no config never fails on it: version,
 // cobra's help and completion, and __complete, which tab completion runs.
 // What decides it is declared, not whether the command has flags: completion
 // bash has --no-descriptions.
@@ -260,7 +260,7 @@ func TestVersionHelpAndCompletionIgnoreABadConfig(t *testing.T) {
 }
 
 // A log file that can't be opened turns logging off with one warning, and
-// fails nothing (D11.1).
+// fails nothing.
 func TestAnUnopenableLogFileWarnsAndGoesOn(t *testing.T) {
 	withConfig(t, "")
 	state := t.TempDir()
@@ -280,7 +280,7 @@ func TestAnUnopenableLogFileWarnsAndGoesOn(t *testing.T) {
 }
 
 // With no home directory, building the commands never exits; only a run
-// that relies on a default from it fails, naming the flag to pass (D11.3).
+// that relies on a default from it fails, naming the flag to pass.
 func TestNoHomeFailsOnlyWhatNeedsIt(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
@@ -371,9 +371,9 @@ func TestHostWithoutATerminalOrAcceptIsOneLine(t *testing.T) {
 	require.Equal(t, "upterm: upterm host needs a terminal to ask before starting; pass --accept to start without asking\n", stderr)
 }
 
-// Every way upterm fails in a command takes that command's failure code
-// (D2a): a usage error before RunE, a flag, and a config error before it too,
-// not just what RunE returns.
+// Every way upterm fails in a command takes that command's failure code: a
+// usage error before RunE, a flag, and a config error before it too, not just
+// what RunE returns.
 func TestUsageAndConfigErrorsTakeTheCommandsFailureCode(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
@@ -409,8 +409,8 @@ func TestUsageAndConfigErrorsTakeTheCommandsFailureCode(t *testing.T) {
 	}
 }
 
-// Arguments a command doesn't take are a usage error (D11.2), with its
-// failure code (D2a), where they used to be ignored.
+// Arguments a command doesn't take are a usage error, with its failure
+// code, where they used to be ignored.
 func TestExtraArgumentsAreUsageErrors(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "")
@@ -421,7 +421,7 @@ func TestExtraArgumentsAreUsageErrors(t *testing.T) {
 	}
 }
 
-// Ctrl-C at the accept prompt says nothing and exits 130 (D2a); the TUI's own
+// Ctrl-C at the accept prompt says nothing and exits 130; the TUI's own
 // last frame is the only word on it.
 func TestInterruptedAtTheAcceptPromptIsSilent130(t *testing.T) {
 	var stderr bytes.Buffer

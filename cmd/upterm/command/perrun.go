@@ -9,19 +9,17 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// Which flags env and config can set (D8a). One namespace serves every
+// Which flags env and config can set. One namespace serves every
 // command, so a value meant for one run of one command (host's --name, say)
 // reached every run of every command with a flag of that name.
 const (
-	annotationPerRun  = "upterm/per-run"  // env/config still applies in release N, with a warning
+	annotationPerRun  = "upterm/per-run"  // env/config still applies in this release, with a warning
 	annotationCLIOnly = "upterm/cli-only" // never bound to env or config
 )
 
 // perRunIgnoredFrom is the release from which per-run values from env or
-// config are ignored. Set at PR 2's gate to the next minor after the release
-// that ships PR 2; Task 28 flips the behaviour in that release.
-//
-// v0.40 assumes PR 2 ships in v0.39.0; Owen confirms it at PR 2's gate.
+// config are ignored. That is v0.40: v0.39.0 introduces the warnings, and the
+// next minor ignores the values.
 const perRunIgnoredFrom = "v0.40"
 
 // perRun marks flags of fs as per-run.
@@ -80,7 +78,7 @@ func boundElsewhere(cmd *cobra.Command, name string) bool {
 	return bound
 }
 
-// notice is §4.7's line for d in release N, where the value still applies.
+// notice is the warning line for d, while the value still applies.
 func (d deprecation) notice() string {
 	what := d.Source
 	if d.InConfig {

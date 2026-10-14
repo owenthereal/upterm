@@ -54,7 +54,7 @@ func (e UserDiscardedError) Unwrap() error {
 	return host.ErrSessionAbandoned
 }
 
-// What the accept prompt exits with when it ends on a signal (D2a): 128 plus
+// What the accept prompt exits with when it ends on a signal: 128 plus
 // the signal, as if the signal had ended the process, which is also how the
 // relay-key prompt ends.
 const (
@@ -207,8 +207,8 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
 
-	// One run's choices (D8a). --join-timeout stays bound to env and config:
-	// CI sets it there.
+	// One run's choices, not standing configuration. --join-timeout stays
+	// bound to env and config: CI sets it there.
 	perRun(cmd.PersistentFlags(), "name", "detach", "output")
 
 	// The provider list comes from host.ProviderList so --help, the generated
@@ -333,7 +333,7 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 	return err
 }
 
-// nameInUseError is §4.1's line for a name a running session holds, and is
+// nameInUseError is the line for a name a running session holds, and is
 // still sessiondir.ErrNameInUse, which runWithGeneratedNameRetry redraws on.
 type nameInUseError struct {
 	name string
@@ -834,7 +834,7 @@ func homeDefault(rel ...string) (string, error) {
 
 // homeDefaultError fails a run of host or join that relies on the default
 // --known-hosts, not supplied from any origin, when there is no home
-// directory to find it in (D11.3). -i's default needs none: see
+// directory to find it in. -i's default needs none: see
 // defaultPrivateKeys.
 func homeDefaultError() error {
 	if suppliedFlags["known-hosts"] {

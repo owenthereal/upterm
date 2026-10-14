@@ -15,8 +15,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// failureCodeAnnotation is the annotation a command declares its own
-// "upterm failed" exit status in (D2a).
+// failureCodeAnnotation is the annotation in which a command declares its own
+// "upterm failed" exit status.
 const failureCodeAnnotation = "upterm/failure-code"
 
 // installSignalPolicy is InstallSignalPolicy; a var so a test can see Main
@@ -54,7 +54,7 @@ func cliRoot() *cobra.Command {
 	return root
 }
 
-// Reported marks a diagnostic the command already printed (D1 case 3): Exit
+// Reported marks a diagnostic the command already printed: Exit
 // prints nothing more. Its status is the ExitCodeError it wraps, if any, or
 // the command's failure code.
 type Reported struct {
@@ -72,8 +72,8 @@ func (e Reported) Unwrap() error {
 // SilentError is Reported's former name, kept for the call sites that use it.
 type SilentError = Reported
 
-// Exit prints err as D1 says and returns the process's exit status. cmd is
-// what Root().ExecuteC returned (the failing command, or the root).
+// Exit prints err as described below and returns the process's exit status.
+// cmd is what Root().ExecuteC returned (the failing command, or the root).
 //
 // The root silences cobra, so this is the one place an error is printed, in
 // one of three ways:
@@ -109,8 +109,8 @@ func Exit(cmd *cobra.Command, err error, stderr io.Writer) int {
 	return failureCode(cmd)
 }
 
-// report is D1's case 1: each of err's messages as a line on stderr, and in
-// the command's log.
+// report prints an error with a message, as Exit does: each of err's messages
+// as a line on stderr, and in the command's log.
 func report(cmd *cobra.Command, err error, stderr io.Writer) {
 	var logger *logging.Logger
 	if cmd != nil && cmd.Context() != nil {
@@ -147,7 +147,7 @@ func errorLines(err error) []string {
 	return lines
 }
 
-// failureCode is the command's own "upterm failed" status (D2a): the
+// failureCode is the command's own "upterm failed" status: the
 // "upterm/failure-code" annotation, or 1.
 func failureCode(cmd *cobra.Command) int {
 	if cmd != nil {

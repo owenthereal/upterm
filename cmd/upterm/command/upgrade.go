@@ -30,7 +30,7 @@ func upgradeCmd() *cobra.Command {
   # Upgrade to a specific version:
   upterm upgrade 0.2.0`,
 		Args: cobra.MaximumNArgs(1),
-		// A broken config file doesn't stop it (P7).
+		// A broken config file doesn't stop it.
 		Annotations: map[string]string{annotationConfig: "none"},
 		RunE:        upgradeRunE,
 	}
