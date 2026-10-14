@@ -1,0 +1,538 @@
+package io
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"runtime/debug"
+	"sync"
+	"time"
+
+	"github.com/owenthereal/upterm/internal/termsize"
+)
+
+// Replayer reconstructs the screen the ring's bytes drew, for a joining
+// terminal, so the joiner is handed that screen rather than the raw ring.
+// io has no emulator of its own; the host installs one with SetReplayer.
+type Replayer interface {
+	// Start emulates c for a joiner whose terminal is size. The Emulation it
+	// returns stops, within the emulator's meter interval, once ctx is done
+	// or the deadline passes, in Start and in every later call.
+	Start(ctx context.Context, deadline time.Time, c *Capture, size termsize.Size) (Emulation, error)
+}
+
+// Emulation is one joiner's reconstruction, in progress.
+type Emulation interface {
+	// Feed continues the emulation over more of the stream: chunks run on
+	// from the end of everything offered so far, and sizes are the committed
+	// events after the last one offered.
+	Feed(chunks [][]byte, sizes []SizeEvent) error
+	// Handoff is the point the render reconstructs: the stream offset of the
+	// end of what the emulator consumed, where both it and the tracker clone
+	// are outside every sequence, and the Seq of the last event it has
+	// passed, applied or skipped as the size it already had. Bytes offered
+	// after offset were never consumed, nor the events among them.
+	Handoff() (offset, lastSeq uint64)
+	// Render is the reconstruction as of Handoff.
+	Render() ([]byte, error)
+}
+
+// Capture is what a join takes of the fan-out, under one hold of writeMu, to
+// emulate outside it.
+type Capture struct {
+	Modes      *ModeTracker // a clone: the state as of the ring's first byte
+	Chunks     [][]byte     // the stream from Start to End, immutable once handed out
+	Sizes      []SizeEvent  // the committed events covering Chunks, in Seq order, the first in effect at Start
+	Start, End uint64       // stream offsets of Chunks
+	Pinned     bool         // the pty keeps its size for good
+}
+
+// ReplayBudget is how long a join may spend reconstructing the screen before
+// it falls back to the raw ring: the doors take a join's deadline this far
+// from when it begins. A var for tests.
+var ReplayBudget = time.Second
+
+// ReplayPanic is a panic recovered from a Replayer, reported as an error.
+type ReplayPanic struct {
+	Value any
+	Stack []byte
+}
+
+func (p *ReplayPanic) Error() string {
+	return fmt.Sprintf("multiwriter: the replay panicked: %v", p.Value)
+}
+
+// Why a join that could have been emulated fell back to the raw ring, besides
+// ErrReplayCoverage and whatever the replayer itself reports.
+var (
+	ErrReplayGapEvicted       = errors.New("multiwriter: the output since the handoff was evicted")
+	ErrReplayMarginsUncertain = errors.New("multiwriter: the tracker's margins are uncertain")
+	ErrReplayDeadline         = errors.New("multiwriter: the replay ran out of time")
+)
+
+// errRenderTooLong keeps one delivery bounded in io itself, whatever the
+// replayer does: the render, at most DefaultReplayBytes, then the gap, at
+// most the ring, then Pending, together well under DefaultGuestBufferSize.
+var errRenderTooLong = errors.New("multiwriter: the render is longer than DefaultReplayBytes")
+
+// SetReplayer installs r, and fallback, which is told why each join that
+// fell back did (never called with the fan-out's locks held). Once, before
+// any join.
+func (t *MultiWriter) SetReplayer(r Replayer, fallback func(error)) {
+	t.replayer, t.fallback = r, fallback
+}
+
+// AppendSized attaches w, a joiner whose terminal is size, handing it a
+// reconstruction of the screen the ring drew rather than the ring itself,
+// once the deadline allows and a replayer is installed. A viewer keeps
+// Append's raw ring, and so does a join with no replayer, no time, or nothing
+// in the ring to reconstruct.
+//
+// The emulation runs outside every fan-out lock, so a Write never waits on
+// it, and only the capture and the handoff hold writeMu. The capture takes
+// the ring, a clone of the tracker and the sizes the ring was written at;
+// while the emulation runs, the stream moves on. The handoff, under one hold
+// of writeMu, then writes the render, the ring from the emulation's handoff
+// point on, which it never consumed, and Pending, and attaches w: every byte
+// written since the capture reaches w once. Until a hold finds the
+// emulation has reached every resize logged, the join catches it up on what
+// it missed, or waits outside the lock for what it is still missing.
+//
+// A join that can't be emulated, for any of the reasons fallback is told,
+// is attached by Append's path instead, and AppendSized returns nil. It
+// returns ErrClosed once Shutdown has run, and ctx's error once the joiner
+// has left, and then attaches nothing.
+func (t *MultiWriter) AppendSized(ctx context.Context, deadline time.Time, size termsize.Size, w io.Writer) error {
+	if err := checkRemovable(w); err != nil {
+		return err
+	}
+	if !size.Valid() || t.replayer == nil || !time.Now().Before(deadline) {
+		return t.Append(w)
+	}
+
+	j := &join{t: t, ctx: ctx, deadline: deadline, size: size, w: w}
+	c, done, err := j.capture()
+	if done {
+		return err
+	}
+	// One emulation at a time, the permit held from Start to the handoff's
+	// outcome and released on every one, so a guest rejoining in a loop
+	// costs the host one core, not one per join (spec A6).
+	switch err := t.acquire(ctx, deadline); {
+	case errors.Is(err, ErrReplayDeadline):
+		j.err = err
+	case err != nil:
+		return err
+	default:
+		defer t.release()
+		j.start(c)
+	}
+	return j.handoff()
+}
+
+// join is one AppendSized past its fast paths.
+type join struct {
+	t        *MultiWriter
+	ctx      context.Context
+	deadline time.Time
+	size     termsize.Size
+	w        io.Writer
+
+	// What the emulation has been offered: the stream up to offeredEnd, and
+	// the events up to offeredSeq. losses is the size log's count at the
+	// capture: a change means coverage broke since (spec A1).
+	offeredEnd, offeredSeq uint64
+	losses                 uint64
+	// heldBack is set while bytes the capture stopped short of, behind a
+	// resize whose outcome wasn't known yet, have yet to be offered: spec J5
+	// offers them once it is known, with the event if it committed and
+	// without it if not.
+	heldBack bool
+
+	em     Emulation
+	err    error  // why the replay failed, once it has
+	render []byte // the render as of h and lastSeq, the emulation's handoff
+	h      uint64
+	// lastSeq is the last event the emulation has passed.
+	lastSeq uint64
+}
+
+// capture takes what the emulation starts from, under one hold of writeMu.
+// done is set when the join ended there instead: refused, or attached by
+// Append's path, which an empty ring takes, and a ring that can't be
+// emulated falls back to.
+func (j *join) capture() (c *Capture, done bool, err error) {
+	t := j.t
+	var fellBack error
+	defer func() { t.reportFallback(fellBack) }()
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.applyResize()
+	if t.closed {
+		return nil, true, ErrClosed
+	}
+	start, end := t.buffer.Start(), t.buffer.End()
+	if start == end {
+		// Nothing to reconstruct: Append's path, which is no fallback.
+		return nil, true, t.attachRaw(j.w)
+	}
+	if t.modes.uncertain() {
+		fellBack = ErrReplayMarginsUncertain
+		return nil, true, t.attachRaw(j.w)
+	}
+	sizes, err := t.sizes.covering(start)
+	if err != nil {
+		fellBack = err
+		return nil, true, t.attachRaw(j.w)
+	}
+
+	// Nothing past a resize whose outcome isn't known: the bytes after it
+	// were laid out at a size the emulation can't know yet, and feeding the
+	// event afterwards can't repair them (spec J3).
+	e0, below := t.offerBound()
+	sizes = upTo(sizes, e0, below)
+	chunks, _ := t.buffer.Range(start, e0)
+	j.offeredEnd, j.offeredSeq = e0, sizes[len(sizes)-1].Seq
+	j.losses = t.sizes.losses()
+	j.heldBack = e0 < end
+	return &Capture{
+		Modes:  t.modes.Clone(),
+		Chunks: chunks,
+		Sizes:  sizes,
+		Start:  start,
+		End:    e0,
+		Pinned: t.sizes.pinned(),
+	}, false, nil
+}
+
+// start runs the emulation's Start and its first render, outside every lock.
+func (j *join) start(c *Capture) {
+	if !time.Now().Before(j.deadline) {
+		// The permit came as the deadline passed.
+		j.err = ErrReplayDeadline
+		return
+	}
+	j.err = guard(func() (err error) {
+		j.em, err = j.t.replayer.Start(j.ctx, j.deadline, c, j.size)
+		return err
+	})
+	if j.err == nil {
+		j.err = j.rerender()
+	}
+}
+
+// feed offers the emulation more of the stream and renders it again,
+// outside every lock.
+func (j *join) feed(chunks [][]byte, sizes []SizeEvent) {
+	j.err = guard(func() error { return j.em.Feed(chunks, sizes) })
+	if j.err == nil {
+		j.err = j.rerender()
+	}
+}
+
+// rerender renders the emulation, and reads the handoff point the render is
+// as of.
+func (j *join) rerender() error {
+	return guard(func() error {
+		render, err := j.em.Render()
+		if err != nil {
+			return err
+		}
+		if len(render) > DefaultReplayBytes {
+			return errRenderTooLong
+		}
+		j.render = render
+		j.h, j.lastSeq = j.em.Handoff()
+		return nil
+	})
+}
+
+// guard runs f, a call into the replayer, and turns a panic in it into a
+// *ReplayPanic. The replayer runs on bytes a guest can influence, and a panic
+// left to unwind would take the host's whole process with it.
+func guard(f func() error) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = &ReplayPanic{Value: v, Stack: debug.Stack()}
+		}
+	}()
+	return f()
+}
+
+// handoff ends the join under one hold of writeMu: it attaches w with the
+// render, falls back, or is refused. Between holds it catches the emulation
+// up, or waits for what it is missing, outside every lock.
+func (j *join) handoff() error {
+	for {
+		// Taken before the hold, so a Write or a ResizeEnd after it wakes the
+		// wait for one even if it comes before the wait begins.
+		changed := j.t.changed.wait()
+		s := j.hold()
+		switch {
+		case s.done:
+			return s.err
+		case s.resolved != nil:
+			j.wait(waitResize, s.resolved)
+		case len(s.chunks) == 0 && len(s.sizes) == 0:
+			// Nothing new to offer: what the emulation lacks to hand off,
+			// the rest of a sequence or a resize, can only come with more
+			// output or another resize.
+			j.wait(waitOutput, changed)
+		default:
+			j.feed(s.chunks, s.sizes)
+		}
+	}
+}
+
+// step is what one hold of writeMu at the handoff decided.
+type step struct {
+	done     bool
+	err      error           // what AppendSized returns, once done
+	resolved <-chan struct{} // closed with an unresolved resize's outcome, to wait for
+	chunks   [][]byte        // what to feed the emulation, if neither of those
+	sizes    []SizeEvent
+}
+
+// hold is one hold of writeMu at the handoff (spec J5): every resize
+// reported before it is in the reconstruction, or the join waits for it or
+// catches up on it, and every one after it reaches the joiner as a live
+// resize.
+func (j *join) hold() step {
+	t := j.t
+	var fellBack error
+	defer func() { t.reportFallback(fellBack) }()
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.applyResize()
+	if t.closed {
+		return step{done: true, err: ErrClosed}
+	}
+	if err := j.ctx.Err(); err != nil {
+		return step{done: true, err: err}
+	}
+	if fellBack = j.failed(); fellBack != nil {
+		return step{done: true, err: t.attachRaw(j.w)}
+	}
+	if _, seq, ok := t.sizes.firstUnresolved(); ok {
+		// The emulation was offered nothing past it, and its outcome comes
+		// when the pty's ioctl returns.
+		return step{resolved: t.sizes.wait(seq)}
+	}
+	// A committed event the emulation hasn't passed: bytes after it were
+	// laid out at a size the reconstruction doesn't have. Events are
+	// compared by Seq, never by offset, because several can share one.
+	if j.heldBack || len(t.sizes.after(j.lastSeq)) > 0 {
+		chunks, sizes, err := j.offer()
+		if err != nil {
+			fellBack = err
+			return step{done: true, err: t.attachRaw(j.w)}
+		}
+		return step{chunks: chunks, sizes: sizes}
+	}
+	gap, ok := t.buffer.Range(j.h, t.buffer.End())
+	if !ok {
+		fellBack = ErrReplayGapEvicted
+		return step{done: true, err: t.attachRaw(j.w)}
+	}
+	return step{done: true, err: j.attach(gap)}
+}
+
+// failed says why the handoff can't use the emulation, if it can't. Called
+// with writeMu held.
+func (j *join) failed() error {
+	t := j.t
+	start := t.buffer.Start()
+	switch {
+	case j.err != nil:
+		return j.err
+	case t.sizes.losses() != j.losses:
+		// A report or an event was lost since the capture, so some size the
+		// emulation would be offered is unknown, even if a known one has
+		// closed the loss since.
+		return ErrReplayCoverage
+	case start > j.h:
+		return ErrReplayGapEvicted
+	case start == j.h && j.unofferedAt(start):
+		// prune keeps only the last committed event at the ring's start, so
+		// events there the emulation hasn't been offered may be gone: an 80
+		// → 45 → 80 at the handoff would lose the 45's truncation.
+		return ErrReplayGapEvicted
+	case !time.Now().Before(j.deadline):
+		return ErrReplayDeadline
+	}
+	return nil
+}
+
+// unofferedAt reports a committed event at offset that the emulation hasn't
+// been offered. Called with writeMu held.
+func (j *join) unofferedAt(offset uint64) bool {
+	for _, e := range j.t.sizes.after(j.offeredSeq) {
+		if e.Offset == offset {
+			return true
+		}
+	}
+	return false
+}
+
+// offer takes what the emulation hasn't been offered of the stream: the bytes
+// since offeredEnd, and the committed events after offeredSeq, the last
+// offered rather than the last passed, so an event still in the emulation's
+// tail is never offered twice (spec A9). Like the capture, it stops at the
+// first unresolved event. An unknown size among the events is the end of
+// the emulation (spec A1). Called with writeMu held.
+func (j *join) offer() (chunks [][]byte, sizes []SizeEvent, err error) {
+	t := j.t
+	end, below := t.offerBound()
+	sizes = upTo(t.sizes.after(j.offeredSeq), end, below)
+	for _, e := range sizes {
+		if !e.Size.Valid() {
+			return nil, nil, ErrReplayCoverage
+		}
+	}
+	chunks, ok := t.buffer.Range(j.offeredEnd, end)
+	if !ok {
+		return nil, nil, ErrReplayGapEvicted
+	}
+	j.offeredEnd, j.heldBack = end, end < t.buffer.End()
+	if len(sizes) > 0 {
+		j.offeredSeq = sizes[len(sizes)-1].Seq
+	}
+	return chunks, sizes, nil
+}
+
+// attach hands w the render, then gap, the ring from the handoff point on,
+// which the emulation never consumed, then the sequence the filter holds,
+// read now and never at the capture, and attaches w (spec J6). Called with
+// writeMu held, the same hold that found the emulation had passed every
+// event logged.
+func (j *join) attach(gap [][]byte) error {
+	t := j.t
+	if len(j.render) > 0 {
+		if _, err := j.w.Write(j.render); err != nil {
+			return err
+		}
+	}
+	for _, d := range gap {
+		if _, err := j.w.Write(d); err != nil {
+			return err
+		}
+	}
+	if err := t.writePending(j.w); err != nil {
+		return err
+	}
+	t.attach(j.w)
+	return nil
+}
+
+// wait waits outside writeMu for ch, the join's ctx or its deadline, which
+// ever comes first; the next hold decides what it means.
+func (j *join) wait(what joinWait, ch <-chan struct{}) {
+	if testHookJoinWaits != nil {
+		testHookJoinWaits(what)
+	}
+	timer := time.NewTimer(time.Until(j.deadline))
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-j.ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// offerBound is how far a join may offer its emulation the stream now: to
+// End, or to the first event whose outcome isn't known, and only the events
+// below its Seq. Called with writeMu held.
+func (t *MultiWriter) offerBound() (end, below uint64) {
+	end, below = t.buffer.End(), math.MaxUint64
+	if offset, seq, ok := t.sizes.firstUnresolved(); ok {
+		end, below = min(end, offset), seq
+	}
+	return end, below
+}
+
+// upTo returns the leading events of sizes, which are in Seq order, at or
+// before end and below Seq below.
+func upTo(sizes []SizeEvent, end, below uint64) []SizeEvent {
+	for i, e := range sizes {
+		if e.Offset > end || e.Seq >= below {
+			return sizes[:i]
+		}
+	}
+	return sizes
+}
+
+// acquire takes the emulation permit: ctx's error once ctx is done, or
+// ErrReplayDeadline once the deadline passes, while it waits.
+func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
+	select {
+	case t.permit <- struct{}{}:
+		return nil
+	default:
+	}
+	if testHookJoinWaits != nil {
+		testHookJoinWaits(waitPermit)
+	}
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case t.permit <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ErrReplayDeadline
+	}
+}
+
+func (t *MultiWriter) release() { <-t.permit }
+
+// reportFallback tells the installed fallback why a join fell back, if one
+// did. Called with no fan-out lock held.
+func (t *MultiWriter) reportFallback(err error) {
+	if err != nil && t.fallback != nil {
+		t.fallback(err)
+	}
+}
+
+// broadcast wakes whoever waits for the next of something: wait hands out a
+// channel, and notify closes it.
+type broadcast struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (b *broadcast) wait() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ch == nil {
+		b.ch = make(chan struct{})
+	}
+	return b.ch
+}
+
+func (b *broadcast) notify() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ch != nil {
+		close(b.ch)
+		b.ch = nil
+	}
+}
+
+// joinWait is what a join waits for outside writeMu.
+type joinWait int
+
+const (
+	waitPermit joinWait = iota // another join's emulation to end
+	waitResize                 // an unresolved resize's outcome
+	waitOutput                 // more output or a resize, with nothing new to offer
+)
+
+// testHookJoinWaits, when a test sets it, is called each time a join is about
+// to wait, with what for, so that the test can act once the join is parked
+// rather than guess when it is. Nil outside tests.
+var testHookJoinWaits func(joinWait)

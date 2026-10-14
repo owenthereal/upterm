@@ -211,6 +211,7 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 		writers: writers,
 		buffer:  &buffer{max: replayBytes},
 		modes:   NewModeTracker(),
+		permit:  make(chan struct{}, 1),
 	}
 	t.replay = NewTerminalQueryFilter(bufferWriter{b: t.buffer})
 
@@ -281,6 +282,20 @@ type MultiWriter struct {
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
 	closed bool
+
+	// replayer reconstructs the screen for a joining terminal, and fallback
+	// hears why a join fell back to the raw ring instead; see AppendSized.
+	// Both are set once, before any join.
+	replayer Replayer
+	fallback func(error)
+
+	// permit lets one join's emulation run at a time; see AppendSized.
+	permit chan struct{}
+
+	// changed is notified by every Write and ResizeEnd, for a join whose
+	// emulation needs more of the stream than there is yet to wait on,
+	// outside writeMu.
+	changed broadcast
 }
 
 // Append attaches writers, handing each the replay buffer first so it starts
@@ -313,41 +328,67 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	}
 
 	for _, w := range writers {
-		// The snapshot describes the terminal as of the ring's first byte,
-		// so it has to go immediately in front of the ring and nowhere else:
-		// it can end mid-sequence, where the ring's own first bytes are the
-		// rest of that sequence.
-		if snap := t.modes.Snapshot(); len(snap) > 0 {
-			if _, err := w.Write(snap); err != nil {
-				return err
-			}
-		}
-		for _, d := range t.buffer.Data() {
-			if _, err := w.Write(d); err != nil {
-				return err
-			}
-		}
-
-		// A partial escape sequence the filter is still holding is live output,
-		// not history: it is not in the ring yet, so the loop above never sees
-		// it. A joiner that misses it would see only the tail once the
-		// remainder arrives live, which is garbage on its terminal. Replaying
-		// the lead-in lets the joiner's own filter see the sequence whole. Only
-		// a filter may take it: in drop mode it is the head of a dropped query,
-		// whose rest never comes, so a terminal fed it would answer it or wait
-		// inside it.
-		if pending := t.replay.Pending(); len(pending) > 0 {
-			if _, err := w.Write(pending); err != nil {
-				return err
-			}
+		if err := t.replayRaw(w); err != nil {
+			return err
 		}
 	}
+	t.attach(writers...)
+	return nil
+}
 
+// replayRaw hands w the replay Append gives a joiner: the tracker's snapshot,
+// the ring, and the sequence the filter is holding. Called with writeMu held.
+func (t *MultiWriter) replayRaw(w io.Writer) error {
+	// The snapshot describes the terminal as of the ring's first byte, so it
+	// has to go immediately in front of the ring and nowhere else: it can end
+	// mid-sequence, where the ring's own first bytes are the rest of that
+	// sequence.
+	if snap := t.modes.Snapshot(); len(snap) > 0 {
+		if _, err := w.Write(snap); err != nil {
+			return err
+		}
+	}
+	for _, d := range t.buffer.Data() {
+		if _, err := w.Write(d); err != nil {
+			return err
+		}
+	}
+	return t.writePending(w)
+}
+
+// writePending hands w the partial escape sequence the filter is still
+// holding. It is live output, not history: it is not in the ring yet, so a
+// replay of the ring never has it. A joiner that misses it would see only
+// the tail once the remainder arrives live, which is garbage on its terminal.
+// Replaying the lead-in lets the joiner's own filter see the sequence whole.
+// Only a filter may take it: in drop mode it is the head of a dropped query,
+// whose rest never comes, so a terminal fed it would answer it or wait inside
+// it. Called with writeMu held.
+func (t *MultiWriter) writePending(w io.Writer) error {
+	if pending := t.replay.Pending(); len(pending) > 0 {
+		if _, err := w.Write(pending); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// attachRaw hands w Append's replay and attaches it: the join's fallback.
+// Called with writeMu held.
+func (t *MultiWriter) attachRaw(w io.Writer) error {
+	if err := t.replayRaw(w); err != nil {
+		return err
+	}
+	t.attach(w)
+	return nil
+}
+
+// attach adds writers to the fan-out, once each has had its replay. Called
+// with writeMu held, so the next Write is the first they miss nothing of.
+func (t *MultiWriter) attach(writers ...io.Writer) {
 	t.membersMu.Lock()
 	defer t.membersMu.Unlock()
 	t.writers = append(t.writers, writers...)
-
-	return nil
 }
 
 // checkRemovable rejects a writer that Remove could not match.
@@ -439,6 +480,7 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	_, _ = t.replay.Write(p)
 	t.sizes.prune(t.buffer.Start())
 	t.sizes.bound()
+	t.changed.notify()
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))

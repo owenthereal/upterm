@@ -128,6 +128,8 @@ func (t *MultiWriter) ResizeEnd(seq uint64, applied bool) {
 		l.ended = make(map[uint64]bool)
 	}
 	l.ended[seq] = applied
+	// A committed resize can be what a join's emulation needs to hand off.
+	t.changed.notify()
 }
 
 // Pinned records that the pty keeps size for good. Called once, at start,
