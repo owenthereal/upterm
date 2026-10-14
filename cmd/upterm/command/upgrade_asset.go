@@ -16,17 +16,23 @@ type platform struct {
 	Level    string // "6" for GOARM=6; "v3" for GOAMD64=v3; "" otherwise
 }
 
-// currentPlatform reads runtime.GOOS/GOARCH and the build info's "GOARM" or
-// "GOAMD64" setting, dropping a ",softfloat"/",hardfloat" suffix.
+// currentPlatform is platformFrom for the running binary: runtime.GOOS,
+// runtime.GOARCH and the build info's settings.
 func currentPlatform() platform {
-	p := platform{OS: runtime.GOOS, Arch: runtime.GOARCH}
-
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return p
+	var settings []debug.BuildSetting
+	if info, ok := debug.ReadBuildInfo(); ok {
+		settings = info.Settings
 	}
 
-	for _, s := range info.Settings {
+	return platformFrom(runtime.GOOS, runtime.GOARCH, settings)
+}
+
+// platformFrom reads the "GOARM" or "GOAMD64" setting for goarch, dropping a
+// ",softfloat"/",hardfloat" suffix.
+func platformFrom(goos, goarch string, settings []debug.BuildSetting) platform {
+	p := platform{OS: goos, Arch: goarch}
+
+	for _, s := range settings {
 		switch {
 		case p.Arch == "arm" && s.Key == "GOARM":
 			p.Level = armLevel(s.Value)
@@ -55,7 +61,8 @@ func amd64Level(s string) string {
 }
 
 // assetName is the archive's whole name, built as .goreleaser.yml:36 builds
-// it: upterm_<os>_<arch>[v<arm>|<amd64 level>].tar.gz.
+// it: upterm_<os>_<arch>[v<arm>|<amd64 level>].tar.gz. The template's
+// _<mips> term is left out because upterm builds no mips binary.
 func (p platform) assetName() string {
 	name := "upterm_" + p.OS + "_" + p.Arch
 	switch p.Arch {
