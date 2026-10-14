@@ -75,11 +75,10 @@ when stopped, and 255 when it can't join.`,
   upterm join --wait ID@uptermd.upterm.dev`,
 		Args: f.resolveTarget,
 		RunE: f.run,
-		// Every failure, a flag's or a missing target's before RunE too, is
-		// told on one line of upterm join's own, which nothing repeats.
-		SilenceUsage:  true,
-		SilenceErrors: true,
 	}
+	// Every failure, a flag's or a missing target's before RunE too, is told
+	// on one line of upterm join's own, and returns only its status, for
+	// which Exit prints nothing more.
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return joinFailure("upterm: " + err.Error())
 	})

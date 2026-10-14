@@ -68,20 +68,6 @@ func (e UserInterruptedError) Unwrap() error {
 	return host.ErrSessionAbandoned
 }
 
-// SilentError wraps an error that has already been displayed to the user.
-// main.go checks for this type to avoid duplicate logging.
-type SilentError struct {
-	Err error
-}
-
-func (e SilentError) Error() string {
-	return e.Err.Error()
-}
-
-func (e SilentError) Unwrap() error {
-	return e.Err
-}
-
 var (
 	flagServer                  string
 	flagForceCommand            string
@@ -326,6 +312,18 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 	return err
 }
 
+// nameInUseError is §4.1's line for a name a running session holds, and is
+// still sessiondir.ErrNameInUse, which runWithGeneratedNameRetry redraws on.
+type nameInUseError struct {
+	name string
+}
+
+func (e nameInUseError) Error() string {
+	return fmt.Sprintf("a running session is already named %s; attach with upterm attach %s, or pick another --name", e.name, e.name)
+}
+
+func (nameInUseError) Unwrap() error { return sessiondir.ErrNameInUse }
+
 // validateSessionNameFlag rejects an unusable --name before anything is
 // started, so the user sees one clear error rather than a failure partway
 // through startup.
@@ -420,7 +418,7 @@ func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
 	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
 		return nil
 	}
-	return errors.New("interactive confirmation requires a terminal on stdin and stdout")
+	return errors.New("upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 }
 
 // hostOptions is everything shareRunE derives from flags and arguments
@@ -505,16 +503,6 @@ func resolveAuthorizedKeys(ctx context.Context, opts hostOptions, logger *slog.L
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
-	// Set here rather than on the command, because where it is set is what
-	// divides the two kinds of failure. Cobra raises unknown flags and bad
-	// flag combinations (validateShareRequiredFlags, a PreRunE) before this
-	// line, and usage is the right answer to those. Everything below it is a
-	// session that did not happen or a command that exited — and the hosted
-	// command's own exit status is the most common of them, which printed
-	// thirty lines of flags after `exit 2` as if the user had mistyped
-	// something.
-	c.SilenceUsage = true
-
 	logger := uptermctx.Logger(c.Context())
 	if logger == nil {
 		return fmt.Errorf("logger not available")
@@ -533,12 +521,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
 	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
-		c.SilenceUsage = true
-		c.SilenceErrors = true
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "To run in non-interactive environments (CI, scripts, etc.), use --accept:")
-		fmt.Fprintln(os.Stderr, "  upterm host --accept [command]")
+		_, _ = fmt.Fprintln(os.Stderr, "upterm: "+err.Error())
 		return SilentError{Err: err}
 	}
 
@@ -615,14 +598,9 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 		return s.run(c.Context())
 	})
 
-	err = mapUserAction(c, err)
-	var ec ExitCodeError
-	if errors.As(err, &ec) && ec.Err == nil {
-		// The line that explains it was printed already; the status is for
-		// a script.
-		c.SilenceErrors = true
-	}
-	return err
+	// A bare ExitCodeError is the hosted command's status: the line that
+	// explains it was printed already, and Exit prints nothing for it.
+	return mapUserAction(c, err)
 }
 
 // terminalSecretReader reads a passphrase from stdin without echo, or is
@@ -640,12 +618,12 @@ func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
 
 // mapUserAction turns a UserDiscardedError or UserInterruptedError from a
 // run attempt into the exit shareRunE reports, on either path: a decline is
-// a clean exit (nothing printed, status 0), and an interruption silences
-// both usage and error display before being returned — a session the
-// operator declined or interrupted at the prompt is not a fault, and must
-// not read as one in the daemon's log or the foreground's stderr. Anything
-// else is returned unchanged.
-func mapUserAction(c *cobra.Command, err error) error {
+// a clean exit (nothing printed, status 0), and an interruption is Reported,
+// so that Exit prints nothing for it — a session the operator declined or
+// interrupted at the prompt is not a fault, and must not read as one in the
+// daemon's log or the foreground's stderr. Anything else is returned
+// unchanged.
+func mapUserAction(_ *cobra.Command, err error) error {
 	var userDiscardedErr UserDiscardedError
 	if errors.As(err, &userDiscardedErr) {
 		return nil // Clean exit for user discard (exit code 0)
@@ -653,10 +631,7 @@ func mapUserAction(c *cobra.Command, err error) error {
 
 	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
-		// Set both flags to prevent help menu and error display
-		c.SilenceUsage = true
-		c.SilenceErrors = true
-		return userInterruptedErr
+		return Reported{Err: userInterruptedErr}
 	}
 
 	return err

@@ -196,7 +196,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		f := outcome.Failed
 		switch {
 		case f.NameInUse:
-			return fmt.Errorf("%w: %s", sessiondir.ErrNameInUse, s.name)
+			return nameInUseError{name: s.name}
 		case f.Abandoned && displayErr != nil:
 			// The operator's own answer; shareRunE knows what to do with it.
 			return displayErr

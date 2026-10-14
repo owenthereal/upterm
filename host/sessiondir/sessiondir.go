@@ -34,16 +34,30 @@ import (
 	"time"
 )
 
+// The errors read without a package prefix: upterm prints them as they are,
+// after "upterm: ".
 var (
 	// ErrNameInUse is returned when a name is held by a live session.
-	ErrNameInUse = errors.New("sessiondir: name is in use by a running session")
+	ErrNameInUse = errors.New("name is in use by a running session")
 	// ErrInvalidName is returned for a name that is not a single safe path
 	// component.
-	ErrInvalidName = errors.New("sessiondir: invalid session name")
+	ErrInvalidName = errors.New("invalid session name")
 	// ErrSocketPathTooLong is returned when a name is legal but would put the
 	// session's sockets past what a unix socket address can hold.
-	ErrSocketPathTooLong = errors.New("sessiondir: session socket path is too long")
+	ErrSocketPathTooLong = errors.New("session socket path is too long")
 )
+
+// invalidNameError is ErrInvalidName for one name, saying why it isn't one
+// in words rather than with nameRe.
+type invalidNameError struct {
+	name, why string
+}
+
+func (e invalidNameError) Error() string {
+	return fmt.Sprintf("%q isn't a session name: %s", e.name, e.why)
+}
+
+func (invalidNameError) Unwrap() error { return ErrInvalidName }
 
 const (
 	// Runtime and state live in distinct sub-namespaces because the two roots
@@ -71,7 +85,8 @@ const (
 // nameRe is an allowlist, not a denylist. A name becomes a path component and
 // then a target for RemoveAll, so anything that is not obviously safe is
 // refused: no separators, no leading dot (which would also let a name collide
-// with .registry.lock), and a bounded length.
+// with .registry.lock), and a bounded length. ValidateName's refusal says the
+// same in words; change both together.
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // maxNameLen is the length nameRe bounds names to, 1 + 63. Change both together.
@@ -95,10 +110,11 @@ const maxGeneratedBase = 20
 // ValidateName reports whether name is a single safe path component.
 func ValidateName(name string) error {
 	if len(name) > maxNameLen {
-		return fmt.Errorf("%w: %q is longer than %d bytes", ErrInvalidName, name, maxNameLen)
+		return invalidNameError{name, fmt.Sprintf("it's longer than %d bytes", maxNameLen)}
 	}
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf("%w: %q must match %s", ErrInvalidName, name, nameRe)
+		// nameRe, in words.
+		return invalidNameError{name, fmt.Sprintf("use letters, digits, '.', '_' and '-', starting with a letter or digit, at most %d bytes", maxNameLen)}
 	}
 	// Two of Windows' rules, applied on every platform for the reason
 	// maxSocketPath gives: a name that works on Linux and fails on Windows is
@@ -112,12 +128,12 @@ func ValidateName(name string) error {
 	// before the first period is what is compared: the strictest release is
 	// the one the contract has to hold on.
 	if base, _, _ := strings.Cut(name, "."); isReservedDeviceName(base) {
-		return fmt.Errorf("%w: %q is a device name on Windows", ErrInvalidName, name)
+		return invalidNameError{name, "it's a device name on Windows"}
 	}
 	// A trailing period is dropped when the path is created, so build. and
 	// build would be one directory under two names.
 	if strings.HasSuffix(name, ".") {
-		return fmt.Errorf("%w: %q ends in a period, which Windows drops", ErrInvalidName, name)
+		return invalidNameError{name, "it ends in a period, which Windows drops"}
 	}
 	return nil
 }
@@ -428,7 +444,7 @@ func (d *Dir) Release(ctx context.Context) error {
 		// for the next Claim or Reap, which is recoverable; a teardown that
 		// blocks forever is not.
 		_ = d.dropLocks()
-		return fmt.Errorf("sessiondir: leaving %s for later reaping: %w", d.runtime, err)
+		return fmt.Errorf("leaving %s for later reaping: %w", d.runtime, err)
 	}
 	defer releaseRegistry(reg)
 
@@ -670,7 +686,7 @@ func lockRegistry(ctx context.Context, root string) (*os.File, error) {
 			// Named: this guards both the sessions and the results registry,
 			// and a caller timing out needs to know which one is contended
 			// rather than a fixed phrase that is wrong for half its callers.
-			return nil, fmt.Errorf("sessiondir: waiting for the registry lock %s: %w", path, ctx.Err())
+			return nil, fmt.Errorf("waiting for the registry lock %s: %w", path, ctx.Err())
 		case <-timer.C:
 		}
 

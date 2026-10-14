@@ -1043,38 +1043,32 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 	}
 }
 
-// A session that did not happen, or a hosted command that exited non-zero, is
-// not the user mistyping a flag. Printing the usage block after `exit 2`
-// buries the one line that says what happened under thirty lines of flags —
-// which is what `upterm host -- bash` did on every non-zero exit, since the
-// command's status comes back as an ordinary error from RunE.
+// No failure prints the usage (D1). A session that did not happen, or a
+// hosted command that exited non-zero, is not the user mistyping a flag:
+// printing the usage block after `exit 2` buried the one line that says what
+// happened under thirty lines of flags, which is what `upterm host -- bash`
+// did on every non-zero exit. And a mistyped flag is one line that names it,
+// as upterm join's always was.
 //
-// The failure here is a malformed --proxy because it is deterministic and
-// reaches nothing: no keys, no relay, no session. What is under test is where
-// SilenceUsage is set, not which error follows it.
-func Test_hostUsageIsForUsageErrorsOnly(t *testing.T) {
+// The failure to host is a malformed --proxy because it is deterministic and
+// reaches nothing: no keys, no relay, no session.
+func Test_hostPrintsNoUsage(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
 	origAccept, origProxy := flagAccept, flagProxy
 	t.Cleanup(func() { flagAccept, flagProxy = origAccept, origProxy })
 
-	var out strings.Builder
-	root := Root()
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"host", "--accept", "--proxy", "://not-a-url", "--", "true"})
+	stdout, stderr, code := runCLI(t, "host", "--accept", "--proxy", "://not-a-url", "--", "true")
+	require.Equal(t, 1, code)
+	require.True(t, strings.HasPrefix(stderr, "upterm: "), stderr)
+	require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
+	require.NotContains(t, stdout+stderr, "Usage:", "a failure to host is not a usage error")
+	require.NotContains(t, stdout+stderr, "--force-command", "and the flag list has nothing to do with it")
 
-	require.Error(t, root.Execute())
-	require.NotContains(t, out.String(), "Usage:", "a failure to host is not a usage error")
-	require.NotContains(t, out.String(), "--force-command", "and the flag list has nothing to do with it")
-
-	// The other half of the contract: a flag combination that is genuinely
-	// wrong still explains itself with the usage the user needs.
-	out.Reset()
-	root = Root()
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"host", "--nonexistent-flag"})
-	require.Error(t, root.Execute())
-	require.Contains(t, out.String(), "Usage:", "an unknown flag is exactly what usage is for")
+	stdout, stderr, code = runCLI(t, "host", "--nonexistent-flag")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: unknown flag: --nonexistent-flag\n", stderr)
+	require.NotContains(t, stdout, "Usage:", "a mistyped flag is one line too")
 }
 
 // runHostCmd executes `upterm host --accept <args> -- true` in a controlled

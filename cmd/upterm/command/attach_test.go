@@ -211,7 +211,6 @@ func TestAttachRunERejectsABadEscapeCharAsACouldNotAttach(t *testing.T) {
 	require.ErrorAs(t, attachRunE(cmd, nil), &ec)
 	require.Equal(t, exitAttachFailed, ec.Code)
 	require.ErrorContains(t, ec, "single ASCII character", "and says what would have worked")
-	require.True(t, cmd.SilenceUsage, "a value the flag accepted is not a usage error")
 }
 
 func TestParseEscapeChar(t *testing.T) {

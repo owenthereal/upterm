@@ -237,15 +237,14 @@ as in the example below, then run 'upterm session wait NAME'.`,
   upterm session wait build`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			c.SilenceUsage = true
 			code, err := waitSession(c.Context(), args[0], os.Stdout)
 			if err != nil {
 				return ExitCodeError{Code: waitUnavailableCode, Err: err}
 			}
 			if code != 0 {
-				// Bare, with no Err, exactly as attach.go:202 returns it:
-				// this command succeeded; the thing it watched did not.
-				c.SilenceErrors = true
+				// Bare, with no Err, exactly as attachExitError returns it,
+				// so that Exit prints nothing: this command succeeded; the
+				// thing it watched did not.
 				return ExitCodeError{Code: code}
 			}
 			return nil
@@ -351,7 +350,6 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
   upterm session stop build-shell`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			c.SilenceUsage = true
 			return stopSession(c.Context(), args[0], os.Stdout)
 		},
 	}
@@ -522,7 +520,6 @@ info NAME' shows what the session holds.`,
 			if joinTimeout < 0 {
 				return fmt.Errorf("--join-timeout must not be negative, got %s", joinTimeout)
 			}
-			c.SilenceUsage = true
 			return setSession(c.Context(), args[0], joinTimeout, os.Stdout)
 		},
 	}
@@ -1267,10 +1264,6 @@ func withTunnelState(detail tui.SessionDetail, info sessionInfo) tui.SessionDeta
 // alone; printing the usage and the error twice for the common case, as it
 // once did, is thirty lines on every prompt outside a session.
 func currentRunE(c *cobra.Command, args []string) error {
-	// Set first, so that no failure returned below prints the usage. Cobra
-	// raises a bad flag before this runs, and usage is the right answer to that.
-	c.SilenceUsage = true
-
 	// The format is checked before the socket, so that a typo in a prompt's
 	// config is reported outside a session too. Behind the quiet path it would
 	// go unnoticed for as long as nobody happened to be sharing.
@@ -1285,7 +1278,7 @@ func currentRunE(c *cobra.Command, args []string) error {
 	}
 
 	if flagAdminSocket == "" {
-		return notInSession(c, quiet, "$UPTERM_ADMIN_SOCKET is not set")
+		return notInSession(quiet, "$UPTERM_ADMIN_SOCKET is not set")
 	}
 
 	// One deadline for the query. A host that was stopped rather than killed
@@ -1309,7 +1302,7 @@ func currentRunE(c *cobra.Command, args []string) error {
 			if logger := uptermctx.Logger(ctx); logger != nil {
 				logger.Debug("no session answers at the admin socket", "socket", flagAdminSocket, "error", err)
 			}
-			return notInSession(c, quiet, "no session answers at "+flagAdminSocket)
+			return notInSession(quiet, "no session answers at "+flagAdminSocket)
 		}
 		// Any other failure is "could not ask", and the bare gRPC status does not
 		// say which socket it was, so it is named here for both modes.
@@ -1337,11 +1330,10 @@ func currentRunE(c *cobra.Command, args []string) error {
 // for a name nobody holds. With -o it says nothing at all, which is what a
 // prompt that renders the output wants to show; otherwise it is one line for a
 // person, and why.
-func notInSession(c *cobra.Command, quiet bool, why string) error {
+func notInSession(quiet bool, why string) error {
 	if quiet {
-		// A bare ExitCodeError, as `session wait` returns one: cobra prints
-		// Err unless it is silenced, and with none it prints "exit status 4".
-		c.SilenceErrors = true
+		// A bare ExitCodeError, as `session wait` returns one: Exit prints
+		// nothing for it, where an Err would be printed.
 		return ExitCodeError{Code: notFoundCode}
 	}
 	return ExitCodeError{Code: notFoundCode, Err: errors.New("not in an upterm session: " + why)}

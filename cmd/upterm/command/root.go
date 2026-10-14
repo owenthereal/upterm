@@ -83,7 +83,20 @@ Environment Variables:
 
   # Set flags via environment variables:
   $ UPTERM_HIDE_CLIENT_IP=true upterm host`,
+		// For every command: cobra checks the root's. Exit prints each error
+		// once, as one line, and never the usage (D1); cobra would print
+		// "Error: ...", often the usage block too, and then main its own copy.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// The root and the groups only print their help or name an
+			// unknown command (reportUnknownCommands), and read no config:
+			// a broken config file mustn't stop `upterm session` showing
+			// the help it showed when cobra couldn't run it.
+			if cmd.HasSubCommands() {
+				return nil
+			}
+
 			// Bind all flags to environment variables with UPTERM_ prefix
 			supplied, err := bindFlagsToEnv(cmd)
 			if err != nil && !isConfigCommand(cmd) {
@@ -129,7 +142,29 @@ Environment Variables:
 	rootCmd.AddCommand(upgradeCmd())
 	rootCmd.AddCommand(versionCmd())
 
+	reportUnknownCommands(rootCmd)
+	for _, c := range rootCmd.Commands() {
+		if c.HasSubCommands() {
+			reportUnknownCommands(c)
+		}
+	}
+
 	return rootCmd
+}
+
+// reportUnknownCommands makes the root or a group runnable (P6), only to
+// answer what follows it: nothing prints the help, as cobra does for a
+// command it can't run; anything else is unknownCommandError. Left to
+// cobra, a typo under a group printed the group's help and exited 0, and an
+// unknown command printed a block of suggestions.
+func reportUnknownCommands(c *cobra.Command) {
+	c.Args = cobra.ArbitraryArgs
+	c.RunE = func(c *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return c.Help()
+		}
+		return unknownCommandError(c, args[0])
+	}
 }
 
 // bindFlagsToEnv binds cmd's flags to the config file and environment

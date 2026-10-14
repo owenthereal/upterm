@@ -371,6 +371,7 @@ func TestSpawnedSessionRedrawsATakenName(t *testing.T) {
 	go func() { d.await().Failed("name in use: s", true, false) }()
 	err := s.run(context.Background())
 	require.ErrorIs(t, err, sessiondir.ErrNameInUse, "runWithGeneratedNameRetry redraws on exactly this error")
+	require.EqualError(t, err, "a running session is already named s; attach with upterm attach s, or pick another --name")
 }
 
 func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
