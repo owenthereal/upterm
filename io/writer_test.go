@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 func Test_MultiWriter_ReplayIsByteBounded(t *testing.T) {
@@ -1434,25 +1436,6 @@ func TestTheTrackerHearsTheEventAtTheRingsStart(t *testing.T) {
 	require.Equal(t, "\x1b[2;5r", string(clone.Snapshot()), "decided at the 8 rows in effect at the ring's start")
 }
 
-// A session's last state is the tracker's once Shutdown has fed it the ring,
-// and that includes the resizes in the ring: decided at the 8 rows the
-// tracker last heard, CSI 10;15r would be ignored, and a guest's terminal, at
-// the 20 rows it had by then, left inside it.
-func TestShutdownHearsTheResizesInTheRing(t *testing.T) {
-	w := NewMultiWriter(16)
-	guest := resetBuffer{&bytes.Buffer{}}
-	require.NoError(t, w.Append(guest))
-	resize(w, rows(8))
-	write(w, 17) // evicts its first byte, and the 8-row event with it
-	resize(w, rows(20))
-	writeString(w, "\x1b[10;15r")
-
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	require.NoError(t, w.Shutdown(ctx))
-	require.Equal(t, strings.Repeat("x", 17)+"\x1b[10;15r"+"\x1b[r", guest.String())
-}
-
 // armedGate passes writes through until armed, and then parks the next one
 // until released, closing entered first.
 type armedGate struct {
@@ -1502,4 +1485,90 @@ func TestAnOutcomeRecordedMidWriteReachesTheTracker(t *testing.T) {
 			require.Equal(t, tc.want, snap)
 		})
 	}
+}
+
+// Restore goes to guests' own terminals, which can be taller than the pty,
+// so it resets the margins after any DECSTBM, whatever the pty's height
+// decided: 0;24 is the whole of a 24-row pty and not of a 30-row guest; 1;30
+// clamps to the whole pty at 24 rows and not at 30; a resize of the pty
+// resets the pty's region, not a guest's; and Shutdown feeds the tracker the
+// ring without its resizes, so it ignores 25;28 at the 24 rows it last heard,
+// where the pty, at 30 by then, took it. Each case but the last is evicted
+// whole, so the tracker decides it at the pty's 24 rows.
+func TestShutdownResetsTheMarginsAfterAnyDECSTBM(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream func(w *MultiWriter)
+	}{
+		{"the whole pty, after a region", func(w *MultiWriter) {
+			writeString(w, "\x1b[0;23rabc\x1b[0;24r")
+			write(w, 16)
+		}},
+		{"clamped to the whole pty", func(w *MultiWriter) {
+			writeString(w, "\x1b[1;30r")
+			write(w, 16)
+		}},
+		{"a region, then a resize", func(w *MultiWriter) {
+			writeString(w, "\x1b[2;10r")
+			resize(w, termsize.Size{Cols: 100, Rows: 24})
+			write(w, 16)
+			write(w, 16)
+		}},
+		{"decided at a height the pty had left", func(w *MultiWriter) {
+			write(w, 17) // evicts its first byte, and the 24-row event with it
+			resize(w, termsize.Size{Cols: 80, Rows: 30})
+			writeString(w, "\x1b[25;28r")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(16)
+			guest := resetBuffer{&bytes.Buffer{}}
+			require.NoError(t, w.Append(guest))
+			resize(w, at80x24)
+			tc.stream(w)
+			before := guest.Len()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			require.NoError(t, w.Shutdown(ctx))
+			require.Equal(t, "\x1b[r", guest.String()[before:])
+		})
+	}
+}
+
+// Events at one offset are each heard, in Seq order: here a committed resize
+// to 4 rows and a tentative one to 8, with no output between them, then
+// CSI 2;6r, which is 2;4 at 4 rows and 2;6 at 8. With the tentative one
+// deleted, the region is the one decided at 4.
+func TestEveryEventAtOneOffsetIsHeard(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(24))
+	write(w, 1)
+	resize(w, rows(4))
+	seq := w.ResizeBegin(rows(8))
+	writeString(w, "\x1b[2;6r")
+	write(w, 16)
+	_, uncertain := marginsAt(w)
+	require.True(t, uncertain)
+
+	w.ResizeEnd(seq, false)
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;4r", snap)
+}
+
+// A resize to the size the pty already has sends no SIGWINCH, and a terminal
+// resets nothing, so the tracker doesn't either, as the replay applies no
+// such event (Task 7).
+func TestASameSizeResizeResetsNothing(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, at80x24)
+	writeString(w, "\x1b[2;10r")
+	resize(w, at80x24)
+	write(w, 1)
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;10r", snap)
 }

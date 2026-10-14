@@ -598,39 +598,3 @@ func TestPinnedIsNeverLost(t *testing.T) {
 	require.Zero(t, lossCount(w))
 	require.Equal(t, []SizeEvent{{Seq: sizeQueueMax + 1, Offset: 0, Size: at80x24}}, loggedAfter(w, 0))
 }
-
-// resolved is the outcome as ResizeEnd recorded it, before apply has applied
-// it, for an eviction that reaches the event in between.
-func TestResolvedReportsTheRecordedOutcome(t *testing.T) {
-	w := NewMultiWriter(DefaultReplayBytes)
-	resolvedNow := func(seq uint64) (committed, deleted bool) {
-		w.writeMu.Lock()
-		defer w.writeMu.Unlock()
-		return w.sizes.resolved(seq)
-	}
-	type outcome struct{ committed, deleted bool }
-	requireOutcome := func(want outcome, seq uint64, msg string) {
-		t.Helper()
-		committed, deleted := resolvedNow(seq)
-		require.Equal(t, want, outcome{committed, deleted}, msg)
-	}
-
-	kept, failed := w.ResizeBegin(at80x24), w.ResizeBegin(at45x30)
-	write(w, 1)
-	requireOutcome(outcome{}, kept, "tentative")
-	requireOutcome(outcome{}, failed, "tentative")
-
-	w.ResizeEnd(kept, true)
-	w.ResizeEnd(failed, false)
-	requireOutcome(outcome{committed: true}, kept, "recorded, not yet applied")
-	requireOutcome(outcome{deleted: true}, failed, "recorded, not yet applied")
-
-	write(w, 1)
-	requireOutcome(outcome{committed: true}, kept, "applied")
-	requireOutcome(outcome{}, failed, "applied, so no longer held")
-
-	queued := w.ResizeBegin(at45x30)
-	requireOutcome(outcome{}, queued, "queued")
-	w.ResizeEnd(queued, true)
-	requireOutcome(outcome{committed: true}, queued, "queued, recorded")
-}

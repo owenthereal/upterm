@@ -562,17 +562,13 @@ type ResetTarget interface {
 // but for one held in drop mode: the head of a query being dropped, which was
 // never sent. Fed it, the tracker sits inside a string, so the reset gains a
 // CAN, which the terminal, never having seen the head, ignores in ground.
-// The ring is fed with the resizes logged inside it, as eviction feeds it, so
-// that its DECSTBMs are decided at the heights the terminal had.
 //
 // That spends the tracker: its snapshot no longer describes the ring's start.
 // So it runs once, from Shutdown, after which Append refuses every joiner and
 // nothing asks for a snapshot again. Called with writeMu held.
 func (t *MultiWriter) restore() []byte {
-	offset := t.buffer.Start()
 	for _, d := range t.buffer.Data() {
-		t.sizes.hear(t.modes, offset, d)
-		offset += uint64(len(d))
+		_, _ = t.modes.Write(d)
 	}
 	_, _ = t.modes.Write(t.replay.Pending())
 	return t.modes.Restore()

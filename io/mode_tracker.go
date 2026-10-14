@@ -110,21 +110,24 @@ var restorable = map[int]bool{
 
 // maxUnresolvedResizes bounds the resizes, crossed by eviction while still
 // waiting for their outcome, that the tracker keeps a margin candidate for
-// (spec A23). A resize is crossed unresolved only once a ring's worth of
-// output has followed its ResizeBegin before its ResizeEnd, and a pty reports
-// the two around a single ioctl: reaching this is a stalled report, not a
-// resize storm.
+// (spec A23). What it bounds is the candidates kept, not the events
+// unresolved: an event whose candidate a later commit removed costs nothing,
+// so it isn't counted. That is more precise than A22's wording, which counts
+// unresolved events, and the bound is the same. A resize is crossed
+// unresolved only once a ring's worth of output has followed its ResizeBegin
+// before its ResizeEnd, and a pty reports the two around a single ioctl:
+// reaching this is a stalled report, not a resize storm.
 const maxUnresolvedResizes = 16
 
-// marginCandidate is the terminal's height and scrolling region as one
+// marginCandidate is the terminal's size and scrolling region as one
 // outcome of the unresolved resizes eviction has crossed has them (spec A22).
 type marginCandidate struct {
 	// after is the crossed resize this candidate assumes committed last, every
 	// later one deleted; 0 is none of them.
 	after uint64
-	// height is the terminal's rows, which a DECSTBM is decided against: 0
-	// while no size is known.
-	height int
+	// size is the terminal's, whose rows a DECSTBM is decided against: the
+	// zero size while none is known.
+	size termsize.Size
 	// top and bottom are the region a terminal holds, 1-based and inclusive,
 	// after its defaults and clamping: both 0 while it is the whole screen.
 	top, bottom int
@@ -139,7 +142,8 @@ type marginCandidate struct {
 // only if bottom > top, or else nothing changes. seq is the sequence as
 // written.
 func (c *marginCandidate) decstbm(top, bottom int, seq []byte) {
-	if c.height == 0 {
+	height := heightOf(c.size)
+	if height == 0 {
 		// With no height to decide it against, it is decided as the tracker
 		// decided every DECSTBM before it heard of sizes: each is taken, and
 		// the last is replayed as written.
@@ -147,14 +151,14 @@ func (c *marginCandidate) decstbm(top, bottom int, seq []byte) {
 		return
 	}
 	top = max(top, 1)
-	if bottom == 0 || bottom > c.height {
-		bottom = c.height
+	if bottom == 0 || bottom > height {
+		bottom = height
 	}
 	if bottom <= top {
 		return
 	}
 	c.top, c.bottom, c.written = top, bottom, nil
-	if top == 1 && bottom == c.height {
+	if top == 1 && bottom == height {
 		// The whole screen, which is where a terminal starts.
 		c.top, c.bottom = 0, 0
 	}
@@ -231,6 +235,13 @@ type ModeTracker struct {
 	// state, and the region is uncertain until a resize heard in order (spec
 	// A23).
 	overflowed bool
+	// marginsSet is whether a DECSTBM has been taken since the last RIS or
+	// DECSTR, decided or not, for Restore alone. Restore goes to guests' own
+	// terminals, which can be taller than the pty: CSI 0;24r is the whole
+	// screen at the pty's 24 rows and a region at a guest's 30, and a resize
+	// of the pty resets the pty's margins and not a guest's. So no resize
+	// clears it, and nothing the candidates decide does.
+	marginsSet bool
 
 	charsetG0 []byte // last "ESC ( X", verbatim
 
@@ -343,8 +354,29 @@ func (m *ModeTracker) Clone() *ModeTracker {
 // committed last, this one came after it, and their outcomes change nothing
 // from here (spec A22).
 func (m *ModeTracker) Resized(size termsize.Size) {
-	m.candidates = append(m.candidates[:0], marginCandidate{height: heightOf(size)})
+	m.candidates = append(m.candidates[:0], marginCandidate{size: size})
 	m.overflowed = false
+}
+
+// resizeHeard applies a committed resize to size that eviction reached in
+// order. Where the terminal already had that size it is no resize at all: the
+// pty sends no SIGWINCH, the terminal resets nothing, and the replay applies
+// no such event either (Task 7). Each candidate is its own terminal for this:
+// one at another size is reset to size and the whole screen, one at size
+// keeps its region, and only when every one resets is this Resized, which
+// settles them. Overflowed, the fallback's size is the one compared, though
+// the terminal's own is a guess there.
+func (m *ModeTracker) resizeHeard(size termsize.Size) {
+	reset := 0
+	for i, c := range m.candidates {
+		if c.size != size {
+			m.candidates[i] = marginCandidate{after: c.after, size: size}
+			reset++
+		}
+	}
+	if reset == len(m.candidates) {
+		m.Resized(size)
+	}
 }
 
 // crossTentative records that eviction reached resize seq, to size, before its
@@ -359,13 +391,13 @@ func (m *ModeTracker) Resized(size termsize.Size) {
 func (m *ModeTracker) crossTentative(seq uint64, size termsize.Size) {
 	switch {
 	case m.overflowed:
-		m.candidates[0] = marginCandidate{height: heightOf(size)}
+		m.candidates[0] = marginCandidate{size: size}
 	case len(m.candidates) > maxUnresolvedResizes:
 		// The newest candidate at the overflow, which is this resize's.
-		m.candidates = append(m.candidates[:0], marginCandidate{height: heightOf(size)})
+		m.candidates = append(m.candidates[:0], marginCandidate{size: size})
 		m.overflowed = true
 	default:
-		m.candidates = append(m.candidates, marginCandidate{after: seq, height: heightOf(size)})
+		m.candidates = append(m.candidates, marginCandidate{after: seq, size: size})
 	}
 }
 
@@ -672,12 +704,14 @@ func (m *ModeTracker) softReset() {
 // the snapshot replay a "?47h" the session was no longer in.
 var altScreenModes = map[int]bool{47: true, 1047: true, 1049: true}
 
-// clearRegions puts the region back to the whole screen, as a reset does at
-// any height: the candidates stay, for the heights they hold.
+// clearRegions puts the region back to the whole screen, as RIS and DECSTR do
+// at any height, on a guest's terminal too: the candidates stay, for the
+// sizes they hold.
 func (m *ModeTracker) clearRegions() {
 	for i := range m.candidates {
 		m.candidates[i].top, m.candidates[i].bottom, m.candidates[i].written = 0, 0, nil
 	}
+	m.marginsSet = false
 }
 
 func (m *ModeTracker) altActive() bool { return m.altScreen }
@@ -757,6 +791,7 @@ func (m *ModeTracker) decstbm(params []byte) {
 			}
 		}
 	}
+	m.marginsSet = true
 	seq := append(append([]byte("\x1b["), params...), 'r')
 	for i := range m.candidates {
 		m.candidates[i].decstbm(tb[0], tb[1], seq)
@@ -1010,10 +1045,11 @@ func (m *ModeTracker) Restore() []byte {
 	// terminal still under a full-screen program's DECSTBM scrolls inside
 	// those rows and leaves the rest of the screen frozen. They are the
 	// terminal's, not a screen's, so they are reset once, on the screen it
-	// goes back to. While uncertain, they are reset if any candidate has a
-	// region: resetting margins a terminal doesn't have is harmless, and
+	// goes back to. They are reset after any DECSTBM, whatever the pty's
+	// height decided (see marginsSet), and while uncertain, if any candidate
+	// has a region: resetting margins a terminal doesn't have is harmless, and
 	// missing some is not (spec A23).
-	if slices.ContainsFunc(m.candidates, marginCandidate.hasRegion) {
+	if m.marginsSet || slices.ContainsFunc(m.candidates, marginCandidate.hasRegion) {
 		out = append(out, 0x1b, '[', 'r')
 	}
 

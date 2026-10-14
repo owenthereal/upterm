@@ -311,16 +311,16 @@ func (l *sizeLog) lose(n, seq uint64) {
 
 // hear feeds m the bytes p, which begin at stream offset offset, with each
 // logged event at or before their end that m hasn't heard yet placed where it
-// falls among them, in Seq order (spec E3): a committed one as Resized, and a
-// tentative one as crossTentative, its outcome to follow through apply. One
-// exactly at their end is heard too, since it is in effect at the byte after
-// them, the ring's first once they have left. A deleted event is no longer
-// logged, so it is never heard.
+// falls among them, in Seq order (spec E3): a committed one through
+// resizeHeard, which skips one of the size the terminal already has, and a
+// tentative one through crossTentative, its outcome to follow through apply.
+// One exactly at their end is heard too, since it is in effect at the byte
+// after them, the ring's first once they have left. A deleted event is no
+// longer logged, so it is never heard.
 //
-// The log is read for whether an event is tentative, not resolved: an event
-// the log holds is tentative exactly while apply hasn't applied an outcome to
-// it, and an outcome ResizeEnd records later reaches m through apply, like
-// any other. Called with writeMu held.
+// The log's own entry says whether an event is tentative: it is exactly while
+// apply hasn't applied an outcome to it, and an outcome ResizeEnd records
+// later reaches m through apply, like any other. Called with writeMu held.
 func (l *sizeLog) hear(m *ModeTracker, offset uint64, p []byte) {
 	end := offset + uint64(len(p))
 	for _, e := range l.events {
@@ -338,7 +338,7 @@ func (l *sizeLog) hear(m *ModeTracker, offset uint64, p []byte) {
 		if e.tentative {
 			m.crossTentative(e.Seq, e.Size)
 		} else {
-			m.Resized(e.Size)
+			m.resizeHeard(e.Size)
 		}
 		l.heard = e.Seq
 	}
@@ -407,25 +407,6 @@ func (l *sizeLog) firstUnresolved() (offset uint64, seq uint64, ok bool) {
 		}
 	}
 	return 0, 0, false
-}
-
-// resolved reports the outcome ResizeEnd recorded for seq, whether or not
-// apply has applied it yet. Both are false while seq is tentative, and for an
-// event the log no longer holds: a deleted one goes at the apply after its
-// outcome, and a committed one once pruned. Called with writeMu held.
-func (l *sizeLog) resolved(seq uint64) (committed, deleted bool) {
-	l.mu.Lock()
-	applied, ok := l.ended[seq]
-	l.mu.Unlock()
-	if ok {
-		return applied, !applied
-	}
-	for _, e := range l.events {
-		if e.Seq == seq {
-			return !e.tentative, false
-		}
-	}
-	return false, false
 }
 
 // prune forgets what the ring no longer needs, now that it starts at start.

@@ -1127,7 +1127,7 @@ func TestSnapshotAfterAnOverflow(t *testing.T) {
 
 	m.crossTentative(maxUnresolvedResizes+2, rows(20))
 	require.Empty(t, m.Snapshot(), "assumed to commit")
-	require.Empty(t, m.Restore())
+	require.Equal(t, "\x1b[r", string(m.Restore()), "a DECSTBM was taken, and a guest may hold it")
 	_, _ = m.Write([]byte("\x1b[2;30r"))
 	require.Equal(t, "\x1b[2;20r", string(m.Snapshot()))
 
@@ -1348,4 +1348,93 @@ func requireNothingShared(t *testing.T, path string, a, b reflect.Value, seen ma
 	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer, reflect.Array:
 		t.Fatalf("%s: the walk doesn't know how to check a %s", path, a.Kind())
 	}
+}
+
+// Restore resets the margins once any DECSTBM has been taken, decided or
+// not, until RIS or DECSTR resets them on every terminal: a guest's own can
+// be taller than the pty, where 0;24 at 24 rows is a region. Snapshot keeps
+// the region decided at the pty's height.
+func TestRestoreRemembersEveryDECSTBMTaken(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(24))
+	_, _ = m.Write([]byte("\x1b[?2;6r"))
+	require.Empty(t, m.Restore(), "XTRESTORE is not a DECSTBM")
+
+	_, _ = m.Write([]byte("\x1b[0;24r"))
+	require.Empty(t, m.Snapshot())
+	require.Equal(t, "\x1b[r", string(m.Restore()))
+	m.Resized(rows(30))
+	require.Equal(t, "\x1b[r", string(m.Restore()), "a resize of the pty is no reset of a guest's")
+	require.Equal(t, "\x1b[r", string(m.Clone().Restore()))
+
+	_, _ = m.Write([]byte("\x1b[!p"))
+	require.Empty(t, m.Restore(), "DECSTR resets the margins")
+	_, _ = m.Write([]byte("\x1b[5;5r"))
+	require.Equal(t, "\x1b[r", string(m.Restore()), "taken, though no terminal sets it")
+	_, _ = m.Write([]byte("\x1bc"))
+	require.Empty(t, m.Restore(), "and so does RIS")
+}
+
+// A committed resize heard in order is no resize at all where the terminal
+// already had its size: no SIGWINCH, nothing reset. Each candidate is its own
+// terminal for this, so one at that size keeps its region while one at
+// another is reset, and the candidates collapse only when every one resets.
+func TestAResizeHeardInOrderResetsOnlyWhereTheSizeChanges(t *testing.T) {
+	mixed := func() *ModeTracker {
+		m := NewModeTracker()
+		m.Resized(rows(24))
+		m.crossTentative(1, rows(30))
+		_, _ = m.Write([]byte("\x1b[2;10r"))
+		m.resizeHeard(rows(24))
+		return m
+	}
+
+	t.Run("at the size of some candidates", func(t *testing.T) {
+		m := mixed()
+		require.True(t, m.uncertain(), "2;10 at 24 rows, the whole screen at 30 resized to 24")
+		m.resolve(1, false)
+		require.False(t, m.uncertain())
+		require.Equal(t, "\x1b[2;10r", string(m.Snapshot()))
+
+		m = mixed()
+		m.resolve(1, true)
+		require.False(t, m.uncertain())
+		require.Empty(t, m.Snapshot())
+	})
+
+	t.Run("at the size of every candidate", func(t *testing.T) {
+		m := NewModeTracker()
+		m.Resized(rows(24))
+		m.crossTentative(1, rows(24))
+		_, _ = m.Write([]byte("\x1b[2;10r"))
+		m.resizeHeard(rows(24))
+		require.Len(t, m.candidates, 2)
+		require.Equal(t, "\x1b[2;10r", string(m.Snapshot()))
+	})
+
+	t.Run("at the size of none", func(t *testing.T) {
+		m := NewModeTracker()
+		m.Resized(rows(24))
+		m.crossTentative(1, rows(30))
+		_, _ = m.Write([]byte("\x1b[2;10r"))
+		m.resizeHeard(termsize.Size{Cols: 100, Rows: 24})
+		require.Len(t, m.candidates, 1)
+		require.False(t, m.uncertain())
+		require.Empty(t, m.Snapshot())
+	})
+
+	t.Run("overflowed, at the fallback's size", func(t *testing.T) {
+		m := NewModeTracker()
+		for seq := uint64(1); seq <= maxUnresolvedResizes+1; seq++ {
+			m.crossTentative(seq, rows(24))
+		}
+		_, _ = m.Write([]byte("\x1b[2;10r"))
+		m.resizeHeard(rows(24))
+		require.True(t, m.uncertain(), "still overflowed")
+		require.Equal(t, "\x1b[2;10r", string(m.Snapshot()))
+
+		m.resizeHeard(rows(30))
+		require.False(t, m.uncertain())
+		require.Empty(t, m.Snapshot())
+	})
 }
