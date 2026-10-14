@@ -164,8 +164,6 @@ func (c *marginCandidate) decstbm(top, bottom int, seq []byte) {
 	}
 }
 
-func (c marginCandidate) hasRegion() bool { return c.top != 0 || len(c.written) > 0 }
-
 func (c marginCandidate) sameRegion(d marginCandidate) bool {
 	return c.top == d.top && c.bottom == d.bottom && bytes.Equal(c.written, d.written)
 }
@@ -364,9 +362,19 @@ func (m *ModeTracker) Resized(size termsize.Size) {
 // no such event either (Task 7). Each candidate is its own terminal for this:
 // one at another size is reset to size and the whole screen, one at size
 // keeps its region, and only when every one resets is this Resized, which
-// settles them. Overflowed, the fallback's size is the one compared, though
-// the terminal's own is a guess there.
+// settles them.
+//
+// Overflowed, there is no comparing: the fallback's size is a guess at the
+// terminal's, and a skip decided against a guess could leave the tracker
+// certain and wrong. The pty reports a resize only when its size really
+// changes (a Setsize to the size it has reports nothing), so every committed
+// event is a resize that resets the margins, and it settles the tracker, as
+// spec A23 has it.
 func (m *ModeTracker) resizeHeard(size termsize.Size) {
+	if m.overflowed {
+		m.Resized(size)
+		return
+	}
 	reset := 0
 	for i, c := range m.candidates {
 		if c.size != size {
@@ -1045,11 +1053,12 @@ func (m *ModeTracker) Restore() []byte {
 	// terminal still under a full-screen program's DECSTBM scrolls inside
 	// those rows and leaves the rest of the screen frozen. They are the
 	// terminal's, not a screen's, so they are reset once, on the screen it
-	// goes back to. They are reset after any DECSTBM, whatever the pty's
-	// height decided (see marginsSet), and while uncertain, if any candidate
-	// has a region: resetting margins a terminal doesn't have is harmless, and
-	// missing some is not (spec A23).
-	if m.marginsSet || slices.ContainsFunc(m.candidates, marginCandidate.hasRegion) {
+	// goes back to. They are reset after any DECSTBM since the last RIS or
+	// DECSTR, whatever the pty's height decided (see marginsSet), which
+	// covers every candidate's region too, since only a DECSTBM sets one:
+	// resetting margins a terminal doesn't have is harmless, and missing some
+	// is not (spec A23).
+	if m.marginsSet {
 		out = append(out, 0x1b, '[', 'r')
 	}
 

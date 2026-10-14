@@ -1423,18 +1423,19 @@ func TestAResizeHeardInOrderResetsOnlyWhereTheSizeChanges(t *testing.T) {
 		require.Empty(t, m.Snapshot())
 	})
 
+	// Overflowed, the fallback's size is a guess, not the terminal's, so it
+	// decides nothing: the pty reports a resize only when its size changes,
+	// and every one resets the margins (spec A23).
 	t.Run("overflowed, at the fallback's size", func(t *testing.T) {
 		m := NewModeTracker()
 		for seq := uint64(1); seq <= maxUnresolvedResizes+1; seq++ {
 			m.crossTentative(seq, rows(24))
 		}
 		_, _ = m.Write([]byte("\x1b[2;10r"))
+		require.True(t, m.uncertain())
 		m.resizeHeard(rows(24))
-		require.True(t, m.uncertain(), "still overflowed")
-		require.Equal(t, "\x1b[2;10r", string(m.Snapshot()))
-
-		m.resizeHeard(rows(30))
 		require.False(t, m.uncertain())
+		require.Len(t, m.candidates, 1)
 		require.Empty(t, m.Snapshot())
 	})
 }
