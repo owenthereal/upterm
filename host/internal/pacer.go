@@ -114,6 +114,11 @@ func (p *guestPacer) Write(b []byte) (int, error) {
 // took output unpaced until it overflowed. With it, registration order is
 // attachment order, and no guest attaches ahead of an earlier registered one.
 func (p *guestPacer) attach(ctx context.Context, s pacedSink, appendFn func() error) error {
+	// Asked first: with the slot free, the select below would pick between
+	// the two at random, and attach a guest that has already left.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case p.attachSlot <- struct{}{}:
 	case <-ctx.Done():

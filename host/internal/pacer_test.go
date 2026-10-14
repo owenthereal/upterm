@@ -647,6 +647,28 @@ func TestGuestPacerGateWaitsOnTheJoinersContext(t *testing.T) {
 	require.Equal(t, 2, registered(p))
 }
 
+// A guest that has already left is refused even with the slot free: it is
+// never registered and its Append never runs. Two hundred times, because a
+// select between a free slot and a done context picks either at random, and
+// a refusal that depended on it would pass by chance about half the time.
+func TestGuestPacerRefusesAGuestThatHasAlreadyLeft(t *testing.T) {
+	p, _ := newTestPacer(t, time.Minute)
+	left, leave := context.WithCancel(t.Context())
+	leave()
+	for i := range 200 {
+		sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+		ran := false
+		err := p.attach(left, sink, func() error {
+			ran = true
+			return nil
+		})
+		p.remove(sink)
+		_ = sink.Close()
+		require.ErrorIs(t, err, context.Canceled, "attempt %d", i)
+		require.False(t, ran, "attempt %d: a guest that had left was attached", i)
+	}
+}
+
 // A failed Append takes its registration back out, or a guest that never
 // joined would pace the session from then on. The sink is refused without
 // being closed, unlike attachGuestOutput's refusal: a closed sink is skipped

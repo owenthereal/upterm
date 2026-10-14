@@ -262,7 +262,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		commandEnv:            s.CommandEnv,
 		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
-		shared:                shared,
 		eventEmmiter:          s.EventEmitter,
 		terminals:             newTerminalWindows(s.Logger),
 		writers:               writers,
@@ -883,12 +882,6 @@ type sessionHandler struct {
 	cmdDone       <-chan struct{}
 	commandResult func() CommandResult
 
-	// shared is the handle ptmx starts out as, kept in its own type so a host
-	// client that arrives before the pty exists can offer it the geometry to
-	// open with. Separate from ptmx because a forced command replaces that
-	// with a pty of its own.
-	shared *sharedPTY
-
 	// onHostClientAttached, set on the host door only, reports that a local
 	// client's output subscription is installed. That is what a server told to
 	// await its initial client starts the command on.
@@ -1397,15 +1390,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 		// Attached, in the sense the gate is defined by: the subscription is
 		// installed, so nothing the command writes from here on can be missed.
-		// The geometry is offered first, because the command's start reads it
-		// the moment the gate opens.
-		if h.kind == kindHost {
-			if isPty && h.shared != nil {
-				h.shared.offerSize(size)
-			}
-			if h.onHostClientAttached != nil {
-				h.onHostClientAttached()
-			}
+		// The geometry the command's start reads the moment the gate opens is
+		// already recorded: counting this terminal, above, resized the shared
+		// pty, which before the command starts records the minimum over the
+		// terminals attached as the size to open with.
+		if h.kind == kindHost && h.onHostClientAttached != nil {
+			h.onHostClientAttached()
 		}
 
 		// Everything a repaint needs is now queued: the mode snapshot, the

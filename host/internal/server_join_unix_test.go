@@ -236,7 +236,9 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 			rig := newJoinRig(t, r, uio.DefaultReplayBytes, false)
 			require.NoError(t, rig.writers.Shutdown(t.Context()))
 
-			rig.join(t, kind, phone).awaitDone(t)
+			j := rig.join(t, kind, phone)
+			j.awaitDone(t)
+			require.Equal(t, []int{0}, j.exitCodes(), "a client that arrived as the session ended is told 0")
 			require.Empty(t, r.seen(), "a join to a fan-out already shut down reached the replayer")
 			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
 			require.Equal(t, desktop, rig.ptySize(t))
@@ -254,6 +256,7 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 			require.Equal(t, desktopAndPhone, rig.ptySize(t), "the joiner was not counted before the capture")
 			j.leave()
 			j.awaitDone(t)
+			require.Empty(t, j.exitCodes(), "a client that left was sent a status")
 			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
 			require.Equal(t, desktop, rig.ptySize(t))
 		}},
@@ -267,6 +270,7 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 			rig.sizes.await(t, desktopAndPhone)
 			j.leave()
 			j.awaitDone(t)
+			require.Empty(t, j.exitCodes(), "a client that left was sent a status")
 			require.Empty(t, r.seen(), "a joiner refused at the pacer's gate reached the replayer")
 			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
 			require.Equal(t, desktop, rig.ptySize(t))
@@ -280,7 +284,9 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 			_, err := rig.writers.Write(bytes.Repeat([]byte("x"), uio.DefaultGuestBufferSize+1))
 			require.NoError(t, err)
 
-			rig.join(t, kind, phone).awaitDone(t)
+			j := rig.join(t, kind, phone)
+			j.awaitDone(t)
+			require.Equal(t, []int{1}, j.exitCodes(), "a client whose output couldn't be attached is told 1")
 			require.Len(t, r.seen(), 1, "the join never reached the replayer")
 			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
 			require.Equal(t, desktop, rig.ptySize(t))
@@ -396,7 +402,9 @@ func TestTheDeadlineStartsBeforeThePacerGate(t *testing.T) {
 	require.Equal(t, tablet, second.size)
 	want := uio.ReplayBudget - waited
 	require.LessOrEqual(t, second.left, want, "the join's budget started after it began")
-	require.GreaterOrEqual(t, second.left, want-50*time.Millisecond)
+	// Loose: how long the release takes to reach Start is the runner's, and
+	// the bound only catches a budget charged for far more than the wait.
+	require.GreaterOrEqual(t, second.left, want-250*time.Millisecond)
 }
 
 // A host-door viewer (no pty) still gets the raw ring.
@@ -417,6 +425,43 @@ func TestAViewerStillGetsTheRawRing(t *testing.T) {
 	_, viewer, _ := h.connectHost(t, nil)
 	require.NotContains(t, readUntil(t, viewer, ringMark), emulatedMark, "a viewer was handed a reconstruction")
 	require.Len(t, r.seen(), 1, "a viewer's join reached the replayer")
+}
+
+// Host-door terminals that arrive before the command has started decide the
+// size it opens at, and that is the minimum over them, as any resize is: a
+// second terminal, larger than the first, must not open the command at its
+// own size.
+//
+// At the handler rather than through ServeWithContext: there, the first
+// terminal's attach opens the gate the command's start waits on, and nothing
+// holds the start back until a second has arrived.
+func TestTerminalsBeforeTheCommandOpenItAtTheirMinimum(t *testing.T) {
+	shared := newSharedPTY()
+	t.Cleanup(shared.abandon)
+	attached := make(chan struct{}, 2)
+	h := &sessionHandler{
+		kind:              kindHost,
+		ptmx:              shared,
+		writers:           uio.NewMultiWriter(uio.DefaultReplayBytes),
+		eventEmmiter:      emitter.New(1),
+		terminals:         newTerminalWindows(discardLogger()),
+		keepAliveDuration: time.Hour,
+		ctx:               t.Context(),
+		logger:            discardLogger(),
+		// What the command's start waits on, and reads the size after.
+		onHostClientAttached: func() { attached <- struct{}{} },
+	}
+
+	larger := termsize.Size{Cols: 100, Rows: 40}
+	for i, size := range []termsize.Size{phone, larger} {
+		startJoiner(t, h, fmt.Sprintf("%s/%d", t.Name(), i), size)
+		select {
+		case <-attached:
+		case <-time.After(harnessTimeout):
+			t.Fatalf("the %v terminal was never attached", size)
+		}
+	}
+	require.Equal(t, phone, shared.initialSize(), "the command would open at a size larger than a terminal attached")
 }
 
 // joinRig is a session's doors with nothing in front of them, for outcomes a
@@ -477,9 +522,17 @@ func newJoinRig(t *testing.T, r uio.Replayer, ringBytes int, paced bool) *joinRi
 // handler has returned.
 func (r *joinRig) join(t *testing.T, kind clientKind, size termsize.Size) *joiner {
 	t.Helper()
-	j := newJoiner(t, fmt.Sprintf("%s/%d", t.Name(), r.joined.Add(1)), size)
 	h := r.handler
 	h.kind = kind
+	return startJoiner(t, &h, fmt.Sprintf("%s/%d", t.Name(), r.joined.Add(1)), size)
+}
+
+// startJoiner runs a joiner, id, with a terminal of size, through h, on a
+// goroutine of its own. By the time the test ends it has left and its
+// handler has returned.
+func startJoiner(t *testing.T, h *sessionHandler, id string, size termsize.Size) *joiner {
+	t.Helper()
+	j := newJoiner(t, id, size)
 	go func() {
 		defer close(j.done)
 		h.HandleSession(j)
@@ -489,7 +542,7 @@ func (r *joinRig) join(t *testing.T, kind clientKind, size termsize.Size) *joine
 		select {
 		case <-j.done:
 		case <-time.After(harnessTimeout):
-			t.Errorf("the handler of joiner %s never returned", j.ctx.sessionID)
+			t.Errorf("the handler of joiner %s never returned", id)
 		}
 	})
 	return j
@@ -612,6 +665,9 @@ type joiner struct {
 
 	gone, reading, done chan struct{}
 	leaveOnce, readOnce sync.Once
+
+	mu    sync.Mutex
+	exits []int // the codes Exit was called with
 }
 
 func newJoiner(t *testing.T, id string, size termsize.Size) *joiner {
@@ -643,8 +699,14 @@ func (j *joiner) Read([]byte) (int, error) {
 
 func (j *joiner) Write(p []byte) (int, error) { return j.out.Write(p) }
 func (j *joiner) Close() error                { return nil }
-func (j *joiner) Exit(int) error              { j.leave(); return nil }
-func (j *joiner) Context() gssh.Context       { return j.ctx }
+func (j *joiner) Exit(code int) error {
+	j.mu.Lock()
+	j.exits = append(j.exits, code)
+	j.mu.Unlock()
+	j.leave()
+	return nil
+}
+func (j *joiner) Context() gssh.Context { return j.ctx }
 func (j *joiner) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
 	return gssh.Pty{Term: "xterm", Window: j.window}, j.winCh, true
 }
@@ -652,6 +714,13 @@ func (j *joiner) Environ() []string                              { return nil }
 func (j *joiner) PublicKey() gssh.PublicKey                      { return j.key }
 func (j *joiner) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
 func (j *joiner) Signals(chan<- gssh.Signal)                     {}
+
+// exitCodes is every code the joiner's handler sent it, in order.
+func (j *joiner) exitCodes() []int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]int(nil), j.exits...)
+}
 
 func (j *joiner) leave() {
 	j.leaveOnce.Do(func() {
