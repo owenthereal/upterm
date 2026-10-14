@@ -3,8 +3,6 @@ package command
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -50,14 +48,14 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		},
 	}
 
-	var r release
+	var r *update.Release
 	if len(args) > 0 {
 		rr, err := m.GetRelease(trimVPrefix(args[0]))
 		if err != nil {
 			return fmt.Errorf("error fetching release: %s", err)
 		}
 
-		r = release{rr}
+		r = rr
 	} else {
 		// fetch the new releases
 		releases, err := m.LatestReleases()
@@ -72,7 +70,7 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		}
 
 		// latest release
-		r = release{releases[0]}
+		r = releases[0]
 	}
 
 	if version.String() == trimVPrefix(r.Version) {
@@ -81,9 +79,10 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	}
 
 	// find the tarball for this system
-	a := r.FindTarballWithVersion(runtime.GOOS, runtime.GOARCH)
+	name := currentPlatform().assetName()
+	a := findAsset(r.Assets, name)
 	if a == nil {
-		return fmt.Errorf("no binary for your system")
+		return fmt.Errorf("release %s has no upterm archive for this system (%s)", r.Version, name)
 	}
 
 	// download tarball to a tmp dir
@@ -103,22 +102,6 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 func trimVPrefix(s string) string {
 	return strings.TrimPrefix(s, "v")
-}
-
-type release struct {
-	*update.Release
-}
-
-func (r *release) FindTarballWithVersion(os, arch string) *update.Asset {
-	s := fmt.Sprintf("%s_%s", os, arch)
-	for _, a := range r.Assets {
-		ext := filepath.Ext(a.Name)
-		if strings.Contains(a.Name, s) && ext == ".gz" {
-			return a
-		}
-	}
-
-	return nil
 }
 
 type store struct {
