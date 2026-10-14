@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
 	"github.com/tj/go-update/progress"
-	"github.com/tj/go/term"
 )
 
 func upgradeCmd() *cobra.Command {
@@ -58,8 +57,10 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return errors.New(unwritableLine(target, err))
 	}
 
-	term.HideCursor()
-	defer term.ShowCursor()
+	removeStaleOld(target, runtime.GOOS)
+
+	showCursor := hideCursorIfTerminal(os.Stdout)
+	defer showCursor()
 
 	m := &update.Manager{
 		Command: "upterm",
@@ -99,8 +100,9 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		r = releases[0]
 	}
 
-	if version.String() == trimVPrefix(r.Version) {
-		fmt.Println("Upterm is up-to-date")
+	cur, next := version.String(), trimVPrefix(r.Version)
+	if compareVersions(cur, next) == 0 {
+		fmt.Println(outcomeLine(cur, next))
 		return nil
 	}
 
@@ -111,18 +113,25 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("release %s has no upterm archive for this system (%s)", r.Version, name)
 	}
 
+	// The progress bar is drawn with escape sequences, so only for a terminal.
+	var proxy update.Proxy
+	if isTerminal(os.Stdout) {
+		proxy = progress.Reader
+	}
+
 	// download tarball to a tmp dir
-	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, progress.Reader)
+	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, proxy)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(tarball) }()
 
-	// install it in the running binary's directory, not wherever PATH finds an upterm
-	if err := m.InstallTo(tarball, filepath.Dir(target)); err != nil {
-		return fmt.Errorf("error installing: %s", err)
+	// replace the running binary itself, not wherever PATH finds an upterm
+	if err := installBinary(tarball, target, runtime.GOOS); err != nil {
+		return fmt.Errorf("installing %s: %w", target, err)
 	}
 
-	fmt.Printf("Upgraded upterm %s to %s\n", version.String(), trimVPrefix(r.Version))
+	fmt.Println(outcomeLine(cur, next))
 	return nil
 }
 

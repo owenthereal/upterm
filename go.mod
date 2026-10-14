@@ -9,7 +9,6 @@ require (
 	github.com/VividCortex/gohistogram v1.0.0 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/apex/log v1.9.0 // indirect
-	github.com/buger/goterm v1.0.4 // indirect; idirect
 	github.com/c4milo/unpackit v0.0.0-20170704181138-4ed373e9ef1c // indirect
 	github.com/creack/pty v1.1.24
 	github.com/dchest/uniuri v1.2.0
@@ -36,7 +35,6 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rs/xid v1.6.0
 	github.com/spf13/cobra v1.10.2
-	github.com/tj/go v1.8.7
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	golang.org/x/crypto v0.58.0
 	google.golang.org/grpc v1.84.0

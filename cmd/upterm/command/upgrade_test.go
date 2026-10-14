@@ -230,6 +230,14 @@ func runUpgrade(t *testing.T, args []string) error {
 
 	quietStdout(t)
 
+	return runUpgradeLoud(t, args)
+}
+
+// runUpgradeLoud is runUpgrade with stdout left as it is, for a test that
+// reads what upgrade prints.
+func runUpgradeLoud(t *testing.T, args []string) error {
+	t.Helper()
+
 	logger, err := logging.New(logging.File(filepath.Join(t.TempDir(), "upterm.log")))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = logger.Close() })
