@@ -449,6 +449,17 @@ func TestALogOverflowDropsTheOldestCommittedEvent(t *testing.T) {
 		events := loggedAfter(w, 0)
 		require.Len(t, events, 1023)
 		require.Equal(t, uint64(3), events[0].Seq)
+
+		// Committed, it is in effect at 0, and the event dropped after it
+		// leaves the size from 1 on unknown.
+		w.ResizeEnd(seq, true)
+		for _, start := range []uint64{0, 1} {
+			_, err := coverageAt(w, start)
+			require.ErrorIs(t, err, ErrReplayCoverage, "start %d", start)
+		}
+		events, err := coverageAt(w, 2)
+		require.NoError(t, err)
+		require.Equal(t, uint64(3), events[0].Seq)
 	})
 
 	t.Run("with none committed, the oldest goes, and its wait with it", func(t *testing.T) {
@@ -476,6 +487,116 @@ func TestALogOverflowDropsTheOldestCommittedEvent(t *testing.T) {
 		w.ResizeEnd(seqs[0], true)
 		require.Empty(t, loggedAfter(w, 0))
 	})
+}
+
+// A loss stays open across a tentative event placed after it: only a
+// committed one closes it, so that event's deletion leaves the size after the
+// lost report as unknown as it was.
+func TestADeletedResizeLeavesALossOpen(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, at80x24)
+	write(w, 1)
+	for range sizeQueueMax + 1 {
+		resize(w, at45x30)
+	}
+	write(w, 1)
+	require.Equal(t, uint64(1), lossCount(w))
+
+	seq := w.ResizeBegin(at100x40)
+	write(w, 1)
+	write(w, 32)
+	w.ResizeEnd(seq, false)
+	_, err := coverageAtStart(w)
+	require.ErrorIs(t, err, ErrReplayCoverage, "the size after the lost report is still unknown")
+}
+
+// Only the newest loss is kept, so a loss recorded after it but of an older
+// event mustn't replace it: here a log overflow drops the oldest event while
+// a queue overflow's loss, newer, is still open.
+func TestALogOverflowKeepsTheNewerLoss(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	resize(w, at80x24)
+	write(w, 1)
+	resize(w, at45x30)
+	write(w, 1)
+	for range sizeQueueMax + 1 {
+		resize(w, at80x24)
+	}
+	write(w, 1)
+	require.Equal(t, uint64(1), lossCount(w))
+
+	// Resized and captured with no write between, so the log grows at one
+	// offset until it drops its oldest event, the first.
+	for loggedAfter(w, 0)[0].Seq == 1 {
+		resize(w, at100x40)
+	}
+	require.Equal(t, uint64(2), lossCount(w))
+
+	for _, start := range []uint64{0, 1, 2} {
+		_, err := coverageAt(w, start)
+		require.ErrorIs(t, err, ErrReplayCoverage, "start %d: the queue's lost report is after every event in effect there", start)
+	}
+	events, err := coverageAt(w, 3)
+	require.NoError(t, err)
+	require.Equal(t, at100x40, events[0].Size)
+}
+
+// A tentative event is kept however far the ring evicts past it, even once a
+// committed event after it is in effect at the ring's start: its outcome is
+// still to come, and a join waits on it.
+func TestPruneKeepsATentativeEvent(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, at80x24)
+	write(w, 1)
+	seq := w.ResizeBegin(at45x30)
+	write(w, 1)
+	resize(w, at100x40)
+	write(w, 1)
+	write(w, 32)
+
+	offset, first, ok := unresolved(w)
+	require.True(t, ok)
+	require.Equal(t, seq, first)
+	require.Equal(t, uint64(1), offset)
+}
+
+// The log is bounded once a Write has let the ring prune it, not before: an
+// event the same Write forgets as superseded is no loss, and a join that
+// captured before that Write mustn't fall back for it.
+func TestAWriteBoundsTheLogAfterPruningIt(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, at80x24)
+	write(w, 16)
+
+	// Resized and captured with no write between, up to the bound, all at
+	// the ring's end.
+	for range sizeLogMax - 1 {
+		resize(w, at45x30)
+		require.Zero(t, lossCount(w))
+	}
+	require.Len(t, loggedAfter(w, 0), sizeLogMax)
+
+	// One more, placed by a Write that evicts up to it: every event before it
+	// is superseded there.
+	resize(w, at100x40)
+	write(w, 16)
+	require.Zero(t, lossCount(w))
+	require.Equal(t, []SizeEvent{{Seq: sizeLogMax + 1, Offset: 16, Size: at100x40}}, loggedAfter(w, 0))
+	_, err := coverageAtStart(w)
+	require.NoError(t, err)
+}
+
+// Pinned is a pinned pty's only report, so it is never the one dropped: the
+// queue's bound is for a resize storm, which a pinned pty never has.
+func TestPinnedIsNeverLost(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	for range sizeQueueMax {
+		w.ResizeBegin(at45x30)
+	}
+	w.Pinned(at80x24)
+
+	require.Zero(t, lossCount(w))
+	require.Equal(t, []SizeEvent{{Seq: sizeQueueMax + 1, Offset: 0, Size: at80x24}}, loggedAfter(w, 0))
 }
 
 // resolved is the outcome as ResizeEnd recorded it, before apply has applied

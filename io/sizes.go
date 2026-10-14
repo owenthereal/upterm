@@ -69,7 +69,7 @@ type sizeLog struct {
 
 	// The log, guarded by the fan-out's writeMu.
 	events []loggedSize // in Seq order, which is offset order
-	loss   sizeLoss     // the newest loss, while a known size hasn't closed it
+	loss   uint64       // the newest loss's Seq, while a known size hasn't closed it; see lose
 	lost   uint64       // every report or event ever lost; see losses
 }
 
@@ -82,14 +82,6 @@ type loggedSize struct {
 	SizeEvent
 	tentative bool // logged before its outcome, which apply hasn't had yet
 }
-
-// sizeLoss is where the log lost a report or an event: in Seq order, between
-// the events before seq and those after it, and in the stream at offset.
-// What the size was from there on is unknown until a committed, valid event
-// after it closes the loss. Only the newest loss is kept: the event that
-// closes it closes every older one too, and any start an older loss fails
-// coverage for, the newest fails as well. A seq of 0 is none.
-type sizeLoss struct{ seq, offset uint64 }
 
 // closedWait is what wait hands out for an event with no outcome to wait for.
 var closedWait = func() chan struct{} {
@@ -110,7 +102,7 @@ func (t *MultiWriter) ResizeBegin(size termsize.Size) uint64 {
 	if l.pin {
 		return 0
 	}
-	return l.report(SizeEvent{Size: size}, false, false)
+	return l.report(size)
 }
 
 // ResizeEnd records the outcome: applied commits the event, !applied
@@ -150,43 +142,47 @@ func (t *MultiWriter) Pinned(size termsize.Size) {
 		return
 	}
 	l.pin = true
-	l.report(SizeEvent{Offset: 0, Size: size}, true, true)
+
+	// Queued past the bound, which is for a resize storm: this is a pinned
+	// pty's only report, and losing it would leave its every byte at an
+	// unknown size for good.
+	l.lastSeq++
+	l.queue = append(l.queue, queuedSize{SizeEvent: SizeEvent{Seq: l.lastSeq, Offset: 0, Size: size}, stamped: true})
+	if l.ended == nil {
+		l.ended = make(map[uint64]bool)
+	}
+	l.ended[l.lastSeq] = true
 }
 
 // applyResize brings the size log up to date with what was reported since
 // the last hold of writeMu, placing new events before the next byte the ring
-// takes. Called with writeMu held, at the start of Write, and of every
-// capture and release, so each sees the pty's size as of the hold.
+// takes. Called with writeMu held, at the start of every capture and release,
+// so each sees the pty's size as of the hold. Write does the same in two
+// halves, around the ring's eviction; see bound.
 func (t *MultiWriter) applyResize() {
 	t.sizes.apply(t.buffer.End())
+	t.sizes.bound()
 }
 
-// report queues ev under the next Seq, already committed when committed, or
-// drops it when the queue is full. Called with mu held.
-func (l *sizeLog) report(ev SizeEvent, stamped, committed bool) uint64 {
+// report queues a tentative resize to size under the next Seq, or drops it
+// when the queue is full. Called with mu held.
+func (l *sizeLog) report(size termsize.Size) uint64 {
 	l.lastSeq++
-	ev.Seq = l.lastSeq
+	seq := l.lastSeq
 	if len(l.queue) == sizeQueueMax {
 		if l.dropped == 0 {
-			l.droppedSeq = ev.Seq
+			l.droppedSeq = seq
 		}
 		l.dropped++
-		return ev.Seq
+		return seq
 	}
 
-	l.queue = append(l.queue, queuedSize{SizeEvent: ev, stamped: stamped})
-	if committed {
-		if l.ended == nil {
-			l.ended = make(map[uint64]bool)
-		}
-		l.ended[ev.Seq] = true
-		return ev.Seq
-	}
+	l.queue = append(l.queue, queuedSize{SizeEvent: SizeEvent{Seq: seq, Size: size}})
 	if l.open == nil {
 		l.open = make(map[uint64]chan struct{})
 	}
-	l.open[ev.Seq] = make(chan struct{})
-	return ev.Seq
+	l.open[seq] = make(chan struct{})
+	return seq
 }
 
 // wait returns a channel closed once ResizeEnd records seq's outcome, either
@@ -249,20 +245,26 @@ func (l *sizeLog) apply(end uint64) {
 	if dropped > 0 {
 		// The reports dropped would have been placed here, after everything
 		// the queue held.
-		l.lose(dropped, sizeLoss{seq: droppedSeq, offset: end})
+		l.lose(dropped, droppedSeq)
 	}
+}
 
-	// Past the bound, the oldest committed event goes: tentative ones are
-	// kept for their outcome, which a capture waits on. Only 1,024 resizes
-	// begun and never ended leave none committed, and then the oldest goes
-	// anyway, so the log stays bounded whatever the pty does.
+// bound drops events past the log's bound: the oldest committed event goes,
+// while tentative ones are kept for their outcome, which a capture waits on.
+// Only 1,024 resizes begun and never ended leave none committed, and then the
+// oldest goes anyway, so the log stays bounded whatever the pty does.
+//
+// A Write calls it after prune, not with apply: an event its own eviction lets
+// prune forget is superseded, not lost, and counted lost it would fail every
+// join that captured before it. Called with writeMu held.
+func (l *sizeLog) bound() {
 	var gone []uint64
 	for len(l.events) > sizeLogMax {
 		i := slices.IndexFunc(l.events, func(e loggedSize) bool { return !e.tentative })
 		i = max(i, 0)
 		e := l.events[i]
 		l.events = slices.Delete(l.events, i, i+1)
-		l.lose(1, sizeLoss{seq: e.Seq, offset: e.Offset})
+		l.lose(1, e.Seq)
 		if e.tentative {
 			gone = append(gone, e.Seq)
 		}
@@ -281,12 +283,17 @@ func (l *sizeLog) apply(end uint64) {
 	}
 }
 
-// lose counts n reports or events lost and records where. Called with
+// lose counts n reports or events lost and records where, by Seq: the first
+// report dropped, or the event dropped. The size from there on, between the
+// events before seq and those after it, is unknown until a committed, valid
+// event after it closes the loss. Only the newest loss is kept: the event that
+// closes it closes every older one too, and any start an older loss fails
+// coverage for, the newest fails as well. A loss of 0 is none. Called with
 // writeMu held.
-func (l *sizeLog) lose(n uint64, at sizeLoss) {
+func (l *sizeLog) lose(n, seq uint64) {
 	l.lost += n
-	if at.seq > l.loss.seq {
-		l.loss = at
+	if seq > l.loss {
+		l.loss = seq
 	}
 }
 
@@ -313,7 +320,7 @@ func (l *sizeLog) covering(start uint64) ([]SizeEvent, error) {
 		}
 		from = i
 	}
-	if from < 0 || l.loss.seq > l.events[from].Seq {
+	if from < 0 || l.loss > l.events[from].Seq {
 		return nil, ErrReplayCoverage
 	}
 
@@ -386,11 +393,11 @@ func (l *sizeLog) resolved(seq uint64) (committed, deleted bool) {
 // Tentative events are never pruned: their outcome is still to come. Called
 // with writeMu held, after the ring is fed.
 func (l *sizeLog) prune(start uint64) {
-	if l.loss.seq != 0 {
+	if l.loss != 0 {
 		for _, e := range l.events {
-			if e.Seq > l.loss.seq && !e.tentative && e.Size.Valid() {
+			if e.Seq > l.loss && !e.tentative && e.Size.Valid() {
 				if e.Offset <= start {
-					l.loss = sizeLoss{}
+					l.loss = 0
 				}
 				break
 			}

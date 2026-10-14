@@ -426,10 +426,12 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 
 	// The size log is brought up to date ahead of p, so a resize reported
 	// before p reached the fan-out counts for p, and pruned behind it, once
-	// the ring has taken p and evicted what p pushed out.
-	t.applyResize()
+	// the ring has taken p and evicted what p pushed out. It is bounded only
+	// then, so that nothing prune forgets is counted lost.
+	t.sizes.apply(t.buffer.End())
 	_, _ = t.replay.Write(p)
 	t.sizes.prune(t.buffer.Start())
+	t.sizes.bound()
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
