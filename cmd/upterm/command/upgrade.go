@@ -54,8 +54,8 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	if o, ok := confirmedOwner(target, systemProbes); ok {
 		return errors.New(o.refusal())
 	}
-	if !writableDir(target) {
-		return errors.New(unwritableLine(target))
+	if err := writableDir(target); err != nil {
+		return errors.New(unwritableLine(target, err))
 	}
 
 	term.HideCursor()

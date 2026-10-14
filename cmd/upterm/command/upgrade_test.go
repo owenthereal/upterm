@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	ggh "github.com/google/go-github/v48/github"
@@ -166,7 +168,16 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 	t.Run("in a directory it can't write", func(t *testing.T) {
 		bin := filepath.Join(readOnlyDir(t), "upterm")
 
-		stops(t, func() (string, error) { return bin, nil }, unwritableLine(bin))
+		stops(t, func() (string, error) { return bin, nil }, unwritableLine(bin, fs.ErrPermission))
+	})
+
+	t.Run("on a read-only file system", func(t *testing.T) {
+		bin := aStandaloneBinary(t)
+		withWritableDir(t, func(path string) error {
+			return &fs.PathError{Op: "open", Path: filepath.Join(filepath.Dir(path), ".upterm-writable-1"), Err: syscall.EROFS}
+		})
+
+		stops(t, func() (string, error) { return bin, nil }, "can't replace "+bin+": read-only file system")
 	})
 
 	t.Run("not found", func(t *testing.T) {
@@ -201,6 +212,16 @@ func withRunningBinaryFunc(t *testing.T, f func() (string, error)) {
 	orig := runningBinary
 	t.Cleanup(func() { runningBinary = orig })
 	runningBinary = f
+}
+
+// withWritableDir replaces the check that upgrade can write beside the
+// binary, so a test can fail it for a reason the machine can't produce.
+func withWritableDir(t *testing.T, f func(path string) error) {
+	t.Helper()
+
+	orig := writableDir
+	t.Cleanup(func() { writableDir = orig })
+	writableDir = f
 }
 
 // runUpgrade runs the command with args and returns its error.

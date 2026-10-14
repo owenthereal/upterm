@@ -39,18 +39,23 @@ type probes struct {
 	rpmOwns  func(path string) bool // rpm -qf PATH exits 0
 }
 
-// systemProbes ask this machine's package databases. Only a Linux
-// distribution's package puts upterm where dpkg or rpm would own it, so
-// elsewhere they say no without running anything.
-var systemProbes = probes{
-	dpkgOwns: func(path string) bool { return linuxPackageOwns("dpkg-query", "-S", path) },
-	rpmOwns:  func(path string) bool { return linuxPackageOwns("rpm", "-qf", path) },
+// packageProbes ask the package databases of a machine running goos. Only a
+// Linux distribution's package puts upterm where dpkg or rpm would own it, so
+// on any other system they say no without running anything.
+func packageProbes(goos string) probes {
+	return probes{
+		dpkgOwns: func(path string) bool { return packageOwns(goos, "dpkg-query", "-S", path) },
+		rpmOwns:  func(path string) bool { return packageOwns(goos, "rpm", "-qf", path) },
+	}
 }
 
-// linuxPackageOwns reports whether the package tool exits 0 for args. A tool
-// that isn't installed doesn't run, so it owns nothing.
-func linuxPackageOwns(tool string, args ...string) bool {
-	if runtime.GOOS != "linux" {
+// systemProbes ask this machine's package databases.
+var systemProbes = packageProbes(runtime.GOOS)
+
+// packageOwns reports whether the package tool exits 0 for args, on Linux. A
+// tool that isn't installed doesn't run, so it owns nothing.
+func packageOwns(goos, tool string, args ...string) bool {
+	if goos != "linux" {
 		return false
 	}
 

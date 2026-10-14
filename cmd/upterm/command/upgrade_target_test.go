@@ -1,9 +1,13 @@
 package command
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -132,25 +136,113 @@ func TestEachManagersRefusalNamesItsUpgradeCommand(t *testing.T) {
 	}
 }
 
-func TestUnwritableLineNamesTheFileAndItsDirectory(t *testing.T) {
+func TestUnwritableLineForAPermissionErrorNamesTheFileAndItsDirectory(t *testing.T) {
 	target := filepath.FromSlash("/usr/bin/upterm")
+	err := &fs.PathError{Op: "open", Path: filepath.FromSlash("/usr/bin/.upterm-writable-1"), Err: fs.ErrPermission}
+
 	require.Equal(t,
 		"can't replace "+target+": permission denied. If a package manager installed it, upgrade it there; otherwise rerun with permission to write "+filepath.Dir(target),
-		unwritableLine(target))
+		unwritableLine(target, err))
+}
+
+// Any other cause gives the operating system's reason and no advice: upterm
+// can't tell that a package manager is involved, or that more permission
+// would help.
+func TestUnwritableLineForAnyOtherCauseGivesTheSystemsReasonOnly(t *testing.T) {
+	target := filepath.FromSlash("/nix/store/abc-upterm/bin/upterm")
+	err := &fs.PathError{Op: "open", Path: filepath.FromSlash("/nix/store/abc-upterm/bin/.upterm-writable-1"), Err: syscall.EROFS}
+
+	require.Equal(t,
+		"can't replace "+target+": read-only file system",
+		unwritableLine(target, err))
 }
 
 func TestWritableDirIsAboutCreatingAFileBesideTheBinary(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "upterm")
-	require.True(t, writableDir(bin))
+	require.NoError(t, writableDir(bin))
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Empty(t, entries, "the probe file is removed")
 
-	require.False(t, writableDir(filepath.Join(dir, "missing", "upterm")))
+	require.ErrorIs(t, writableDir(filepath.Join(dir, "missing", "upterm")), fs.ErrNotExist)
 
 	locked := readOnlyDir(t)
-	require.False(t, writableDir(filepath.Join(locked, "upterm")))
+	require.ErrorIs(t, writableDir(filepath.Join(locked, "upterm")), fs.ErrPermission)
+}
+
+// fakeTool makes name the only command on PATH. It exits with status, but
+// only when run with exactly args; any other call exits 2.
+func fakeTool(t *testing.T, name string, status int, args ...string) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake tools are shell scripts")
+	}
+
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\n")
+	fmt.Fprintf(&script, "[ \"$#\" = %d ] || exit 2\n", len(args))
+	for i, a := range args {
+		fmt.Fprintf(&script, "[ \"$%d\" = '%s' ] || exit 2\n", i+1, a)
+	}
+	fmt.Fprintf(&script, "exit %d\n", status)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script.String()), 0o755))
+	t.Setenv("PATH", dir)
+}
+
+func TestPackageProbesTrustTheToolsExitStatusOnLinux(t *testing.T) {
+	const path = "/usr/bin/upterm"
+	for _, tc := range []struct {
+		tool   string
+		args   []string
+		probe  func(probes) func(string) bool
+		status int
+		want   bool
+	}{
+		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }, 0, true},
+		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }, 1, false},
+		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }, 0, true},
+		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }, 1, false},
+	} {
+		t.Run(fmt.Sprintf("%s exits %d", tc.tool, tc.status), func(t *testing.T) {
+			fakeTool(t, tc.tool, tc.status, tc.args...)
+
+			require.Equal(t, tc.want, tc.probe(packageProbes("linux"))(path))
+		})
+	}
+}
+
+func TestPackageProbesSayNoWhenTheToolIsMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("probes ask nothing here")
+	}
+
+	t.Setenv("PATH", t.TempDir())
+
+	p := packageProbes("linux")
+	require.False(t, p.dpkgOwns("/usr/bin/upterm"))
+	require.False(t, p.rpmOwns("/usr/bin/upterm"))
+}
+
+// Off Linux the probes don't run the tools at all, so a tool that would
+// answer yes is never asked.
+func TestPackageProbesAskNothingOffLinux(t *testing.T) {
+	const path = "/usr/bin/upterm"
+	for _, goos := range []string{"darwin", "windows", "freebsd"} {
+		t.Run(goos+" dpkg", func(t *testing.T) {
+			fakeTool(t, "dpkg-query", 0, "-S", path)
+
+			require.False(t, packageProbes(goos).dpkgOwns(path))
+		})
+		t.Run(goos+" rpm", func(t *testing.T) {
+			fakeTool(t, "rpm", 0, "-qf", path)
+
+			require.False(t, packageProbes(goos).rpmOwns(path))
+		})
+	}
 }
 
 // readOnlyDir is a directory its owner can't create files in. It skips the
