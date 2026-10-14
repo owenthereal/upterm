@@ -150,6 +150,10 @@ func (pty *pty) Setsize(h, w int) error {
 		}
 	}
 	ws := unix.Winsize{Row: uint16(h), Col: uint16(w)}
+	// What the ioctl applies, which is what the command is told and lays its
+	// output out at: a dimension past what a winsize holds wraps, so 65537
+	// columns is one, and the fan-out must hear the one.
+	applied := termsize.Size{Cols: int(ws.Col), Rows: int(ws.Row)}
 	err := pty.control(func(fd uintptr) error {
 		report := pty.report
 		if report != nil {
@@ -158,7 +162,9 @@ func (pty *pty) Setsize(h, w int) error {
 			// real change, and a same-size one would reset the region it is
 			// weighing. A size that cannot be read is reported all the same:
 			// the ioctl may well apply it, and if it does not its outcome
-			// deletes the report.
+			// deletes the report. The check and the ioctl are not one step, so
+			// Setsize calls must be serialized, as their callers do:
+			// terminalWindows under its mu, and sharedPTY's set under its own.
 			if cur, err := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ); err == nil &&
 				cur.Row == ws.Row && cur.Col == ws.Col {
 				report = nil
@@ -175,7 +181,7 @@ func (pty *pty) Setsize(h, w int) error {
 		// repaint that follows draws over it.
 		var seq uint64
 		if report != nil {
-			seq = report.ResizeBegin(termsize.Size{Cols: w, Rows: h})
+			seq = report.ResizeBegin(applied)
 		}
 		err := setWinsize(int(fd), &ws)
 		if report != nil {

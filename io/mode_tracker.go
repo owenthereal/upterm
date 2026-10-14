@@ -393,6 +393,11 @@ func (m *ModeTracker) resizeHeard(size termsize.Size) {
 // it adds a candidate, size and the whole screen, and the candidates already
 // kept stay, as its deleted branch, until resolve selects (spec A22).
 //
+// The new candidate's region is the whole screen, as a terminal's is after
+// a resize, because no ResizeBegin is a same-size resize: the host's pty
+// guarantees it, its Setsize reporting nothing for a resize to the size it
+// has. A same-size report would reset a region no terminal reset.
+//
 // Past maxUnresolvedResizes the candidates give way to one fallback state,
 // which does guess: that each resize it crosses commits, since a resize's
 // ioctl rarely fails. The region is uncertain from then on (spec A23).

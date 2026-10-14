@@ -348,6 +348,22 @@ func TestPtyReportsEachResizeInTwoSteps(t *testing.T) {
 		}, rec.got()[4:])
 	})
 
+	// A winsize holds each dimension in 16 bits, and a request past that is
+	// applied wrapped. The fan-out stamps the ring's bytes with what is
+	// reported, so the report is the size the command was given, not the one
+	// asked for: 65537 columns is one.
+	t.Run("a size past what a winsize holds is reported as the size the ioctl applied", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		applied := termsize.Size{Cols: 1, Rows: 24}
+
+		require.NoError(t, p.Setsize(24, termsize.Max+2))
+		require.Equal(t, applied, winsize(t, p))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: applied, Seq: 2, Before: initial},
+			{Kind: "end", Seq: 2, Applied: true},
+		}, rec.got()[2:])
+	})
+
 	// Not being able to read the size is not a reason to hide a resize that
 	// may well apply: the report is deleted by its outcome when it does not.
 	t.Run("a size that cannot be read is reported anyway", func(t *testing.T) {

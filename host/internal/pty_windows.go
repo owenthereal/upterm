@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -121,11 +122,20 @@ func (p *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	// conpty.Resize narrows each dimension to an int16, so a larger one would
+	// wrap: clamped here instead, so that what is compared, reported and
+	// recorded below is the size the ConPTY is actually asked for, which is
+	// what the command is told and lays its output out at.
+	h, w = min(h, math.MaxInt16), min(w, math.MaxInt16)
+
 	report := p.report
 	if report != nil && int(p.lastH.Load()) == h && int(p.lastW.Load()) == w {
 		// A resize to the size the ConPTY has changes nothing, so there is
 		// nothing to report: the fan-out takes every ResizeBegin for a real
 		// change, and a same-size one would reset the region it is weighing.
+		// The check and the resize are not one step, so Setsize calls must be
+		// serialized, as their callers do: terminalWindows under its mu, and
+		// sharedPTY's set under its own.
 		report = nil
 	}
 

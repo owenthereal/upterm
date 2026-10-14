@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"math"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -317,6 +318,25 @@ func TestConPTYReportsEachResizeInTwoSteps(t *testing.T) {
 		require.NoError(t, p.Setsize(30, 45))
 		require.Equal(t, applied, rec.got(), "the size a Setsize gave it")
 		require.Equal(t, resized, winsize(t, p))
+	})
+
+	// conpty.Resize narrows each dimension to an int16, where 65537 columns
+	// would wrap to one. Setsize clamps instead, and reports the clamped
+	// size, which is the one the ConPTY is asked for: the fan-out stamps the
+	// ring's bytes with what is reported. Whether ConPTY then takes that many
+	// columns is its own business, and the outcome says.
+	t.Run("a size past what a ConPTY holds is reported as the size it is asked for", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		asked := termsize.Size{Cols: math.MaxInt16, Rows: 24}
+
+		err := p.Setsize(24, termsize.Max+2)
+		got := rec.got()[2:]
+		require.Len(t, got, 2)
+		require.Equal(t, sizeCall{Kind: "begin", Size: asked, Seq: 2, Before: initial}, got[0])
+		require.Equal(t, sizeCall{Kind: "end", Seq: 2, Applied: err == nil}, got[1])
+		if err == nil {
+			require.Equal(t, asked, winsize(t, p))
+		}
 	})
 
 	t.Run("a redraw reports nothing", func(t *testing.T) {
