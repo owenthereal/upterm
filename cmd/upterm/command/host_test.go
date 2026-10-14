@@ -847,6 +847,30 @@ func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
 	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
 }
 
+// UPTERM_NAME still names the session in this release (D8a), and upterm host
+// says once that it won't from perRunIgnoredFrom.
+func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
+	withConfig(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir, err := os.MkdirTemp("", "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	origName := flagName
+	t.Cleanup(func() { flagName = origName })
+	t.Setenv("UPTERM_NAME", "x")
+
+	inProcessDaemons(t, []string{"true"})
+	_, stderr, code := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--", "true")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "upterm: session x could not start: ")
+	require.Equal(t, 1, strings.Count(stderr, "upterm: UPTERM_NAME is deprecated; pass --name. This environment variable will be ignored starting in "+perRunIgnoredFrom+".\n"), stderr)
+}
+
 // Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps
 // an error AuthorizedKeysFromFile has already described. The daemon is what
 // resolves the keys and so what produces the error; the parent adds only its

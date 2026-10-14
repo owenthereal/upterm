@@ -9,6 +9,7 @@ func versionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Show version",
+		Args:  cobra.ExactArgs(0),
 		// A broken config file doesn't stop it (P7).
 		Annotations: map[string]string{annotationConfig: "none"},
 		RunE: func(c *cobra.Command, args []string) error {

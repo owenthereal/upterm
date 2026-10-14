@@ -145,6 +145,7 @@ Follows the XDG Base Directory Specification with fallback to $HOME/.upterm
 in constrained environments where XDG directories are unavailable.`, sessiondir.ResultsRoot(stateDir), sessiondir.SessionsRoot(runtimeDir)),
 		Example: `  # List shared sessions:
   upterm session list`,
+		Args: cobra.ExactArgs(0),
 		RunE: listRunE,
 	}
 
@@ -170,10 +171,12 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 
   # Output as JSON:
   upterm session info NAME -o json`,
+		Args: cobra.ExactArgs(1),
 		RunE: infoRunE,
 	}
 
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json")
+	perRun(cmd.Flags(), "output")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
@@ -527,6 +530,7 @@ info NAME' shows what the session holds.`,
 		},
 	}
 	cmd.Flags().DurationVar(&joinTimeout, "join-timeout", 0, "End the session this long from now unless a guest joins first (e.g. 10m). Replaces any join timeout already set; 0 disables it.")
+	perRun(cmd.Flags(), "join-timeout")
 	return cmd
 }
 
@@ -673,11 +677,13 @@ prints nothing.`, sessiondir.SessionsRoot(runtimeDir)),
 
   # For terminal title:
   upterm session current -o go-template='upterm: {{.ClientCount}} clients | {{.SessionID}}'`,
+		Args: cobra.ExactArgs(0),
 		RunE: currentRunE,
 	}
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path; defaults to $UPTERM_ADMIN_SOCKET.")
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
+	perRun(cmd.Flags(), "output")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
@@ -1131,9 +1137,6 @@ func adminSocketFor(runtimeRoot string, rec *sessiondir.Record) (string, error) 
 }
 
 func infoRunE(c *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("missing session name")
-	}
 	name := args[0]
 
 	// One deadline for the whole lookup, which waits on the registry and then

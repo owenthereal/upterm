@@ -401,11 +401,23 @@ func TestUsageAndConfigErrorsTakeTheCommandsFailureCode(t *testing.T) {
 		{[]string{"join", "x@y"}, 255},
 		{[]string{"attach", "x"}, 255},
 		{[]string{"session", "wait", "x"}, 125},
-		{[]string{"session", "info"}, 1},
+		{[]string{"session", "info", "x"}, 1},
 	} {
 		_, stderr, code := runCLI(t, tc.args...)
 		require.Equal(t, tc.want, code, tc.args)
 		require.Contains(t, stderr, "unknown config key", tc.args)
+	}
+}
+
+// Arguments a command doesn't take are a usage error (D11.2), with its
+// failure code (D2a), where they used to be ignored.
+func TestExtraArgumentsAreUsageErrors(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	for _, args := range [][]string{{"version", "x"}, {"session", "list", "x"}, {"session", "current", "x"}, {"session", "info"}, {"session", "info", "a", "b"}, {"proxy", "wss://a@b", "x"}, {"upgrade", "1", "2"}} {
+		_, stderr, code := runCLI(t, args...)
+		require.Equal(t, 1, code, args)
+		require.Contains(t, stderr, "upterm: accepts", args)
 	}
 }
 

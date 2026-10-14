@@ -104,6 +104,7 @@ when stopped, and 255 when it can't join.`,
 	flags.StringVar(&f.proxy, "proxy", "", "HTTP proxy to reach the relay through (e.g. http://proxy.example.com:3128). Works with ssh, ws and wss targets. Without it, ws and wss use HTTPS_PROXY/HTTP_PROXY, and ssh goes direct.")
 	flags.StringVar(&f.escapeChar, "escape-char", "~", "Escape character for leaving (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
 	flags.BoolVar(&f.wait, "wait", false, "On the first join, wait for a host as a rejoin does, with no 30 s limit.")
+	perRun(flags, "wait")
 	return cmd
 }
 

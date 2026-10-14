@@ -102,11 +102,12 @@ Environment Variables:
 			// Bind all flags to environment variables with UPTERM_ prefix. A
 			// config or env error fails only a command that reads config
 			// (D11.1), and never `upterm config`, which repairs the file.
-			supplied, err := bindFlagsToEnv(cmd)
+			supplied, deps, err := bindFlagsToEnv(cmd)
 			if err != nil && readsConfig(cmd) && !isConfigCommand(cmd) {
 				return err
 			}
 			suppliedFlags = supplied
+			warnDeprecations(cmd.ErrOrStderr(), deps)
 
 			debug, _ := cmd.Flags().GetBool("debug")
 
@@ -247,7 +248,9 @@ func reportUnknownCommands(c *cobra.Command) {
 
 // bindFlagsToEnv binds cmd's flags to the config file and environment
 // variables, and reports which flags were supplied from any origin
-// (command line, environment, or config file) in the returned map.
+// (command line, environment, or config file) in the returned map, and the
+// per-run values it applied from env or config in deps (D8a). A CLI-only
+// flag is never bound.
 //
 // Configuration priority (highest to lowest):
 //  1. Command-line flags
@@ -266,8 +269,8 @@ func reportUnknownCommands(c *cobra.Command) {
 // should let every command fail this way except `upterm config ...`, which
 // must stay reachable to repair the file (see isConfigCommand), and those
 // that read no config (see readsConfig).
-func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
-	supplied := make(map[string]bool)
+func bindFlagsToEnv(cmd *cobra.Command) (supplied map[string]bool, deps []deprecation, err error) {
+	supplied = make(map[string]bool)
 
 	// Seed from the command line first; the sync loop below never visits these.
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
@@ -289,7 +292,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 		// disappears. viper returns the underlying *fs.PathError here, so
 		// errors.Is separates the two cases exactly.
 		if !errors.Is(err, fs.ErrNotExist) {
-			return supplied, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+			return supplied, nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 		}
 	}
 
@@ -313,12 +316,12 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	known := knownFlagNames(cmd)
 	for k := range configKeys {
 		if !known[k] {
-			return supplied, fmt.Errorf("unknown config key %q in %s; remove it or correct the spelling", k, configPath)
+			return supplied, nil, fmt.Errorf("unknown config key %q in %s; remove it or correct the spelling", k, configPath)
 		}
 	}
 
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		if flag.Name != "help" {
+		if flag.Name != "help" && !hasAnnotation(flag, annotationCLIOnly) {
 			_ = v.BindPFlag(flag.Name, flag)
 		}
 	})
@@ -327,9 +330,18 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.SetEnvPrefix("UPTERM")
 
+	// applied records a value env or config gave flag, and for a per-run
+	// flag, the values it still takes from them (D8a, release N).
+	applied := func(flag *pflag.Flag, inConfig bool) {
+		supplied[flag.Name] = true
+		if hasAnnotation(flag, annotationPerRun) {
+			deps = append(deps, perRunDeprecations(cmd, flag.Name, configPath, inConfig)...)
+		}
+	}
+
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		if bindErr != nil || flag.Name == "help" {
+		if bindErr != nil || flag.Name == "help" || hasAnnotation(flag, annotationCLIOnly) {
 			return
 		}
 
@@ -391,7 +403,7 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 				bindErr = bindSetError(flag.Name, strings.Join(elems, ","), valueOrigin(flag.Name, configPath, inConfig), err)
 				return
 			}
-			supplied[flag.Name] = true
+			applied(flag, inConfig)
 			return
 		}
 
@@ -405,10 +417,10 @@ func bindFlagsToEnv(cmd *cobra.Command) (map[string]bool, error) {
 			bindErr = bindSetError(flag.Name, scalar, valueOrigin(flag.Name, configPath, inConfig), err)
 			return
 		}
-		supplied[flag.Name] = true
+		applied(flag, inConfig)
 	})
 
-	return supplied, bindErr
+	return supplied, deps, bindErr
 }
 
 // envVarName returns the UPTERM_-prefixed environment variable name that
@@ -454,20 +466,26 @@ func bindSetError(name, display, origin string, err error) error {
 // --authorized-user, which is persistent on hostCmd rather than root) would
 // otherwise be invisible when validating a config key from a sibling command
 // such as `upterm version`.
+//
+// A CLI-only flag's name is known too: another command may bind it.
 func knownFlagNames(cmd *cobra.Command) map[string]bool {
 	names := make(map[string]bool)
+	visitTreeFlags(cmd, func(f *pflag.Flag) { names[f.Name] = true })
+	return names
+}
 
+// visitTreeFlags calls fn for each flag of each command in the tree rooted
+// at cmd.Root().
+func visitTreeFlags(cmd *cobra.Command, fn func(*pflag.Flag)) {
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
-		c.Flags().VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
-		c.PersistentFlags().VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
+		c.Flags().VisitAll(fn)
+		c.PersistentFlags().VisitAll(fn)
 		for _, child := range c.Commands() {
 			walk(child)
 		}
 	}
 	walk(cmd.Root())
-
-	return names
 }
 
 // toStringSlice converts a config or environment value into flag elements.

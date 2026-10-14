@@ -207,6 +207,10 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
 
+	// One run's choices (D8a). --join-timeout stays bound to env and config:
+	// CI sets it there.
+	perRun(cmd.PersistentFlags(), "name", "detach", "output")
+
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
 	// services are supported.
