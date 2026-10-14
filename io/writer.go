@@ -304,6 +304,10 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	// A resize reported since the last Write is in effect at the ring's start
+	// when the ring is empty, and a terminal resets its margins on one, so
+	// the snapshot has to have heard it, as a capture's clone has.
+	t.applyResize()
 	if t.closed {
 		return ErrClosed
 	}

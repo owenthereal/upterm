@@ -1572,3 +1572,18 @@ func TestASameSizeResizeResetsNothing(t *testing.T) {
 	require.False(t, uncertain)
 	require.Equal(t, "\x1b[2;10r", snap)
 }
+
+// Append's snapshot hears every resize reported before it, as a capture's
+// does: with the ring empty, an event reported since the last Write is in
+// effect at the ring's start, and it resets the margins on a terminal, so
+// the snapshot must not carry the region the tracker held before it.
+func TestAppendHearsAResizeReportedSinceTheLastWrite(t *testing.T) {
+	w := NewMultiWriter(0) // the ring keeps nothing: the tracker hears it all
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	resize(w, rows(12))
+
+	var joined bytes.Buffer
+	require.NoError(t, w.Append(&joined))
+	require.Empty(t, joined.String(), "the resize reset the margins before the snapshot")
+}
