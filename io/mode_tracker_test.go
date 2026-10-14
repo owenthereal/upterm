@@ -2,12 +2,16 @@ package io
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 func Test_ModeTracker_DECPrivateModes(t *testing.T) {
@@ -45,38 +49,22 @@ func Test_ModeTracker_ScrollRegionAndCharset(t *testing.T) {
 	require.Equal(t, "\x1b[5;20r\x1b(0", string(m.Snapshot()))
 }
 
-// Each screen buffer owns its scroll region. Replaying the alternate screen's
-// margins to a joiner that is on the normal screen -- or the normal screen's
-// after an alt-screen switch -- confines it to rows it never asked for.
-func Test_ModeTracker_ScrollRegionFollowsTheScreenBuffer(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "margins set before the switch belong to the normal screen",
-			input: "\x1b[1;23r\x1b[?1049h",
-			want:  "\x1b[1;23r\x1b[?1049h",
-		},
-		{
-			name:  "margins set after the switch belong to the alternate screen",
-			input: "\x1b[?1049h\x1b[5;10r",
-			want:  "\x1b[?1049h\x1b[5;10r",
-		},
-		{
-			name:  "leaving the alternate screen discards its margins",
-			input: "\x1b[1;23r\x1b[?1049h\x1b[5;10r\x1b[?1049l",
-			want:  "\x1b[1;23r",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+// Spec A17: a terminal has one scrolling region, which no screen switch
+// changes, as in xterm (SwitchBufs leaves top_marg and bot_marg). Kept per
+// screen, the region set on one screen went missing on the other, and later
+// line feeds and scrolls on a joiner landed where the session's didn't.
+func TestMarginsSurviveBufferSwitches(t *testing.T) {
+	for _, via := range []int{1049, 47, 1047} {
+		t.Run(strconv.Itoa(via), func(t *testing.T) {
 			m := NewModeTracker()
-			_, err := m.Write([]byte(tt.input))
-			require.NoError(t, err)
-			require.Equal(t, tt.want, string(m.Snapshot()))
+			m.Resized(rows(24))
+			_, _ = fmt.Fprintf(m, "\x1b[2;10r\x1b[?%dh", via)
+			require.Equal(t, fmt.Sprintf("\x1b[2;10r\x1b[?%dh", via), string(m.Snapshot()), "set on the main screen, kept on the alternate one")
+			require.Equal(t, 1, strings.Count(string(m.Restore()), "\x1b[r"), "and reset once")
+
+			_, _ = fmt.Fprintf(m, "\x1b[3;8r\x1b[?%dl", via)
+			require.Equal(t, "\x1b[3;8r", string(m.Snapshot()), "set on the alternate screen, kept on the main one")
+			require.Equal(t, "\x1b[r", string(m.Restore()))
 		})
 	}
 }
@@ -388,11 +376,11 @@ func Test_ModeTracker_BoundsUnterminatedString(t *testing.T) {
 func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	m := NewModeTracker()
 
-	// The worst case is both screen buffers carrying margins and a full kitty
-	// keyboard stack, so the normal screen's are set before the modes switch
-	// to the alternate one. The widest numbers are an unsigned 32-bit one's:
-	// kitty's flags come back as the seven bits kitty keeps, and
-	// modifyOtherKeys as it was written.
+	// The worst case is a scrolling region and both screens' kitty keyboard
+	// stacks full, the normal screen's set before the modes switch to the
+	// alternate one; with no size known, the region is kept as written. The
+	// widest numbers are an unsigned 32-bit one's: kitty's flags come back as
+	// the seven bits kitty keeps, and modifyOtherKeys as it was written.
 	widest := strconv.FormatUint(math.MaxUint32, 10)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
@@ -418,7 +406,7 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	require.Equal(t, 2*kittyStackDepth, strings.Count(snap, "\x1b[>127u"), "both kitty stacks must be full, or the bound below is about empty ones")
 	require.Contains(t, snap, "\x1b[>4;"+widest+"m", "and modifyOtherKeys set")
 
-	// Every restorable mode set at once, plus both scroll regions, both kitty
+	// Every restorable mode set at once, plus the scroll region, both kitty
 	// stacks full, modifyOtherKeys, the charset and a string partial at its
 	// own cap, must still be trivially smaller than a guest's sink.
 	const constantBudget = 1024 // everything that is not the partial
@@ -524,8 +512,8 @@ func Test_ModeTracker_ResetClearsEverything(t *testing.T) {
 // does. No terminal behaves that way: the tracker models xterm's soft reset,
 // which keeps the screen buffer, the mouse modes, focus reporting and
 // bracketed paste across it, and returns only the cursor keys, autowrap and
-// cursor visibility to their defaults, along with the active buffer's margins
-// and the charset. tmux keeps even more -- it has no handler for CSI ! p and
+// cursor visibility to their defaults, along with the margins and the
+// charset. tmux keeps even more -- it has no handler for CSI ! p and
 // ignores DECSTR outright.
 func Test_ModeTracker_SoftResetIsNotAFullReset(t *testing.T) {
 	m := NewModeTracker()
@@ -543,15 +531,15 @@ func Test_ModeTracker_SoftResetIsNotAFullReset(t *testing.T) {
 // of it.
 func Test_ModeTracker_RestoreUndoesWhatTheSessionSet(t *testing.T) {
 	m := NewModeTracker()
-	// A full-screen program's opening: margins on the normal screen, then the
-	// alternate screen, the cursor hidden, the mouse and bracketed paste on,
-	// and its own margins on the screen it switched to.
+	// A full-screen program's opening: margins, then the alternate screen,
+	// the cursor hidden, the mouse and bracketed paste on, and margins again.
 	_, err := m.Write([]byte("\x1b[2;20r\x1b[?1049h\x1b[?25l\x1b[?1000;1006h\x1b[?2004h\x1b[5;15r"))
 	require.NoError(t, err)
 
 	// Leaving the alternate screen comes first, so everything after it lands
-	// on the screen the terminal is going back to. That screen's margins are
-	// released; the alternate screen's are not, because they went with it.
+	// on the screen the terminal is going back to. The margins are the
+	// terminal's, not a screen's, so they outlive the switch and are released
+	// once.
 	require.Equal(t,
 		"\x1b[?1049l"+"\x1b[r"+"\x1b[?25h\x1b[?1000l\x1b[?1006l\x1b[?2004l",
 		string(m.Restore()))
@@ -861,8 +849,10 @@ func Test_ModeTracker_KeyboardStateOrder(t *testing.T) {
 	_, err := m.Write([]byte("\x1b[2;20r\x1b[>1u\x1b[>4;2m\x1b[?2004h\x1b[?1049h\x1b[5;15r\x1b[>3u\x1b(0"))
 	require.NoError(t, err)
 
+	// The terminal's one region, the last set, goes first, whichever screen
+	// set it.
 	require.Equal(t,
-		"\x1b[2;20r"+"\x1b[?2004h"+"\x1b[>1u"+"\x1b[>4;2m"+"\x1b[?1049h"+"\x1b[5;15r"+"\x1b[>3u"+"\x1b(0",
+		"\x1b[5;15r"+"\x1b[?2004h"+"\x1b[>1u"+"\x1b[>4;2m"+"\x1b[?1049h"+"\x1b[>3u"+"\x1b(0",
 		string(m.Snapshot()))
 	require.Equal(t,
 		"\x1b[<1u"+"\x1b[?1049l"+"\x1b[r"+"\x1b[?2004l"+"\x1b[<1u"+"\x1b[>4m"+"\x1b(B",
@@ -994,5 +984,368 @@ func TestCloneIsIndependent(t *testing.T) {
 				require.Equal(t, string(wantC.Restore()), string(c.Restore()), "the clone's restore")
 			})
 		}
+	}
+}
+
+// rows is a terminal of n rows, the dimension a DECSTBM is decided against.
+func rows(n int) termsize.Size { return termsize.Size{Cols: 80, Rows: n} }
+
+// Spec A21, Owen's: the tracker decides a DECSTBM as xterm's CASE_DECSTBM
+// does, at the height of the moment. Top is 1 if absent or 0; bottom is the
+// height if absent, 0 or past it; and the region is set only if bottom >
+// top, or else nothing changes. Stored as written, CSI 10;11r replaced 2;5,
+// though a terminal of 8 rows ignores it and keeps 2;5.
+func TestTrackerDecidesDECSTBMAtTheHeight(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(8))
+	for _, step := range []struct{ in, want string }{
+		{"\x1b[2;5r", "\x1b[2;5r"},
+		{"\x1b[10;11r", "\x1b[2;5r"}, // bottom clamps to 8, not below 10
+		{"\x1b[10r", "\x1b[2;5r"},
+		{"\x1b[3r", "\x1b[3;8r"},
+		{"\x1b[r", ""}, // the whole screen, which a joiner starts with
+		{"\x1b[5;5r", ""},
+	} {
+		_, _ = m.Write([]byte(step.in))
+		require.Equal(t, step.want, string(m.Snapshot()), "after %q", step.in)
+	}
+}
+
+// The parameters as xterm reads them: an explicit 0 is a default, a number
+// past any height is the height, and a parameter past the second is ignored.
+// An r sequence with a prefix, an intermediate or a subparameter is not
+// DECSTBM at all -- CSI ? r is XTRESTORE, CSI $ r is DECCARA -- and leaves the
+// region alone.
+func TestTrackerReadsDECSTBMsParameters(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"\x1b[0;0r", ""},
+		{"\x1b[;6r", "\x1b[1;6r"},
+		{"\x1b[0;6r", "\x1b[1;6r"},
+		{"\x1b[2;0r", "\x1b[2;8r"},
+		{"\x1b[2;99999999999999999999r", "\x1b[2;8r"},
+		{"\x1b[99999999999999999999r", "\x1b[3;5r"},
+		{"\x1b[2;5;7r", "\x1b[2;5r"},
+		{"\x1b[?2;6r", "\x1b[3;5r"},
+		{"\x1b[>2;6r", "\x1b[3;5r"},
+		{"\x1b[2;6$r", "\x1b[3;5r"},
+		{"\x1b[2:1;6r", "\x1b[3;5r"},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.in), func(t *testing.T) {
+			m := NewModeTracker()
+			m.Resized(rows(8))
+			_, _ = m.Write([]byte("\x1b[3;5r" + tc.in))
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+}
+
+// With no size known yet, there is no height to decide a DECSTBM against, so
+// the tracker decides it as it did before it heard of sizes: every one is
+// taken, the last wins, and it is kept and replayed as written, for the
+// joiner's terminal to decide at its own height. Only a tracker nothing feeds
+// sizes stays here, as the host's own for a forced command does.
+func TestDECSTBMWithNoKnownHeight(t *testing.T) {
+	m := NewModeTracker()
+	for _, step := range []struct{ in, want string }{
+		{"\x1b[2;5r", "\x1b[2;5r"},
+		{"\x1b[10;11r", "\x1b[10;11r"},
+		{"\x1b[5;5r", "\x1b[5;5r"},
+		{"\x1b[?2;6r", "\x1b[5;5r"}, // XTRESTORE, not a region
+		{"\x1b[r", "\x1b[r"},
+	} {
+		_, _ = m.Write([]byte(step.in))
+		require.Equal(t, step.want, string(m.Snapshot()), "after %q", step.in)
+		require.Equal(t, "\x1b[r", string(m.Restore()), "after %q", step.in)
+	}
+
+	// A size that isn't one is no height either.
+	m.Resized(termsize.Size{})
+	_, _ = m.Write([]byte("\x1b[10;11r"))
+	require.Equal(t, "\x1b[10;11r", string(m.Snapshot()))
+}
+
+// Spec A23: candidates {none: 8, e1: 4, e2: 12}, CSI 2;6r (2;6, 2;4, 2;6),
+// then e1 commits, which removes "none" with e2 still unresolved: 2;4 and 2;6
+// remain. Snapshot, which the raw fallback replays, gives the newest
+// surviving candidate's, e2's, the likeliest; a "none" candidate is gone, and
+// the one now first is e1's. Restore resets the region.
+func TestSnapshotAfterAPartialCommitment(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(8))
+	m.crossTentative(1, rows(4))
+	m.crossTentative(2, rows(12))
+	_, _ = m.Write([]byte("\x1b[2;6r"))
+	m.resolve(1, true)
+
+	require.True(t, m.uncertain())
+	require.Equal(t, "\x1b[2;6r", string(m.Snapshot()))
+	require.Equal(t, "\x1b[r", string(m.Restore()))
+}
+
+// Spec A23: Restore resets the region if any candidate has one, not only the
+// newest: resetting margins a terminal doesn't have is harmless, and missing
+// some leaves a guest's shell scrolling inside rows. Here the newest, e2's,
+// was crossed after the DECSTBM, so it has none.
+func TestRestoreResetsAnyCandidatesRegion(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(8))
+	m.crossTentative(1, rows(4))
+	_, _ = m.Write([]byte("\x1b[2;6r"))
+	m.crossTentative(2, rows(12))
+	m.resolve(1, true)
+
+	require.True(t, m.uncertain())
+	require.Empty(t, m.Snapshot(), "the newest candidate's, the whole screen")
+	require.Equal(t, "\x1b[r", string(m.Restore()))
+}
+
+// Spec A23: past 16 unresolved crossed events the tracker keeps one bounded
+// fallback state, the newest candidate at the overflow: the 17th's size and
+// the whole screen. While overflowed, each DECSTBM is decided at its height,
+// a crossed event is assumed to commit, outcomes change nothing, and the
+// tracker is uncertain, until a committed resize heard in order.
+func TestSnapshotAfterAnOverflow(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(8))
+	for seq := uint64(1); seq <= maxUnresolvedResizes; seq++ {
+		m.crossTentative(seq, rows(12))
+	}
+	require.False(t, m.uncertain(), "16 candidates, all with the whole screen")
+
+	m.crossTentative(maxUnresolvedResizes+1, rows(4))
+	require.True(t, m.uncertain())
+	require.Empty(t, m.Snapshot(), "the 17th's candidate: the whole screen")
+	_, _ = m.Write([]byte("\x1b[2;6r"))
+	require.Equal(t, "\x1b[2;4r", string(m.Snapshot()), "decided at the 17th's height")
+	require.Equal(t, "\x1b[r", string(m.Restore()))
+
+	for seq := uint64(1); seq <= maxUnresolvedResizes+1; seq++ {
+		m.resolve(seq, seq%2 == 0)
+	}
+	require.True(t, m.uncertain(), "outcomes change nothing")
+	require.Equal(t, "\x1b[2;4r", string(m.Snapshot()))
+
+	m.crossTentative(maxUnresolvedResizes+2, rows(20))
+	require.Empty(t, m.Snapshot(), "assumed to commit")
+	require.Empty(t, m.Restore())
+	_, _ = m.Write([]byte("\x1b[2;30r"))
+	require.Equal(t, "\x1b[2;20r", string(m.Snapshot()))
+
+	m.Resized(rows(8))
+	require.False(t, m.uncertain())
+	require.Empty(t, m.Snapshot())
+}
+
+// An outcome decides something only for an event the tracker crossed and
+// still keeps a candidate for.
+func TestResolveIgnoresAnEventNeverCrossed(t *testing.T) {
+	m := NewModeTracker()
+	m.Resized(rows(8))
+	_, _ = m.Write([]byte("\x1b[2;5r"))
+	m.resolve(7, true)
+	m.resolve(8, false)
+	m.resolve(0, false) // never a resize's Seq
+	require.False(t, m.uncertain())
+	require.Equal(t, "\x1b[2;5r", string(m.Snapshot()))
+	_, _ = m.Write([]byte("\x1b[10;11r"))
+	require.Equal(t, "\x1b[2;5r", string(m.Snapshot()), "still decided at 8 rows")
+}
+
+// AtGround is whether the tracker is outside every sequence, with no partial
+// to replay.
+func TestAtGround(t *testing.T) {
+	m := NewModeTracker()
+	require.True(t, m.AtGround())
+	for _, step := range []struct {
+		in     string
+		ground bool
+	}{
+		{"\x1b", false}, {"[?10", false}, {"49h", true},
+		{"\x1b]0;title", false}, {"\x07", true},
+		{"\x1b(", false}, {"0", true},
+		{"\x1bP", false}, {"q\x1b", false}, {"\\", true},
+		{"\x1b[", false}, {"\x18", true},
+		{"text", true},
+		// Overflowed, a CSI has no partial left, and is still a sequence.
+		{"\x1b[" + strings.Repeat("1", 2*maxSequenceBytes), false}, {"m", true},
+	} {
+		_, _ = m.Write([]byte(step.in))
+		require.Equal(t, step.ground, m.AtGround(), "after %q", step.in)
+	}
+}
+
+// ReplayParts holds every tracked DEC private mode with its value (PF-10),
+// the alternate screen's aside, which AltVia covers; Modes, which a render
+// emits, holds only those off their default, as Snapshot does.
+func TestReplayPartsHoldsEveryMode(t *testing.T) {
+	defaults := maps.Clone(restorable)
+	for n := range altScreenModes {
+		delete(defaults, n)
+	}
+
+	m := NewModeTracker()
+	parts := m.ReplayParts()
+	require.Equal(t, defaults, parts.DECModes)
+	require.True(t, parts.Autowrap)
+	require.Empty(t, parts.Modes)
+	require.Zero(t, parts.AltVia)
+
+	_, _ = m.Write([]byte("\x1b[?1h\x1b[?7l\x1b[?25h\x1b[?2004h\x1b[?1049h"))
+	parts = m.ReplayParts()
+	want := maps.Clone(defaults)
+	want[1], want[7], want[2004] = true, false, true
+	require.Equal(t, want, parts.DECModes)
+	require.False(t, parts.Autowrap)
+	require.Equal(t, "\x1b[?1h\x1b[?2004h", string(parts.Modes), "DECAWM is the render's to put back last")
+	require.Equal(t, 1049, parts.AltVia)
+}
+
+// Rule 4: ReplayParts' pieces, reassembled around the screen switch and with
+// DECAWM put back in its place, are Snapshot's, less the region, the charset
+// and the partial, which the reconstruction gives in its own places.
+func TestReplayPartsReassembleSnapshot(t *testing.T) {
+	const (
+		modes = "\x1b[?1h\x1b[?25l\x1b[?2004h"
+		keys  = "\x1b[>1u\x1b[>5u\x1b[>4;2m"
+	)
+	for _, tc := range []struct{ name, body string }{
+		{"the main screen", modes + keys},
+		{"the main screen, autowrap off", modes + "\x1b[?7l" + keys},
+		{"the main screen, an alternate stack hidden", modes + "\x1b[?7l" + keys + "\x1b[?1049h\x1b[>3u\x1b[?1049l"},
+		{"47", modes + "\x1b[?7l" + keys + "\x1b[?47h\x1b[>3u"},
+		{"1047", modes + keys + "\x1b[?1047h\x1b[>3u\x1b[>2u"},
+		{"1049", modes + "\x1b[?7l" + keys + "\x1b[?1049h\x1b[>3u"},
+		{"nothing set", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const region, tail = "\x1b[2;20r", "\x1b(0\x1b[?10"
+			m := NewModeTracker()
+			m.Resized(rows(24))
+			_, _ = m.Write([]byte(region + tc.body + tail))
+
+			snap := string(m.Snapshot())
+			require.True(t, strings.HasPrefix(snap, region), "%q", snap)
+			require.True(t, strings.HasSuffix(snap, tail), "%q", snap)
+			middle := strings.TrimSuffix(strings.TrimPrefix(snap, region), tail)
+			require.Equal(t, middle, reassemble(m.ReplayParts()))
+		})
+	}
+}
+
+// reassemble puts ReplayParts back together as Snapshot orders them: the
+// modes, with DECAWM after DECCKM, the one tracked mode numbered below it;
+// the main stack and modifyOtherKeys; then the trip that pushes a hidden
+// alternate stack, or the switch to the alternate screen and its stack.
+func reassemble(p ReplayParts) string {
+	modes := string(p.Modes)
+	if !p.Autowrap {
+		if rest, ok := strings.CutPrefix(modes, "\x1b[?1h"); ok {
+			modes = "\x1b[?1h\x1b[?7l" + rest
+		} else {
+			modes = "\x1b[?7l" + modes
+		}
+	}
+	out := modes + string(p.MainKeys)
+	switch {
+	case p.AltVia != 0:
+		out += fmt.Sprintf("\x1b[?%dh", p.AltVia) + string(p.AltKeys)
+	case p.HiddenAltKeys != nil:
+		out += "\x1b7\x1b[?47h" + string(p.HiddenAltKeys) + "\x1b[?47l\x1b8"
+	}
+	return out
+}
+
+// PF-22: a clone's candidates, fallback state and heights are its own. Each
+// is changed in place -- a resolve deletes from the list, a crossing while
+// overflowed rewrites the fallback -- so a list shared with the original
+// would carry one's outcomes into the other.
+func TestCloneCopiesTheMarginCandidates(t *testing.T) {
+	t.Run("candidates", func(t *testing.T) {
+		m := NewModeTracker()
+		m.Resized(rows(8))
+		m.crossTentative(1, rows(4))
+		_, _ = m.Write([]byte("\x1b[2;6r"))
+
+		c := m.Clone()
+		c.resolve(1, true)
+		_, _ = c.Write([]byte("\x1b[2;30r"))
+		m.resolve(1, false)
+		_, _ = m.Write([]byte("\x1b[3;30r"))
+
+		require.Equal(t, "\x1b[2;4r", string(c.Snapshot()), "the clone kept the 4-row candidate")
+		require.Equal(t, "\x1b[3;8r", string(m.Snapshot()), "the original kept the 8-row one")
+	})
+
+	t.Run("the fallback state", func(t *testing.T) {
+		m := NewModeTracker()
+		for seq := uint64(1); seq <= maxUnresolvedResizes+1; seq++ {
+			m.crossTentative(seq, rows(8))
+		}
+		_, _ = m.Write([]byte("\x1b[2;30r"))
+
+		c := m.Clone()
+		c.crossTentative(maxUnresolvedResizes+2, rows(4))
+		_, _ = c.Write([]byte("\x1b[3;30r"))
+
+		require.Equal(t, "\x1b[3;4r", string(c.Snapshot()))
+		require.Equal(t, "\x1b[2;8r", string(m.Snapshot()))
+		require.True(t, c.uncertain())
+		require.True(t, m.uncertain())
+
+		m.Resized(rows(8))
+		require.False(t, m.uncertain())
+		require.True(t, c.uncertain(), "the clone is still overflowed")
+	})
+}
+
+// Clone is a hand-kept list of the fields to copy deep, so this walks the
+// tracker by reflection and fails on any reference -- a slice's array or a
+// map -- the clone shares with the original, down through the candidates. A
+// field added later and left to the shallow copy fails here; so does one the
+// fixture leaves empty, which this couldn't check.
+func TestCloneSharesNoReference(t *testing.T) {
+	m := NewModeTracker()
+	// No size yet, so the region is kept as written, a slice; then a
+	// candidate per crossed event. Both screens' kitty stacks, the charset,
+	// modifyOtherKeys, and a CSI the stream stops inside, for the partial and
+	// the parameters.
+	_, _ = m.Write([]byte("\x1b[2;5r\x1b(0\x1b[>1u\x1b[?1049h\x1b[>2u\x1b[>4;1m\x1b[?25l"))
+	m.crossTentative(1, rows(4))
+	_, _ = m.Write([]byte("\x1b[?10"))
+
+	c := m.Clone()
+	seen := map[string]bool{}
+	requireNothingShared(t, "ModeTracker", reflect.ValueOf(m).Elem(), reflect.ValueOf(c).Elem(), seen)
+	for path, filled := range seen {
+		require.True(t, filled, "%s is empty in the fixture, so its copy goes unchecked: fill it", path)
+	}
+}
+
+// requireNothingShared walks a and b, which must have the same type, and
+// fails where a slice or map of a is b's too. seen records each reference
+// field by its path, indices left out, and whether a held anything there.
+func requireNothingShared(t *testing.T, path string, a, b reflect.Value, seen map[string]bool) {
+	t.Helper()
+	switch a.Kind() {
+	case reflect.Struct:
+		for i := range a.NumField() {
+			requireNothingShared(t, path+"."+a.Type().Field(i).Name, a.Field(i), b.Field(i), seen)
+		}
+	case reflect.Slice:
+		seen[path] = seen[path] || a.Cap() > 0
+		if a.Cap() > 0 && b.Cap() > 0 {
+			require.NotEqual(t, a.Pointer(), b.Pointer(), "%s is shared with the clone", path)
+		}
+		for i := range min(a.Len(), b.Len()) {
+			requireNothingShared(t, path+"[]", a.Index(i), b.Index(i), seen)
+		}
+	case reflect.Map:
+		seen[path] = seen[path] || a.Len() > 0
+		if !a.IsNil() {
+			require.NotEqual(t, a.Pointer(), b.Pointer(), "%s is shared with the clone", path)
+		}
+		require.True(t, a.Type().Elem().Kind() <= reflect.Complex128, "%s: the walk doesn't look inside a map of %s", path, a.Type().Elem())
+	case reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer, reflect.Array:
+		t.Fatalf("%s: the walk doesn't know how to check a %s", path, a.Kind())
 	}
 }

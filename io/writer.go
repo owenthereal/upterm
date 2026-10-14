@@ -207,8 +207,12 @@ func (w bufferWriter) Write(p []byte) (int, error) {
 // NewMultiWriter returns a fan-out whose replay ring holds the most recent
 // replayBytes bytes of output.
 func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
-	b := &buffer{max: replayBytes}
-	modes := NewModeTracker()
+	t := &MultiWriter{
+		writers: writers,
+		buffer:  &buffer{max: replayBytes},
+		modes:   NewModeTracker(),
+	}
+	t.replay = NewTerminalQueryFilter(bufferWriter{b: t.buffer})
 
 	// The tracker watches what leaves the ring, not what enters it. Append
 	// replays the snapshot ahead of the ring's bytes, so the state it
@@ -217,14 +221,13 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	// the state after the ring, and any mode set inside the ring window was
 	// applied twice: once by the snapshot, far too early, and again by the
 	// replay.
-	b.onEvict = func(_ uint64, p []byte) { _, _ = modes.Write(p) }
+	//
+	// It hears the pty's resizes there too, each where it fell among the
+	// bytes, as the terminal did: a resize resets the margins, and a DECSTBM
+	// is decided at the height of its moment (spec E3, A21).
+	t.buffer.onEvict = func(offset uint64, p []byte) { t.sizes.hear(t.modes, offset, p) }
 
-	return &MultiWriter{
-		writers: writers,
-		buffer:  b,
-		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
-		modes:   modes,
-	}
+	return t
 }
 
 // ErrClosed is returned by Append once Shutdown has run. A guest that reaches
@@ -428,7 +431,7 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	// before p reached the fan-out counts for p, and pruned behind it, once
 	// the ring has taken p and evicted what p pushed out. It is bounded only
 	// then, so that nothing prune forgets is counted lost.
-	t.sizes.apply(t.buffer.End())
+	t.sizes.apply(t.buffer.End(), t.modes)
 	_, _ = t.replay.Write(p)
 	t.sizes.prune(t.buffer.Start())
 	t.sizes.bound()
@@ -559,13 +562,17 @@ type ResetTarget interface {
 // but for one held in drop mode: the head of a query being dropped, which was
 // never sent. Fed it, the tracker sits inside a string, so the reset gains a
 // CAN, which the terminal, never having seen the head, ignores in ground.
+// The ring is fed with the resizes logged inside it, as eviction feeds it, so
+// that its DECSTBMs are decided at the heights the terminal had.
 //
 // That spends the tracker: its snapshot no longer describes the ring's start.
 // So it runs once, from Shutdown, after which Append refuses every joiner and
 // nothing asks for a snapshot again. Called with writeMu held.
 func (t *MultiWriter) restore() []byte {
+	offset := t.buffer.Start()
 	for _, d := range t.buffer.Data() {
-		_, _ = t.modes.Write(d)
+		t.sizes.hear(t.modes, offset, d)
+		offset += uint64(len(d))
 	}
 	_, _ = t.modes.Write(t.replay.Pending())
 	return t.modes.Restore()

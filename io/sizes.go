@@ -71,6 +71,7 @@ type sizeLog struct {
 	events []loggedSize // in Seq order, which is offset order
 	loss   uint64       // the newest loss's Seq, while a known size hasn't closed it; see lose
 	lost   uint64       // every report or event ever lost; see losses
+	heard  uint64       // the last event the fan-out's tracker has heard; see hear
 }
 
 type queuedSize struct {
@@ -156,11 +157,16 @@ func (t *MultiWriter) Pinned(size termsize.Size) {
 
 // applyResize brings the size log up to date with what was reported since
 // the last hold of writeMu, placing new events before the next byte the ring
-// takes. Called with writeMu held, at the start of every capture and release,
-// so each sees the pty's size as of the hold. Write does the same in two
-// halves, around the ring's eviction; see bound.
+// takes, and has the tracker hear every event in effect at the ring's start.
+// Called with writeMu held, at the start of every capture and release, so
+// each sees the pty's size as of the hold. Write does the same in two halves,
+// around the ring's eviction; see bound.
 func (t *MultiWriter) applyResize() {
-	t.sizes.apply(t.buffer.End())
+	t.sizes.apply(t.buffer.End(), t.modes)
+	// Eviction hears each event as the ring's start reaches it, but an event
+	// placed while the ring was empty is at its start already, and a capture
+	// clones the tracker as of there.
+	t.sizes.hear(t.modes, t.buffer.Start(), nil)
 	t.sizes.bound()
 }
 
@@ -202,9 +208,12 @@ func (l *sizeLog) wait(seq uint64) <-chan struct{} {
 // at end, and applies the outcomes recorded since the last apply: a committed
 // event becomes one, and a deleted one goes, wherever it is. Events keep
 // their Seq order, and none is coalesced: 80 → 45 → 80 with no output between
-// truncates the screen at 45, which 80 alone doesn't. Called with writeMu
-// held.
-func (l *sizeLog) apply(end uint64) {
+// truncates the screen at 45, which 80 alone doesn't.
+//
+// An event the tracker m has already heard, eviction having crossed it before
+// its outcome, has its outcome passed on, to select among the candidates m
+// kept for it (spec A22). Called with writeMu held.
+func (l *sizeLog) apply(end uint64, m *ModeTracker) {
 	l.mu.Lock()
 	queue, ended := l.queue, l.ended
 	dropped, droppedSeq := l.dropped, l.droppedSeq
@@ -223,6 +232,9 @@ func (l *sizeLog) apply(end uint64) {
 		kept := l.events[:0]
 		for _, e := range l.events {
 			if applied, ok := ended[e.Seq]; ok && e.tentative {
+				if e.Seq <= l.heard {
+					m.resolve(e.Seq, applied)
+				}
 				if !applied {
 					continue
 				}
@@ -295,6 +307,42 @@ func (l *sizeLog) lose(n, seq uint64) {
 	if seq > l.loss {
 		l.loss = seq
 	}
+}
+
+// hear feeds m the bytes p, which begin at stream offset offset, with each
+// logged event at or before their end that m hasn't heard yet placed where it
+// falls among them, in Seq order (spec E3): a committed one as Resized, and a
+// tentative one as crossTentative, its outcome to follow through apply. One
+// exactly at their end is heard too, since it is in effect at the byte after
+// them, the ring's first once they have left. A deleted event is no longer
+// logged, so it is never heard.
+//
+// The log is read for whether an event is tentative, not resolved: an event
+// the log holds is tentative exactly while apply hasn't applied an outcome to
+// it, and an outcome ResizeEnd records later reaches m through apply, like
+// any other. Called with writeMu held.
+func (l *sizeLog) hear(m *ModeTracker, offset uint64, p []byte) {
+	end := offset + uint64(len(p))
+	for _, e := range l.events {
+		if e.Seq <= l.heard {
+			continue
+		}
+		if e.Offset > end {
+			break
+		}
+		if e.Offset > offset {
+			n := e.Offset - offset
+			_, _ = m.Write(p[:n])
+			p, offset = p[n:], e.Offset
+		}
+		if e.tentative {
+			m.crossTentative(e.Seq, e.Size)
+		} else {
+			m.Resized(e.Size)
+		}
+		l.heard = e.Seq
+	}
+	_, _ = m.Write(p)
 }
 
 // covering returns the committed event in effect at start, the last with

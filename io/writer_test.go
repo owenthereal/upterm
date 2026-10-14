@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1172,6 +1174,332 @@ func TestRingEvictsWithOffsets(t *testing.T) {
 				require.Equal(t, b.Start(), next, "the spans end where the ring begins, after a write of %d", n)
 				require.Equal(t, string(written[:next]), string(got))
 			}
+		})
+	}
+}
+
+// writeString writes s to the fan-out.
+func writeString(w *MultiWriter, s string) { _, _ = w.Write([]byte(s)) }
+
+// marginsAt reads the fan-out's tracker as a capture does, with writeMu held
+// once what was reported since the last hold is applied: Snapshot, and
+// whether the region is uncertain.
+func marginsAt(w *MultiWriter) (snapshot string, uncertain bool) {
+	withLog(w, func(*sizeLog, uint64) {
+		snapshot, uncertain = string(w.modes.Snapshot()), w.modes.uncertain()
+	})
+	return snapshot, uncertain
+}
+
+// Spec A21 through the fan-out: the tracker hears the 8-row event before the
+// bytes it evicts after it, and decides each DECSTBM at that height.
+func TestEvictedDECSTBMKeepsTheAcceptedRegion(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r\x1b[10;11r\x1b[10r")
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;5r", snap)
+}
+
+// A resize resets the region on a terminal, so one the tracker hears in
+// order does too: priming never sets margins a resize already cleared (spec
+// E3). An event exactly at the ring's start is in effect there, so eviction
+// that reaches its offset crosses it.
+func TestTrackerResetsMarginsAtAnEvictedResize(t *testing.T) {
+	for _, past := range []bool{false, true} {
+		t.Run(fmt.Sprintf("past=%t", past), func(t *testing.T) {
+			w := NewMultiWriter(16)
+			resize(w, rows(24))
+			writeString(w, "\x1b[2;10r") // 0 to 6
+			resize(w, rows(30))
+			write(w, 9) // the event at 7, and the ring full
+			write(w, 7) // the ring starts at the event
+			start := uint64(7)
+			if past {
+				write(w, 1)
+				start++
+			}
+
+			withLog(w, func(_ *sizeLog, got uint64) { require.Equal(t, start, got) })
+			snap, uncertain := marginsAt(w)
+			require.False(t, uncertain)
+			require.Empty(t, snap)
+		})
+	}
+}
+
+// Spec A22, Owen's: height 8, region 2;5; eviction crosses a tentative resize
+// to 4; CSI 2;6r is evicted after it, 2;6 at 8 and 2;4 at 4, so the region is
+// uncertain. The resize's outcome selects: failed, the region is the one
+// decided without it, 2;6, which marks alone lost (they primed 2;5);
+// committed, 2;4.
+func TestAFailedResizeSelectsTheRegionDecidedWithoutIt(t *testing.T) {
+	for _, tc := range []struct {
+		applied bool
+		want    string
+	}{{false, "\x1b[2;6r"}, {true, "\x1b[2;4r"}} {
+		t.Run(fmt.Sprintf("applied=%t", tc.applied), func(t *testing.T) {
+			w := NewMultiWriter(16)
+			resize(w, rows(8))
+			writeString(w, "\x1b[2;5r")
+			seq := w.ResizeBegin(rows(4))
+			writeString(w, "\x1b[2;6r")
+			write(w, 16)
+
+			snap, uncertain := marginsAt(w)
+			require.True(t, uncertain)
+			require.Equal(t, "\x1b[2;4r", snap, "the newest candidate's")
+
+			w.ResizeEnd(seq, tc.applied)
+			snap, uncertain = marginsAt(w)
+			require.False(t, uncertain)
+			require.Equal(t, tc.want, snap)
+		})
+	}
+}
+
+// Spec A22: candidates that agree aren't merged, and keep their heights, so a
+// later DECSTBM is still decided under each. CSI 1;3r is 1;3 at 8 and at 4;
+// CSI 2;6r after it isn't.
+func TestACommonDECSTBMKeepsTheHeightCandidates(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	seq := w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[1;3r")
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[1;3r", snap)
+
+	writeString(w, "\x1b[2;6r")
+	write(w, 16)
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain, "the heights were kept")
+
+	w.ResizeEnd(seq, true)
+	snap, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;4r", snap)
+}
+
+// Spec A22: candidates that agree are no uncertainty. CSI 1;3r is 1;3 at 8
+// and at 4, so Snapshot carries it while the event is unresolved.
+func TestSnapshotUsesTheCommonRegion(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	write(w, 1)
+	w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[1;3r")
+	write(w, 16)
+
+	_, _, ok := unresolved(w)
+	require.True(t, ok)
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[1;3r", snap)
+}
+
+// Spec A22: height 8; two tentative events crossed, to 4 then to 12, so the
+// candidates are 8, 4 and 12; CSI 2;6r gives 2;6, 2;4 and 2;6. Each pair of
+// outcomes, in either order, selects the region the terminal holds, and the
+// tracker is uncertain exactly while the candidates left disagree.
+func TestEveryHeightCandidateDecides(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second bool // e1's and e2's outcomes: committed or not
+		afterFirst    bool // uncertain with only e1's outcome applied
+		afterSecond   bool // uncertain with only e2's
+		want          string
+	}{
+		{"deleted/deleted", false, false, false, true, "\x1b[2;6r"},
+		{"committed/deleted", true, false, true, true, "\x1b[2;4r"},
+		{"deleted/committed", false, true, false, false, "\x1b[2;6r"},
+		{"committed/committed", true, true, true, false, "\x1b[2;6r"},
+	} {
+		for _, e1First := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/e1 first=%t", tc.name, e1First), func(t *testing.T) {
+				w := NewMultiWriter(16)
+				resize(w, rows(8))
+				write(w, 1)
+				e1 := w.ResizeBegin(rows(4))
+				write(w, 1)
+				e2 := w.ResizeBegin(rows(12))
+				writeString(w, "\x1b[2;6r")
+				write(w, 16)
+				snap, uncertain := marginsAt(w)
+				require.True(t, uncertain)
+				require.Equal(t, "\x1b[2;6r", snap, "e2's, the newest")
+
+				if e1First {
+					w.ResizeEnd(e1, tc.first)
+					_, uncertain = marginsAt(w)
+					require.Equal(t, tc.afterFirst, uncertain)
+					w.ResizeEnd(e2, tc.second)
+				} else {
+					w.ResizeEnd(e2, tc.second)
+					_, uncertain = marginsAt(w)
+					require.Equal(t, tc.afterSecond, uncertain)
+					w.ResizeEnd(e1, tc.first)
+				}
+				snap, uncertain = marginsAt(w)
+				require.False(t, uncertain)
+				require.Equal(t, tc.want, snap)
+			})
+		}
+	}
+}
+
+// A committed event heard in order after a crossed tentative one resets the
+// region on a terminal whichever way the tentative one went, so the tracker
+// keeps one candidate, the whole screen at its size, and the tentative
+// event's later outcome changes nothing.
+func TestAnInOrderResizeCollapsesTheCandidates(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	seq := w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[2;6r")
+	resize(w, rows(12))
+	write(w, 1)
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Empty(t, snap)
+	withLog(w, func(*sizeLog, uint64) { require.Len(t, w.modes.candidates, 1) })
+
+	w.ResizeEnd(seq, true)
+	snap, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+	require.Empty(t, snap)
+
+	// Decided at the 12 rows heard in order, not at the 4 that committed
+	// before them.
+	writeString(w, "\x1b[2;10r")
+	write(w, 16)
+	snap, _ = marginsAt(w)
+	require.Equal(t, "\x1b[2;10r", snap)
+}
+
+// Spec A22 and A23: 16 crossed events still have a candidate each; a 17th
+// overflows into the bounded fallback state, which is uncertain through every
+// outcome, until a committed resize heard in order.
+func TestTooManyCandidatesStayUncertain(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	var seqs []uint64
+	for i := range maxUnresolvedResizes + 1 {
+		write(w, 1)
+		seqs = append(seqs, w.ResizeBegin(rows(10+i)))
+	}
+	write(w, 1) // the events at 1 to 17
+
+	write(w, 14) // the ring starts at 16: 16 crossed
+	_, uncertain := marginsAt(w)
+	require.False(t, uncertain, "16 candidates, all with the whole screen")
+
+	write(w, 1) // and the 17th
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain)
+
+	for _, seq := range seqs {
+		w.ResizeEnd(seq, true)
+	}
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain, "outcomes change nothing while overflowed")
+
+	resize(w, rows(20))
+	write(w, 1)
+	write(w, 16)
+	_, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+}
+
+// A capture's clone describes the ring's first byte, so it has heard every
+// event in effect there, even one no eviction has reached yet: the clone is
+// fed the ring and decides its DECSTBMs at that size.
+func TestTheTrackerHearsTheEventAtTheRingsStart(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	resize(w, rows(8))
+	writeString(w, "abc")
+
+	var clone *ModeTracker
+	withLog(w, func(*sizeLog, uint64) { clone = w.modes.Clone() })
+	_, _ = clone.Write([]byte("abc\x1b[2;5r\x1b[10;11r"))
+	require.Equal(t, "\x1b[2;5r", string(clone.Snapshot()), "decided at the 8 rows in effect at the ring's start")
+}
+
+// A session's last state is the tracker's once Shutdown has fed it the ring,
+// and that includes the resizes in the ring: decided at the 8 rows the
+// tracker last heard, CSI 10;15r would be ignored, and a guest's terminal, at
+// the 20 rows it had by then, left inside it.
+func TestShutdownHearsTheResizesInTheRing(t *testing.T) {
+	w := NewMultiWriter(16)
+	guest := resetBuffer{&bytes.Buffer{}}
+	require.NoError(t, w.Append(guest))
+	resize(w, rows(8))
+	write(w, 17) // evicts its first byte, and the 8-row event with it
+	resize(w, rows(20))
+	writeString(w, "\x1b[10;15r")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, w.Shutdown(ctx))
+	require.Equal(t, strings.Repeat("x", 17)+"\x1b[10;15r"+"\x1b[r", guest.String())
+}
+
+// armedGate passes writes through until armed, and then parks the next one
+// until released, closing entered first.
+type armedGate struct {
+	armed   atomic.Bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *armedGate) Write(p []byte) (int, error) {
+	if g.armed.Load() {
+		g.once.Do(func() { close(g.entered) })
+		<-g.release
+	}
+	return len(p), nil
+}
+
+// An outcome ResizeEnd records while a Write is still under way, after that
+// Write's apply and its eviction crossing the event, is applied by the next
+// hold of writeMu, and selects among the candidates the crossing kept.
+func TestAnOutcomeRecordedMidWriteReachesTheTracker(t *testing.T) {
+	for _, tc := range []struct {
+		applied bool
+		want    string
+	}{{false, "\x1b[2;6r"}, {true, "\x1b[2;4r"}} {
+		t.Run(fmt.Sprintf("applied=%t", tc.applied), func(t *testing.T) {
+			gate := &armedGate{entered: make(chan struct{}), release: make(chan struct{})}
+			w := NewMultiWriter(16)
+			require.NoError(t, w.Append(gate))
+			resize(w, rows(8))
+			writeString(w, "\x1b[2;5r")
+			seq := w.ResizeBegin(rows(4))
+			writeString(w, "\x1b[2;6r")
+
+			// The ring takes this Write and evicts past the event, and then
+			// the Write parks in the gate, writeMu held.
+			gate.armed.Store(true)
+			wrote := make(chan struct{})
+			go func() { defer close(wrote); write(w, 16) }()
+			<-gate.entered
+			w.ResizeEnd(seq, tc.applied)
+			close(gate.release)
+			<-wrote
+
+			snap, uncertain := marginsAt(w)
+			require.False(t, uncertain)
+			require.Equal(t, tc.want, snap)
 		})
 	}
 }
