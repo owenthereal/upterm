@@ -13,7 +13,6 @@ import (
 	"time"
 
 	ggh "github.com/google/go-github/v48/github"
-	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
@@ -39,11 +38,6 @@ func upgradeCmd() *cobra.Command {
 }
 
 func upgradeRunE(c *cobra.Command, args []string) error {
-	logger := uptermctx.Logger(c.Context())
-	if logger == nil {
-		return fmt.Errorf("logger not available")
-	}
-
 	// The binary to replace, and whether upterm may replace it, are settled
 	// before anything is looked up or downloaded.
 	target, err := runningBinary()
@@ -63,7 +57,6 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	defer showCursor()
 
 	m := &update.Manager{
-		Command: "upterm",
 		Store: &store{
 			ctx:     c.Context(),
 			Owner:   "owenthereal",
@@ -113,14 +106,8 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		return fmt.Errorf("release %s has no upterm archive for this system (%s)", r.Version, name)
 	}
 
-	// The progress bar is drawn with escape sequences, so only for a terminal.
-	var proxy update.Proxy
-	if isTerminal(os.Stdout) {
-		proxy = progress.Reader
-	}
-
 	// download tarball to a tmp dir
-	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, proxy)
+	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, downloadProxy(os.Stdout))
 	if err != nil {
 		return err
 	}
@@ -133,6 +120,17 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 
 	fmt.Println(outcomeLine(cur, next))
 	return nil
+}
+
+// downloadProxy draws the download's progress bar on f when f is a terminal.
+// The bar is made of escape sequences and keeps writing to the stdout it
+// started on, so for a pipe or a file there is none.
+func downloadProxy(f *os.File) update.Proxy {
+	if !isTerminal(f) {
+		return nil
+	}
+
+	return progress.Reader
 }
 
 func trimVPrefix(s string) string {
@@ -151,6 +149,12 @@ type store struct {
 	Version string
 }
 
+// githubText is err's text without the " []" go-github ends an error
+// response's with when it has no detailed errors, which is a plain 4xx or 5xx.
+func githubText(err error) string {
+	return strings.TrimSuffix(err.Error(), " []")
+}
+
 func (s *store) GetRelease(version string) (*update.Release, error) {
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
@@ -162,7 +166,7 @@ func (s *store) GetRelease(version string) (*update.Release, error) {
 		case res != nil && res.StatusCode == http.StatusNotFound:
 			return nil, update.ErrNotFound
 		case res != nil && res.StatusCode >= http.StatusBadRequest:
-			return nil, fmt.Errorf("GitHub returned an error for v%s: %w", version, err)
+			return nil, fmt.Errorf("GitHub returned an error for v%s: %s", version, githubText(err))
 		}
 
 		return nil, fmt.Errorf("can't reach GitHub to look up v%s: %w", version, err)
@@ -178,7 +182,7 @@ func (s *store) LatestReleases() ([]*update.Release, error) {
 	r, res, err := githubClient().Repositories.GetLatestRelease(ctx, s.Owner, s.Repo)
 	if err != nil {
 		if res != nil && res.StatusCode >= http.StatusBadRequest {
-			return nil, fmt.Errorf("GitHub returned an error for the latest release: %w", err)
+			return nil, fmt.Errorf("GitHub returned an error for the latest release: %s", githubText(err))
 		}
 
 		return nil, fmt.Errorf("can't reach GitHub to look up the latest release: %w", err)

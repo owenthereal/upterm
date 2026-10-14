@@ -408,6 +408,20 @@ func TestNoCursorEscapesIntoAPipe(t *testing.T) {
 	require.Empty(t, out)
 }
 
+// The progress bar draws with escape sequences on whatever stdout it was
+// started on, so it is only given a terminal.
+func TestNoProgressBarForAPipeOrAFile(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	require.Nil(t, downloadProxy(w))
+
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = null.Close() })
+	require.Nil(t, downloadProxy(null))
+}
+
 // withVersion makes the running upterm report v for the rest of the test.
 func withVersion(t *testing.T, v string) {
 	t.Helper()

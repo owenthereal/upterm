@@ -11,13 +11,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 
 	ggh "github.com/google/go-github/v48/github"
-	uptermctx "github.com/owenthereal/upterm/internal/context"
-	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/stretchr/testify/require"
 	"github.com/tj/go-update"
 )
@@ -131,6 +130,9 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 			if tc.not != "" {
 				require.NotContains(t, err.Error(), tc.not)
 			}
+			// go-github ends a plain error response with the empty list of
+			// its detailed errors.
+			require.False(t, strings.HasSuffix(err.Error(), " []"), "got %q", err)
 		})
 	}
 }
@@ -161,9 +163,58 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(bin), 0o755))
 		require.NoError(t, os.WriteFile(bin, nil, 0o755))
 
+		// A confirmed owner is refused before anything is probed for writing.
+		withWritableDir(t, func(string) error {
+			t.Error("upgrade checked that it could write before it checked who owns the binary")
+			return nil
+		})
+
 		stops(t, func() (string, error) { return bin, nil },
 			"this upterm was installed by Homebrew; upgrade it with brew upgrade upterm")
 	})
+
+	// A binary a Linux package database lists is refused, through the probes
+	// the command really runs and the tools those run.
+	for _, tc := range []struct{ name, tool, flag, want string }{
+		{"dpkg", "dpkg-query", "-S", "this upterm was installed by the upterm package (dpkg); upgrade it with apt"},
+		{"rpm", "rpm", "-qf", "this upterm was installed by the upterm package (rpm); upgrade it with dnf or yum"},
+	} {
+		// owned runs upgrade on a binary the tool says the package owns: it
+		// is refused, GitHub isn't asked, nothing is probed for writing, and
+		// the binary and its directory are as they were.
+		owned := func(t *testing.T) {
+			bin := aStandaloneBinary(t)
+			require.NoError(t, os.WriteFile(bin, []byte("old"), 0o755))
+			fakeTool(t, tc.tool, 0, tc.flag, bin)
+			withWritableDir(t, func(string) error {
+				t.Error("upgrade checked that it could write before it checked who owns the binary")
+				return nil
+			})
+
+			stops(t, func() (string, error) { return bin, nil }, tc.want)
+
+			got, err := os.ReadFile(bin)
+			require.NoError(t, err)
+			require.Equal(t, "old", string(got))
+			require.Equal(t, []string{"upterm"}, fileNames(t, filepath.Dir(bin)))
+		}
+
+		t.Run(tc.name+" owns it", func(t *testing.T) {
+			if runtime.GOOS != "linux" {
+				t.Skip("the system's probes ask only on Linux")
+			}
+
+			owned(t)
+		})
+
+		t.Run(tc.name+" owns it, on any system", func(t *testing.T) {
+			orig := systemProbes
+			t.Cleanup(func() { systemProbes = orig })
+			systemProbes = packageProbes("linux")
+
+			owned(t)
+		})
+	}
 
 	t.Run("in a directory it can't write", func(t *testing.T) {
 		bin := filepath.Join(readOnlyDir(t), "upterm")
@@ -238,12 +289,8 @@ func runUpgrade(t *testing.T, args []string) error {
 func runUpgradeLoud(t *testing.T, args []string) error {
 	t.Helper()
 
-	logger, err := logging.New(logging.File(filepath.Join(t.TempDir(), "upterm.log")))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = logger.Close() })
-
 	cmd := upgradeCmd()
-	cmd.SetContext(uptermctx.WithLogger(context.Background(), logger))
+	cmd.SetContext(context.Background())
 
 	return cmd.RunE(cmd, args)
 }

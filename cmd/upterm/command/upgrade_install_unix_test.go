@@ -37,3 +37,11 @@ func TestCursorIsHiddenOnATerminalAndShownAgain(t *testing.T) {
 		t.Fatal("the terminal was sent no cursor escapes")
 	}
 }
+
+func TestProgressBarOnATerminal(t *testing.T) {
+	ptmx, tty, err := ptylib.Open()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ptmx.Close(); _ = tty.Close() })
+
+	require.NotNil(t, downloadProxy(tty))
+}

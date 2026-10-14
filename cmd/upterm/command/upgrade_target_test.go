@@ -171,9 +171,19 @@ func TestWritableDirIsAboutCreatingAFileBesideTheBinary(t *testing.T) {
 	require.ErrorIs(t, writableDir(filepath.Join(locked, "upterm")), fs.ErrPermission)
 }
 
-// fakeTool makes name the only command on PATH. It exits with status, but
-// only when run with exactly args; any other call exits 2.
+// fakeTool makes name the only command on PATH, and the only one the probes
+// can find. It exits with status, but only when run with exactly args; any
+// other call exits 2.
 func fakeTool(t *testing.T, name string, status int, args ...string) {
+	t.Helper()
+
+	t.Setenv("PATH", writeFakeTool(t, name, status, args...))
+	withToolFallbacks(t, nil)
+}
+
+// writeFakeTool writes the script fakeTool describes into a new directory and
+// returns the directory.
+func writeFakeTool(t *testing.T, name string, status int, args ...string) string {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -190,7 +200,18 @@ func fakeTool(t *testing.T, name string, status int, args ...string) {
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script.String()), 0o755))
-	t.Setenv("PATH", dir)
+
+	return dir
+}
+
+// withToolFallbacks sets where the probes look for a tool PATH doesn't have,
+// for the rest of the test.
+func withToolFallbacks(t *testing.T, fallbacks map[string]string) {
+	t.Helper()
+
+	orig := toolFallbacks
+	t.Cleanup(func() { toolFallbacks = orig })
+	toolFallbacks = fallbacks
 }
 
 func TestPackageProbesTrustTheToolsExitStatusOnLinux(t *testing.T) {
@@ -221,10 +242,54 @@ func TestPackageProbesSayNoWhenTheToolIsMissing(t *testing.T) {
 	}
 
 	t.Setenv("PATH", t.TempDir())
+	withToolFallbacks(t, nil)
 
 	p := packageProbes("linux")
 	require.False(t, p.dpkgOwns("/usr/bin/upterm"))
 	require.False(t, p.rpmOwns("/usr/bin/upterm"))
+}
+
+// root's PATH may lack /usr/bin, and a package-owned binary must not be
+// overwritten for that: a tool PATH doesn't have is tried where the system
+// keeps it, and one PATH does have is the one asked.
+func TestPackageProbesFallBackToWhereTheSystemKeepsTheTools(t *testing.T) {
+	const path = "/usr/bin/upterm"
+	for _, tc := range []struct {
+		tool  string
+		args  []string
+		probe func(probes) func(string) bool
+	}{
+		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }},
+		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }},
+	} {
+		t.Run(tc.tool+" only in the fallback", func(t *testing.T) {
+			for status, want := range map[int]bool{0: true, 1: false} {
+				t.Setenv("PATH", t.TempDir())
+				withToolFallbacks(t, map[string]string{
+					tc.tool: filepath.Join(writeFakeTool(t, tc.tool, status, tc.args...), tc.tool),
+				})
+
+				require.Equal(t, want, tc.probe(packageProbes("linux"))(path), "exits %d", status)
+			}
+		})
+
+		t.Run(tc.tool+" on PATH and in the fallback", func(t *testing.T) {
+			t.Setenv("PATH", writeFakeTool(t, tc.tool, 1, tc.args...))
+			withToolFallbacks(t, map[string]string{
+				tc.tool: filepath.Join(writeFakeTool(t, tc.tool, 0, tc.args...), tc.tool),
+			})
+
+			require.False(t, tc.probe(packageProbes("linux"))(path), "the fallback answered over PATH")
+		})
+	}
+}
+
+// The tools' fallback locations are where Linux distributions put them.
+func TestToolFallbacksAreTheSystemsOwnDirectory(t *testing.T) {
+	require.Equal(t, map[string]string{
+		"dpkg-query": "/usr/bin/dpkg-query",
+		"rpm":        "/usr/bin/rpm",
+	}, toolFallbacks)
 }
 
 // Off Linux the probes don't run the tools at all, so a tool that would

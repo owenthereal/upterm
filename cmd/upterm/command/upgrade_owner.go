@@ -49,17 +49,34 @@ func packageProbes(goos string) probes {
 	}
 }
 
+// toolFallbacks is where each package tool is when PATH doesn't have it. A
+// root's PATH may leave out /usr/bin, and a package-owned binary must not be
+// replaced for that. A var so a test can point it elsewhere.
+var toolFallbacks = map[string]string{
+	"dpkg-query": "/usr/bin/dpkg-query",
+	"rpm":        "/usr/bin/rpm",
+}
+
 // systemProbes ask this machine's package databases.
 var systemProbes = packageProbes(runtime.GOOS)
 
-// packageOwns reports whether the package tool exits 0 for args, on Linux. A
-// tool that isn't installed doesn't run, so it owns nothing.
+// packageOwns reports whether the package tool exits 0 for args, on Linux. The
+// tool is looked up on PATH, then in toolFallbacks; one that isn't found
+// doesn't run, so it owns nothing.
 func packageOwns(goos, tool string, args ...string) bool {
 	if goos != "linux" {
 		return false
 	}
 
-	return exec.Command(tool, args...).Run() == nil
+	exe, err := exec.LookPath(tool)
+	if err != nil {
+		var ok bool
+		if exe, ok = toolFallbacks[tool]; !ok {
+			return false
+		}
+	}
+
+	return exec.Command(exe, args...).Run() == nil
 }
 
 // confirmedOwner reports the package manager that owns path, only when its own
