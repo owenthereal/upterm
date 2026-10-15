@@ -250,10 +250,11 @@ type configProblem struct {
 // and returns every problem, sorted by key (a file that isn't YAML is one
 // problem, whole). Each names the file and ends on how to fix it. A key is a
 // problem when it is unknown, has no value, or holds a value its flag refuses;
-// and when its value passes the flag but fails a check a command makes before
-// running: host's server, join-timeout, and read-only with
-// allow-local-tcp-forwarding, made by the functions host itself calls. A file
-// that doesn't exist has no problems, as commands read it.
+// and when its value passes the flag but fails a check that the command it
+// belongs to makes before running (host's, and the session commands' output
+// format), made by the functions that command itself calls. The checks are
+// the table and the loop over the users below it. A file that doesn't exist
+// has no problems, as commands read it.
 //
 // It applies the file's values to the flags under root, so those flags hold
 // them afterwards: config edit's process exits after it.
