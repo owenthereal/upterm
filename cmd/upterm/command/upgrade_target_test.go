@@ -435,7 +435,66 @@ func TestToolFallbacksAreTheSystemsOwnDirectory(t *testing.T) {
 	require.Equal(t, map[string]string{
 		"dpkg-query": "/usr/bin/dpkg-query",
 		"rpm":        "/usr/bin/rpm",
-	}, toolFallbacks)
+	}, realToolFallbacks)
+}
+
+// The tests never run the machine's own package tools: a test that reaches
+// the probes without fakes would get an answer that depends on the machine.
+func TestTheSuiteHasNoPackageToolsToAsk(t *testing.T) {
+	require.Nil(t, systemProbes.dpkgOwns)
+	require.Nil(t, systemProbes.rpmOwns)
+	require.Empty(t, toolFallbacks)
+	require.NotNil(t, realSystemProbes.dpkgOwns, "TestMain keeps the real ones for the tests of them")
+}
+
+// A package tool runs with the words it says in English and the system's
+// directories after upterm's own PATH, so one found by the fallback can run its
+// helpers when upterm's PATH has none.
+func TestPackageToolsRunWithTheSystemDirectoriesOnPATH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake tools are shell scripts")
+	}
+
+	const path = "/usr/bin/upterm"
+	for _, tc := range []struct {
+		name string
+		// path is upterm's PATH, set once the tool is placed.
+		path func(toolDir string) string
+		// fallback is that the tool is found by the fallback, not PATH.
+		fallback bool
+		want     func(toolDir string) string
+	}{
+		{"found on PATH", func(dir string) string { return dir }, false,
+			func(dir string) string { return dir + ":/usr/sbin:/usr/bin:/sbin:/bin" }},
+		{"found by the fallback, PATH set", func(string) string { return "/some/dir" }, true,
+			func(string) string { return "/some/dir:/usr/sbin:/usr/bin:/sbin:/bin" }},
+		{"found by the fallback, PATH empty", func(string) string { return "" }, true,
+			func(string) string { return "/usr/sbin:/usr/bin:/sbin:/bin" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			seen := filepath.Join(t.TempDir(), "seen")
+			script := "#!/bin/sh\n" +
+				"printf '%s\\n%s\\n' \"$PATH\" \"$LC_ALL\" > " + shellQuoted(seen) + "\n" +
+				"exit 0\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte(script), 0o755))
+
+			t.Setenv("PATH", tc.path(dir))
+			if tc.fallback {
+				withToolFallbacks(t, map[string]string{"dpkg-query": filepath.Join(dir, "dpkg-query")})
+			} else {
+				withToolFallbacks(t, nil)
+			}
+
+			owned, err := packageProbes("linux").dpkgOwns(path)
+			require.NoError(t, err)
+			require.True(t, owned)
+
+			got, err := os.ReadFile(seen)
+			require.NoError(t, err)
+			require.Equal(t, tc.want(dir)+"\nC\n", string(got))
+		})
+	}
 }
 
 // Off Linux the probes don't run the tools at all, so a tool that would

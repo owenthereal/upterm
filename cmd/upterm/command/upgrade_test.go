@@ -230,6 +230,12 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 				t.Skip("the system's probes ask only on Linux")
 			}
 
+			// The probes the command has when it runs, in place of the
+			// stand-ins the tests have; the tool they run is the fake.
+			orig := systemProbes
+			t.Cleanup(func() { systemProbes = orig })
+			systemProbes = realSystemProbes
+
 			refused(t)
 		})
 

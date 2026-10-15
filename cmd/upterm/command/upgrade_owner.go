@@ -112,8 +112,7 @@ func packageOwns(goos, tool string, args []string, listsNothing func(status int,
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(exe, args...)
-	// The words rpm and dpkg-query say are the ones in their own language.
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = toolEnv()
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
 	err = cmd.Run()
@@ -138,6 +137,22 @@ func packageOwns(goos, tool string, args []string, listsNothing func(status int,
 	}
 
 	return false, fmt.Errorf("%s failed: %s", tool, failure)
+}
+
+// systemPath is where a Linux system keeps the programs its package tools run.
+const systemPath = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+// toolEnv is the environment a package tool runs in: upterm's own, with the
+// words it says in English (they are matched, see packageProbes), and with
+// systemPath after upterm's PATH, so a tool found by toolFallbacks can still
+// run the helpers it needs when upterm's PATH lacks them.
+func toolEnv() []string {
+	path := systemPath
+	if p := os.Getenv("PATH"); p != "" {
+		path = p + ":" + systemPath
+	}
+
+	return append(os.Environ(), "LC_ALL=C", "PATH="+path)
 }
 
 // unknownOwnerLine is what upgrade says when a package database can't be asked

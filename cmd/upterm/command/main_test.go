@@ -31,8 +31,24 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "command tests: this test binary was re-executed as a daemon; a test reached the real spawn instead of runHostInProcess")
 		os.Exit(2)
 	}
+
+	// No test runs the machine's own dpkg or rpm. upgrade asks them who owns
+	// the binary it would replace, and what they answer depends on the
+	// machine: one with rpm installed answers a test's temp file with
+	// an error of its own. A test of what upgrade does with a package tool
+	// puts a fake on PATH and swaps these back in itself.
+	realSystemProbes, realToolFallbacks = systemProbes, toolFallbacks
+	systemProbes, toolFallbacks = probes{}, nil
+
 	os.Exit(m.Run())
 }
+
+// realSystemProbes and realToolFallbacks are what the package has before
+// TestMain takes them out of the tests' reach.
+var (
+	realSystemProbes  probes
+	realToolFallbacks map[string]string
+)
 
 // startedAsDaemon reports whether this process's environment says it was
 // re-executed as the daemon.
