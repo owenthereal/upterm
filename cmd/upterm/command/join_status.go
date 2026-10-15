@@ -51,6 +51,9 @@ type joinStatus struct {
 	open    bool   // an in-place waiting line has been written without its end
 	line    string // the open waiting line
 	rows    int    // the rows it took as it was written: more than one when it wrapped
+	// countdown says the open line only counts down to the next try, which a
+	// first join's no-host line, a statement of its own, does not.
+	countdown bool
 	// cause is the last cause line written in this outage, which a session
 	// being ready again clears.
 	cause string
@@ -108,11 +111,17 @@ func (s *joinStatus) eol() string {
 func (s *joinStatus) event(e join.Event) {
 	now := s.now()
 	line := renderEvent(e, s.t, now, s.wait)
+	var cleared string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch e.Kind {
 	case join.Joined:
 		s.joined, s.dropped, s.hinted, s.cause = true, false, false, ""
+		// A rejoin takes the place of the countdown that was open: no further
+		// try happens. A first join only ends it, as it says nothing.
+		if e.Rejoin {
+			cleared = s.clearCountdown()
+		}
 	case join.Lost:
 		s.dropped = true
 	case join.Waiting:
@@ -133,7 +142,7 @@ func (s *joinStatus) event(e join.Event) {
 		}
 		if s.tty {
 			_, _ = io.WriteString(s.w, s.rewind()+cause+hint+line)
-			s.open, s.line, s.rows = true, line, s.rowsOf(line)
+			s.open, s.line, s.rows, s.countdown = true, line, s.rowsOf(line), !firstJoinWait(e)
 			return
 		}
 		_, _ = io.WriteString(s.w, cause+hint)
@@ -142,7 +151,7 @@ func (s *joinStatus) event(e join.Event) {
 	// the session's output starts at the margin.
 	s.endLine()
 	if line != "" {
-		_, _ = io.WriteString(s.w, line+s.eol())
+		_, _ = io.WriteString(s.w, cleared+line+s.eol())
 	}
 }
 
@@ -180,6 +189,20 @@ func (s *joinStatus) rowsOf(line string) int {
 		return 1
 	}
 	return (n + cols - 1) / cols
+}
+
+// clearCountdown takes an open countdown off the screen, and returns what
+// moves the cursor to where it started; "" when no countdown is open. A line
+// that ends a wait is written there instead of below it, since the countdown
+// says when a try will happen and none will. Any other open line stays. The
+// caller holds mu.
+func (s *joinStatus) clearCountdown() string {
+	if !s.open || !s.countdown {
+		return ""
+	}
+	wipe := s.rewind()
+	s.open = false
+	return wipe
 }
 
 // endLine ends an open waiting line, so that what follows starts a line of
@@ -235,10 +258,11 @@ func (w statusWriter) Write(p []byte) (int, error) {
 }
 
 // last writes the run's last line, once the terminal is restored. On a
-// terminal it starts a line of its own after a waiting line or a session's
-// output, as upterm attach's last line does. The write is bounded, because
-// stderr may be the terminal that just stopped taking output, and it waits
-// within that bound for a status line that join abandoned as it stopped.
+// terminal it starts a line of its own after a session's output or a waiting
+// line, as upterm attach's last line does, except that it takes the place of
+// an open countdown. The write is bounded, because stderr may be the terminal
+// that just stopped taking output, and it waits within that bound for a status
+// line that join abandoned as it stopped.
 func (s *joinStatus) last(line string) {
 	logging.Within(logging.LogBound, func() {
 		s.mu.Lock()
@@ -246,7 +270,9 @@ func (s *joinStatus) last(line string) {
 		text := line + "\n"
 		if s.tty {
 			text = line + "\r\n"
-			if s.open || s.joined {
+			if cleared := s.clearCountdown(); cleared != "" {
+				text = cleared + text
+			} else if s.open || s.joined {
 				text = "\r\n" + text
 			}
 		}
@@ -288,10 +314,13 @@ func nextIn(e join.Event, now time.Time) int {
 	return max(0, int(math.Ceil(e.Next.Sub(now).Seconds())))
 }
 
+// firstJoinWait is whether e is a first join waiting for a host.
+func firstJoinWait(e join.Event) bool { return e.Why == join.NoHost && e.First }
+
 // waitingLine is the line redrawn for a Waiting event: when the next try is,
 // or for a first join waiting for a host, that it has none yet.
 func waitingLine(e join.Event, t join.Target, now time.Time, wait bool) string {
-	if e.Why == join.NoHost && e.First {
+	if firstJoinWait(e) {
 		if wait {
 			return fmt.Sprintf("upterm: session %s has no host yet; waiting", t.SessionID())
 		}
@@ -306,7 +335,7 @@ func causeLine(e join.Event, t join.Target) string {
 	since := e.Since.Local().Format("15:04:05")
 	switch e.Why {
 	case join.NoHost:
-		if e.First {
+		if firstJoinWait(e) {
 			return ""
 		}
 		return fmt.Sprintf("upterm: waiting for the host since %s", since)

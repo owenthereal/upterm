@@ -370,8 +370,10 @@ func TestStatusRewritesTheWaitingLineInPlaceOnATerminal(t *testing.T) {
 	s.event(waiting(join.NoHost, 2))
 	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: time.Second})
 	out := b.String()
-	require.Equal(t, 2, strings.Count(out, "\r\033[K"))
-	require.Contains(t, out, "next try in 2 s\r\nupterm: rejoined after")
+	// The cause line's start, the two countdowns', and the countdown cleared
+	// for the line that ends the wait.
+	require.Equal(t, 3, strings.Count(out, "\r\033[K"))
+	require.Contains(t, out, "next try in 2 s\r\033[Kupterm: rejoined after")
 	require.True(t, strings.HasSuffix(out, "\r\n"))
 }
 
@@ -384,6 +386,84 @@ func TestStatusEndsTheWaitingLineWhenAFirstJoinSucceeds(t *testing.T) {
 	s.raw(true)
 	s.event(join.Event{Kind: join.Joined})
 	require.True(t, strings.HasSuffix(b.String(), "next try in 1 s\r\n"), "%q", b.String())
+}
+
+// What ends a wait, a rejoin or the run's last line, is written where the
+// open countdown was: the countdown says when a try will happen, and none
+// will. The cause above it, and the hint and the drop's line, stay.
+func TestAnEndingLineTakesTheOpenCountdownsPlace(t *testing.T) {
+	const (
+		lost     = "upterm: lost the connection (EOF); rejoining. Enter retries now, Ctrl-C stops."
+		cause    = "upterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused"
+		rejoined = "upterm: rejoined after 28s"
+		deadline = "upterm: can't reach relay.test: dial tcp 192.0.2.1:22: connect: connection refused"
+		stopped  = "upterm: stopped"
+	)
+	long := waitingAt(join.Unreachable, errRefused, 4)
+	long.Long = true
+	for _, tc := range []struct {
+		name string
+		end  func(*joinStatus)
+		line string
+	}{
+		{"a rejoin", func(s *joinStatus) { s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 28 * time.Second}) }, rejoined},
+		{"the first join's deadline", func(s *joinStatus) { s.last(deadline) }, deadline},
+		{"Ctrl-C", func(s *joinStatus) { s.last(stopped) }, stopped},
+	} {
+		for _, cols := range []int{80, 10} {
+			t.Run(fmt.Sprintf("%s at %d columns", tc.name, cols), func(t *testing.T) {
+				var b bytes.Buffer
+				s := newStatus(&b, true, mustTarget(t), false)
+				s.now = func() time.Time { return now }
+				s.columns = func() int { return cols }
+				s.event(waitingAt(join.Unreachable, errRefused, 8))
+				s.event(waitingAt(join.Unreachable, errRefused, 4))
+				tc.end(s)
+				require.Equal(t, append(wrapAt(cause, cols), wrapAt(tc.line, cols)...), screen(t, b.String(), cols))
+			})
+		}
+	}
+
+	// After a drop and a long wait, the lost line, the cause and the hint stay.
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 80 }
+	s.event(join.Event{Kind: join.Lost, Err: io.EOF})
+	s.event(waitingAt(join.Unreachable, io.EOF, 1))
+	s.event(waitingAt(join.Unreachable, errRefused, 8))
+	s.event(long)
+	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 28 * time.Second})
+	require.Equal(t, slices.Concat([]string{lost}, wrapAt(cause, 80), []string{longWaitLine, rejoined}), screen(t, b.String(), 80))
+
+	// Anywhere but a terminal there is nothing to clear: each is a line.
+	b.Reset()
+	s = newStatus(&b, false, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.event(waitingAt(join.Unreachable, errRefused, 8))
+	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 28 * time.Second})
+	s.last(stopped)
+	require.Equal(t, cause+"\nupterm: next try in 8 s\n"+rejoined+"\n"+stopped+"\n", b.String())
+}
+
+// A first join's no-host line is not a countdown: it says the session has no
+// host, which stays true when the run ends, so the last line goes below it.
+func TestALastLineLeavesAFirstJoinsNoHostLine(t *testing.T) {
+	first := join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: now.Add(8 * time.Second)}
+	const (
+		wait     = "upterm: session abc has no host yet; retrying for 30 s"
+		deadline = "upterm: no host is connected for session abc on relay.test. It may have ended, or the ID may be wrong."
+	)
+	for _, last := range []string{deadline, "upterm: stopped"} {
+		var b bytes.Buffer
+		s := newStatus(&b, true, mustTarget(t), false)
+		s.now = func() time.Time { return now }
+		s.columns = func() int { return 80 }
+		s.event(first)
+		s.event(first)
+		s.last(last)
+		require.Equal(t, append([]string{wait}, wrapAt(last, 80)...), screen(t, b.String(), 80))
+	}
 }
 
 // A countdown wider than the terminal wraps, and "\033[K" clears only the row
