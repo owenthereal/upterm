@@ -68,9 +68,9 @@ func writeEditor(t *testing.T, name, body string) string {
 // what the editor left in it, one line each, and exits 1 until the file is
 // fine.
 func TestConfigEditNamesWhatTheEditorLeftBehind(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
 	withConfig(t, "")
-	restoreHostFlags(t)
 	t.Setenv("VISUAL", "")
 	record := filepath.Join(t.TempDir(), "args")
 	t.Setenv("EDITOR_RECORD", record)
@@ -93,9 +93,9 @@ func TestConfigEditNamesWhatTheEditorLeftBehind(t *testing.T) {
 }
 
 func TestConfigEditNamesEveryProblemOnItsOwnLine(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
 	withConfig(t, "")
-	restoreHostFlags(t)
 	t.Setenv("VISUAL", "")
 	t.Setenv("EDITOR", writeEditor(t, "append", "for f; do :; done\nprintf 'zzz: 1\\njoin-timeout: -1s\\nbogus-key: 1\\n' >> \"$f\"\n"))
 	configPath := utils.UptermConfigFilePath()
@@ -111,6 +111,7 @@ func TestConfigEditNamesEveryProblemOnItsOwnLine(t *testing.T) {
 
 // An editor that fails is reported as that, not as a problem with the file.
 func TestConfigEditReportsAnEditorThatWillNotStart(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
 	withConfig(t, "")
 	t.Setenv("VISUAL", "")
@@ -121,16 +122,22 @@ func TestConfigEditReportsAnEditorThatWillNotStart(t *testing.T) {
 	require.Contains(t, stderr, "upterm: failed to open editor: ")
 }
 
-// An editor that exits with a failure is reported as that, and the file isn't
+// An editor that ends with a failure is reported as that, and the file isn't
 // checked: the editor may not have finished with it.
 func TestConfigEditDoesNotCheckTheFileAfterAFailingEditor(t *testing.T) {
+	restoreFlags(t)
 	setupSessionRoots(t)
 	withConfig(t, "")
-	restoreHostFlags(t)
 	t.Setenv("VISUAL", "")
-	t.Setenv("EDITOR", writeEditor(t, "fail", "for f; do :; done\necho 'bogus-key: 1' >> \"$f\"\nexit 1\n"))
+	configPath := utils.UptermConfigFilePath()
 
+	t.Setenv("EDITOR", writeEditor(t, "fail", "for f; do :; done\necho 'bogus-key: 1' >> \"$f\"\nexit 1\n"))
 	_, stderr, code := runCLI(t, "config", "edit")
 	require.Equal(t, 1, code)
-	require.Equal(t, "upterm: failed to open editor: exit status 1\n", stderr)
+	require.Equal(t, "upterm: the editor exited with status 1; "+configPath+" wasn't checked\n", stderr)
+
+	t.Setenv("EDITOR", writeEditor(t, "killed", "kill -9 $$\n"))
+	_, stderr, code = runCLI(t, "config", "edit")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: the editor ended with signal: killed; "+configPath+" wasn't checked\n", stderr)
 }

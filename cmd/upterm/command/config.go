@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -163,6 +165,15 @@ func configEditRunE(c *cobra.Command, args []string) error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		// An editor that started and ended badly may not be done with the
+		// file, so it isn't checked.
+		var ended *exec.ExitError
+		if errors.As(err, &ended) {
+			if code := ended.ExitCode(); code >= 0 {
+				return fmt.Errorf("the editor exited with status %d; %s wasn't checked", code, configPath)
+			}
+			return fmt.Errorf("the editor ended with %v; %s wasn't checked", ended, configPath)
+		}
 		return fmt.Errorf("failed to open editor: %w", err)
 	}
 
@@ -177,12 +188,13 @@ func configEditRunE(c *cobra.Command, args []string) error {
 
 // editorCommand is the command that opens path in the user's editor: $VISUAL
 // (for full-screen editors), then $EDITOR (for line editors), then the
-// platform's default; a variable that is blank counts as unset. The variable
-// may carry arguments, as in code --wait; editorWords splits it.
+// platform's default; a variable that is blank counts as unset, and the space
+// around a value is no part of it. The variable may carry arguments, as in
+// code --wait; editorWords splits it.
 func editorCommand(getenv func(string) string, path string) (*exec.Cmd, error) {
 	variable, line := "", defaultEditor()
 	for _, name := range []string{"VISUAL", "EDITOR"} {
-		if s := getenv(name); strings.TrimSpace(s) != "" {
+		if s := strings.TrimSpace(getenv(name)); s != "" {
 			variable, line = name, s
 			break
 		}
@@ -290,30 +302,73 @@ func validateConfigFile(root *cobra.Command, path string) []error {
 		}
 	}
 
-	// The checks a command makes before it runs, on the values just applied.
-	// A default passes them, so only the keys the file holds are checked, and
-	// not those already refused.
-	checked := func(names ...string) bool {
-		for _, name := range names {
-			if failed[name] || !slices.Contains(keys, name) {
-				return false
+	// The checks a command makes before it runs, on the values just applied. A
+	// default passes them, so a check runs only when the file holds the keys it
+	// reads, and none of them was refused above. A problem is named after the
+	// first key.
+	held := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		held[key] = true
+	}
+	for _, c := range []struct {
+		keys  []string
+		check func() error
+	}{
+		{[]string{"join-timeout"}, func() error { return validateJoinTimeout(flagJoinTimeout) }},
+		{[]string{"read-only", "allow-local-tcp-forwarding"}, func() error {
+			return validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding)
+		}},
+		// detach is judged on accept's value, unless accept is itself refused.
+		{[]string{"detach"}, func() error {
+			if failed["accept"] {
+				return nil
 			}
+			return validateDetachAccept(flagDetach, flagAccept)
+		}},
+		{[]string{"server"}, func() error { return validateServer(flagServer) }},
+		{[]string{"proxy"}, func() error { _, err := parseProxyURL(flagProxy); return err }},
+		{[]string{"escape-char"}, func() error { _, err := parseEscapeChar(flagHostEscapeChar); return err }},
+		{[]string{"pty-size"}, func() error {
+			if flagPtySize == "" {
+				return nil
+			}
+			_, err := termsize.Parse(flagPtySize)
+			return err
+		}},
+		{[]string{"force-command"}, func() error { _, err := parseForceCommand(flagForceCommand); return err }},
+		{[]string{"name"}, func() error { return validateSessionNameFlag(flagName) }},
+		// Valid for the commands that print a session, host's -o json among
+		// them; a command that wants more of it (host needs --detach) asks
+		// when it runs.
+		{[]string{"output"}, func() error {
+			if flagOutput == "" {
+				return nil
+			}
+			_, err := sessionOutput(flagOutput)
+			return err
+		}},
+	} {
+		runs := true
+		for _, key := range c.keys {
+			runs = runs && held[key] && !failed[key]
 		}
-		return true
-	}
-	if checked("join-timeout") {
-		if err := validateJoinTimeout(flagJoinTimeout); err != nil {
-			problem("join-timeout", "join-timeout: "+err.Error())
+		if !runs {
+			continue
+		}
+		if err := c.check(); err != nil {
+			problem(c.keys[0], c.keys[0]+": "+err.Error())
 		}
 	}
-	if checked("read-only", "allow-local-tcp-forwarding") {
-		if err := validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding); err != nil {
-			problem("read-only", "read-only: "+err.Error())
+	// Each user a flag names must be one host.ParseUserRef reads, as hosting
+	// does; the legacy per-service flags are keys too.
+	for _, flag := range userSpecs() {
+		if !held[flag.flag] || failed[flag.flag] {
+			continue
 		}
-	}
-	if checked("server") {
-		if err := validateServer(flagServer); err != nil {
-			problem("server", "server: "+err.Error())
+		for _, spec := range flag.specs {
+			if _, err := host.ParseUserRef(spec); err != nil {
+				problem(flag.flag, flag.flag+": "+err.Error())
+			}
 		}
 	}
 

@@ -364,10 +364,10 @@ func validateSessionNameFlag(name string) error {
 	return sessiondir.CheckSocketPath(utils.UptermRuntimeDir(), name)
 }
 
-// validateJoinTimeout, validateReadOnlyForwarding and validateServer are the
-// checks host makes on its flags' values before it runs. config edit calls
-// them on the values the config file sets, so a file it accepts is one host
-// accepts.
+// validateJoinTimeout, validateReadOnlyForwarding, validateDetachAccept and
+// validateServer are the checks host makes on its flags' values before it
+// runs. config edit calls them on the values the config file sets, so a file
+// it accepts is one host accepts.
 func validateJoinTimeout(d time.Duration) error {
 	if d < 0 {
 		return errors.New("--join-timeout cannot be negative; use 0 to wait forever")
@@ -378,6 +378,13 @@ func validateJoinTimeout(d time.Duration) error {
 func validateReadOnlyForwarding(readOnly, forwarding bool) error {
 	if readOnly && forwarding {
 		return errors.New("--read-only and --allow-local-tcp-forwarding cannot be used together: a read-only session must not permit network pivoting through the host")
+	}
+	return nil
+}
+
+func validateDetachAccept(detach, accept bool) error {
+	if detach && !accept {
+		return errors.New("--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
 	}
 	return nil
 }
@@ -439,8 +446,8 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		result = multierror.Append(result, err)
 	}
 
-	if flagDetach && !flagAccept {
-		result = multierror.Append(result, fmt.Errorf("--detach requires --accept: a session nobody is watching cannot be confirmed interactively"))
+	if err := validateDetachAccept(flagDetach, flagAccept); err != nil {
+		result = multierror.Append(result, err)
 	}
 	if flagHostOutput != "" && !flagDetach {
 		result = multierror.Append(result, fmt.Errorf("--output requires --detach"))
@@ -512,10 +519,8 @@ func parseHostOptions(args []string) (hostOptions, error) {
 			return opts, fmt.Errorf("no command is specified")
 		}
 	}
-	if flagForceCommand != "" {
-		if opts.forceCommand, err = shlex.Split(flagForceCommand); err != nil {
-			return opts, fmt.Errorf("error parsing command %s: %w", flagForceCommand, err)
-		}
+	if opts.forceCommand, err = parseForceCommand(flagForceCommand); err != nil {
+		return opts, err
 	}
 	if opts.refs, err = collectUserRefs(); err != nil {
 		return opts, err
@@ -530,6 +535,19 @@ func parseHostOptions(args []string) (hostOptions, error) {
 		return opts, err
 	}
 	return opts, nil
+}
+
+// parseForceCommand splits --force-command into the command it names; empty
+// names none.
+func parseForceCommand(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	command, err := shlex.Split(s)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing command %s: %w", s, err)
+	}
+	return command, nil
 }
 
 // resolveAuthorizedKeys reads the authorized keys file and fetches every
@@ -931,25 +949,40 @@ var legacyUserFlags = []struct {
 	{"srht-user", "srht", &flagSourceHutUsers},
 }
 
-func collectUserRefs() ([]host.UserRef, error) {
-	raw := append([]string{}, flagAuthorizedUsers...)
-	for _, lf := range legacyUserFlags {
-		for _, user := range *lf.values {
-			raw = append(raw, lf.provider+":"+user)
-		}
-	}
+// userFlagSpecs is the users one flag names, as host.ParseUserRef reads them.
+type userFlagSpecs struct {
+	flag  string
+	specs []string
+}
 
+// userSpecs is each user flag with the users it holds: --authorized-user, then
+// the legacy per-service flags, whose values are users of one service.
+func userSpecs() []userFlagSpecs {
+	specs := []userFlagSpecs{{"authorized-user", flagAuthorizedUsers}}
+	for _, lf := range legacyUserFlags {
+		var users []string
+		for _, user := range *lf.values {
+			users = append(users, lf.provider+":"+user)
+		}
+		specs = append(specs, userFlagSpecs{lf.flag, users})
+	}
+	return specs
+}
+
+func collectUserRefs() ([]host.UserRef, error) {
 	var (
 		refs []host.UserRef
 		errs error
 	)
-	for _, s := range raw {
-		ref, err := host.ParseUserRef(s)
-		if err != nil {
-			errs = multierror.Append(errs, err)
-			continue
+	for _, flag := range userSpecs() {
+		for _, s := range flag.specs {
+			ref, err := host.ParseUserRef(s)
+			if err != nil {
+				errs = multierror.Append(errs, err)
+				continue
+			}
+			refs = append(refs, ref)
 		}
-		refs = append(refs, ref)
 	}
 	if errs != nil {
 		return nil, errs

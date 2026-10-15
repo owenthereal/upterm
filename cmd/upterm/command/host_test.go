@@ -84,6 +84,20 @@ func Test_hostValueChecks(t *testing.T) {
 	require.NoError(t, validateReadOnlyForwarding(false, true))
 	require.ErrorContains(t, validateReadOnlyForwarding(true, true), "--read-only and --allow-local-tcp-forwarding cannot be used together")
 
+	require.NoError(t, validateDetachAccept(false, false))
+	require.NoError(t, validateDetachAccept(false, true))
+	require.NoError(t, validateDetachAccept(true, true))
+	require.EqualError(t, validateDetachAccept(true, false), "--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
+
+	command, err := parseForceCommand("tmux attach -t 'pair programming'")
+	require.NoError(t, err)
+	require.Equal(t, []string{"tmux", "attach", "-t", "pair programming"}, command)
+	command, err = parseForceCommand("")
+	require.NoError(t, err)
+	require.Nil(t, command)
+	_, err = parseForceCommand("'unclosed")
+	require.EqualError(t, err, "error parsing command 'unclosed: EOF found when expecting closing quote")
+
 	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://[::1]:2222", "ws://example.com", "wss://example.com:8443"} {
 		require.NoError(t, validateServer(ok), ok)
 	}

@@ -12,8 +12,9 @@ import (
 // which leave a path's backslashes alone: C:\Windows\notepad.exe is one word,
 // where POSIX quoting would eat the backslashes.
 func editorArgs(s string) ([]string, error) {
-	// For a blank line CommandLineToArgv answers with the running program's
-	// own path, which must not become the editor.
+	// x/sys answers "" with no words, but a line of only whitespace goes to
+	// CommandLineToArgv, which can answer a blank line with the running
+	// program's own path, and that must not become the editor.
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
 	}
