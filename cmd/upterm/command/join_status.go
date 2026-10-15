@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,11 +30,12 @@ const needsATerminal = "upterm: upterm join needs a terminal."
 
 // joinStatus is the Events seam: it writes each event as its line on
 // stderr, synchronously, so that Events returns once the line has been
-// written. On a terminal a waiting line is rewritten in place at each
-// attempt; anywhere else every event is a line of its own. What else upterm
-// join writes while it runs goes through it too (see writer and promptOut),
-// so that no two writes interleave and every line ends as the terminal's
-// mode needs.
+// written. A wait says its cause once, on a line of its own, when it first
+// appears or changes; on a terminal the line that counts down to the next try
+// is rewritten in place at each attempt, and anywhere else every event is a
+// line of its own. What else upterm join writes while it runs goes through it
+// too (see writer and promptOut), so that no two writes interleave and every
+// line ends as the terminal's mode needs.
 type joinStatus struct {
 	mu  sync.Mutex
 	w   io.Writer
@@ -49,11 +51,17 @@ type joinStatus struct {
 	open    bool   // an in-place waiting line has been written without its end
 	line    string // the open waiting line
 	rows    int    // the rows it took as it was written: more than one when it wrapped
+	// countdown says the open line only counts down to the next try, which a
+	// first join's no-host line, a statement of its own, does not.
+	countdown bool
+	// cause is the last cause line written in this outage, which a session
+	// being ready again clears.
+	cause string
 	// joined says a session has been ready, so its output may have left the
 	// cursor anywhere on the line.
 	joined bool
-	// dropped says the last line was a drop's, so the waiting line that
-	// follows it, which no attempt has tried yet, says only when the next is.
+	// dropped says the last line was a drop's, so the wait that follows it,
+	// which no attempt has tried yet, says no cause, only when the next try is.
 	dropped bool
 	// hinted says this outage's long wait has been told, which a session
 	// being ready again resets.
@@ -103,35 +111,47 @@ func (s *joinStatus) eol() string {
 func (s *joinStatus) event(e join.Event) {
 	now := s.now()
 	line := renderEvent(e, s.t, now, s.wait)
+	var cleared string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch e.Kind {
 	case join.Joined:
-		s.joined, s.dropped, s.hinted = true, false, false
+		s.joined, s.dropped, s.hinted, s.cause = true, false, false, ""
+		// A rejoin takes the place of the countdown that was open: no further
+		// try happens. A first join only ends it, as it says nothing.
+		if e.Rejoin {
+			cleared = s.clearCountdown()
+		}
 	case join.Lost:
 		s.dropped = true
 	case join.Waiting:
-		if s.dropped {
-			line, s.dropped = nextTryLine(e, now), false
+		// A cause is told when it first appears or changes, on a line of its
+		// own, where the open waiting line was: it has nothing left to say once
+		// the cause has changed. Straight after a drop no attempt has said what
+		// stops a rejoin, so the cause waits for the first attempt's result.
+		var cause string
+		if c := causeLine(e, s.t); c != "" && causeKey(c) != causeKey(s.cause) && !s.dropped {
+			cause, s.cause = c+s.eol(), c
 		}
-		// A long wait is told once, on a line of its own above the waiting
-		// line, which goes on being rewritten below it.
+		s.dropped = false
+		// A long wait is told once, on a line of its own above the countdown,
+		// which goes on being rewritten below it.
 		var hint string
 		if e.Long && !s.hinted {
 			hint, s.hinted = longWaitLine+s.eol(), true
 		}
 		if s.tty {
-			_, _ = io.WriteString(s.w, s.rewind()+hint+line)
-			s.open, s.line, s.rows = true, line, s.rowsOf(line)
+			_, _ = io.WriteString(s.w, s.rewind()+cause+hint+line)
+			s.open, s.line, s.rows, s.countdown = true, line, s.rowsOf(line), !firstJoinWait(e)
 			return
 		}
-		_, _ = io.WriteString(s.w, hint)
+		_, _ = io.WriteString(s.w, cause+hint)
 	}
 	// A first join says nothing, and still ends the waiting line, so that
 	// the session's output starts at the margin.
 	s.endLine()
 	if line != "" {
-		_, _ = io.WriteString(s.w, line+s.eol())
+		_, _ = io.WriteString(s.w, cleared+line+s.eol())
 	}
 }
 
@@ -169,6 +189,20 @@ func (s *joinStatus) rowsOf(line string) int {
 		return 1
 	}
 	return (n + cols - 1) / cols
+}
+
+// clearCountdown takes an open countdown off the screen, and returns what
+// moves the cursor to where it started; "" when no countdown is open. A line
+// that ends a wait is written there instead of below it, since the countdown
+// says when a try will happen and none will. Any other open line stays. The
+// caller holds mu.
+func (s *joinStatus) clearCountdown() string {
+	if !s.open || !s.countdown {
+		return ""
+	}
+	wipe := s.rewind()
+	s.open = false
+	return wipe
 }
 
 // endLine ends an open waiting line, so that what follows starts a line of
@@ -224,10 +258,11 @@ func (w statusWriter) Write(p []byte) (int, error) {
 }
 
 // last writes the run's last line, once the terminal is restored. On a
-// terminal it starts a line of its own after a waiting line or a session's
-// output, as upterm attach's last line does. The write is bounded, because
-// stderr may be the terminal that just stopped taking output, and it waits
-// within that bound for a status line that join abandoned as it stopped.
+// terminal it starts a line of its own after a session's output or a waiting
+// line, as upterm attach's last line does, except that it takes the place of
+// an open countdown. The write is bounded, because stderr may be the terminal
+// that just stopped taking output, and it waits within that bound for a status
+// line that join abandoned as it stopped.
 func (s *joinStatus) last(line string) {
 	logging.Within(logging.LogBound, func() {
 		s.mu.Lock()
@@ -235,7 +270,9 @@ func (s *joinStatus) last(line string) {
 		text := line + "\n"
 		if s.tty {
 			text = line + "\r\n"
-			if s.open || s.joined {
+			if cleared := s.clearCountdown(); cleared != "" {
+				text = cleared + text
+			} else if s.open || s.joined {
 				text = "\r\n" + text
 			}
 		}
@@ -245,7 +282,8 @@ func (s *joinStatus) last(line string) {
 }
 
 // renderEvent is e as the guest reads it; "" for an event that says nothing,
-// a first join. now is what "next try in N s" counts from; wait is --wait.
+// a first join. A Waiting event is the line redrawn at each attempt; its cause
+// is causeLine's. now is what "next try in N s" counts from; wait is --wait.
 func renderEvent(e join.Event, t join.Target, now time.Time, wait bool) string {
 	switch e.Kind {
 	case join.Joined:
@@ -261,15 +299,14 @@ func renderEvent(e join.Event, t join.Target, now time.Time, wait bool) string {
 	return ""
 }
 
-// nextTryLine is the waiting line straight after a drop, before any attempt
-// has said what stops a rejoin.
+// nextTryLine is the line redrawn at each attempt: when the next is.
 func nextTryLine(e join.Event, now time.Time) string {
 	return fmt.Sprintf("upterm: next try in %d s", nextIn(e, now))
 }
 
 // longWaitLine is said once an outage has lasted join's Timing.LongAfter. It
 // names no duration: Since is a wall-clock time, which a stepped clock would
-// make wrong, and the waiting line below it says since when.
+// make wrong, and the cause line above it says since when.
 const longWaitLine = "upterm: still waiting; the session may have ended or moved. Check with the host."
 
 // nextIn is the whole seconds from now to e's next attempt.
@@ -277,29 +314,54 @@ func nextIn(e join.Event, now time.Time) int {
 	return max(0, int(math.Ceil(e.Next.Sub(now).Seconds())))
 }
 
+// firstJoinWait is whether e is a first join waiting for a host.
+func firstJoinWait(e join.Event) bool { return e.Why == join.NoHost && e.First }
+
+// waitingLine is the line redrawn for a Waiting event: when the next try is,
+// or for a first join waiting for a host, that it has none yet.
 func waitingLine(e join.Event, t join.Target, now time.Time, wait bool) string {
+	if firstJoinWait(e) {
+		if wait {
+			return fmt.Sprintf("upterm: session %s has no host yet; waiting", t.SessionID())
+		}
+		return fmt.Sprintf("upterm: session %s has no host yet; retrying for 30 s", t.SessionID())
+	}
+	return nextTryLine(e, now)
+}
+
+// causeLine is the line that tells why a Waiting event waits; "" for a first
+// join waiting for a host, which has a line of its own (see waitingLine).
+func causeLine(e join.Event, t join.Target) string {
 	since := e.Since.Local().Format("15:04:05")
-	next := nextIn(e, now)
 	switch e.Why {
 	case join.NoHost:
-		switch {
-		case e.First && wait:
-			return fmt.Sprintf("upterm: session %s has no host yet; waiting", t.SessionID())
-		case e.First:
-			return fmt.Sprintf("upterm: session %s has no host yet; retrying for 30 s", t.SessionID())
+		if firstJoinWait(e) {
+			return ""
 		}
-		return fmt.Sprintf("upterm: waiting for the host since %s; next try in %d s", since, next)
+		return fmt.Sprintf("upterm: waiting for the host since %s", since)
 	case join.Unreachable:
-		return fmt.Sprintf("upterm: can't reach %s since %s (%v); next try in %d s", t.Relay(), since, e.Err, next)
+		return fmt.Sprintf("upterm: can't reach %s since %s: %v", t.Relay(), since, e.Err)
 	case join.RelayLookup:
-		return fmt.Sprintf("upterm: the relay can't look up sessions since %s; next try in %d s", since, next)
+		return fmt.Sprintf("upterm: the relay can't look up sessions since %s", since)
 	case join.Upstream:
-		return fmt.Sprintf("upterm: the relay can't reach the host since %s; next try in %d s", since, next)
+		return fmt.Sprintf("upterm: the relay can't reach the host since %s", since)
 	case join.IdentityFailure:
-		return fmt.Sprintf("upterm: your SSH agent can't sign since %s (%v); next try in %d s", since, agentCause(e.Err), next)
+		return fmt.Sprintf("upterm: your SSH agent can't sign since %s: %v", since, agentCause(e.Err))
 	}
 	// Setup, which is also what join makes of anything it doesn't recognise.
-	return fmt.Sprintf("upterm: can't start the session since %s (%v); next try in %d s", since, e.Err, next)
+	return fmt.Sprintf("upterm: can't start the session since %s: %v", since, e.Err)
+}
+
+// localEnd is the local end of a connection, as a net error names it: "read
+// tcp 192.0.2.9:51832->198.51.100.7:22". Each attempt connects from a port of
+// its own, so an error from a connection that was already made, as a
+// handshake's is, differs from the last attempt's in that port alone.
+var localEnd = regexp.MustCompile(`\b(tcp[46]?|udp[46]?|unix(?:gram|packet)?) \S+->`)
+
+// causeKey is what a cause is compared by to tell whether it has changed: the
+// line without the local end of the connection its error names.
+func causeKey(line string) string {
+	return localEnd.ReplaceAllString(line, "$1 ->")
 }
 
 // renderOutcome is how a run ended, as its last line and the exit status.
