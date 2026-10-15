@@ -1,6 +1,10 @@
 package command
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,12 +35,13 @@ func (o owner) refusal() string {
 	return "this upterm was installed by " + by + "; upgrade it with " + o.Upgrade
 }
 
-// probes run a package database; tests replace them. Each returns false when
-// the tool is missing or says the file isn't owned, and a nil probe never
-// claims a file.
+// probes run a package database; tests replace them. Each reports whether the
+// database lists the file. A tool that isn't installed lists nothing, but one
+// that runs and can't say, a database it can't open say, is an error: it
+// doesn't tell upterm the file is unowned. A nil probe never claims a file.
 type probes struct {
-	dpkgOwns func(path string) bool // dpkg-query -S PATH exits 0
-	rpmOwns  func(path string) bool // rpm -qf PATH exits 0
+	dpkgOwns func(path string) (bool, error)
+	rpmOwns  func(path string) (bool, error)
 }
 
 // packageProbes ask the package databases of a machine running goos. Only a
@@ -44,8 +49,18 @@ type probes struct {
 // on any other system they say no without running anything.
 func packageProbes(goos string) probes {
 	return probes{
-		dpkgOwns: func(path string) bool { return packageOwns(goos, "dpkg-query", "-S", path) },
-		rpmOwns:  func(path string) bool { return packageOwns(goos, "rpm", "-qf", path) },
+		// dpkg-query -S exits 0 for a listed file, 1 for one no package lists
+		// and 2 for a failure such as a database it can't read.
+		dpkgOwns: func(path string) (bool, error) {
+			return packageOwns(goos, "dpkg-query", []string{"-S", path},
+				func(status int, _ string) bool { return status == 1 })
+		},
+		// rpm -qf exits 1 both for a file no package lists and for a database
+		// it can't read; only what it says tells them apart.
+		rpmOwns: func(path string) (bool, error) {
+			return packageOwns(goos, "rpm", []string{"-qf", path},
+				func(_ int, output string) bool { return strings.Contains(output, "is not owned by any package") })
+		},
 	}
 }
 
@@ -60,43 +75,94 @@ var toolFallbacks = map[string]string{
 // systemProbes ask this machine's package databases.
 var systemProbes = packageProbes(runtime.GOOS)
 
-// packageOwns reports whether the package tool exits 0 for args, on Linux. The
+// packageOwns reports whether the package tool lists a file, on Linux: it does
+// when the tool exits 0. A tool that fails lists nothing only if listsNothing,
+// given its exit status and its output, says so; any other failure is an error
+// naming the tool, its exit status and the first line it wrote to stderr. The
 // tool is looked up on PATH, then in toolFallbacks; one that isn't found
 // doesn't run, so it owns nothing.
-func packageOwns(goos, tool string, args ...string) bool {
+func packageOwns(goos, tool string, args []string, listsNothing func(status int, output string) bool) (bool, error) {
 	if goos != "linux" {
-		return false
+		return false, nil
 	}
 
 	exe, err := exec.LookPath(tool)
 	if err != nil {
 		var ok bool
 		if exe, ok = toolFallbacks[tool]; !ok {
-			return false
+			return false, nil
 		}
 	}
 
-	return exec.Command(exe, args...).Run() == nil
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(exe, args...)
+	// The words rpm and dpkg-query say are the ones in their own language.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+
+	err = cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && listsNothing(exit.ExitCode(), stdout.String()+stderr.String()) {
+		return false, nil
+	}
+
+	failure := err.Error()
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			failure += ": " + line
+			break
+		}
+	}
+
+	return false, fmt.Errorf("%s failed: %s", tool, failure)
+}
+
+// unknownOwnerLine is what upgrade says when a package database can't be asked
+// whether it lists path, and err says why. It stops rather than replace what a
+// package might own.
+func unknownOwnerLine(path string, err error) string {
+	return fmt.Sprintf("can't check whether a package owns %s: %s; if a package manager installed it, upgrade it there", path, err)
 }
 
 // confirmedOwner reports the package manager that owns path, only when its own
 // structure or database says so: Homebrew's Cellar or Caskroom, a Scoop app
 // directory, or a dpkg or rpm database that lists the file. A path alone
-// proves nothing, so a binary in /usr/bin that no database lists is
-// unowned.
-func confirmedOwner(path string, p probes) (owner, bool) {
+// proves nothing, so a binary in /usr/bin that no database lists is unowned.
+// A database that can't be asked is an error, and the ones after it aren't
+// asked.
+func confirmedOwner(path string, p probes) (owner, bool, error) {
 	switch {
 	case inHomebrew(path):
-		return homebrew, true
+		return homebrew, true, nil
 	case scoopOwns(path):
-		return scoop, true
-	case p.dpkgOwns != nil && p.dpkgOwns(path):
-		return dpkg, true
-	case p.rpmOwns != nil && p.rpmOwns(path):
-		return rpm, true
+		return scoop, true, nil
 	}
 
-	return owner{}, false
+	for _, db := range []struct {
+		owns func(path string) (bool, error)
+		by   owner
+	}{{p.dpkgOwns, dpkg}, {p.rpmOwns, rpm}} {
+		if db.owns == nil {
+			continue
+		}
+
+		owned, err := db.owns(path)
+		if err != nil {
+			return owner{}, false, err
+		}
+		if owned {
+			return db.by, true, nil
+		}
+	}
+
+	return owner{}, false, nil
 }
 
 // inHomebrew reports whether path lies in upterm's own Cellar (formula) or

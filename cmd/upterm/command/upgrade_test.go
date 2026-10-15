@@ -173,25 +173,50 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 			"this upterm was installed by Homebrew; upgrade it with brew upgrade upterm")
 	})
 
-	// A binary a Linux package database lists is refused, through the probes
-	// the command really runs and the tools those run.
-	for _, tc := range []struct{ name, tool, flag, want string }{
-		{"dpkg", "dpkg-query", "-S", "this upterm was installed by the upterm package (dpkg); upgrade it with apt"},
-		{"rpm", "rpm", "-qf", "this upterm was installed by the upterm package (rpm); upgrade it with dnf or yum"},
+	// A binary a Linux package database lists, or that a database which can't
+	// be asked might list, is refused: through the probes the command really
+	// runs and the tools those run.
+	for _, tc := range []struct {
+		name, tool, flag string
+		status           int
+		stderr           string
+		// want is the line, for the binary at bin.
+		want func(bin string) string
+	}{
+		{"dpkg owns it", "dpkg-query", "-S", 0, "",
+			func(string) string {
+				return "this upterm was installed by the upterm package (dpkg); upgrade it with apt"
+			}},
+		{"rpm owns it", "rpm", "-qf", 0, "",
+			func(string) string {
+				return "this upterm was installed by the upterm package (rpm); upgrade it with dnf or yum"
+			}},
+		{"dpkg can't be asked", "dpkg-query", "-S", 2, "dpkg-query: error: the database is locked",
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": dpkg-query failed: exit status 2: dpkg-query: error: the database is locked; if a package manager installed it, upgrade it there"
+			}},
+		{"rpm can't be asked", "rpm", "-qf", 1, "error: cannot open Packages database in /var/lib/rpm",
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1: error: cannot open Packages database in /var/lib/rpm; if a package manager installed it, upgrade it there"
+			}},
+		{"rpm fails without a word", "rpm", "-qf", 1, "",
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1; if a package manager installed it, upgrade it there"
+			}},
 	} {
-		// owned runs upgrade on a binary the tool says the package owns: it
+		// refused runs upgrade on a binary the tool answers for as above: it
 		// is refused, GitHub isn't asked, nothing is probed for writing, and
 		// the binary and its directory are as they were.
-		owned := func(t *testing.T) {
+		refused := func(t *testing.T) {
 			bin := aStandaloneBinary(t)
 			require.NoError(t, os.WriteFile(bin, []byte("old"), 0o755))
-			fakeTool(t, tc.tool, 0, tc.flag, bin)
+			fakeToolSaying(t, tc.tool, tc.status, "", tc.stderr, tc.flag, bin)
 			withWritableDir(t, func(string) error {
 				t.Error("upgrade checked that it could write before it checked who owns the binary")
 				return nil
 			})
 
-			stops(t, func() (string, error) { return bin, nil }, tc.want)
+			stops(t, func() (string, error) { return bin, nil }, tc.want(bin))
 
 			got, err := os.ReadFile(bin)
 			require.NoError(t, err)
@@ -199,20 +224,20 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 			require.Equal(t, []string{"upterm"}, fileNames(t, filepath.Dir(bin)))
 		}
 
-		t.Run(tc.name+" owns it", func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			if runtime.GOOS != "linux" {
 				t.Skip("the system's probes ask only on Linux")
 			}
 
-			owned(t)
+			refused(t)
 		})
 
-		t.Run(tc.name+" owns it, on any system", func(t *testing.T) {
+		t.Run(tc.name+", on any system", func(t *testing.T) {
 			orig := systemProbes
 			t.Cleanup(func() { systemProbes = orig })
 			systemProbes = packageProbes("linux")
 
-			owned(t)
+			refused(t)
 		})
 	}
 

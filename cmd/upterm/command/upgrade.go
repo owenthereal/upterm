@@ -44,7 +44,11 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("can't find the running upterm: %w", err)
 	}
-	if o, ok := confirmedOwner(target, systemProbes); ok {
+	o, owned, err := confirmedOwner(target, systemProbes)
+	if err != nil {
+		return errors.New(unknownOwnerLine(target, err))
+	}
+	if owned {
 		return errors.New(o.refusal())
 	}
 	if err := writableDir(target); err != nil {

@@ -3,11 +3,15 @@ package command
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
 
 	"github.com/owenthereal/upterm/internal/version"
 	"golang.org/x/term"
@@ -31,22 +35,30 @@ func binaryName(goos string) string {
 }
 
 // installBinary takes the upterm binary at the root of the .tar.gz archive,
-// writes it beside target as target+".new" and renames it over target. No
-// other file in the archive is written, and whatever target is called, that
-// is the file replaced. The archive is read to its end first, so a damaged one
-// replaces nothing. A failure leaves target as it was, with nothing left
-// beside it, except on Windows when target can't be put back after being set
-// aside as target+".old" (the rename that does so is allowed while it runs);
+// writes it beside target under a name of its own (see uniqueFile) and renames
+// it over target. No other file in the archive is written, and whatever target
+// is called, that is the file replaced. The archive is read to its end first,
+// so a damaged one replaces nothing. A failure leaves target as it was, with
+// nothing left beside it, except on Windows when target can't be put back
+// after being set aside (the rename that does so is allowed while it runs);
 // see replaceRunning.
 func installBinary(archive, target, goos string) (err error) {
-	tmp := target + ".new"
+	staged, err := uniqueFile(target, "new")
+	if err != nil {
+		return err
+	}
+	tmp := staged.Name()
 	defer func() {
 		if err != nil {
 			_ = os.Remove(tmp)
 		}
 	}()
 
-	if err := extractBinary(archive, binaryName(goos), tmp); err != nil {
+	err = extractBinary(archive, binaryName(goos), staged)
+	if cerr := staged.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return err
 	}
 
@@ -57,9 +69,33 @@ func installBinary(archive, target, goos string) (err error) {
 	return renameFile(tmp, target)
 }
 
+// uniqueFile creates and opens a new file beside target, named
+// .<target's name>.<16 hex digits>.<ext>, with mode 0600. The name is taken
+// only if no file has it, so every caller gets a file of its own: two upgrades
+// running at once can't share one, and nothing that exists is opened,
+// written through or replaced.
+func uniqueFile(target, ext string) (*os.File, error) {
+	dir, base := filepath.Dir(target), filepath.Base(target)
+
+	for range 10 {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, err
+		}
+
+		name := "." + base + "." + hex.EncodeToString(random[:]) + "." + ext
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if !errors.Is(err, fs.ErrExist) {
+			return f, err
+		}
+	}
+
+	return nil, fmt.Errorf("no unused name beside %s", target)
+}
+
 // extractBinary writes the file named name at the root of the .tar.gz archive
-// to dst, and reads the rest of the archive.
-func extractBinary(archive, name, dst string) error {
+// to dst, and reads the rest of the archive. It leaves dst open.
+func extractBinary(archive, name string, dst *os.File) error {
 	f, err := os.Open(archive)
 	if err != nil {
 		return fmt.Errorf("opening the archive: %w", err)
@@ -104,33 +140,20 @@ func extractBinary(archive, name, dst string) error {
 	}
 }
 
-// writeExecutable creates path, which must not exist or is replaced, with
-// mode 0755 whatever the umask, fills it from r and syncs it. A file left by an
-// interrupted install is removed first, so nothing is written through it.
-func writeExecutable(path string, r io.Reader) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+// writeExecutable gives f mode 0755 whatever the umask, fills it from r and
+// syncs it. The caller closes it.
+func writeExecutable(f *os.File, r io.Reader) error {
+	if err := f.Chmod(0o755); err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-	if err != nil {
+	if _, err := io.Copy(f, archiveReader{r}); err != nil {
 		return err
 	}
 
-	err = f.Chmod(0o755)
-	if err == nil {
-		_, err = io.Copy(f, archiveReader{r})
-	}
 	// On disk before it is renamed into place, so a crash can't leave the
 	// name pointing at a file that never got its contents.
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-
-	return err
+	return f.Sync()
 }
 
 // archiveReader says "reading the archive" of the errors it gets from r, so
@@ -148,11 +171,23 @@ func (r archiveReader) Read(p []byte) (int, error) {
 
 // replaceRunning renames tmp over target, which may be running. Windows
 // refuses to overwrite or delete a running .exe but lets it be renamed, so
-// target is set aside as target+".old" first and the next upgrade removes it.
-// If tmp can't take its place, target is put back.
+// target is set aside first, under a name of its own that the next upgrade
+// removes (see removeStaleOld). If tmp can't take its place, target is put
+// back.
 func replaceRunning(tmp, target string) error {
-	old := target + ".old"
+	// The file reserves the name; renaming target onto it replaces it.
+	reserved, err := uniqueFile(target, "old")
+	if err != nil {
+		return err
+	}
+	old := reserved.Name()
+	if err := reserved.Close(); err != nil {
+		_ = os.Remove(old)
+		return err
+	}
+
 	if err := renameFile(target, old); err != nil {
+		_ = os.Remove(old)
 		return err
 	}
 
@@ -167,12 +202,27 @@ func replaceRunning(tmp, target string) error {
 	return nil
 }
 
-// removeStaleOld removes the binary a previous upgrade set aside, which on
-// Windows could not be deleted while it was running. It is only ever made
-// there, so elsewhere a file by that name is not upterm's to remove.
+// removeStaleOld removes the binaries earlier upgrades set aside beside
+// target, which on Windows could not be deleted while they were running. Only
+// the files named as replaceRunning names them are removed: a backup a user
+// keeps as target+".old" is not upterm's. They are only ever made on Windows,
+// so elsewhere nothing is removed.
 func removeStaleOld(target, goos string) {
-	if goos == "windows" {
-		_ = os.Remove(target + ".old")
+	if goos != "windows" {
+		return
+	}
+
+	dir := filepath.Dir(target)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	setAside := regexp.MustCompile(`^\.` + regexp.QuoteMeta(filepath.Base(target)) + `\.[0-9a-f]{16}\.old$`)
+	for _, e := range entries {
+		if e.Type().IsRegular() && setAside.MatchString(e.Name()) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 }
 

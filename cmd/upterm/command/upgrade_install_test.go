@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -117,6 +118,29 @@ func fileNames(t *testing.T, dir string) []string {
 	return names
 }
 
+// setAsideName matches the name upgrade gives, on Windows, to the binary it
+// replaces: hidden, its own, and unique to the run.
+func setAsideName(base string) *regexp.Regexp {
+	return regexp.MustCompile(`^\.` + regexp.QuoteMeta(base) + `\.[0-9a-f]{16}\.old$`)
+}
+
+// splitSetAside divides what dir holds into the binaries upgrade set aside
+// while replacing base, and everything else.
+func splitSetAside(t *testing.T, dir, base string) (rest, aside []string) {
+	t.Helper()
+
+	rest, aside = []string{}, []string{}
+	for _, name := range fileNames(t, dir) {
+		if setAsideName(base).MatchString(name) {
+			aside = append(aside, name)
+		} else {
+			rest = append(rest, name)
+		}
+	}
+
+	return rest, aside
+}
+
 // installCases are the platforms upgrade installs for and their name for the
 // binary in the archive.
 var installCases = []struct{ goos, binary string }{
@@ -171,16 +195,18 @@ func TestInstallWritesExactlyTheTarget(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "new", string(got))
 
-			want := []string{filepath.Base(target)}
+			rest, aside := splitSetAside(t, dir, filepath.Base(target))
+			require.Equal(t, []string{filepath.Base(target)}, rest)
 			if tc.goos == "windows" {
 				// The replaced binary may be the one running; it is set
 				// aside, not deleted.
-				want = append(want, filepath.Base(target)+".old")
-				old, err := os.ReadFile(target + ".old")
+				require.Len(t, aside, 1)
+				old, err := os.ReadFile(filepath.Join(dir, aside[0]))
 				require.NoError(t, err)
 				require.Equal(t, "old", string(old))
+			} else {
+				require.Empty(t, aside)
 			}
-			require.ElementsMatch(t, want, fileNames(t, dir))
 		})
 	}
 }
@@ -208,9 +234,8 @@ func TestInstallTakesOnlyTheBinaryAtTheRoot(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "new", string(got))
 
-			for _, name := range fileNames(t, dir) {
-				require.Contains(t, []string{tc.binary, tc.binary + ".old"}, name)
-			}
+			rest, _ := splitSetAside(t, dir, tc.binary)
+			require.Equal(t, []string{tc.binary}, rest)
 		})
 	}
 }
@@ -301,24 +326,18 @@ func TestAFailedRenameLeavesTheOldBinaryAndNothingElse(t *testing.T) {
 		goos   string
 		binary string
 		fails  func(target, from, to string) bool
-		// wantInErr is in the error: where the old binary is when it
-		// couldn't be put back.
-		wantInErr string
-		// wantNames is what the directory holds afterwards.
-		wantNames []string
+		// stranded is that the old binary couldn't be put back, so it is the
+		// one file left, set aside, and the error says where.
+		stranded bool
 	}{
 		{"linux, moving the new binary into place", "linux", "upterm",
-			func(target, _, to string) bool { return to == target },
-			"", []string{"upterm"}},
+			func(target, _, to string) bool { return to == target }, false},
 		{"windows, setting the old binary aside", "windows", "upterm.exe",
-			func(_, _, to string) bool { return strings.HasSuffix(to, ".old") },
-			"", []string{"upterm.exe"}},
+			func(_, _, to string) bool { return strings.HasSuffix(to, ".old") }, false},
 		{"windows, moving the new binary into place", "windows", "upterm.exe",
-			func(target, from, _ string) bool { return strings.HasSuffix(from, ".new") },
-			"", []string{"upterm.exe"}},
+			func(target, from, _ string) bool { return strings.HasSuffix(from, ".new") }, false},
 		{"windows, and the old binary can't be put back", "windows", "upterm.exe",
-			func(target, _, to string) bool { return to == target },
-			"upterm.exe.old", []string{"upterm.exe.old"}},
+			func(target, _, to string) bool { return to == target }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -336,21 +355,138 @@ func TestAFailedRenameLeavesTheOldBinaryAndNothingElse(t *testing.T) {
 
 			err := installBinary(tarball(t, tc.binary, "new"), target, tc.goos)
 			require.ErrorContains(t, err, "rename refused")
-			if tc.wantInErr != "" {
-				require.ErrorContains(t, err, filepath.Join(dir, tc.wantInErr))
+
+			rest, aside := splitSetAside(t, dir, tc.binary)
+			if tc.stranded {
+				require.Empty(t, rest)
+				require.Len(t, aside, 1)
+				require.ErrorContains(t, err, filepath.Join(dir, aside[0]))
+				old, rerr := os.ReadFile(filepath.Join(dir, aside[0]))
+				require.NoError(t, rerr)
+				require.Equal(t, "old", string(old))
+
+				return
 			}
 
-			require.Equal(t, tc.wantNames, fileNames(t, dir))
-			if tc.wantInErr == "" {
-				got, rerr := os.ReadFile(target)
-				require.NoError(t, rerr)
-				require.Equal(t, "old", string(got))
-			}
+			require.Equal(t, []string{tc.binary}, rest)
+			require.Empty(t, aside)
+			got, rerr := os.ReadFile(target)
+			require.NoError(t, rerr)
+			require.Equal(t, "old", string(got))
 		})
 	}
 }
 
-func TestOnlyWindowsClearsTheLastUpgradesOldBinary(t *testing.T) {
+// Two upgrades at once can't share a staging file: each stages under a name
+// of its own, so one finishing doesn't pull the file from under the other.
+func TestOverlappingInstallsStageUnderTheirOwnNames(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "upterm")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o755))
+
+	var staged []string
+	var inner error
+	nested := false
+
+	orig := renameFile
+	t.Cleanup(func() { renameFile = orig })
+	renameFile = func(from, to string) error {
+		staged = append(staged, filepath.Base(from))
+		if !nested {
+			// The other upgrade runs to its end while this one is about to
+			// move its staged file into place.
+			nested = true
+			inner = installBinary(tarball(t, "upterm", "second"), target, "linux")
+		}
+
+		return os.Rename(from, to)
+	}
+
+	require.NoError(t, installBinary(tarball(t, "upterm", "first"), target, "linux"))
+	require.NoError(t, inner)
+
+	require.Len(t, staged, 2)
+	require.NotEqual(t, staged[0], staged[1])
+	for _, name := range staged {
+		require.Regexp(t, `^\.upterm\.[0-9a-f]{16}\.new$`, name)
+	}
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "first", string(got), "the upgrade that renames last leaves its binary, and neither failed")
+	require.Equal(t, []string{"upterm"}, fileNames(t, dir))
+}
+
+// A file at the names an earlier upterm staged and set aside under, or one a
+// user keeps there, is not upgrade's to remove or write through.
+func TestInstallLeavesOtherFilesAtItsOldNamesAlone(t *testing.T) {
+	for _, tc := range installCases {
+		for _, ok := range []bool{true, false} {
+			name := tc.goos + "/installed"
+			if !ok {
+				name = tc.goos + "/failed"
+			}
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				target := filepath.Join(dir, tc.binary)
+				require.NoError(t, os.WriteFile(target, []byte("old"), 0o755))
+
+				mine := map[string]string{
+					tc.binary + ".new": "a staged file",
+					tc.binary + ".old": "a backup",
+					".upterm.old":      "a hidden backup",
+				}
+				for n, c := range mine {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, n), []byte(c), 0o644))
+				}
+
+				archive := tarball(t, tc.binary, "new")
+				if !ok {
+					archive = tarball(t, "LICENSE", "no binary")
+				}
+				err := installBinary(archive, target, tc.goos)
+				if ok {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+
+				for n, c := range mine {
+					got, rerr := os.ReadFile(filepath.Join(dir, n))
+					require.NoError(t, rerr, n)
+					require.Equal(t, c, string(got), n)
+				}
+			})
+		}
+	}
+}
+
+// Nothing is written through a link planted at the name staging used to have.
+func TestInstallDoesNotWriteThroughALinkAtTheOldStagingName(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "upterm")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o755))
+
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	require.NoError(t, os.WriteFile(elsewhere, []byte("not upterm's"), 0o644))
+	if err := os.Symlink(elsewhere, target+".new"); err != nil {
+		t.Skipf("this account can't create symlinks: %v", err)
+	}
+
+	require.NoError(t, installBinary(tarball(t, "upterm", "new"), target, "linux"))
+
+	got, err := os.ReadFile(elsewhere)
+	require.NoError(t, err)
+	require.Equal(t, "not upterm's", string(got))
+	_, err = os.Lstat(target + ".new")
+	require.NoError(t, err, "the link is still there")
+}
+
+// What an earlier upgrade set aside is removed on Windows, and nothing else:
+// a backup a user keeps as upterm.exe.old, or anything near its name, is theirs.
+func TestOnlyWindowsClearsWhatUpgradeSetAside(t *testing.T) {
+	const ours = ".upterm.0123456789abcdef.old"
+
 	for _, tc := range []struct {
 		goos string
 		kept bool
@@ -359,17 +495,47 @@ func TestOnlyWindowsClearsTheLastUpgradesOldBinary(t *testing.T) {
 			dir := t.TempDir()
 			target := filepath.Join(dir, "upterm")
 			require.NoError(t, os.WriteFile(target, []byte("new"), 0o755))
-			require.NoError(t, os.WriteFile(target+".old", []byte("old"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ours), []byte("old"), 0o755))
+
+			theirs := []string{
+				"upterm.old",                          // the plain name
+				".upterm.old",                         // hidden, but no run's name
+				"upterm.0123456789abcdef.old",         // not hidden
+				".upterm.xyz.old",                     // not a run's name
+				".upterm.0123456789abcde.old",         // too short
+				".upterm.0123456789abcdef0.old",       // too long
+				".upterm.AAAAAAAAAAAAAAAA.old",        // not lower case
+				".upterm.0123456789abcdef.old.bak",    // something else after it
+				".upterm.0123456789abcdef.new",        // a staging name
+				".uptermd.0123456789abcdef.old",       // another program's
+				"x.upterm.0123456789abcdef.old",       // something before it
+				".upterm.0123456789abcdef.old.d/file", // inside a directory below
+			}
+			for _, n := range theirs {
+				path := filepath.Join(dir, filepath.FromSlash(n))
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte("theirs"), 0o644))
+			}
+			// A directory by our name is not a file we set aside.
+			require.NoError(t, os.Mkdir(filepath.Join(dir, ".upterm.fedcba9876543210.old"), 0o755))
 
 			removeStaleOld(target, tc.goos)
 
-			_, err := os.Stat(target + ".old")
+			_, err := os.Stat(filepath.Join(dir, ours))
 			require.Equal(t, tc.kept, err == nil)
+			for _, n := range theirs {
+				got, rerr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(n)))
+				require.NoError(t, rerr, n)
+				require.Equal(t, "theirs", string(got), n)
+			}
+			_, err = os.Stat(filepath.Join(dir, ".upterm.fedcba9876543210.old"))
+			require.NoError(t, err)
 			_, err = os.Stat(target)
 			require.NoError(t, err)
 
-			// Nothing to clear is not a problem.
+			// Nothing to clear, or nowhere to look, is not a problem.
 			removeStaleOld(filepath.Join(dir, "other"), tc.goos)
+			removeStaleOld(filepath.Join(dir, "missing", "upterm"), tc.goos)
 		})
 	}
 }
@@ -526,11 +692,13 @@ func TestUpgradeReplacesTheRunningBinaryAndSaysWhichWay(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "on PATH", string(got))
 
-			want := []string{"upterm-dev"}
+			rest, aside := splitSetAside(t, dir, "upterm-dev")
+			require.Equal(t, []string{"upterm-dev"}, rest)
 			if runtime.GOOS == "windows" {
-				want = append(want, "upterm-dev.old")
+				require.Len(t, aside, 1)
+			} else {
+				require.Empty(t, aside)
 			}
-			require.ElementsMatch(t, want, fileNames(t, dir))
 
 			// The downloaded archive is gone.
 			require.Empty(t, fileNames(t, tmp))
@@ -592,6 +760,45 @@ func TestUpgradeWithoutAVersionLeavesABuildNewerThanTheLatestRelease(t *testing.
 	}
 }
 
+// A package tool that says no package lists the binary is no reason to stop.
+func TestUpgradeGoesAheadWhenThePackageToolSaysNobodyOwnsTheBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, flag string
+		status           int
+		stdout, stderr   string
+	}{
+		{"dpkg lists nothing", "dpkg-query", "-S", 1, "", "dpkg-query: no path found matching pattern /tmp/upterm"},
+		{"rpm says on stdout that no package has it", "rpm", "-qf", 1, rpmNotOwned, ""},
+		{"rpm says on stderr that no package has it", "rpm", "-qf", 1, "", rpmNotOwned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := systemProbes
+			t.Cleanup(func() { systemProbes = orig })
+			systemProbes = packageProbes("linux")
+
+			withVersion(t, "0.37.0")
+			withTempDir(t)
+			base, downloads := releaseOf(t, "v0.38.0", tarball(t, archiveName(), "new"))
+			withGitHub(t, base)
+
+			target := filepath.Join(t.TempDir(), "upterm")
+			require.NoError(t, os.WriteFile(target, []byte("old"), 0o755))
+			withRunningBinary(t, target)
+			fakeToolSaying(t, tc.tool, tc.status, tc.stdout, tc.stderr, tc.flag, target)
+
+			var err error
+			out := captureStdout(t, func() { err = runUpgradeLoud(t, nil) })
+			require.NoError(t, err)
+			require.Equal(t, "Upgraded upterm 0.37.0 to 0.38.0\n", out)
+
+			require.EqualValues(t, 1, downloads.Load())
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "new", string(got))
+		})
+	}
+}
+
 func TestUpgradeThatCantInstallLeavesTheBinaryAndRemovesTheDownload(t *testing.T) {
 	withVersion(t, "0.37.0")
 	tmp := withTempDir(t)
@@ -616,10 +823,10 @@ func TestUpgradeThatCantInstallLeavesTheBinaryAndRemovesTheDownload(t *testing.T
 	require.Empty(t, fileNames(t, tmp))
 }
 
-// An upgrade clears the previous one's set-aside binary on Windows, where it
-// couldn't be deleted while it was running, and touches no such file
-// elsewhere.
-func TestUpgradeClearsTheLastUpgradesOldBinaryOnWindowsOnly(t *testing.T) {
+// An upgrade clears the binary the previous one set aside on Windows, where
+// it couldn't be deleted while it was running, and touches no such file
+// elsewhere, nor a plain upterm.old anywhere.
+func TestUpgradeClearsOnlyTheBinaryAnEarlierUpgradeSetAside(t *testing.T) {
 	withVersion(t, "0.38.0")
 	withTempDir(t)
 	base, _ := releaseOf(t, "v0.38.0", tarball(t, archiveName(), "new"))
@@ -628,14 +835,19 @@ func TestUpgradeClearsTheLastUpgradesOldBinaryOnWindowsOnly(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "upterm")
 	require.NoError(t, os.WriteFile(target, nil, 0o755))
-	require.NoError(t, os.WriteFile(target+".old", []byte("old"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".upterm.0123456789abcdef.old"), []byte("old"), 0o755))
+	require.NoError(t, os.WriteFile(target+".old", []byte("a backup"), 0o644))
 	withRunningBinary(t, target)
 
 	require.NoError(t, runUpgrade(t, nil))
 
-	want := []string{"upterm", "upterm.old"}
+	want := []string{"upterm", "upterm.old", ".upterm.0123456789abcdef.old"}
 	if runtime.GOOS == "windows" {
-		want = []string{"upterm"}
+		want = []string{"upterm", "upterm.old"}
 	}
 	require.ElementsMatch(t, want, fileNames(t, dir))
+
+	backup, err := os.ReadFile(target + ".old")
+	require.NoError(t, err)
+	require.Equal(t, "a backup", string(backup))
 }

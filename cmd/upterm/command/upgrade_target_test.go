@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -35,26 +36,74 @@ func TestUpgradeTargetResolvesSymlinks(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+// ownerOf is confirmedOwner for a case that has no failing probe.
+func ownerOf(t *testing.T, path string, p probes) (owner, bool) {
+	t.Helper()
+
+	o, ok, err := confirmedOwner(path, p)
+	require.NoError(t, err, path)
+
+	return o, ok
+}
+
+// answers is a probe that always gives the same answer.
+func answers(owned bool, err error) func(string) (bool, error) {
+	return func(string) (bool, error) { return owned, err }
+}
+
 func TestManagedInstallsAreRefusedWithTheirCommand(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/opt/homebrew/Caskroom/upterm/0.38.0/upterm", "brew upgrade upterm"},
 		{"/home/linuxbrew/.linuxbrew/Cellar/upterm/0.38.0/bin/upterm", "brew upgrade upterm"},
 	} {
-		o, ok := confirmedOwner(tc.path, probes{})
+		o, ok := ownerOf(t, tc.path, probes{})
 		require.True(t, ok, tc.path)
 		require.Equal(t, tc.want, o.Upgrade)
 	}
 
-	o, ok := confirmedOwner("/usr/bin/upterm", probes{dpkgOwns: func(string) bool { return true }})
+	o, ok := ownerOf(t, "/usr/bin/upterm", probes{dpkgOwns: answers(true, nil)})
 	require.True(t, ok)
 	require.Equal(t, "dpkg", o.Name)
 
-	o, ok = confirmedOwner("/usr/bin/upterm", probes{
-		dpkgOwns: func(string) bool { return false },
-		rpmOwns:  func(string) bool { return true },
+	o, ok = ownerOf(t, "/usr/bin/upterm", probes{
+		dpkgOwns: answers(false, nil),
+		rpmOwns:  answers(true, nil),
 	})
 	require.True(t, ok)
 	require.Equal(t, "rpm", o.Name)
+}
+
+// A package database that can't be asked is neither a yes nor a no: the
+// answer is the error, and nothing else is asked after it.
+func TestAPackageDatabaseThatCantBeAskedIsNotAnAnswer(t *testing.T) {
+	failed := errors.New("dpkg-query failed: exit status 2")
+	rpmAsked := func(string) (bool, error) {
+		t.Error("rpm was asked after dpkg couldn't answer")
+		return true, nil
+	}
+
+	_, ok, err := confirmedOwner("/usr/bin/upterm", probes{dpkgOwns: answers(false, failed), rpmOwns: rpmAsked})
+	require.False(t, ok)
+	require.ErrorIs(t, err, failed)
+
+	failed = errors.New("rpm failed: exit status 1")
+	_, ok, err = confirmedOwner("/usr/bin/upterm", probes{dpkgOwns: answers(false, nil), rpmOwns: answers(false, failed)})
+	require.False(t, ok)
+	require.ErrorIs(t, err, failed)
+
+	// Homebrew and Scoop are known from the path's own structure, with no
+	// database to ask.
+	broken := probes{dpkgOwns: answers(false, failed), rpmOwns: answers(false, failed)}
+	o, ok, err := confirmedOwner("/opt/homebrew/Cellar/upterm/0.38.0/bin/upterm", broken)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, homebrew, o)
+}
+
+func TestUnknownOwnerLineNamesTheFileAndTheToolsFailure(t *testing.T) {
+	require.Equal(t,
+		"can't check whether a package owns /usr/bin/upterm: dpkg-query failed: exit status 2: dpkg-query: error: the database is locked; if a package manager installed it, upgrade it there",
+		unknownOwnerLine("/usr/bin/upterm", errors.New("dpkg-query failed: exit status 2: dpkg-query: error: the database is locked")))
 }
 
 func TestHomebrewOwnsOnlyUptermsOwnDirectories(t *testing.T) {
@@ -64,7 +113,7 @@ func TestHomebrewOwnsOnlyUptermsOwnDirectories(t *testing.T) {
 		"/opt/homebrew/Cellar/other/0.1.0/bin/upterm",
 		"/home/me/Cellar/upterm",
 	} {
-		_, ok := confirmedOwner(path, probes{})
+		_, ok := ownerOf(t, path, probes{})
 		require.False(t, ok, path)
 	}
 }
@@ -81,7 +130,7 @@ func TestScoopUnderACustomRootIsConfirmedByItsMetadata(t *testing.T) {
 		for _, n := range names {
 			require.NoError(t, os.WriteFile(filepath.Join(app, n), []byte("{}"), 0o644))
 		}
-		o, ok := confirmedOwner(bin, probes{})
+		o, ok := ownerOf(t, bin, probes{})
 		require.True(t, ok, names)
 		require.Equal(t, "scoop update upterm", o.Upgrade)
 		for _, n := range names {
@@ -116,9 +165,9 @@ func TestScoopNeedsItsAppDirectoryAndBothMetadataFiles(t *testing.T) {
 }
 
 func TestAStandaloneBinaryInUsrBinIsNotClaimedForAnyManager(t *testing.T) {
-	_, ok := confirmedOwner("/usr/bin/upterm", probes{dpkgOwns: func(string) bool { return false }, rpmOwns: func(string) bool { return false }})
+	_, ok := ownerOf(t, "/usr/bin/upterm", probes{dpkgOwns: answers(false, nil), rpmOwns: answers(false, nil)})
 	require.False(t, ok)
-	_, ok = confirmedOwner("/usr/bin/upterm", probes{})
+	_, ok = ownerOf(t, "/usr/bin/upterm", probes{})
 	require.False(t, ok, "tools that are missing own nothing")
 }
 
@@ -177,13 +226,26 @@ func TestWritableDirIsAboutCreatingAFileBesideTheBinary(t *testing.T) {
 func fakeTool(t *testing.T, name string, status int, args ...string) {
 	t.Helper()
 
-	t.Setenv("PATH", writeFakeTool(t, name, status, args...))
+	fakeToolSaying(t, name, status, "", "", args...)
+}
+
+// fakeToolSaying is fakeTool for a tool that also writes stdout and stderr
+// (each a line, when not empty) before it exits.
+func fakeToolSaying(t *testing.T, name string, status int, stdout, stderr string, args ...string) {
+	t.Helper()
+
+	t.Setenv("PATH", writeFakeTool(t, name, status, stdout, stderr, args...))
 	withToolFallbacks(t, nil)
 }
 
-// writeFakeTool writes the script fakeTool describes into a new directory and
-// returns the directory.
-func writeFakeTool(t *testing.T, name string, status int, args ...string) string {
+// shellQuoted is s as one word of a shell script.
+func shellQuoted(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// writeFakeTool writes the script fakeToolSaying describes into a new
+// directory and returns the directory.
+func writeFakeTool(t *testing.T, name string, status int, stdout, stderr string, args ...string) string {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -194,7 +256,13 @@ func writeFakeTool(t *testing.T, name string, status int, args ...string) string
 	script.WriteString("#!/bin/sh\n")
 	fmt.Fprintf(&script, "[ \"$#\" = %d ] || exit 2\n", len(args))
 	for i, a := range args {
-		fmt.Fprintf(&script, "[ \"$%d\" = '%s' ] || exit 2\n", i+1, a)
+		fmt.Fprintf(&script, "[ \"$%d\" = %s ] || exit 2\n", i+1, shellQuoted(a))
+	}
+	if stdout != "" {
+		fmt.Fprintf(&script, "printf '%%s\\n' %s\n", shellQuoted(stdout))
+	}
+	if stderr != "" {
+		fmt.Fprintf(&script, "printf '%%s\\n' %s >&2\n", shellQuoted(stderr))
 	}
 	fmt.Fprintf(&script, "exit %d\n", status)
 
@@ -214,28 +282,63 @@ func withToolFallbacks(t *testing.T, fallbacks map[string]string) {
 	toolFallbacks = fallbacks
 }
 
-func TestPackageProbesTrustTheToolsExitStatusOnLinux(t *testing.T) {
-	const path = "/usr/bin/upterm"
-	for _, tc := range []struct {
-		tool   string
-		args   []string
-		probe  func(probes) func(string) bool
-		status int
-		want   bool
-	}{
-		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }, 0, true},
-		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }, 1, false},
-		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }, 0, true},
-		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }, 1, false},
-	} {
-		t.Run(fmt.Sprintf("%s exits %d", tc.tool, tc.status), func(t *testing.T) {
-			fakeTool(t, tc.tool, tc.status, tc.args...)
+// rpmNotOwned is what rpm says, on stdout, of a file no package lists.
+const rpmNotOwned = "file /usr/bin/upterm is not owned by any package"
 
-			require.Equal(t, tc.want, tc.probe(packageProbes("linux"))(path))
+// dpkg-query: 0 is owned, 1 is not owned, anything else is that it couldn't
+// say. rpm: 0 is owned, a failure whose output says the file is not owned by
+// any package is not owned, and any other failure is that it couldn't say.
+func TestPackageProbesAnswerFromTheToolsOwnWordsOnLinux(t *testing.T) {
+	const path = "/usr/bin/upterm"
+	dpkgProbe := func(p probes) func(string) (bool, error) { return p.dpkgOwns }
+	rpmProbe := func(p probes) func(string) (bool, error) { return p.rpmOwns }
+
+	for _, tc := range []struct {
+		name           string
+		tool           string
+		args           []string
+		probe          func(probes) func(string) (bool, error)
+		status         int
+		stdout, stderr string
+		owned          bool
+		failure        string // the error's text; empty when the tool could say
+	}{
+		{"dpkg lists it", "dpkg-query", []string{"-S", path}, dpkgProbe, 0, "upterm: /usr/bin/upterm", "", true, ""},
+		{"dpkg lists nothing", "dpkg-query", []string{"-S", path}, dpkgProbe, 1, "", "dpkg-query: no path found matching pattern /usr/bin/upterm", false, ""},
+		{"dpkg has a fatal error", "dpkg-query", []string{"-S", path}, dpkgProbe, 2, "", "dpkg-query: error: the database is locked\nsecond line", false,
+			"dpkg-query failed: exit status 2: dpkg-query: error: the database is locked"},
+		{"dpkg has a fatal error and says nothing", "dpkg-query", []string{"-S", path}, dpkgProbe, 2, "", "", false,
+			"dpkg-query failed: exit status 2"},
+		{"dpkg fails some other way", "dpkg-query", []string{"-S", path}, dpkgProbe, 3, "", "  \n  padded line  \n", false,
+			"dpkg-query failed: exit status 3: padded line"},
+
+		{"rpm lists it", "rpm", []string{"-qf", path}, rpmProbe, 0, "upterm-0.38.0-1.x86_64", "", true, ""},
+		{"rpm says on stdout that no package has it", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, "", false, ""},
+		{"rpm says on stderr that no package has it", "rpm", []string{"-qf", path}, rpmProbe, 1, "", rpmNotOwned, false, ""},
+		{"rpm says it with another status", "rpm", []string{"-qf", path}, rpmProbe, 2, rpmNotOwned, "", false, ""},
+		{"rpm can't open its database", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "error: cannot open Packages database in /var/lib/rpm", false,
+			"rpm failed: exit status 1: error: cannot open Packages database in /var/lib/rpm"},
+		{"rpm fails and says nothing", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "", false,
+			"rpm failed: exit status 1"},
+		{"rpm can't find the file", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "error: file /usr/bin/upterm: No such file or directory", false,
+			"rpm failed: exit status 1: error: file /usr/bin/upterm: No such file or directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeToolSaying(t, tc.tool, tc.status, tc.stdout, tc.stderr, tc.args...)
+
+			owned, err := tc.probe(packageProbes("linux"))(path)
+			require.Equal(t, tc.owned, owned)
+			if tc.failure == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.failure)
+			}
 		})
 	}
 }
 
+// A tool that isn't installed doesn't run, and owns nothing: it can't have
+// installed upterm.
 func TestPackageProbesSayNoWhenTheToolIsMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("probes ask nothing here")
@@ -245,8 +348,24 @@ func TestPackageProbesSayNoWhenTheToolIsMissing(t *testing.T) {
 	withToolFallbacks(t, nil)
 
 	p := packageProbes("linux")
-	require.False(t, p.dpkgOwns("/usr/bin/upterm"))
-	require.False(t, p.rpmOwns("/usr/bin/upterm"))
+	owned, err := p.dpkgOwns("/usr/bin/upterm")
+	require.NoError(t, err)
+	require.False(t, owned)
+	owned, err = p.rpmOwns("/usr/bin/upterm")
+	require.NoError(t, err)
+	require.False(t, owned)
+
+	// Nor does one the fallback names but the system doesn't have.
+	withToolFallbacks(t, map[string]string{
+		"dpkg-query": filepath.Join(t.TempDir(), "dpkg-query"),
+		"rpm":        filepath.Join(t.TempDir(), "rpm"),
+	})
+	owned, err = p.dpkgOwns("/usr/bin/upterm")
+	require.NoError(t, err)
+	require.False(t, owned)
+	owned, err = p.rpmOwns("/usr/bin/upterm")
+	require.NoError(t, err)
+	require.False(t, owned)
 }
 
 // root's PATH may lack /usr/bin, and a package-owned binary must not be
@@ -257,29 +376,40 @@ func TestPackageProbesFallBackToWhereTheSystemKeepsTheTools(t *testing.T) {
 	for _, tc := range []struct {
 		tool  string
 		args  []string
-		probe func(probes) func(string) bool
+		probe func(probes) func(string) (bool, error)
+		// notOwned is how the tool says it lists nothing.
+		notOwnedStatus int
+		notOwnedStdout string
 	}{
-		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) bool { return p.dpkgOwns }},
-		{"rpm", []string{"-qf", path}, func(p probes) func(string) bool { return p.rpmOwns }},
+		{"dpkg-query", []string{"-S", path}, func(p probes) func(string) (bool, error) { return p.dpkgOwns }, 1, ""},
+		{"rpm", []string{"-qf", path}, func(p probes) func(string) (bool, error) { return p.rpmOwns }, 1, rpmNotOwned},
 	} {
 		t.Run(tc.tool+" only in the fallback", func(t *testing.T) {
-			for status, want := range map[int]bool{0: true, 1: false} {
-				t.Setenv("PATH", t.TempDir())
-				withToolFallbacks(t, map[string]string{
-					tc.tool: filepath.Join(writeFakeTool(t, tc.tool, status, tc.args...), tc.tool),
-				})
+			t.Setenv("PATH", t.TempDir())
+			withToolFallbacks(t, map[string]string{
+				tc.tool: filepath.Join(writeFakeTool(t, tc.tool, 0, "", "", tc.args...), tc.tool),
+			})
+			owned, err := tc.probe(packageProbes("linux"))(path)
+			require.NoError(t, err)
+			require.True(t, owned, "the fallback's yes")
 
-				require.Equal(t, want, tc.probe(packageProbes("linux"))(path), "exits %d", status)
-			}
+			withToolFallbacks(t, map[string]string{
+				tc.tool: filepath.Join(writeFakeTool(t, tc.tool, tc.notOwnedStatus, tc.notOwnedStdout, "", tc.args...), tc.tool),
+			})
+			owned, err = tc.probe(packageProbes("linux"))(path)
+			require.NoError(t, err)
+			require.False(t, owned, "the fallback's no")
 		})
 
 		t.Run(tc.tool+" on PATH and in the fallback", func(t *testing.T) {
-			t.Setenv("PATH", writeFakeTool(t, tc.tool, 1, tc.args...))
+			t.Setenv("PATH", writeFakeTool(t, tc.tool, tc.notOwnedStatus, tc.notOwnedStdout, "", tc.args...))
 			withToolFallbacks(t, map[string]string{
-				tc.tool: filepath.Join(writeFakeTool(t, tc.tool, 0, tc.args...), tc.tool),
+				tc.tool: filepath.Join(writeFakeTool(t, tc.tool, 0, "", "", tc.args...), tc.tool),
 			})
 
-			require.False(t, tc.probe(packageProbes("linux"))(path), "the fallback answered over PATH")
+			owned, err := tc.probe(packageProbes("linux"))(path)
+			require.NoError(t, err)
+			require.False(t, owned, "the fallback answered over PATH")
 		})
 	}
 }
@@ -300,12 +430,16 @@ func TestPackageProbesAskNothingOffLinux(t *testing.T) {
 		t.Run(goos+" dpkg", func(t *testing.T) {
 			fakeTool(t, "dpkg-query", 0, "-S", path)
 
-			require.False(t, packageProbes(goos).dpkgOwns(path))
+			owned, err := packageProbes(goos).dpkgOwns(path)
+			require.NoError(t, err)
+			require.False(t, owned)
 		})
 		t.Run(goos+" rpm", func(t *testing.T) {
 			fakeTool(t, "rpm", 0, "-qf", path)
 
-			require.False(t, packageProbes(goos).rpmOwns(path))
+			owned, err := packageProbes(goos).rpmOwns(path)
+			require.NoError(t, err)
+			require.False(t, owned)
 		})
 	}
 }

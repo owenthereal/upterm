@@ -82,14 +82,18 @@ func TestInstallReplacesABinaryWhileItRuns(t *testing.T) {
 	got, err := os.ReadFile(exe)
 	require.NoError(t, err)
 	require.Equal(t, "new", string(got))
-	_, err = os.Stat(exe + ".old")
-	require.NoError(t, err, "the running binary is set aside")
+	_, aside := splitSetAside(t, filepath.Dir(exe), "upterm.exe")
+	require.Len(t, aside, 1, "the running binary is set aside")
 
 	// The program carries on to a clean exit.
 	require.NoError(t, stdin.Close())
 	require.NoError(t, cmd.Wait())
 
+	// A backup of the user's, by the plain name, is not upterm's to clear.
+	require.NoError(t, os.WriteFile(exe+".old", []byte("a backup"), 0o644))
+
 	removeStaleOld(exe, "windows")
-	_, err = os.Stat(exe + ".old")
-	require.True(t, os.IsNotExist(err), "the next upgrade clears it")
+	rest, aside := splitSetAside(t, filepath.Dir(exe), "upterm.exe")
+	require.Empty(t, aside, "the next upgrade clears it")
+	require.ElementsMatch(t, []string{"upterm.exe", "upterm.exe.old"}, rest)
 }
