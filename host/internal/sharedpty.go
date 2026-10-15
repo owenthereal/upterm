@@ -71,6 +71,25 @@ func (s *sharedPTY) abandon() {
 	s.once.Do(func() { close(s.done) })
 }
 
+// forgetInitialSize drops the geometry Setsize recorded for the command to
+// open with, if the pty does not exist yet. It is how terminalWindows says that
+// the last terminal that gave one has gone: no terminal is left to take a
+// minimum across, so nothing will correct the record, and a client that
+// attaches afterwards -- a viewer with no terminal -- would open the command
+// at the size of one that is no longer there.
+//
+// Once the pty exists this does nothing: a pty keeps the size it has when its
+// last terminal leaves, and there is no opening size left to forget. Under mu,
+// like Setsize's record-or-delegate decision, so a pty published between the
+// two is never told to forget.
+func (s *sharedPTY) forgetInitialSize() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ptmx == nil {
+		s.initial = termsize.Size{}
+	}
+}
+
 func (s *sharedPTY) initialSize() termsize.Size {
 	s.mu.Lock()
 	defer s.mu.Unlock()

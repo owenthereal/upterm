@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,4 +150,61 @@ func TestTheLastTerminalLeavingDoesNotResizeThePtyToNothing(t *testing.T) {
 
 	rows, cols := pty.lastSize()
 	require.Equal(t, [2]int{30, 100}, [2]int{rows, cols}, "the pty was resized after its last terminal left")
+}
+
+// Before the command starts, the geometry a terminal gives the pty is the size
+// the command will open at, and a terminal that leaves takes its part of that
+// with it.
+//
+// The last one leaving is the case detached has nothing to resize for: no
+// terminal is left to take a minimum across. Without more, the pty would keep
+// the departed terminal's size as the one to open at, and a client that
+// attaches afterwards -- one with no terminal at all -- would start the
+// command at a size nobody is watching it at.
+//
+// Driven at terminalWindows and sharedPTY, the two halves of the claim, with
+// no session or door in the way. Its end-to-end twin is
+// TestAJoinerThatLeavesBeforeTheCommandStartsDoesNotSizeIt.
+func TestTheLastTerminalLeavingBeforeTheCommandStartsForgetsItsSize(t *testing.T) {
+	var (
+		wide   = termsize.Size{Cols: 100, Rows: 30}
+		narrow = termsize.Size{Cols: 80, Rows: 24}
+	)
+
+	t.Run("the last terminal", func(t *testing.T) {
+		tw := newTerminalWindows(discardLogger())
+		shared := newSharedPTY()
+
+		tw.changed(shared, "a", wide.Cols, wide.Rows, nil)
+		require.Equal(t, wide, shared.initialSize(), "the terminal's size was not recorded to open at")
+
+		tw.detached(shared, "a")
+		require.Equal(t, termsize.Size{}, shared.initialSize(), "the command would open at the size of a terminal that has left")
+	})
+
+	t.Run("one of two", func(t *testing.T) {
+		tw := newTerminalWindows(discardLogger())
+		shared := newSharedPTY()
+
+		tw.changed(shared, "a", wide.Cols, wide.Rows, nil)
+		tw.changed(shared, "b", narrow.Cols, narrow.Rows, nil)
+		require.Equal(t, narrow, shared.initialSize(), "the minimum of the two was not recorded")
+
+		tw.detached(shared, "b")
+		require.Equal(t, wide, shared.initialSize(), "the survivor's size was not recorded once the other left")
+	})
+
+	t.Run("after the pty exists", func(t *testing.T) {
+		tw := newTerminalWindows(discardLogger())
+		shared := newSharedPTY()
+		p := &exitedPTY{}
+
+		tw.changed(shared, "a", wide.Cols, wide.Rows, nil)
+		shared.set(p)
+		tw.detached(shared, "a")
+
+		require.Equal(t, wide, shared.initialSize(), "a pty that exists was told to forget a size it has")
+		rows, cols := p.lastSize()
+		require.Equal(t, [2]int{wide.Rows, wide.Cols}, [2]int{rows, cols}, "a pty that exists was resized by its last terminal leaving")
+	})
 }

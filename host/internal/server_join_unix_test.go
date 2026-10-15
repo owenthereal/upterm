@@ -561,6 +561,113 @@ func TestTerminalsBeforeTheCommandOpenItAtTheirMinimum(t *testing.T) {
 	require.Equal(t, phone, shared.initialSize(), "the command would open at a size larger than a terminal attached")
 }
 
+// A terminal counts its size before it attaches, and before the command has
+// started that size is what the command will open at. When the terminal never
+// attaches -- it leaves, or its join fails -- the size goes with it: a client
+// that attaches afterwards and opens the gate, a pipe viewer with no terminal,
+// starts the command at the default, not at the size of a terminal that is no
+// longer there.
+//
+// At the handler, as TestTerminalsBeforeTheCommandOpenItAtTheirMinimum is,
+// and for the same reason: through ServeWithContext the first client's attach
+// opens the gate at once, so nothing can be staged between a terminal counting
+// and the command starting. What the gate does -- start the command with the
+// size the handle recorded, then publish its pty -- is done by hand, after the
+// viewer's attach has reported what the gate waits for.
+//
+// Both ways out of the counted-not-attached state: the client leaving while
+// the join waits for the fan-out's lock, which takes it out from the context's
+// end, and the join failing outright, which takes it out as the handler
+// returns.
+func TestAJoinerThatLeavesBeforeTheCommandStartsDoesNotSizeIt(t *testing.T) {
+	newHost := func(t *testing.T) (h *sessionHandler, shared *sharedPTY, writers *uio.MultiWriter, attached chan struct{}) {
+		shared = newSharedPTY()
+		t.Cleanup(shared.abandon)
+		writers = uio.NewMultiWriter(uio.DefaultReplayBytes)
+		attached = make(chan struct{}, 2)
+		h = &sessionHandler{
+			kind:              kindHost,
+			ptmx:              shared,
+			writers:           writers,
+			eventEmmiter:      emitter.New(1),
+			terminals:         newTerminalWindows(discardLogger()),
+			keepAliveDuration: time.Hour,
+			ctx:               t.Context(),
+			logger:            discardLogger(),
+			// What the command's start waits on, and reads the size after.
+			onHostClientAttached: func() { attached <- struct{}{} },
+		}
+		return h, shared, writers, attached
+	}
+
+	// openCommand is the gate's start: the command opened with the size the
+	// handle recorded, and the pty published. It reports the size the pty
+	// opened at, as the kernel has it.
+	openCommand := func(t *testing.T, shared *sharedPTY, writers *uio.MultiWriter) termsize.Size {
+		t.Helper()
+		cmd := newCommand("sleep", []string{"600"}, nil, termsize.Size{}, false, "", emitter.New(1), writers, discardLogger())
+		p, err := cmd.Start(t.Context(), shared.initialSize())
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = p.Kill()
+			_ = p.Close()
+			_ = p.Wait()
+		})
+		shared.set(p)
+		rows, cols, err := ptylib.Getsize(p.(*pty).File)
+		require.NoError(t, err)
+		return termsize.Size{Cols: cols, Rows: rows}
+	}
+
+	t.Run("the client leaves while its join waits for the fan-out", func(t *testing.T) {
+		h, shared, writers, attached := newHost(t)
+		member := newParkingMember()
+		require.NoError(t, writers.Append(member))
+		member.park(t, writers)
+
+		j := startJoiner(t, h, t.Name()+"/terminal", phone)
+		// After the joiner's own cleanup is registered, so it runs before:
+		// a failed test doesn't leave the join waiting on it.
+		t.Cleanup(member.release)
+		require.Eventually(t, func() bool { return shared.initialSize() == phone },
+			harnessTimeout, time.Millisecond, "the terminal was never counted")
+		j.leave()
+		// Out from the context's end, with the fan-out's lock still held.
+		require.Eventually(t, func() bool { return shared.initialSize() == termsize.Size{} },
+			harnessTimeout, time.Millisecond, "the command would open at the size of a terminal that has left")
+
+		member.release()
+		j.awaitDone(t)
+		require.Empty(t, attached, "a client that left was reported attached")
+
+		startViewer(t, h, t.Name()+"/viewer")
+		select {
+		case <-attached:
+		case <-time.After(harnessTimeout):
+			t.Fatal("the viewer was never attached")
+		}
+		require.Equal(t, termsize.Size{}, shared.initialSize())
+		require.Equal(t, termsize.Default, openCommand(t, shared, writers),
+			"the command opened at the size of a terminal that had left")
+	})
+
+	t.Run("the join fails", func(t *testing.T) {
+		h, shared, writers, attached := newHost(t)
+		// The fan-out is shut down, so the terminal's attach is refused and
+		// its handler returns.
+		require.NoError(t, writers.Shutdown(t.Context()))
+
+		j := startJoiner(t, h, t.Name()+"/terminal", phone)
+		j.awaitDone(t)
+		require.Equal(t, []int{0}, j.exitCodes(), "a client that arrived as the session ended is told 0")
+		require.Empty(t, attached, "a client whose join failed was reported attached")
+
+		require.Equal(t, termsize.Size{}, shared.initialSize(), "the command would open at the size of a terminal that has left")
+		require.Equal(t, termsize.Default, openCommand(t, shared, writers),
+			"the command opened at the size of a terminal that had left")
+	})
+}
+
 // joinRig is a session's doors with nothing in front of them, for outcomes a
 // session served over SSH can't stage on demand: Shutdown before a join, a
 // sink that can't take the ring. It has a real pty, which reports its
@@ -630,19 +737,41 @@ func (r *joinRig) join(t *testing.T, kind clientKind, size termsize.Size) *joine
 func startJoiner(t *testing.T, h *sessionHandler, id string, size termsize.Size) *joiner {
 	t.Helper()
 	j := newJoiner(t, id, size)
+	runJoiner(t, h, j, j)
+	return j
+}
+
+// startViewer runs a client with no terminal, `upterm host` in a pipe or
+// backgrounded, through h. It counts towards no size.
+func startViewer(t *testing.T, h *sessionHandler, id string) *joiner {
+	t.Helper()
+	j := newJoiner(t, id, termsize.Size{})
+	runJoiner(t, h, j, pipeViewer{j})
+	return j
+}
+
+// pipeViewer is a joiner that asked for no pty.
+type pipeViewer struct{ *joiner }
+
+func (pipeViewer) Pty() (gssh.Pty, <-chan gssh.Window, bool) { return gssh.Pty{}, nil, false }
+
+// runJoiner runs sess, which is j or stands in for it, through h on a
+// goroutine of its own. By the time the test ends j has left and the handler
+// has returned.
+func runJoiner(t *testing.T, h *sessionHandler, j *joiner, sess gssh.Session) {
+	t.Helper()
 	go func() {
 		defer close(j.done)
-		h.HandleSession(j)
+		h.HandleSession(sess)
 	}()
 	t.Cleanup(func() {
 		j.leave()
 		select {
 		case <-j.done:
 		case <-time.After(harnessTimeout):
-			t.Errorf("the handler of joiner %s never returned", id)
+			t.Errorf("the handler of joiner %s never returned", j.ctx.sessionID)
 		}
 	})
-	return j
 }
 
 // parkingMember is a member of a fan-out whose Write, once it is told to

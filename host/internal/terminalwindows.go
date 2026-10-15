@@ -35,6 +35,13 @@ type terminalWindows struct {
 	m map[PTY]map[string]window
 }
 
+// initialSizeForgetter is a PTY that records the size it will open at, before
+// it exists: sharedPTY. terminalWindows tells it when the terminals that gave
+// that size are all gone.
+type initialSizeForgetter interface {
+	forgetInitialSize()
+}
+
 type window struct {
 	Width  int
 	Height int
@@ -112,8 +119,16 @@ func (t *terminalWindows) detached(ptmx PTY, id string) {
 	delete(ts, id)
 	if len(ts) == 0 {
 		// Nothing left to take a minimum across, and 0x0 is what computing
-		// one over nothing would ask for.
+		// one over nothing would ask for. A pty keeps the size it has, but
+		// one that does not exist yet has only the size its terminals
+		// recorded for it to open at, and with none left that record is
+		// nobody's: a client that attaches without a terminal would open the
+		// command at it. Told under mu, as resizeWindow's Setsize is, so a
+		// terminal counted after this cannot have its size forgotten.
 		delete(t.m, ptmx)
+		if f, ok := ptmx.(initialSizeForgetter); ok {
+			f.forgetInitialSize()
+		}
 		t.mu.Unlock()
 		return
 	}
