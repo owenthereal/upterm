@@ -738,6 +738,37 @@ func TestAcquireRefusesOnceShutdown(t *testing.T) {
 	}
 }
 
+// A joiner gone before its join reaches the permit: acquire refuses with its
+// ctx's error, however select breaks a tie between the permit and ctx, and
+// the permit is left free for the next join, as with Shutdown above.
+func TestAcquireRefusesAJoinerThatHasLeft(t *testing.T) {
+	const attempts = 200
+	for _, tc := range []struct {
+		name string
+		held bool
+	}{
+		{"the permit is free", false},
+		{"the permit frees as the join begins to wait", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(DefaultReplayBytes)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if tc.held {
+				testHookJoinWaits = func(joinWait) { <-w.permit }
+				t.Cleanup(func() { testHookJoinWaits = nil })
+			}
+			for i := range attempts {
+				if tc.held {
+					w.permit <- struct{}{}
+				}
+				require.ErrorIs(t, w.acquire(ctx, far()), context.Canceled, "attempt %d", i)
+				require.Empty(t, w.permit, "attempt %d left the permit taken", i)
+			}
+		})
+	}
+}
+
 // The same through AppendSized: a join waiting for the permit while another's
 // emulation holds it, Shutdown, then the permit freed. The waiting join is
 // refused and its Start never called, whichever way select breaks the tie

@@ -486,17 +486,22 @@ func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
 	if err := t.take(ctx, deadline); err != nil {
 		return err
 	}
-	// Whichever way the permit came, it comes with no word on Shutdown: the
-	// fast path never looks, and a select with both cases ready picks one at
-	// random. A join begun after Shutdown is refused here, not left to fail
-	// at the handoff after an emulation nobody needs.
+	// Whichever way the permit came, it comes with no word on Shutdown or on
+	// the joiner: the fast path never looks, and a select with several cases
+	// ready picks one at random. A join begun after Shutdown, or for a joiner
+	// already gone, is refused here, with the permit freed for the next join,
+	// not left to hold it through an emulation nobody needs.
 	select {
 	case <-t.closing:
 		t.release()
 		return ErrClosed
 	default:
-		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		t.release()
+		return err
+	}
+	return nil
 }
 
 // take is acquire's wait for the permit.
