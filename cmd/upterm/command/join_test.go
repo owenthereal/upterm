@@ -222,12 +222,69 @@ func TestANewCauseGetsItsOwnLine(t *testing.T) {
 	s.event(waitingAt(join.Unreachable, errors.New("connection refused"), 8))
 	s.event(waitingAt(join.NoHost, nil, 4))
 	require.Contains(t, b.String(), "upterm: waiting for the host since 14:02:11")
-	// The countdown above it is ended, not rewritten, and the new cause
-	// starts a line of its own.
+	// The new cause is written where the countdown was, which has nothing left
+	// to say once the cause has changed, and a countdown goes below it.
 	require.Equal(t, "\r\033[Kupterm: can't reach relay.test since 14:02:11: connection refused\n"+
-		"upterm: next try in 8 s\n"+
+		"upterm: next try in 8 s"+
 		"\r\033[Kupterm: waiting for the host since 14:02:11\n"+
 		"upterm: next try in 4 s", b.String())
+}
+
+// A new cause takes the rows of the countdown that is open, and only those: a
+// wrapped one is cleared whole, and the cause above it stays.
+func TestANewCauseReplacesOnlyTheOpenCountdown(t *testing.T) {
+	const (
+		above  = "$ upterm join"
+		first  = "upterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused"
+		second = "upterm: waiting for the host since 14:02:11"
+		n8     = "upterm: next try in 8 s"
+		n4     = "upterm: next try in 4 s"
+	)
+	var b bytes.Buffer
+	b.WriteString(above + "\n")
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 10 }
+	s.event(waitingAt(join.Unreachable, errRefused, 8))
+	s.event(waitingAt(join.NoHost, nil, 4))
+	require.Equal(t, above+"\n\r\033[K"+first+"\n"+n8+"\r\033[2A\033[J"+second+"\n"+n4, b.String())
+	require.Equal(t, slices.Concat(wrapAt(above, 10), wrapAt(first, 10), wrapAt(second, 10), wrapAt(n4, 10)), screen(t, b.String(), 10))
+}
+
+// Another port on this end of the connection is no new cause: a handshake
+// that fails mid-way names the connection it was on, and each attempt makes a
+// new one. A different remote end, or another reason, is a new cause.
+func TestACauseIgnoresThePortOnThisEndOfTheConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b string
+		same bool
+	}{
+		{"another local port", "ssh: handshake failed: read tcp 192.0.2.9:51832->198.51.100.7:22: use of closed network connection", "ssh: handshake failed: read tcp 192.0.2.9:51833->198.51.100.7:22: use of closed network connection", true},
+		{"another local address and port", "read tcp 192.0.2.9:51832->198.51.100.7:22: i/o timeout", "read tcp 192.0.2.10:40000->198.51.100.7:22: i/o timeout", true},
+		{"IPv6", "write tcp [2001:db8::9]:51832->[2001:db8::7]:22: write: broken pipe", "write tcp [2001:db8::9]:51833->[2001:db8::7]:22: write: broken pipe", true},
+		{"udp", "read udp 192.0.2.9:51832->198.51.100.7:53: i/o timeout", "read udp 192.0.2.9:51833->198.51.100.7:53: i/o timeout", true},
+		{"unix", "read unix @->/run/relay.sock: i/o timeout", "read unix /tmp/c1->/run/relay.sock: i/o timeout", true},
+		{"another remote address", "read tcp 192.0.2.9:51832->198.51.100.7:22: i/o timeout", "read tcp 192.0.2.9:51832->198.51.100.8:22: i/o timeout", false},
+		{"another remote port", "read tcp 192.0.2.9:51832->198.51.100.7:22: i/o timeout", "read tcp 192.0.2.9:51832->198.51.100.7:2222: i/o timeout", false},
+		{"another reason", "read tcp 192.0.2.9:51832->198.51.100.7:22: i/o timeout", "read tcp 192.0.2.9:51832->198.51.100.7:22: connection reset by peer", false},
+		{"i/o timeout, then refused", "i/o timeout", "dial tcp 198.51.100.7:22: connect: connection refused", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b bytes.Buffer
+			s := newStatus(&b, false, mustTarget(t), false)
+			s.now = func() time.Time { return now }
+			s.event(waitingAt(join.Unreachable, errors.New(tc.a), 8))
+			s.event(waitingAt(join.Unreachable, errors.New(tc.b), 4))
+			first := "upterm: can't reach relay.test since 14:02:11: " + tc.a + "\n"
+			if tc.same {
+				// The line told first is the one that stays.
+				require.Equal(t, first+"upterm: next try in 8 s\nupterm: next try in 4 s\n", b.String())
+				return
+			}
+			require.Equal(t, first+"upterm: next try in 8 s\nupterm: can't reach relay.test since 14:02:11: "+tc.b+"\nupterm: next try in 4 s\n", b.String())
+		})
+	}
 }
 
 // The cause is its kind and its error: the same kind with another error is a
@@ -290,6 +347,11 @@ func TestStatusKeepsAFirstJoinsNoHostLine(t *testing.T) {
 		s.event(first)
 		s.event(first)
 		require.Equal(t, "\r\033[K"+want+"\r\033[K"+want, b.String(), "--wait: %v", wait)
+
+		// A cause that comes after it takes its place.
+		b.Reset()
+		s.event(waitingAt(join.Unreachable, errRefused, 8))
+		require.Equal(t, "\r\033[K"+"upterm: can't reach relay.test since 14:02:11: "+errRefused.Error()+"\nupterm: next try in 8 s", b.String(), "--wait: %v", wait)
 
 		b.Reset()
 		s = newStatus(&b, false, mustTarget(t), wait)
@@ -422,12 +484,12 @@ func TestStatusSaysOnlyWhenTheNextTryIsAfterADrop(t *testing.T) {
 	s.now = func() time.Time { return now }
 	s.raw(true)
 	drop(s)
-	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\n\r\033[K"+cause+"\r\n"+second, b.String())
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+cause+"\r\n"+second, b.String())
 
 	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 3 * time.Second})
 	b.Reset()
 	drop(s)
-	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\n\r\033[K"+cause+"\r\n"+second, b.String())
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+cause+"\r\n"+second, b.String())
 
 	// Anywhere but a terminal, each is a line of its own.
 	b.Reset()

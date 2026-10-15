@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -116,12 +117,11 @@ func (s *joinStatus) event(e join.Event) {
 		s.dropped = true
 	case join.Waiting:
 		// A cause is told when it first appears or changes, on a line of its
-		// own: what is open is ended, not rewritten. Straight after a drop no
-		// attempt has said what stops a rejoin, so the cause waits for the first
-		// attempt's result.
+		// own, where the open waiting line was: it has nothing left to say once
+		// the cause has changed. Straight after a drop no attempt has said what
+		// stops a rejoin, so the cause waits for the first attempt's result.
 		var cause string
-		if c := causeLine(e, s.t); c != "" && c != s.cause && !s.dropped {
-			s.endLine()
+		if c := causeLine(e, s.t); c != "" && causeKey(c) != causeKey(s.cause) && !s.dropped {
 			cause, s.cause = c+s.eol(), c
 		}
 		s.dropped = false
@@ -321,6 +321,18 @@ func causeLine(e join.Event, t join.Target) string {
 	}
 	// Setup, which is also what join makes of anything it doesn't recognise.
 	return fmt.Sprintf("upterm: can't start the session since %s: %v", since, e.Err)
+}
+
+// localEnd is the local end of a connection, as a net error names it: "read
+// tcp 192.0.2.9:51832->198.51.100.7:22". Each attempt connects from a port of
+// its own, so an error from a connection that was already made, as a
+// handshake's is, differs from the last attempt's in that port alone.
+var localEnd = regexp.MustCompile(`\b(tcp[46]?|udp[46]?|unix(?:gram|packet)?) \S+->`)
+
+// causeKey is what a cause is compared by to tell whether it has changed: the
+// line without the local end of the connection its error names.
+func causeKey(line string) string {
+	return localEnd.ReplaceAllString(line, "$1 ->")
 }
 
 // renderOutcome is how a run ended, as its last line and the exit status.
