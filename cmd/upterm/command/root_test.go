@@ -454,7 +454,7 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 
 	// `config edit` launches $VISUAL. `true` exits 0 without touching the file,
 	// which keeps the test from opening an editor while still exercising the
-	// whole handler, including its post-edit validation warning.
+	// whole handler, including its check of the file afterwards.
 	t.Setenv("VISUAL", "true")
 
 	// All three must stay reachable: they are the commands you need in order to
@@ -464,7 +464,6 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 	for _, args := range [][]string{
 		{"config", "path"},
 		{"config", "view"},
-		{"config", "edit"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			root := Root()
@@ -474,6 +473,18 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 			assert.NoError(t, root.Execute())
 		})
 	}
+
+	// edit opens the editor on the broken file, and then says what is wrong
+	// with it: its own report, not the refusal other commands give.
+	t.Run("config edit", func(t *testing.T) {
+		root := Root()
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		root.SetArgs([]string{"config", "edit"})
+		err := root.Execute()
+		assert.ErrorContains(t, err, "; run upterm config edit to fix it")
+		assert.NotContains(t, err.Error(), "failed to read config file")
+	})
 
 	// version reads no config, so it doesn't fail on one either.
 	root2 := Root()

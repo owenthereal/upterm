@@ -73,6 +73,61 @@ func Test_validateShareRequiredFlags_readOnlyAndLocalTCPForwarding(t *testing.T)
 	}
 }
 
+// The checks host and config edit share, with host's wording.
+func Test_hostValueChecks(t *testing.T) {
+	require.NoError(t, validateJoinTimeout(0))
+	require.NoError(t, validateJoinTimeout(time.Minute))
+	require.EqualError(t, validateJoinTimeout(-time.Second), "--join-timeout cannot be negative; use 0 to wait forever")
+
+	require.NoError(t, validateReadOnlyForwarding(false, false))
+	require.NoError(t, validateReadOnlyForwarding(true, false))
+	require.NoError(t, validateReadOnlyForwarding(false, true))
+	require.ErrorContains(t, validateReadOnlyForwarding(true, true), "--read-only and --allow-local-tcp-forwarding cannot be used together")
+
+	require.NoError(t, validateDetachAccept(false, false))
+	require.NoError(t, validateDetachAccept(false, true))
+	require.NoError(t, validateDetachAccept(true, true))
+	require.EqualError(t, validateDetachAccept(true, false), "--detach requires --accept: a session nobody is watching cannot be confirmed interactively")
+
+	command, err := parseForceCommand("tmux attach -t 'pair programming'")
+	require.NoError(t, err)
+	require.Equal(t, []string{"tmux", "attach", "-t", "pair programming"}, command)
+	command, err = parseForceCommand("")
+	require.NoError(t, err)
+	require.Nil(t, command)
+	_, err = parseForceCommand("'unclosed")
+	require.EqualError(t, err, "error parsing command 'unclosed: EOF found when expecting closing quote")
+
+	for _, ok := range []string{"ssh://uptermd.upterm.dev:22", "ssh://[::1]:2222", "ws://example.com", "wss://example.com:8443"} {
+		require.NoError(t, validateServer(ok), ok)
+	}
+	for raw, want := range map[string]string{
+		"":                         "missing flag --server",
+		"ftp://example.com:22":     "unsupported server protocol ftp",
+		"example.com:22":           "unsupported server protocol example.com",
+		"ssh://example.com":        "missing port in address",
+		"ssh://exa mple.com:22":    "error parsing server URL",
+		"http://example.com:8080/": "unsupported server protocol http",
+	} {
+		require.ErrorContains(t, validateServer(raw), want, raw)
+	}
+}
+
+func Test_withDefaultPort(t *testing.T) {
+	for raw, want := range map[string]string{
+		"ws://example.com":          "ws://example.com:80",
+		"wss://example.com":         "wss://example.com:443",
+		"wss://example.com/path":    "wss://example.com:443/path",
+		"wss://example.com:8443":    "wss://example.com:8443",
+		"ssh://example.com:22":      "ssh://example.com:22",
+		"ssh://example.com":         "ssh://example.com",
+		"wss://[::1]":               "wss://[::1]:443",
+		"ws://user@example.com/x?y": "ws://user@example.com:80/x?y",
+	} {
+		require.Equal(t, want, withDefaultPort(raw), raw)
+	}
+}
+
 // Test_validateShareRequiredFlags_detachNeedsAcceptAndOutputNeedsDetach pins
 // the three combinations that cannot work: a background session nobody can
 // confirm, an output format for a foreground run that has none, and a format

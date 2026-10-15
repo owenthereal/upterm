@@ -1,13 +1,21 @@
 package command
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
+	"strings"
 
+	"github.com/hashicorp/go-multierror"
+	"github.com/owenthereal/upterm/host"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -148,41 +156,75 @@ func configEditRunE(c *cobra.Command, args []string) error {
 		}
 	}
 
-	// Determine editor to use
-	editor := getEditor()
-
-	// Open editor
-	cmd := exec.Command(editor, configPath)
+	cmd, err := editorCommand(os.Getenv, configPath)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		// An editor that started and ended badly may not be done with the
+		// file, so it isn't checked.
+		var ended *exec.ExitError
+		if errors.As(err, &ended) {
+			if code := ended.ExitCode(); code >= 0 {
+				return fmt.Errorf("the editor exited with status %d; %s wasn't checked", code, configPath)
+			}
+			return fmt.Errorf("the editor ended with %v; %s wasn't checked", ended, configPath)
+		}
 		return fmt.Errorf("failed to open editor: %w", err)
 	}
 
-	// Validate config after editing
-	if err := validateConfig(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: config file has syntax errors: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Edit again with 'upterm config edit' or view with 'upterm config view'.\n")
+	// Check the file as commands will read it, and say everything wrong with
+	// it at once.
+	if errs := validateConfigFile(c.Root(), configPath); len(errs) > 0 {
+		return multierror.Append(nil, errs...)
 	}
 
 	return nil
 }
 
-// getEditor returns the editor to use, checking $VISUAL, $EDITOR, then defaults.
-func getEditor() string {
-	// Check $VISUAL first (for full-screen editors)
-	if editor := os.Getenv("VISUAL"); editor != "" {
-		return editor
+// editorCommand is the command that opens path in the user's editor: $VISUAL
+// (for full-screen editors), then $EDITOR (for line editors), then the
+// platform's default; a variable that is blank counts as unset, and the space
+// around a value is no part of it. The variable may carry arguments, as in
+// code --wait; editorWords splits it.
+func editorCommand(getenv func(string) string, path string) (*exec.Cmd, error) {
+	variable, line := "", defaultEditor()
+	for _, name := range []string{"VISUAL", "EDITOR"} {
+		if s := strings.TrimSpace(getenv(name)); s != "" {
+			variable, line = name, s
+			break
+		}
 	}
 
-	// Check $EDITOR (for line editors)
-	if editor := os.Getenv("EDITOR"); editor != "" {
-		return editor
+	words, err := editorWords(line)
+	if err != nil {
+		return nil, fmt.Errorf("can't read $%s: %w", variable, err)
 	}
+	if len(words) == 0 {
+		return nil, fmt.Errorf("$%s names no program", variable)
+	}
+	return exec.Command(words[0], append(words[1:], path)...), nil
+}
 
-	// Platform-specific defaults
+// editorWords is the program and arguments an editor variable holds. A value
+// that names a file is that program whole: an unquoted path with spaces in it,
+// such as /Applications/Sublime Text.app/Contents/SharedSupport/bin/subl or
+// C:\Program Files\Notepad++\notepad++.exe, split at the spaces would name a
+// program that isn't there. Anything else, a quoted path or a path with
+// arguments, is split by editorArgs.
+func editorWords(line string) ([]string, error) {
+	if fi, err := os.Stat(line); err == nil && !fi.IsDir() {
+		return []string{line}, nil
+	}
+	return editorArgs(line)
+}
+
+// defaultEditor is the editor when neither $VISUAL nor $EDITOR is set.
+func defaultEditor() string {
 	switch runtime.GOOS {
 	case "windows":
 		return "notepad"
@@ -195,11 +237,175 @@ func getEditor() string {
 	}
 }
 
-// validateConfig validates the config file by attempting to parse it.
-func validateConfig(path string) error {
+// fixConfig is what each problem with the config file ends on.
+const fixConfig = "run upterm config edit to fix it"
+
+// configProblem is one thing wrong with a config file: the key it is about,
+// which orders the problems, and what is wrong with it.
+type configProblem struct {
+	key, what string
+}
+
+// validateConfigFile checks the config file at path the way commands read it
+// and returns every problem, sorted by key (a file that isn't YAML is one
+// problem, whole). Each names the file and ends on how to fix it. A key is a
+// problem when it is unknown, has no value, or holds a value its flag refuses;
+// and when its value passes the flag but fails a check that the command it
+// belongs to makes before running (host's, and the session commands' output
+// format), made by the functions that command itself calls. The checks are
+// the table and the loop over the users below it. A file that doesn't exist
+// has no problems, as commands read it.
+//
+// It applies the file's values to the flags under root, so those flags hold
+// them afterwards: config edit's process exits after it.
+func validateConfigFile(root *cobra.Command, path string) []error {
 	v := viper.New()
 	v.SetConfigFile(path)
-	return v.ReadInConfig()
+	if err := v.ReadInConfig(); err != nil {
+		var parseErr viper.ConfigParseError
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return nil
+		case errors.As(err, &parseErr):
+			return []error{fmt.Errorf("%s: %w; %s", path, err, fixConfig)}
+		default:
+			return []error{fmt.Errorf("failed to read config file %s: %w", path, err)}
+		}
+	}
+
+	known := knownFlagNames(root)
+	settable := make(map[string][]*pflag.Flag)
+	visitTreeFlags(root, func(f *pflag.Flag) {
+		if f.Name != "help" && !hasAnnotation(f, annotationCLIOnly) {
+			settable[f.Name] = append(settable[f.Name], f)
+		}
+	})
+
+	var problems []configProblem
+	failed := make(map[string]bool)
+	problem := func(key, what string) {
+		problems = append(problems, configProblem{key, what})
+		failed[key] = true
+	}
+
+	keys := v.AllKeys()
+	slices.Sort(keys)
+	for _, key := range keys {
+		switch {
+		case !known[key]:
+			problem(key, fmt.Sprintf("unknown key %q", key))
+		case !v.IsSet(key):
+			problem(key, key+": config key has no value")
+		default:
+			if err := setFlagsFromConfig(settable[key], key, v.Get(key)); err != nil {
+				problem(key, err.Error())
+			}
+		}
+	}
+
+	// The checks a command makes before it runs, on the values just applied. A
+	// default passes them, so a check runs only when the file holds the keys it
+	// reads, and none of them was refused above. A problem is named after the
+	// first key.
+	held := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		held[key] = true
+	}
+	for _, c := range []struct {
+		keys  []string
+		check func() error
+	}{
+		{[]string{"join-timeout"}, func() error { return validateJoinTimeout(flagJoinTimeout) }},
+		{[]string{"read-only", "allow-local-tcp-forwarding"}, func() error {
+			return validateReadOnlyForwarding(flagReadOnly, flagAllowLocalTCPForwarding)
+		}},
+		// detach is judged on accept's value, unless accept is itself refused.
+		{[]string{"detach"}, func() error {
+			if failed["accept"] {
+				return nil
+			}
+			return validateDetachAccept(flagDetach, flagAccept)
+		}},
+		{[]string{"server"}, func() error { return validateServer(flagServer) }},
+		{[]string{"proxy"}, func() error { _, err := parseProxyURL(flagProxy); return err }},
+		{[]string{"escape-char"}, func() error { _, err := parseEscapeChar(flagHostEscapeChar); return err }},
+		{[]string{"pty-size"}, func() error {
+			if flagPtySize == "" {
+				return nil
+			}
+			_, err := termsize.Parse(flagPtySize)
+			return err
+		}},
+		{[]string{"force-command"}, func() error { _, err := parseForceCommand(flagForceCommand); return err }},
+		{[]string{"name"}, func() error { return validateSessionNameFlag(flagName) }},
+		// Valid for the commands that print a session, host's -o json among
+		// them; a command that wants more of it (host needs --detach) asks
+		// when it runs.
+		{[]string{"output"}, func() error {
+			if flagOutput == "" {
+				return nil
+			}
+			_, err := sessionOutput(flagOutput)
+			return err
+		}},
+	} {
+		runs := true
+		for _, key := range c.keys {
+			runs = runs && held[key] && !failed[key]
+		}
+		if !runs {
+			continue
+		}
+		if err := c.check(); err != nil {
+			problem(c.keys[0], c.keys[0]+": "+err.Error())
+		}
+	}
+	// Each user a flag names must be one host.ParseUserRef reads, as hosting
+	// does; the legacy per-service flags are keys too.
+	for _, flag := range userSpecs() {
+		if !held[flag.flag] || failed[flag.flag] {
+			continue
+		}
+		for _, spec := range flag.specs {
+			if _, err := host.ParseUserRef(spec); err != nil {
+				problem(flag.flag, flag.flag+": "+err.Error())
+			}
+		}
+	}
+
+	slices.SortStableFunc(problems, func(a, b configProblem) int { return strings.Compare(a.key, b.key) })
+	errs := make([]error, 0, len(problems))
+	for _, p := range problems {
+		errs = append(errs, fmt.Errorf("%s: %s; %s", path, p.what, fixConfig))
+	}
+	return errs
+}
+
+// setFlagsFromConfig sets each of flags, all named name, to val, a value from
+// the config file converted as bindFlagsToEnv converts it. It stops at the
+// first flag that refuses.
+func setFlagsFromConfig(flags []*pflag.Flag, name string, val any) error {
+	for _, flag := range flags {
+		if sv, ok := flag.Value.(pflag.SliceValue); ok {
+			elems, err := toStringSlice(name, val)
+			if err != nil {
+				return err
+			}
+			if err := sv.Replace(elems); err != nil {
+				return fmt.Errorf("%s: cannot use value %q: %w", name, strings.Join(elems, ","), err)
+			}
+			continue
+		}
+
+		scalar, err := toScalarString(name, val)
+		if err != nil {
+			return err
+		}
+		if err := flag.Value.Set(scalar); err != nil {
+			return fmt.Errorf("%s: cannot use value %q: %w", name, scalar, err)
+		}
+	}
+	return nil
 }
 
 // exampleConfig returns an example config file with comments.
