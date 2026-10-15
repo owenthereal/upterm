@@ -94,8 +94,16 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	}
 
 	cur, next := version.String(), trimVPrefix(r.Version)
-	if compareVersions(cur, next) == 0 {
+	cmp := compareVersions(cur, next)
+	if cmp == 0 {
 		fmt.Println(outcomeLine(cur, next))
+		return nil
+	}
+
+	// Asked for the latest, a build past it has nothing to upgrade to. Only a
+	// version asked for by name is installed when it is older.
+	if len(args) == 0 && cmp > 0 {
+		fmt.Printf("upterm %s is newer than the latest release (%s)\n", cur, next)
 		return nil
 	}
 

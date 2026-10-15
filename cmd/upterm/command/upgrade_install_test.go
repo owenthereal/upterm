@@ -563,6 +563,35 @@ func TestUpgradeToTheVersionItIsDownloadsNothing(t *testing.T) {
 	}
 }
 
+// With no version asked for, upgrade goes to the latest release; a build that
+// is already past it stays. A version asked for is installed whichever way it
+// goes (TestUpgradeReplacesTheRunningBinaryAndSaysWhichWay).
+func TestUpgradeWithoutAVersionLeavesABuildNewerThanTheLatestRelease(t *testing.T) {
+	for _, cur := range []string{"0.39.0", "0.38.1-0.20260101000000-abcdef123456"} {
+		t.Run(cur, func(t *testing.T) {
+			withVersion(t, cur)
+			tmp := withTempDir(t)
+			base, downloads := releaseOf(t, "v0.38.0", tarball(t, archiveName(), "new"))
+			withGitHub(t, base)
+
+			target := aStandaloneBinary(t)
+			withRunningBinary(t, target)
+
+			var err error
+			out := captureStdout(t, func() { err = runUpgradeLoud(t, nil) })
+			require.NoError(t, err)
+			require.Equal(t, "upterm "+cur+" is newer than the latest release (0.38.0)\n", out)
+
+			require.Zero(t, downloads.Load())
+			require.Empty(t, fileNames(t, tmp))
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Empty(t, got, "the binary is untouched")
+			require.Equal(t, []string{"upterm"}, fileNames(t, filepath.Dir(target)))
+		})
+	}
+}
+
 func TestUpgradeThatCantInstallLeavesTheBinaryAndRemovesTheDownload(t *testing.T) {
 	withVersion(t, "0.37.0")
 	tmp := withTempDir(t)
