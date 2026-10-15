@@ -314,6 +314,12 @@ type MultiWriter struct {
 // writers no longer block on I/O; under the old design it would have
 // reintroduced the deadlock #523 removed.
 func (t *MultiWriter) Append(writers ...io.Writer) error {
+	return t.appendRaw(context.Background(), writers...)
+}
+
+// appendRaw is Append for joiners whose ctx may end: the same hold of writeMu
+// that attaches them finds it done, and then attaches none (AppendSized).
+func (t *MultiWriter) appendRaw(ctx context.Context, writers ...io.Writer) error {
 	// Reject anything Remove could not later take back out, before it is
 	// attached and before it is written to.
 	for _, w := range writers {
@@ -331,6 +337,9 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	t.applyResize()
 	if t.closed {
 		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	for _, w := range writers {

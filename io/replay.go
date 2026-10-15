@@ -110,13 +110,16 @@ func (t *MultiWriter) SetReplayer(r Replayer, fallback func(error)) {
 // A join that can't be emulated, for any of the reasons fallback is told,
 // is attached by Append's path instead, and AppendSized returns nil. It
 // returns ErrClosed once Shutdown has run, and ctx's error once the joiner
-// has left, and then attaches nothing.
+// has left, and then attaches nothing: on every path, the raw ones included,
+// the hold of writeMu that would attach w is the one that finds ctx done. The
+// check waits for nothing, so a joiner with nothing to emulate is attached as
+// promptly as Append would (spec J2).
 func (t *MultiWriter) AppendSized(ctx context.Context, deadline time.Time, size termsize.Size, w io.Writer) error {
 	if err := checkRemovable(w); err != nil {
 		return err
 	}
 	if !size.Valid() || t.replayer == nil || !time.Now().Before(deadline) {
-		return t.Append(w)
+		return t.appendRaw(ctx, w)
 	}
 
 	j := &join{t: t, ctx: ctx, deadline: deadline, size: size, w: w}
@@ -180,6 +183,11 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 	t.applyResize()
 	if t.closed {
 		return nil, true, ErrClosed
+	}
+	// A joiner that has left is attached by none of the paths below, raw or
+	// emulated, and is no fallback to report.
+	if err := j.ctx.Err(); err != nil {
+		return nil, true, err
 	}
 	start, end := t.buffer.Start(), t.buffer.End()
 	if start == end {

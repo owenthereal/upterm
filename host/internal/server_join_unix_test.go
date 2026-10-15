@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -212,9 +213,10 @@ func TestTheJoinerResizesThePtyBeforeTheCapture(t *testing.T) {
 }
 
 // For each outcome that attaches nothing after the resize (Shutdown first,
-// ctx cancelled while a gated Replayer runs, a refusal at the pacer's gate,
-// a sink whose Write fails): the pty is back at the size without the
-// joiner. A Replayer that panics instead: the joiner gets the raw fallback,
+// ctx cancelled while a gated Replayer runs, ctx cancelled while the join
+// waits for the fan-out's lock with nothing to emulate, a refusal at the
+// pacer's gate, a sink whose Write fails): the pty is back at the size
+// without the joiner. A Replayer that panics instead: the joiner gets the raw fallback,
 // is attached, and the pty keeps its size (spec A11).
 //
 // Every outcome on both doors but the pacer's gate, which only guests pass.
@@ -257,6 +259,36 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 			j.leave()
 			j.awaitDone(t)
 			require.Empty(t, j.exitCodes(), "a client that left was sent a status")
+			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
+			require.Equal(t, desktop, rig.ptySize(t))
+		}},
+		{name: "the joiner leaves while it waits for the fan-out, with nothing to emulate", run: func(t *testing.T, kind clientKind) {
+			// No replayer: the join is attached by the raw ring, and has to
+			// find out its client is gone from the hold of the fan-out's lock
+			// that would attach it. Nothing before that hold asks.
+			rig := newJoinRig(t, nil, uio.DefaultReplayBytes, false)
+			logs := &recordingWriter{}
+			rig.handler.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			var hostAttached atomic.Bool
+			rig.handler.onHostClientAttached = func() { hostAttached.Store(true) }
+			member := newParkingMember()
+			require.NoError(t, rig.writers.Append(member))
+			member.park(t, rig.writers)
+
+			j := rig.join(t, kind, phone)
+			// After the joiner's own cleanup is registered, so it runs before:
+			// a failed test doesn't leave the join waiting on it.
+			t.Cleanup(member.release)
+			// Counted, so past its deadline and its resize, and on its way to
+			// the lock the parked Write holds.
+			rig.sizes.await(t, desktopAndPhone)
+			j.leave()
+			member.release()
+			j.awaitDone(t)
+			require.Empty(t, j.exitCodes(), "a client that left was sent a status")
+			require.False(t, hostAttached.Load(), "a client that left was reported attached")
+			require.Contains(t, string(logs.bytes()), "left before its output was attached",
+				"a client that left was attached by the raw ring")
 			require.Equal(t, countedThenTakenOut, rig.sizes.applied())
 			require.Equal(t, desktop, rig.ptySize(t))
 		}},
@@ -547,6 +579,45 @@ func startJoiner(t *testing.T, h *sessionHandler, id string, size termsize.Size)
 	})
 	return j
 }
+
+// parkingMember is a member of a fan-out whose Write, once it is told to
+// park, parks until released: the Write that reaches it holds the fan-out's
+// lock, so a join that wants the lock waits, outside anything a test can see,
+// for the release.
+type parkingMember struct {
+	armed   atomic.Bool
+	in      chan struct{} // closed as the first parked Write begins
+	gate    chan struct{}
+	inOnce  sync.Once
+	outOnce sync.Once
+}
+
+// newParkingMember returns a member that takes writes until told to park.
+func newParkingMember() *parkingMember {
+	return &parkingMember{in: make(chan struct{}), gate: make(chan struct{})}
+}
+
+func (m *parkingMember) Write(p []byte) (int, error) {
+	if m.armed.Load() {
+		m.inOnce.Do(func() { close(m.in) })
+		<-m.gate
+	}
+	return len(p), nil
+}
+
+// park has a Write to w park in the member, and returns once it has.
+func (m *parkingMember) park(t *testing.T, w io.Writer) {
+	t.Helper()
+	m.armed.Store(true)
+	go func() { _, _ = w.Write([]byte("x")) }()
+	select {
+	case <-m.in:
+	case <-time.After(harnessTimeout):
+		t.Fatal("no Write reached the parking member")
+	}
+}
+
+func (m *parkingMember) release() { m.outOnce.Do(func() { close(m.gate) }) }
 
 // holdTheGate has the pacer's gate held, by an attach that waits there until
 // the test ends.

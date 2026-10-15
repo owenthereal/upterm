@@ -646,6 +646,64 @@ func TestAppendSizedAttachesNothingOnceTheJoinerLeft(t *testing.T) {
 	}
 }
 
+// A joiner whose ctx is done when the join takes its hold is refused on every
+// path that would attach it raw too, not only the ones that emulate: ctx's
+// error, nothing handed over, nothing attached, no fallback reported (a
+// joiner that left is no fallback), and no Start.
+func TestAppendSizedRawPathsAttachNothingOnceTheJoinerLeft(t *testing.T) {
+	// The tracker holds ?2004h, the ring 16 bytes, and the filter "\x1b[".
+	stream := func(w *MultiWriter) {
+		writeString(w, "\x1b[?2004h")
+		write(w, 16)
+		writeString(w, "\x1b[")
+	}
+	for _, tc := range []struct {
+		name     string
+		replayer bool
+		size     termsize.Size
+		deadline func() time.Time
+		stream   func(w *MultiWriter)
+	}{
+		{"no replayer", false, at80x24, far, stream},
+		{"a viewer", true, termsize.Size{}, far, stream},
+		{"a passed deadline", true, at80x24, time.Now, stream},
+		{"an empty ring", true, at80x24, far, func(w *MultiWriter) { writeString(w, "\x1b[") }},
+		{"a 0x0 event in the ring", true, at80x24, far, func(w *MultiWriter) {
+			write(w, 1)
+			resize(w, termsize.Size{})
+			write(w, 1)
+		}},
+		{"margins uncertain", true, at80x24, far, func(w *MultiWriter) {
+			resize(w, rows(8))
+			writeString(w, "\x1b[2;5r")
+			w.ResizeBegin(rows(4))
+			writeString(w, "\x1b[2;6r")
+			write(w, 16)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeReplayer{}
+			w := NewMultiWriter(16)
+			fallbacks := &fallbackLog{w: w}
+			if tc.replayer {
+				w.SetReplayer(r, fallbacks.report)
+			}
+			resize(w, at80x24)
+			tc.stream(w)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			var joiner recordingWriter
+			require.ErrorIs(t, w.AppendSized(ctx, tc.deadline(), tc.size, &joiner), context.Canceled)
+			writeString(w, "z")
+			require.Empty(t, joiner.bytes(), "a joiner that had left was handed output")
+			require.Zero(t, attachedTimes(w, &joiner), "a joiner that had left was attached")
+			require.Zero(t, r.starts())
+			require.Empty(t, fallbacks.all())
+		})
+	}
+}
+
 // Shutdown before a join reaches the permit: acquire refuses, however select
 // breaks a tie between the permit and the fan-out closing, and the permit is
 // left free. With it free, the fast path takes it; held until the join begins
