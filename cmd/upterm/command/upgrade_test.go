@@ -2,19 +2,21 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	ggh "github.com/google/go-github/v48/github"
-	uptermctx "github.com/owenthereal/upterm/internal/context"
-	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/stretchr/testify/require"
 	"github.com/tj/go-update"
 )
@@ -116,19 +118,9 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withGitHub(t, tc.base)
-			quietStdout(t)
-			// Install would replace whatever upterm is on PATH; it must
-			// not be reached, and could not find one if it were.
-			t.Setenv("PATH", t.TempDir())
+			withRunningBinary(t, aStandaloneBinary(t))
 
-			logger, err := logging.New(logging.File(filepath.Join(t.TempDir(), "upterm.log")))
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = logger.Close() })
-
-			cmd := upgradeCmd()
-			cmd.SetContext(uptermctx.WithLogger(context.Background(), logger))
-
-			err = cmd.RunE(cmd, tc.args)
+			err := runUpgrade(t, tc.args)
 			require.Error(t, err)
 			if tc.prefix {
 				require.True(t, strings.HasPrefix(err.Error(), tc.want), "got %q, want it to start with %q", err, tc.want)
@@ -138,8 +130,201 @@ func TestUpgradeReportsWhyItStopped(t *testing.T) {
 			if tc.not != "" {
 				require.NotContains(t, err.Error(), tc.not)
 			}
+			// go-github ends a plain error response with the empty list of
+			// its detailed errors.
+			require.False(t, strings.HasSuffix(err.Error(), " []"), "got %q", err)
 		})
 	}
+}
+
+// Whose binary it is, and whether it can be replaced, is settled before
+// anything is looked up or downloaded.
+func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upgrade asked GitHub for %s", r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(github.Close)
+
+	// stops runs upgrade, for the latest release and for a pinned one, with
+	// binary as the running upterm, and expects want from both.
+	stops := func(t *testing.T, binary func() (string, error), want string) {
+		t.Helper()
+
+		withGitHub(t, github.URL)
+		withRunningBinaryFunc(t, binary)
+
+		require.EqualError(t, runUpgrade(t, nil), want)
+		require.EqualError(t, runUpgrade(t, []string{"0.37.0"}), want)
+	}
+
+	t.Run("installed by Homebrew", func(t *testing.T) {
+		bin := filepath.Join(t.TempDir(), "Cellar", "upterm", "0.38.0", "bin", "upterm")
+		require.NoError(t, os.MkdirAll(filepath.Dir(bin), 0o755))
+		require.NoError(t, os.WriteFile(bin, nil, 0o755))
+
+		// A confirmed owner is refused before anything is probed for writing.
+		withWritableDir(t, func(string) error {
+			t.Error("upgrade checked that it could write before it checked who owns the binary")
+			return nil
+		})
+
+		stops(t, func() (string, error) { return bin, nil },
+			"this upterm was installed by Homebrew; upgrade it with brew upgrade upterm")
+	})
+
+	// A binary a Linux package database lists, or that a database which can't
+	// be asked might list, is refused: through the probes the command really
+	// runs and the tools those run.
+	for _, tc := range []struct {
+		name, tool, flag string
+		status           int
+		stdout, stderr   string
+		// want is the line, for the binary at bin.
+		want func(bin string) string
+	}{
+		{"dpkg owns it", "dpkg-query", "-S", 0, "", "",
+			func(string) string {
+				return "this upterm was installed by the upterm package (dpkg); upgrade it with apt"
+			}},
+		{"rpm owns it", "rpm", "-qf", 0, "", "",
+			func(string) string {
+				return "this upterm was installed by the upterm package (rpm); upgrade it with dnf or yum"
+			}},
+		{"dpkg can't be asked", "dpkg-query", "-S", 2, "", "dpkg-query: error: the database is locked",
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": dpkg-query failed: exit status 2: dpkg-query: error: the database is locked; if a package manager installed it, upgrade it there"
+			}},
+		// Unable to open its database, rpm says the file is not owned as well.
+		{"rpm can't be asked", "rpm", "-qf", 1, rpmNotOwned, rpmCantOpen,
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1: error: cannot open Packages database in /var/lib/rpm; if a package manager installed it, upgrade it there"
+			}},
+		{"rpm fails without a word", "rpm", "-qf", 1, "", "",
+			func(bin string) string {
+				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1; if a package manager installed it, upgrade it there"
+			}},
+	} {
+		// refused runs upgrade on a binary the tool answers for as above: it
+		// is refused, GitHub isn't asked, nothing is probed for writing, and
+		// the binary and its directory are as they were.
+		refused := func(t *testing.T) {
+			bin := aStandaloneBinary(t)
+			require.NoError(t, os.WriteFile(bin, []byte("old"), 0o755))
+			fakeToolSaying(t, tc.tool, tc.status, tc.stdout, tc.stderr, tc.flag, bin)
+			withWritableDir(t, func(string) error {
+				t.Error("upgrade checked that it could write before it checked who owns the binary")
+				return nil
+			})
+
+			stops(t, func() (string, error) { return bin, nil }, tc.want(bin))
+
+			got, err := os.ReadFile(bin)
+			require.NoError(t, err)
+			require.Equal(t, "old", string(got))
+			require.Equal(t, []string{"upterm"}, fileNames(t, filepath.Dir(bin)))
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			if runtime.GOOS != "linux" {
+				t.Skip("the system's probes ask only on Linux")
+			}
+
+			// The probes the command has when it runs, in place of the
+			// stand-ins the tests have; the tool they run is the fake.
+			orig := systemProbes
+			t.Cleanup(func() { systemProbes = orig })
+			systemProbes = realSystemProbes
+
+			refused(t)
+		})
+
+		t.Run(tc.name+", on any system", func(t *testing.T) {
+			orig := systemProbes
+			t.Cleanup(func() { systemProbes = orig })
+			systemProbes = packageProbes("linux")
+
+			refused(t)
+		})
+	}
+
+	t.Run("in a directory it can't write", func(t *testing.T) {
+		bin := filepath.Join(readOnlyDir(t), "upterm")
+
+		stops(t, func() (string, error) { return bin, nil }, unwritableLine(bin, fs.ErrPermission))
+	})
+
+	t.Run("on a read-only file system", func(t *testing.T) {
+		bin := aStandaloneBinary(t)
+		withWritableDir(t, func(path string) error {
+			return &fs.PathError{Op: "open", Path: filepath.Join(filepath.Dir(path), ".upterm-writable-1"), Err: syscall.EROFS}
+		})
+
+		stops(t, func() (string, error) { return bin, nil }, "can't replace "+bin+": read-only file system")
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		stops(t, func() (string, error) { return "", errors.New("no such file") },
+			"can't find the running upterm: no such file")
+	})
+}
+
+// aStandaloneBinary is a file nothing owns, in a directory the test can
+// write: what a binary put there by hand looks like.
+func aStandaloneBinary(t *testing.T) string {
+	t.Helper()
+
+	bin := filepath.Join(t.TempDir(), "upterm")
+	require.NoError(t, os.WriteFile(bin, nil, 0o755))
+
+	return bin
+}
+
+// withRunningBinary makes upgrade take path for the binary it replaces, so
+// no test can reach the test binary.
+func withRunningBinary(t *testing.T, path string) {
+	t.Helper()
+
+	withRunningBinaryFunc(t, func() (string, error) { return path, nil })
+}
+
+// withRunningBinaryFunc is withRunningBinary for a binary that can't be found.
+func withRunningBinaryFunc(t *testing.T, f func() (string, error)) {
+	t.Helper()
+
+	orig := runningBinary
+	t.Cleanup(func() { runningBinary = orig })
+	runningBinary = f
+}
+
+// withWritableDir replaces the check that upgrade can write beside the
+// binary, so a test can fail it for a reason the machine can't produce.
+func withWritableDir(t *testing.T, f func(path string) error) {
+	t.Helper()
+
+	orig := writableDir
+	t.Cleanup(func() { writableDir = orig })
+	writableDir = f
+}
+
+// runUpgrade runs the command with args and returns its error.
+func runUpgrade(t *testing.T, args []string) error {
+	t.Helper()
+
+	quietStdout(t)
+
+	return runUpgradeLoud(t, args)
+}
+
+// runUpgradeLoud is runUpgrade with stdout left as it is, for a test that
+// reads what upgrade prints.
+func runUpgradeLoud(t *testing.T, args []string) error {
+	t.Helper()
+
+	cmd := upgradeCmd()
+	cmd.SetContext(context.Background())
+
+	return cmd.RunE(cmd, args)
 }
 
 // githubAnswering is the base URL of a GitHub that answers every request

@@ -8,16 +8,15 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"time"
 
 	ggh "github.com/google/go-github/v48/github"
-	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/tj/go-update"
 	"github.com/tj/go-update/progress"
-	"github.com/tj/go/term"
 )
 
 func upgradeCmd() *cobra.Command {
@@ -39,16 +38,29 @@ func upgradeCmd() *cobra.Command {
 }
 
 func upgradeRunE(c *cobra.Command, args []string) error {
-	logger := uptermctx.Logger(c.Context())
-	if logger == nil {
-		return fmt.Errorf("logger not available")
+	// The binary to replace, and whether upterm may replace it, are settled
+	// before anything is looked up or downloaded.
+	target, err := runningBinary()
+	if err != nil {
+		return fmt.Errorf("can't find the running upterm: %w", err)
+	}
+	o, owned, err := confirmedOwner(target, systemProbes)
+	if err != nil {
+		return errors.New(unknownOwnerLine(target, err))
+	}
+	if owned {
+		return errors.New(o.refusal())
+	}
+	if err := writableDir(target); err != nil {
+		return errors.New(unwritableLine(target, err))
 	}
 
-	term.HideCursor()
-	defer term.ShowCursor()
+	removeStaleOld(target, runtime.GOOS)
+
+	showCursor := hideCursorIfTerminal(os.Stdout)
+	defer showCursor()
 
 	m := &update.Manager{
-		Command: "upterm",
 		Store: &store{
 			ctx:     c.Context(),
 			Owner:   "owenthereal",
@@ -85,8 +97,17 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		r = releases[0]
 	}
 
-	if version.String() == trimVPrefix(r.Version) {
-		fmt.Println("Upterm is up-to-date")
+	cur, next := version.String(), trimVPrefix(r.Version)
+	cmp := compareVersions(cur, next)
+	if cmp == 0 {
+		fmt.Println(outcomeLine(cur, next))
+		return nil
+	}
+
+	// Asked for the latest, a build past it has nothing to upgrade to. Only a
+	// version asked for by name is installed when it is older.
+	if len(args) == 0 && cmp > 0 {
+		fmt.Printf("upterm %s is newer than the latest release (%s)\n", cur, next)
 		return nil
 	}
 
@@ -98,18 +119,30 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	}
 
 	// download tarball to a tmp dir
-	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, progress.Reader)
+	tarball, err := downloadAsset(c.Context(), http.DefaultClient, a.URL, downloadProxy(os.Stdout))
 	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(tarball) }()
 
-	// install it
-	if err := m.Install(tarball); err != nil {
-		return fmt.Errorf("error installing: %s", err)
+	// replace the running binary itself, not wherever PATH finds an upterm
+	if err := installBinary(tarball, target, runtime.GOOS); err != nil {
+		return fmt.Errorf("installing %s: %w", target, err)
 	}
 
-	fmt.Printf("Upgraded upterm %s to %s\n", version.String(), trimVPrefix(r.Version))
+	fmt.Println(outcomeLine(cur, next))
 	return nil
+}
+
+// downloadProxy draws the download's progress bar on f when f is a terminal.
+// The bar is made of escape sequences and keeps writing to the stdout it
+// started on, so for a pipe or a file there is none.
+func downloadProxy(f *os.File) update.Proxy {
+	if !isTerminal(f) {
+		return nil
+	}
+
+	return progress.Reader
 }
 
 func trimVPrefix(s string) string {
@@ -128,6 +161,12 @@ type store struct {
 	Version string
 }
 
+// githubText is err's text without the " []" go-github ends an error
+// response's with when it has no detailed errors, which is a plain 4xx or 5xx.
+func githubText(err error) string {
+	return strings.TrimSuffix(err.Error(), " []")
+}
+
 func (s *store) GetRelease(version string) (*update.Release, error) {
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
@@ -139,7 +178,7 @@ func (s *store) GetRelease(version string) (*update.Release, error) {
 		case res != nil && res.StatusCode == http.StatusNotFound:
 			return nil, update.ErrNotFound
 		case res != nil && res.StatusCode >= http.StatusBadRequest:
-			return nil, fmt.Errorf("GitHub returned an error for v%s: %w", version, err)
+			return nil, fmt.Errorf("GitHub returned an error for v%s: %s", version, githubText(err))
 		}
 
 		return nil, fmt.Errorf("can't reach GitHub to look up v%s: %w", version, err)
@@ -155,7 +194,7 @@ func (s *store) LatestReleases() ([]*update.Release, error) {
 	r, res, err := githubClient().Repositories.GetLatestRelease(ctx, s.Owner, s.Repo)
 	if err != nil {
 		if res != nil && res.StatusCode >= http.StatusBadRequest {
-			return nil, fmt.Errorf("GitHub returned an error for the latest release: %w", err)
+			return nil, fmt.Errorf("GitHub returned an error for the latest release: %s", githubText(err))
 		}
 
 		return nil, fmt.Errorf("can't reach GitHub to look up the latest release: %w", err)
