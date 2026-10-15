@@ -36,7 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := rootCmd.GenBashCompletionFile("./etc/completion/upterm.bash_completion.sh"); err != nil {
+	if err := rootCmd.GenBashCompletionFileV2("./etc/completion/upterm.bash_completion.sh", true); err != nil {
 		logger.Error("failed generating bash completion", "error", err)
 		os.Exit(1)
 	}

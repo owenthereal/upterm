@@ -171,11 +171,13 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 
   # Output as JSON:
   upterm session info NAME -o json`,
-		Args: cobra.ExactArgs(1),
-		RunE: infoRunE,
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionNames,
+		RunE:              infoRunE,
 	}
 
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	perRun(cmd.Flags(), "output")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
@@ -239,7 +241,8 @@ as in the example below, then run 'upterm session wait NAME'.`,
 		Example: `  # Wait for a detached session and take its exit status:
   upterm host --detach --accept --name build -- make
   upterm session wait build`,
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionNames,
 		// Usage and config errors exit with that failure code too, not only what
 		// RunE returns.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(waitUnavailableCode)},
@@ -355,7 +358,8 @@ A session that has already ended is reported as such and is not an error.
 Exits 4 when no session has the name, and 1 for any other failure.`,
 		Example: `  # Stop the session named build-shell:
   upterm session stop build-shell`,
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionNames,
 		RunE: func(c *cobra.Command, args []string) error {
 			return stopSession(c.Context(), args[0], os.Stdout)
 		},
@@ -519,7 +523,8 @@ info NAME' shows what the session holds.`,
 
   # Turn the join timeout off:
   upterm session set build --join-timeout 0`,
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionNames,
 		RunE: func(c *cobra.Command, args []string) error {
 			if !c.Flags().Changed("join-timeout") {
 				return fmt.Errorf("nothing to set: pass --join-timeout")
@@ -684,6 +689,7 @@ prints nothing.`, sessiondir.SessionsRoot(runtimeDir)),
 
 	cmd.PersistentFlags().StringVarP(&flagAdminSocket, "admin-socket", "", currentAdminSocketFile(), "Admin socket path; defaults to $UPTERM_ADMIN_SOCKET.")
 	cmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: json or go-template='...'")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json", "go-template="))
 	perRun(cmd.Flags(), "output")
 	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 

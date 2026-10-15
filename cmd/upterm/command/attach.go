@@ -72,8 +72,9 @@ the log for which); 255 if it could not attach.`,
 
   # Attach with no escape character, so every keystroke reaches the session:
   upterm attach build-shell --escape-char none`,
-		Args: cobra.MaximumNArgs(1),
-		RunE: attachRunE,
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeSessionNames,
+		RunE:              attachRunE,
 		// Usage and config errors exit with that failure code too, not only what
 		// RunE returns.
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},

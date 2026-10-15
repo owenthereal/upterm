@@ -205,6 +205,7 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().DurationVar(&flagJoinTimeout, "join-timeout", 0, "End the session if no guest has joined within this long (e.g. 10m). 0 waits forever. A guest who joins disarms it permanently, so a guest who joins and then leaves does not re-arm it. Change it later with 'upterm session set NAME --join-timeout'.")
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
 
 	// One run's choices, not standing configuration. --join-timeout stays
