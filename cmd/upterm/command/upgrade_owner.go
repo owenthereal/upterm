@@ -37,7 +37,7 @@ func (o owner) refusal() string {
 
 // probes run a package database; tests replace them. Each reports whether the
 // database lists the file. A tool that isn't installed lists nothing, but one
-// that runs and can't say, a database it can't open say, is an error: it
+// that runs and can't say (say, for a database it can't open) is an error: it
 // doesn't tell upterm the file is unowned. A nil probe never claims a file.
 type probes struct {
 	dpkgOwns func(path string) (bool, error)
@@ -53,15 +53,30 @@ func packageProbes(goos string) probes {
 		// and 2 for a failure such as a database it can't read.
 		dpkgOwns: func(path string) (bool, error) {
 			return packageOwns(goos, "dpkg-query", []string{"-S", path},
-				func(status int, _ string) bool { return status == 1 })
+				func(status int, _, _ string) bool { return status == 1 })
 		},
 		// rpm -qf exits 1 both for a file no package lists and for a database
-		// it can't read; only what it says tells them apart.
+		// it can't open, and for the second it says the file is not owned as
+		// well, after an error line. So the file is unowned only when rpm
+		// says so and had no error to report.
 		rpmOwns: func(path string) (bool, error) {
 			return packageOwns(goos, "rpm", []string{"-qf", path},
-				func(_ int, output string) bool { return strings.Contains(output, "is not owned by any package") })
+				func(_ int, stdout, stderr string) bool {
+					return strings.Contains(stdout, "is not owned by any package") && !hasErrorLine(stderr)
+				})
 		},
 	}
+}
+
+// hasErrorLine reports whether a tool's stderr has a line that begins "error:".
+func hasErrorLine(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "error:") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // toolFallbacks is where each package tool is when PATH doesn't have it. A
@@ -77,11 +92,12 @@ var systemProbes = packageProbes(runtime.GOOS)
 
 // packageOwns reports whether the package tool lists a file, on Linux: it does
 // when the tool exits 0. A tool that fails lists nothing only if listsNothing,
-// given its exit status and its output, says so; any other failure is an error
+// given its exit status and what it wrote to stdout and to stderr, says so; any
+// other failure is an error
 // naming the tool, its exit status and the first line it wrote to stderr. The
 // tool is looked up on PATH, then in toolFallbacks; one that isn't found
 // doesn't run, so it owns nothing.
-func packageOwns(goos, tool string, args []string, listsNothing func(status int, output string) bool) (bool, error) {
+func packageOwns(goos, tool string, args []string, listsNothing func(status int, stdout, stderr string) bool) (bool, error) {
 	if goos != "linux" {
 		return false, nil
 	}
@@ -109,7 +125,7 @@ func packageOwns(goos, tool string, args []string, listsNothing func(status int,
 	}
 
 	var exit *exec.ExitError
-	if errors.As(err, &exit) && listsNothing(exit.ExitCode(), stdout.String()+stderr.String()) {
+	if errors.As(err, &exit) && listsNothing(exit.ExitCode(), stdout.String(), stderr.String()) {
 		return false, nil
 	}
 

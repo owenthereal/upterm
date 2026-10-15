@@ -179,27 +179,28 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 	for _, tc := range []struct {
 		name, tool, flag string
 		status           int
-		stderr           string
+		stdout, stderr   string
 		// want is the line, for the binary at bin.
 		want func(bin string) string
 	}{
-		{"dpkg owns it", "dpkg-query", "-S", 0, "",
+		{"dpkg owns it", "dpkg-query", "-S", 0, "", "",
 			func(string) string {
 				return "this upterm was installed by the upterm package (dpkg); upgrade it with apt"
 			}},
-		{"rpm owns it", "rpm", "-qf", 0, "",
+		{"rpm owns it", "rpm", "-qf", 0, "", "",
 			func(string) string {
 				return "this upterm was installed by the upterm package (rpm); upgrade it with dnf or yum"
 			}},
-		{"dpkg can't be asked", "dpkg-query", "-S", 2, "dpkg-query: error: the database is locked",
+		{"dpkg can't be asked", "dpkg-query", "-S", 2, "", "dpkg-query: error: the database is locked",
 			func(bin string) string {
 				return "can't check whether a package owns " + bin + ": dpkg-query failed: exit status 2: dpkg-query: error: the database is locked; if a package manager installed it, upgrade it there"
 			}},
-		{"rpm can't be asked", "rpm", "-qf", 1, "error: cannot open Packages database in /var/lib/rpm",
+		// Unable to open its database, rpm says the file is not owned as well.
+		{"rpm can't be asked", "rpm", "-qf", 1, rpmNotOwned, rpmCantOpen,
 			func(bin string) string {
 				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1: error: cannot open Packages database in /var/lib/rpm; if a package manager installed it, upgrade it there"
 			}},
-		{"rpm fails without a word", "rpm", "-qf", 1, "",
+		{"rpm fails without a word", "rpm", "-qf", 1, "", "",
 			func(bin string) string {
 				return "can't check whether a package owns " + bin + ": rpm failed: exit status 1; if a package manager installed it, upgrade it there"
 			}},
@@ -210,7 +211,7 @@ func TestUpgradeRefusesTheRunningBinaryBeforeLookingAnythingUp(t *testing.T) {
 		refused := func(t *testing.T) {
 			bin := aStandaloneBinary(t)
 			require.NoError(t, os.WriteFile(bin, []byte("old"), 0o755))
-			fakeToolSaying(t, tc.tool, tc.status, "", tc.stderr, tc.flag, bin)
+			fakeToolSaying(t, tc.tool, tc.status, tc.stdout, tc.stderr, tc.flag, bin)
 			withWritableDir(t, func(string) error {
 				t.Error("upgrade checked that it could write before it checked who owns the binary")
 				return nil

@@ -768,8 +768,8 @@ func TestUpgradeGoesAheadWhenThePackageToolSaysNobodyOwnsTheBinary(t *testing.T)
 		stdout, stderr   string
 	}{
 		{"dpkg lists nothing", "dpkg-query", "-S", 1, "", "dpkg-query: no path found matching pattern /tmp/upterm"},
-		{"rpm says on stdout that no package has it", "rpm", "-qf", 1, rpmNotOwned, ""},
-		{"rpm says on stderr that no package has it", "rpm", "-qf", 1, "", rpmNotOwned},
+		{"rpm says that no package has it", "rpm", "-qf", 1, rpmNotOwned, ""},
+		{"rpm says it and warns", "rpm", "-qf", 1, rpmNotOwned, "warning: something to note"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := systemProbes

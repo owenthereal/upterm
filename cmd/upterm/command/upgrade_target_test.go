@@ -282,12 +282,17 @@ func withToolFallbacks(t *testing.T, fallbacks map[string]string) {
 	toolFallbacks = fallbacks
 }
 
-// rpmNotOwned is what rpm says, on stdout, of a file no package lists.
-const rpmNotOwned = "file /usr/bin/upterm is not owned by any package"
+// rpmNotOwned is what rpm says, on stdout, of a file no package lists. It says
+// it when it can't open its database too, then with rpmCantOpen on stderr.
+const (
+	rpmNotOwned = "file /usr/bin/upterm is not owned by any package"
+	rpmCantOpen = "error: cannot open Packages database in /var/lib/rpm"
+)
 
 // dpkg-query: 0 is owned, 1 is not owned, anything else is that it couldn't
-// say. rpm: 0 is owned, a failure whose output says the file is not owned by
-// any package is not owned, and any other failure is that it couldn't say.
+// say. rpm: 0 is owned; a failure whose stdout says the file is not owned by
+// any package, with no error line on stderr, is not owned; any other failure
+// is that it couldn't say.
 func TestPackageProbesAnswerFromTheToolsOwnWordsOnLinux(t *testing.T) {
 	const path = "/usr/bin/upterm"
 	dpkgProbe := func(p probes) func(string) (bool, error) { return p.dpkgOwns }
@@ -314,10 +319,21 @@ func TestPackageProbesAnswerFromTheToolsOwnWordsOnLinux(t *testing.T) {
 
 		{"rpm lists it", "rpm", []string{"-qf", path}, rpmProbe, 0, "upterm-0.38.0-1.x86_64", "", true, ""},
 		{"rpm says on stdout that no package has it", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, "", false, ""},
-		{"rpm says on stderr that no package has it", "rpm", []string{"-qf", path}, rpmProbe, 1, "", rpmNotOwned, false, ""},
 		{"rpm says it with another status", "rpm", []string{"-qf", path}, rpmProbe, 2, rpmNotOwned, "", false, ""},
-		{"rpm can't open its database", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "error: cannot open Packages database in /var/lib/rpm", false,
-			"rpm failed: exit status 1: error: cannot open Packages database in /var/lib/rpm"},
+		{"rpm says it and warns", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, "warning: something to note", false, ""},
+		// What rpm does when it can't open its database: it says the file is
+		// not owned as well, but after an error line.
+		{"rpm can't open its database", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, rpmCantOpen, false,
+			"rpm failed: exit status 1: " + rpmCantOpen},
+		{"rpm can't open its database, twice over", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, rpmCantOpen + "\n" + rpmCantOpen, false,
+			"rpm failed: exit status 1: " + rpmCantOpen},
+		{"rpm errors after a warning", "rpm", []string{"-qf", path}, rpmProbe, 1, rpmNotOwned, "warning: a note\n  " + rpmCantOpen, false,
+			"rpm failed: exit status 1: warning: a note"},
+		// Only stderr has the words: not what rpm says of a file no package has.
+		{"rpm says it on stderr", "rpm", []string{"-qf", path}, rpmProbe, 1, "", rpmNotOwned, false,
+			"rpm failed: exit status 1: " + rpmNotOwned},
+		{"rpm errors and says nothing else", "rpm", []string{"-qf", path}, rpmProbe, 1, "", rpmCantOpen, false,
+			"rpm failed: exit status 1: " + rpmCantOpen},
 		{"rpm fails and says nothing", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "", false,
 			"rpm failed: exit status 1"},
 		{"rpm can't find the file", "rpm", []string{"-qf", path}, rpmProbe, 1, "", "error: file /usr/bin/upterm: No such file or directory", false,
