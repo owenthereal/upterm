@@ -354,7 +354,7 @@ func TestConPTYReportsEachResizeInTwoSteps(t *testing.T) {
 	// Neither leg of a redraw is reported when both succeed. When the first
 	// does and the second fails, the ConPTY is left a column wider than the
 	// size the fan-out's log and lastW hold, and a later Setsize back to that
-	// size would be taken for no change and never heal it.
+	// size would resize it but go unreported, taken for no change.
 	t.Run("a redraw whose first leg fails changes and reports nothing", func(t *testing.T) {
 		p, rec := start(t, initial, false)
 		opening := rec.got()

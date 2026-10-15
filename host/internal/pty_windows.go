@@ -215,10 +215,11 @@ func (p *pty) Redraw() error {
 	}
 
 	// The round trip didn't come back: the ConPTY is at w+1, and the fan-out's
-	// size log and lastW still say w. Left so, a Setsize to w would be taken
-	// for no change and suppressed, and nothing would ever bring the ConPTY
-	// back. So the size it is at is reported and recorded now, begun and ended
-	// at once, the resize being done.
+	// size log and lastW still say w. Left so, the log would go on saying w
+	// for bytes laid out at w+1, and a Setsize back to w would resize the
+	// ConPTY but be taken for no change and go unreported, so the log would
+	// never record either move. So the size it is at is reported and recorded
+	// now, begun and ended at once, the resize being done.
 	//
 	// The report is late, which is the cost of the first leg being unreported:
 	// any bytes the ring took since then count as w, though the command laid
