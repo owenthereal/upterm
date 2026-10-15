@@ -1182,9 +1182,22 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// sit through. Both doors, because a guest arrives with a terminal
 		// exactly as a local client does.
 		var size termsize.Size
+		stop := func() bool { return false }
 		if isPty {
 			size = termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}
 			h.terminals.changed(ptmx, sessionID, size.Cols, size.Rows, alive)
+			// The attach below takes the fan-out's lock, and a synchronous
+			// primary parked in a write to a terminal that has stopped holds
+			// that lock for as long as the terminal stays stopped. A client
+			// that hangs up meanwhile is still waiting for it: the guard
+			// below cannot run, and the departures further down are actors
+			// that start only after the attach. Its size would go on
+			// constraining the pty until the primary resumes, so its
+			// departure takes it out from here. The attach stops this, and
+			// from then on those actors own the removal.
+			stop = context.AfterFunc(sess.Context(), func() {
+				h.terminals.detached(ptmx, sessionID)
+			})
 		}
 		// Once counted, a terminal that never attaches is taken out again,
 		// whatever stopped it: the session ending, the client leaving,
@@ -1195,6 +1208,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// panicked, is attached, and keeps its size (spec A11).
 		attached := false
 		defer func() {
+			stop()
 			if isPty && !attached {
 				h.terminals.detached(ptmx, sessionID)
 			}
@@ -1234,6 +1248,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				return
 			}
 			attached = true
+			stop()
 			sink.markAttached()
 
 			defer func() {
@@ -1379,6 +1394,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				return
 			}
 			attached = true
+			stop()
 
 			defer func() {
 				h.detachGuest(sink)

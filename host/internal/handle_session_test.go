@@ -92,13 +92,17 @@ func (f *fakeGuestSession) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
 
 func (f *fakeGuestSession) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
 
-// fakeGuestContext supplies the one thing HandleSession asks of a session's
-// context, the session ID, and leaves the rest nil for the same reason.
+// fakeGuestContext supplies what HandleSession asks of a session's context,
+// the session ID and a Done for the departure of a client with a terminal to
+// wait on, and leaves the rest nil for the same reason. This client never goes:
+// a nil Done is one that is never closed.
 type fakeGuestContext struct {
 	gssh.Context
 
 	sessionID string
 }
+
+func (c fakeGuestContext) Done() <-chan struct{} { return nil }
 
 func (c fakeGuestContext) Value(key any) any {
 	if key == gssh.ContextKeySessionID {

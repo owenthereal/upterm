@@ -355,6 +355,71 @@ func TestAFailedJoinTakesItsTerminalOutAgain(t *testing.T) {
 	}
 }
 
+// The fan-out's lock can be held indefinitely: a synchronous primary, the
+// host's own terminal, parked in a write to a terminal that has stopped holds
+// it for as long as the terminal stays stopped. A join that wants the lock
+// waits for it, and the terminal it has counted constrains the pty meanwhile.
+// When the joiner hangs up in that wait, the pty goes back to the size without
+// it at once, not when the lock is released: the departure that takes a
+// terminal out is an actor, and none has started for a join that has not
+// attached. Once the lock is released the joiner's handler returns, finding
+// its client gone, and nothing puts the terminal back.
+//
+// Both doors, as both count a terminal before they attach it. The parked
+// member stands for the primary: what holds the lock is a Write parked in the
+// fan-out, whoever's it is.
+func TestAJoinerThatLeavesStopsConstrainingThePtyWhileTheFanOutIsHeld(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		kind clientKind
+	}{{"guest", kindGuest}, {"host", kindHost}} {
+		t.Run(door.name, func(t *testing.T) {
+			rig := newJoinRig(t, nil, uio.DefaultReplayBytes, false)
+			var hostAttached atomic.Bool
+			rig.handler.onHostClientAttached = func() { hostAttached.Store(true) }
+			member := newParkingMember()
+			require.NoError(t, rig.writers.Append(member))
+			member.park(t, rig.writers)
+
+			j := rig.join(t, door.kind, phone)
+			// After the joiner's own cleanup is registered, so it runs before:
+			// a failed test doesn't leave the join waiting on it.
+			t.Cleanup(member.release)
+			// Counted, so past its resize and on its way to the lock the
+			// parked Write holds.
+			rig.sizes.await(t, desktopAndPhone)
+			j.leave()
+
+			// Taken out again with the lock still held: the pty is back at
+			// the size without the joiner.
+			rig.sizes.await(t, desktop)
+			require.Equal(t, desktop, rig.ptySize(t))
+			select {
+			case <-j.done:
+				t.Fatal("the joiner's handler returned with the fan-out's lock still held: the test never held the join up")
+			default:
+			}
+
+			member.release()
+			j.awaitDone(t)
+			require.Empty(t, j.exitCodes(), "a client that left was sent a status")
+			require.False(t, hostAttached.Load(), "a client that left was reported attached")
+			require.Equal(t, []termsize.Size{desktop, desktopAndPhone, desktop}, rig.sizes.applied(),
+				"the pty was resized again after the joiner was taken out")
+			require.Equal(t, desktop, rig.ptySize(t))
+
+			terminals := rig.handler.terminals
+			terminals.mu.Lock()
+			counted := make([]string, 0, 2)
+			for id := range terminals.m[rig.handler.ptmx] {
+				counted = append(counted, id)
+			}
+			terminals.mu.Unlock()
+			require.Equal(t, []string{"desktop"}, counted, "a terminal that had left was counted again")
+		})
+	}
+}
+
 // With a pacer: a join gated inside its Replayer holds the gate; a second
 // joiner disconnects while waiting; its handler returns within 50 ms, its
 // AsyncWriter is Closed, and the goroutine count is back to its baseline

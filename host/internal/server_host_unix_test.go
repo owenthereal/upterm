@@ -407,7 +407,9 @@ func (f *fakeSignalSession) signal(sig gssh.Signal) {
 // fakeHostContext supplies what HandleSession's host-door path asks of a
 // session's context beyond the session ID fakeGuestContext (handle_session_
 // test.go) already covers: Err, for the liveness check terminalWindows.changed
-// makes, and ClientVersion, for the host client-joined event.
+// makes, Done, for the departure of a client with a terminal to wait on (this
+// one never goes, and a nil Done is never closed), and ClientVersion, for the
+// host client-joined event.
 type fakeHostContext struct {
 	gssh.Context
 	sessionID string
@@ -419,6 +421,7 @@ func (c fakeHostContext) Value(key any) any {
 	}
 	return nil
 }
+func (c fakeHostContext) Done() <-chan struct{} { return nil }
 func (c fakeHostContext) Err() error            { return nil }
 func (c fakeHostContext) ClientVersion() string { return "test" }
 
