@@ -20,8 +20,9 @@ var errNoPty = errors.New("session ended before its command started")
 // pty to deliver them to. Writes wait for the pty; the last geometry Setsize
 // is given before it exists is what the pty is opened with -- each is already
 // the minimum across the terminals attached so far, computed by
-// resizeWindow, so the most recent one is the current answer. Everything
-// else delegates.
+// resizeWindow, so the most recent one is the current answer, unless the
+// last of those terminals has left since, which forgets it. Everything else
+// delegates.
 type sharedPTY struct {
 	ready chan struct{}
 	done  chan struct{}
