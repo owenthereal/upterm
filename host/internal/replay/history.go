@@ -6,24 +6,29 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
-// crlf follows each history line in the render (R2), so each line kept costs
-// it too.
+// crlf follows each history line in the render (R2).
 const crlf = "\r\n"
+
+// lineCost is what a line costs the history besides its bytes: the CRLF the
+// render follows it with, and the length the history keeps of it, a uint32.
+const lineCost = len(crlf) + 4
 
 // history keeps the newest lines that scrolled off the emulator's main
 // screen, each encoded as it left (spec E8), within a budget: a line costs
-// its bytes and the CRLF the render follows it with, and the oldest lines go
-// to keep the total within max. Counting the CRLF bounds the number of lines
-// too, so a flood of blank lines can't grow it past the budget.
+// its bytes and lineCost, and the oldest lines go to keep the total within
+// max. So both the render's share and the history's own bookkeeping stay
+// within the budget (spec §6.3), even for a flood of blank lines, which
+// cost nothing else.
 //
 // The lines are kept end to end in one buffer, with their lengths, rather
 // than a slice each: a short line would cost more in its own allocation and
-// slice header than in its bytes.
+// slice header than in its bytes. A line is never longer than the budget,
+// so its length fits 32 bits.
 type history struct {
 	max  int
-	data []byte // the lines kept, oldest first
-	lens []int  // the length of each, oldest first
-	cost int    // what they cost: their bytes and a CRLF each
+	data []byte   // the lines kept, oldest first
+	lens []uint32 // the length of each, oldest first
+	cost int      // what they cost: their bytes and lineCost each
 	enc  encoder
 }
 
@@ -33,17 +38,18 @@ type history struct {
 // scroll-off function, and the line is the screen's own storage, so it is
 // encoded here and never kept.
 func (h *history) push(line uv.Line) {
-	h.enc.reset(max(h.max-len(crlf), 0))
+	h.enc.reset(max(h.max-lineCost, 0))
 	if h.enc.row(line) != nil {
 		return
 	}
+	n := len(h.enc.buf)
 	h.data = append(h.data, h.enc.buf...)
-	h.lens = append(h.lens, len(h.enc.buf))
-	h.cost += len(h.enc.buf) + len(crlf)
+	h.lens = append(h.lens, uint32(n))
+	h.cost += n + lineCost
 	for h.cost > h.max {
-		n := h.lens[0]
+		n := int(h.lens[0])
 		h.data, h.lens = h.data[n:], h.lens[1:]
-		h.cost -= n + len(crlf)
+		h.cost -= n + lineCost
 	}
 }
 
@@ -58,10 +64,11 @@ func (h *history) all() iter.Seq[[]byte] {
 	return func(yield func([]byte) bool) {
 		off := 0
 		for _, n := range h.lens {
-			if !yield(h.data[off : off+n : off+n]) {
+			end := off + int(n)
+			if !yield(h.data[off:end:end]) {
 				return
 			}
-			off += n
+			off = end
 		}
 	}
 }

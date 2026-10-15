@@ -1,15 +1,18 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/owenthereal/x/ansi"
+	"github.com/owenthereal/x/vt"
 	"github.com/stretchr/testify/require"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -418,14 +421,23 @@ func TestReplayPrimesTheEmulatorWithTheTrackersSnapshot(t *testing.T) {
 // doesn't block the emulator on a pipe nobody reads; the title kept.
 func TestReplaySetsUpTheEmulator(t *testing.T) {
 	stream := "\x1b[c\x1b]2;the title\x07" + strings.Repeat("line\r\n", 30)
-	done := make(chan *emulation)
-	go func() { done <- start(t, captureOf(stream, event(1, 0, 80, 24))) }()
-	var e *emulation
+	type started struct {
+		em  uio.Emulation
+		err error
+	}
+	done := make(chan started, 1)
+	go func() {
+		em, err := New().Start(context.Background(), time.Now().Add(time.Minute), captureOf(stream, event(1, 0, 80, 24)), joiner)
+		done <- started{em, err}
+	}()
+	var s started
 	select {
-	case e = <-done:
+	case s = <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("a reply blocked the emulator")
 	}
+	require.NoError(t, s.err)
+	e := s.em.(*emulation)
 
 	requireHandoff(t, e, len(stream), 1)
 	require.Equal(t, "the title", e.title)
@@ -436,8 +448,9 @@ func TestReplaySetsUpTheEmulator(t *testing.T) {
 }
 
 // Spec E8: the history keeps the newest lines that fit its budget, each
-// costing its bytes and the CRLF the render follows it with; a line over the
-// whole budget is dropped, and the clear function empties it.
+// costing its bytes, the CRLF the render follows it with and the length the
+// history keeps of it; a line over the whole budget is dropped, and the clear
+// function empties it.
 func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	line := func(s string) uv.Line {
 		l := uv.NewLine(20)
@@ -446,22 +459,41 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 		}
 		return l
 	}
-	h := history{max: 12}
+	// "aaa" costs 3 + 2 + 4: two such lines fit, and a third pushes one out.
+	h := history{max: 18}
 	for _, s := range []string{"aaa", "bbb", "ccc"} {
 		h.push(line(s))
 	}
 	require.Equal(t, [][]byte{[]byte("bbb"), []byte("ccc")}, collect(&h))
 
-	h.push(line("dddddddddddd"))
+	h.push(line("ddddddddddddd"))
 	require.Equal(t, [][]byte{[]byte("bbb"), []byte("ccc")}, collect(&h), "a line over the budget alone")
 
 	h.push(line(""))
-	require.Equal(t, [][]byte{[]byte("bbb"), []byte("ccc"), {}}, collect(&h))
+	require.Equal(t, [][]byte{[]byte("ccc"), {}}, collect(&h))
 
 	h.clear()
 	require.Empty(t, collect(&h))
 	h.push(line("eee"))
 	require.Equal(t, [][]byte{[]byte("eee")}, collect(&h))
+}
+
+// Spec §6.3: the history takes at most its budget, its own bookkeeping
+// included, even of lines that cost the render only their CRLF.
+func TestHistoryBookkeepingStaysWithinItsBudget(t *testing.T) {
+	h := history{max: budget}
+	blank := uv.NewLine(8)
+	// Three times what it keeps, so the oldest lines have gone, twice over.
+	for range 3 * budget / (len(crlf) + 4) {
+		h.push(blank)
+	}
+	kept := 0
+	for range h.all() {
+		kept++
+	}
+	require.Equal(t, budget/(len(crlf)+4), kept)
+	require.LessOrEqual(t, len(h.data)+len(h.lens)*int(unsafe.Sizeof(h.lens[0])), budget)
+	require.LessOrEqual(t, h.cost, budget)
 }
 
 func collect(h *history) [][]byte {
@@ -495,16 +527,25 @@ func TestReplayFailsWhenTheRingStartsInsideAnEndlessSequence(t *testing.T) {
 	require.ErrorIs(t, err, errNoHandoff)
 }
 
-// Spec E7: the two parsers must agree on being inside a sequence at the
-// ring's first byte too. A string longer than the tracker keeps leaves it
-// inside the string with nothing to prime the emulator with, which would
-// print the string's rest as text.
-func TestReplayFailsWhenThePrimedParsersDisagree(t *testing.T) {
-	modes := uio.NewModeTracker()
-	_, _ = modes.Write([]byte("\x1b]52;c;" + strings.Repeat("QUFB", 2<<10)))
-	require.False(t, modes.AtGround())
-	_, err := New().Start(context.Background(), time.Now().Add(time.Minute), captureFrom(modes, "QUFB\x07x\r\n"), joiner)
-	require.ErrorIs(t, err, ErrTrackerDisagrees)
+// A sequence longer than the tracker keeps, in flight at the ring's first
+// byte, leaves the tracker inside it with nothing to prime the emulator
+// with, which would print its rest as text. That is the tracker's bound, not
+// a disagreement between the two parsers: the join falls back, saying so.
+func TestReplayFallsBackWhenTheRingStartsInsideALongSequence(t *testing.T) {
+	w := uio.NewMultiWriter(1 << 10)
+	var fellBack []error
+	w.SetReplayer(New(), func(err error) { fellBack = append(fellBack, err) })
+	w.Pinned(joiner)
+	// An OSC 52 copy of 8 KiB, the ring's 1 KiB inside it.
+	_, _ = w.Write([]byte("\x1b]52;c;" + strings.Repeat("QUFB", 2<<10)))
+	_, _ = w.Write([]byte("\x07x\r\n"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(t.Context(), time.Now().Add(time.Minute), joiner, &got))
+	require.Len(t, fellBack, 1)
+	require.ErrorIs(t, fellBack[0], errRingStartsInsideALongSequence)
+	require.NotErrorIs(t, fellBack[0], ErrTrackerDisagrees)
+	require.True(t, bytes.HasSuffix(got.Bytes(), []byte("QUFB\x07x\r\n")), "the raw ring: %q", got.Bytes())
 }
 
 // A same-size event closes no cluster, since it is skipped, so it is no
@@ -539,4 +580,37 @@ func TestFeedRefusesAnEventItCantPlace(t *testing.T) {
 			requireHandoff(t, e, 3, 1)
 		})
 	}
+}
+
+// Spec §6.2: the lookahead rescans the tail once for each event that could
+// end the batch, so events inside a span that ends without a closure (a
+// string CAN aborts, then text) cost a rescan each: about 1,024 of 256 KiB
+// at worst. The stop function is asked before each, and once it says stop,
+// no further rescan runs, so the overshoot is one rescan of at most the tail,
+// here under one meter interval.
+func TestReplayChecksItsStopBeforeEachRescan(t *testing.T) {
+	e := start(t, captureOf("x\r\n", event(1, 0, 80, 24)))
+	calls := 0
+	e.stop = func() bool {
+		calls++
+		return calls > 3
+	}
+
+	const open = "\x1b]0;"
+	payload := strings.Repeat("a", 32<<10)
+	chunk := open + payload + "\x18abc"
+	require.Less(t, len(chunk), vt.MeterInterval)
+	var events []uio.SizeEvent
+	for i := range 200 {
+		cols := 60
+		if i%2 == 1 {
+			cols = 80
+		}
+		events = append(events, event(uint64(2+i), 3+len(open)+100*(i+1), cols, 24))
+	}
+
+	err := e.Feed([][]byte{[]byte(chunk)}, events)
+	require.ErrorIs(t, err, uio.ErrReplayDeadline)
+	require.Equal(t, 4, calls, "a rescan ran after the stop function said stop, or none asked it")
+	requireHandoff(t, e, 3, 1)
 }

@@ -36,6 +36,10 @@ var testHookResize func(termsize.Size)
 // no point in it is one to hand off at.
 var errNoHandoff = errors.New("replay: the ring starts inside a sequence it doesn't end")
 
+// errRingStartsInsideALongSequence is a ring whose first byte is inside a
+// sequence longer than the tracker keeps.
+var errRingStartsInsideALongSequence = errors.New("replay: the ring starts inside a sequence too long to prime")
+
 // errNoRender is what Render returns once the emulation is consistent, until
 // the render is built.
 var errNoRender = errors.New("replay: the render isn't built")
@@ -120,9 +124,16 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 		return nil, stopped(err)
 	}
 	// Both are now inside the sequence the ring starts in, if it starts in
-	// one, or neither is. A string longer than the tracker keeps is one only
-	// the tracker is in, and the emulator would print its rest as text.
-	if e.modes.AtGround() != e.term.AtBoundary() {
+	// one, or neither is. But the tracker keeps a sequence's bytes only up to
+	// its bound (a string's 4 KiB, a CSI's 64 bytes), and past it has none to
+	// prime with: the emulator, outside the sequence, would print its rest as
+	// text. An OSC 52 copy in flight at the ring's start is enough, so this is
+	// the tracker's bound, not a disagreement. The emulator inside a sequence
+	// the tracker isn't is one: the two parsers read the snapshot apart.
+	switch inTracker, inEmulator := !e.modes.AtGround(), !e.term.AtBoundary(); {
+	case inTracker && !inEmulator:
+		return nil, errRingStartsInsideALongSequence
+	case inEmulator && !inTracker:
 		return nil, fmt.Errorf("%w: at the ring's first byte", ErrTrackerDisagrees)
 	}
 	if err := e.offer(c.Chunks, c.Sizes[1:]); err != nil {
@@ -211,8 +222,11 @@ func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 	if len(sizes) > 0 {
 		e.offeredSeq = sizes[len(sizes)-1].Seq
 	}
-	x, n := e.batchEnd()
-	if err := e.consume(x, n); err != nil {
+	x, n, err := e.batchEnd()
+	if err == nil {
+		err = e.consume(x, n)
+	}
+	if err != nil {
 		e.err = err
 		return err
 	}
@@ -230,7 +244,15 @@ func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 //
 // n is how many of the events waiting the batch passes: every one at or
 // before x.
-func (e *emulation) batchEnd() (x uint64, n int) {
+//
+// The lookahead runs outside the emulator's meter. Each pass is one scan of
+// the tail, but a candidate before the end of the tail's ground prefix needs
+// a scan of its own, of the tail up to it, and there can be one per event:
+// about 1,024 scans of 256 KiB, for events inside a span that ends with no
+// closure (a string CAN aborts, then text). So the stop function is asked
+// before each, which bounds the overshoot past the deadline to one scan
+// (spec §6.2).
+func (e *emulation) batchEnd() (x uint64, n int, err error) {
 	x = e.h + uint64(e.term.HandoffPrefix(e.tail))
 	ground := -1 // the longest prefix of the tail at ground, once needed
 	for i := len(e.events) - 1; i >= 0; i-- {
@@ -248,31 +270,30 @@ func (e *emulation) batchEnd() (x uint64, n int) {
 		if ground < 0 {
 			ground = e.term.GroundPrefix(e.tail)
 		}
-		if e.atGround(int(ev.Offset-e.h), ground) {
-			x = ev.Offset
-			break
+		// The parser is at ground after the tail's first k bytes, k > 0,
+		// exactly when GroundPrefix of them is k; and no prefix longer than
+		// ground ends there. (Of the empty prefix it can't tell, as it is 0
+		// both at ground and where no prefix reaches it; but a candidate is
+		// past x, which is h at least.)
+		k := int(ev.Offset - e.h)
+		if k > ground {
+			continue
 		}
+		if k < ground {
+			if e.stop() {
+				return 0, 0, uio.ErrReplayDeadline
+			}
+			if e.term.GroundPrefix(e.tail[:k]) != k {
+				continue
+			}
+		}
+		x = ev.Offset
+		break
 	}
 	for n < len(e.events) && e.events[n].Offset <= x {
 		n++
 	}
-	return x, n
-}
-
-// atGround reports that the parser, continuing from h, is outside every
-// sequence after the tail's first k bytes, k > 0. ground is GroundPrefix of
-// the whole tail: no longer prefix ends at ground, and GroundPrefix of the
-// first k bytes is k exactly when they do. (Of the empty prefix it can't
-// tell: GroundPrefix is 0 both at ground and where no prefix reaches it. But
-// an event is a candidate only past x, which is h at least.)
-func (e *emulation) atGround(k, ground int) bool {
-	switch {
-	case k == ground:
-		return true
-	case k > ground:
-		return false
-	}
-	return e.term.GroundPrefix(e.tail[:k]) == k
+	return x, n, nil
 }
 
 // consume runs the batch from h to x, passing the first n events waiting,
