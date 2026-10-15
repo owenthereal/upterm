@@ -47,6 +47,7 @@ require (
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
+	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/cli/go-gh/v2 v2.16.2
@@ -56,6 +57,8 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/ncruces/zenity v0.10.15
 	github.com/owenthereal/tmux v0.0.0-20260110065009-80f16deab60d
+	github.com/owenthereal/x/ansi v0.0.0-20261015013042-3e706d88bf76
+	github.com/owenthereal/x/vt v0.0.0-20261015020222-4f972e284c76
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/pkg/sftp v1.13.11
 	github.com/samber/slog-multi v1.8.0
