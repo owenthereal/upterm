@@ -475,6 +475,24 @@ func upTo(sizes []SizeEvent, end, below uint64) []SizeEvent {
 // error once ctx is done, or ErrReplayDeadline once the deadline passes,
 // while it waits.
 func (t *MultiWriter) acquire(ctx context.Context, deadline time.Time) error {
+	if err := t.take(ctx, deadline); err != nil {
+		return err
+	}
+	// Whichever way the permit came, it comes with no word on Shutdown: the
+	// fast path never looks, and a select with both cases ready picks one at
+	// random. A join begun after Shutdown is refused here, not left to fail
+	// at the handoff after an emulation nobody needs.
+	select {
+	case <-t.closing:
+		t.release()
+		return ErrClosed
+	default:
+		return nil
+	}
+}
+
+// take is acquire's wait for the permit.
+func (t *MultiWriter) take(ctx context.Context, deadline time.Time) error {
 	select {
 	case t.permit <- struct{}{}:
 		return nil

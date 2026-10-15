@@ -646,6 +646,82 @@ func TestAppendSizedAttachesNothingOnceTheJoinerLeft(t *testing.T) {
 	}
 }
 
+// Shutdown before a join reaches the permit: acquire refuses, however select
+// breaks a tie between the permit and the fan-out closing, and the permit is
+// left free. With it free, the fast path takes it; held until the join begins
+// to wait, then freed, both cases of the wait are ready at once. A coin flip
+// picks one, so the attempts repeat.
+func TestAcquireRefusesOnceShutdown(t *testing.T) {
+	const attempts = 200
+	for _, tc := range []struct {
+		name string
+		// held fills the permit before each attempt and frees it as the join
+		// begins to wait for it.
+		held bool
+	}{
+		{"the permit is free", false},
+		{"the permit frees as the join begins to wait", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(DefaultReplayBytes)
+			require.NoError(t, w.Shutdown(t.Context()))
+			if tc.held {
+				testHookJoinWaits = func(joinWait) { <-w.permit }
+				t.Cleanup(func() { testHookJoinWaits = nil })
+			}
+			for i := range attempts {
+				if tc.held {
+					w.permit <- struct{}{}
+				}
+				require.ErrorIs(t, w.acquire(t.Context(), far()), ErrClosed, "attempt %d", i)
+				require.Empty(t, w.permit, "attempt %d left the permit taken", i)
+			}
+		})
+	}
+}
+
+// The same through AppendSized: a join waiting for the permit while another's
+// emulation holds it, Shutdown, then the permit freed. The waiting join is
+// refused and its Start never called, whichever way select breaks the tie
+// between the permit and the fan-out closing, so the join repeats.
+func TestAppendSizedStartsNoEmulationOnceShutdown(t *testing.T) {
+	const attempts = 200
+	for i := range attempts {
+		func() {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			r := &fakeReplayer{start: parkedStart(entered, gate)}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			resize(w, at80x24)
+			writeString(w, "A")
+
+			var a, b recordingWriter
+			doneA := joinAsync(w, t.Context(), far(), &a)
+			within(t, entered, "A's Start")
+
+			// Once B is about to wait for the permit A holds: end the session
+			// and A's emulation, and let A return, which frees the permit.
+			var errA error
+			testHookJoinWaits = func(what joinWait) {
+				if what != waitPermit {
+					return
+				}
+				_ = w.Shutdown(t.Context())
+				close(gate)
+				errA = <-doneA
+			}
+			defer func() { testHookJoinWaits = nil }()
+			doneB := joinAsync(w, t.Context(), far(), &b)
+
+			require.ErrorIs(t, within(t, doneB, "B"), ErrClosed, "attempt %d", i)
+			require.ErrorIs(t, errA, ErrClosed, "attempt %d", i)
+			require.Equal(t, 1, r.starts(), "attempt %d: a join began an emulation after Shutdown", i)
+			require.Empty(t, b.bytes())
+			require.Zero(t, attachedTimes(w, &b))
+			require.Empty(t, fallbacks.all())
+		}()
+	}
+}
+
 // A viewer size, no replayer, a passed deadline, an empty ring: Start is
 // never called and the joiner gets Append's bytes.
 func TestAppendSizedTakesTheFastPath(t *testing.T) {
