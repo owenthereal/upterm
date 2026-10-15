@@ -1193,8 +1193,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			// below cannot run, and the departures further down are actors
 			// that start only after the attach. Its size would go on
 			// constraining the pty until the primary resumes, so its
-			// departure takes it out from here. The attach stops this, and
-			// from then on those actors own the removal.
+			// departure takes it out from here. The attach stops this: an
+			// attached client is taken out as it was before the reorder, by
+			// the actors below.
 			stop = context.AfterFunc(sess.Context(), func() {
 				h.terminals.detached(ptmx, sessionID)
 			})
