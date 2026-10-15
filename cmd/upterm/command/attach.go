@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/owenthereal/upterm/attach"
@@ -28,9 +29,9 @@ const (
 
 var flagEscapeChar string
 
-// ExitCodeError carries an exit status for main to use. Err is what cobra
-// prints; main exits with Code, and says nothing more — logging Err again
-// would put the same sentence on stderr twice.
+// ExitCodeError carries an exit status for Exit to use. With an Err, Exit
+// prints it as upterm's one line and exits with Code; with none, Code is the
+// whole outcome and nothing is printed.
 type ExitCodeError struct {
 	Code int
 	Err  error
@@ -73,6 +74,9 @@ the log for which); 255 if it could not attach.`,
   upterm attach build-shell --escape-char none`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: attachRunE,
+		// Usage and config errors exit with that failure code too, not only what
+		// RunE returns.
+		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},
 	}
 	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
 	return cmd
@@ -207,15 +211,6 @@ func attachExitError(name string, res attach.Result) error {
 }
 
 func attachRunE(c *cobra.Command, args []string) error {
-	// Set here rather than on the command, because where it is set is what
-	// divides the two kinds of failure. Cobra raises unknown flags and too
-	// many arguments before this line, and usage is the right answer to
-	// those; everything below it is a failure to attach — a name nobody
-	// holds, a session that has ended, a socket that refuses — and printing
-	// seventeen lines of flags after "no session named" buries the one
-	// sentence that answers the question.
-	c.SilenceUsage = true
-
 	// A bad escape character is a could-not-attach like the rest: the flag
 	// parsed, its value is just not one this can use.
 	escape, err := parseEscapeChar(flagEscapeChar)
@@ -253,8 +248,8 @@ func attachRunE(c *cobra.Command, args []string) error {
 	// because stderr may be the terminal that just stopped.
 	logging.WriteWithin(os.Stderr, logging.LogBound, "\r\n"+attachEndLine(name, res)+"\r\n")
 	// The line above is the whole account of how this ended; the status
-	// returned below is for a script, not for a reader.
-	c.SilenceErrors = true
+	// returned below is for a script, not for a reader, and Exit prints
+	// nothing for it.
 	return attachExitError(name, res)
 }
 

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -75,20 +76,17 @@ when stopped, and 255 when it can't join.`,
   upterm join --wait ID@uptermd.upterm.dev`,
 		Args: f.resolveTarget,
 		RunE: f.run,
-		// Every failure, a flag's or a missing target's before RunE too, is
-		// told on one line of upterm join's own, which nothing repeats.
-		SilenceUsage:  true,
-		SilenceErrors: true,
+		// Config errors, which PersistentPreRunE finds before RunE, as well
+		// as the failures joinFailure and the join outcomes carry.
+		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitJoinFailed)},
 	}
+	// Every failure, a flag's or a missing target's before RunE too, is told
+	// on one line of upterm join's own, and returns only its status, for
+	// which Exit prints nothing more.
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return joinFailure("upterm: " + err.Error())
 	})
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("error getting user home directory", "error", err)
-		os.Exit(1)
-	}
 	flags := cmd.Flags()
 	// join's flags stop at the first argument that isn't one, so that an
 	// unquoted paste of one of the ssh commands upterm prints for guests,
@@ -96,8 +94,8 @@ when stopped, and 255 when it can't join.`,
 	// suggest the join target it reaches. resolveTarget still reads join's
 	// flags after a target that stands alone.
 	flags.SetInterspersed(false)
-	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
-	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(homeDir), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
+	flags.StringSliceVarP(&f.privateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, and a .pub selects that key in the SSH agent, as upterm host -i does. By default, the agent's keys are offered first, then the listed files that exist and the agent doesn't hold, and a generated key when there are neither.")
+	flags.StringVar(&f.knownHosts, "known-hosts", defaultKnownHost(), "Known keys of relays. An unknown relay key is shown for confirmation, as ssh does.")
 	// Keep help and generated docs portable without changing the runtime
 	// defaults, as upterm host does.
 	flags.Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
@@ -106,6 +104,7 @@ when stopped, and 255 when it can't join.`,
 	flags.StringVar(&f.proxy, "proxy", "", "HTTP proxy to reach the relay through (e.g. http://proxy.example.com:3128). Works with ssh, ws and wss targets. Without it, ws and wss use HTTPS_PROXY/HTTP_PROXY, and ssh goes direct.")
 	flags.StringVar(&f.escapeChar, "escape-char", "~", "Escape character for leaving (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
 	flags.BoolVar(&f.wait, "wait", false, "On the first join, wait for a host as a rejoin does, with no 30 s limit.")
+	perRun(flags, "wait")
 	return cmd
 }
 
@@ -179,6 +178,11 @@ func pastedText(args []string) string {
 
 func (f *joinFlags) run(c *cobra.Command, _ []string) error {
 	target, typed := f.target, f.typed
+	// Checked before the terminal, as host checks it: like a flag's error,
+	// passing the flag fixes it. Exit prints it, with join's 255.
+	if err := homeDefaultError(); err != nil {
+		return err
+	}
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
 	if lt.pty == nil || !lt.rawMode {
 		return joinFailure(needsATerminal)

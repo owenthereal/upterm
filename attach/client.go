@@ -55,10 +55,10 @@ type Client struct {
 // never attached; once attached, every ending is a Result.
 func (c *Client) Run(ctx context.Context) (Result, error) {
 	if c.Stdout == nil {
-		return Result{}, errors.New("attach: Stdout is required")
+		return Result{}, errors.New("stdout is required")
 	}
 	if len(c.HostKeys) == 0 {
-		return Result{}, errors.New("attach: HostKeys is required")
+		return Result{}, errors.New("HostKeys is required")
 	}
 
 	// A throwaway key per connection: nothing is written to disk and there is
@@ -83,7 +83,8 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	}
 	raw, err := dial(dialCtx, c.Socket)
 	if err != nil {
-		return Result{}, fmt.Errorf("attach: %w", err)
+		// Already "dial unix SOCKET: …".
+		return Result{}, err
 	}
 	// One budget covers the handshake and every setup request after it — a
 	// daemon that completed the handshake and then stopped answering would
@@ -104,7 +105,8 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	})
 	if err != nil {
 		_ = raw.Close()
-		return Result{}, fmt.Errorf("attach: %w", err)
+		// Already "ssh: handshake failed: …".
+		return Result{}, err
 	}
 	_ = raw.SetDeadline(time.Time{})
 	client := ssh.NewClient(conn, chans, reqs)
@@ -151,6 +153,7 @@ func (c *Client) checkHostKey(hostname string, remote net.Addr, key ssh.PublicKe
 			return nil
 		}
 	}
-	// No "attach:" prefix: Run wraps the handshake's error with one already.
+	// No prefix: Run returns the handshake's error as it is, which x/crypto
+	// already starts with "ssh: handshake failed:".
 	return fmt.Errorf("%w (it presented %s)", ErrHostKeyMismatch, ssh.FingerprintSHA256(key))
 }

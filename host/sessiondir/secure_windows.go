@@ -35,12 +35,12 @@ func SecureDir(path string) error { return secureSessionDir(path) }
 func secureSessionDir(path string) error {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
-		return fmt.Errorf("sessiondir: open process token: %w", err)
+		return fmt.Errorf("open process token: %w", err)
 	}
 	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return fmt.Errorf("sessiondir: current user: %w", err)
+		return fmt.Errorf("current user: %w", err)
 	}
 
 	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
@@ -54,13 +54,13 @@ func secureSessionDir(path string) error {
 		},
 	}}, nil)
 	if err != nil {
-		return fmt.Errorf("sessiondir: build DACL: %w", err)
+		return fmt.Errorf("build DACL: %w", err)
 	}
 
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
-		return fmt.Errorf("sessiondir: set DACL on %s: %w", path, err)
+		return fmt.Errorf("set DACL on %s: %w", path, err)
 	}
 
 	// The DACL alone does not separate UAC's split tokens. An elevated host
@@ -77,26 +77,27 @@ func secureSessionDir(path string) error {
 	// through this function is labelled, not only session directories.
 	rid, err := tokenIntegrityRID(token)
 	if err != nil {
-		return fmt.Errorf("sessiondir: %w", err)
+		// Already "read token integrity level: …".
+		return err
 	}
 	label, err := windows.SecurityDescriptorFromString(fmt.Sprintf("S:(ML;OICI;NRNWNX;;;S-1-16-%d)", rid))
 	if err != nil {
-		return fmt.Errorf("sessiondir: build integrity label S-1-16-%d: %w", rid, err)
+		return fmt.Errorf("build integrity label S-1-16-%d: %w", rid, err)
 	}
 	sacl, _, err := label.SACL()
 	if err != nil {
-		return fmt.Errorf("sessiondir: integrity label S-1-16-%d has no SACL: %w", rid, err)
+		return fmt.Errorf("integrity label S-1-16-%d has no SACL: %w", rid, err)
 	}
 	if sacl == nil {
 		// x/sys reports a present-but-empty SACL as a nil ACL with no error,
 		// and passing that on would ask SetNamedSecurityInfo to clear the
 		// label rather than set one — the state this whole block exists to
 		// prevent.
-		return fmt.Errorf("sessiondir: integrity label S-1-16-%d parsed to an empty SACL", rid)
+		return fmt.Errorf("integrity label S-1-16-%d parsed to an empty SACL", rid)
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, sacl); err != nil {
-		return fmt.Errorf("sessiondir: set integrity label S-1-16-%d on %s: %w", rid, path, err)
+		return fmt.Errorf("set integrity label S-1-16-%d on %s: %w", rid, path, err)
 	}
 	return nil
 }

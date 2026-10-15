@@ -116,6 +116,15 @@ func Console() Option {
 	}
 }
 
+// Discard sends the log nowhere (logging falls back to it when the file
+// can't be opened; New with no output option would write JSON to stderr).
+func Discard() Option {
+	return func(c *config) error {
+		c.outputs = append(c.outputs, io.Discard)
+		return nil
+	}
+}
+
 // File logs to a file (path is required)
 func File(path string) Option {
 	return func(c *config) error {

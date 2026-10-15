@@ -29,7 +29,10 @@ func upgradeCmd() *cobra.Command {
 
   # Upgrade to a specific version:
   upterm upgrade 0.2.0`,
-		RunE: upgradeRunE,
+		Args: cobra.MaximumNArgs(1),
+		// A broken config file doesn't stop it.
+		Annotations: map[string]string{annotationConfig: "none"},
+		RunE:        upgradeRunE,
 	}
 
 	return cmd
@@ -70,7 +73,6 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 		// fetch the new releases
 		releases, err := m.LatestReleases()
 		if err != nil {
-			logger.Error("error fetching releases", "error", err)
 			return err
 		}
 

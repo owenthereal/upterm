@@ -54,6 +54,29 @@ func (e UserDiscardedError) Unwrap() error {
 	return host.ErrSessionAbandoned
 }
 
+// What the accept prompt exits with when it ends on a signal: 128 plus
+// the signal, as if the signal had ended the process, which is also how the
+// relay-key prompt ends.
+const (
+	exitInterrupted = 130 // SIGINT, or Ctrl-C at the prompt
+	exitTerminated  = 143 // SIGTERM
+)
+
+// UserTerminatedError is the accept prompt ending without an answer: SIGTERM
+// quits the program bubbletea runs it in, with no error.
+type UserTerminatedError struct{}
+
+func (e UserTerminatedError) Error() string {
+	return "terminated at the prompt"
+}
+
+// Unwrap makes a termination an abandoned startup rather than a failed one,
+// for the same reason UserInterruptedError.Unwrap does: the session was never
+// accepted, so nothing failed.
+func (e UserTerminatedError) Unwrap() error {
+	return host.ErrSessionAbandoned
+}
+
 // UserInterruptedError represents a user's Ctrl+C interruption
 type UserInterruptedError struct{}
 
@@ -66,20 +89,6 @@ func (e UserInterruptedError) Error() string {
 // the operator hit Ctrl+C at the prompt instead of answering it.
 func (e UserInterruptedError) Unwrap() error {
 	return host.ErrSessionAbandoned
-}
-
-// SilentError wraps an error that has already been displayed to the user.
-// main.go checks for this type to avoid duplicate logging.
-type SilentError struct {
-	Err error
-}
-
-func (e SilentError) Error() string {
-	return e.Err.Error()
-}
-
-func (e SilentError) Unwrap() error {
-	return e.Err
 }
 
 var (
@@ -170,16 +179,10 @@ background and this command prints how to reach it.`,
 		RunE:    shareRunE,
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("error getting user home directory", "error", err)
-		os.Exit(1)
-	}
-
 	cmd.PersistentFlags().StringVarP(&flagServer, "server", "", "ssh://uptermd.upterm.dev:22", "Specify the upterm server address (required). Supported protocols: ssh, ws, wss.")
 	cmd.PersistentFlags().StringVarP(&flagForceCommand, "force-command", "f", "", "Enforce a specified command for clients to join, and link the command's input/output to the client's terminal.")
-	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(homeDir), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
-	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(homeDir), "Specify a file containing known keys for remote hosts (required).")
+	cmd.PersistentFlags().StringSliceVarP(&flagPrivateKeys, "private-key", "i", defaultPrivateKeys(), "Identity files for authenticating with the upterm server. Supplying this makes the list the whole set, like OpenSSH's IdentitiesOnly: each file must load, a .pub selects that key in the SSH agent, and other agent keys are not offered. By default, the agent's keys are used when it has any, then the listed files that exist, then a generated key.")
+	cmd.PersistentFlags().StringVarP(&flagKnownHostsFilename, "known-hosts", "", defaultKnownHost(), "Specify a file containing known keys for remote hosts (required).")
 	// Keep help and generated docs portable without changing the runtime defaults.
 	cmd.PersistentFlags().Lookup("private-key").DefValue = "[~/.ssh/id_{ed25519,ed25519_sk,ecdsa,ecdsa_sk,dsa,rsa}]"
 	cmd.PersistentFlags().Lookup("known-hosts").DefValue = "~/.ssh/known_hosts"
@@ -203,6 +206,10 @@ background and this command prints how to reach it.`,
 	cmd.PersistentFlags().BoolVar(&flagDetach, "detach", false, "Start the session in the background and exit once it is running. Requires --accept. Attach a terminal later with 'upterm attach NAME'; stop it with 'upterm session stop NAME'.")
 	cmd.PersistentFlags().StringVarP(&flagHostOutput, "output", "o", "", "With --detach, print the started session as JSON (the same shape as 'upterm session info NAME -o json').")
 	cmd.PersistentFlags().StringVar(&flagHostEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only) this terminal from the session, or 'none' to disable.")
+
+	// One run's choices, not standing configuration. --join-timeout stays
+	// bound to env and config: CI sets it there.
+	perRun(cmd.PersistentFlags(), "name", "detach", "output")
 
 	// The provider list comes from host.ProviderList so --help, the generated
 	// docs and the parser's own error messages cannot disagree about which
@@ -326,6 +333,20 @@ func runWithNameRetry(logger *slog.Logger, explicit string, newName func() strin
 	return err
 }
 
+// nameInUseError is the error for a name a running session holds; its message
+// says to attach to that session or pick another --name. It unwraps to
+// sessiondir.ErrNameInUse, which runWithGeneratedNameRetry redraws on for a
+// generated name (an explicit --name is reported as is).
+type nameInUseError struct {
+	name string
+}
+
+func (e nameInUseError) Error() string {
+	return fmt.Sprintf("a running session is already named %s; attach with upterm attach %s, or pick another --name", e.name, e.name)
+}
+
+func (nameInUseError) Unwrap() error { return sessiondir.ErrNameInUse }
+
 // validateSessionNameFlag rejects an unusable --name before anything is
 // started, so the user sees one clear error rather than a failure partway
 // through startup.
@@ -401,6 +422,10 @@ func validateShareRequiredFlags(c *cobra.Command, args []string) error {
 		}
 	}
 
+	if err := homeDefaultError(); err != nil {
+		result = multierror.Append(result, err)
+	}
+
 	return result
 }
 
@@ -420,7 +445,7 @@ func confirmationTerminalError(accept bool, stdin, stdout *os.File) error {
 	if term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd())) {
 		return nil
 	}
-	return errors.New("interactive confirmation requires a terminal on stdin and stdout")
+	return errors.New("upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 }
 
 // hostOptions is everything shareRunE derives from flags and arguments
@@ -505,16 +530,6 @@ func resolveAuthorizedKeys(ctx context.Context, opts hostOptions, logger *slog.L
 }
 
 func shareRunE(c *cobra.Command, args []string) error {
-	// Set here rather than on the command, because where it is set is what
-	// divides the two kinds of failure. Cobra raises unknown flags and bad
-	// flag combinations (validateShareRequiredFlags, a PreRunE) before this
-	// line, and usage is the right answer to those. Everything below it is a
-	// session that did not happen or a command that exited — and the hosted
-	// command's own exit status is the most common of them, which printed
-	// thirty lines of flags after `exit 2` as if the user had mistyped
-	// something.
-	c.SilenceUsage = true
-
 	logger := uptermctx.Logger(c.Context())
 	if logger == nil {
 		return fmt.Errorf("logger not available")
@@ -533,12 +548,7 @@ func shareRunE(c *cobra.Command, args []string) error {
 	// Refuse before anything is claimed or connected: a session that reaches
 	// the prompt and cannot be answered is an orphan holding a name.
 	if err := confirmationTerminalError(flagAccept, os.Stdin, os.Stdout); err != nil {
-		c.SilenceUsage = true
-		c.SilenceErrors = true
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "To run in non-interactive environments (CI, scripts, etc.), use --accept:")
-		fmt.Fprintln(os.Stderr, "  upterm host --accept [command]")
+		_, _ = fmt.Fprintln(os.Stderr, "upterm: "+err.Error())
 		return SilentError{Err: err}
 	}
 
@@ -597,6 +607,7 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
 		}
 	}
+	warning := logWarningFor(c.Context())
 	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
 		s := &spawnedSession{
 			name:         name,
@@ -611,18 +622,14 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			display:      display,
 			attachClient: attachClient,
 			logger:       logger,
+			logWarning:   warning,
 		}
 		return s.run(c.Context())
 	})
 
-	err = mapUserAction(c, err)
-	var ec ExitCodeError
-	if errors.As(err, &ec) && ec.Err == nil {
-		// The line that explains it was printed already; the status is for
-		// a script.
-		c.SilenceErrors = true
-	}
-	return err
+	// A bare ExitCodeError is the hosted command's status: the line that
+	// explains it was printed already, and Exit prints nothing for it.
+	return mapUserAction(c, err)
 }
 
 // terminalSecretReader reads a passphrase from stdin without echo, or is
@@ -638,14 +645,14 @@ func terminalSecretReader(stdin, stderr *os.File) func(string) ([]byte, error) {
 	}
 }
 
-// mapUserAction turns a UserDiscardedError or UserInterruptedError from a
-// run attempt into the exit shareRunE reports, on either path: a decline is
-// a clean exit (nothing printed, status 0), and an interruption silences
-// both usage and error display before being returned — a session the
-// operator declined or interrupted at the prompt is not a fault, and must
-// not read as one in the daemon's log or the foreground's stderr. Anything
-// else is returned unchanged.
-func mapUserAction(c *cobra.Command, err error) error {
+// mapUserAction turns a UserDiscardedError, UserInterruptedError or
+// UserTerminatedError from a run attempt into the exit shareRunE reports, on
+// either path: a decline is a clean exit (nothing printed, status 0), and an
+// interruption or termination is Reported with status 130 or 143, so that
+// Exit prints nothing for it — a session the operator declined or interrupted
+// at the prompt is not a fault, and must not read as one in the daemon's log
+// or the foreground's stderr. Anything else is returned unchanged.
+func mapUserAction(_ *cobra.Command, err error) error {
 	var userDiscardedErr UserDiscardedError
 	if errors.As(err, &userDiscardedErr) {
 		return nil // Clean exit for user discard (exit code 0)
@@ -653,10 +660,12 @@ func mapUserAction(c *cobra.Command, err error) error {
 
 	var userInterruptedErr UserInterruptedError
 	if errors.As(err, &userInterruptedErr) {
-		// Set both flags to prevent help menu and error display
-		c.SilenceUsage = true
-		c.SilenceErrors = true
-		return userInterruptedErr
+		return Reported{Err: ExitCodeError{Code: exitInterrupted, Err: userInterruptedErr}}
+	}
+
+	var userTerminatedErr UserTerminatedError
+	if errors.As(err, &userTerminatedErr) {
+		return Reported{Err: ExitCodeError{Code: exitTerminated, Err: userTerminatedErr}}
 	}
 
 	return err
@@ -777,7 +786,19 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	model := tui.NewHostSessionModel(detail, false)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
-	finalModel, err := p.Run()
+	return confirmationOutcome(p.Run())
+}
+
+// confirmationOutcome is what displaySession makes of how the prompt ended:
+// the final model and the error Program.Run returned.
+//
+// A prompt that ended without an answer never starts the session. SIGINT is
+// an error wrapping tea.ErrInterrupted, which is the operator's Ctrl-C all the
+// same; SIGTERM is no error at all, only a model still undecided.
+func confirmationOutcome(finalModel tea.Model, err error) error {
+	if errors.Is(err, tea.ErrInterrupted) {
+		return UserInterruptedError{}
+	}
 	if err != nil {
 		return fmt.Errorf("session confirmation failed: %w", err)
 	}
@@ -796,12 +817,45 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 		return UserDiscardedError{}
 	case tui.HostSessionConfirmInterrupted:
 		return UserInterruptedError{}
+	case tui.HostSessionConfirmUndecided:
+		return UserTerminatedError{}
 	default:
 		return fmt.Errorf("unknown confirmation result: %d", sessionModel.Result())
 	}
 }
 
-func defaultPrivateKeys(homeDir string) []string {
+// homeDefault returns HOME-based defaults, or "" and the reason when HOME
+// is unavailable. Construction never exits.
+func homeDefault(rel ...string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(append([]string{home}, rel...)...), nil
+}
+
+// homeDefaultError fails a run of host or join that relies on the default
+// --known-hosts, not supplied from any origin, when there is no home
+// directory to find it in. -i's default needs none: see
+// defaultPrivateKeys.
+func homeDefaultError() error {
+	if suppliedFlags["known-hosts"] {
+		return nil
+	}
+	if _, err := homeDefault(); err != nil {
+		return fmt.Errorf("can't find your home directory for the default --known-hosts: %w; pass --known-hosts", err)
+	}
+	return nil
+}
+
+// defaultPrivateKeys is the files that exist of OpenSSH's default
+// identities. With no home directory there are none, as in a home with no
+// keys: the agent's keys and a generated one are used as ever.
+func defaultPrivateKeys() []string {
+	sshDir, err := homeDefault(".ssh")
+	if err != nil {
+		return nil
+	}
 	var pks []string
 	for _, f := range []string{
 		"id_ed25519",
@@ -811,7 +865,7 @@ func defaultPrivateKeys(homeDir string) []string {
 		"id_dsa",
 		"id_rsa",
 	} {
-		pk := filepath.Join(homeDir, ".ssh", f)
+		pk := filepath.Join(sshDir, f)
 		if _, err := os.Stat(pk); os.IsNotExist(err) {
 			continue
 		}
@@ -822,8 +876,10 @@ func defaultPrivateKeys(homeDir string) []string {
 	return pks
 }
 
-func defaultKnownHost(homeDir string) string {
-	return filepath.Join(homeDir, ".ssh", "known_hosts")
+// defaultKnownHost is ~/.ssh/known_hosts, or "" with no home directory.
+func defaultKnownHost() string {
+	kh, _ := homeDefault(".ssh", "known_hosts")
+	return kh
 }
 
 // legacyUserFlags maps the hidden per-provider flags onto the reference

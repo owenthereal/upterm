@@ -21,7 +21,6 @@ import (
 
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
-	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/liveness"
 	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/join"
@@ -807,10 +806,10 @@ func TestJoinFlagErrorsAreOneLine(t *testing.T) {
 	}
 }
 
-// runRoot runs Root() with args, stdin and stdout pipes, and returns what it
-// wrote to stderr and the status main would exit with. The configuration
-// and state directories are the test's own, so the developer's config file
-// sets no flag.
+// runRoot is runCLI with the configuration and state directories the
+// test's own, so the developer's config file sets no flag. It returns what
+// went to stderr, upterm join's own lines and Exit's, and the status main
+// would exit with.
 func runRoot(t *testing.T, args ...string) (string, int) {
 	t.Helper()
 	stderr, code, _ := runRootCmd(t, args...)
@@ -822,38 +821,8 @@ func runRootCmd(t *testing.T, args ...string) (string, int, *cobra.Command) {
 	t.Helper()
 	withConfig(t, "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	stdinR, stdinW, err := os.Pipe()
-	require.NoError(t, err)
-	stdoutR, stdoutW, err := os.Pipe()
-	require.NoError(t, err)
-	stderrR, stderrW, err := os.Pipe()
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		for _, f := range []*os.File{stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW} {
-			_ = f.Close()
-		}
-	})
-	origIn, origOut, origErr := os.Stdin, os.Stdout, os.Stderr
-	os.Stdin, os.Stdout, os.Stderr = stdinR, stdoutW, stderrW
-	defer func() { os.Stdin, os.Stdout, os.Stderr = origIn, origOut, origErr }()
-
-	collected := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(stderrR)
-		collected <- string(b)
-	}()
-
-	root := Root()
-	root.SetArgs(args)
-	cmd, err := root.ExecuteC()
-	// A command that fails skips PersistentPostRunE, which closes the log
-	// file; Windows won't remove the state directory while it is open.
-	if logger := uptermctx.Logger(cmd.Context()); logger != nil {
-		_ = logger.Close()
-	}
-	require.NoError(t, stderrW.Close())
-	return <-collected, exitStatus(err), cmd
+	_, stderr, code, cmd := runCLICmd(t, args...)
+	return stderr, code, cmd
 }
 
 var relayAddr = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 22}

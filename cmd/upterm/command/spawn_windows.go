@@ -51,6 +51,9 @@ type spawnOptions struct {
 	env        []string
 	name       string
 	logPath    string
+	// logOff, if set, is told why the log couldn't be opened; the child
+	// then starts with its stdout and stderr on the null device.
+	logOff func(err error)
 }
 
 // spawnDaemon starts the daemon and returns the parent's end of the
@@ -59,7 +62,8 @@ type spawnOptions struct {
 // The child is this executable with the same arguments, detached from this
 // console (a window closing reaches nothing in it), with stdin from NUL and
 // stdout and stderr appended to the log — anything it prints outside its
-// logger, a panic above all, has to land somewhere a person can find.
+// logger, a panic above all, has to land somewhere a person can find. A log
+// that can't be opened doesn't stop it: logOff is told, and they go to NUL.
 //
 // The channel is an AF_UNIX socket rather than the socketpair Unix inherits,
 // because Windows has neither socketpair nor ExtraFiles. That difference is
@@ -147,9 +151,12 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 	defer func() { _ = devnull.Close() }()
 	logFile, err := os.OpenFile(opts.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open log: %w", err)
+		if opts.logOff != nil {
+			opts.logOff(err)
+		}
+	} else {
+		defer func() { _ = logFile.Close() }()
 	}
-	defer func() { _ = logFile.Close() }()
 
 	// Built twice on the breakaway retry, because an exec.Cmd is not
 	// restartable. The files are passed as *os.File and so are the caller's
@@ -161,8 +168,10 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 			daemonNonceEnv+"="+nonce,
 			daemonNameEnv+"="+opts.name)
 		cmd.Stdin = devnull
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
+		if logFile != nil { // otherwise exec's null device
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
 		return cmd
 	}
@@ -239,6 +248,14 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 		return nil, nil, fmt.Errorf("bootstrap hello: %w", err)
 	}
 	return conn, cmd.Process, nil
+}
+
+// isDaemonProcess reports whether this process is the session daemon:
+// UPTERM_DAEMON_FD (Unix) or UPTERM_DAEMON_SOCKET (Windows) is set. Only
+// until bootstrapConn unsets it, which is after the root's pre-run.
+func isDaemonProcess() bool {
+	_, ok := os.LookupEnv(daemonSocketEnv)
+	return ok
 }
 
 // bootstrapConn returns the channel this process was started to connect on,

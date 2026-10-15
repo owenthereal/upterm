@@ -3,6 +3,7 @@ package sessiondir
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -107,6 +108,20 @@ func Test_ValidateName(t *testing.T) {
 	// port or a suffix past the period is an ordinary name.
 	for _, ok := range []string{"console", "com", "com10", "nul-1a2b", "build.1", "aux2"} {
 		require.NoError(t, ValidateName(ok), "name %q", ok)
+	}
+}
+
+// A refusal is read by a person, after "upterm: ": the name and what a name
+// is, with no package prefix and no regular expression.
+func Test_ValidateName_SaysWhatANameIs(t *testing.T) {
+	require.EqualError(t, ValidateName("a:b"), `"a:b" isn't a session name: use letters, digits, '.', '_' and '-', starting with a letter or digit, at most 64 bytes`)
+	for _, bad := range []string{"a:b", strings.Repeat("a", 65), "con", "build."} {
+		msg := ValidateName(bad).Error()
+		require.True(t, strings.HasPrefix(msg, fmt.Sprintf("%q isn't a session name: ", bad)), msg)
+		require.NotContains(t, msg, nameRe.String())
+	}
+	for _, err := range []error{ErrNameInUse, ErrInvalidName, ErrSocketPathTooLong} {
+		require.NotContains(t, err.Error(), "sessiondir")
 	}
 }
 

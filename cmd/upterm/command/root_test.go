@@ -10,6 +10,7 @@ import (
 
 	"github.com/owenthereal/upterm/utils"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -167,7 +168,7 @@ func Test_toScalarString(t *testing.T) {
 func Test_bindFlagsToEnv_scalarFlagRejectsYAMLList(t *testing.T) {
 	withConfig(t, `force-command: ["/bin/bash", "-l"]`+"\n")
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "force-command")
 	assert.ErrorContains(t, err, `expected a single value, got []interface {}; write it as a single string, e.g. force-command: "/bin/bash -l"`)
 }
@@ -176,7 +177,7 @@ func Test_bindFlagsToEnv_badEnvValueNamesTheEnvVar(t *testing.T) {
 	withConfig(t, "")
 	t.Setenv("UPTERM_DEBUG", "yes")
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "UPTERM_DEBUG")
 	assert.ErrorContains(t, err, "debug")
 }
@@ -184,7 +185,7 @@ func Test_bindFlagsToEnv_badEnvValueNamesTheEnvVar(t *testing.T) {
 func Test_bindFlagsToEnv_badConfigValueNamesTheConfigFile(t *testing.T) {
 	withConfig(t, "debug: yes\n")
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, utils.UptermConfigFilePath())
 	assert.ErrorContains(t, err, "debug")
 }
@@ -192,7 +193,7 @@ func Test_bindFlagsToEnv_badConfigValueNamesTheConfigFile(t *testing.T) {
 func Test_bindFlagsToEnv_unknownConfigKeyIsFatal(t *testing.T) {
 	withConfig(t, "authorized_user:\n  - github:alice\n")
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, `unknown config key "authorized_user"`)
 }
 
@@ -223,7 +224,7 @@ func Test_bindFlagsToEnv_yamlListIsNotFlattened(t *testing.T) {
 	withConfig(t, "authorized-user:\n  - github:alice\n  - github:bob@ghe.corp.com\nprivate-key:\n  - /a/key1\n  - /a/key2\n")
 
 	cmd := newTestCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 
 	users, err := cmd.Flags().GetStringSlice("authorized-user")
@@ -244,7 +245,7 @@ func Test_bindFlagsToEnv_envListIsCommaSeparated(t *testing.T) {
 	t.Setenv("UPTERM_AUTHORIZED_USER", "github:alice,github:bob")
 
 	cmd := newTestCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 
 	users, err := cmd.Flags().GetStringSlice("authorized-user")
@@ -256,7 +257,7 @@ func Test_bindFlagsToEnv_envListIsCommaSeparated(t *testing.T) {
 func Test_bindFlagsToEnv_malformedConfigIsFatal(t *testing.T) {
 	withConfig(t, "authorized-user: [unclosed\n")
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "failed to read config file")
 }
 
@@ -282,7 +283,7 @@ func Test_bindFlagsToEnv_unreadableConfigIsFatal(t *testing.T) {
 	require.NoError(t, os.Chmod(confDir, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(confDir, 0o755) })
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "failed to read config file")
 }
 
@@ -298,14 +299,14 @@ func Test_bindFlagsToEnv_configThatIsNotAFileIsFatal(t *testing.T) {
 	// platform, which is exactly the case errors.Is must not mistake for absence.
 	require.NoError(t, os.MkdirAll(utils.UptermConfigFilePath(), 0o755))
 
-	_, err := bindFlagsToEnv(newTestCmd())
+	_, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "failed to read config file")
 }
 
 func Test_bindFlagsToEnv_missingConfigIsFine(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	supplied, err := bindFlagsToEnv(newTestCmd())
+	supplied, _, err := bindFlagsToEnv(newTestCmd())
 	require.NoError(t, err)
 	assert.Empty(t, supplied)
 }
@@ -315,7 +316,7 @@ func Test_bindFlagsToEnv_nullConfigValueIsRejected(t *testing.T) {
 	// AllKeys sees the key. Skipping it would drop the restriction silently.
 	withConfig(t, "authorized-user:\n")
 
-	supplied, err := bindFlagsToEnv(newTestCmd())
+	supplied, _, err := bindFlagsToEnv(newTestCmd())
 	assert.ErrorContains(t, err, "config key has no value")
 	assert.True(t, supplied["authorized-user"],
 		"presence must be recorded even when the value is unusable")
@@ -326,7 +327,7 @@ func Test_bindFlagsToEnv_emptyEnvVarIsStillSupplied(t *testing.T) {
 	t.Setenv("UPTERM_AUTHORIZED_USER", "")
 
 	cmd := newTestCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 
 	// viper treats an empty env var as unset, so without the direct LookupEnv
@@ -345,7 +346,7 @@ func Test_bindFlagsToEnv_recordsExplicitCLIFlags(t *testing.T) {
 	cmd := newTestCmd()
 	require.NoError(t, cmd.Flags().Set("authorized-user", "github:alice"))
 
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 
 	// The sync loop skips flags that are already Changed, so without an
@@ -371,7 +372,7 @@ func Test_bindFlagsToEnv_emptyEnvVarAloneEmptiesASliceFlag(t *testing.T) {
 	t.Setenv("UPTERM_PRIVATE_KEY", "")
 
 	cmd := newSliceDefaultCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 	assert.True(t, supplied["private-key"])
 
@@ -387,7 +388,7 @@ func Test_bindFlagsToEnv_emptyEnvVarKeepsAConfigValue(t *testing.T) {
 	t.Setenv("UPTERM_AUTHORIZED_USER", "")
 
 	cmd := newSliceDefaultCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 	assert.True(t, supplied["private-key"])
 	assert.True(t, supplied["authorized-user"])
@@ -408,7 +409,7 @@ func Test_bindFlagsToEnv_emptyEnvVarKeepsACLIValue(t *testing.T) {
 	cmd := newSliceDefaultCmd()
 	require.NoError(t, cmd.Flags().Set("private-key", "/from/cli"))
 	require.NoError(t, cmd.Flags().Set("authorized-user", "github:bob"))
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 	assert.True(t, supplied["private-key"])
 
@@ -425,7 +426,7 @@ func Test_bindFlagsToEnv_emptyEnvVarLeavesScalarsAlone(t *testing.T) {
 	t.Setenv("UPTERM_SERVER", "")
 
 	cmd := newSliceDefaultCmd()
-	supplied, err := bindFlagsToEnv(cmd)
+	supplied, _, err := bindFlagsToEnv(cmd)
 	require.NoError(t, err)
 	assert.True(t, supplied["server"])
 
@@ -474,14 +475,125 @@ func Test_persistentPreRun_malformedConfigSpares_configCommands(t *testing.T) {
 		})
 	}
 
-	// Every other command must refuse, rather than silently dropping a
-	// requested authorization restriction. Use `version` rather than
-	// `host --help`: cobra short-circuits --help without running
-	// PersistentPreRunE, so a help invocation would never reach ingestion.
+	// version reads no config, so it doesn't fail on one either.
 	root2 := Root()
 	root2.SetOut(io.Discard)
 	root2.SetErr(io.Discard)
 	root2.SetArgs([]string{"version"})
-	err := root2.Execute()
-	assert.ErrorContains(t, err, "failed to read config file")
+	assert.NoError(t, root2.Execute())
+
+	// A command that reads it must refuse, rather than silently dropping a
+	// requested authorization restriction. Not `host --help`: cobra
+	// short-circuits --help without running PersistentPreRunE, so a help
+	// invocation would never reach ingestion.
+	root3 := Root()
+	root3.SetOut(io.Discard)
+	root3.SetErr(io.Discard)
+	root3.SetArgs([]string{"session", "list"})
+	assert.ErrorContains(t, root3.Execute(), "failed to read config file")
+}
+
+// Exactly these flags are per-run; every other flag stays bound, host's
+// --join-timeout included (CI sets it).
+func TestPerRunFlagsAreExactlyTheRunsOwnChoices(t *testing.T) {
+	var got []string
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+			if _, ok := f.Annotations[annotationPerRun]; ok {
+				got = append(got, c.CommandPath()+" --"+f.Name)
+			}
+		})
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(Root())
+	require.ElementsMatch(t, []string{
+		"upterm host --detach", "upterm host --name", "upterm host --output",
+		"upterm join --wait",
+		"upterm session current --output", "upterm session info --output",
+		"upterm session set --join-timeout",
+	}, got)
+}
+
+func TestPerRunEnvStillAppliesWithAWarning(t *testing.T) {
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
+	setupSessionRoots(t)
+	withConfig(t, "")
+	_, stderr, code := runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code) // the value still applies: set looks the name up
+	require.Contains(t, stderr, "upterm: UPTERM_JOIN_TIMEOUT is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n")
+}
+
+func TestPerRunConfigNamesTheFile(t *testing.T) {
+	prevOutput := flagOutput
+	t.Cleanup(func() { flagOutput = prevOutput })
+	setupSessionRoots(t)
+	withConfig(t, "output: json\n")
+	_, stderr, code := runCLI(t, "session", "info", "nosuch")
+	require.Equal(t, 4, code) // the lookup fails, with the value or without it
+	require.Contains(t, stderr, "upterm: the output key in "+utils.UptermConfigFilePath()+" is deprecated; pass --output. It will be ignored starting in "+perRunIgnoredFrom+".\n")
+
+	// A config value alone still applies: without it, set would have nothing
+	// to set (exit 1), not a name to look up.
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "")
+	require.NoError(t, os.Unsetenv("UPTERM_JOIN_TIMEOUT"))
+	withConfig(t, "join-timeout: 5m\n")
+	_, stderr, code = runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code, stderr)
+	require.Contains(t, stderr, "upterm: the join-timeout key in "+utils.UptermConfigFilePath()+" is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n")
+}
+
+// Each value env and config hold is one line, the one that applies and the
+// one it overrides alike: both stop being read in the same release. A value
+// on the command line outranks them both, and nothing is said.
+func TestPerRunWarnsOncePerValue(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "join-timeout: 5m\n")
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
+	_, stderr, code := runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code)
+	require.Equal(t, "upterm: UPTERM_JOIN_TIMEOUT is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n"+
+		"upterm: the join-timeout key in "+utils.UptermConfigFilePath()+" is deprecated for upterm session set; pass --join-timeout. It will be ignored there starting in "+perRunIgnoredFrom+".\n"+
+		"upterm: no session named \"nosuch\"\n", stderr)
+
+	_, stderr, code = runCLI(t, "session", "set", "nosuch", "--join-timeout", "1m")
+	require.Equal(t, 4, code)
+	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
+}
+
+// The daemon re-parses the same argv, env and config, and applies the same
+// values; only the parent warns, since the daemon's stderr is the log.
+func TestPerRunWarningsAreTheParentsOnly(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	t.Setenv("UPTERM_JOIN_TIMEOUT", "10m")
+	_, stderr, code := runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code)
+	require.Equal(t, 1, strings.Count(stderr, "UPTERM_JOIN_TIMEOUT is deprecated"), stderr)
+
+	t.Setenv(daemonHandoffEnv, "3")
+	_, stderr, code = runCLI(t, "session", "set", "nosuch")
+	require.Equal(t, 4, code) // applied all the same
+	require.Equal(t, "upterm: no session named \"nosuch\"\n", stderr)
+}
+
+// A CLI-only flag is never bound to env or config: an `output:` key or
+// UPTERM_OUTPUT meant for another command would otherwise change or break a
+// command that never asked for it. The name stays a known config key, which
+// another command may own, so `output:` in a config neither sets the flag nor
+// fails the run.
+func TestCLIOnlyFlagsIgnoreEnvAndConfig(t *testing.T) {
+	withConfig(t, "output: json\n")
+	cmd := &cobra.Command{Use: "probe", RunE: func(*cobra.Command, []string) error { return nil }}
+	var out string
+	cmd.Flags().StringVarP(&out, "output", "o", "", "")
+	require.NoError(t, cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"}))
+	t.Setenv("UPTERM_OUTPUT", "json")
+	supplied, deps, err := bindFlagsToEnv(cmd)
+	require.NoError(t, err)
+	require.Empty(t, out)
+	require.False(t, supplied["output"])
+	require.Empty(t, deps)
 }

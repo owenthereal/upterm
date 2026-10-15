@@ -10,8 +10,13 @@ import (
 type HostSessionConfirmResult int
 
 const (
+	// HostSessionConfirmUndecided indicates nobody answered: the prompt is
+	// still open, or ended without an answer (bubbletea quits the program on
+	// SIGTERM). It is the zero value so that nothing reads an unanswered
+	// prompt as an acceptance.
+	HostSessionConfirmUndecided HostSessionConfirmResult = iota
 	// HostSessionConfirmAccepted indicates the user accepted (pressed 'y')
-	HostSessionConfirmAccepted HostSessionConfirmResult = iota
+	HostSessionConfirmAccepted
 	// HostSessionConfirmRejected indicates the user rejected (pressed 'n')
 	HostSessionConfirmRejected
 	// HostSessionConfirmInterrupted indicates the user interrupted (pressed Ctrl+C)
@@ -42,15 +47,17 @@ const (
 // NewHostSessionModel creates a model for displaying session and getting confirmation
 func NewHostSessionModel(detail SessionDetail, autoAccept bool) HostSessionModel {
 	initialState := stateWaitingForConfirm
+	result := HostSessionConfirmUndecided
 	if autoAccept {
 		initialState = stateDone
+		result = HostSessionConfirmAccepted
 	}
 
 	return HostSessionModel{
 		detail:     detail,
 		autoAccept: autoAccept,
 		state:      initialState,
-		result:     HostSessionConfirmAccepted, // default for auto-accept
+		result:     result,
 		width:      getTermWidth(),
 	}
 }

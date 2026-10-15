@@ -17,10 +17,12 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/go-cmp/cmp"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -768,6 +770,27 @@ func Test_guardedSpawn_RefusesInsideATestBinary(t *testing.T) {
 func runHostInProcess(t *testing.T, argv ...string) error {
 	t.Helper()
 
+	var command []string
+	for i, a := range argv {
+		if a == "--" {
+			command = argv[i+1:]
+			break
+		}
+	}
+	inProcessDaemons(t, command)
+
+	root := Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs(argv)
+	return root.Execute()
+}
+
+// inProcessDaemons is runHostInProcess's daemon: hostSpawn, until the test
+// ends, starts one in a goroutine of this process, hosting command.
+func inProcessDaemons(t *testing.T, command []string) {
+	t.Helper()
+
 	orig := hostSpawn
 	t.Cleanup(func() { hostSpawn = orig })
 
@@ -776,14 +799,6 @@ func runHostInProcess(t *testing.T, argv ...string) error {
 	// variables the next test is about to write.
 	var daemons sync.WaitGroup
 	t.Cleanup(daemons.Wait)
-
-	var command []string
-	for i, a := range argv {
-		if a == "--" {
-			command = argv[i+1:]
-			break
-		}
-	}
 
 	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
 		opts, err := parseHostOptions(command)
@@ -800,12 +815,87 @@ func runHostInProcess(t *testing.T, argv ...string) error {
 		}()
 		return b, nil, nil
 	}
+}
 
-	root := Root()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs(argv)
-	return root.Execute()
+// inProcessHostEnv is runCLI's `upterm host` with inProcessDaemons, kept
+// to the test: no config, a home with no keys, no agent, and short XDG
+// roots, the directory it returns.
+func inProcessHostEnv(t *testing.T) string {
+	t.Helper()
+	withConfig(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir, err := os.MkdirTemp("", "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	return dir
+}
+
+// A daemon that fails with several errors says so on one line: the
+// parent gets the failure as text, which Exit can't split, so it never
+// carries multierror's "N errors occurred" list.
+func TestADaemonsSeveralErrorsAreOneLine(t *testing.T) {
+	inProcessHostEnv(t)
+	inProcessDaemons(t, []string{"true"})
+	const alice, bob = "https://127.0.0.1:1/alice", "https://127.0.0.1:1/bob"
+
+	_, stderr, code := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1",
+		"--authorized-user", alice, "--authorized-user", bob, "--", "true")
+	require.Equal(t, 1, code)
+	require.Equal(t, 1, strings.Count(stderr, "\n"), stderr)
+	require.True(t, strings.HasPrefix(stderr, "upterm: session "), stderr)
+	require.Contains(t, stderr, "could not start: error reading user keys: "+alice+": ")
+	require.Contains(t, stderr, "; error reading user keys: "+bob+": ")
+	require.NotContains(t, stderr, "errors occurred")
+}
+
+// The root's pre-run and the daemon's spawn both find the log unopenable,
+// and share one warning: upterm host says so once.
+func TestHostWithoutItsLogWarnsOnce(t *testing.T) {
+	dir := inProcessHostEnv(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "upterm"), nil, 0o600)) // a file where the dir goes
+
+	inProcessDaemons(t, []string{"true"})
+	inProcess := hostSpawn
+	hostSpawn = func(so spawnOptions) (net.Conn, *os.Process, error) {
+		// What spawnDaemon does with a log it can't open.
+		_, err := os.OpenFile(so.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		require.Error(t, err)
+		so.logOff(err)
+		return inProcess(so)
+	}
+
+	_, stderr, _ := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--", "true")
+	require.Equal(t, 1, strings.Count(stderr, "upterm: warning: can't open the log file"), stderr)
+	require.NotContains(t, stderr, "(see ", "nothing of the session is in the log")
+}
+
+// UPTERM_NAME still names the session before v0.40, and upterm host says
+// once that it will be ignored from perRunIgnoredFrom.
+func TestHostNameFromEnvStillAppliesWithAWarning(t *testing.T) {
+	withConfig(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("SSH_AUTH_SOCK", "")
+	dir, err := os.MkdirTemp("", "up")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	origName := flagName
+	t.Cleanup(func() { flagName = origName })
+	t.Setenv("UPTERM_NAME", "x")
+
+	inProcessDaemons(t, []string{"true"})
+	_, stderr, code := runCLI(t, "host", "--detach", "--accept", "--server", "ssh://127.0.0.1:1", "--", "true")
+	require.Equal(t, 1, code)
+	require.Contains(t, stderr, "upterm: session x could not start: ")
+	require.Equal(t, 1, strings.Count(stderr, "upterm: UPTERM_NAME is deprecated; pass --name. This environment variable will be ignored starting in "+perRunIgnoredFrom+".\n"), stderr)
 }
 
 // Test_hostCmd_authorizedKeysErrorNamesTheFileOnce pins that nobody re-wraps
@@ -1043,38 +1133,32 @@ func Test_hostCmd_guardCoversEveryAuthorizationFlag(t *testing.T) {
 	}
 }
 
-// A session that did not happen, or a hosted command that exited non-zero, is
-// not the user mistyping a flag. Printing the usage block after `exit 2`
-// buries the one line that says what happened under thirty lines of flags —
-// which is what `upterm host -- bash` did on every non-zero exit, since the
-// command's status comes back as an ordinary error from RunE.
+// No failure prints the usage. A session that did not happen, or a
+// hosted command that exited non-zero, is not the user mistyping a flag:
+// printing the usage block after `exit 2` buried the one line that says what
+// happened under thirty lines of flags, which is what `upterm host -- bash`
+// did on every non-zero exit. And a mistyped flag is one line that names it,
+// as upterm join's always was.
 //
-// The failure here is a malformed --proxy because it is deterministic and
-// reaches nothing: no keys, no relay, no session. What is under test is where
-// SilenceUsage is set, not which error follows it.
-func Test_hostUsageIsForUsageErrorsOnly(t *testing.T) {
+// The failure to host is a malformed --proxy because it is deterministic and
+// reaches nothing: no keys, no relay, no session.
+func Test_hostPrintsNoUsage(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
 	origAccept, origProxy := flagAccept, flagProxy
 	t.Cleanup(func() { flagAccept, flagProxy = origAccept, origProxy })
 
-	var out strings.Builder
-	root := Root()
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"host", "--accept", "--proxy", "://not-a-url", "--", "true"})
+	stdout, stderr, code := runCLI(t, "host", "--accept", "--proxy", "://not-a-url", "--", "true")
+	require.Equal(t, 1, code)
+	require.True(t, strings.HasPrefix(stderr, "upterm: "), stderr)
+	require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
+	require.NotContains(t, stdout+stderr, "Usage:", "a failure to host is not a usage error")
+	require.NotContains(t, stdout+stderr, "--force-command", "and the flag list has nothing to do with it")
 
-	require.Error(t, root.Execute())
-	require.NotContains(t, out.String(), "Usage:", "a failure to host is not a usage error")
-	require.NotContains(t, out.String(), "--force-command", "and the flag list has nothing to do with it")
-
-	// The other half of the contract: a flag combination that is genuinely
-	// wrong still explains itself with the usage the user needs.
-	out.Reset()
-	root = Root()
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"host", "--nonexistent-flag"})
-	require.Error(t, root.Execute())
-	require.Contains(t, out.String(), "Usage:", "an unknown flag is exactly what usage is for")
+	stdout, stderr, code = runCLI(t, "host", "--nonexistent-flag")
+	require.Equal(t, 1, code)
+	require.Equal(t, "upterm: unknown flag: --nonexistent-flag\n", stderr)
+	require.NotContains(t, stdout, "Usage:", "a mistyped flag is one line too")
 }
 
 // runHostCmd executes `upterm host --accept <args> -- true` in a controlled
@@ -1174,4 +1258,66 @@ func Test_hostCmd_emptyPrivateKeyEnvPreservesAnExplicitValue(t *testing.T) {
 		t.Setenv("UPTERM_PRIVATE_KEY", "")
 		require.ErrorContains(t, runHostCmd(t, "--private-key", missing), "cannot read private key "+missing)
 	})
+}
+
+// promptOutcome runs the accept prompt in a program with no terminal and no
+// signal handler, sends it msgs, and returns what displaySession makes of how
+// it ended. A signal is the message bubbletea turns it into, tea.QuitMsg for
+// SIGTERM and tea.InterruptMsg for SIGINT; the test process is never
+// signalled.
+func promptOutcome(t *testing.T, msgs ...tea.Msg) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p := tea.NewProgram(tui.NewHostSessionModel(tui.SessionDetail{}, false),
+		tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutSignalHandler())
+	go func() {
+		for _, m := range msgs {
+			p.Send(m)
+		}
+	}()
+	return confirmationOutcome(p.Run())
+}
+
+// A prompt that ends without an answer never starts the session, and a
+// signal says nothing: SIGINT is 130 and SIGTERM 143, as if the signal had
+// ended the process.
+func TestASignalAtTheAcceptPromptNeverStartsTheSession(t *testing.T) {
+	for name, tc := range map[string]struct {
+		msg  tea.Msg
+		want int
+	}{
+		"SIGTERM": {tea.QuitMsg{}, 143},
+		"SIGINT":  {tea.InterruptMsg{}, 130},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := promptOutcome(t, tc.msg)
+			require.Error(t, err, "nil would start the session")
+			var stderr strings.Builder
+			cmd := &cobra.Command{}
+			require.Equal(t, tc.want, Exit(cmd, mapUserAction(cmd, err), &stderr))
+			require.Empty(t, stderr.String())
+		})
+	}
+}
+
+func TestTheAcceptPromptsAnswers(t *testing.T) {
+	require.NoError(t, promptOutcome(t, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}))
+
+	err := promptOutcome(t, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	require.ErrorAs(t, err, new(UserDiscardedError))
+
+	err = promptOutcome(t, tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.ErrorAs(t, err, new(UserInterruptedError))
+}
+
+// Whatever else ends the program is a failure, told as one: only an interrupt
+// is the operator's own word.
+func TestConfirmationOutcomeOfAProgramKilled(t *testing.T) {
+	// What Program.Run returns for a SIGINT.
+	err := confirmationOutcome(nil, fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrInterrupted))
+	require.ErrorAs(t, err, new(UserInterruptedError))
+
+	err = confirmationOutcome(nil, fmt.Errorf("%w: %w", tea.ErrProgramKilled, context.Canceled))
+	require.EqualError(t, err, "session confirmation failed: program was killed: context canceled")
 }

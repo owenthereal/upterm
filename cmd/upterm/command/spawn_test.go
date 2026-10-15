@@ -133,6 +133,47 @@ func TestSpawnDaemonHandsTheChildItsChannel(t *testing.T) {
 	requirePlatformReports(t, log)
 }
 
+// A log that can't be opened doesn't stop the daemon: its stdout and
+// stderr go to the null device, and the spawn says why, once.
+func TestSpawnDaemonStartsWithoutItsLog(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	logPath := filepath.Join(file, "upterm.log") // under a regular file
+	var offs []error
+	conn, proc, err := spawnDaemon(spawnOptions{
+		executable: os.Args[0],
+		args:       []string{"-test.run=^TestSpawnHelperProcess$"},
+		env:        append(os.Environ(), "UPTERM_SPAWN_HELPER=1"),
+		name:       "helper-1",
+		logPath:    logPath,
+		logOff:     func(err error) { offs = append(offs, err) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		exited := make(chan struct{})
+		go func() {
+			_, _ = proc.Wait()
+			close(exited)
+		}()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("the child was still running 10s after the test finished with it; killing it")
+			_ = proc.Kill()
+			<-exited
+		}
+	})
+	defer func() { _ = conn.Close() }()
+
+	c := bootstrap.NewConn(conn)
+	require.NoError(t, c.Send(&api.Startup{Msg: &api.Startup_Print{Print: &api.Print{Text: "ping"}}}))
+	m, err := c.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "ping", m.GetPrint().GetText(), "the child runs without its log")
+	require.Len(t, offs, 1)
+	require.Error(t, offs[0])
+}
+
 func TestSpawnDaemonRequiresANameAndALog(t *testing.T) {
 	_, _, err := spawnDaemon(spawnOptions{logPath: filepath.Join(t.TempDir(), "x")})
 	require.Error(t, err)

@@ -48,6 +48,26 @@ type spawnedSession struct {
 	display      displayFunc // shows the session and reports the operator's decision
 	attachClient clientFunc  // nil with --detach
 	logger       *slog.Logger
+	logWarning   *logWarning // the run's, shared by every spawn in it
+	logOff       bool        // the spawn couldn't open logPath
+}
+
+// loggedTo is the log the daemon's output went to, or "" when the spawn
+// couldn't open it.
+func (s *spawnedSession) loggedTo() string {
+	if s.logOff {
+		return ""
+	}
+	return s.logPath
+}
+
+// seeLog is a line's pointer to the log, format with logPath in it, or
+// nothing when there is no log to point at (logPath is "").
+func seeLog(format, logPath string) string {
+	if logPath == "" {
+		return ""
+	}
+	return fmt.Sprintf(format, logPath)
 }
 
 type clientOutcome struct {
@@ -56,10 +76,15 @@ type clientOutcome struct {
 }
 
 func (s *spawnedSession) run(ctx context.Context) error {
-	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath})
+	// A log the spawn can't open is warned about, and the daemon starts
+	// without it: nothing of this session is in it to point at.
+	conn, _, err := s.spawn(spawnOptions{name: s.name, logPath: s.logPath, logOff: func(err error) {
+		s.logOff = true
+		s.logWarning.warn(s.logPath, err)
+	}})
 	if err != nil {
 		if _, statErr := os.Stat(s.logPath); statErr == nil {
-			return fmt.Errorf("could not start the session daemon: %w (see %s)", err, s.logPath)
+			return fmt.Errorf("could not start the session daemon: %w%s", err, seeLog(" (see %s)", s.loggedTo()))
 		}
 		return fmt.Errorf("could not start the session daemon: %w", err)
 	}
@@ -189,21 +214,21 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		clientDone = nil
 		return fmt.Errorf("could not attach the local terminal to session %s: %w", s.name, out.err)
 	case errors.Is(runErr, context.Canceled) && ctx.Err() == nil:
-		return fmt.Errorf("session %s: the daemon did not report whether the command started within %s; see %s", s.name, verdictWait, s.logPath)
+		return fmt.Errorf("session %s: the daemon did not report whether the command started within %s%s", s.name, verdictWait, seeLog("; see %s", s.loggedTo()))
 	case runErr != nil:
-		return fmt.Errorf("session %s: %w (see %s)", s.name, runErr, s.logPath)
+		return fmt.Errorf("session %s: %w%s", s.name, runErr, seeLog(" (see %s)", s.loggedTo()))
 	case outcome.Failed != nil:
 		f := outcome.Failed
 		switch {
 		case f.NameInUse:
-			return fmt.Errorf("%w: %s", sessiondir.ErrNameInUse, s.name)
+			return nameInUseError{name: s.name}
 		case f.Abandoned && displayErr != nil:
 			// The operator's own answer; shareRunE knows what to do with it.
 			return displayErr
 		case f.Abandoned:
 			return fmt.Errorf("session %s was not started: %s", s.name, f.Error)
 		default:
-			return fmt.Errorf("session %s could not start: %s (see %s)", s.name, f.Error, s.logPath)
+			return fmt.Errorf("session %s could not start: %s%s", s.name, f.Error, seeLog(" (see %s)", s.loggedTo()))
 		}
 	}
 
@@ -234,11 +259,12 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		}
 		// Preserve the foreground host's command-exit message; attach uses a
 		// generic session status. The line is the whole story, so the error
-		// carries only the script exit code and host.go silences cobra.
+		// carries only the script exit code: an ExitCodeError with no
+		// message, for which Exit prints nothing.
 		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+commandExitedMessage(s.name, out.res.Status)+"\r\n")
 		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:
-		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+localDisconnectMessage(s.name, s.logPath, out.res)+"\r\n")
+		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+localDisconnectMessage(s.name, s.loggedTo(), out.res)+"\r\n")
 		return ExitCodeError{Code: exitDisconnected}
 	}
 	return nil
@@ -293,7 +319,7 @@ func parseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 // or one line saying how to reach the session.
 func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSessionResponse, st *api.Started) error {
 	if claimed == nil {
-		return fmt.Errorf("session %s started but the daemon never reported its claim (see %s)", s.name, s.logPath)
+		return fmt.Errorf("session %s started but the daemon never reported its claim%s", s.name, seeLog(" (see %s)", s.loggedTo()))
 	}
 	if !s.jsonOut {
 		_, err := fmt.Fprintf(s.stdout, "Session %s is running in the background. Attach with 'upterm attach %s'; stop it with 'upterm session stop %s'.\n", s.name, s.name, s.name)
@@ -306,7 +332,7 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 	// exchange sends one. The exchange is unreleased, so this is a bug in
 	// this binary rather than an older daemon to accommodate.
 	if st.Status == "" {
-		return fmt.Errorf("session %s started but the daemon reported no status for it (see %s)", s.name, s.logPath)
+		return fmt.Errorf("session %s started but the daemon reported no status for it%s", s.name, seeLog(" (see %s)", s.loggedTo()))
 	}
 	info := sessionInfo{
 		Name:     claimed.Name,

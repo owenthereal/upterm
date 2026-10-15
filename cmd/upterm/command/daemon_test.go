@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -305,6 +306,10 @@ func TestRunDaemonProcessMapsTheDecision(t *testing.T) {
 		{api.Accept_INTERRUPTED, func(t *testing.T, err error) {
 			var want UserInterruptedError
 			require.ErrorAs(t, err, &want)
+			// What shareRunE makes of it in the daemon: no word, status 130.
+			var stderr bytes.Buffer
+			require.Equal(t, exitInterrupted, Exit(nil, mapUserAction(nil, err), &stderr))
+			require.Empty(t, stderr.String())
 		}},
 	} {
 		t.Run(tc.dec.String(), func(t *testing.T) {

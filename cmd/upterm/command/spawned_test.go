@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -111,6 +112,7 @@ func newSession(t *testing.T, spawn spawnFunc, client clientFunc, stdout, stderr
 		display:      func(context.Context, *api.GetSessionResponse, string) error { return nil },
 		attachClient: client,
 		logger:       discardLogger(),
+		logWarning:   &logWarning{w: stderr},
 	}
 }
 
@@ -148,6 +150,86 @@ func TestSpawnedSessionNamesTheLogWhenTheSpawnFails(t *testing.T) {
 		require.ErrorContains(t, err, "boom")
 		require.NotContains(t, err.Error(), "(see")
 	})
+	t.Run("log not opened", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "upterm.log")
+		require.NoError(t, os.WriteFile(logPath, nil, 0o600))
+		spawn := func(opts spawnOptions) (net.Conn, *os.Process, error) {
+			opts.logOff(&fs.PathError{Op: "open", Path: opts.logPath, Err: errors.New("permission denied")})
+			return nil, nil, errors.New("boom")
+		}
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.logPath = logPath
+
+		err := s.run(context.Background())
+		require.ErrorContains(t, err, "boom")
+		require.NotContains(t, err.Error(), "(see", "nothing of this run is in it")
+	})
+}
+
+// A spawn that can't open the log warns once in a run, however often it
+// spawns again (a name retry), and the session goes on. The root's
+// pre-run shares the warning: TestHostWithoutItsLogWarnsOnce.
+func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	warning := &logWarning{w: &stderr}
+	for range 2 {
+		spawn, d := newScriptedDaemon(t)
+		withoutLog := func(opts spawnOptions) (net.Conn, *os.Process, error) {
+			opts.logOff(&fs.PathError{Op: "open", Path: opts.logPath, Err: errors.New("permission denied")})
+			return spawn(opts)
+		}
+		s := newSession(t, withoutLog, nil, &stdout, &stderr)
+		s.detach, s.logWarning = true, warning
+		dec := d.startup(t, "s")
+		go func() { <-dec; d.start() }()
+		require.NoError(t, s.run(context.Background()))
+	}
+	require.Equal(t, "upterm: warning: can't open the log file /var/log/upterm.log: permission denied; logging is off\n", stderr.String())
+}
+
+// A session whose spawn couldn't open the log points no line at it:
+// nothing of the session is in it. With the log, the lines still do.
+func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
+	for _, logOff := range []bool{false, true} {
+		see := " (see /var/log/upterm.log)"
+		if logOff {
+			see = ""
+		}
+		spawnFor := func() (spawnFunc, *scriptedDaemon) {
+			spawn, d := newScriptedDaemon(t)
+			if !logOff {
+				return spawn, d
+			}
+			return func(opts spawnOptions) (net.Conn, *os.Process, error) {
+				opts.logOff(&fs.PathError{Op: "open", Path: opts.logPath, Err: errors.New("permission denied")})
+				return spawn(opts)
+			}, d
+		}
+
+		// The command couldn't start.
+		spawn, d := spawnFor()
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		go func() { d.await().Failed("exec: no such file", false, false) }()
+		require.EqualError(t, s.run(context.Background()), "session s could not start: exec: no such file"+see, "log off: %v", logOff)
+
+		// The local terminal was disconnected.
+		spawn, d = spawnFor()
+		attached := make(chan string, 1)
+		result := make(chan attach.Result, 1)
+		stdout.Reset()
+		stderr.Reset()
+		s = newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
+		d.startup(t, "s")
+		go func() {
+			<-attached
+			d.start()
+			result <- attach.Result{Reason: attach.Disconnected}
+		}()
+		_ = s.run(context.Background())
+		require.Contains(t, stderr.String(), "upterm: the local terminal was disconnected from session s"+see+"; the session continues", "log off: %v", logOff)
+	}
 }
 
 func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
@@ -371,6 +453,7 @@ func TestSpawnedSessionRedrawsATakenName(t *testing.T) {
 	go func() { d.await().Failed("name in use: s", true, false) }()
 	err := s.run(context.Background())
 	require.ErrorIs(t, err, sessiondir.ErrNameInUse, "runWithGeneratedNameRetry redraws on exactly this error")
+	require.EqualError(t, err, "a running session is already named s; attach with upterm attach s, or pick another --name")
 }
 
 func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
@@ -383,6 +466,34 @@ func TestSpawnedSessionDeclineIsNotAnError(t *testing.T) {
 	require.Equal(t, api.Accept_DECLINED, <-dec)
 	var discarded UserDiscardedError
 	require.ErrorAs(t, err, &discarded, "shareRunE maps this to exit 0")
+}
+
+// Ctrl-C at the accept prompt, as the foreground host meets it: answered
+// INTERRUPTED, and what run returns exits 130 with nothing said.
+func TestSpawnedSessionInterruptedIsSilent130(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserInterruptedError{} }
+	dec := d.startup(t, "s")
+	err := s.run(context.Background())
+	require.Equal(t, api.Accept_INTERRUPTED, <-dec)
+	require.Equal(t, exitInterrupted, Exit(nil, mapUserAction(nil, err), &stderr))
+	require.Empty(t, stderr.String())
+}
+
+// SIGTERM at the accept prompt: the daemon is told the session is not to
+// start, and what run returns exits 143 with nothing said.
+func TestSpawnedSessionTerminatedAtThePromptIsSilent143(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.display = func(context.Context, *api.GetSessionResponse, string) error { return UserTerminatedError{} }
+	dec := d.startup(t, "s")
+	err := s.run(context.Background())
+	require.Equal(t, api.Accept_INTERRUPTED, <-dec)
+	require.Equal(t, 143, Exit(nil, mapUserAction(nil, err), &stderr))
+	require.Empty(t, stderr.String())
 }
 
 func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {

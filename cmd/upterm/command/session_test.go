@@ -1531,25 +1531,17 @@ func TestWaitCobraReportsOutcomeOnceAndDiagnosesObserverErrors(t *testing.T) {
 		{"corrupt session", "corrupt", "", "invalid character"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := Root()
-			root.SetArgs([]string{"session", "wait", tc.session})
-			var stderr bytes.Buffer
-			root.SetErr(&stderr)
-			var err error
-			stdout := captureStdout(t, func() { err = root.Execute() })
-			require.Error(t, err)
+			stdout, stderr, code := runCLI(t, "session", "wait", tc.session)
 			if tc.wantOutcome != "" {
-				var exit ExitCodeError
-				require.ErrorAs(t, err, &exit)
-				require.Equal(t, 7, exit.Code)
+				require.Equal(t, 7, code)
 				require.Equal(t, 1, strings.Count(stdout, tc.wantOutcome))
-				require.Empty(t, stderr.String(), "Cobra must not invent an error for a completed session")
+				require.Empty(t, stderr, "nothing may invent an error for a completed session")
 			} else {
-				var exit ExitCodeError
-				require.ErrorAs(t, err, &exit)
-				require.Equal(t, 125, exit.Code)
+				require.Equal(t, 125, code)
 				require.Empty(t, stdout)
-				require.Contains(t, stderr.String(), tc.wantError)
+				require.True(t, strings.HasPrefix(stderr, "upterm: "), stderr)
+				require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
+				require.Contains(t, stderr, tc.wantError)
 			}
 		})
 	}
@@ -1569,10 +1561,13 @@ func TestWaitRefusesARealReplacement(t *testing.T) {
 		dir := claimSession(t, "reused") // holds the name, LaunchID L1
 		root := Root()
 		root.SetArgs([]string{"session", "wait", "reused"})
-		var stderr bytes.Buffer
-		root.SetErr(&stderr)
 		done := make(chan error, 1)
-		go func() { done <- root.Execute() }()
+		var cmd *cobra.Command
+		go func() {
+			var err error
+			cmd, err = root.ExecuteC()
+			done <- err
+		}()
 
 		// waitSession has completed its first Inspect and is durably blocked on
 		// its polling timer, so it is bound to dir's launch before replacement.
@@ -1589,6 +1584,8 @@ func TestWaitRefusesARealReplacement(t *testing.T) {
 		var exit ExitCodeError
 		require.ErrorAs(t, err, &exit)
 		require.Equal(t, 125, exit.Code)
+		var stderr bytes.Buffer
+		require.Equal(t, 125, Exit(cmd, err, &stderr))
 		require.Contains(t, stderr.String(), "replaced while waiting")
 	})
 }
@@ -1602,10 +1599,13 @@ func TestWaitCancellationLeavesTheSessionRunning(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		root := Root()
 		root.SetArgs([]string{"session", "wait", "live"})
-		var stderr bytes.Buffer
-		root.SetErr(&stderr)
 		done := make(chan error, 1)
-		go func() { done <- root.ExecuteContext(ctx) }()
+		var cmd *cobra.Command
+		go func() {
+			var err error
+			cmd, err = root.ExecuteContextC(ctx)
+			done <- err
+		}()
 
 		// The waiter has inspected the real lock and is now waiting to poll.
 		synctest.Wait()
@@ -1616,6 +1616,8 @@ func TestWaitCancellationLeavesTheSessionRunning(t *testing.T) {
 		var exit ExitCodeError
 		require.ErrorAs(t, err, &exit)
 		require.Equal(t, 125, exit.Code)
+		var stderr bytes.Buffer
+		require.Equal(t, 125, Exit(cmd, err, &stderr))
 		require.Contains(t, stderr.String(), "context canceled")
 
 		_, held, err := sessiondir.Inspect(context.Background(), utils.UptermStateDir(), "live")
@@ -1683,10 +1685,13 @@ func TestWaitCobraLosesObservedRecord(t *testing.T) {
 				defer func() { _ = dir.Release(context.Background()) }()
 				root := Root()
 				root.SetArgs([]string{"session", "wait", "observed"})
-				var stderr bytes.Buffer
-				root.SetErr(&stderr)
 				done := make(chan error, 1)
-				go func() { done <- root.Execute() }()
+				var cmd *cobra.Command
+				go func() {
+					var err error
+					cmd, err = root.ExecuteC()
+					done <- err
+				}()
 				synctest.Wait()
 				want := "disappeared while waiting"
 				if corrupt {
@@ -1700,6 +1705,8 @@ func TestWaitCobraLosesObservedRecord(t *testing.T) {
 				var exit ExitCodeError
 				require.ErrorAs(t, err, &exit)
 				require.Equal(t, 125, exit.Code)
+				var stderr bytes.Buffer
+				require.Equal(t, 125, Exit(cmd, err, &stderr))
 				require.Contains(t, stderr.String(), want)
 			})
 		})
@@ -1722,15 +1729,9 @@ func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &fields))
 	require.Equal(t, float64(7), fields["signalNumber"])
 	require.Equal(t, "bus error", fields["signal"])
-	root = Root()
-	root.SetArgs([]string{"session", "wait", "signal-info"})
-	var stderr bytes.Buffer
-	root.SetErr(&stderr)
-	captureStdout(t, func() { err = root.Execute() })
-	var exit ExitCodeError
-	require.ErrorAs(t, err, &exit)
-	require.Equal(t, 135, exit.Code)
-	require.Empty(t, stderr.String())
+	_, stderr, code := runCLI(t, "session", "wait", "signal-info")
+	require.Equal(t, 135, code)
+	require.Empty(t, stderr)
 }
 
 // A script has to be able to tell "no such session" from "could not ask"

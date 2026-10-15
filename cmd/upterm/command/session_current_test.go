@@ -1,9 +1,7 @@
 package command
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,8 +16,7 @@ import (
 )
 
 // runCurrent runs `upterm session current` with UPTERM_ADMIN_SOCKET set to
-// socket ("" for none) and returns what it printed and the status main would
-// exit with. The caller has run setupSessionRoots.
+// socket ("" for none) through runCLI. The caller has run setupSessionRoots.
 //
 // Everything that can set this command's flags from outside is pinned, since
 // the developer running the suite may have any of it:
@@ -40,30 +37,7 @@ func runCurrent(t *testing.T, socket string, args ...string) (stdout, stderr str
 	t.Setenv("UPTERM_ADMIN_SOCKET", socket)
 	t.Setenv("UPTERM_OUTPUT", "")
 	t.Setenv("XDG_CONFIG_HOME", os.Getenv("XDG_RUNTIME_DIR"))
-	root := Root()
-	root.SetArgs(append([]string{"session", "current"}, args...))
-	// Cobra prints the error through its err writer but the usage through its
-	// out writer (cobra 1.10.2: c.Println -> OutOrStderr), so both land here.
-	// The command's own output goes to os.Stdout, which captureStdout takes.
-	var errBuf bytes.Buffer
-	root.SetErr(&errBuf)
-	root.SetOut(&errBuf)
-	var err error
-	stdout = captureStdout(t, func() { err = root.Execute() })
-	return stdout, errBuf.String(), exitStatus(err)
-}
-
-// exitStatus is main.go's mapping, except that an error main would log a
-// second time on its own reports -1, so a test can insist there is none.
-func exitStatus(err error) int {
-	if err == nil {
-		return 0
-	}
-	var ec ExitCodeError
-	if errors.As(err, &ec) {
-		return ec.Code
-	}
-	return -1
+	return runCLI(t, append([]string{"session", "current"}, args...)...)
 }
 
 func socketIn(t *testing.T, name string) string {
@@ -98,12 +72,12 @@ func TestSessionCurrentOutsideSession(t *testing.T) {
 	}{
 		{"no socket, template", "", tmpl, ""},
 		{"no socket, json", "", json, ""},
-		{"no socket, detail", "", nil, "Error: not in an upterm session: $UPTERM_ADMIN_SOCKET is not set\n"},
+		{"no socket, detail", "", nil, "upterm: not in an upterm session: $UPTERM_ADMIN_SOCKET is not set\n"},
 		{"missing socket, template", missing, tmpl, ""},
-		{"missing socket, detail", missing, nil, "Error: not in an upterm session: no session answers at " + missing + "\n"},
+		{"missing socket, detail", missing, nil, "upterm: not in an upterm session: no session answers at " + missing + "\n"},
 		{"stale socket file, template", stale, tmpl, ""},
 		{"stale socket file, json", stale, json, ""},
-		{"stale socket file, detail", stale, nil, "Error: not in an upterm session: no session answers at " + stale + "\n"},
+		{"stale socket file, detail", stale, nil, "upterm: not in an upterm session: no session answers at " + stale + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, code := runCurrent(t, tc.socket, tc.args...)
@@ -124,8 +98,8 @@ func TestSessionCurrentBadOutputOutsideSession(t *testing.T) {
 		format string
 		stderr string
 	}{
-		{"format", "yaml", `Error: invalid output format "yaml": must be 'json' or 'go-template=<template>'` + "\n"},
-		{"template", "go-template={{.Nope", "Error: invalid template: template: session:1: unclosed action\n"},
+		{"format", "yaml", `upterm: invalid output format "yaml": must be 'json' or 'go-template=<template>'` + "\n"},
+		{"template", "go-template={{.Nope", "upterm: invalid template: template: session:1: unclosed action\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, code := runCurrent(t, "", "-o", tc.format)

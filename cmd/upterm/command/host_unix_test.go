@@ -43,7 +43,7 @@ func Test_confirmationTerminalError(t *testing.T) {
 				require.NoError(t, err)
 				return
 			}
-			require.EqualError(t, err, "interactive confirmation requires a terminal on stdin and stdout")
+			require.EqualError(t, err, "upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 		})
 	}
 }

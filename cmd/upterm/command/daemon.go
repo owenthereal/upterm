@@ -51,7 +51,15 @@ func runDaemon(ctx context.Context, logger *slog.Logger, args []string, conn net
 func reportDaemonFailure(conn net.Conn, err error) {
 	child := bootstrap.NewChild(conn, nil)
 	defer func() { _ = child.Close() }()
-	child.Failed(err.Error(), false, false)
+	child.Failed(failureText(err), false, false)
+}
+
+// failureText is err as the daemon tells its parent, which prints it on
+// one line after "session NAME could not start:". The parent gets
+// text, which Exit can't split, so each error a multierror collects is
+// joined here as Exit would print it, never as its "N errors occurred" list.
+func failureText(err error) string {
+	return strings.Join(errorLines(err), "; ")
 }
 
 // runDaemonProcess is upterm host's session logic run as the daemon, with
@@ -70,12 +78,12 @@ func runDaemonProcess(ctx context.Context, logger *slog.Logger, opts hostOptions
 
 	h, err := buildDaemonHost(ctx, name, opts, child, logger)
 	if err != nil {
-		child.Failed(err.Error(), false, false)
+		child.Failed(failureText(err), false, false)
 		return err
 	}
 	err = run(ctx, h)
 	if err != nil {
-		child.Failed(err.Error(), errors.Is(err, sessiondir.ErrNameInUse), errors.Is(err, host.ErrSessionAbandoned))
+		child.Failed(failureText(err), errors.Is(err, sessiondir.ErrNameInUse), errors.Is(err, host.ErrSessionAbandoned))
 	}
 	return err
 }

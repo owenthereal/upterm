@@ -2,7 +2,6 @@ package command
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -23,6 +22,7 @@ func proxyCmd() *cobra.Command {
 
   # Client connects to the host session via WebSocket:
   ssh -o ProxyCommand='upterm proxy wss://TOKEN@uptermd.upterm.dev' TOKEN@uptermd.upterm.dev:443`,
+		Args: cobra.ExactArgs(1),
 		RunE: proxyRunE,
 	}
 
@@ -32,10 +32,6 @@ func proxyCmd() *cobra.Command {
 }
 
 func proxyRunE(c *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("missing WebSocket url")
-	}
-
 	u, err := url.Parse(args[0])
 	if err != nil {
 		return err
