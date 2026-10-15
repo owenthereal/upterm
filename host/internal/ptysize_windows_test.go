@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"errors"
 	"math"
 	"os/exec"
 	"regexp"
@@ -244,8 +245,9 @@ func (r *sizeRecorder) got() []sizeCall {
 // reports nothing, and ConPTY repaints at the final size.
 //
 // The Unix test also fails the ioctl and checks the report is ended as not
-// applied. There is no hook to fail a ConPTY resize, so that case has no
-// counterpart here.
+// applied. A ConPTY resize is failed through the pty's resize field, as the
+// Unix pty's is through setWinsize, and the case that matters here is Redraw's
+// second leg failing.
 func TestConPTYReportsEachResizeInTwoSteps(t *testing.T) {
 	var (
 		initial = termsize.Size{Cols: 80, Rows: 24}
@@ -347,6 +349,62 @@ func TestConPTYReportsEachResizeInTwoSteps(t *testing.T) {
 		require.NoError(t, p.Redraw())
 		require.Equal(t, applied, rec.got(), "ConPTY repaints at the final size, which is the one it had")
 		require.Equal(t, resized, winsize(t, p))
+	})
+
+	// Neither leg of a redraw is reported when both succeed. When the first
+	// does and the second fails, the ConPTY is left a column wider than the
+	// size the fan-out's log and lastW hold, and a later Setsize back to that
+	// size would be taken for no change and never heal it.
+	t.Run("a redraw whose first leg fails changes and reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		opening := rec.got()
+		errFirst := errors.New("the first leg fails")
+		p.resize = func(int, int) error { return errFirst }
+
+		require.ErrorIs(t, p.Redraw(), errFirst)
+		require.Equal(t, opening, rec.got())
+		require.Equal(t, initial, winsize(t, p))
+		require.EqualValues(t, initial.Cols, p.lastW.Load())
+	})
+
+	t.Run("a redraw whose second leg fails reports the size the ConPTY is left at", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		wider := termsize.Size{Cols: initial.Cols + 1, Rows: initial.Rows}
+		errSecond := errors.New("the second leg fails")
+		legs := 0
+		p.resize = func(w, h int) error {
+			legs++
+			if legs == 2 {
+				return errSecond
+			}
+			return p.cpty.Resize(w, h)
+		}
+
+		require.ErrorIs(t, p.Redraw(), errSecond)
+		require.Equal(t, 2, legs)
+		require.Equal(t, wider, winsize(t, p), "the first leg is what the ConPTY is left at")
+		require.EqualValues(t, wider.Cols, p.lastW.Load())
+		require.EqualValues(t, wider.Rows, p.lastH.Load())
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+			// Late, after the first leg: the recorder found the ConPTY already
+			// at the size it is told of.
+			{Kind: "begin", Size: wider, Seq: 2, Before: wider},
+			{Kind: "end", Seq: 2, Applied: true},
+		}, rec.got())
+
+		// The size the pty was meant to have is a change again, so the next
+		// Setsize to it is reported and brings the ConPTY back, not taken for
+		// one already made.
+		p.resize = nil
+		require.NoError(t, p.Setsize(int(initial.Rows), int(initial.Cols)))
+		require.Equal(t, initial, winsize(t, p))
+		require.EqualValues(t, initial.Cols, p.lastW.Load())
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 3, Before: wider},
+			{Kind: "end", Seq: 3, Applied: true},
+		}, rec.got()[4:])
 	})
 
 	t.Run("a closed pty reports nothing", func(t *testing.T) {

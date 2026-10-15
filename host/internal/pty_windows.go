@@ -91,6 +91,9 @@ type pty struct {
 	conptyClosed        bool           // Tracks if ConPTY I/O has been closed
 	processHandleClosed bool           // Tracks if process handle has been closed
 	pinned              bool
+	// resize is the ConPTY's resize unless a test has made it fail; see
+	// resizeConPTY.
+	resize func(w, h int) error
 	// report hears of each resize Setsize makes, in two steps; see startPty.
 	// Nil reports nothing.
 	report sizeReporter
@@ -103,6 +106,15 @@ type pty struct {
 	lastH, lastW atomic.Int32
 
 	sync.RWMutex
+}
+
+// resizeConPTY resizes the ConPTY, or calls p.resize in its place. Called with
+// the lock held and the ConPTY open.
+func (p *pty) resizeConPTY(w, h int) error {
+	if p.resize != nil {
+		return p.resize(w, h)
+	}
+	return p.cpty.Resize(w, h)
 }
 
 func (p *pty) Setsize(h, w int) error {
@@ -147,7 +159,7 @@ func (p *pty) Setsize(h, w int) error {
 	if report != nil {
 		seq = report.ResizeBegin(termsize.Size{Cols: w, Rows: h})
 	}
-	err := p.cpty.Resize(w, h)
+	err := p.resizeConPTY(w, h)
 	if report != nil {
 		// A failed resize is ended, not undone with a report of the old
 		// size: the bytes that followed are the old size's, and the fan-out
@@ -188,15 +200,38 @@ func (p *pty) Redraw() error {
 	if h <= 0 || w <= 0 {
 		return nil
 	}
-	// The ConPTY directly, not Setsize, and reported to no one: the round-trip
-	// ends at the size it started from, so the size has not changed, and
-	// ConPTY repaints at that final size rather than at the one column wider
-	// it passes through. Reporting the intermediate size would only stamp a
-	// repaint's bytes with a size the command ends up not having.
-	if err := p.cpty.Resize(w+1, h); err != nil {
+	// The ConPTY directly, not Setsize, and reported to no one, but for a round
+	// trip that doesn't come back (below): it ends at the size it started
+	// from, so the size has not changed, and ConPTY repaints at that final
+	// size rather than at the one column wider it passes through. Reporting
+	// the intermediate size would only stamp a repaint's bytes with a size the
+	// command ends up not having.
+	if err := p.resizeConPTY(w+1, h); err != nil {
 		return err
 	}
-	return p.cpty.Resize(w, h)
+	err := p.resizeConPTY(w, h)
+	if err == nil {
+		return nil
+	}
+
+	// The round trip didn't come back: the ConPTY is at w+1, and the fan-out's
+	// size log and lastW still say w. Left so, a Setsize to w would be taken
+	// for no change and suppressed, and nothing would ever bring the ConPTY
+	// back. So the size it is at is reported and recorded now, begun and ended
+	// at once, the resize being done.
+	//
+	// The report is late, which is the cost of the first leg being unreported:
+	// any bytes the ring took since then count as w, though the command laid
+	// them out at w+1. Those few are a misattribution no report can repair,
+	// and the record is still the right one to end on: every byte from here
+	// is at w+1, and the next change is measured from the size the ConPTY
+	// has.
+	p.lastW.Store(int32(w + 1))
+	if p.report != nil {
+		seq := p.report.ResizeBegin(termsize.Size{Cols: w + 1, Rows: h})
+		p.report.ResizeEnd(seq, true)
+	}
+	return err
 }
 
 func (p *pty) Read(data []byte) (n int, err error) {
