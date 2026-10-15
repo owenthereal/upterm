@@ -37,40 +37,64 @@ func mustTarget(t *testing.T) join.Target {
 	return tg
 }
 
+var (
+	since = time.Date(2026, 10, 12, 14, 2, 11, 0, time.Local)
+	now   = since.Add(30 * time.Second)
+)
+
+// waitingAt is a Waiting event of an outage that began at since, whose next
+// attempt is inSecs seconds after now.
+func waitingAt(why join.WaitReason, err error, inSecs int) join.Event {
+	return join.Event{Kind: join.Waiting, Why: why, Err: err, Since: since, Next: now.Add(time.Duration(inSecs) * time.Second)}
+}
+
 // waiting is a Waiting event whose next attempt is n seconds away. The status
 // writer measures against time.Now, so the line it renders says n s for as
-// long as less than a second has passed since this was built.
+// long as less than a second has passed since this was built. The outage's
+// start is fixed, so that its cause line is the same each time.
 func waiting(why join.WaitReason, n int) join.Event {
-	now := time.Now()
-	return join.Event{Kind: join.Waiting, Why: why, Since: now, Next: now.Add(time.Duration(n) * time.Second)}
+	return join.Event{Kind: join.Waiting, Why: why, Since: since, Next: time.Now().Add(time.Duration(n) * time.Second)}
 }
 
 func TestRenderEveryText(t *testing.T) {
 	tg, _ := join.ParseTarget("ssh://abc@relay.test")
-	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
-	next := since.Add(8 * time.Second)
+	outage := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
+	next := outage.Add(8 * time.Second)
 	refused := errors.New("agent refused operation")
+
+	// A cause is told once, on a line of its own, and the error follows a colon.
 	for want, e := range map[string]join.Event{
-		"upterm: waiting for the host since 14:02:11; next try in 8 s":                                              {Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next},
-		"upterm: can't reach relay.test since 14:02:11 (dial tcp: refused); next try in 8 s":                        {Kind: join.Waiting, Why: join.Unreachable, Err: errors.New("dial tcp: refused"), Since: since, Next: next},
-		"upterm: the relay can't look up sessions since 14:02:11; next try in 8 s":                                  {Kind: join.Waiting, Why: join.RelayLookup, Since: since, Next: next},
-		"upterm: the relay can't reach the host since 14:02:11; next try in 8 s":                                    {Kind: join.Waiting, Why: join.Upstream, Since: since, Next: next},
-		"upterm: your SSH agent can't sign since 14:02:11 (agent refused operation); next try in 8 s":               {Kind: join.Waiting, Why: join.IdentityFailure, Err: &join.IdentityError{Key: "SHA256:k", Err: &host.AgentRefusedError{Key: "SHA256:k", Err: refused}}, Since: since, Next: next},
-		"upterm: can't start the session since 14:02:11 (shell request refused); next try in 8 s":                   {Kind: join.Waiting, Why: join.Setup, Err: errors.New("shell request refused"), Since: since, Next: next},
-		"upterm: session abc has no host yet; retrying for 30 s":                                                    {Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next},
-		"upterm: rejoined after 1m12s":                                                                              {Kind: join.Joined, Rejoin: true, Down: 72 * time.Second},
+		"upterm: waiting for the host since 14:02:11":                               {Kind: join.Waiting, Why: join.NoHost, Since: outage, Next: next},
+		"upterm: can't reach relay.test since 14:02:11: dial tcp: refused":          {Kind: join.Waiting, Why: join.Unreachable, Err: errors.New("dial tcp: refused"), Since: outage, Next: next},
+		"upterm: the relay can't look up sessions since 14:02:11":                   {Kind: join.Waiting, Why: join.RelayLookup, Since: outage, Next: next},
+		"upterm: the relay can't reach the host since 14:02:11":                     {Kind: join.Waiting, Why: join.Upstream, Since: outage, Next: next},
+		"upterm: your SSH agent can't sign since 14:02:11: agent refused operation": {Kind: join.Waiting, Why: join.IdentityFailure, Err: &join.IdentityError{Key: "SHA256:k", Err: &host.AgentRefusedError{Key: "SHA256:k", Err: refused}}, Since: outage, Next: next},
+		"upterm: can't start the session since 14:02:11: shell request refused":     {Kind: join.Waiting, Why: join.Setup, Err: errors.New("shell request refused"), Since: outage, Next: next},
+		// A first join waiting for a host has a line of its own, which is no cause.
+		"": {Kind: join.Waiting, Why: join.NoHost, First: true, Since: outage, Next: next},
+	} {
+		require.Equal(t, want, causeLine(e, tg), want)
+	}
+
+	for want, e := range map[string]join.Event{
+		// What is redrawn says only when the next try is, whatever the cause.
+		"upterm: next try in 8 s":                                {Kind: join.Waiting, Why: join.NoHost, Since: outage, Next: next},
+		"upterm: session abc has no host yet; retrying for 30 s": {Kind: join.Waiting, Why: join.NoHost, First: true, Since: outage, Next: next},
+		"upterm: rejoined after 1m12s":                           {Kind: join.Joined, Rejoin: true, Down: 72 * time.Second},
 		"upterm: lost the connection (no bytes from the peer for 30s); rejoining. Enter retries now, Ctrl-C stops.": {Kind: join.Lost, Err: fmt.Errorf("%w for %s", liveness.ErrSilent, 30*time.Second)},
 		// A first join is quiet, as ssh is.
 		"": {Kind: join.Joined},
 	} {
 		require.Equal(t, want, renderEvent(e, tg, next.Add(-8*time.Second), false), want)
 	}
+	require.Equal(t, "upterm: next try in 8 s",
+		renderEvent(waitingAt(join.Unreachable, errRefused, 0), tg, now.Add(-8*time.Second), false))
 	require.Equal(t, "upterm: session abc has no host yet; waiting",
-		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: next}, tg, since, true))
+		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: outage, Next: next}, tg, outage, true))
 	// A long wait's line is the same line: its hint is a line of its own,
 	// written once (see TestStatusTellsALongWaitOnce).
-	require.Equal(t, "upterm: waiting for the host since 14:02:11; next try in 8 s",
-		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: next, Long: true}, tg, since, false))
+	require.Equal(t, "upterm: next try in 8 s",
+		renderEvent(join.Event{Kind: join.Waiting, Why: join.NoHost, Since: outage, Next: next, Long: true}, tg, outage, false))
 
 	// One row per line a run can end with, the same way, through
 	// renderOutcome. The target as typed is what the -i PATH lines name.
@@ -173,7 +197,107 @@ func TestStatusPlainLinesWhenStderrIsNotATerminal(t *testing.T) {
 	s.event(waiting(join.NoHost, 1))
 	s.event(waiting(join.NoHost, 2))
 	require.NotContains(t, b.String(), "\r\033[K")
-	require.Equal(t, 2, strings.Count(b.String(), "\n"))
+	// The cause once, and a line for each attempt.
+	require.Equal(t, "upterm: waiting for the host since 14:02:11\nupterm: next try in 1 s\nupterm: next try in 2 s\n", b.String())
+}
+
+func TestTheCauseIsWrittenOnceAndTheCountdownRedrawn(t *testing.T) {
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	refused := errors.New("dial tcp 192.0.2.1:22: connect: connection refused")
+	s.event(waitingAt(join.Unreachable, refused, 8))
+	s.event(waitingAt(join.Unreachable, refused, 4))
+	out := b.String()
+	require.Equal(t, 1, strings.Count(out, "upterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused"))
+	require.Contains(t, out, "\r\033[Kupterm: next try in 4 s")
+	require.Equal(t, "\r\033[Kupterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused\n"+
+		"upterm: next try in 8 s\r\033[Kupterm: next try in 4 s", out)
+}
+
+func TestANewCauseGetsItsOwnLine(t *testing.T) {
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.event(waitingAt(join.Unreachable, errors.New("connection refused"), 8))
+	s.event(waitingAt(join.NoHost, nil, 4))
+	require.Contains(t, b.String(), "upterm: waiting for the host since 14:02:11")
+	// The countdown above it is ended, not rewritten, and the new cause
+	// starts a line of its own.
+	require.Equal(t, "\r\033[Kupterm: can't reach relay.test since 14:02:11: connection refused\n"+
+		"upterm: next try in 8 s\n"+
+		"\r\033[Kupterm: waiting for the host since 14:02:11\n"+
+		"upterm: next try in 4 s", b.String())
+}
+
+// The cause is its kind and its error: the same kind with another error is a
+// new cause, and the same cause after the session was ready is told again.
+func TestACauseIsKindAndErrorAndIsToldAgainAfterAJoin(t *testing.T) {
+	var b bytes.Buffer
+	s := newStatus(&b, false, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	outage := func() {
+		s.event(waitingAt(join.Unreachable, errors.New("connection refused"), 8))
+		s.event(waitingAt(join.Unreachable, errors.New("connection refused"), 4))
+		s.event(waitingAt(join.Unreachable, errors.New("i/o timeout"), 2))
+	}
+	outage()
+	require.Equal(t, "upterm: can't reach relay.test since 14:02:11: connection refused\n"+
+		"upterm: next try in 8 s\n"+
+		"upterm: next try in 4 s\n"+
+		"upterm: can't reach relay.test since 14:02:11: i/o timeout\n"+
+		"upterm: next try in 2 s\n", b.String())
+
+	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: time.Second})
+	b.Reset()
+	s.event(join.Event{Kind: join.Lost, Err: io.EOF})
+	s.event(waitingAt(join.Unreachable, io.EOF, 1))
+	s.event(waitingAt(join.Unreachable, errors.New("i/o timeout"), 2))
+	require.Equal(t, "upterm: lost the connection (EOF); rejoining. Enter retries now, Ctrl-C stops.\n"+
+		"upterm: next try in 1 s\n"+
+		"upterm: can't reach relay.test since 14:02:11: i/o timeout\n"+
+		"upterm: next try in 2 s\n", b.String())
+}
+
+// Only the countdown is redrawn, and it is one short row, however long the
+// cause is: the rows of the cause above it are never touched.
+func TestOnlyTheCountdownIsRedrawnAndItFitsTheTerminal(t *testing.T) {
+	cause := "upterm: can't reach relay.test since 14:02:11: " + strings.Repeat("a long error ", 20)
+	var b bytes.Buffer
+	s := newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.columns = func() int { return 80 }
+	for _, n := range []int{8, 4, 2} {
+		s.event(waitingAt(join.Unreachable, errors.New(strings.Repeat("a long error ", 20)), n))
+	}
+	out := b.String()
+	require.Equal(t, 1, strings.Count(out, cause))
+	require.NotContains(t, out, "\033[J", "no rewrite goes up")
+	require.Equal(t, append(wrapAt(cause, 80), "upterm: next try in 2 s"), screen(t, out, 80))
+}
+
+// A first join's wait for a host is one line, rewritten at each attempt, and
+// says no cause.
+func TestStatusKeepsAFirstJoinsNoHostLine(t *testing.T) {
+	first := join.Event{Kind: join.Waiting, Why: join.NoHost, First: true, Since: since, Next: now.Add(8 * time.Second)}
+	for wait, want := range map[bool]string{
+		false: "upterm: session abc has no host yet; retrying for 30 s",
+		true:  "upterm: session abc has no host yet; waiting",
+	} {
+		var b bytes.Buffer
+		s := newStatus(&b, true, mustTarget(t), wait)
+		s.now = func() time.Time { return now }
+		s.event(first)
+		s.event(first)
+		require.Equal(t, "\r\033[K"+want+"\r\033[K"+want, b.String(), "--wait: %v", wait)
+
+		b.Reset()
+		s = newStatus(&b, false, mustTarget(t), wait)
+		s.now = func() time.Time { return now }
+		s.event(first)
+		s.event(first)
+		require.Equal(t, want+"\n"+want+"\n", b.String(), "--wait: %v", wait)
+	}
 }
 
 func TestStatusRewritesTheWaitingLineInPlaceOnATerminal(t *testing.T) {
@@ -200,59 +324,52 @@ func TestStatusEndsTheWaitingLineWhenAFirstJoinSucceeds(t *testing.T) {
 	require.True(t, strings.HasSuffix(b.String(), "next try in 1 s\r\n"), "%q", b.String())
 }
 
-// A waiting line wider than the terminal wraps, and "\033[K" clears only the
-// row the cursor is on, its last: the rows above it would pile up, one set
-// at each attempt. So the rewrite goes up to the line's first row and clears
-// to the end of the screen, and only the newest line is left.
-func TestStatusRewritesAWrappedWaitingLineWhole(t *testing.T) {
-	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
-	now := since.Add(time.Minute)
-	wait := func(n int, long bool) join.Event {
-		if long {
-			return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: errRefused, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
-		}
-		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
-	}
+// A countdown wider than the terminal wraps, and "\033[K" clears only the row
+// the cursor is on, its last: the rows above it would pile up, one set at each
+// attempt. So the rewrite goes up to the countdown's first row and clears to
+// the end of the screen, and only the newest is left, below the cause.
+func TestStatusRewritesAWrappedCountdownWhole(t *testing.T) {
 	const (
-		long1 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 8 s"
-		long2 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 4 s"
-		short = "upterm: waiting for the host since 14:02:11; next try in 2 s"
+		cause = "upterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused"
+		n8    = "upterm: next try in 8 s"
+		n4    = "upterm: next try in 4 s"
 	)
 
 	var b bytes.Buffer
 	s := newStatus(&b, true, mustTarget(t), false)
 	s.now = func() time.Time { return now }
-	s.columns = func() int { return 40 }
-	s.event(wait(8, true))
-	s.event(wait(4, true))
-	require.Equal(t, "\r\033[K"+long1+"\r\033[2A\033[J"+long2, b.String())
-	require.Equal(t, wrapAt(long2, 40), screen(t, b.String(), 40))
+	s.columns = func() int { return 10 }
+	s.event(waitingAt(join.Unreachable, errRefused, 8))
+	s.event(waitingAt(join.Unreachable, errRefused, 4))
+	require.Equal(t, "\r\033[K"+cause+"\n"+n8+"\r\033[2A\033[J"+n4, b.String())
+	require.Equal(t, append(wrapAt(cause, 10), wrapAt(n4, 10)...), screen(t, b.String(), 10))
 
-	// A line that fits after one that wrapped clears the rows the wrapped
-	// one took, and the next is rewritten as any line that fits is.
+	// A countdown that fits after one that wrapped clears the rows the wrapped
+	// one took, and the next is rewritten as any that fits is.
+	const (
+		n100 = "upterm: next try in 100 s"
+		n99  = "upterm: next try in 99 s"
+		n98  = "upterm: next try in 98 s"
+	)
 	b.Reset()
 	s = newStatus(&b, true, mustTarget(t), false)
 	s.now = func() time.Time { return now }
-	s.columns = func() int { return 80 }
-	s.event(wait(8, true))
-	s.event(wait(2, false))
-	s.event(wait(2, false))
-	require.Equal(t, "\r\033[K"+long1+"\r\033[1A\033[J"+short+"\r\033[K"+short, b.String())
-	require.Equal(t, []string{short}, screen(t, b.String(), 80))
+	s.columns = func() int { return 24 }
+	s.event(waitingAt(join.Unreachable, errRefused, 100))
+	s.event(waitingAt(join.Unreachable, errRefused, 99))
+	s.event(waitingAt(join.Unreachable, errRefused, 98))
+	require.Equal(t, "\r\033[K"+cause+"\n"+n100+"\r\033[1A\033[J"+n99+"\r\033[K"+n98, b.String())
+	require.Equal(t, append(wrapAt(cause, 24), n98), screen(t, b.String(), 24))
 }
 
-// A wrapped waiting line's rewrite never clears what is above it, whichever
-// way the terminal's width changed between the two writes (see rewind).
-func TestStatusRewriteNeverClearsAboveTheWaitingLine(t *testing.T) {
-	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
-	now := since.Add(time.Minute)
-	wait := func(n int) join.Event {
-		return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: errRefused, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
-	}
+// A wrapped countdown's rewrite never clears what is above it, whichever way
+// the terminal's width changed between the two writes (see rewind).
+func TestStatusRewriteNeverClearsAboveTheCountdown(t *testing.T) {
 	const (
 		above = "$ upterm join ssh://abc@relay.test"
-		long1 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 8 s"
-		long2 = "upterm: can't reach relay.test since 14:02:11 (dial tcp 192.0.2.1:22: connect: connection refused); next try in 4 s"
+		cause = "upterm: can't reach relay.test since 14:02:11: dial tcp 192.0.2.1:22: connect: connection refused"
+		n8    = "upterm: next try in 8 s"
+		n4    = "upterm: next try in 4 s"
 	)
 	rewrite := func(from, to int) string {
 		var b bytes.Buffer
@@ -261,41 +378,38 @@ func TestStatusRewriteNeverClearsAboveTheWaitingLine(t *testing.T) {
 		s := newStatus(&b, true, mustTarget(t), false)
 		s.now = func() time.Time { return now }
 		s.columns = func() int { return width }
-		s.event(wait(8))
+		s.event(waitingAt(join.Unreachable, errRefused, 8))
 		width = to
-		s.event(wait(4))
+		s.event(waitingAt(join.Unreachable, errRefused, 4))
 		return b.String()
 	}
 
-	// Three rows at 40 columns, two once the terminal widens to 80 and
-	// reflows it.
-	out := rewrite(40, 80)
-	// The reflowed screen is what the output so far shows at 80 columns.
-	require.Equal(t, append([]string{above}, wrapAt(long2, 80)...), screen(t, out, 80))
-	require.Equal(t, above+"\n\r\033[K"+long1+"\r\033[1A\033[J"+long2, out)
+	// Three rows at 8 columns, two once the terminal widens to 12 and reflows
+	// it.
+	out := rewrite(8, 12)
+	// The reflowed screen is what the output so far shows at 12 columns.
+	require.Equal(t, slices.Concat(wrapAt(above, 12), wrapAt(cause, 12), wrapAt(n4, 12)), screen(t, out, 12))
+	require.Equal(t, above+"\n\r\033[K"+cause+"\n"+n8+"\r\033[1A\033[J"+n4, out)
 
-	// Two rows at 80; narrowed to 40 they stay two on a terminal that
-	// doesn't reflow, so the rewrite goes up one, not two.
-	require.Equal(t, above+"\n\r\033[K"+long1+"\r\033[1A\033[J"+long2, rewrite(80, 40))
+	// Two rows at 12; narrowed to 8 they stay two on a terminal that doesn't
+	// reflow, so the rewrite goes up one, not two.
+	require.Equal(t, above+"\n\r\033[K"+cause+"\n"+n8+"\r\033[1A\033[J"+n4, rewrite(12, 8))
 }
 
-// errRefused makes a waiting line too long for 80 columns.
+// errRefused makes a cause line too long for 80 columns.
 var errRefused = errors.New("dial tcp 192.0.2.1:22: connect: connection refused")
 
-// Straight after a drop, nothing has tried the relay yet: the waiting line
-// says only when the next try is, and the drop's line above it says why the
-// connection went. The tries after it say what stopped them, and so does the
-// first after the next drop.
+// Straight after a drop, nothing has tried the relay yet: the countdown says
+// only when the next try is, and the drop's line above it says why the
+// connection went. The cause comes with the first try's result, and so does
+// the first after the next drop.
 func TestStatusSaysOnlyWhenTheNextTryIsAfterADrop(t *testing.T) {
-	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
-	now := since.Add(time.Minute)
-	wait := func(n int, err error) join.Event {
-		return join.Event{Kind: join.Waiting, Why: join.Unreachable, Err: err, Since: since, Next: now.Add(time.Duration(n) * time.Second)}
-	}
+	wait := func(n int, err error) join.Event { return waitingAt(join.Unreachable, err, n) }
 	const (
-		lost    = "upterm: lost the connection (EOF); rejoining. Enter retries now, Ctrl-C stops."
-		first   = "upterm: next try in 1 s"
-		refused = "upterm: can't reach relay.test since 14:02:11 (connection refused); next try in 2 s"
+		lost   = "upterm: lost the connection (EOF); rejoining. Enter retries now, Ctrl-C stops."
+		first  = "upterm: next try in 1 s"
+		cause  = "upterm: can't reach relay.test since 14:02:11: connection refused"
+		second = "upterm: next try in 2 s"
 	)
 	drop := func(s *joinStatus) {
 		s.event(join.Event{Kind: join.Lost, Err: io.EOF})
@@ -308,35 +422,36 @@ func TestStatusSaysOnlyWhenTheNextTryIsAfterADrop(t *testing.T) {
 	s.now = func() time.Time { return now }
 	s.raw(true)
 	drop(s)
-	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+refused, b.String())
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\n\r\033[K"+cause+"\r\n"+second, b.String())
 
 	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 3 * time.Second})
 	b.Reset()
 	drop(s)
-	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\033[K"+refused, b.String())
+	require.Equal(t, lost+"\r\n\r\033[K"+first+"\r\n\r\033[K"+cause+"\r\n"+second, b.String())
 
 	// Anywhere but a terminal, each is a line of its own.
 	b.Reset()
 	s = newStatus(&b, false, mustTarget(t), false)
 	s.now = func() time.Time { return now }
 	drop(s)
-	require.Equal(t, lost+"\n"+first+"\n"+refused+"\n", b.String())
+	require.Equal(t, lost+"\n"+first+"\n"+cause+"\n"+second+"\n", b.String())
 }
 
 // Once a wait has lasted long enough that the session may have ended or
-// moved, that is said once, on a line of its own above the waiting line,
-// which goes on being rewritten below it. A later outage that lasts as long
-// says it again.
+// moved, that is said once, on a line of its own below the cause and above the
+// countdown, which goes on being rewritten below it. A later outage that lasts
+// as long says it again.
 func TestStatusTellsALongWaitOnce(t *testing.T) {
-	since := time.Date(2026, 10, 7, 14, 2, 11, 0, time.Local)
-	now := since.Add(5*time.Minute + 30*time.Second)
 	wait := func(n int) join.Event {
-		return join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: now.Add(time.Duration(n) * time.Second), Long: true}
+		e := waitingAt(join.NoHost, nil, n)
+		e.Long = true
+		return e
 	}
 	const (
-		hint = "upterm: still waiting; the session may have ended or moved. Check with the host."
-		w60  = "upterm: waiting for the host since 14:02:11; next try in 60 s"
-		w59  = "upterm: waiting for the host since 14:02:11; next try in 59 s"
+		cause = "upterm: waiting for the host since 14:02:11"
+		hint  = "upterm: still waiting; the session may have ended or moved. Check with the host."
+		n60   = "upterm: next try in 60 s"
+		n59   = "upterm: next try in 59 s"
 	)
 	outage := func(s *joinStatus) {
 		s.event(wait(60))
@@ -350,9 +465,9 @@ func TestStatusTellsALongWaitOnce(t *testing.T) {
 	s.columns = func() int { return 40 }
 	s.raw(true)
 	outage(s)
-	require.Equal(t, "\r\033[K"+hint+"\r\n"+w60+"\r\033[1A\033[J"+w59+"\r\033[1A\033[J"+w60, b.String())
-	// The hint wraps, and the rewrites below it leave it whole.
-	require.Equal(t, append(wrapAt(hint, 40), wrapAt(w60, 40)...), screen(t, b.String(), 40))
+	require.Equal(t, "\r\033[K"+cause+"\r\n"+hint+"\r\n"+n60+"\r\033[K"+n59+"\r\033[K"+n60, b.String())
+	// The cause and the hint wrap, and the rewrites below them leave them whole.
+	require.Equal(t, append(append(wrapAt(cause, 40), wrapAt(hint, 40)...), n60), screen(t, b.String(), 40))
 
 	s.event(join.Event{Kind: join.Joined, Rejoin: true, Down: 6 * time.Minute})
 	b.Reset()
@@ -361,27 +476,39 @@ func TestStatusTellsALongWaitOnce(t *testing.T) {
 	s.event(wait(59))
 	require.Equal(t, 1, strings.Count(b.String(), hint), "%q", b.String())
 
+	// A wait that turns long after its cause was told: the hint is written
+	// where the countdown was, above the countdown, and once.
+	b.Reset()
+	s = newStatus(&b, true, mustTarget(t), false)
+	s.now = func() time.Time { return now }
+	s.event(waitingAt(join.NoHost, nil, 60))
+	s.event(wait(59))
+	s.event(wait(58))
+	require.Equal(t, "\r\033[K"+cause+"\n"+"upterm: next try in 60 s"+"\r\033[K"+hint+"\n"+n59+"\r\033[K"+"upterm: next try in 58 s", b.String())
+
 	// Anywhere but a terminal, the same: once per outage.
 	b.Reset()
 	s = newStatus(&b, false, mustTarget(t), false)
 	s.now = func() time.Time { return now }
 	outage(s)
-	require.Equal(t, hint+"\n"+w60+"\n"+w59+"\n"+w60+"\n", b.String())
+	require.Equal(t, cause+"\n"+hint+"\n"+n60+"\n"+n59+"\n"+n60+"\n", b.String())
 
 	// The hint names no duration: Since is a wall-clock time, and a clock
 	// stepped back during the outage would make one negative.
 	b.Reset()
 	s = newStatus(&b, false, mustTarget(t), false)
 	s.now = func() time.Time { return since.Add(-10 * time.Minute) }
-	s.event(join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: since, Long: true})
-	require.True(t, strings.HasPrefix(b.String(), hint+"\n"), "%q", b.String())
+	e := join.Event{Kind: join.Waiting, Why: join.NoHost, Since: since, Next: since, Long: true}
+	s.event(e)
+	require.True(t, strings.HasPrefix(b.String(), cause+"\n"+hint+"\n"), "%q", b.String())
 }
 
-// wrapAt is line as a terminal width columns wide shows it.
+// wrapAt is line as a terminal width columns wide shows it, trailing blanks
+// dropped as screen drops them.
 func wrapAt(line string, width int) []string {
 	var rows []string
 	for r := []rune(line); len(r) > 0; r = r[min(width, len(r)):] {
-		rows = append(rows, string(r[:min(width, len(r))]))
+		rows = append(rows, strings.TrimRight(string(r[:min(width, len(r))]), " "))
 	}
 	return rows
 }
@@ -924,8 +1051,10 @@ func TestSkipHostKeyCheckRecordsANewKeyOnAStatusLine(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "known_hosts")
 	var b bytes.Buffer
 	st := newStatus(&b, true, mustTarget(t), false)
-	st.event(waiting(join.Unreachable, 1))
+	st.now = func() time.Time { return now }
+	st.event(waitingAt(join.Unreachable, errRefused, 1))
 	st.raw(true)
+	opened := b.Len()
 	keys := newRelayKeys(host.KnownHosts{File: file, Stdout: st.writer()}, true, nil, nil)
 
 	require.NoError(t, keys.check("relay.test:22", relayAddr, key))
@@ -935,7 +1064,7 @@ func TestSkipHostKeyCheckRecordsANewKeyOnAStatusLine(t *testing.T) {
 	require.Contains(t, out, "next try in 1 s\r\n", "the open waiting line is ended first")
 	require.Contains(t, out, "Permanently added")
 	require.True(t, strings.HasSuffix(out, "\r\n"), "%q", out)
-	require.NotContains(t, strings.ReplaceAll(out, "\r\n", ""), "\n", "every line ends \\r\\n in raw mode")
+	require.NotContains(t, strings.ReplaceAll(out[opened:], "\r\n", ""), "\n", "every line ends \\r\\n in raw mode")
 }
 
 // ConfirmHostKey's signature has no address, so the prompt names the one
