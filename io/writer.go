@@ -35,16 +35,23 @@ type buffer struct {
 	max   int // cap in bytes
 	size  int // bytes currently held
 
-	// onEvict is handed every byte that leaves the ring, in stream order.
-	// What it feeds is state the replay can no longer reconstruct from the
-	// ring itself; see NewMultiWriter.
-	onEvict func([]byte)
+	// total counts every byte ever appended, so it is the stream offset of
+	// the next byte to arrive, and total-size that of the ring's first. A
+	// position in the stream is kept as an offset because a position in the
+	// queue moves every time the ring is trimmed.
+	total uint64
+
+	// onEvict is handed every byte that leaves the ring, in stream order,
+	// with the stream offset of the first of them. What it feeds is state the
+	// replay can no longer reconstruct from the ring itself; see
+	// NewMultiWriter.
+	onEvict func(offset uint64, p []byte)
 }
 
 // Append copies p into the ring and hands whatever that pushed out to
 // onEvict, in stream order, before returning.
 func (c *buffer) Append(p []byte) {
-	evicted := c.push(p)
+	evicted, offset := c.push(p)
 	if c.onEvict == nil {
 		return
 	}
@@ -55,22 +62,27 @@ func (c *buffer) Append(p []byte) {
 	// handed over are read before this returns and not retained, so the ones
 	// that alias p are safe.
 	for _, e := range evicted {
-		c.onEvict(e)
+		c.onEvict(offset, e)
+		offset += uint64(len(e))
 	}
 }
 
 // push does Append's bookkeeping and returns the evicted bytes for it to
-// deliver.
-func (c *buffer) push(p []byte) [][]byte {
+// deliver, with the stream offset of the first. They are contiguous and begin
+// at the ring's first byte as it was before p, because the stream leaves in
+// the order it arrived: a write larger than the ring sends its own prefix out
+// behind everything already queued.
+func (c *buffer) push(p []byte) (evicted [][]byte, offset uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	offset = c.total - uint64(c.size)
+	c.total += uint64(len(p))
+
 	if c.max <= 0 {
 		// Nothing is kept, so everything handed over has already left.
-		return [][]byte{p}
+		return [][]byte{p}, offset
 	}
-
-	var evicted [][]byte
 
 	// A single write larger than the ring keeps only its tail. Everything
 	// queued is older than the prefix being dropped, so it leaves first.
@@ -117,7 +129,7 @@ func (c *buffer) push(p []byte) [][]byte {
 		c.size -= len(head)
 	}
 
-	return evicted
+	return evicted, offset
 }
 
 func (c *buffer) Data() [][]byte {
@@ -128,6 +140,59 @@ func (c *buffer) Data() [][]byte {
 	// followed by the real ones.
 	result := make([][]byte, 0, len(c.queue))
 	return append(result, c.queue...)
+}
+
+// End is the stream offset of the next byte the ring is handed.
+func (c *buffer) End() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
+}
+
+// Start is the stream offset of the ring's first byte, which is End when the
+// ring is empty.
+func (c *buffer) Start() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total - uint64(c.size)
+}
+
+// Range returns the ring's chunks from stream offset from to to, sliced to
+// exactly that range. ok is false if from is before Start or to is after End,
+// and for a range that runs backwards. An empty range is nil, true.
+//
+// The slices are the ring's own, not copies, and are immutable once handed
+// out: the ring only ever appends after what it has returned and trims in
+// front of it, so what a caller holds stays what it was. Each is capped at its
+// length, so that a caller appending to one reallocates rather than writing
+// over the bytes that follow it in the ring.
+func (c *buffer) Range(from, to uint64) (chunks [][]byte, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	start := c.total - uint64(c.size)
+	if from < start || to > c.total || from > to {
+		return nil, false
+	}
+
+	skip, take := from-start, to-from
+	for _, chunk := range c.queue {
+		if take == 0 {
+			break
+		}
+		if skip >= uint64(len(chunk)) {
+			skip -= uint64(len(chunk))
+			continue
+		}
+		part := chunk[skip:]
+		skip = 0
+		if uint64(len(part)) > take {
+			part = part[:take]
+		}
+		chunks = append(chunks, part[:len(part):len(part)])
+		take -= uint64(len(part))
+	}
+	return chunks, true
 }
 
 // bufferWriter adapts the replay ring to io.Writer so a filter can sit in
@@ -142,8 +207,14 @@ func (w bufferWriter) Write(p []byte) (int, error) {
 // NewMultiWriter returns a fan-out whose replay ring holds the most recent
 // replayBytes bytes of output.
 func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
-	b := &buffer{max: replayBytes}
-	modes := NewModeTracker()
+	t := &MultiWriter{
+		writers: writers,
+		buffer:  &buffer{max: replayBytes},
+		modes:   NewModeTracker(),
+		permit:  make(chan struct{}, 1),
+		closing: make(chan struct{}),
+	}
+	t.replay = NewTerminalQueryFilter(bufferWriter{b: t.buffer})
 
 	// The tracker watches what leaves the ring, not what enters it. Append
 	// replays the snapshot ahead of the ring's bytes, so the state it
@@ -152,14 +223,13 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	// the state after the ring, and any mode set inside the ring window was
 	// applied twice: once by the snapshot, far too early, and again by the
 	// replay.
-	b.onEvict = func(p []byte) { _, _ = modes.Write(p) }
+	//
+	// It hears the pty's resizes there too, each where it fell among the
+	// bytes, as the terminal did: a resize resets the margins, and a DECSTBM
+	// is decided at the height of its moment (spec E3, A21).
+	t.buffer.onEvict = func(offset uint64, p []byte) { t.sizes.hear(t.modes, offset, p) }
 
-	return &MultiWriter{
-		writers: writers,
-		buffer:  b,
-		replay:  NewTerminalQueryFilter(bufferWriter{b: b}),
-		modes:   modes,
-	}
+	return t
 }
 
 // ErrClosed is returned by Append once Shutdown has run. A guest that reaches
@@ -205,10 +275,33 @@ type MultiWriter struct {
 	// the ring's evictions rather than by Write; see NewMultiWriter.
 	modes *ModeTracker
 
+	// sizes records the size the pty was at for each byte of the ring. Its
+	// reports are never under writeMu, and its log always is; see sizeLog.
+	sizes sizeLog
+
 	// closed is guarded by writeMu, so Shutdown's quiesce and a concurrent
 	// Append cannot interleave: an attach in progress either completes before
 	// the snapshot and is flushed, or finds this set and is refused.
 	closed bool
+
+	// replayer reconstructs the screen for a joining terminal, and fallback
+	// hears why a join fell back to the raw ring instead; see AppendSized.
+	// Both are set once, before any join.
+	replayer Replayer
+	fallback func(error)
+
+	// permit lets one join's emulation run at a time; see AppendSized.
+	permit chan struct{}
+
+	// closing is closed by Shutdown's first call, once closed is set, so a
+	// join parked outside writeMu wakes to be refused rather than sleeping
+	// out its deadline.
+	closing chan struct{}
+
+	// changed is notified by every Write and ResizeEnd, for a join whose
+	// emulation needs more of the stream than there is yet to wait on,
+	// outside writeMu.
+	changed broadcast
 }
 
 // Append attaches writers, handing each the replay buffer first so it starts
@@ -221,6 +314,12 @@ type MultiWriter struct {
 // writers no longer block on I/O; under the old design it would have
 // reintroduced the deadlock #523 removed.
 func (t *MultiWriter) Append(writers ...io.Writer) error {
+	return t.appendRaw(context.Background(), writers...)
+}
+
+// appendRaw is Append for joiners whose ctx may end: the same hold of writeMu
+// that attaches them finds it done, and then attaches none (AppendSized).
+func (t *MultiWriter) appendRaw(ctx context.Context, writers ...io.Writer) error {
 	// Reject anything Remove could not later take back out, before it is
 	// attached and before it is written to.
 	for _, w := range writers {
@@ -232,46 +331,79 @@ func (t *MultiWriter) Append(writers ...io.Writer) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	// A resize reported since the last Write is in effect at the ring's start
+	// when the ring is empty, and a terminal resets its margins on one, so
+	// the snapshot has to have heard it, as a capture's clone has.
+	t.applyResize()
 	if t.closed {
 		return ErrClosed
 	}
-
-	for _, w := range writers {
-		// The snapshot describes the terminal as of the ring's first byte,
-		// so it has to go immediately in front of the ring and nowhere else:
-		// it can end mid-sequence, where the ring's own first bytes are the
-		// rest of that sequence.
-		if snap := t.modes.Snapshot(); len(snap) > 0 {
-			if _, err := w.Write(snap); err != nil {
-				return err
-			}
-		}
-		for _, d := range t.buffer.Data() {
-			if _, err := w.Write(d); err != nil {
-				return err
-			}
-		}
-
-		// A partial escape sequence the filter is still holding is live output,
-		// not history: it is not in the ring yet, so the loop above never sees
-		// it. A joiner that misses it would see only the tail once the
-		// remainder arrives live, which is garbage on its terminal. Replaying
-		// the lead-in lets the joiner's own filter see the sequence whole. Only
-		// a filter may take it: in drop mode it is the head of a dropped query,
-		// whose rest never comes, so a terminal fed it would answer it or wait
-		// inside it.
-		if pending := t.replay.Pending(); len(pending) > 0 {
-			if _, err := w.Write(pending); err != nil {
-				return err
-			}
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
+	for _, w := range writers {
+		if err := t.replayRaw(w); err != nil {
+			return err
+		}
+	}
+	t.attach(writers...)
+	return nil
+}
+
+// replayRaw hands w the replay Append gives a joiner: the tracker's snapshot,
+// the ring, and the sequence the filter is holding. Called with writeMu held.
+func (t *MultiWriter) replayRaw(w io.Writer) error {
+	// The snapshot describes the terminal as of the ring's first byte, so it
+	// has to go immediately in front of the ring and nowhere else: it can end
+	// mid-sequence, where the ring's own first bytes are the rest of that
+	// sequence.
+	if snap := t.modes.Snapshot(); len(snap) > 0 {
+		if _, err := w.Write(snap); err != nil {
+			return err
+		}
+	}
+	for _, d := range t.buffer.Data() {
+		if _, err := w.Write(d); err != nil {
+			return err
+		}
+	}
+	return t.writePending(w)
+}
+
+// writePending hands w the partial escape sequence the filter is still
+// holding. It is live output, not history: it is not in the ring yet, so a
+// replay of the ring never has it. A joiner that misses it would see only
+// the tail once the remainder arrives live, which is garbage on its terminal.
+// Replaying the lead-in lets the joiner's own filter see the sequence whole.
+// Only a filter may take it: in drop mode it is the head of a dropped query,
+// whose rest never comes, so a terminal fed it would answer it or wait inside
+// it. Called with writeMu held.
+func (t *MultiWriter) writePending(w io.Writer) error {
+	if pending := t.replay.Pending(); len(pending) > 0 {
+		if _, err := w.Write(pending); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// attachRaw hands w Append's replay and attaches it: the join's fallback.
+// Called with writeMu held.
+func (t *MultiWriter) attachRaw(w io.Writer) error {
+	if err := t.replayRaw(w); err != nil {
+		return err
+	}
+	t.attach(w)
+	return nil
+}
+
+// attach adds writers to the fan-out, once each has had its replay. Called
+// with writeMu held, so the next Write is the first they miss nothing of.
+func (t *MultiWriter) attach(writers ...io.Writer) {
 	t.membersMu.Lock()
 	defer t.membersMu.Unlock()
 	t.writers = append(t.writers, writers...)
-
-	return nil
 }
 
 // checkRemovable rejects a writer that Remove could not match.
@@ -355,7 +487,15 @@ func (t *MultiWriter) Write(p []byte) (int, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
+	// The size log is brought up to date ahead of p, so a resize reported
+	// before p reached the fan-out counts for p, and pruned behind it, once
+	// the ring has taken p and evicted what p pushed out. It is bounded only
+	// then, so that nothing prune forgets is counted lost.
+	t.sizes.apply(t.buffer.End(), t.modes)
 	_, _ = t.replay.Write(p)
+	t.sizes.prune(t.buffer.Start())
+	t.sizes.bound()
+	t.changed.notify()
 
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
@@ -407,6 +547,9 @@ func (t *MultiWriter) Shutdown(ctx context.Context) error {
 	t.writeMu.Lock()
 	first := !t.closed
 	t.closed = true
+	if first {
+		close(t.closing)
+	}
 	t.membersMu.Lock()
 	writers := make([]io.Writer, len(t.writers))
 	copy(writers, t.writers)

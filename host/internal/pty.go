@@ -6,6 +6,8 @@ import (
 	"io"
 	"os/exec"
 	"syscall"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 // PTY represents a pseudo-terminal abstraction that works across platforms.
@@ -48,6 +50,40 @@ type PTY interface {
 	// hangup reaches its jobs. Unsupported on Windows, which returns
 	// errors.ErrUnsupported and lets the caller go straight to Kill.
 	Signal(sig syscall.Signal) error
+}
+
+// sizeReporter hears how a pty's size changes, so the fan-out can tell which
+// size each byte of the replay ring was written at. The fan-out
+// (*uio.MultiWriter) is one.
+//
+// A resize is reported in two steps, ResizeBegin before the pty is told the
+// new size and ResizeEnd with the outcome after it, because the command can
+// repaint before the resize call returns and that repaint must already count
+// at the new size. A pty reports a size only when it changes the size, and
+// reports nothing of a resize it declines to make.
+type sizeReporter interface {
+	ResizeBegin(termsize.Size) uint64
+	ResizeEnd(seq uint64, applied bool)
+	Pinned(termsize.Size)
+}
+
+// reportStart tells r the size a pty opened at: the size it keeps for good if
+// pinned, otherwise the first of the sizes it will have. A nil r reports
+// nothing.
+//
+// Called by startPty once the pty exists and before it returns, which is
+// before anything reads the pty into the fan-out, so the size is known before
+// the first byte.
+func reportStart(r sizeReporter, size termsize.Size, pinned bool) {
+	if r == nil {
+		return
+	}
+	if pinned {
+		r.Pinned(size)
+		return
+	}
+	seq := r.ResizeBegin(size)
+	r.ResizeEnd(seq, true)
 }
 
 // ExitError reports that a PTY's process exited with a non-zero status.

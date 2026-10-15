@@ -252,7 +252,12 @@ func (c *command) Start(ctx context.Context, initial termsize.Size) (PTY, error)
 	var err error
 	// startPty falls back to termsize.Default for a size that is not one, so
 	// a session nobody offered a geometry still opens at something usable.
-	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize)
+	//
+	// The fan-out hears the pty's size so that it knows which size every byte
+	// of the replay ring was written at: once inside startPty, before the
+	// copy in Run starts, so the first byte has one, and then at each change.
+	// A forced command's pty (startSessionPty) reports to no one.
+	c.ptmx, err = startPty(c.cmd, want, c.pinPtySize, c.writers)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start pty: %w", err)
 	}

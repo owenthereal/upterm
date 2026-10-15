@@ -4,6 +4,7 @@ package internal
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -13,11 +14,12 @@ import (
 	ptylib "github.com/creack/pty"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func Test_StartPty_AppliesInitialSize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -32,7 +34,7 @@ func Test_StartPty_AppliesInitialSize(t *testing.T) {
 
 func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, true)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, true, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -50,7 +52,7 @@ func Test_StartPty_PinnedIgnoresResize(t *testing.T) {
 
 func Test_StartPty_UnpinnedHonoursResize(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 132, Rows: 43}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -107,7 +109,7 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 	// disposition and kills the command, which on Linux leaves the parked
 	// write with nothing left to release it.
 	cmd := exec.Command("sh", "-c", "stty raw -echo; trap 'exec cat >/dev/null' USR1; printf READY; while :; do sleep 0.05; done")
-	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false, nil)
 	require.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -178,7 +180,7 @@ func ioctlsAgainstAParkedWrite(t *testing.T) {
 // ignore a closed pty rather than reporting the ioctl's error.
 func Test_Pty_IoctlsOnAClosedPtyAreNotErrors(t *testing.T) {
 	cmd := exec.Command("sleep", "5")
-	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false)
+	p, err := startPty(cmd, termsize.Size{Cols: 80, Rows: 24}, false, nil)
 	require.NoError(t, err)
 	defer func() { _ = p.Kill(); _ = p.Close() }()
 
@@ -187,4 +189,222 @@ func Test_Pty_IoctlsOnAClosedPtyAreNotErrors(t *testing.T) {
 
 	require.NoError(t, p.Setsize(24, 80))
 	require.NoError(t, p.Redraw())
+}
+
+// sizeCall is one call the fan-out would have heard from the pty.
+type sizeCall struct {
+	Kind    string        // "begin", "end" or "pinned"
+	Size    termsize.Size // begin and pinned: the size reported
+	Seq     uint64        // begin: the Seq handed out; end: the Seq it closes
+	Applied bool          // end: the outcome
+	// Before is, for a begin, the size the pty had when it was reported. Zero
+	// for the report startPty makes before there is a pty to ask.
+	Before termsize.Size
+}
+
+// sizeRecorder is a sizeReporter that writes down what it hears, and for each
+// ResizeBegin asks the pty what size it has at that moment: a report made
+// before the ioctl sees the old size, one made after it the new.
+type sizeRecorder struct {
+	mu    sync.Mutex
+	calls []sizeCall
+	seq   uint64
+	file  *os.File // the pty's master, once there is one
+}
+
+func (r *sizeRecorder) ResizeBegin(size termsize.Size) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	c := sizeCall{Kind: "begin", Size: size, Seq: r.seq}
+	if r.file != nil {
+		rows, cols, err := ptylib.Getsize(r.file)
+		if err == nil {
+			c.Before = termsize.Size{Cols: cols, Rows: rows}
+		}
+	}
+	r.calls = append(r.calls, c)
+	return r.seq
+}
+
+func (r *sizeRecorder) ResizeEnd(seq uint64, applied bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sizeCall{Kind: "end", Seq: seq, Applied: applied})
+}
+
+func (r *sizeRecorder) Pinned(size termsize.Size) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sizeCall{Kind: "pinned", Size: size})
+}
+
+func (r *sizeRecorder) got() []sizeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]sizeCall(nil), r.calls...)
+}
+
+// TestPtyReportsEachResizeInTwoSteps pins what the pty tells the fan-out about
+// its geometry: a ResizeBegin before each ioctl and a ResizeEnd after it, for
+// a resize that changes the size and for nothing else. The fan-out stamps the
+// ring's bytes with the size they were written at from these calls, so a size
+// reported but never applied, or applied but never reported, or reported
+// after the command's repaint was already in the ring, would decide a join's
+// replay against a geometry the command never drew at.
+func TestPtyReportsEachResizeInTwoSteps(t *testing.T) {
+	var (
+		initial = termsize.Size{Cols: 80, Rows: 24}
+		resized = termsize.Size{Cols: 45, Rows: 30}
+	)
+	start := func(t *testing.T, size termsize.Size, pinned bool) (*pty, *sizeRecorder) {
+		t.Helper()
+		rec := &sizeRecorder{}
+		p, err := startPty(exec.Command("sleep", "5"), size, pinned, rec)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = p.Kill(); _ = p.Close() })
+		f := p.(*pty)
+		rec.mu.Lock()
+		rec.file = f.File
+		rec.mu.Unlock()
+		return f, rec
+	}
+	winsize := func(t *testing.T, p *pty) termsize.Size {
+		t.Helper()
+		rows, cols, err := ptylib.Getsize(p.File)
+		require.NoError(t, err)
+		return termsize.Size{Cols: cols, Rows: rows}
+	}
+
+	t.Run("start reports the initial size, begun and ended, before startPty returns", func(t *testing.T) {
+		_, rec := start(t, initial, false)
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+		}, rec.got())
+	})
+
+	t.Run("start reports the size the pty opened at, not the one asked for", func(t *testing.T) {
+		_, rec := start(t, termsize.Size{}, false)
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: termsize.Default, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+		}, rec.got())
+	})
+
+	t.Run("a resize is begun before the ioctl and ended after it", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, resized, winsize(t, p))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+			// The recorder asked the pty for its size inside ResizeBegin, and
+			// it still had the old one: the report came before the ioctl.
+			{Kind: "begin", Size: resized, Seq: 2, Before: initial},
+			{Kind: "end", Seq: 2, Applied: true},
+		}, rec.got())
+	})
+
+	// The tracker takes every ResizeBegin for a real size change: a same-size
+	// report would reset the region its candidate is weighing, over bytes
+	// that were never at another size.
+	t.Run("a resize to the size the pty has reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		opening := rec.got()
+
+		require.NoError(t, p.Setsize(24, 80))
+		require.Equal(t, opening, rec.got(), "the size it opened at")
+
+		require.NoError(t, p.Setsize(30, 45))
+		applied := rec.got()
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, applied, rec.got(), "the size a Setsize gave it")
+		require.Equal(t, resized, winsize(t, p))
+	})
+
+	t.Run("a failed ioctl ends the report as not applied, and reports no size after it", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		p.setWinsize = func(int, *unix.Winsize) error { return syscall.EIO }
+
+		require.ErrorIs(t, p.Setsize(30, 45), syscall.EIO)
+		require.Equal(t, initial, winsize(t, p), "nothing applied")
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: initial, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: true},
+			{Kind: "begin", Size: resized, Seq: 2, Before: initial},
+			{Kind: "end", Seq: 2, Applied: false},
+		}, rec.got())
+
+		// The pty is still at the old size, so asking for the new one again is
+		// a change again and is reported again, rather than taken for one
+		// already made.
+		p.setWinsize = nil
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, resized, winsize(t, p))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: resized, Seq: 3, Before: initial},
+			{Kind: "end", Seq: 3, Applied: true},
+		}, rec.got()[4:])
+	})
+
+	// A winsize holds each dimension in 16 bits, and a request past that is
+	// applied wrapped. The fan-out stamps the ring's bytes with what is
+	// reported, so the report is the size the command was given, not the one
+	// asked for: 65537 columns is one.
+	t.Run("a size past what a winsize holds is reported as the size the ioctl applied", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		applied := termsize.Size{Cols: 1, Rows: 24}
+
+		require.NoError(t, p.Setsize(24, termsize.Max+2))
+		require.Equal(t, applied, winsize(t, p))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: applied, Seq: 2, Before: initial},
+			{Kind: "end", Seq: 2, Applied: true},
+		}, rec.got()[2:])
+	})
+
+	// Not being able to read the size is not a reason to hide a resize that
+	// may well apply: the report is deleted by its outcome when it does not.
+	t.Run("a size that cannot be read is reported anyway", func(t *testing.T) {
+		// Not a terminal: neither TIOCGWINSZ nor TIOCSWINSZ works on it.
+		f, err := os.Open(os.DevNull)
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
+		rec := &sizeRecorder{}
+		p := wrapPty(f, exec.Command("true"), false, rec)
+
+		require.Error(t, p.Setsize(30, 45))
+		require.Equal(t, []sizeCall{
+			{Kind: "begin", Size: resized, Seq: 1},
+			{Kind: "end", Seq: 1, Applied: false},
+		}, rec.got())
+	})
+
+	t.Run("a closed pty reports nothing", func(t *testing.T) {
+		p, rec := start(t, initial, false)
+		opening := rec.got()
+		require.NoError(t, p.Kill())
+		require.NoError(t, p.Close())
+
+		require.NoError(t, p.Setsize(30, 45))
+		require.Equal(t, opening, rec.got())
+	})
+
+	t.Run("a pinned pty reports Pinned once and nothing on Setsize", func(t *testing.T) {
+		p, rec := start(t, initial, true)
+		require.Equal(t, []sizeCall{{Kind: "pinned", Size: initial}}, rec.got())
+
+		require.NoError(t, p.Setsize(30, 45))
+		require.NoError(t, p.Setsize(24, 80))
+		require.Equal(t, []sizeCall{{Kind: "pinned", Size: initial}}, rec.got())
+		require.Equal(t, initial, winsize(t, p))
+	})
+
+	t.Run("no reporter reports nothing", func(t *testing.T) {
+		p, err := startPty(exec.Command("sleep", "5"), initial, false, nil)
+		require.NoError(t, err)
+		defer func() { _ = p.Kill(); _ = p.Close() }()
+		require.NoError(t, p.Setsize(30, 45))
+	})
 }

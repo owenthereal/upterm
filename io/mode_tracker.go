@@ -3,9 +3,13 @@ package io
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 // maxSequenceBytes caps how much of an in-progress mode sequence the tracker
@@ -104,6 +108,86 @@ var restorable = map[int]bool{
 	2004: false, // bracketed paste
 }
 
+// maxUnresolvedResizes bounds the resizes, crossed by eviction while still
+// waiting for their outcome, that the tracker keeps a margin candidate for
+// (spec A23). What it bounds is the candidates kept, not the events
+// unresolved: an event whose candidate a later commit removed costs nothing,
+// so it isn't counted. That is more precise than A22's wording, which counts
+// unresolved events, and the bound is the same. A resize is crossed
+// unresolved only once a ring's worth of output has followed its ResizeBegin
+// before its ResizeEnd, and a pty reports the two around a single ioctl:
+// reaching this is a stalled report, not a resize storm.
+const maxUnresolvedResizes = 16
+
+// marginCandidate is the terminal's size and scrolling region as one
+// outcome of the unresolved resizes eviction has crossed has them (spec A22).
+type marginCandidate struct {
+	// after is the crossed resize this candidate assumes committed last, every
+	// later one deleted; 0 is none of them.
+	after uint64
+	// size is the terminal's, whose rows a DECSTBM is decided against: the
+	// zero size while none is known.
+	size termsize.Size
+	// top and bottom are the region a terminal holds, 1-based and inclusive,
+	// after its defaults and clamping: both 0 while it is the whole screen.
+	top, bottom int
+	// written stands in for them while no size is known: the last DECSTBM as
+	// written, which a terminal replayed it decides at its own height.
+	written []byte
+}
+
+// decstbm decides a DECSTBM, with its parameters top and bottom, 0 where
+// absent, as xterm's CASE_DECSTBM does at this candidate's height (spec A21):
+// top is 1 if 0; bottom is the height if 0 or past it; and the region is set
+// only if bottom > top, or else nothing changes. seq is the sequence as
+// written.
+func (c *marginCandidate) decstbm(top, bottom int, seq []byte) {
+	height := heightOf(c.size)
+	if height == 0 {
+		// With no height to decide it against, it is decided as the tracker
+		// decided every DECSTBM before it heard of sizes: each is taken, and
+		// the last is replayed as written.
+		c.top, c.bottom, c.written = 0, 0, seq
+		return
+	}
+	top = max(top, 1)
+	if bottom == 0 || bottom > height {
+		bottom = height
+	}
+	if bottom <= top {
+		return
+	}
+	c.top, c.bottom, c.written = top, bottom, nil
+	if top == 1 && bottom == height {
+		// The whole screen, which is where a terminal starts.
+		c.top, c.bottom = 0, 0
+	}
+}
+
+func (c marginCandidate) sameRegion(d marginCandidate) bool {
+	return c.top == d.top && c.bottom == d.bottom && bytes.Equal(c.written, d.written)
+}
+
+// appendRegion appends the DECSTBM that sets this candidate's region on a
+// terminal at its default, or nothing for the whole screen.
+func (c marginCandidate) appendRegion(out []byte) []byte {
+	if len(c.written) > 0 {
+		return append(out, c.written...)
+	}
+	if c.top == 0 {
+		return out
+	}
+	return fmt.Appendf(out, "\x1b[%d;%dr", c.top, c.bottom)
+}
+
+// heightOf is the rows of size, or 0 for a size that isn't one.
+func heightOf(size termsize.Size) int {
+	if !size.Valid() {
+		return 0
+	}
+	return size.Rows
+}
+
 // restorableModes returns the tracked mode numbers. It exists for tests.
 func restorableModes() []int {
 	out := make([]int, 0, len(restorable))
@@ -121,8 +205,8 @@ func restorableModes() []int {
 // It is deliberately not a terminal emulator: it reconstructs no screen and no
 // cursor position. Anything it does not recognise passes through unrecorded.
 //
-// Not safe for concurrent use. MultiWriter owns one and only touches it under
-// writeMu.
+// Not safe for concurrent use, Clone included. MultiWriter owns one and only
+// touches it under writeMu, which is where a capture clones it too.
 type ModeTracker struct {
 	decPrivate map[int]bool
 
@@ -134,11 +218,28 @@ type ModeTracker struct {
 	altScreen bool
 	altVia    int // 47, 1047 or 1049
 
-	// Each screen buffer has its own margins, so the two DECSTBMs are kept
-	// apart: replaying the alternate screen's to a joiner sitting on the
-	// normal one, or the reverse, confines it to rows nothing set.
-	mainRegion []byte // last DECSTBM on the normal screen, verbatim
-	altRegion  []byte // last DECSTBM on the alternate screen, verbatim
+	// The scrolling region is the whole terminal's, as in xterm, and no
+	// screen switch changes it (spec A17). A terminal decides a DECSTBM at its
+	// height, so the tracker hears resizes too, and while eviction has crossed
+	// resizes whose outcome is unknown, the height is one of several. So
+	// candidates holds a state per outcome that matters, in Seq order (spec
+	// A22): the first assumes every crossed resize still unresolved was
+	// deleted, and each other that its own resize committed last. A resize
+	// heard committed in order resets the region whatever came before it, so
+	// it leaves one. There is always at least one.
+	candidates []marginCandidate
+	// overflowed is set while more crossed resizes are unresolved than the
+	// tracker keeps candidates for: candidates is then one bounded fallback
+	// state, and the region is uncertain until a resize heard in order (spec
+	// A23).
+	overflowed bool
+	// marginsSet is whether a DECSTBM has been taken since the last RIS or
+	// DECSTR, decided or not, for Restore alone. Restore goes to guests' own
+	// terminals, which can be taller than the pty: CSI 0;24r is the whole
+	// screen at the pty's 24 rows and a region at a guest's 30, and a resize
+	// of the pty resets the pty's margins and not a guest's. So no resize
+	// clears it, and nothing the candidates decide does.
+	marginsSet bool
 
 	charsetG0 []byte // last "ESC ( X", verbatim
 
@@ -212,8 +313,148 @@ const (
 )
 
 func NewModeTracker() *ModeTracker {
-	return &ModeTracker{decPrivate: map[int]bool{}}
+	return &ModeTracker{decPrivate: map[int]bool{}, candidates: []marginCandidate{{}}}
 }
+
+// Clone returns an independent copy: writing to either leaves the other's
+// Snapshot and Restore unchanged.
+//
+// A caller that needs the snapshot as of a later point in the ring than its
+// first byte gets it by feeding a clone the ring's bytes up to there. The
+// tracker itself has to go on describing the ring's first byte, so the copy is
+// deep: the parser appends to its slices in place and rewrites a key stack's
+// top entry in place, the margin candidates are deleted from and rewritten in
+// place, and a shared backing array or map would carry the clone's writes
+// back into the original, and the original's into the clone.
+func (m *ModeTracker) Clone() *ModeTracker {
+	c := *m
+	c.decPrivate = maps.Clone(m.decPrivate)
+	c.candidates = slices.Clone(m.candidates)
+	for i := range c.candidates {
+		c.candidates[i].written = slices.Clone(m.candidates[i].written)
+	}
+	c.charsetG0 = slices.Clone(m.charsetG0)
+	c.mainKeys.entries = slices.Clone(m.mainKeys.entries)
+	c.altKeys.entries = slices.Clone(m.altKeys.entries)
+	c.modifyOtherKeys = slices.Clone(m.modifyOtherKeys)
+	c.partial = slices.Clone(m.partial)
+	c.seq = slices.Clone(m.seq)
+	return &c
+}
+
+// Resized records the terminal's new size and resets the margin region, as
+// a terminal resets it on a resize. The size is what DECSTBM is decided
+// against (spec A21). Exported: the replay package's clone hears resizes
+// too.
+//
+// It is a resize the terminal is known to have made, heard where it fell in
+// the stream, so it settles the candidates: whichever crossed resize
+// committed last, this one came after it, and their outcomes change nothing
+// from here (spec A22).
+func (m *ModeTracker) Resized(size termsize.Size) {
+	m.candidates = append(m.candidates[:0], marginCandidate{size: size})
+	m.overflowed = false
+}
+
+// resizeHeard applies a committed resize to size that eviction reached in
+// order. Where the terminal already had that size it is no resize at all: the
+// pty sends no SIGWINCH, the terminal resets nothing, and the replay applies
+// no such event either (Task 7). Each candidate is its own terminal for this:
+// one at another size is reset to size and the whole screen, one at size
+// keeps its region, and only when every one resets is this Resized, which
+// settles them.
+//
+// Overflowed, there is no comparing: the fallback's size is a guess at the
+// terminal's, and a skip decided against a guess could leave the tracker
+// certain and wrong. The pty reports a resize only when its size really
+// changes (a Setsize to the size it has reports nothing), so every committed
+// event is a resize that resets the margins, and it settles the tracker, as
+// spec A23 has it.
+func (m *ModeTracker) resizeHeard(size termsize.Size) {
+	if m.overflowed {
+		m.Resized(size)
+		return
+	}
+	reset := 0
+	for i, c := range m.candidates {
+		if c.size != size {
+			m.candidates[i] = marginCandidate{after: c.after, size: size}
+			reset++
+		}
+	}
+	if reset == len(m.candidates) {
+		m.Resized(size)
+	}
+}
+
+// crossTentative records that eviction reached resize seq, to size, before its
+// outcome. The bytes after it were written at size if it commits and at the
+// size before if it is deleted, and the tracker doesn't guess which (spec E3):
+// it adds a candidate, size and the whole screen, and the candidates already
+// kept stay, as its deleted branch, until resolve selects (spec A22).
+//
+// The new candidate's region is the whole screen, as a terminal's is after
+// a resize, because no ResizeBegin is a same-size resize: the host's pty
+// guarantees it, its Setsize reporting nothing for a resize to the size it
+// has. A same-size report would reset a region no terminal reset.
+//
+// Past maxUnresolvedResizes the candidates give way to one fallback state,
+// which does guess: that each resize it crosses commits, since a resize's
+// ioctl rarely fails. The region is uncertain from then on (spec A23).
+func (m *ModeTracker) crossTentative(seq uint64, size termsize.Size) {
+	switch {
+	case m.overflowed:
+		m.candidates[0] = marginCandidate{size: size}
+	case len(m.candidates) > maxUnresolvedResizes:
+		// The newest candidate at the overflow, which is this resize's.
+		m.candidates = append(m.candidates[:0], marginCandidate{size: size})
+		m.overflowed = true
+	default:
+		m.candidates = append(m.candidates, marginCandidate{after: seq, size: size})
+	}
+}
+
+// resolve applies crossed resize seq's outcome, from the fan-out's apply, as
+// it reaches the log: deleted, its candidate goes; committed, every candidate
+// before it goes, since it or a later resize committed last, and its own
+// becomes the first, the one with every resize still unresolved deleted. An
+// event the tracker never crossed decides nothing, and nor does one whose
+// candidate a later commit or a resize heard in order removed already, or any
+// while overflowed.
+func (m *ModeTracker) resolve(seq uint64, committed bool) {
+	if m.overflowed || seq == 0 {
+		return
+	}
+	i := slices.IndexFunc(m.candidates, func(c marginCandidate) bool { return c.after == seq })
+	if i < 0 {
+		return
+	}
+	if !committed {
+		m.candidates = slices.Delete(m.candidates, i, i+1)
+		return
+	}
+	m.candidates = slices.Delete(m.candidates, 0, i)
+	m.candidates[0].after = 0
+}
+
+// uncertain reports that the region can't be known yet: the candidates
+// disagree on it, or there were too many to keep. Every capture fails while
+// it is (spec A22).
+func (m *ModeTracker) uncertain() bool {
+	if m.overflowed {
+		return true
+	}
+	for _, c := range m.candidates[1:] {
+		if !c.sameRegion(m.candidates[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// AtGround reports that the tracker is outside every sequence: no partial,
+// and no sequence overflowed past its bound either.
+func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 
 // bufferedBytes reports the parser's current accumulation: both the CSI
 // parameters it is collecting and the raw partial of the same sequence, which
@@ -435,8 +676,7 @@ func (m *ModeTracker) resetToDefaults() {
 	clear(m.decPrivate)
 	m.altScreen = false
 	m.altVia = 0
-	m.mainRegion = nil
-	m.altRegion = nil
+	m.clearRegions()
 	m.charsetG0 = nil
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
@@ -458,13 +698,7 @@ func (m *ModeTracker) softReset() {
 	for _, n := range softResetModes {
 		delete(m.decPrivate, n)
 	}
-	// The margins of the buffer that is showing, and only that one: the other
-	// buffer's are not the ones being reset.
-	if m.altActive() {
-		m.altRegion = nil
-	} else {
-		m.mainRegion = nil
-	}
+	m.clearRegions()
 	m.charsetG0 = nil
 	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
 	// The protocol is kitty's, so its reset is the one to follow here.
@@ -483,6 +717,16 @@ func (m *ModeTracker) softReset() {
 // the snapshot replay a "?47h" the session was no longer in.
 var altScreenModes = map[int]bool{47: true, 1047: true, 1049: true}
 
+// clearRegions puts the region back to the whole screen, as RIS and DECSTR do
+// at any height, on a guest's terminal too: the candidates stay, for the
+// sizes they hold.
+func (m *ModeTracker) clearRegions() {
+	for i := range m.candidates {
+		m.candidates[i].top, m.candidates[i].bottom, m.candidates[i].written = 0, 0, nil
+	}
+	m.marginsSet = false
+}
+
 func (m *ModeTracker) altActive() bool { return m.altScreen }
 
 func (m *ModeTracker) finishCSI(final byte) {
@@ -494,7 +738,6 @@ func (m *ModeTracker) finishCSI(final byte) {
 		if len(params) == 0 || params[0] != '?' {
 			return
 		}
-		wasAlt := m.altActive()
 		set := final == 'h'
 		for _, field := range bytes.Split(params[1:], []byte{';'}) {
 			n, err := strconv.Atoi(string(field))
@@ -515,23 +758,8 @@ func (m *ModeTracker) finishCSI(final byte) {
 			}
 			m.decPrivate[n] = set
 		}
-		if m.altActive() != wasAlt {
-			// A fresh alternate screen has no margins, and the ones it had
-			// are gone the moment it is left.
-			m.altRegion = nil
-		}
 	case 'r':
-		// DECSTBM, stored verbatim including a bare reset, against whichever
-		// screen buffer is showing.
-		seq := make([]byte, 0, len(params)+3)
-		seq = append(seq, 0x1b, '[')
-		seq = append(seq, params...)
-		seq = append(seq, 'r')
-		if m.altActive() {
-			m.altRegion = seq
-		} else {
-			m.mainRegion = seq
-		}
+		m.decstbm(params)
 	case 'p':
 		// DECSTR, a soft reset. Its parameter is the intermediate '!', which
 		// is what separates it from the several other CSI ... p sequences.
@@ -552,6 +780,34 @@ func (m *ModeTracker) finishCSI(final byte) {
 		if string(params) == ">4" {
 			m.modifyOtherKeys = []byte("\x1b[>4n")
 		}
+	}
+}
+
+// decstbm applies a DECSTBM to every candidate, each deciding it at its own
+// height: candidates aren't merged, so a later DECSTBM that depends on the
+// height is still decided under each (spec A22).
+//
+// Only an r sequence of plain numeric parameters is one. With a prefix or an
+// intermediate it is another sequence -- CSI ? r is XTRESTORE, CSI $ r is
+// DECCARA -- and a subparameter makes it one xterm doesn't take either. xterm
+// reads the first two parameters, ignores the rest, and holds none past
+// termsize.Max, its own bound, which no height reaches.
+func (m *ModeTracker) decstbm(params []byte) {
+	var tb [2]int
+	for i, field := range bytes.Split(params, []byte{';'}) {
+		for _, b := range field {
+			if b < '0' || b > '9' {
+				return
+			}
+			if i < len(tb) {
+				tb[i] = min(tb[i]*10+int(b-'0'), termsize.Max)
+			}
+		}
+	}
+	m.marginsSet = true
+	seq := append(append([]byte("\x1b["), params...), 'r')
+	for i := range m.candidates {
+		m.candidates[i].decstbm(tb[0], tb[1], seq)
 	}
 }
 
@@ -798,11 +1054,16 @@ func (m *ModeTracker) Restore() []byte {
 		out = append(out, "\x1b[?47l\x1b8"...)
 	}
 
-	// The normal screen's margins, which outlive whatever set them: a shell
-	// returned to a terminal still under a full-screen program's DECSTBM
-	// scrolls inside those rows and leaves the rest of the screen frozen.
-	// The alternate screen's are not restored because they are gone with it.
-	if len(m.mainRegion) > 0 {
+	// The margins, which outlive whatever set them: a shell returned to a
+	// terminal still under a full-screen program's DECSTBM scrolls inside
+	// those rows and leaves the rest of the screen frozen. They are the
+	// terminal's, not a screen's, so they are reset once, on the screen it
+	// goes back to. They are reset after any DECSTBM since the last RIS or
+	// DECSTR, whatever the pty's height decided (see marginsSet), which
+	// covers every candidate's region too, since only a DECSTBM sets one:
+	// resetting margins a terminal doesn't have is harmless, and missing some
+	// is not (spec A23).
+	if m.marginsSet {
 		out = append(out, 0x1b, '[', 'r')
 	}
 
@@ -840,20 +1101,28 @@ func (m *ModeTracker) Restore() []byte {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the screen switch, the three verbatim sequences, two
-// kitty keyboard stacks of kittyStackDepth entries, modifyOtherKeys and one
-// partial sequence. Only the partial is sized by the stream rather than by
-// this file, and its own bound is maxSequenceBytes for a mode sequence or
-// maxStringBytes for a string: the ceiling is a few kilobytes, not the hundreds
-// of bytes everything else comes to.
+// len(restorable) plus the screen switch, the region, the charset and
+// modifyOtherKeys, each one sequence of at most maxSequenceBytes parameters,
+// two kitty keyboard stacks of kittyStackDepth entries, and one partial
+// sequence. Only the partial is sized by the stream rather than by this file,
+// and its own bound is maxSequenceBytes for a mode sequence or maxStringBytes
+// for a string: the ceiling is a few kilobytes, not the hundreds of bytes
+// everything else comes to.
 //
 // The order is the order the stream would have had to use to reach this
-// state: the normal screen's margins, then the modes, then the normal
-// screen's kitty keyboard stack and modifyOtherKeys, then the switch to the
-// alternate screen, then that screen's own margins and keyboard stack, and
-// only while it is the one showing. While the normal screen is showing, the
-// alternate screen's stack is replayed on a trip there and back, because a
-// push applies only to the screen that is showing.
+// state: the margins, then the modes, then the normal screen's kitty keyboard
+// stack and modifyOtherKeys, then the switch to the alternate screen and that
+// screen's own keyboard stack, only while it is the one showing. While the
+// normal screen is showing, the alternate screen's stack is replayed on a
+// trip there and back, because a push applies only to the screen that is
+// showing. The margins are the terminal's, so no switch moves them.
+//
+// The region is defined while it is uncertain too, for the raw fallback,
+// which replays it then; a capture never does (spec A23). It is the
+// candidates' common region when they agree, which is the newest's; the
+// newest surviving candidate's when they disagree, the likeliest, since a
+// resize's ioctl rarely fails and so the newest crossed resize most likely
+// committed last; and the fallback's while overflowed, the only one kept.
 //
 // The state as of the ring's first byte includes being partway through a
 // sequence, so the partial goes last, after the charset. The ring's first
@@ -861,26 +1130,8 @@ func (m *ModeTracker) Restore() []byte {
 // -- which is what they did when the trim boundary fell inside a sequence and
 // the snapshot said nothing about it.
 func (m *ModeTracker) Snapshot() []byte {
-	nums := make([]int, 0, len(m.decPrivate))
-	for n := range m.decPrivate {
-		nums = append(nums, n)
-	}
-	sort.Ints(nums)
-
-	out := append([]byte(nil), m.mainRegion...)
-	for _, n := range nums {
-		if m.decPrivate[n] == restorable[n] {
-			// Already where a joining terminal starts.
-			continue
-		}
-		out = append(out, 0x1b, '[', '?')
-		out = append(out, []byte(strconv.Itoa(n))...)
-		if m.decPrivate[n] {
-			out = append(out, 'h')
-		} else {
-			out = append(out, 'l')
-		}
-	}
+	out := m.candidates[len(m.candidates)-1].appendRegion(nil)
+	out = m.appendModes(out, 0)
 	out = kittyPushes(out, m.mainKeys)
 	out = append(out, m.modifyOtherKeys...)
 	if !m.altActive() && len(m.altKeys.entries) > 0 {
@@ -893,13 +1144,86 @@ func (m *ModeTracker) Snapshot() []byte {
 	if m.altActive() {
 		// Replayed through the mode that entered, so a joiner is left in the
 		// state the session's own "l" will match.
-		out = append(out, 0x1b, '[', '?')
-		out = append(out, []byte(strconv.Itoa(m.altVia))...)
-		out = append(out, 'h')
-		out = append(out, m.altRegion...)
+		out = appendMode(out, m.altVia, true)
 		out = kittyPushes(out, m.altKeys)
 	}
 	out = append(out, m.charsetG0...)
 	out = append(out, m.partial...)
 	return out
+}
+
+// ReplayParts is the tracked state a reconstruction needs, in the order
+// Snapshot emits it, split where the reconstruction interleaves drawing.
+type ReplayParts struct {
+	DECModes      map[int]bool // each tracked DEC private mode, the alternate screen's aside, with its value
+	Modes         []byte       // those not at their default as CSI ? n h/l, in Snapshot's order, DECAWM (7) excluded
+	Autowrap      bool         // DECAWM; the render restores it last (spec A20)
+	MainKeys      []byte       // the main kitty stack's pushes, then modifyOtherKeys
+	HiddenAltKeys []byte       // the hidden alternate stack's pushes, while the main screen shows, or nil
+	AltVia        int          // 47, 1047 or 1049 while the alternate screen shows, else 0
+	AltKeys       []byte       // the alternate stack's pushes, while it shows
+}
+
+// ReplayParts returns Snapshot's pieces but for the region, the charset and
+// the partial, which a reconstruction gives in places of its own: Modes, with
+// DECAWM put back in its place when it is off, then MainKeys, then either the
+// switch through AltVia and AltKeys, or HiddenAltKeys, which Snapshot pushes
+// on a trip to the alternate screen and back. The render builds its own trip
+// (spec A5), so the pushes come alone.
+func (m *ModeTracker) ReplayParts() ReplayParts {
+	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
+	for n, def := range restorable {
+		if altScreenModes[n] {
+			continue
+		}
+		v, ok := m.decPrivate[n]
+		if !ok {
+			v = def
+		}
+		p.DECModes[n] = v
+	}
+	p.Autowrap = p.DECModes[7]
+	p.Modes = m.appendModes(nil, 7)
+	p.MainKeys = append(kittyPushes(nil, m.mainKeys), m.modifyOtherKeys...)
+	if m.altActive() {
+		p.AltVia = m.altVia
+		p.AltKeys = kittyPushes(nil, m.altKeys)
+	} else if len(m.altKeys.entries) > 0 {
+		p.HiddenAltKeys = kittyPushes(nil, m.altKeys)
+	}
+	return p
+}
+
+// changedModes returns the tracked DEC private modes not at their default, in
+// ascending order, so what is emitted from them is deterministic.
+func (m *ModeTracker) changedModes() []int {
+	nums := make([]int, 0, len(m.decPrivate))
+	for n, set := range m.decPrivate {
+		if set != restorable[n] {
+			nums = append(nums, n)
+		}
+	}
+	sort.Ints(nums)
+	return nums
+}
+
+// appendModes appends the modes not at their default as they are set, but for
+// skip.
+func (m *ModeTracker) appendModes(out []byte, skip int) []byte {
+	for _, n := range m.changedModes() {
+		if n != skip {
+			out = appendMode(out, n, m.decPrivate[n])
+		}
+	}
+	return out
+}
+
+// appendMode appends CSI ? n h, or l when !set.
+func appendMode(out []byte, n int, set bool) []byte {
+	out = append(out, 0x1b, '[', '?')
+	out = strconv.AppendInt(out, int64(n), 10)
+	if set {
+		return append(out, 'h')
+	}
+	return append(out, 'l')
 }

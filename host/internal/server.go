@@ -158,6 +158,12 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 // builds it, so a test can watch the gate hold. Nil in production.
 var onGuestPacer func(*guestPacer)
 
+// sessionReplayer, when set, builds the replayer each session's fan-out
+// reconstructs a joining terminal's screen with, rather than handing it the
+// raw ring. Nil for now: no replayer is wired yet, so every join gets the
+// raw ring, and a test installs its own here.
+var sessionReplayer func() uio.Replayer
+
 // ServeWithContext runs the session: the hosted command, the guest door on
 // guest, and — when host is not nil — the host door on host, for clients that
 // are already on this machine.
@@ -167,6 +173,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	}
 
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	// Installed before anything can join: SetReplayer is once, before any
+	// join.
+	if sessionReplayer != nil {
+		writers.SetReplayer(sessionReplayer(), nil)
+	}
 	// The pty as the doors see it: the host door serves before the command
 	// starts, so a client can reach this handle before there is a pty behind
 	// it.
@@ -251,7 +262,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		commandEnv:            s.CommandEnv,
 		hideClientIP:          s.HideClientIP,
 		ptmx:                  shared,
-		shared:                shared,
 		eventEmmiter:          s.EventEmitter,
 		terminals:             newTerminalWindows(s.Logger),
 		writers:               writers,
@@ -872,12 +882,6 @@ type sessionHandler struct {
 	cmdDone       <-chan struct{}
 	commandResult func() CommandResult
 
-	// shared is the handle ptmx starts out as, kept in its own type so a host
-	// client that arrives before the pty exists can offer it the geometry to
-	// open with. Separate from ptmx because a forced command replaces that
-	// with a pty of its own.
-	shared *sharedPTY
-
 	// onHostClientAttached, set on the host door only, reports that a local
 	// client's output subscription is installed. That is what a server told to
 	// await its initial client starts the command on.
@@ -1153,6 +1157,64 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 	} else {
 		// output
+
+		// The join begins here, and so does its budget for having the
+		// screen reconstructed (spec J1): time it spends waiting its turn,
+		// behind another join's emulation at the pacer, is its own, so the
+		// deadline is taken before anything it can wait on.
+		deadline := time.Now().Add(uio.ReplayBudget)
+
+		// The pty's geometry follows the terminals watching it, and this
+		// one is counted before it attaches, not after (spec D8): the
+		// fan-out reconstructs a joiner's screen at the size the pty has
+		// when the join takes its capture, so the pty has to have the size
+		// this terminal gives it by then. Counted after, the reconstruction
+		// would be at the old size, and the joiner's own resize would
+		// reach it as live output.
+		//
+		// The window-change loop would get there too — charm seeds a
+		// session's window channel with the pty request's own window
+		// (session.go:373-375), so an arriving terminal's size reaches that
+		// loop without anybody resizing anything. But that loop is an actor,
+		// started further down, after the nudge below, which is what makes a
+		// full-screen program repaint: a repaint at the size the session had
+		// before this terminal arrived is one the arriving terminal has to
+		// sit through. Both doors, because a guest arrives with a terminal
+		// exactly as a local client does.
+		var size termsize.Size
+		stop := func() bool { return false }
+		if isPty {
+			size = termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height}
+			h.terminals.changed(ptmx, sessionID, size.Cols, size.Rows, alive)
+			// The attach below takes the fan-out's lock, and a synchronous
+			// primary parked in a write to a terminal that has stopped holds
+			// that lock for as long as the terminal stays stopped. A client
+			// that hangs up meanwhile is still waiting for it: the guard
+			// below cannot run, and the departures further down are actors
+			// that start only after the attach. Its size would go on
+			// constraining the pty until the primary resumes, so its
+			// departure takes it out from here. The attach stops this: an
+			// attached client is taken out as it was before the reorder, by
+			// the actors below.
+			stop = context.AfterFunc(sess.Context(), func() {
+				h.terminals.detached(ptmx, sessionID)
+			})
+		}
+		// Once counted, a terminal that never attaches is taken out again,
+		// whatever stopped it: the session ending, the client leaving,
+		// another join at the pacer, a sink that couldn't take the replay,
+		// a panic. Nothing else would: the departures below that take a
+		// terminal out are actors, and a join that failed never starts
+		// them. One attached by the raw ring, after a replay that failed or
+		// panicked, is attached, and keeps its size (spec A11).
+		attached := false
+		defer func() {
+			stop()
+			if isPty && !attached {
+				h.terminals.detached(ptmx, sessionID)
+			}
+		}()
+
 		if h.kind == kindHost {
 			// A client on the host door gets a sink that can become the
 			// primary: synchronous and unfiltered, so the command cannot
@@ -1170,17 +1232,24 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				}
 			}
 			sink := newHostSink(sess, disconnect, sessionID, h.logger)
-			if err := attachGuestOutput(h.writers, sink); err != nil {
-				if errors.Is(err, uio.ErrClosed) {
+			if err := attachGuestOutput(sess.Context(), deadline, h.writers, sink, size); err != nil {
+				switch {
+				case errors.Is(err, uio.ErrClosed):
 					// The session is already tearing down. This client
 					// arrived a moment too late, which is not its error.
 					_ = sess.Exit(0)
-				} else {
+				case errors.Is(err, context.Canceled):
+					// The client left while its screen was reconstructed:
+					// there is nobody to tell.
+					h.logger.Debug("client left before its output was attached", "session-id", sessionID)
+				default:
 					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
 					_ = sess.Exit(1)
 				}
 				return
 			}
+			attached = true
+			stop()
 			sink.markAttached()
 
 			defer func() {
@@ -1304,8 +1373,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			onDrop := guestDropHandler(sess.Close, h.logger, sessionID, pacingStallTimeout)
 
 			sink := uio.NewAsyncWriter(filtered, uio.DefaultGuestBufferSize, onDrop)
-			if err := h.attachGuest(sink); err != nil {
-				if errors.Is(err, uio.ErrClosed) {
+			if err := h.attachGuest(sess.Context(), deadline, sink, size); err != nil {
+				switch {
+				case errors.Is(err, uio.ErrClosed):
 					// The session is already tearing down. This guest arrived a
 					// moment too late, which is not its error. Its shell was
 					// accepted before the session's end stopped waiting for
@@ -1313,12 +1383,19 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// gets (see the top of HandleSession). One that arrives
 					// after that is refused at its request (see admitGuest).
 					_ = sess.Exit(0)
-				} else {
+				case errors.Is(err, context.Canceled):
+					// The guest left while it waited its turn at the pacer, or
+					// while its screen was reconstructed: there is nobody to
+					// tell.
+					h.logger.Debug("guest left before its output was attached", "session-id", sessionID)
+				default:
 					h.logger.Error("error attaching guest output", "session-id", sessionID, "error", err)
 					_ = sess.Exit(1)
 				}
 				return
 			}
+			attached = true
+			stop()
 
 			defer func() {
 				h.detachGuest(sink)
@@ -1330,31 +1407,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 		// Attached, in the sense the gate is defined by: the subscription is
 		// installed, so nothing the command writes from here on can be missed.
-		// The geometry is offered first, because the command's start reads it
-		// the moment the gate opens.
-		if h.kind == kindHost {
-			if isPty && h.shared != nil {
-				h.shared.offerSize(termsize.Size{Cols: ptyReq.Window.Width, Rows: ptyReq.Window.Height})
-			}
-			if h.onHostClientAttached != nil {
-				h.onHostClientAttached()
-			}
-		}
-
-		// The pty's geometry follows the terminals watching it: record the
-		// size this one arrived with, here, before the redraw nudge below.
-		//
-		// The window-change loop would get there too — charm seeds a
-		// session's window channel with the pty request's own window
-		// (session.go:373-375), so an arriving terminal's size reaches that
-		// loop without anybody resizing anything. But that loop is an actor,
-		// started further down, and the nudge below is what makes a
-		// full-screen program repaint: a repaint at the size the session had
-		// before this terminal arrived is one the arriving terminal has to
-		// sit through. Both doors, because a guest arrives with a terminal
-		// exactly as a local client does.
-		if isPty {
-			h.terminals.changed(ptmx, sessionID, ptyReq.Window.Width, ptyReq.Window.Height, alive)
+		// The geometry the command's start reads the moment the gate opens is
+		// already recorded: counting this terminal, above, resized the shared
+		// pty, which before the command starts records the minimum over the
+		// terminals attached as the size to open with.
+		if h.kind == kindHost && h.onHostClientAttached != nil {
+			h.onHostClientAttached()
 		}
 
 		// Everything a repaint needs is now queued: the mode snapshot, the
@@ -1596,10 +1654,16 @@ func awaitChannelClosed(closed <-chan struct{}, winCh <-chan gssh.Window, timeou
 	}
 }
 
-// attachGuestOutput attaches a guest's sink to the fan-out, releasing it if the
-// fan-out refuses.
+// attachGuestOutput attaches a client's sink to the fan-out, releasing it if
+// the fan-out refuses.
 //
-// That release is the one path nothing else covers: the sink's goroutine is
+// A client with a terminal of size joins by AppendSized: handed a
+// reconstruction of the screen at the pty's size, if the fan-out has a
+// replayer and the reconstruction is ready by deadline, and the raw ring
+// otherwise, with ctx, the client's, ending the wait for it. A zero size, a
+// viewer's, is Append and the raw ring.
+//
+// The release is the one path nothing else covers: the sink's goroutine is
 // idle rather than blocked in I/O, so neither closing the session nor the
 // fan-out's teardown can reach it — and a refused attach became reachable in
 // normal operation the moment MultiWriter learned to quiesce.
@@ -1607,11 +1671,17 @@ func awaitChannelClosed(closed <-chan struct{}, winCh <-chan gssh.Window, timeou
 // It takes a built sink rather than building one so the caller, and a test,
 // keeps a handle on what it must release. The sink is whatever the door built:
 // an AsyncWriter for a guest, a hostSink for a local client.
-func attachGuestOutput(writers *uio.MultiWriter, sink interface {
+func attachGuestOutput(ctx context.Context, deadline time.Time, writers *uio.MultiWriter, sink interface {
 	io.Writer
 	Close() error
-}) error {
-	if err := writers.Append(sink); err != nil {
+}, size termsize.Size) error {
+	var err error
+	if size == (termsize.Size{}) {
+		err = writers.Append(sink)
+	} else {
+		err = writers.AppendSized(ctx, deadline, size, sink)
+	}
+	if err != nil {
 		_ = sink.Close()
 		return err
 	}
@@ -1622,11 +1692,23 @@ func attachGuestOutput(writers *uio.MultiWriter, sink interface {
 // registers it first and takes the registration back if the fan-out refuses:
 // see guestPacer.attach for why the order is what bounds a new guest's
 // exposure. Without a pacer it attaches directly.
-func (h *sessionHandler) attachGuest(sink *uio.AsyncWriter) error {
+//
+// The pacer can also refuse, before the fan-out is reached: a guest that
+// leaves while it waits its turn there. attachGuestOutput's release never
+// runs then, and the sink, built before the wait, is released here instead,
+// or its goroutine would wait for a first write for the rest of the session
+// (spec A8).
+func (h *sessionHandler) attachGuest(ctx context.Context, deadline time.Time, sink *uio.AsyncWriter, size termsize.Size) error {
+	attach := func() error { return attachGuestOutput(ctx, deadline, h.writers, guestSink{sink}, size) }
 	if h.pacer == nil {
-		return attachGuestOutput(h.writers, guestSink{sink})
+		return attach()
 	}
-	return h.pacer.attach(sink, func() error { return attachGuestOutput(h.writers, guestSink{sink}) })
+	if err := h.pacer.attach(ctx, sink, attach); err != nil {
+		// Close is idempotent: a refusal by the fan-out has closed it already.
+		_ = sink.Close()
+		return err
+	}
+	return nil
 }
 
 // detachGuest takes a guest's sink out of the fan-out, then out of the

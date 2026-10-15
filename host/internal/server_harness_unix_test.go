@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/olebedev/emitter"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/owenthereal/upterm/server"
 	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
@@ -203,7 +204,11 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 		return nil, nil, nil, err
 	}
 	t.Cleanup(func() { _ = sess.Close() })
-	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+	window := termsize.Default
+	if cfg.window.Valid() {
+		window = cfg.window
+	}
+	if err := sess.RequestPty("xterm", window.Rows, window.Cols, ssh.TerminalModes{}); err != nil {
 		return nil, nil, nil, err
 	}
 	guestInput, err := sess.StdinPipe()
@@ -313,6 +318,9 @@ type dialConfig struct {
 	// signers, when non-empty, replaces the harness's guest credential, so a
 	// test can offer a certificate of its own making.
 	signers []ssh.Signer
+	// window, when set, is the terminal size a guest's pty request carries
+	// instead of 80x24.
+	window termsize.Size
 }
 
 // withRekeyThreshold forces key renegotiation early, so a test can watch what
@@ -325,6 +333,12 @@ func withRekeyThreshold(n uint64) dialOption {
 // the order given.
 func withGuestSigners(signers ...ssh.Signer) dialOption {
 	return func(c *dialConfig) { c.signers = signers }
+}
+
+// withWindow has a guest arrive with a terminal of this size rather than
+// 80x24.
+func withWindow(size termsize.Size) dialOption {
+	return func(c *dialConfig) { c.window = size }
 }
 
 // withDialDeadline replaces the harness's absolute connection deadline for one

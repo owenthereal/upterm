@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/owenthereal/upterm/internal/termsize"
 )
 
 func Test_MultiWriter_ReplayIsByteBounded(t *testing.T) {
@@ -1004,4 +1008,582 @@ func TestMultiWriterSlowGuestDoesNotStallTheSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, w.Shutdown(ctx), "a dropped guest must not fail shutdown")
+}
+
+// ringStream is n bytes of the stream starting at offset at. No two adjacent
+// offsets hold the same byte, so a range that is off by one in either
+// direction reads back different.
+func ringStream(at, n int) []byte {
+	p := make([]byte, n)
+	for i := range p {
+		o := at + i
+		p[i] = byte(o*131 + o>>8)
+	}
+	return p
+}
+
+// ringCase is a ring and the sizes it is written in.
+type ringCase struct {
+	name   string
+	max    int
+	writes []int
+	chunks int // the fewest chunks the ring is left holding; 0 for no minimum
+}
+
+// ringCases cover the ways bytes enter and leave the ring: a ring evicting
+// part of its head chunk on every write; one whose writes close chunks, so
+// that a range spans several; one handed a write larger than itself, an empty
+// one and one exactly its size; and one that keeps nothing.
+var ringCases = []ringCase{
+	{"64 bytes in 16-byte writes", 64, []int{16, 16, 16, 16, 16, 16, 16, 16, 16}, 1},
+	{"chunks", 10000, []int{1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500}, 4},
+	{"large and empty writes", 64, []int{0, 16, 16, 100, 5, 0, 64, 65, 3}, 1},
+	{"nothing kept", 0, []int{16, 8, 0, 16}, 0},
+}
+
+// A ring of 64 bytes written 16 at a time: End and Start follow every write,
+// and Range hands back exactly the bytes written over [from, to) for any range
+// the ring still holds. It refuses one it does not, rather than return what is
+// left of it.
+func TestRingOffsetsAndRange(t *testing.T) {
+	for _, tc := range ringCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &buffer{max: tc.max}
+			var written []byte
+			for _, n := range tc.writes {
+				// What a caller holds from before the write is the ring's own
+				// bytes and must read the same after it: the tail chunk is
+				// grown in place and the head is trimmed, neither of which
+				// may reach what has been handed out.
+				held, ok := b.Range(b.Start(), b.End())
+				require.True(t, ok)
+				heldWant := bytes.Clone(written[b.Start():])
+
+				p := ringStream(len(written), n)
+				b.Append(p)
+				written = append(written, p...)
+
+				require.Equal(t, string(heldWant), string(bytes.Join(held, nil)), "bytes handed out before a write of %d", n)
+				requireRing(t, b, written)
+			}
+			require.GreaterOrEqual(t, len(b.Data()), tc.chunks, "the chunks the ring ends with")
+		})
+	}
+}
+
+// requireRing checks b against written, every byte ever appended to it.
+func requireRing(t *testing.T, b *buffer, written []byte) {
+	t.Helper()
+
+	end := uint64(len(written))
+	start := end
+	if b.max > 0 {
+		start = end - uint64(min(len(written), b.max))
+	}
+	require.Equal(t, end, b.End(), "End")
+	require.Equal(t, start, b.Start(), "Start")
+
+	// Every range at the bounds, at each chunk's edges and at a spread in
+	// between, which is every range the 64-byte ring holds and a sample of the
+	// larger one's.
+	offsets := []uint64{start, end}
+	if start < end {
+		offsets = append(offsets, start+1, end-1)
+	}
+	at := start
+	for _, c := range b.Data() {
+		at += uint64(len(c))
+		offsets = append(offsets, at, at-min(at, 1), min(at+1, end))
+	}
+	step := max(1, (end-start)/32)
+	for o := start; o < end; o += step {
+		offsets = append(offsets, o)
+	}
+
+	for _, from := range offsets {
+		for _, to := range offsets {
+			if from > to {
+				chunks, ok := b.Range(from, to)
+				require.False(t, ok, "Range(%d, %d) runs backwards", from, to)
+				require.Nil(t, chunks)
+				continue
+			}
+			chunks, ok := b.Range(from, to)
+			require.True(t, ok, "Range(%d, %d) of [%d, %d)", from, to, start, end)
+			if from == to {
+				require.Nil(t, chunks, "an empty Range(%d, %d)", from, to)
+				continue
+			}
+			require.Equal(t, string(written[from:to]), string(bytes.Join(chunks, nil)), "Range(%d, %d)", from, to)
+			for _, c := range chunks {
+				require.NotEmpty(t, c, "Range(%d, %d) hands out an empty chunk", from, to)
+				// What a caller appends to a chunk it was handed must not
+				// land on the ring's bytes after the range.
+				_ = append(c, 0xff, 0xff, 0xff)
+			}
+		}
+	}
+	got, ok := b.Range(start, end)
+	require.True(t, ok)
+	require.Equal(t, string(written[start:]), string(bytes.Join(got, nil)), "the ring after appends to the chunks Range handed out")
+
+	// Outside the ring: before its first byte, or past its last.
+	if start > 0 {
+		for _, r := range [][2]uint64{{start - 1, end}, {start - 1, start - 1}, {0, start}} {
+			chunks, ok := b.Range(r[0], r[1])
+			require.False(t, ok, "Range(%d, %d) starts before Start %d", r[0], r[1], start)
+			require.Nil(t, chunks)
+		}
+	}
+	for _, r := range [][2]uint64{{start, end + 1}, {end + 1, end + 1}, {end, end + 1}} {
+		chunks, ok := b.Range(r[0], r[1])
+		require.False(t, ok, "Range(%d, %d) ends after End %d", r[0], r[1], end)
+		require.Nil(t, chunks)
+	}
+}
+
+// Everything that leaves the ring is handed to onEvict with the stream offset
+// of its first byte, in order and with nothing between one span and the next:
+// together the spans are exactly the stream's bytes before Start, and each is
+// delivered before the Append that pushed it out returns.
+func TestRingEvictsWithOffsets(t *testing.T) {
+	type span struct {
+		offset uint64
+		data   []byte
+	}
+
+	for _, tc := range ringCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &buffer{max: tc.max}
+			var evicted []span
+			b.onEvict = func(offset uint64, p []byte) {
+				evicted = append(evicted, span{offset, bytes.Clone(p)})
+			}
+
+			var written []byte
+			for _, n := range tc.writes {
+				p := ringStream(len(written), n)
+				b.Append(p)
+				written = append(written, p...)
+
+				var next uint64
+				var got []byte
+				for _, e := range evicted {
+					require.Equal(t, next, e.offset, "a span's offset follows the one before it")
+					next += uint64(len(e.data))
+					got = append(got, e.data...)
+				}
+				require.Equal(t, b.Start(), next, "the spans end where the ring begins, after a write of %d", n)
+				require.Equal(t, string(written[:next]), string(got))
+			}
+		})
+	}
+}
+
+// writeString writes s to the fan-out.
+func writeString(w *MultiWriter, s string) { _, _ = w.Write([]byte(s)) }
+
+// marginsAt reads the fan-out's tracker as a capture does, with writeMu held
+// once what was reported since the last hold is applied: Snapshot, and
+// whether the region is uncertain.
+func marginsAt(w *MultiWriter) (snapshot string, uncertain bool) {
+	withLog(w, func(*sizeLog, uint64) {
+		snapshot, uncertain = string(w.modes.Snapshot()), w.modes.uncertain()
+	})
+	return snapshot, uncertain
+}
+
+// Spec A21 through the fan-out: the tracker hears the 8-row event before the
+// bytes it evicts after it, and decides each DECSTBM at that height.
+func TestEvictedDECSTBMKeepsTheAcceptedRegion(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r\x1b[10;11r\x1b[10r")
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;5r", snap)
+}
+
+// A resize resets the region on a terminal, so one the tracker hears in
+// order does too: priming never sets margins a resize already cleared (spec
+// E3). An event exactly at the ring's start is in effect there, so eviction
+// that reaches its offset crosses it.
+func TestTrackerResetsMarginsAtAnEvictedResize(t *testing.T) {
+	for _, past := range []bool{false, true} {
+		t.Run(fmt.Sprintf("past=%t", past), func(t *testing.T) {
+			w := NewMultiWriter(16)
+			resize(w, rows(24))
+			writeString(w, "\x1b[2;10r") // 0 to 6
+			resize(w, rows(30))
+			write(w, 9) // the event at 7, and the ring full
+			write(w, 7) // the ring starts at the event
+			start := uint64(7)
+			if past {
+				write(w, 1)
+				start++
+			}
+
+			withLog(w, func(_ *sizeLog, got uint64) { require.Equal(t, start, got) })
+			snap, uncertain := marginsAt(w)
+			require.False(t, uncertain)
+			require.Empty(t, snap)
+		})
+	}
+}
+
+// Spec A22, Owen's: height 8, region 2;5; eviction crosses a tentative resize
+// to 4; CSI 2;6r is evicted after it, 2;6 at 8 and 2;4 at 4, so the region is
+// uncertain. The resize's outcome selects: failed, the region is the one
+// decided without it, 2;6, which marks alone lost (they primed 2;5);
+// committed, 2;4.
+func TestAFailedResizeSelectsTheRegionDecidedWithoutIt(t *testing.T) {
+	for _, tc := range []struct {
+		applied bool
+		want    string
+	}{{false, "\x1b[2;6r"}, {true, "\x1b[2;4r"}} {
+		t.Run(fmt.Sprintf("applied=%t", tc.applied), func(t *testing.T) {
+			w := NewMultiWriter(16)
+			resize(w, rows(8))
+			writeString(w, "\x1b[2;5r")
+			seq := w.ResizeBegin(rows(4))
+			writeString(w, "\x1b[2;6r")
+			write(w, 16)
+
+			snap, uncertain := marginsAt(w)
+			require.True(t, uncertain)
+			require.Equal(t, "\x1b[2;4r", snap, "the newest candidate's")
+
+			w.ResizeEnd(seq, tc.applied)
+			snap, uncertain = marginsAt(w)
+			require.False(t, uncertain)
+			require.Equal(t, tc.want, snap)
+		})
+	}
+}
+
+// Spec A22: candidates that agree aren't merged, and keep their heights, so a
+// later DECSTBM is still decided under each. CSI 1;3r is 1;3 at 8 and at 4;
+// CSI 2;6r after it isn't.
+func TestACommonDECSTBMKeepsTheHeightCandidates(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	seq := w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[1;3r")
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[1;3r", snap)
+
+	writeString(w, "\x1b[2;6r")
+	write(w, 16)
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain, "the heights were kept")
+
+	w.ResizeEnd(seq, true)
+	snap, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;4r", snap)
+}
+
+// Spec A22: candidates that agree are no uncertainty. CSI 1;3r is 1;3 at 8
+// and at 4, so Snapshot carries it while the event is unresolved.
+func TestSnapshotUsesTheCommonRegion(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	write(w, 1)
+	w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[1;3r")
+	write(w, 16)
+
+	_, _, ok := unresolved(w)
+	require.True(t, ok)
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[1;3r", snap)
+}
+
+// Spec A22: height 8; two tentative events crossed, to 4 then to 12, so the
+// candidates are 8, 4 and 12; CSI 2;6r gives 2;6, 2;4 and 2;6. Each pair of
+// outcomes, in either order, selects the region the terminal holds, and the
+// tracker is uncertain exactly while the candidates left disagree.
+func TestEveryHeightCandidateDecides(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second bool // e1's and e2's outcomes: committed or not
+		afterFirst    bool // uncertain with only e1's outcome applied
+		afterSecond   bool // uncertain with only e2's
+		want          string
+	}{
+		{"deleted/deleted", false, false, false, true, "\x1b[2;6r"},
+		{"committed/deleted", true, false, true, true, "\x1b[2;4r"},
+		{"deleted/committed", false, true, false, false, "\x1b[2;6r"},
+		{"committed/committed", true, true, true, false, "\x1b[2;6r"},
+	} {
+		for _, e1First := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/e1 first=%t", tc.name, e1First), func(t *testing.T) {
+				w := NewMultiWriter(16)
+				resize(w, rows(8))
+				write(w, 1)
+				e1 := w.ResizeBegin(rows(4))
+				write(w, 1)
+				e2 := w.ResizeBegin(rows(12))
+				writeString(w, "\x1b[2;6r")
+				write(w, 16)
+				snap, uncertain := marginsAt(w)
+				require.True(t, uncertain)
+				require.Equal(t, "\x1b[2;6r", snap, "e2's, the newest")
+
+				if e1First {
+					w.ResizeEnd(e1, tc.first)
+					_, uncertain = marginsAt(w)
+					require.Equal(t, tc.afterFirst, uncertain)
+					w.ResizeEnd(e2, tc.second)
+				} else {
+					w.ResizeEnd(e2, tc.second)
+					_, uncertain = marginsAt(w)
+					require.Equal(t, tc.afterSecond, uncertain)
+					w.ResizeEnd(e1, tc.first)
+				}
+				snap, uncertain = marginsAt(w)
+				require.False(t, uncertain)
+				require.Equal(t, tc.want, snap)
+			})
+		}
+	}
+}
+
+// A committed event heard in order after a crossed tentative one resets the
+// region on a terminal whichever way the tentative one went, so the tracker
+// keeps one candidate, the whole screen at its size, and the tentative
+// event's later outcome changes nothing.
+func TestAnInOrderResizeCollapsesTheCandidates(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	seq := w.ResizeBegin(rows(4))
+	writeString(w, "\x1b[2;6r")
+	resize(w, rows(12))
+	write(w, 1)
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Empty(t, snap)
+	withLog(w, func(*sizeLog, uint64) { require.Len(t, w.modes.candidates, 1) })
+
+	w.ResizeEnd(seq, true)
+	snap, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+	require.Empty(t, snap)
+
+	// Decided at the 12 rows heard in order, not at the 4 that committed
+	// before them.
+	writeString(w, "\x1b[2;10r")
+	write(w, 16)
+	snap, _ = marginsAt(w)
+	require.Equal(t, "\x1b[2;10r", snap)
+}
+
+// Spec A22 and A23: 16 crossed events still have a candidate each; a 17th
+// overflows into the bounded fallback state, which is uncertain through every
+// outcome, until a committed resize heard in order.
+func TestTooManyCandidatesStayUncertain(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(8))
+	var seqs []uint64
+	for i := range maxUnresolvedResizes + 1 {
+		write(w, 1)
+		seqs = append(seqs, w.ResizeBegin(rows(10+i)))
+	}
+	write(w, 1) // the events at 1 to 17
+
+	write(w, 14) // the ring starts at 16: 16 crossed
+	_, uncertain := marginsAt(w)
+	require.False(t, uncertain, "16 candidates, all with the whole screen")
+
+	write(w, 1) // and the 17th
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain)
+
+	for _, seq := range seqs {
+		w.ResizeEnd(seq, true)
+	}
+	_, uncertain = marginsAt(w)
+	require.True(t, uncertain, "outcomes change nothing while overflowed")
+
+	resize(w, rows(20))
+	write(w, 1)
+	write(w, 16)
+	_, uncertain = marginsAt(w)
+	require.False(t, uncertain)
+}
+
+// A capture's clone describes the ring's first byte, so it has heard every
+// event in effect there, even one no eviction has reached yet: the clone is
+// fed the ring and decides its DECSTBMs at that size.
+func TestTheTrackerHearsTheEventAtTheRingsStart(t *testing.T) {
+	w := NewMultiWriter(DefaultReplayBytes)
+	resize(w, rows(8))
+	writeString(w, "abc")
+
+	var clone *ModeTracker
+	withLog(w, func(*sizeLog, uint64) { clone = w.modes.Clone() })
+	_, _ = clone.Write([]byte("abc\x1b[2;5r\x1b[10;11r"))
+	require.Equal(t, "\x1b[2;5r", string(clone.Snapshot()), "decided at the 8 rows in effect at the ring's start")
+}
+
+// armedGate passes writes through until armed, and then parks the next one
+// until released, closing entered first.
+type armedGate struct {
+	armed   atomic.Bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *armedGate) Write(p []byte) (int, error) {
+	if g.armed.Load() {
+		g.once.Do(func() { close(g.entered) })
+		<-g.release
+	}
+	return len(p), nil
+}
+
+// An outcome ResizeEnd records while a Write is still under way, after that
+// Write's apply and its eviction crossing the event, is applied by the next
+// hold of writeMu, and selects among the candidates the crossing kept.
+func TestAnOutcomeRecordedMidWriteReachesTheTracker(t *testing.T) {
+	for _, tc := range []struct {
+		applied bool
+		want    string
+	}{{false, "\x1b[2;6r"}, {true, "\x1b[2;4r"}} {
+		t.Run(fmt.Sprintf("applied=%t", tc.applied), func(t *testing.T) {
+			gate := &armedGate{entered: make(chan struct{}), release: make(chan struct{})}
+			w := NewMultiWriter(16)
+			require.NoError(t, w.Append(gate))
+			resize(w, rows(8))
+			writeString(w, "\x1b[2;5r")
+			seq := w.ResizeBegin(rows(4))
+			writeString(w, "\x1b[2;6r")
+
+			// The ring takes this Write and evicts past the event, and then
+			// the Write parks in the gate, writeMu held.
+			gate.armed.Store(true)
+			wrote := make(chan struct{})
+			go func() { defer close(wrote); write(w, 16) }()
+			<-gate.entered
+			w.ResizeEnd(seq, tc.applied)
+			close(gate.release)
+			<-wrote
+
+			snap, uncertain := marginsAt(w)
+			require.False(t, uncertain)
+			require.Equal(t, tc.want, snap)
+		})
+	}
+}
+
+// Restore goes to guests' own terminals, which can be taller than the pty,
+// so it resets the margins after any DECSTBM, whatever the pty's height
+// decided: 0;24 is the whole of a 24-row pty and not of a 30-row guest; 1;30
+// clamps to the whole pty at 24 rows and not at 30; a resize of the pty
+// resets the pty's region, not a guest's; and Shutdown feeds the tracker the
+// ring without its resizes, so it ignores 25;28 at the 24 rows it last heard,
+// where the pty, at 30 by then, took it. Each case but the last is evicted
+// whole, so the tracker decides it at the pty's 24 rows.
+func TestShutdownResetsTheMarginsAfterAnyDECSTBM(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream func(w *MultiWriter)
+	}{
+		{"the whole pty, after a region", func(w *MultiWriter) {
+			writeString(w, "\x1b[0;23rabc\x1b[0;24r")
+			write(w, 16)
+		}},
+		{"clamped to the whole pty", func(w *MultiWriter) {
+			writeString(w, "\x1b[1;30r")
+			write(w, 16)
+		}},
+		{"a region, then a resize", func(w *MultiWriter) {
+			writeString(w, "\x1b[2;10r")
+			resize(w, termsize.Size{Cols: 100, Rows: 24})
+			write(w, 16)
+			write(w, 16)
+		}},
+		{"decided at a height the pty had left", func(w *MultiWriter) {
+			write(w, 17) // evicts its first byte, and the 24-row event with it
+			resize(w, termsize.Size{Cols: 80, Rows: 30})
+			writeString(w, "\x1b[25;28r")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(16)
+			guest := resetBuffer{&bytes.Buffer{}}
+			require.NoError(t, w.Append(guest))
+			resize(w, at80x24)
+			tc.stream(w)
+			before := guest.Len()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			require.NoError(t, w.Shutdown(ctx))
+			require.Equal(t, "\x1b[r", guest.String()[before:])
+		})
+	}
+}
+
+// Events at one offset are each heard, in Seq order: here a committed resize
+// to 4 rows and a tentative one to 8, with no output between them, then
+// CSI 2;6r, which is 2;4 at 4 rows and 2;6 at 8. With the tentative one
+// deleted, the region is the one decided at 4.
+func TestEveryEventAtOneOffsetIsHeard(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, rows(24))
+	write(w, 1)
+	resize(w, rows(4))
+	seq := w.ResizeBegin(rows(8))
+	writeString(w, "\x1b[2;6r")
+	write(w, 16)
+	_, uncertain := marginsAt(w)
+	require.True(t, uncertain)
+
+	w.ResizeEnd(seq, false)
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;4r", snap)
+}
+
+// A resize to the size the pty already has sends no SIGWINCH, and a terminal
+// resets nothing, so the tracker doesn't either, as the replay applies no
+// such event (Task 7).
+func TestASameSizeResizeResetsNothing(t *testing.T) {
+	w := NewMultiWriter(16)
+	resize(w, at80x24)
+	writeString(w, "\x1b[2;10r")
+	resize(w, at80x24)
+	write(w, 1)
+	write(w, 16)
+
+	snap, uncertain := marginsAt(w)
+	require.False(t, uncertain)
+	require.Equal(t, "\x1b[2;10r", snap)
+}
+
+// Append's snapshot hears every resize reported before it, as a capture's
+// does: with the ring empty, an event reported since the last Write is in
+// effect at the ring's start, and it resets the margins on a terminal, so
+// the snapshot must not carry the region the tracker held before it.
+func TestAppendHearsAResizeReportedSinceTheLastWrite(t *testing.T) {
+	w := NewMultiWriter(0) // the ring keeps nothing: the tracker hears it all
+	resize(w, rows(8))
+	writeString(w, "\x1b[2;5r")
+	resize(w, rows(12))
+
+	var joined bytes.Buffer
+	require.NoError(t, w.Append(&joined))
+	require.Empty(t, joined.String(), "the resize reset the margins before the snapshot")
 }

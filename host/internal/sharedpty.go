@@ -17,11 +17,12 @@ var errNoPty = errors.New("session ended before its command started")
 // It exists because the host door serves before the command starts: the
 // first host client's subscription is what the command's start waits for,
 // so that client's input and resize requests can arrive before there is a
-// pty to deliver them to. Writes wait for the pty; the last geometry offered
-// before it exists is what the pty is opened with -- each offer is already
+// pty to deliver them to. Writes wait for the pty; the last geometry Setsize
+// is given before it exists is what the pty is opened with -- each is already
 // the minimum across the terminals attached so far, computed by
-// resizeWindow, so the most recent one is the current answer. Everything
-// else delegates.
+// resizeWindow, so the most recent one is the current answer, unless the
+// last of those terminals has left since, which forgets it. Everything else
+// delegates.
 type sharedPTY struct {
 	ready chan struct{}
 	done  chan struct{}
@@ -40,9 +41,8 @@ func newSharedPTY() *sharedPTY {
 //
 // If a size was recorded while the pty did not exist, it is applied here
 // before ready closes -- the gap Setsize's fast path otherwise leaves open:
-// cmd.Start reads initialSize once, before this runs, so a size offered
-// between that read and this call would otherwise be recorded and then
-// never looked at again.
+// cmd.Start reads initialSize once, before this runs, so a size recorded
+// between that read and this call would otherwise never be looked at again.
 //
 // Applied under mu, not after releasing it. Between publishing s.ptmx and
 // applying the recorded size, a concurrent Setsize would take the delegating
@@ -72,12 +72,22 @@ func (s *sharedPTY) abandon() {
 	s.once.Do(func() { close(s.done) })
 }
 
-// offerSize records the latest valid geometry seen before the pty exists.
-func (s *sharedPTY) offerSize(size termsize.Size) {
+// forgetInitialSize drops the geometry Setsize recorded for the command to
+// open with, if the pty does not exist yet. It is how terminalWindows says that
+// the last terminal that gave one has gone: no terminal is left to take a
+// minimum across, so nothing will correct the record, and a client that
+// attaches afterwards -- a viewer with no terminal -- would open the command
+// at the size of one that is no longer there.
+//
+// Once the pty exists this does nothing: a pty keeps the size it has when its
+// last terminal leaves, and there is no opening size left to forget. Under mu,
+// like Setsize's record-or-delegate decision, so a pty published between the
+// two is never told to forget.
+func (s *sharedPTY) forgetInitialSize() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ptmx == nil && size.Valid() {
-		s.initial = size
+	if s.ptmx == nil {
+		s.initial = termsize.Size{}
 	}
 }
 
@@ -123,8 +133,7 @@ func (s *sharedPTY) Read(p []byte) (int, error) {
 // than by consulting the ready channel and then separately locking: the
 // latter left a window between the two where a resize could land after
 // ready closed but before the lock was taken, and fall through recorded
-// nowhere. offerSize is not reused for the recording half, because reaching
-// it would mean unlocking and relocking, reopening exactly that window.
+// nowhere.
 func (s *sharedPTY) Setsize(h, w int) error {
 	s.mu.Lock()
 	if s.ptmx == nil {

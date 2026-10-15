@@ -15,7 +15,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
+// startPty starts c on a pty of the given size, falling back to
+// termsize.Default for a size that is not one. A pinned pty keeps that size:
+// its Setsize changes nothing.
+//
+// r hears of the pty's size: once at start, before startPty returns, and for
+// each Setsize that changes it; see sizeReporter. Nil reports nothing, as a
+// forced command's pty does (startSessionPty).
+func startPty(c *exec.Cmd, size termsize.Size, pinned bool, r sizeReporter) (PTY, error) {
 	if !size.Valid() {
 		size = termsize.Default
 	}
@@ -30,8 +37,9 @@ func startPty(c *exec.Cmd, size termsize.Size, pinned bool) (PTY, error) {
 	if err != nil {
 		return nil, err
 	}
+	reportStart(r, size, pinned)
 
-	return wrapPty(f, c, pinned), nil
+	return wrapPty(f, c, pinned, r), nil
 }
 
 // startSessionPty is startPty for a command a guest runs on a pty of its own,
@@ -72,7 +80,7 @@ func startSessionPty(c *exec.Cmd, size termsize.Size) (PTY, error) {
 		return nil, err
 	}
 
-	return wrapPty(f, c, false), nil
+	return wrapPty(f, c, false, nil), nil
 }
 
 // Linux kernel return EIO when attempting to read from a master pseudo
@@ -86,7 +94,7 @@ func ptyError(err error) error {
 	return nil
 }
 
-func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
+func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool, r sizeReporter) *pty {
 	// Snapshotted once, here, rather than read from cmd through the RWMutex
 	// below every time Signal or Kill needs them: see Signal's and Kill's
 	// own comments for why.
@@ -96,7 +104,7 @@ func wrapPty(f *os.File, cmd *exec.Cmd, pinned bool) *pty {
 		pid = cmd.Process.Pid
 		process = cmd.Process
 	}
-	return &pty{File: f, cmd: cmd, pinned: pinned, pid: pid, process: process}
+	return &pty{File: f, cmd: cmd, pinned: pinned, report: r, pid: pid, process: process}
 }
 
 // Pty is a wrapper of the pty *os.File that provides a read/write mutex.
@@ -108,6 +116,12 @@ type pty struct {
 	*os.File
 	cmd    *exec.Cmd // Process started with this PTY
 	pinned bool
+
+	// setWinsize is TIOCSWINSZ unless a test has made it fail.
+	setWinsize func(fd int, ws *unix.Winsize) error
+	// report hears of each resize Setsize makes, in two steps; see startPty.
+	// Nil reports nothing.
+	report sizeReporter
 	// pid and process are cmd.Process.Pid and cmd.Process, fixed at
 	// construction (see wrapPty) and never touched again. Signal and Kill
 	// read them without the RWMutex below; nothing else does.
@@ -129,9 +143,55 @@ func (pty *pty) Setsize(h, w int) error {
 		return nil
 	}
 
+	setWinsize := pty.setWinsize
+	if setWinsize == nil {
+		setWinsize = func(fd int, ws *unix.Winsize) error {
+			return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, ws)
+		}
+	}
+	ws := unix.Winsize{Row: uint16(h), Col: uint16(w)}
+	// What the ioctl applies, which is what the command is told and lays its
+	// output out at: a dimension past what a winsize holds wraps, so 65537
+	// columns is one, and the fan-out must hear the one.
+	applied := termsize.Size{Cols: int(ws.Col), Rows: int(ws.Row)}
 	err := pty.control(func(fd uintptr) error {
-		return unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ,
-			&unix.Winsize{Row: uint16(h), Col: uint16(w)})
+		report := pty.report
+		if report != nil {
+			// A resize to the size the pty has changes nothing, so there is
+			// nothing to report: the fan-out takes every ResizeBegin for a
+			// real change, and a same-size one would reset the region it is
+			// weighing. A size that cannot be read is reported all the same:
+			// the ioctl may well apply it, and if it does not its outcome
+			// deletes the report. The check and the ioctl are not one step, so
+			// Setsize calls must be serialized, as their callers do:
+			// terminalWindows under its mu, and sharedPTY's set under its own.
+			if cur, err := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ); err == nil &&
+				cur.Row == ws.Row && cur.Col == ws.Col {
+				report = nil
+			}
+		}
+
+		// Begun before the ioctl, not after it. The ioctl is what sends the
+		// command SIGWINCH, and a command that repaints at once can have its
+		// repaint in the fan-out before the ioctl returns: reported after,
+		// that repaint would count as drawn at the old size, and a joiner at
+		// the new one would be replayed without it. Reported before, the
+		// error goes the other way, and is one the command repairs: output
+		// already on its way at the old size counts as the new, and the
+		// repaint that follows draws over it.
+		var seq uint64
+		if report != nil {
+			seq = report.ResizeBegin(applied)
+		}
+		err := setWinsize(int(fd), &ws)
+		if report != nil {
+			// A failed ioctl is ended, not undone with a report of the old
+			// size: it sent no SIGWINCH and changed no layout, so the bytes
+			// that followed are the old size's, and the fan-out drops the
+			// event.
+			report.ResizeEnd(seq, err == nil)
+		}
+		return err
 	})
 	if errors.Is(err, os.ErrClosed) {
 		// A resize that lost the race with the end of the session is nothing
