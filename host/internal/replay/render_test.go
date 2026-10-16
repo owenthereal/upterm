@@ -318,6 +318,7 @@ func TestReplayFailsOnUnsupportedState(t *testing.T) {
 	for _, tc := range []struct{ name, stream, state string }{
 		{"a wrap a widening left", full + "\x1b[m", "a pending wrap off the last column"},
 		{"a saved wrap a widening left", full + "\x1b7\r\n", "the main screen's saved pending wrap off the last column"},
+		{"an alternate saved wrap a widening left", "\x1b[?47h" + full + "\x1b7\x1b[?47l\r\n", "the alternate screen's saved pending wrap off the last column"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wide := termsize.Size{Cols: 100, Rows: 24}
@@ -529,9 +530,9 @@ func TestReplayInstallsTheOneRegionAfterBothBuffers(t *testing.T) {
 // A wrap pending under autowrap off is rebuilt with autowrap on, which goes
 // off only after it: ?7h then a character wraps in both.
 //
-// x/vt leaves a wrap pending after a character printed at the last column
-// under autowrap off too, so B can't tell where ?7l came, and the order is
-// checked directly, for a terminal that doesn't.
+// A character that fills the line leaves a wrap pending with autowrap on or
+// off, so B can't tell where ?7l came: the render keeps it after the last
+// reprint, and the order is checked directly.
 func TestReplayRestoresAutowrapAfterTheWrapReprint(t *testing.T) {
 	j := joinAt(t, 4, 3, "xxxx\x1b7\x1b[?7l\x1b[2;1H\x1b8")
 	requireAfterTheReprints(t, j.render, "\x1b[?7l")

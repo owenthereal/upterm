@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand/v2"
 	"strings"
@@ -295,4 +296,35 @@ func TestEncoderRestoreTakesTheModelFromTheSlot(t *testing.T) {
 	require.True(t, enc.pen == uv.Style{})
 	require.Equal(t, uv.Link{}, enc.link)
 	require.Equal(t, ascii, enc.cs)
+}
+
+// Cells the emulator kept apart, because something other than a print came
+// between them, stay apart on the joiner: where two of them written back to
+// back would segment as one cluster, a NUL comes between them, and nowhere
+// else. A combining mark on its own is dropped, never kept in a cell, but a
+// spacing mark is kept.
+func TestEncoderRowKeepsAdjacentClustersApart(t *testing.T) {
+	for _, tc := range []struct {
+		name, drawn string
+		nuls        int
+	}{
+		{"two regional indicators", "🇺\x1b[m🇸", 1},
+		{"an emoji and a skin tone", "👍\x1b[m🏽", 1},
+		{"a base and a spacing mark", "e\x1b[mा", 1},
+		{"Hangul jamo", "ᄀ\x1b[mᅡ", 1},
+		{"a row of whole clusters", "ab 中文 é 🇺🇸👍🏽 का x", 0},
+		{"a pen between them", "🇺\x1b[31m🇸", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := vt.NewEmulator(40, 1)
+			_, _ = a.WriteString(tc.drawn)
+			enc := encoder{max: 1 << 10}
+			require.NoError(t, enc.row(a.MainScreen().Line(0)))
+
+			b := vt.NewEmulator(40, 1)
+			_, _ = b.Write(enc.buf)
+			require.Empty(t, sameScreen(a.MainScreen(), b.MainScreen()), "%q", enc.buf)
+			require.Equal(t, tc.nuls, bytes.Count(enc.buf, []byte{0}), "%q", enc.buf)
+		})
+	}
 }

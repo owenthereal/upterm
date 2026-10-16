@@ -320,9 +320,10 @@ func (r *renderer) cursor() (reprinted int) {
 // charsets, insert mode, the application keypad, reverse video, the title,
 // the cursor's style, autowrap, and last the active pen and link.
 //
-// Autowrap goes off here, after every wrap reprint, since a terminal that
-// leaves no wrap pending after a character printed at the last column under
-// autowrap off would lose the one the reprint sets.
+// Autowrap goes off here, after every wrap reprint. A character that fills
+// the line leaves a wrap pending with autowrap on or off, so where ?7l goes
+// changes nothing; it is kept after the last reprint, and the tests pin that
+// order.
 //
 // A render whose last action is the reprint ends with a NUL, which a
 // terminal ignores, so the live bytes extend no cluster the render printed:
@@ -572,14 +573,6 @@ func lastColumn(scr *vt.Screen, y int) (int, *uv.Cell) {
 		c = &uv.Cell{Content: " ", Width: 1}
 	}
 	return x, c
-}
-
-// content is what the encoder prints for c.
-func content(c *uv.Cell) string {
-	if c.Content == "" {
-		return " "
-	}
-	return c.Content
 }
 
 // blankCell reports a blank cell an erase in its background makes: a space,

@@ -3,8 +3,10 @@ package replay
 import (
 	"image/color"
 	"strconv"
+	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/owenthereal/x/ansi"
 
 	uio "github.com/owenthereal/upterm/io"
 )
@@ -246,25 +248,63 @@ func (e *encoder) linkTo(to uv.Link) error {
 
 // cell writes c at the cursor, in its own pen and link.
 func (e *encoder) cell(c *uv.Cell) error {
+	return e.cellAfter("", c)
+}
+
+// cellAfter writes c as cell does, right after a cell whose text was prev,
+// or "" when anything but that print came before. A terminal segments the
+// text it prints, so two cells the emulator kept apart, because something
+// other than a print came between them, can print back to back as one
+// cluster: a lone regional indicator and another, an emoji and a skin tone,
+// a base and a spacing mark. Where nothing else comes between them and they
+// would, a NUL goes first, which a terminal ignores and which ends the
+// cluster.
+func (e *encoder) cellAfter(prev string, c *uv.Cell) error {
 	return e.whole(func() error {
+		n := len(e.buf)
 		if err := e.penTo(c.Style); err != nil {
 			return err
 		}
 		if err := e.linkTo(c.Link); err != nil {
 			return err
 		}
-		content := c.Content
-		if content == "" {
-			content = " "
+		text := content(c)
+		if len(e.buf) == n && joins(prev, text) {
+			if err := e.put("\x00"); err != nil {
+				return err
+			}
 		}
-		return e.put(content)
+		return e.put(text)
 	})
+}
+
+// joins reports two clusters that printed back to back segment as one, as
+// the fork's parser segments printed text. Printable ASCII never joins the
+// cluster before it.
+func joins(prev, next string) bool {
+	if prev == "" || next[0] < utf8.RuneSelf {
+		return false
+	}
+	var b [64]byte
+	both := append(append(b[:0], prev...), next...)
+	cluster, _ := ansi.FirstGraphemeCluster(both, ansi.GraphemeWidth)
+	return len(cluster) > len(prev)
+}
+
+// content is what the encoder prints for c: a cell holding nothing is a
+// space.
+func content(c *uv.Cell) string {
+	if c.Content == "" {
+		return " "
+	}
+	return c.Content
 }
 
 // row writes line's cells from the cursor on, each in its own pen and link,
 // but for its trailing blanks, which the joiner's screen, cleared before any
 // row is drawn, holds already. A wide character's placeholder is left out:
-// the character itself moves the cursor past it. The row ends at the zero pen
+// the character itself moves the cursor past it. Two cells that would print
+// as one cluster are kept apart (see cellAfter). The row ends at the zero pen
 // and link, so whatever follows starts from them.
 func (e *encoder) row(line uv.Line) error {
 	if e.err != nil {
@@ -279,13 +319,15 @@ func (e *encoder) row(line uv.Line) error {
 		for end > 0 && line[end-1] == uv.EmptyCell {
 			end--
 		}
+		prev := ""
 		for i := range line[:end] {
 			if line[i].Width == 0 {
 				continue
 			}
-			if err := e.cell(&line[i]); err != nil {
+			if err := e.cellAfter(prev, &line[i]); err != nil {
 				return err
 			}
+			prev = content(&line[i])
 		}
 		if err := e.penTo(uv.Style{}); err != nil {
 			return err
