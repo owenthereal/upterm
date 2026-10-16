@@ -1886,16 +1886,57 @@ func TestEveryCauseTheDaemonNamesIsReadAsItsKind(t *testing.T) {
 	}
 }
 
-// A payload this client cannot decode says nothing it can report.
+// sendRawSessionEnd sends the session-end request with payload as it is, and
+// returns the client's reply.
+func sendRawSessionEnd(t *testing.T, s gssh.Session, payload []byte) bool {
+	t.Helper()
+	ok, _, err := serverConnOf(s).SendRequest(upterm.SessionEndRequestType, true, payload)
+	if err != nil {
+		t.Errorf("session-end request: %v", err)
+	}
+	return ok
+}
+
+// A payload this client cannot decode says nothing it can report, and the
+// client says so in its reply.
 func TestAnUndecodableCauseGivesNoCause(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{"shorter than a length", []byte{0xff, 0xff}},
+		{"a cause with its signal missing", ssh.Marshal(&struct{ Cause string }{upterm.CauseStopped})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replies := make(chan bool, 1)
+			door := serveDoor(t, func(s gssh.Session) {
+				replies <- sendRawSessionEnd(t, s, tc.payload)
+				_ = s.Exit(1)
+			})
+			res := runClient(t, door)
+			require.Equal(t, Exited, res.Reason)
+			require.Equal(t, 1, res.Status)
+			require.Equal(t, Cause{}, res.Cause)
+			require.False(t, <-replies, "the client took a payload it could not read")
+		})
+	}
+}
+
+// A later daemon may append fields to the payload. This client reads the ones
+// it knows and takes the cause all the same: were it to refuse the payload,
+// every stop a later daemon reported would read here as a plain status of 1.
+func TestACauseWithFieldsAppendedIsStillRead(t *testing.T) {
+	replies := make(chan bool, 1)
 	door := serveDoor(t, func(s gssh.Session) {
-		_, _, _ = serverConnOf(s).SendRequest(upterm.SessionEndRequestType, true, []byte{0xff, 0xff})
+		replies <- sendRawSessionEnd(t, s, ssh.Marshal(&struct {
+			Cause, Signal, Added string
+		}{upterm.CauseSignaled, "TERM", "a field from a later daemon"}))
 		_ = s.Exit(1)
 	})
 	res := runClient(t, door)
 	require.Equal(t, Exited, res.Reason)
-	require.Equal(t, 1, res.Status)
-	require.Equal(t, Cause{}, res.Cause)
+	require.Equal(t, Cause{Kind: CauseSignaled, Signal: "TERM"}, res.Cause)
+	require.True(t, <-replies, "the client refused a payload it could read")
 }
 
 // The cause explains a status; without a status there is nothing for it to

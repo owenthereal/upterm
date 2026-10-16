@@ -229,7 +229,7 @@ func (e *endReader) handle(req *ssh.Request) {
 		_ = req.Reply(false, nil)
 		return
 	}
-	var end upterm.SessionEnd
+	var end sessionEnd
 	if err := ssh.Unmarshal(req.Payload, &end); err != nil {
 		// Not a payload this client knows, so nothing it can report.
 		_ = req.Reply(false, nil)
@@ -237,10 +237,21 @@ func (e *endReader) handle(req *ssh.Request) {
 	}
 	e.mu.Lock()
 	if e.end == nil {
-		e.end = &end
+		e.end = &upterm.SessionEnd{Cause: end.Cause, Signal: end.Signal}
 	}
 	e.mu.Unlock()
 	_ = req.Reply(true, nil)
+}
+
+// sessionEnd is upterm.SessionEnd as this client reads it: the fields it
+// knows, in the same order, and then whatever a later daemon has appended to
+// them, which it ignores. x/crypto's Unmarshal refuses a payload with anything
+// left over, so without Rest a field added later would cost this client the
+// cause.
+type sessionEnd struct {
+	Cause  string
+	Signal string
+	Rest   []byte `ssh:"rest"`
 }
 
 // drain returns once the loop has handled every request that was queued when
