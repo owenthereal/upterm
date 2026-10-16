@@ -383,10 +383,11 @@ func TestAppendSizedCatchesUpOnAResizeInTheGap(t *testing.T) {
 	}
 }
 
-// captureStopsAtATentativeResize is spec J3's race: ResizeBegin(45x30)
-// without its end, a write of "X", then the capture, which ends at the
-// event's offset, without "X". Then the outcome: the handoff feeds "X", after
-// the event if it committed.
+// captureStopsAtATentativeResize is the race between a join's capture and a
+// resize whose outcome isn't known yet: ResizeBegin(45x30) without its end, a
+// write of "X", then the capture, which ends at the event's offset, without
+// "X". Then the outcome: the handoff feeds "X", after the event if it
+// committed.
 func captureStopsAtATentativeResize(t *testing.T, applied bool) {
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	r := &fakeReplayer{start: parkedStart(entered, gate)}
@@ -416,10 +417,10 @@ func captureStopsAtATentativeResize(t *testing.T, applied bool) {
 	require.Empty(t, fallbacks.all())
 }
 
-// Spec J3's race: ResizeBegin(45x30) without its end, a write of "X", then
-// the capture: Capture.End is the event's offset and "X" isn't in Chunks.
-// Then ResizeEnd(true): the handoff feeds the event and then "X", in that
-// order, and the joiner gets "X" once.
+// ResizeBegin(45x30) without its end, a write of "X", then the capture:
+// Capture.End is the event's offset and "X" isn't in Chunks. Then
+// ResizeEnd(true): the handoff feeds the event and then "X", in that order,
+// and the joiner gets "X" once.
 func TestCaptureStopsAtATentativeResize(t *testing.T) { captureStopsAtATentativeResize(t, true) }
 
 // The same with ResizeEnd(false): "X" is fed with no event.
@@ -955,9 +956,9 @@ func TestAppendSizedFallsBackWhenMarginsAreUncertain(t *testing.T) {
 	require.Equal(t, "\x1b[2;4r"+strings.Repeat("x", 16), string(joiner.bytes()), "today's replay")
 }
 
-// The spec's TestReplayFailsOnIncompleteSizeCoverage, where coverage is
-// decided: a queue overflow before the capture, and a 0x0 event inside the
-// ring, each fall back with ErrReplayCoverage; Start is never called.
+// Coverage is decided at the capture: a queue overflow before it, and a 0x0
+// event inside the ring, each fall back with ErrReplayCoverage; Start is never
+// called.
 func TestAppendSizedFallsBackOnIncompleteCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -991,10 +992,10 @@ func TestAppendSizedFallsBackOnIncompleteCoverage(t *testing.T) {
 	}
 }
 
-// Spec A1: while the fake's Start is gated, 65 ResizeBegin+ResizeEnd pairs
-// with no write between (a queue overflow); then a write and the gate
-// opens: the handoff falls back with ErrReplayCoverage; Feed is never
-// offered the events that survived.
+// While the fake's Start is gated, 65 ResizeBegin+ResizeEnd pairs with no write
+// between (a queue overflow); then a write and the gate opens: the handoff
+// falls back with ErrReplayCoverage; Feed is never offered the events that
+// survived.
 func TestAppendSizedFallsBackWhenCoverageBreaksWhileEmulating(t *testing.T) {
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	r := &fakeReplayer{start: parkedStart(entered, gate)}
@@ -1039,8 +1040,8 @@ func TestAppendSizedFallsBackOnAnUnknownSizeAfterTheCapture(t *testing.T) {
 	require.Equal(t, "AX", string(joiner.bytes()), "today's replay")
 }
 
-// Spec A6: join A's catch-up Feed is gated; join B arrives: B's Start does
-// not begin until A has attached; then it runs.
+// The permit is held through the catch-up: join A's catch-up Feed is gated;
+// join B arrives: B's Start does not begin until A has attached; then it runs.
 func TestAppendSizedHoldsThePermitThroughCatchUp(t *testing.T) {
 	waits := joinWaits(t)
 	fedA, gate := make(chan struct{}), make(chan struct{})
@@ -1092,9 +1093,8 @@ func TestAppendSizedHoldsThePermitThroughCatchUp(t *testing.T) {
 	require.Empty(t, fallbacks.all())
 }
 
-// Spec A9: the fake defers an offered event (its Handoff's lastSeq stays
-// before it); two more catch-ups follow: the fake is offered each Seq
-// exactly once.
+// The fake defers an offered event (its Handoff's lastSeq stays before it);
+// two more catch-ups follow: the fake is offered each Seq exactly once.
 func TestCatchUpNeverOffersAnEventTwice(t *testing.T) {
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
 	fed, proceed := make(chan int), make(chan struct{})
@@ -1341,11 +1341,10 @@ func TestShutdownWakesAParkedJoin(t *testing.T) {
 	})
 }
 
-// PF-9, where it is decided: the capture takes only committed events below
-// the first unresolved one's Seq, whatever their offsets. A resize begun and
-// committed while an earlier one waits for its ioctl lands at the same
-// offset, after it, and is offered only once the earlier one's outcome is
-// known, after it if it committed.
+// The capture takes only committed events below the first unresolved one's Seq,
+// whatever their offsets. A resize begun and committed while an earlier one
+// waits for its ioctl lands at the same offset, after it, and is offered only
+// once the earlier one's outcome is known, after it if it committed.
 func TestCaptureTakesNoEventPastAnUnresolvedOne(t *testing.T) {
 	for _, applied := range []bool{true, false} {
 		t.Run(fmt.Sprintf("applied=%t", applied), func(t *testing.T) {
@@ -1403,14 +1402,12 @@ func streamBytes(from, to uint64) []byte {
 	return out
 }
 
-// Review focus 2: a goroutine writes 4 KiB chunks continuously; the fake's
-// Feed takes 5 ms; the join either attaches with every byte once
-// (checked by sequence numbers in the chunks) or falls back at the
-// deadline, within deadline + 50 ms.
+// A goroutine writes 4 KiB chunks continuously; the fake's Feed takes 5 ms;
+// the join either attaches with every byte once (checked by sequence numbers
+// in the chunks) or falls back at the deadline, within deadline + 50 ms.
 //
 // The bound is on the decision, the sink's first byte: the release's own
-// hold, writing up to the whole ring into the sink, is outside the deadline
-// (spec §6.2).
+// hold, writing up to the whole ring into the sink, is outside the deadline.
 func TestAppendSizedUnderStreamingOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1528,7 +1525,7 @@ func (s *stormSink) Write(p []byte) (int, error) {
 	return s.recordingWriter.Write(p)
 }
 
-// Review focus 5: 20 joins at once, a fake that takes 200 ms with a 1 s
+// A rejoin storm: 20 joins at once, a fake that takes 200 ms with a 1 s
 // deadline: they run one at a time; those past their deadline fall back;
 // an attached recorder sees every write within 50 ms; each joiner is
 // attached exactly once.
@@ -1637,12 +1634,12 @@ func TestAppendSizedRejoinStorm(t *testing.T) {
 	t.Logf("%d joins attached by render, %d fell back; %d lines; slowest write %v", rendered, len(reasons), out.lines, out.slowest)
 }
 
-// Spec A23, through the real fallback and the real Restore: candidates
-// {none: 8, e1: 4, e2: 12} by eviction, CSI 2;6r evicted, ResizeEnd(e1,
-// true) with e2 still tentative ("none" gone; 2;4 and 2;6 remain). A join
-// falls back (ErrReplayMarginsUncertain); the joiner's first bytes are
-// Snapshot with CSI 2;6r (the newest surviving candidate, e2's), then the
-// ring. Then Shutdown: the guest's reset contains ESC[r.
+// Through the real fallback and the real Restore: candidates {none: 8, e1: 4,
+// e2: 12} by eviction, CSI 2;6r evicted, ResizeEnd(e1, true) with e2 still
+// tentative ("none" gone; 2;4 and 2;6 remain). A join falls back
+// (ErrReplayMarginsUncertain); the joiner's first bytes are Snapshot with CSI
+// 2;6r (the newest surviving candidate, e2's), then the ring. Then Shutdown:
+// the guest's reset contains ESC[r.
 func TestRawFallbackAfterAPartialCommitment(t *testing.T) {
 	r := &fakeReplayer{}
 	w, fallbacks := joinable(16, r)

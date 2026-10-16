@@ -226,7 +226,7 @@ func NewMultiWriter(replayBytes int, writers ...io.Writer) *MultiWriter {
 	//
 	// It hears the pty's resizes there too, each where it fell among the
 	// bytes, as the terminal did: a resize resets the margins, and a DECSTBM
-	// is decided at the height of its moment (spec E3, A21).
+	// is decided at the height of its moment.
 	t.buffer.onEvict = func(offset uint64, p []byte) { t.sizes.hear(t.modes, offset, p) }
 
 	return t
