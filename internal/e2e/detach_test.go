@@ -126,9 +126,10 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 // that started it. Both the host's own terminal and an `upterm attach` see
 // the stop: the daemon tells each attached terminal the session was stopped
 // before it gives the status, 1 for a stopped session whatever its command
-// returned while being torn down, and each says so in the same line. Both
-// restore the terminal modes they found on the way out: the host's own through
-// localclient.go, `upterm attach` through withRawTerminal in
+// returned while being torn down -- here a shell that handles the hangup and
+// exits 0 -- and each says so in the same line. Both restore the terminal
+// modes they found on the way out: the host's own through localclient.go,
+// `upterm attach` through withRawTerminal in
 // cmd/upterm/command/terminal.go. Every other stop test in this file stops
 // a session with nothing attached; this is the one with two terminals on
 // it when the stop lands.
@@ -176,9 +177,14 @@ func TestSessionStopReleasesAttachedTerminals(t *testing.T) {
 	require.NoError(t, h.waitForText(term, uptermPrompt, 30*time.Second))
 
 	// Liveness before the stop, so what follows means something: two
-	// terminals, one running session.
+	// terminals, one running session. The same line has the hosted shell
+	// handle the hangup the stop's teardown starts with by exiting 0, as a
+	// command that handles it would, and the marker is printed only once the
+	// trap is set. A shell the hangup killed would give 1 whatever the
+	// session made of it; this one gives 0, so the 1 below can only be the
+	// stop's.
 	live := fmt.Sprintf("LIVE_%d", time.Now().UnixNano())
-	require.NoError(t, h.host.SendLine(h.ctx, fmt.Sprintf(`echo "LIV""%s"`, strings.TrimPrefix(live, "LIV"))))
+	require.NoError(t, h.host.SendLine(h.ctx, fmt.Sprintf(`trap 'exit 0' HUP; echo "LIV""%s"`, strings.TrimPrefix(live, "LIV"))))
 	require.NoError(t, h.waitForText(h.host, live, 10*time.Second))
 	require.NoError(t, h.waitForText(term, live, 10*time.Second))
 
