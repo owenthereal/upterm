@@ -2,6 +2,7 @@ package replay
 
 import (
 	"image/color"
+	"strconv"
 
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -9,9 +10,11 @@ import (
 )
 
 // encoder writes a reconstruction into a buffer with a hard cap, and models
-// the joiner's terminal as it goes: the pen and link it has emitted. Every
-// SGR and OSC 8 it writes goes from the model, never from a default, so it is
-// right whatever the joiner's terminal held before.
+// the joiner's terminal as it goes: the pen, link and charsets it has
+// emitted, and what each screen's DECSC slot holds of them. Every SGR, OSC 8
+// and SCS it writes goes from the model, never from a default, so it is
+// right whatever the joiner's terminal held before, and an ESC 8 takes the
+// model back to what the matching ESC 7 recorded.
 //
 // Each method fails before an append would cross the cap, leaving the buffer
 // and the model as they were, so nothing past the cap is ever allocated;
@@ -23,14 +26,44 @@ type encoder struct {
 	stop func() bool // ctx or the deadline; nil never stops
 	pen  uv.Style
 	link uv.Link
+	cs   charsets
+	slot [2]savedModel // by screen: mainScreen, altScreen
 	err  error
 }
 
-// reset empties e for a new reconstruction of at most limit bytes, from the
-// zero pen and link, keeping its buffer's storage.
+// The screens, as the encoder's slots are indexed.
+const (
+	mainScreen = 0
+	altScreen  = 1
+)
+
+// charsets is what the joiner's terminal maps a printed byte through: the
+// character set designated to each of G0-G3, by the final byte of the SCS
+// that designated it, and which of them GL invokes. GR invokes none of them
+// for a print, whose byte is ASCII, so only its default is ever rendered.
+type charsets struct {
+	g  [4]byte
+	gl int
+}
+
+// ascii is a terminal's charsets as it starts: ASCII in G0-G3, G0 in GL.
+var ascii = charsets{g: [4]byte{'B', 'B', 'B', 'B'}}
+
+// savedModel is what the model says a DECSC slot holds.
+type savedModel struct {
+	pen  uv.Style
+	link uv.Link
+	cs   charsets
+}
+
+// reset empties e for a new reconstruction of at most limit bytes, from a
+// terminal at its defaults: the zero pen and link, ASCII charsets, and slots
+// no DECSC has filled, which DECRC restores the same defaults from. It keeps
+// its buffer's storage.
 func (e *encoder) reset(limit int) {
-	e.buf, e.max = e.buf[:0], limit
-	e.pen, e.link, e.err = uv.Style{}, uv.Link{}, nil
+	e.buf, e.max = e.buf[:0], max(limit, 0)
+	e.pen, e.link, e.cs, e.err = uv.Style{}, uv.Link{}, ascii, nil
+	e.slot = [2]savedModel{{cs: ascii}, {cs: ascii}}
 }
 
 // room makes room for n more bytes within the cap, or fails. It grows the
@@ -74,6 +107,78 @@ func (e *encoder) put(s ...string) error {
 	for _, p := range s {
 		e.buf = append(e.buf, p...)
 	}
+	return nil
+}
+
+// cup moves the cursor to a 1-based row and column.
+func (e *encoder) cup(row, col int) error {
+	var b [24]byte
+	s := strconv.AppendInt(append(b[:0], "\x1b["...), int64(row), 10)
+	s = strconv.AppendInt(append(s, ';'), int64(col), 10)
+	return e.bytes(append(s, 'H'))
+}
+
+// cha moves the cursor to a 1-based column of its row.
+func (e *encoder) cha(col int) error {
+	var b [16]byte
+	s := strconv.AppendInt(append(b[:0], "\x1b["...), int64(col), 10)
+	return e.bytes(append(s, 'G'))
+}
+
+// shifts invoke G0-G3 into GL: SI, SO, LS2 and LS3.
+var shifts = [4]string{"\x0f", "\x0e", "\x1bn", "\x1bo"}
+
+// charsetsTo writes the SCS for each designation that differs from the
+// model's, then the shift that invokes to's GL if that differs, and nothing
+// if the two are the same.
+func (e *encoder) charsetsTo(to charsets) error {
+	if e.err != nil {
+		return e.err
+	}
+	if e.cs == to {
+		return nil
+	}
+	var b [16]byte
+	s := b[:0]
+	for i, d := range to.g {
+		if e.cs.g[i] != d {
+			s = append(s, 0x1b, "()*+"[i], d)
+		}
+	}
+	if e.cs.gl != to.gl {
+		s = append(s, shifts[to.gl]...)
+	}
+	if err := e.bytes(s); err != nil {
+		return err
+	}
+	e.cs = to
+	return nil
+}
+
+// save writes ESC 7, recording the modelled pen, link and charsets as the
+// slot of screen, the one showing.
+func (e *encoder) save(screen int) error {
+	return e.saveBy("\x1b7", screen)
+}
+
+// saveBy writes seq, a sequence that saves the cursor in screen's slot as
+// DECSC does, and records the model there.
+func (e *encoder) saveBy(seq string, screen int) error {
+	if err := e.put(seq); err != nil {
+		return err
+	}
+	e.slot[screen] = savedModel{e.pen, e.link, e.cs}
+	return nil
+}
+
+// restore writes ESC 8, setting the model back from the slot of screen, the
+// one showing.
+func (e *encoder) restore(screen int) error {
+	if err := e.put("\x1b8"); err != nil {
+		return err
+	}
+	s := e.slot[screen]
+	e.pen, e.link, e.cs = s.pen, s.link, s.cs
 	return nil
 }
 

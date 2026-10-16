@@ -32,17 +32,15 @@ const piece = 4 << 10
 // emulation applies. Nil outside tests.
 var testHookResize func(termsize.Size)
 
-// errNoHandoff is a ring that starts inside a sequence and doesn't end it:
-// no point in it is one to hand off at.
-var errNoHandoff = errors.New("replay: the ring starts inside a sequence it doesn't end")
+// errNoHandoff is a ring that starts inside a sequence with no handoff
+// point after it: the sequence doesn't end, or it ends by CAN or SUB, or as a
+// CSI the parser ignores, which close no cluster, with nothing after it that
+// does.
+var errNoHandoff = errors.New("replay: the ring starts inside a sequence with no handoff point after it")
 
 // errRingStartsInsideALongSequence is a ring whose first byte is inside a
 // sequence longer than the tracker keeps.
 var errRingStartsInsideALongSequence = errors.New("replay: the ring starts inside a sequence too long to prime")
-
-// errNoRender is what Render returns once the emulation is consistent, until
-// the render is built.
-var errNoRender = errors.New("replay: the render isn't built")
 
 // New returns the replayer the host installs in its fan-out. It logs
 // nothing: io tells the fan-out's fallback callback why a join fell back.
@@ -66,6 +64,7 @@ type emulation struct {
 	stop  func() bool      // ctx or the deadline, for the meter and the encoder
 	hist  history
 	title string
+	enc   encoder
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -386,16 +385,22 @@ func (e *emulation) Handoff() (offset, lastSeq uint64) {
 }
 
 // Render is the reconstruction as of Handoff, once the tracker clone and the
-// emulator agree on what both track.
+// emulator agree on what both track. A failure spends the emulation, as io
+// falls back on it.
 func (e *emulation) Render() ([]byte, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
-	if err := e.consistent(); err != nil {
+	err := e.consistent()
+	var out []byte
+	if err == nil {
+		out, err = e.render()
+	}
+	if err != nil {
 		e.err = err
 		return nil, err
 	}
-	return nil, errNoRender
+	return out, nil
 }
 
 // consistent checks that the tracker clone and the emulator agree, at the

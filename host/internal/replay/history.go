@@ -72,3 +72,34 @@ func (h *history) all() iter.Seq[[]byte] {
 		}
 	}
 }
+
+// newest returns the first of the newest lines that fit in room, each with
+// the CRLF the render follows it with, and the bytes they take, CRLFs
+// included. Lines are kept whole, so the history a render carries is cut
+// at a line.
+func (h *history) newest(room int) (first, size int) {
+	first = len(h.lens)
+	for first > 0 {
+		n := int(h.lens[first-1]) + len(crlf)
+		if size+n > room {
+			break
+		}
+		size += n
+		first--
+	}
+	return first, size
+}
+
+// appendFrom appends the lines from first on, oldest first, each followed by
+// a CRLF.
+func (h *history) appendFrom(out []byte, first int) []byte {
+	off := 0
+	for i, n := range h.lens {
+		end := off + int(n)
+		if i >= first {
+			out = append(append(out, h.data[off:end]...), crlf...)
+		}
+		off = end
+	}
+	return out
+}

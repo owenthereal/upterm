@@ -218,3 +218,81 @@ func TestEncodeLine(t *testing.T) {
 	_, err = encodeLine(line, len(got)-1)
 	require.ErrorIs(t, err, ErrOverBudget)
 }
+
+// cup moves to a 1-based row and column.
+func TestEncoderCupMovesTheCursor(t *testing.T) {
+	enc := encoder{max: 1 << 10}
+	require.NoError(t, enc.cup(3, 5))
+	require.Equal(t, "\x1b[3;5H", string(enc.buf))
+}
+
+// charsetsTo takes an emulator whose charsets are the model to the charsets
+// asked for, with one SCS per designation that differs and one shift for GL.
+func TestEncoderCharsetsToReachesTheCharsets(t *testing.T) {
+	sets := []charsets{
+		ascii,
+		{g: [4]byte{'0', 'B', 'B', 'B'}},
+		{g: [4]byte{'B', '0', 'B', 'B'}, gl: 1},
+		{g: [4]byte{'A', 'B', '0', 'B'}, gl: 2},
+		{g: [4]byte{'B', 'B', 'B', '0'}, gl: 3},
+	}
+	// One emulator for every pair: SCS and the shifts set all there is.
+	term := vt.NewEmulator(10, 1)
+	for _, from := range sets {
+		for _, to := range sets {
+			var reset encoder
+			reset.reset(1 << 10)
+			require.NoError(t, reset.charsetsTo(from))
+			_, _ = term.WriteString("\x1b(B\x1b)B\x1b*B\x1b+B\x0f")
+			_, _ = term.Write(reset.buf)
+			enc := encoder{max: 1 << 10, cs: from}
+			require.NoError(t, enc.charsetsTo(to))
+			_, _ = term.Write(enc.buf)
+
+			d, gl, _ := term.Charsets()
+			require.Equal(t, to, charsets{g: d, gl: gl}, "%+v to %+v: %q", from, to, enc.buf)
+			require.Equal(t, to, enc.cs)
+			if from == to {
+				require.Empty(t, enc.buf)
+			}
+		}
+	}
+}
+
+// save records the modelled pen, link and charsets as a screen's slot, and
+// restore takes the model back from it, as ESC 7 and ESC 8 take the
+// terminal's. A slot never saved holds the defaults.
+func TestEncoderRestoreTakesTheModelFromTheSlot(t *testing.T) {
+	red, blue := penOf("\x1b[31m"), penOf("\x1b[34m")
+	link := uv.Link{URL: "https://x.example"}
+	lines := charsets{g: [4]byte{'0', 'B', 'B', 'B'}, gl: 0}
+
+	var enc encoder
+	enc.reset(1 << 10)
+	require.NoError(t, enc.penTo(red))
+	require.NoError(t, enc.linkTo(link))
+	require.NoError(t, enc.charsetsTo(lines))
+	require.NoError(t, enc.save(mainScreen))
+	require.NoError(t, enc.penTo(blue))
+	require.NoError(t, enc.linkTo(uv.Link{}))
+	require.NoError(t, enc.charsetsTo(ascii))
+	require.NoError(t, enc.restore(mainScreen))
+
+	term := vt.NewEmulator(10, 1)
+	_, _ = term.Write(enc.buf)
+	cur := term.ActiveScreen().Cursor()
+	require.True(t, cur.Pen == red && enc.pen == red)
+	require.Equal(t, link, cur.Link)
+	require.Equal(t, link, enc.link)
+	d, gl, _ := term.Charsets()
+	require.Equal(t, lines, charsets{g: d, gl: gl})
+	require.Equal(t, lines, enc.cs)
+
+	enc.reset(1 << 10)
+	require.NoError(t, enc.penTo(blue))
+	require.NoError(t, enc.charsetsTo(lines))
+	require.NoError(t, enc.restore(altScreen))
+	require.True(t, enc.pen == uv.Style{})
+	require.Equal(t, uv.Link{}, enc.link)
+	require.Equal(t, ascii, enc.cs)
+}
