@@ -70,8 +70,8 @@ func countResizes(t *testing.T) *int {
 	return n
 }
 
-// The handoff is never inside a rune (spec J6), nor right after a print,
-// which a later mark could extend (spec A13).
+// The handoff is never inside a rune, nor right after a print, which a later
+// mark could extend.
 func TestReplayHandsOffBeforeASplitRune(t *testing.T) {
 	const head = "abc\r\n"
 	e := start(t, captureOf(head+"\xe2\x9c", event(1, 0, 80, 24)))
@@ -86,7 +86,7 @@ func TestReplayHandsOffBeforeASplitRune(t *testing.T) {
 }
 
 // A C0 control inside an unfinished CSI is the joiner's to execute, from the
-// raw gap: the emulator never consumed it (spec E7).
+// raw gap: the emulator never consumed it.
 func TestReplayDefersTheUnfinishedTail(t *testing.T) {
 	const head = "x\r\n"
 	e := start(t, captureOf(head+"\x1b[1;\n", event(1, 0, 80, 24)))
@@ -98,8 +98,8 @@ func TestReplayDefersTheUnfinishedTail(t *testing.T) {
 	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e)))
 }
 
-// Spec A13: a cluster that can still be extended waits in the tail, and the
-// handoff moves past it once anything but printing follows.
+// A cluster that can still be extended waits in the tail, and the handoff
+// moves past it once anything but printing follows.
 func TestReplayDefersAnExtendibleCluster(t *testing.T) {
 	const head = "ab\r\n"
 	e := start(t, captureOf(head+"e", event(1, 0, 80, 24)))
@@ -122,9 +122,9 @@ func TestReplayDefersWithinAZWJSequence(t *testing.T) {
 	require.Equal(t, "\U0001F468\u200d\U0001F469", e.term.CellAt(0, 1).Content)
 }
 
-// A resize closes the cluster it follows (F11), so the joiner's own resize
-// at the capture's end (spec D8) is a handoff point after a prompt: no wait
-// for more output.
+// A resize closes the cluster it follows, so the resize the door makes for a
+// joiner before its capture, the ring's last event, is a handoff point after a
+// prompt: no wait for more output.
 func TestReplayClosesAClusterAtAResize(t *testing.T) {
 	const stream = "x\r\n$ "
 	e := start(t, captureOf(stream, event(1, 0, 80, 24), event(2, len(stream), 60, 24)))
@@ -154,8 +154,8 @@ func TestReplayAppliesNoEventInsideTheTail(t *testing.T) {
 	require.Empty(t, sameState(ref, e.term, *refHist, historyOf(e)))
 }
 
-// Spec E7, revision 3: inside a batch, an event can fall inside a sequence,
-// as it did in the stream. Ground state is needed only at the batch's end.
+// Inside a batch, an event can fall inside a sequence, as it did in the
+// stream. Ground state is needed only at the batch's end.
 func TestReplayResizesInsideASequence(t *testing.T) {
 	const before = "\x1b[3"
 	after := "1m" + strings.Repeat("X", 60) + "\r\n"
@@ -192,7 +192,7 @@ func TestReplayPublishesNoPartialBatch(t *testing.T) {
 		require.ErrorIs(t, e.Feed([][]byte{[]byte("\r\n")}, nil), uio.ErrReplayDeadline)
 	})
 
-	// PF-11: Resize returns no error, so a stop inside the batch's last
+	// Resize returns no error, so a stop inside the batch's last
 	// resize is only seen by the next Write.
 	t.Run("inside the resize at its end", func(t *testing.T) {
 		e := start(t, captureOf("x\r\n", event(1, 0, 80, 24)))
@@ -209,7 +209,7 @@ func TestReplayPublishesNoPartialBatch(t *testing.T) {
 	})
 }
 
-// Spec E2: 80 → 45 → 80 with no output between truncates the rows at 45,
+// 80 → 45 → 80 with no output between truncates the rows at 45,
 // which 80 alone wouldn't.
 func TestReplayKeepsEveryResizeEvent(t *testing.T) {
 	stream := strings.Repeat("A", 80) + "\r\n"
@@ -219,7 +219,7 @@ func TestReplayKeepsEveryResizeEvent(t *testing.T) {
 	require.Equal(t, strings.Repeat("A", 45), e.term.MainScreen().Line(0).String())
 }
 
-// Spec D5: a width shrink truncates the rows on screen, and moves nothing
+// A width shrink truncates the rows on screen, and moves nothing
 // into history.
 func TestReplayTruncatesAtAWidthShrink(t *testing.T) {
 	stream := strings.Repeat("A", 80) + "\r\nshort\r\n"
@@ -230,7 +230,7 @@ func TestReplayTruncatesAtAWidthShrink(t *testing.T) {
 	require.Empty(t, historyOf(e))
 }
 
-// P2: a height shrink keeps the cursor's row, moving the rows above it that
+// A height shrink keeps the cursor's row, moving the rows above it that
 // no longer fit into history.
 func TestReplayKeepsTheCursorLineAtAHeightShrink(t *testing.T) {
 	var lines []string
@@ -252,7 +252,7 @@ func TestReplayKeepsTheCursorLineAtAHeightShrink(t *testing.T) {
 	require.Equal(t, want, historyOf(e))
 }
 
-// P6 and spec E8: Claude Code's resize repaint clears the screen and the
+// Claude Code's resize repaint clears the screen and the
 // history, then draws its transcript again; the history holds it once.
 func TestReplayED3ClearsHistory(t *testing.T) {
 	var transcript strings.Builder
@@ -269,7 +269,7 @@ func TestReplayED3ClearsHistory(t *testing.T) {
 	require.Equal(t, want, historyOf(e))
 }
 
-// Spec E4: a size over the cap fails the replay, wherever it is in the
+// A size over the cap fails the replay, wherever it is in the
 // capture.
 func TestReplayCapsTheSize(t *testing.T) {
 	over := event(2, 3, 600, 300)
@@ -288,7 +288,7 @@ func TestReplayCapsTheSize(t *testing.T) {
 	require.Equal(t, 512, e.term.Width())
 }
 
-// Spec A1: Feed validates every size it is offered before it resizes or
+// Feed validates every size it is offered before it resizes or
 // allocates anything, and either failure spends the emulation.
 func TestFeedValidatesEveryNewSizeFirst(t *testing.T) {
 	for _, tc := range []struct {
@@ -319,8 +319,8 @@ func TestFeedValidatesEveryNewSizeFirst(t *testing.T) {
 	}
 }
 
-// Spec E10: the tracker and the emulator must agree on the screen showing
-// and on every DEC mode both track, both ways (PF-10).
+// The tracker and the emulator must agree on the screen showing and on
+// every DEC mode both track, both ways.
 func TestReplayFailsWhenTheTrackerDisagrees(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -349,7 +349,7 @@ func TestReplayFailsWhenTheTrackerDisagrees(t *testing.T) {
 	})
 }
 
-// Spec E7: at each handoff point the tracker clone is outside every sequence
+// At each handoff point the tracker clone is outside every sequence
 // too, or the two parsers disagree on where one ends.
 func TestReplayFailsWhenTheTrackerIsInsideASequence(t *testing.T) {
 	e := start(t, captureOf("x\r\n", event(1, 0, 80, 24)))
@@ -363,7 +363,7 @@ func TestReplayFailsWhenTheTrackerIsInsideASequence(t *testing.T) {
 	require.ErrorIs(t, err, ErrTrackerDisagrees)
 }
 
-// Spec A13: a batch that ended where the emulator still carries a cluster is
+// A batch that ended where the emulator still carries a cluster is
 // a broken invariant, never a handoff point.
 func TestReplayFailsAtAHandoffThatCarriesACluster(t *testing.T) {
 	e := start(t, captureOf("x\r\ne", event(1, 0, 80, 24)))
@@ -375,7 +375,8 @@ func TestReplayFailsAtAHandoffThatCarriesACluster(t *testing.T) {
 
 // An event of the size already in effect is a no-op the emulation skips,
 // in the emulator and the tracker both, since a resize would reset the
-// margins and the tab stops. It is still passed (PF-7).
+// margins and the tab stops. It is still passed, so the handoff reports it:
+// otherwise io would wait for the emulation to reach it.
 func TestReplaySkipsASameSizeEvent(t *testing.T) {
 	const head = "\x1b[2;5r\x1b[3g"
 	stream := head + "x\r\n"
@@ -389,7 +390,7 @@ func TestReplaySkipsASameSizeEvent(t *testing.T) {
 	require.Equal(t, []byte("\x1b[2;5r"), e.modes.Snapshot())
 }
 
-// Spec E6: the emulator starts in the state the tracker clone describes as
+// The emulator starts in the state the tracker clone describes as
 // of the ring's first byte, a sequence the ring starts inside included.
 func TestReplayPrimesTheEmulatorWithTheTrackersSnapshot(t *testing.T) {
 	modes := uio.NewModeTracker()
@@ -416,7 +417,7 @@ func TestReplayPrimesTheEmulatorWithTheTrackersSnapshot(t *testing.T) {
 	require.NoError(t, e.consistent())
 }
 
-// Spec E5: no scrollback on either screen, the history kept through the
+// No scrollback on either screen, the history kept through the
 // scroll-off function instead; replies discarded, so a query in the stream
 // doesn't block the emulator on a pipe nobody reads; the title kept.
 func TestReplaySetsUpTheEmulator(t *testing.T) {
@@ -447,7 +448,7 @@ func TestReplaySetsUpTheEmulator(t *testing.T) {
 	require.Len(t, historyOf(e), 7)
 }
 
-// Spec E8: the history keeps the newest lines that fit its budget, each
+// The history keeps the newest lines that fit its budget, each
 // costing its bytes, the CRLF the render follows it with and the length the
 // history keeps of it; a line over the whole budget is dropped, and the clear
 // function empties it.
@@ -478,7 +479,7 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("eee")}, collect(&h))
 }
 
-// Spec §6.3: the history takes at most its budget, its own bookkeeping
+// The history takes at most its budget, its own bookkeeping
 // included, even of lines that cost the render only their CRLF.
 func TestHistoryBookkeepingStaysWithinItsBudget(t *testing.T) {
 	h := history{max: budget}
@@ -582,7 +583,7 @@ func TestFeedRefusesAnEventItCantPlace(t *testing.T) {
 	}
 }
 
-// Spec §6.2: the lookahead rescans the tail once for each event that could
+// The lookahead rescans the tail once for each event that could
 // end the batch, so events inside a span that ends without a closure (a
 // string CAN aborts, then text) cost a rescan each: about 1,024 of 256 KiB
 // at worst. The stop function is asked before each, and once it says stop,

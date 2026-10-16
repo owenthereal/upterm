@@ -9,13 +9,14 @@ var (
 	ErrNotContained     = errors.New("replay: the joiner's terminal doesn't contain the render size")
 	ErrTrackerDisagrees = errors.New("replay: the tracker and the emulator disagree")
 	ErrOverBudget       = errors.New("replay: the reconstruction exceeds its budget")
-	// ErrHandoffInvariant means a published handoff point broke A13: the
-	// emulator still carries a cluster there. It is a bug, never an
-	// expected outcome.
+	// ErrHandoffInvariant means the emulator still carries a cluster at a
+	// published handoff point, which a byte of the gap could extend. It is a
+	// bug, never an expected outcome.
 	ErrHandoffInvariant = errors.New("replay: the emulator isn't at a handoff point")
 )
 
-// IneligibleError names state R13 doesn't restore.
+// IneligibleError names state, not at its default, that the render doesn't
+// restore.
 type IneligibleError struct{ State string }
 
 func (e *IneligibleError) Error() string {

@@ -17,15 +17,15 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// MaxCells caps the size of any screen a replay emulates (spec E4): 512x256
-// is about 15 MB a screen, and a guest can ask for a 65535-column window.
+// MaxCells caps the size of any screen a replay emulates: 512x256 is about
+// 15 MB a screen, and a guest can ask for a 65535-column window.
 const MaxCells = 1 << 17
 
 // budget is the most a render, and the history it carries, may take:
 // io's DefaultReplayBytes. A var for tests.
 var budget = uio.DefaultReplayBytes
 
-// piece is the most of the stream one Write hands the emulator (spec E7).
+// piece is the most of the stream one Write hands the emulator.
 const piece = 4 << 10
 
 // testHookResize, when a test sets it, is called before each resize the
@@ -54,14 +54,14 @@ type replayer struct{}
 // byte to a handoff point that moves on as the stream is fed.
 //
 // It consumes the stream in batches, each ending where the emulator's parser
-// is outside every sequence and carries no cluster a later byte could extend
-// (spec E7, A13): there, and only there, the render and the raw gap after it
-// add up to the stream. What follows the last such point, its bytes and the
+// is outside every sequence and carries no cluster a later byte could
+// extend: there, and only there, the render and the raw gap after it add up
+// to the stream. What follows the last such point, its bytes and the
 // events among them, waits unconsumed in the tail.
 type emulation struct {
 	term  *vt.Emulator
 	modes *uio.ModeTracker // the tracker clone, fed exactly what term is
-	join  termsize.Size    // the joiner's terminal, which must contain the render's (spec E1)
+	join  termsize.Size    // the joiner's terminal, which must contain the render's
 	size  termsize.Size    // term's, the size of the last event passed
 	stop  func() bool      // ctx or the deadline, for the meter and the encoder
 	hist  history
@@ -85,7 +85,7 @@ type emulation struct {
 
 // Start emulates c for a joiner whose terminal is size: from the state the
 // tracker clone holds as of the ring's first byte, through the ring, as far
-// as a handoff point (rules 1 and 2).
+// as a handoff point.
 func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
 	if len(c.Sizes) == 0 {
 		return nil, uio.ErrReplayCoverage
@@ -117,7 +117,7 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 	e.stop = func() bool { return ctx.Err() != nil || !time.Now().Before(deadline) }
 	e.setUp()
 
-	// Priming (spec E6): the tracker clone is already in the state it
+	// Priming: the tracker clone is already in the state it
 	// describes, a sequence the ring starts inside included, so only the
 	// emulator is told.
 	if _, err := e.term.Write(c.Modes.Snapshot()); err != nil {
@@ -142,7 +142,7 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 	return e, nil
 }
 
-// setUp makes the emulator a replay's (spec E5): no scrollback on either
+// setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
 // to queries discarded, the title kept, and the meter stopped by ctx or the
 // deadline. Each callback runs inside the emulator's Write and touches only
@@ -151,7 +151,7 @@ func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
 	// The alternate screen has a scrollback of its own, which the main
-	// screen's size leaves at 10,000 lines (spec A25).
+	// screen's size leaves at 10,000 lines: about 600 MiB at 512 columns.
 	t.AltScreen().SetScrollback(nil)
 	t.SetScrollOffFunc(e.hist.push)
 	t.SetScrollbackClearFunc(e.hist.clear)
@@ -161,8 +161,8 @@ func (e *emulation) setUp() {
 }
 
 // Feed offers the emulation more of the stream and runs on to the next
-// handoff point it can reach (rule 4). Every event offered is validated
-// before anything else, so a size over the cap allocates nothing (spec A1).
+// handoff point it can reach. Every event offered is validated before
+// anything else, so a size over the cap allocates nothing.
 func (e *emulation) Feed(chunks [][]byte, sizes []uio.SizeEvent) error {
 	if e.err != nil {
 		return e.err
@@ -235,7 +235,7 @@ func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 
 // batchEnd finds where the next batch ends: the furthest offset x at which
 // the parser, continuing from where h left it, is outside every sequence and
-// no cluster is carried (rule 2, spec A13). That is the larger of two: the
+// no cluster is carried. That is the larger of two: the
 // end of the last action in the tail that isn't a print; and the latest
 // event that changes the size and at which the parser is outside every
 // sequence, since that resize, applied at the batch's end, closes any
@@ -250,8 +250,7 @@ func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 // a scan of its own, of the tail up to it, and there can be one per event:
 // about 1,024 scans of 256 KiB, for events inside a span that ends with no
 // closure (a string CAN aborts, then text). So the stop function is asked
-// before each, which bounds the overshoot past the deadline to one scan
-// (spec §6.2).
+// before each, which bounds the overshoot past the deadline to one scan.
 func (e *emulation) batchEnd() (x uint64, n int, err error) {
 	x = e.h + uint64(e.term.HandoffPrefix(e.tail))
 	ground := -1 // the longest prefix of the tail at ground, once needed
@@ -301,7 +300,7 @@ func (e *emulation) batchEnd() (x uint64, n int, err error) {
 // parsers are where a handoff point needs them. Bytes and events go in stream
 // order: up to an event's offset, then the event, then on. A batch may write
 // up to an event inside a sequence, and resize there, as the stream's own
-// terminal did (spec E7, revision 3); only its end must be outside one.
+// terminal did; only its end must be outside one.
 func (e *emulation) consume(x uint64, n int) error {
 	pos, size := 0, e.size
 	for _, ev := range e.events[:n] {
@@ -321,7 +320,7 @@ func (e *emulation) consume(x uint64, n int) error {
 		return err
 	}
 	// A stop inside the last resize leaves no error behind but a spent
-	// emulator, which only a Write reports (PF-11).
+	// emulator, which only a Write reports.
 	if _, err := e.term.Write(nil); err != nil {
 		return stopped(err)
 	}
@@ -373,7 +372,7 @@ func (e *emulation) resize(size termsize.Size) {
 }
 
 // stopped says why a Write failed: the meter's stop is the deadline or ctx,
-// which io reports as the deadline (rule 3).
+// which io reports as the deadline.
 func stopped(err error) error {
 	if errors.Is(err, vt.ErrStopped) {
 		return uio.ErrReplayDeadline
@@ -387,7 +386,7 @@ func (e *emulation) Handoff() (offset, lastSeq uint64) {
 }
 
 // Render is the reconstruction as of Handoff, once the tracker clone and the
-// emulator agree on what both track (rule 6).
+// emulator agree on what both track.
 func (e *emulation) Render() ([]byte, error) {
 	if e.err != nil {
 		return nil, e.err
@@ -401,7 +400,7 @@ func (e *emulation) Render() ([]byte, error) {
 
 // consistent checks that the tracker clone and the emulator agree, at the
 // handoff point, on the screen showing and on each DEC mode the tracker
-// tracks, either way (spec E10, PF-10). They are two parsers of one stream,
+// tracks, either way. They are two parsers of one stream,
 // and a render built from both would otherwise contradict itself.
 func (e *emulation) consistent() error {
 	p := e.modes.ReplayParts()

@@ -185,7 +185,7 @@ func TestEncoderLeavesItsModelOnFailure(t *testing.T) {
 	require.True(t, enc.pen == uv.Style{})
 }
 
-// Spec E9: the encoder checks its stop function once per row.
+// The encoder checks its stop function once per row.
 func TestEncoderChecksItsStopOncePerRow(t *testing.T) {
 	calls := 0
 	enc := encoder{max: 1 << 10, stop: func() bool {

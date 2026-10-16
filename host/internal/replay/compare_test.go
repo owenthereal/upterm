@@ -46,7 +46,7 @@ func historyOf(e *emulation) [][]byte {
 // there is none: their sizes, the screen showing, the cells and styles on
 // both screens (the hidden one included), the active screen's current
 // cursor (position, pen, link, pending wrap; the other screen's is never seen
-// again, spec A15), both screens' saved slots, compared by what DECRC would
+// again), both screens' saved slots, compared by what DECRC would
 // restore, the modes, the charsets and a pending single shift, the one
 // scroll region, the tab stops, REP's last character, a carried cluster, and
 // the history lines each side collected.
@@ -136,8 +136,7 @@ func sameScreen(a, b *vt.Screen) string {
 //
 // Every colour but the palette's two forms is taken as the RGB the render
 // writes it as, 38;2 at 8 bits a channel, since that is all a reader of the
-// render can get back: CMYK and transparent (spec A30), and the alpha of an
-// RGBA.
+// render can get back: CMYK and transparent, and the alpha of an RGBA.
 func canonical(s uv.Style) uv.Style {
 	s.Fg, s.Bg, s.UnderlineColor = rgb(s.Fg), rgb(s.Bg), rgb(s.UnderlineColor)
 	return s
@@ -192,8 +191,7 @@ func sameModes(a, b ansi.Modes) string {
 
 // sameState keeps SGR 31 and 38;5;1 apart, which ultraviolet compares equal,
 // so a render that loses a colour's type is caught. CMYK and transparent
-// colours, which the render can only write as RGB (spec A30), compare as
-// that RGB.
+// colours, which the render can only write as RGB, compare as that RGB.
 func TestSameStateTellsColourTypesApart(t *testing.T) {
 	differ := func(sa, sb string) string {
 		a, b := vt.NewEmulator(10, 2), vt.NewEmulator(10, 2)

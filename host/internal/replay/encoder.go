@@ -9,13 +9,13 @@ import (
 )
 
 // encoder writes a reconstruction into a buffer with a hard cap, and models
-// the joiner's terminal as it goes: the pen and link it has emitted (spec
-// A3). Every SGR and OSC 8 it writes goes from the model, never from a
-// default, so it is right whatever the joiner's terminal held before.
+// the joiner's terminal as it goes: the pen and link it has emitted. Every
+// SGR and OSC 8 it writes goes from the model, never from a default, so it is
+// right whatever the joiner's terminal held before.
 //
 // Each method fails before an append would cross the cap, leaving the buffer
-// and the model as they were, so nothing past the cap is ever allocated
-// (spec E9); the first failure sticks, and every later call returns it. The
+// and the model as they were, so nothing past the cap is ever allocated;
+// the first failure sticks, and every later call returns it. The
 // stop function is checked once per row.
 type encoder struct {
 	buf  []byte

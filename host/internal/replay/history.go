@@ -6,7 +6,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
-// crlf follows each history line in the render (R2).
+// crlf follows each history line in the render.
 const crlf = "\r\n"
 
 // lineCost is what a line costs the history besides its bytes: the CRLF the
@@ -14,10 +14,10 @@ const crlf = "\r\n"
 const lineCost = len(crlf) + 4
 
 // history keeps the newest lines that scrolled off the emulator's main
-// screen, each encoded as it left (spec E8), within a budget: a line costs
+// screen, each encoded as it left, within a budget: a line costs
 // its bytes and lineCost, and the oldest lines go to keep the total within
 // max. So both the render's share and the history's own bookkeeping stay
-// within the budget (spec §6.3), even for a flood of blank lines, which
+// within the budget, even for a flood of blank lines, which
 // cost nothing else.
 //
 // The lines are kept end to end in one buffer, with their lengths, rather
