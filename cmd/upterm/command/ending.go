@@ -51,8 +51,8 @@ func endedFromResult(res attach.Result) ended {
 
 // outcome is the one way an ended session is told: its reason, with the
 // detail that reason needs. Anything without that detail — an exit with no
-// status, a signal with no name, a reason with no words of its own — is told
-// as unrecorded, so no line guesses.
+// status, a signal with neither name nor number, a reason with no words of
+// its own — is told as unrecorded, so no line guesses.
 type outcome int
 
 const (
@@ -84,7 +84,9 @@ func (e ended) outcome() outcome {
 	return outcomeUnrecorded
 }
 
-// signal is the signal's name ("SIGTERM"), or "" when neither source named it.
+// signal is the signal's name ("SIGTERM"), or its number ("40") for one this
+// system has no name for, to follow "signal" in the lines; "" when neither
+// source gave one.
 func (e ended) signal() string {
 	switch {
 	case e.SignalNumber != nil:

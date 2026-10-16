@@ -124,7 +124,18 @@ func TestSignalName(t *testing.T) {
 	require.Equal(t, "SIGINT", signalName(2))
 	require.Equal(t, "SIGKILL", signalName(9))
 	require.Equal(t, "SIGTERM", signalName(15))
-	require.Equal(t, "signal 200", signalName(200), "a number with no name is still told")
+	require.Equal(t, "200", signalName(200), "a number with no name is still told")
+}
+
+// A signal this system has no name for -- a real-time one on Linux -- is told
+// by its number, and "signal" is said once.
+func TestAnUnnamedSignalIsToldByItsNumber(t *testing.T) {
+	e := ended{Reason: sessiondir.ReasonSignaled, SignalNumber: ptr(40)}
+	require.Equal(t, "session s ended by signal 40", waitLine("s", e))
+	require.Equal(t, "session s has already ended by signal 40", alreadyEndedLine("s", e))
+	require.Equal(t, `session "s" has already ended by signal 40`, refusalLine("s", e))
+	require.Equal(t, "upterm: the session ended by signal 40", endLine(e, false))
+	require.Equal(t, "upterm: the session ended by signal 40", endLine(e, true))
 }
 
 func TestDisconnectNeverSendsYouToAnotherSession(t *testing.T) {
