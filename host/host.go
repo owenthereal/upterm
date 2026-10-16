@@ -240,6 +240,10 @@ type Host struct {
 	// begun and the record has been told so: blocking in it holds Run open
 	// with that write behind it.
 	afterEndingPublish func()
+	// wrapAttachListener, if set, wraps the attach socket's listener once it
+	// is bound. A per-Host test hook: a test that plays the daemon's exit
+	// closes every connection the listener accepted.
+	wrapAttachListener func(net.Listener) net.Listener
 	// joins is the running session's join state, for JoinState. Set by Run
 	// before any actor starts and cleared on its way out, so a callback Run
 	// makes reads it without a lock of its own.
@@ -292,7 +296,7 @@ var ErrNoInitialClient = internal.ErrNoInitialClient
 var errJoinTimeout = internal.ErrJoinTimeout
 
 // errSessionStopped retains the cancellation contract for Host.Run callers.
-var errSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
+var errSessionStopped = internal.ErrSessionStopped
 
 // errReadyUnpublished marks a run ended because its readiness could not be
 // published. The command is running by then, so it is teardown that stops
@@ -303,6 +307,9 @@ var errReadyUnpublished = errors.New("failed to publish the session as ready")
 type hostSignalError struct{ signal syscall.Signal }
 
 func (e hostSignalError) Error() string { return fmt.Sprintf("received signal %s", e.signal) }
+
+// ShutdownSignal is the signal, for the session's clients to be told.
+func (e hostSignalError) ShutdownSignal() syscall.Signal { return e.signal }
 
 // abandonedBy reports whether ctx was cancelled because the process that
 // started the session went away: a cancellation whose cause is
@@ -888,6 +895,9 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			_ = adminServer.Shutdown(ctx)
 			return err
 		}
+		if c.wrapAttachListener != nil {
+			attachLn = c.wrapAttachListener(attachLn)
+		}
 		// Published as soon as the socket a client could dial exists, so that
 		// every record whose attach socket is dialable also carries the key
 		// `upterm attach` needs to pin it.
@@ -1062,10 +1072,22 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 			},
 		}
+		served := make(chan struct{})
 		g.Add(func() error {
+			defer close(served)
 			return sshServer.ServeWithContext(ctx, guestDoor, attachLn)
 		}, func(err error) {
-			// Only the winning group error reaches attached clients.
+			// Only the winning group error reaches attached clients, and it
+			// is published to the session before the cancellation that
+			// starts its teardown, so that every client, and every command's
+			// end, is measured against it. Not when the winner is the
+			// server's own return: the session ended on its own, and that is
+			// not a shutdown.
+			select {
+			case <-served:
+			default:
+				sshServer.PublishShutdown(err)
+			}
 			cancel(err)
 		})
 	}

@@ -40,6 +40,10 @@ var ErrNoInitialClient = errors.New("no client attached before the command could
 // the server context cancellation cause so attached clients also exit zero.
 var ErrJoinTimeout = errors.New("no guest joined within the join timeout")
 
+// ErrSessionStopped is the cause of a session stopped through the admin API;
+// host aliases it as errSessionStopped.
+var ErrSessionStopped = fmt.Errorf("session stopped: %w", context.Canceled)
+
 type Server struct {
 	Command      []string
 	CommandEnv   []string
@@ -110,6 +114,12 @@ type Server struct {
 	// state is read from outside the serving goroutine, and a pointer written
 	// there would be a race with every such read.
 	hostClients hostClients
+
+	// order is the session's shutdown cause, as host publishes it, and the
+	// order of each command's end against it. A value, so that it exists
+	// before ServeWithContext runs: host can publish a cause before the
+	// server has started.
+	order endOrder
 }
 
 // CommandResult returns the hosted command's outcome. Valid after
@@ -183,6 +193,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	// it.
 	shared := newSharedPTY()
 
+	// Before anything that ends can record its end against it.
+	s.order.watch(ctx)
+
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
 	defer cmdCancel()
 	cmd := newCommand(
@@ -205,6 +218,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		onGuestPacer(pacer)
 	}
 	cmd.pacer = pacer
+	cmd.order = &s.order
 	s.cmd = cmd
 
 	var g run.Group
@@ -257,6 +271,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		forceCommand:          s.ForceCommand,
 		forceCommands:         &guestHandlers{},
 		sharedGuests:          &guestHandlers{},
+		hostHandlers:          &guestHandlers{},
 		forceCommandHangup:    hangupGrace,
 		forceCommandGrace:     forceCommandStopGrace,
 		commandEnv:            s.CommandEnv,
@@ -269,6 +284,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		keepAliveDuration:     s.KeepAliveDuration,
 		ctx:                   sessCtx,
 		stopCtx:               ctx,
+		order:                 &s.order,
 		logger:                s.Logger,
 		readonly:              s.ReadOnly,
 		sftpPermissionChecker: s.SFTPPermissionChecker,
@@ -438,6 +454,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		hostSH.readonly = false
 		hostSH.forceCommand = nil
 		hostSH.sftpPermissionChecker = nil
+		hostSH.subsystems = nil
 		// The gate: the first client through this door is what the command's
 		// start is waiting for.
 		hostSH.onHostClientAttached = func() { firstOnce.Do(func() { close(firstHostClient) }) }
@@ -455,6 +472,9 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			Version:          upterm.HostSSHServerVersion,
 			PublicKeyHandler: (&hostPublicKeyHandler{}).HandlePublicKey,
 			ChannelHandlers:  map[string]gssh.ChannelHandler{"session": rawSessionHandler},
+			// Admits a client's shell with the session's end, as the guest
+			// door does a guest's.
+			SessionRequestCallback: hostSH.admitGuest,
 			ConnectionFailedCallback: func(conn net.Conn, err error) {
 				s.Logger.Error("attach connection failed", "error", err)
 			},
@@ -470,13 +490,23 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			<-sessCtx.Done()
 			return nil
 		}, func(err error) {
-			// All this has to do is close the listener: sessions are released
-			// by sessCtx's cancellation, which the guest actor's interrupt
-			// performs, and it runs first because run.Group calls interrupts
-			// in the order the actors were added. The bound is this one's own
-			// rather than sessCtx, so that registration order — which decides
-			// whether sessCtx is already cancelled here — can never turn a
-			// Shutdown that waits on live connections into a deadlock.
+			// Sessions are released by sessCtx's cancellation, which the
+			// guest actor's interrupt performs, and it runs first because
+			// run.Group calls interrupts in the order the actors were added.
+			// Each client's handler then sends it the session's end and its
+			// status, and the reply to the first can take
+			// upterm.SessionEndReplyBound. Wait for them, bounded, before the
+			// session ends: the daemon exits once it has, and a status still
+			// to be sent would go unsent.
+			if !hostSH.hostHandlers.wait(hostEndBound) {
+				s.Logger.Warn("gave up waiting for local clients to be sent the session's end", "bound", hostEndBound)
+			}
+
+			// All that is left is to close the listener. The bound is this
+			// one's own rather than sessCtx, so that registration order —
+			// which decides whether sessCtx is already cancelled here — can
+			// never turn a Shutdown that waits on live connections into a
+			// deadlock.
 			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
 			defer cancelShutdown()
 			_ = hostServer.Shutdown(shutdownCtx)
@@ -625,10 +655,13 @@ func (t *guestHandlers) take(sess gssh.Session) func() {
 	return finish
 }
 
-// guestTracker is what the door registers this session's guests with: the
-// forced commands' tracker when there is one, the shared command's
-// otherwise. Nil in a test's handler.
+// guestTracker is what the door registers this session's clients with: on the
+// host door, its own; on the guest door, the forced commands' tracker when
+// there is one, the shared command's otherwise. Nil in a test's handler.
 func (h *sessionHandler) guestTracker() *guestHandlers {
+	if h.kind == kindHost {
+		return h.hostHandlers
+	}
 	if len(h.forceCommand) > 0 {
 		return h.forceCommands
 	}
@@ -650,7 +683,8 @@ func (h *sessionHandler) guestTracker() *guestHandlers {
 // closed in between would cut off a subsystem the door had just accepted. One
 // the door doesn't serve is refused here, before it is admitted: charm would
 // refuse it after this says yes, and nothing would ever take the admission. A
-// handler with no trackers -- a test's -- admits everything.
+// handler with no trackers -- a test's -- admits everything. The host door
+// admits its clients the same way, with its own tracker.
 func (h *sessionHandler) admitGuest(sess gssh.Session, requestType string) bool {
 	handlers := h.guestTracker()
 	if handlers == nil {
@@ -882,6 +916,11 @@ type sessionHandler struct {
 	cmdDone       <-chan struct{}
 	commandResult func() CommandResult
 
+	// order is the session's published shutdown cause, which decides a
+	// client's status ahead of stopCtx's cause (see shutdownCause), and what a
+	// forced command's end is recorded against. Nil in a test's handler.
+	order *endOrder
+
 	// onHostClientAttached, set on the host door only, reports that a local
 	// client's output subscription is installed. That is what a server told to
 	// await its initial client starts the command on.
@@ -899,6 +938,9 @@ type sessionHandler struct {
 	// sharedGuests is the same for the shared command's guests, each of which
 	// is sent the session's status. Nil in a test's handler.
 	sharedGuests *guestHandlers
+	// hostHandlers is the same for the host door's clients, each of which is
+	// sent the session's end and then its status. Nil in a test's handler.
+	hostHandlers *guestHandlers
 	// forceCommandHangup and forceCommandGrace bound a forced command's
 	// teardown: hangupGrace and forceCommandStopGrace, read once when the
 	// session starts. A handler can outlive its session -- one whose guest
@@ -916,13 +958,11 @@ type sessionHandler struct {
 }
 
 func (h *sessionHandler) HandleSession(sess gssh.Session) {
-	// The door registered this guest's handler as it accepted the shell (see
-	// admitGuest). Finished last, after the guest's status and the wait for
-	// it to be answered.
-	if h.kind == kindGuest {
-		if finish := h.takeAdmission(sess); finish != nil {
-			defer finish()
-		}
+	// The door registered this client's handler as it accepted the shell (see
+	// admitGuest). Finished last, after the client's status and, for a guest,
+	// the wait for it to be answered.
+	if finish := h.takeAdmission(sess); finish != nil {
+		defer finish()
 	}
 
 	sessionID := sess.Context().Value(gssh.ContextKeySessionID).(string)
@@ -995,10 +1035,12 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 	// returns nil. Reading the status off Run therefore made the guest's exit
 	// code a coin toss; measured, `--force-command 'exit 42'` reported 42 or 0
 	// depending on scheduling. Run drains every actor before returning, so
-	// reading these afterwards is ordered.
+	// reading these afterwards is ordered. cmdAfterShutdown is whether the
+	// command ended after the session's shutdown was published.
 	var (
-		cmdCode   int
-		cmdExited bool
+		cmdCode          int
+		cmdExited        bool
+		cmdAfterShutdown bool
 	)
 
 	// simulate openssh keepalive
@@ -1038,11 +1080,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 			// The session is already tearing down. This guest arrived a moment
 			// too late, which is not its error, and a command started now
 			// would only be hung up again. Its shell was accepted before the
-			// session's end stopped waiting for guests, so it is sent 0 and
-			// the wait every guest's status gets (see the top of
-			// HandleSession). One that arrives after that is refused at its
-			// request (see admitGuest).
-			_ = sess.Exit(0)
+			// session's end stopped waiting for guests, so it is sent a status
+			// (see exitLate) and the wait every guest's status gets (see the
+			// top of HandleSession). One that arrives after that is refused at
+			// its request (see admitGuest).
+			h.exitLate(sess)
 			return
 		}
 
@@ -1064,11 +1106,18 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		}
 
 		// Waited on outside the group, so the wait actor and terminate can
-		// both watch it.
+		// both watch it. Its end is recorded against the session's shutdown
+		// the moment Wait returns, before exited closes: which branch the
+		// wait actor's select then takes, where both can be ready, says
+		// nothing about which came first.
 		exited := make(chan struct{})
-		var waitErr error
+		var (
+			waitErr       error
+			afterShutdown bool
+		)
 		go func() {
 			waitErr = ptmx.Wait()
+			afterShutdown = h.order.commandEnded()
 			close(exited)
 		}()
 
@@ -1136,6 +1185,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				select {
 				case <-exited:
 					cmdCode, cmdExited = exitCode(waitErr)
+					cmdAfterShutdown = afterShutdown
 				default:
 				}
 
@@ -1236,8 +1286,9 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 				switch {
 				case errors.Is(err, uio.ErrClosed):
 					// The session is already tearing down. This client
-					// arrived a moment too late, which is not its error.
-					_ = sess.Exit(0)
+					// arrived a moment too late, which is not its error (see
+					// exitLate).
+					h.exitLate(sess)
 				case errors.Is(err, context.Canceled):
 					// The client left while its screen was reconstructed:
 					// there is nobody to tell.
@@ -1379,10 +1430,11 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 					// The session is already tearing down. This guest arrived a
 					// moment too late, which is not its error. Its shell was
 					// accepted before the session's end stopped waiting for
-					// guests, so it is sent 0 and the wait every guest's status
-					// gets (see the top of HandleSession). One that arrives
-					// after that is refused at its request (see admitGuest).
-					_ = sess.Exit(0)
+					// guests, so it is sent a status (see exitLate) and the wait
+					// every guest's status gets (see the top of HandleSession).
+					// One that arrives after that is refused at its request
+					// (see admitGuest).
+					h.exitLate(sess)
 				case errors.Is(err, context.Canceled):
 					// The guest left while it waited its turn at the pacer, or
 					// while its screen was reconstructed: there is nobody to
@@ -1571,23 +1623,28 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 
 	runErr := g.Run()
 
-	commandDone := false
-	if h.cmdDone != nil {
-		select {
-		case <-h.cmdDone:
-			commandDone = true
-		default:
-		}
-	}
+	// Classified once, from the cause host published, so that a handler that
+	// ends between that and the cancellation which follows it still sees it.
+	kind, sig, res, commandDone := h.endingCause()
 
 	switch {
-	case cmdExited:
-		// A forced command ran and terminated under its own control. Its
-		// status is the session's, whichever actor unblocked run.Group first.
+	case cmdExited && (!cmdAfterShutdown || !kind.overrides()):
+		// A forced command ran and terminated under its own control, before
+		// any shutdown. Its status is the session's, whichever actor
+		// unblocked run.Group first.
 		_ = sess.Exit(cmdCode)
-	case h.kind == kindHost && h.stopCtx != nil && errors.Is(context.Cause(h.stopCtx), ErrJoinTimeout):
+	case kind.overrides():
+		// The session was stopped, or its daemon signalled or cancelled, and
+		// this client's command -- the shared one, or this guest's forced
+		// command -- ended after that, or hasn't ended. What it returned while
+		// it was torn down is not its own outcome: the teardown starts with a
+		// hangup, and a command that handles it and exits 0 would tell every
+		// client the session succeeded.
+		h.exitWith(sess, kind.end(sig), 1)
+	case h.kind == kindHost && kind == shutdownJoinTimeout:
 		// The command was killed by a successful first-guest deadline. Its
 		// resulting signal is not the attached foreground client's outcome.
+		sendSessionEnd(serverConn(sess), kind.end(sig))
 		// The group has drained command output before this final notice. Bound
 		// both the write and exit request: a terminal that stopped reading must
 		// not hold teardown open. Closing the transport releases blocked SSH I/O.
@@ -1605,10 +1662,10 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// The session ended because the command did. Its status is the
 		// client's; a command that was signalled rather than exited has none
 		// to give, and 1 is what this client has always been told then.
-		if res := h.commandResult(); res.Exited {
-			_ = sess.Exit(res.Code)
+		if res.Exited {
+			h.exitWith(sess, commandEnd(res), res.Code)
 		} else {
-			_ = sess.Exit(1)
+			h.exitWith(sess, commandEnd(res), 1)
 		}
 	case runErr != nil:
 		_ = sess.Exit(1)

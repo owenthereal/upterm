@@ -5,6 +5,7 @@ package internal
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -114,9 +115,11 @@ func TestAForcedCommandIsHungUpWhenItsGuestLeavesAfterItsInputEnds(t *testing.T)
 
 // When the session ends, a forced command is hung up too, and what it writes
 // on its way out -- a full-screen program putting the guest's terminal back
-// -- reaches the guest, with its exit status. The session waits for that
-// rather than ending under it: in production the tunnel closes behind the
-// session, and the guest would be cut off first.
+// -- reaches the guest, and then the guest's status. The session waits for
+// that rather than ending under it: in production the tunnel closes behind
+// the session, and the guest would be cut off first. The status is 1, not
+// what the forced command returned while it was torn down: the session was
+// cancelled, and a guest told 3 would take that for its command's own end.
 func TestSessionEndHangsUpAForcedCommandAndWaitsForIt(t *testing.T) {
 	// Long enough that the hangup handler below finishes inside the first
 	// step, so nothing escalates past it.
@@ -142,10 +145,235 @@ func TestSessionEndHangsUpAForcedCommandAndWaitsForIt(t *testing.T) {
 	case err := <-exited:
 		var exitErr *ssh.ExitError
 		require.ErrorAs(t, err, &exitErr)
-		assert.Equal(t, 3, exitErr.ExitStatus(), "the forced command's own status")
+		assert.Equal(t, 1, exitErr.ExitStatus(), "the cancelled session's status, not what the hangup handler returned")
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("the guest was not sent its forced command's status before the session ended")
+		t.Fatal("the guest was not sent its status before the session ended")
 	}
+}
+
+// trapsHangupAndExits is a command that exits with code when it is hung up,
+// as a program does whose hangup handler cleans up and reports success.
+func trapsHangupAndExits(code int) []string {
+	return []string{"sh", "-c", fmt.Sprintf(`trap 'exit %d' HUP; printf READY; while :; do sleep 0.05; done`, code)}
+}
+
+// A stopped session's clients get 1, whatever its command returned while it
+// was torn down. The teardown starts with a hangup, and a command that handles
+// it and exits 0 used to give every client 0: `upterm host -- cmd && deploy`
+// deployed after `upterm session stop`. The local client is told why first.
+func TestAStopOverridesAHangupHandlersExitStatus(t *testing.T) {
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint("exit=", code), func(t *testing.T) {
+			h := startHost(t, &Server{Command: trapsHangupAndExits(code)})
+			hostConn, _, hostSess := h.connectHostConn(t, newHostPty(t))
+			_, guestOut, guestSess := h.connectGuestSession(t)
+			readUntil(t, guestOut, "READY")
+
+			h.stopWith(t, ErrSessionStopped)
+
+			requireExitStatus(t, guestSess.Wait(), 1)
+			requireExitStatus(t, hostSess.Wait(), 1)
+			require.Equal(t, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}, hostEnds(t, hostConn))
+		})
+	}
+}
+
+// A forced command is no exception: one that exits while it is torn down by a
+// stop gives its guest 1, not what it returned.
+func TestAStoppedForcedCommandsGuestGetsOne(t *testing.T) {
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint("exit=", code), func(t *testing.T) {
+			h := startHost(t, &Server{
+				Command:      []string{"sh", "-c", "sleep 60"},
+				ForceCommand: trapsHangupAndExits(code),
+			})
+			_, out, sess := h.connectGuestSession(t)
+			readUntil(t, out, "READY")
+
+			h.stopWith(t, ErrSessionStopped)
+
+			requireExitStatus(t, sess.Wait(), 1)
+		})
+	}
+}
+
+// What decides whether a command ended before the stop is the order in which
+// its end and the stop's publication were recorded, both ways, for the shared
+// command and for a forced one. These commands ignore the hangup and exit with
+// the status they read, so it is their input, not the teardown, that ends
+// them; the graces are long, so that nothing escalates past the hangup.
+func TestCompletionBeforeTheStopKeepsItsStatus(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		t.Run(fmt.Sprint("forced=", forced), func(t *testing.T) {
+			h, in, _, sess := startExitOnInput(t, forced)
+			_, err := io.WriteString(in, "7\n")
+			require.NoError(t, err)
+			h.awaitCommandEnded(t)
+
+			h.stopWith(t, ErrSessionStopped)
+
+			requireExitStatus(t, sess.Wait(), 7)
+		})
+	}
+}
+
+func TestCompletionAfterTheStopIsOne(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		for _, code := range []string{"0", "7"} {
+			t.Run(fmt.Sprintf("forced=%t/exit=%s", forced, code), func(t *testing.T) {
+				h, in, _, sess := startExitOnInput(t, forced)
+				// Published, and the server not yet cancelled: the command
+				// then exits on its own, after the stop and before any
+				// teardown has reached it.
+				h.publishShutdownOnly(t, ErrSessionStopped)
+				_, err := io.WriteString(in, code+"\n")
+				require.NoError(t, err)
+				h.awaitCommandEnded(t)
+
+				h.cancelServer(t)
+
+				requireExitStatus(t, sess.Wait(), 1)
+			})
+		}
+	}
+}
+
+// A guest whose forced command ends between the stop's publication and the
+// cancellation that follows it has its handler finish in between, with nothing
+// cancelled yet: it is the published cause that tells it the session was
+// stopped.
+func TestAForcedCommandEndingBetweenPublishAndCancelGetsOne(t *testing.T) {
+	h, in, _, sess := startExitOnInput(t, true)
+	h.publishShutdownOnly(t, ErrSessionStopped)
+	_, err := io.WriteString(in, "0\n")
+	require.NoError(t, err)
+
+	requireExitStatus(t, sess.Wait(), 1)
+	h.cancelServer(t)
+}
+
+// A forced command that ends on its own, with nothing stopping the session,
+// keeps its status.
+func TestAForcedCommandThatEndsOnItsOwnKeepsItsStatus(t *testing.T) {
+	h := startHost(t, &Server{
+		Command:      []string{"sh", "-c", "sleep 60"},
+		ForceCommand: []string{"sh", "-c", "exit 7"},
+	})
+	_, _, sess := h.connectGuestSession(t)
+	requireExitStatus(t, sess.Wait(), 7)
+}
+
+// A forced command torn down because the session ended on its own -- its
+// shared command exited -- keeps its status, even when a stop is published
+// while it is being torn down: the session was ending already, and nothing it
+// did was the stop's doing.
+func TestAForcedCommandTornDownByTheSessionsOwnEndKeepsItsStatus(t *testing.T) {
+	withHangupGrace(t, 5*time.Second)
+	marker := filepath.Join(t.TempDir(), "end")
+	srv := &Server{
+		Command:      []string{"sh", "-c", `while [ ! -e "$0" ]; do sleep 0.01; done`, marker},
+		ForceCommand: []string{"sh", "-c", `trap 'sleep 0.5; exit 3' HUP; printf READY; while :; do sleep 0.05; done`},
+	}
+	ended := make(chan struct{}, 4)
+	srv.order.onCommandEnded = func() {
+		select {
+		case ended <- struct{}{}:
+		default:
+		}
+	}
+	h := &orderHarness{hostHarness: startHost(t, srv), ended: ended}
+	_, out, sess := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+
+	require.NoError(t, os.WriteFile(marker, nil, 0o600))
+	h.awaitCommandEnded(t) // the shared command's: the forced one is hung up only after it
+	h.publishShutdownOnly(t, ErrSessionStopped)
+
+	requireExitStatus(t, sess.Wait(), 3)
+}
+
+// exitsOnInput ignores the hangup and exits with the status it reads.
+const exitsOnInput = `trap '' HUP; printf READY; read c; exit $c`
+
+// orderHarness is the harness with word of each command's end as its waiter
+// records it in the session's endOrder.
+type orderHarness struct {
+	*hostHarness
+	ended chan struct{}
+}
+
+// startExitOnInput serves exitsOnInput as the shared command or, forced, as a
+// guest's forced command, and connects a guest to it, returning the guest's
+// input, output and session once the command is running.
+func startExitOnInput(t *testing.T, forced bool) (*orderHarness, io.Writer, io.Reader, *ssh.Session) {
+	t.Helper()
+	withHangupGrace(t, 5*time.Second)
+	withForceCommandStopGrace(t, 5*time.Second)
+	srv := &Server{Command: []string{"sh", "-c", exitsOnInput}, StopGrace: 5 * time.Second}
+	if forced {
+		srv = &Server{
+			Command:      []string{"sh", "-c", "sleep 60"},
+			ForceCommand: []string{"sh", "-c", exitsOnInput},
+		}
+	}
+	ended := make(chan struct{}, 4)
+	srv.order.onCommandEnded = func() {
+		select {
+		case ended <- struct{}{}:
+		default:
+		}
+	}
+	h := startHost(t, srv)
+	in, out, sess := h.connectGuestSession(t)
+	readUntil(t, out, "READY")
+	return &orderHarness{hostHarness: h, ended: ended}, in, out, sess
+}
+
+// awaitCommandEnded waits until a command's waiter has recorded its end.
+func (h *orderHarness) awaitCommandEnded(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.ended:
+	case <-time.After(harnessTimeout):
+		t.Fatal("no command's end was recorded")
+	}
+}
+
+// stopWith ends the session as host does: the cause published, then the
+// server's context cancelled with it. stop, by contrast, cancels with nothing
+// published, which is a plain cancellation. It doesn't wait for the session to
+// end, so that a test can time what its clients are sent.
+func (h *hostHarness) stopWith(t *testing.T, cause error) {
+	t.Helper()
+	h.publishShutdownOnly(t, cause)
+	h.cancelServer(t)
+}
+
+// publishShutdownOnly is stopWith's first half, with the cancellation
+// withheld: the moment in host between the two.
+func (h *hostHarness) publishShutdownOnly(t *testing.T, cause error) {
+	t.Helper()
+	h.srv.PublishShutdown(cause)
+}
+
+// cancelServer is stopWith's second half: the cancellation, with the cause
+// that was published.
+func (h *hostHarness) cancelServer(t *testing.T) {
+	t.Helper()
+	h.cancelWith(h.srv.order.published())
+}
+
+// requireExitStatus requires err to be a session's end with status code.
+func requireExitStatus(t *testing.T, err error, code int) {
+	t.Helper()
+	if code == 0 {
+		// x/crypto reports a status of 0 as no error at all.
+		require.NoError(t, err)
+		return
+	}
+	var exit *ssh.ExitError
+	require.ErrorAs(t, err, &exit, "the client was sent no exit status: %v", err)
+	require.Equal(t, code, exit.ExitStatus())
 }
 
 // A forced command that ignores the hangup and SIGTERM is still gone once the

@@ -19,6 +19,7 @@ import (
 	"github.com/olebedev/emitter"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -611,4 +612,87 @@ func processGone(pid int) bool {
 		}
 	}
 	return false
+}
+
+// testShutdownSignal is a winning cause that carries the signal the daemon
+// received, as host's hostSignalError does.
+type testShutdownSignal syscall.Signal
+
+func (s testShutdownSignal) Error() string { return "received signal" }
+
+func (s testShutdownSignal) ShutdownSignal() syscall.Signal { return syscall.Signal(s) }
+
+// The session's shutdown cause is classified by what the published cause
+// wraps, not by what it is: host's winner for a stop is the signal actor's
+// join of its context's error and cause, and for a signal its own error type.
+// The published cause comes before the context's; the context's is all there
+// is when nothing was published, and anything unnamed is a cancellation.
+func TestShutdownCauseIsWhatWasPublished(t *testing.T) {
+	cancelled := func(cause error) context.Context {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(cause)
+		return ctx
+	}
+	for _, tc := range []struct {
+		name      string
+		published error
+		stop      context.Context
+		want      upterm.SessionEnd
+		kind      shutdownKind
+	}{
+		{name: "nothing", stop: context.Background(), kind: shutdownNone},
+		{name: "stopped", published: errors.Join(context.Canceled, ErrSessionStopped), stop: context.Background(),
+			kind: shutdownStopped, want: upterm.SessionEnd{Cause: upterm.CauseStopped}},
+		{name: "signaled", published: testShutdownSignal(syscall.SIGTERM), stop: context.Background(),
+			kind: shutdownSignaled, want: upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "TERM"}},
+		{name: "join timeout", published: ErrJoinTimeout, stop: context.Background(),
+			kind: shutdownJoinTimeout, want: upterm.SessionEnd{Cause: upterm.CauseJoinTimeout}},
+		{name: "cancelled", published: errors.Join(context.Canceled, context.Canceled), stop: context.Background(),
+			kind: shutdownCanceled, want: upterm.SessionEnd{Cause: upterm.CauseCanceled}},
+		{name: "anything else", published: errors.New("failed to publish the session as ready"), stop: context.Background(),
+			kind: shutdownCanceled, want: upterm.SessionEnd{Cause: upterm.CauseCanceled}},
+		{name: "published before the context's own cause", published: ErrSessionStopped, stop: cancelled(ErrJoinTimeout),
+			kind: shutdownStopped, want: upterm.SessionEnd{Cause: upterm.CauseStopped}},
+		{name: "nothing published, a cancellation with a cause", stop: cancelled(ErrSessionStopped),
+			kind: shutdownStopped, want: upterm.SessionEnd{Cause: upterm.CauseStopped}},
+		{name: "nothing published, a plain cancellation", stop: cancelled(nil),
+			kind: shutdownCanceled, want: upterm.SessionEnd{Cause: upterm.CauseCanceled}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var o endOrder
+			o.publish(tc.published)
+			kind, sig := shutdownCause(&o, tc.stop)
+			require.Equal(t, tc.kind, kind)
+			if kind != shutdownNone {
+				require.Equal(t, tc.want, kind.end(sig))
+			}
+		})
+	}
+}
+
+// A command's end is ordered against the shutdown where both are recorded: a
+// command that ends once a cause is published -- or, with none published, once
+// the session's context is cancelled -- ended after the shutdown. The first
+// cause published stands, and a nil one publishes nothing.
+func TestEndOrderRecordsACommandsEndAgainstTheShutdown(t *testing.T) {
+	var o endOrder
+	require.False(t, o.commandEnded(), "nothing has been published")
+	o.publish(nil)
+	require.False(t, o.commandEnded(), "a nil cause is no cause")
+	o.publish(ErrSessionStopped)
+	require.True(t, o.commandEnded())
+	o.publish(ErrJoinTimeout)
+	require.ErrorIs(t, o.published(), ErrSessionStopped, "the first cause published stands")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var plain endOrder
+	plain.watch(ctx)
+	require.False(t, plain.commandEnded())
+	cancel()
+	require.True(t, plain.commandEnded(), "a cancellation with nothing published is the shutdown")
+
+	// A test's handler has no order, and nothing is ever after its shutdown.
+	var none *endOrder
+	require.False(t, none.commandEnded())
+	require.NoError(t, none.published())
 }

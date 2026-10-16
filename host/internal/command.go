@@ -170,6 +170,10 @@ type command struct {
 	// DefaultStopGrace. Set by the caller after construction, not a
 	// newCommand parameter.
 	stopGrace time.Duration
+
+	// order is what the command's end is recorded against: the session's
+	// shutdown. Set by the caller after construction; nil records nothing.
+	order *endOrder
 }
 
 // grace is how long terminate waits at each step: the field if set, else
@@ -190,10 +194,10 @@ func (c *command) copyTarget() io.Writer {
 	return c.writers
 }
 
-func (c *command) recordResult(err error) {
+func (c *command) recordResult(err error, afterShutdown bool) {
 	code, exited := exitCode(err)
 
-	res := CommandResult{Exited: exited, Code: code}
+	res := CommandResult{Exited: exited, Code: code, EndedAfterShutdown: afterShutdown}
 	if !exited {
 		res.Signal, res.SignalNumber = signalOutcome(err)
 	}
@@ -358,16 +362,24 @@ func (c *command) Run() error {
 		g.Add(func() error {
 			defer close(waitDone)
 
+			// The command's end is recorded against the session's shutdown
+			// the moment Wait returns, before exited closes: which branch
+			// the select below takes, where both can be ready, says nothing
+			// about which came first.
 			exited := make(chan struct{})
-			var waitErr error
+			var (
+				waitErr       error
+				afterShutdown bool
+			)
 			go func() {
 				waitErr = c.ptmx.Wait()
+				afterShutdown = c.order.commandEnded()
 				close(exited)
 			}()
 
 			select {
 			case <-exited:
-				c.recordResult(waitErr)
+				c.recordResult(waitErr, afterShutdown)
 				return waitErr
 			case <-ctx.Done():
 				// The session is ending and the command is not: hang it up
@@ -382,7 +394,7 @@ func (c *command) Run() error {
 				// actually closed, which happens-before this observes it.
 				select {
 				case <-exited:
-					c.recordResult(waitErr)
+					c.recordResult(waitErr, afterShutdown)
 				default:
 				}
 				return ctx.Err()

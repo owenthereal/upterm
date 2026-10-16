@@ -5,7 +5,10 @@ package internal
 import (
 	"errors"
 	"os/exec"
+	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // signalOutcome names the signal that killed a command, given the error from
@@ -23,4 +26,9 @@ func signalOutcome(err error) (string, *int) {
 		}
 	}
 	return "", nil
+}
+
+// sshSignalName is sig's name as SSH spells it, without "SIG": "TERM".
+func sshSignalName(sig syscall.Signal) string {
+	return strings.TrimPrefix(unix.SignalName(sig), "SIG")
 }

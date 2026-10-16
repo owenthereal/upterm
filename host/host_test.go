@@ -23,6 +23,7 @@ import (
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -656,6 +657,8 @@ type joinTimeoutHost struct {
 	created                     *api.GetSessionResponse
 	done                        chan error
 	output                      bytes.Buffer
+	// afterRun, if set, is called the moment Run returns.
+	afterRun func()
 }
 
 func newJoinTimeoutHost(t *testing.T) *joinTimeoutHost {
@@ -716,7 +719,14 @@ func (f *joinTimeoutHost) start(t *testing.T) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	finished := make(chan struct{})
-	go func() { defer close(finished); f.done <- f.h.Run(ctx) }()
+	go func() {
+		defer close(finished)
+		err := f.h.Run(ctx)
+		if f.afterRun != nil {
+			f.afterRun()
+		}
+		f.done <- err
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -1335,6 +1345,134 @@ func (f *joinTimeoutHost) stillRunning(t *testing.T, d time.Duration, why string
 		t.Fatalf("%s: session ended: %v", why, err)
 	case <-time.After(d):
 	}
+}
+
+// The daemon sends a local client its status before it exits. A client that
+// never answers the session's end -- a terminal suspended with ^Z -- holds
+// its status back for the reply's bound, and a daemon that ended its run
+// without waiting for that would exit with the status unsent: the client would
+// see its connection dropped rather than the session ended.
+func TestTheDaemonDeliversTheStatusBeforeItExits(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.closeConnectionsWhenRunReturns(t)
+	client := f.attachIgnoringSessionEnd(t)
+
+	f.stop(t)
+
+	err := client.Wait()
+	var exit *ssh.ExitError
+	require.ErrorAs(t, err, &exit, "a status, not a connection closed under it: %v", err)
+	require.Equal(t, 1, exit.ExitStatus())
+}
+
+// closeConnectionsWhenRunReturns plays the daemon's exit for the attach
+// socket: the moment Run returns, its listener and every connection it
+// accepted are closed. In process, a handler can outlive Run; once the daemon
+// has exited, nothing it was still to send is sent.
+func (f *joinTimeoutHost) closeConnectionsWhenRunReturns(t *testing.T) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		ln    net.Listener
+		conns []net.Conn
+	)
+	f.h.wrapAttachListener = func(l net.Listener) net.Listener {
+		mu.Lock()
+		defer mu.Unlock()
+		ln = l
+		return &acceptedListener{Listener: l, accepted: func(c net.Conn) {
+			mu.Lock()
+			defer mu.Unlock()
+			conns = append(conns, c)
+		}}
+	}
+	f.afterRun = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if ln != nil {
+			_ = ln.Close()
+		}
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+}
+
+// acceptedListener reports each connection it accepts.
+type acceptedListener struct {
+	net.Listener
+	accepted func(net.Conn)
+}
+
+func (l *acceptedListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted(c)
+	}
+	return c, err
+}
+
+// attachIgnoringSessionEnd is attach with a client that reads the session-end
+// request and never answers it, returning the client's session.
+func (f *joinTimeoutHost) attachIgnoringSessionEnd(t *testing.T) *ssh.Session {
+	t.Helper()
+	f.h.AwaitInitialClient = true
+	listening := make(chan string, 1)
+	f.h.AttachListeningCallback = func(socket string) { listening <- socket }
+	f.start(t)
+	var socket string
+	select {
+	case socket = <-listening:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach socket never bound")
+	}
+	rec := f.record(t)
+	require.NotEmpty(t, rec.HostKeys)
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(rec.HostKeys[0]))
+	require.NoError(t, err)
+	key, err := NewHostKey()
+	require.NoError(t, err)
+
+	raw, err := net.DialTimeout("unix", socket, 3*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	conn, chans, reqs, err := ssh.NewClientConn(raw, socket, &ssh.ClientConfig{
+		User: "host", Auth: []ssh.AuthMethod{ssh.PublicKeys(key)},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+		ClientVersion:   upterm.AttachSSHClientVersion,
+	})
+	require.NoError(t, err)
+	go func() {
+		for req := range reqs {
+			if req.Type != upterm.SessionEndRequestType {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}()
+	none := make(chan *ssh.Request)
+	close(none)
+	client := ssh.NewClient(conn, chans, none)
+	t.Cleanup(func() { _ = client.Close() })
+	sess, err := client.NewSession()
+	require.NoError(t, err)
+	require.NoError(t, sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}))
+	// Held open: a session whose input ends is a client that has left.
+	in, err := sess.StdinPipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = in.Close() })
+	sess.Stdout = io.Discard
+	require.NoError(t, sess.Shell())
+	return sess
+}
+
+// stop stops the session once it is ready, as `upterm session stop` does.
+func (f *joinTimeoutHost) stop(t *testing.T) {
+	t.Helper()
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := f.admin(t).StopSession(ctx, &api.StopSessionRequest{LaunchId: f.record(t).LaunchID})
+	require.NoError(t, err)
 }
 
 func TestSessionSetArmsTheJoinTimeoutAfterReadiness(t *testing.T) {
