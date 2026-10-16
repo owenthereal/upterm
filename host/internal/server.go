@@ -502,13 +502,15 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 				s.Logger.Warn("gave up waiting for local clients to be sent the session's end", "bound", hostEndBound)
 			}
 
-			// All that is left is to close the listener. The bound is this
-			// one's own rather than sessCtx, so that registration order —
-			// which decides whether sessCtx is already cancelled here — can
-			// never turn a Shutdown that waits on live connections into a
-			// deadlock.
-			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
-			defer cancelShutdown()
+			// All that is left is to close the listener, and Shutdown is
+			// handed a context that is already done, so that this is all it
+			// does. Every handler the door admitted has sent its client the
+			// session's end and its status by now, or been given up on above:
+			// a connection still open has nothing more coming, and waiting
+			// for its client to hang up would only hold the daemon. What gets
+			// a client its status is the wait above, not a wait here.
+			shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
+			cancelShutdown()
 			_ = hostServer.Shutdown(shutdownCtx)
 			_ = host.Close()
 		})
