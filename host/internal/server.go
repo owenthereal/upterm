@@ -402,9 +402,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			return nil
 		}, func(err error) {
 			// Let the fan-out finish delivering before the sessions are
-			// released. This is the last interrupt in the group, so waiting
-			// here holds up nothing else, and a command-led exit has already
-			// closed cmdDone by the time it runs.
+			// released. Only the host door's interrupt runs after this one,
+			// and the clients it waits for are sent their ends meanwhile, once
+			// the sessions are released, so waiting here holds up only that
+			// door's listener's close. A command-led exit has already closed
+			// cmdDone by the time this runs.
 			releaseSessions(cmdDone, outputDrainTimeout+guestFlushTimeout, cancel)
 
 			// That cancel hangs up every forced command, and each one's guest is
@@ -548,7 +550,8 @@ func forceCommandStopBound(hangup, grace time.Duration) time.Duration {
 // on when its shell or exec request arrives, since that is when the door
 // registers its handler (see admitGuest). Before the session's end has
 // finished waiting, it is admitted and waited for: it is sent an exit status
-// -- 0, if it arrived too late for the command's -- and then the bounded wait
+// -- 0 if it arrived too late for the command's, or 1 if the session ended by
+// a stop, signal or cancellation (see exitLate) -- and then the bounded wait
 // for that to be answered. After, wait has sealed the set, and the request is
 // refused: the guest's client sees its shell fail to start, rather than a
 // session that ends without a status.

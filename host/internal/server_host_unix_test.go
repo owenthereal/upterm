@@ -10,6 +10,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -127,6 +128,76 @@ func TestAClientThatNeverRepliesDoesntHoldTheStatus(t *testing.T) {
 	require.GreaterOrEqual(t, took, upterm.SessionEndReplyBound, "the status was sent without waiting for the reply")
 	require.Less(t, took, upterm.SessionEndReplyBound+time.Second)
 	require.Equal(t, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}, hostEnds(t, conn))
+}
+
+// A client that reaches the host door as the session ends is sent 1, and told
+// why, only when a shutdown overrode the session's status: a stop, a signal or
+// a cancellation. Otherwise it is sent 0 and no cause: one would say the
+// status was the command's, which it isn't, or name a join timeout whose
+// notice this client never saw.
+func TestALateHostClientIsToldWhyOnlyWhenAShutdownOverrodeItsStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		code  int
+		ends  []upterm.SessionEnd
+	}{
+		{"the command ended", nil, 0, nil},
+		{"join timeout", ErrJoinTimeout, 0, nil},
+		{"stopped", ErrSessionStopped, 1, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}},
+		{"signalled", testShutdownSignal(syscall.SIGTERM), 1, []upterm.SessionEnd{{Cause: upterm.CauseSignaled, Signal: "TERM"}}},
+		{"cancelled", context.Canceled, 1, []upterm.SessionEnd{{Cause: upterm.CauseCanceled}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var order endOrder
+			order.publish(tc.cause)
+			h := &sessionHandler{kind: kindHost, order: &order, logger: discardLogger()}
+			log, sess := serveOneSession(t, h.exitLate)
+
+			requireExitStatus(t, sess.Wait(), tc.code)
+			if tc.ends == nil {
+				require.Empty(t, hostEnds(t, log))
+			} else {
+				require.Equal(t, tc.ends, hostEnds(t, log))
+			}
+		})
+	}
+}
+
+// serveOneSession serves handler on a door of its own over loopback, opens a
+// session to it with a shell, and returns that session and the requestLog
+// answering its connection's global requests.
+func serveOneSession(t *testing.T, handler gssh.Handler) (*requestLog, *ssh.Session) {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	srv := &gssh.Server{HostSigners: []gssh.Signer{signer}, Handler: handler}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-served
+	})
+
+	raw, err := net.DialTimeout("tcp", ln.Addr().String(), harnessTimeout)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	require.NoError(t, raw.SetDeadline(time.Now().Add(harnessTimeout)))
+	conn, chans, reqs, err := ssh.NewClientConn(raw, ln.Addr().String(), &ssh.ClientConfig{
+		User: "host", HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()),
+	})
+	require.NoError(t, err)
+	log := &requestLog{}
+	client := ssh.NewClient(conn, chans, log.serve(reqs))
+	t.Cleanup(func() { _ = client.Close() })
+	sess, err := client.NewSession()
+	require.NoError(t, err)
+	require.NoError(t, sess.Shell())
+	return log, sess
 }
 
 // requestLog is a client's own loop over the global requests its connection

@@ -238,14 +238,16 @@ func (h *sessionHandler) exitWith(sess gssh.Session, end upterm.SessionEnd, code
 
 // exitLate ends the session of a client that arrived as the session was
 // already ending: 1 if it was stopped, signalled or cancelled, as every other
-// client is sent then, and 0 otherwise, as such a client always has been,
-// rather than the status of a command it never saw. A local client is told why
-// first.
+// client is sent then, and a local client is told why first. Otherwise 0, as
+// such a client always has been, rather than the status of a command it never
+// saw, and no cause: an exit would say the 0 was the command's, which it
+// isn't, and a join timeout's is told by a notice in the stream that this
+// client never gets, so the plain status says all there is to say.
 func (h *sessionHandler) exitLate(sess gssh.Session) {
 	kind, sig, _, _ := h.endingCause()
-	code := 0
-	if kind.overrides() {
-		code = 1
+	if !kind.overrides() {
+		_ = sess.Exit(0)
+		return
 	}
-	h.exitWith(sess, kind.end(sig), code)
+	h.exitWith(sess, kind.end(sig), 1)
 }
