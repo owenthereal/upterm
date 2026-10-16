@@ -5,21 +5,11 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
-func TestLocalDisconnectMessageNamesTheLogAndTheReattachCommand(t *testing.T) {
-	msg := localDisconnectMessage("build-shell", "/var/log/upterm.log", attach.Result{Reason: attach.Disconnected})
-	require.Contains(t, msg, "build-shell")
-	require.Contains(t, msg, "/var/log/upterm.log")
-	require.Contains(t, msg, "upterm attach build-shell")
-	require.Empty(t, localDisconnectMessage("x", "/l", attach.Result{Reason: attach.Exited}), "nothing to say when the command simply ended")
-	require.Empty(t, localDisconnectMessage("x", "/l", attach.Result{Reason: attach.Detached}), "nothing to say when the terminal went away")
-}
 
 // Both notification sites, because filtering only the join would announce a
 // departure with no arrival: the host's own terminal leaving, and — once

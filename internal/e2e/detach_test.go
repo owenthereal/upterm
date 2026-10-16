@@ -32,7 +32,7 @@ func TestHostDetachKeyLeavesTheSessionRunning(t *testing.T) {
 
 	require.NoError(t, h.host.SendKeys(h.ctx, "Enter"))
 	require.NoError(t, h.host.SendKeys(h.ctx, "~."))
-	require.NoError(t, h.waitForText(h.host, "detached from session "+name, 10*time.Second))
+	require.NoError(t, h.waitForText(h.host, "upterm: detached; the session continues. Reattach with upterm attach "+name+", or stop it with upterm session stop "+name, 10*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_STATUS=0", 10*time.Second), "a detach exits 0")
 
 	// Still running, and still answering. The marker is split across a shell
@@ -124,13 +124,10 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 
 // A stop reaches every terminal attached to the session, not only the one
 // that started it. Both the host's own terminal and an `upterm attach` see
-// the resulting exit status: the door gives a command that was signalled
-// rather than exited sess.Exit(1)
-// (host/internal/server.go's commandDone branch — a stop sends SIGHUP to
-// the command's process group, so bash dies by signal, not by exiting), and
-// the host prints commandExitedMessage while `upterm attach` reports the
-// status without attributing a cause it cannot observe. Both restore the
-// terminal modes they found on the way out: the host's own through
+// the stop: the daemon tells each attached terminal the session was stopped
+// before it gives the status, 1 for a stopped session whatever its command
+// returned while being torn down, and each says so in the same line. Both
+// restore the terminal modes they found on the way out: the host's own through
 // localclient.go, `upterm attach` through withRawTerminal in
 // cmd/upterm/command/terminal.go. Every other stop test in this file stops
 // a session with nothing attached; this is the one with two terminals on
@@ -188,8 +185,8 @@ func TestSessionStopReleasesAttachedTerminals(t *testing.T) {
 	// The stop, from a third terminal. Split off vertically (top/bottom)
 	// rather than through h.splitPane's horizontal (side-by-side) split:
 	// h.host has already given up half its width to term, and a second
-	// side-by-side split would leave it too narrow to print the 66-column
-	// sentence below without an in-pane line wrap that breaks the
+	// side-by-side split would leave it too narrow to print the lines
+	// below without an in-pane line wrap that breaks the
 	// wait's substring match — a tmux layout artifact, not anything the
 	// session gets wrong. A vertical split costs h.host height instead of
 	// width, which none of its assertions need.
@@ -201,15 +198,14 @@ func TestSessionStopReleasesAttachedTerminals(t *testing.T) {
 	require.NoError(t, ctl.SendLine(h.ctx, "upterm session stop "+name+"; echo STOP_STATUS=$?"))
 	require.NoError(t, h.waitForText(ctl, "STOP_STATUS=0", 40*time.Second))
 
-	// Both attached terminals see the stop: the host reports its command
-	// exit, and attach reports the status without guessing the cause. Both
-	// receive the signalled-command status and their terminal back the way they
-	// found it. A failed restore shows up in the wait's error as
-	// "…_TTY=CHANGED [before] [after]", which is the diagnostic wanted.
-	require.NoError(t, h.waitForText(h.host, "ended: command exited (status 1)", 20*time.Second))
+	// Both attached terminals see the stop, say it was one, exit 1, and get
+	// their terminal back the way they found it. A failed restore shows up in
+	// the wait's error as "…_TTY=CHANGED [before] [after]", which is the
+	// diagnostic wanted.
+	require.NoError(t, h.waitForText(h.host, "upterm: the session was stopped", 20*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_STATUS=1", 15*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_TTY=same", 15*time.Second))
-	require.NoError(t, h.waitForText(term, "session "+name+" ended (status 1)", 20*time.Second))
+	require.NoError(t, h.waitForText(term, "upterm: the session was stopped", 20*time.Second))
 	require.NoError(t, h.waitForText(term, "ATTACH_STATUS=1", 15*time.Second))
 	require.NoError(t, h.waitForText(term, "ATTACH_TTY=same", 15*time.Second))
 

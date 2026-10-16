@@ -1347,7 +1347,7 @@ func Test_stopSession(t *testing.T) {
 		<-released
 		require.False(t, returnedAt.Before(releasedAt),
 			"stopSession must not return before the name was released")
-		require.Contains(t, out.String(), "session ready-1 stopped")
+		require.Equal(t, "session ready-1 stopped\n", out.String())
 		require.Equal(t, d.LaunchID(), stub.lastStoppedLaunchID(),
 			"the request names the launch the record named, not just the session")
 	})
@@ -1378,7 +1378,32 @@ func Test_stopSession(t *testing.T) {
 		buildEndedAfterExit(t, "gone-1")
 		var out bytes.Buffer
 		require.NoError(t, stopSession(context.Background(), "gone-1", &out))
-		require.Contains(t, out.String(), "has already ended")
+		require.Equal(t, "session gone-1 has already ended with status 3\n", out.String())
+	})
+	// The command ended on its own before the stop took effect: the record
+	// says how, and the stop says that rather than claiming it stopped
+	// anything.
+	t.Run("a session that ended another way before the stop landed says how", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "beaten-1")
+		require.NoError(t, d.Update(func(r *sessiondir.Record) {
+			r.Status = sessiondir.StatusReady
+			r.SessionID = "sid-1"
+		}))
+		serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {
+			go func() {
+				code := 0
+				_ = d.Update(func(r *sessiondir.Record) {
+					r.Status = sessiondir.StatusEnding
+					r.Reason = sessiondir.ReasonExited
+					r.ExitCode = &code
+				})
+				_ = d.Release(context.Background())
+			}()
+		})
+		var out bytes.Buffer
+		require.NoError(t, stopSession(context.Background(), "beaten-1", &out))
+		require.Equal(t, "session beaten-1 has already ended\n", out.String())
 	})
 	t.Run("a held name whose socket does not answer names the pid", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -1510,6 +1535,7 @@ func TestWaitReturnsImmediatelyForAnEndedSession(t *testing.T) {
 	code, err := waitSession(context.Background(), "done", &out)
 	require.NoError(t, err)
 	require.Equal(t, 7, code)
+	require.Equal(t, "session done ended\n", out.String(), "the status is the exit code's to carry, not the line's")
 }
 
 func TestWaitCobraReportsOutcomeOnceAndDiagnosesObserverErrors(t *testing.T) {
@@ -1526,7 +1552,7 @@ func TestWaitCobraReportsOutcomeOnceAndDiagnosesObserverErrors(t *testing.T) {
 		wantOutcome   string
 		wantError     string
 	}{
-		{"ended with exit seven", "exit-seven", "session exit-seven ended (", ""},
+		{"ended with exit seven", "exit-seven", "session exit-seven ended\n", ""},
 		{"missing session", "missing", "", "no session named"},
 		{"corrupt session", "corrupt", "", "invalid character"},
 	} {
@@ -1818,7 +1844,7 @@ func Test_setSession_failures(t *testing.T) {
 		buildEndedAfterExit(t, "gone-2")
 		var out bytes.Buffer
 		require.NoError(t, setSession(context.Background(), "gone-2", time.Minute, &out))
-		require.Contains(t, out.String(), "session gone-2 has already ended")
+		require.Equal(t, "session gone-2 has already ended with status 3\n", out.String())
 	})
 	t.Run("a daemon that predates the RPC says so", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -1874,7 +1900,7 @@ func Test_setSession_failures(t *testing.T) {
 		})
 		var out bytes.Buffer
 		require.NoError(t, setSession(context.Background(), "ended-2", time.Minute, &out))
-		require.Equal(t, "session ended-2 has already ended (join_timeout)\n", out.String())
+		require.Equal(t, "session ended-2 has already ended: no guest joined within the join timeout\n", out.String())
 	})
 	t.Run("replaced", func(t *testing.T) {
 		setupSessionRoots(t)

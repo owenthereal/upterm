@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -22,38 +23,39 @@ func TestAttachTarget(t *testing.T) {
 	buildEndedAfterExit(t, "ended")
 
 	for _, name := range []string{"starting", "ready", "gone"} {
-		sock, keys, status, err := attachTarget(context.Background(), name)
+		got, err := attachTarget(context.Background(), name)
 		require.NoError(t, err, name)
 		rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), name)
 		require.NoError(t, err)
-		require.Equal(t, rec.AttachSocket, sock, "the record's path, not one rebuilt under this runtime root")
-		require.Equal(t, rec.Status, status, "and the status that explains a failed dial")
-		require.Len(t, keys, len(rec.HostKeys), "the record's keys, parsed")
-		for i, key := range keys {
+		require.Equal(t, rec.AttachSocket, got.Socket, "the record's path, not one rebuilt under this runtime root")
+		require.Equal(t, rec.Status, got.Status, "and the status that explains a failed dial")
+		require.Equal(t, rec.LaunchID, got.LaunchID, "and the launch, which a disconnect is checked against")
+		require.Equal(t, rec.AdminSocket, got.AdminSocket)
+		require.Len(t, got.Keys, len(rec.HostKeys), "the record's keys, parsed")
+		for i, key := range got.Keys {
 			require.Equal(t, rec.HostKeys[i], strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n"),
 				"key %d is the one the record names, not merely a key", i)
 		}
 	}
 
-	_, _, _, err := attachTarget(context.Background(), "ended")
-	require.ErrorContains(t, err, "ended")
-	require.ErrorContains(t, err, "exited", "the record's reason is the explanation")
+	_, err := attachTarget(context.Background(), "ended")
+	require.EqualError(t, err, `session "ended" has already ended with status 3`, "the record's outcome is the explanation")
 
-	_, _, _, err = attachTarget(context.Background(), "never-existed")
+	_, err = attachTarget(context.Background(), "never-existed")
 	require.ErrorContains(t, err, "no session named")
 }
 
-// TestAttachTargetExplainsHowAnEndedSessionEnded covers describeOutcome's two
-// branches that no exit code reaches: a session killed before it could publish
-// an outcome, and one that published a signal.
+// TestAttachTargetExplainsHowAnEndedSessionEnded covers the two outcomes no
+// exit code reaches: a session killed before it could publish an outcome, and
+// one that published a signal.
 func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	setupSessionRoots(t)
 
-	// Nothing got the chance to write a reason, so "unknown" is the whole
-	// explanation and must still be given.
+	// Nothing got the chance to write a reason, and the refusal says so
+	// rather than guessing one.
 	buildEndedAfterKill(t, "killed")
-	_, _, _, err := attachTarget(context.Background(), "killed")
-	require.ErrorContains(t, err, sessiondir.ReasonUnknown,
+	_, err := attachTarget(context.Background(), "killed")
+	require.EqualError(t, err, `session "killed" has already ended for a reason upterm didn't record`,
 		"a session that ended without saying how still says that much")
 
 	d := claimSession(t, "signaled")
@@ -61,12 +63,38 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	require.NoError(t, d.Release(context.Background()))
 	rec.Status = sessiondir.StatusEnding
 	rec.Reason = sessiondir.ReasonSignaled
-	rec.Signal = "SIGTERM"
+	rec.Signal = "terminated"
+	rec.SignalNumber = ptr(15)
 	writeRecordRaw(t, path, rec)
 
-	_, _, _, err = attachTarget(context.Background(), "signaled")
-	require.ErrorContains(t, err, "signaled by SIGTERM",
+	_, err = attachTarget(context.Background(), "signaled")
+	require.EqualError(t, err, `session "signaled" has already ended by signal SIGTERM`,
 		"a signalled session names the signal, since there is no exit code to name")
+}
+
+// The refusal is one line, prefixed once, and exits 255 like every other
+// attachment that could not be made.
+func TestAttachRefusesAnEndedSessionInOneLine(t *testing.T) {
+	setupSessionRoots(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	buildEndedAfterExit(t, "build")
+
+	stdout, stderr, code := runCLI(t, "attach", "build")
+	require.Equal(t, exitAttachFailed, code)
+	require.Empty(t, stdout)
+	require.Equal(t, "upterm: session \"build\" has already ended with status 3\n", stderr)
+}
+
+// attach points its lines at the log only when the run has one: a log the
+// root's pre-run could not open has nothing of this run in it.
+func TestAttachLogPathIsEmptyWhenLoggingIsOff(t *testing.T) {
+	setupSessionRoots(t)
+	warning := &logWarning{w: io.Discard}
+	ctx := context.WithValue(context.Background(), logWarningKey{}, warning)
+	require.Equal(t, utils.UptermLogFilePath(), attachLogPath(ctx))
+
+	warning.warn(utils.UptermLogFilePath(), errors.New("permission denied"))
+	require.Empty(t, attachLogPath(ctx))
 }
 
 // TestAttachFailure pins which dial failures are worth rewording. A record
@@ -104,7 +132,7 @@ func TestAttachTargetRefusesARecordWithoutAnAttachSocket(t *testing.T) {
 	rec.AttachSocket = ""
 	writeRecordRaw(t, d.RecordPath(), rec)
 
-	_, _, _, err := attachTarget(context.Background(), "old")
+	_, err := attachTarget(context.Background(), "old")
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -122,7 +150,7 @@ func TestAttachTargetRefusesARecordWithoutHostKeys(t *testing.T) {
 		r.Status = sessiondir.StatusReady
 	}))
 
-	_, _, _, err := attachTarget(context.Background(), "no-host-key")
+	_, err := attachTarget(context.Background(), "no-host-key")
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -136,7 +164,7 @@ func TestAttachTargetTellsAStartingSessionApartFromAnOldOne(t *testing.T) {
 	d := claimSession(t, "still-starting")
 	releaseAtEnd(t, d)
 
-	_, _, _, err := attachTarget(context.Background(), "still-starting")
+	_, err := attachTarget(context.Background(), "still-starting")
 	require.ErrorContains(t, err, "still starting")
 	require.NotContains(t, err.Error(), "restart", "waiting is the advice, not restarting")
 }
@@ -153,7 +181,7 @@ func TestAttachTargetRefusesARecordWithAnUnparsableHostKey(t *testing.T) {
 		r.HostKeys = []string{"not a real key"}
 	}))
 
-	_, _, _, err := attachTarget(context.Background(), "bad-host-key")
+	_, err := attachTarget(context.Background(), "bad-host-key")
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -188,13 +216,17 @@ func TestAttachExitError(t *testing.T) {
 	require.Equal(t, exitDisconnected, ec.Code)
 }
 
-// An attachment ends with one line. The session's status is in it only when
-// it isn't 0, as upterm host's own line is (see spawned.go).
+// An attachment ends with one line, or none when the daemon's own notice
+// already said it. Unlike upterm host, attach has a line for a 0.
 func TestAttachEndLine(t *testing.T) {
-	require.Equal(t, "upterm: detached from session s; the session continues", attachEndLine("s", attach.Result{Reason: attach.Detached}))
-	require.Equal(t, "upterm: session s ended", attachEndLine("s", attach.Result{Reason: attach.Exited}))
-	require.Equal(t, "upterm: session s ended (status 3)", attachEndLine("s", attach.Result{Reason: attach.Exited, Status: 3}))
-	require.Contains(t, attachEndLine("s", attach.Result{Reason: attach.Disconnected}), "upterm: disconnected from session s (see ")
+	require.Equal(t, "upterm: detached; the session continues", attachEndLine("s", "/l", attach.Result{Reason: attach.Detached}, unchecked))
+	require.Equal(t, "upterm: the session ended", attachEndLine("s", "/l", attach.Result{Reason: attach.Exited}, unchecked))
+	require.Equal(t, "upterm: the session ended with status 3", attachEndLine("s", "/l", attach.Result{Reason: attach.Exited, Status: 3}, unchecked))
+	require.Equal(t, "upterm: the session was stopped", attachEndLine("s", "/l",
+		attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseStopped}}, unchecked))
+	require.Empty(t, attachEndLine("s", "/l",
+		attach.Result{Reason: attach.Exited, Cause: attach.Cause{Kind: attach.CauseJoinTimeout}}, unchecked),
+		"the daemon's notice said it")
 }
 
 // TestAttachRunERejectsABadEscapeCharAsACouldNotAttach pins the exit code and

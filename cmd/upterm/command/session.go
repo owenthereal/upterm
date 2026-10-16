@@ -330,7 +330,7 @@ func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
 }
 
 func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error) {
-	_, _ = fmt.Fprintf(out, "session %s ended (%s)\n", name, describeOutcome(rec))
+	_, _ = fmt.Fprintln(out, waitLine(name, endedFromRecord(rec)))
 	return waitExitCode(rec), nil
 }
 
@@ -379,7 +379,7 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		return errNoSession(name)
 	}
 	if !held {
-		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
+		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
 		return err
 	}
 
@@ -454,12 +454,17 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		case <-time.After(min(stopPollInterval, max(0, time.Until(deadline)))):
 		}
 	}
+	// The command can end on its own between the request and the teardown
+	// it asked for. The record says which happened, and a stop that lost
+	// that race says how the session did end rather than claim it stopped
+	// it. A record that can't be read, or that another launch has written
+	// since, says nothing about this launch, and the acknowledgement stands.
 	final, err := sessiondir.ReadRecord(stateRoot, name)
-	if err != nil || final == nil || final.LaunchID != rec.LaunchID {
-		_, err := fmt.Fprintf(out, "session %s stopped\n", name)
+	if err == nil && final != nil && final.LaunchID == rec.LaunchID && final.Reason != sessiondir.ReasonStopped {
+		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(final)))
 		return err
 	}
-	_, err = fmt.Fprintf(out, "session %s stopped (%s)\n", name, describeOutcome(final))
+	_, err = fmt.Fprintf(out, "session %s stopped\n", name)
 	return err
 }
 
@@ -554,7 +559,7 @@ func setSession(ctx context.Context, name string, joinTimeout time.Duration, out
 		return errNoSession(name)
 	}
 	if !held {
-		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(rec))
+		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
 		return err
 	}
 
@@ -606,7 +611,7 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr 
 		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
 	case !curHeld:
 		// The name was released: the session is over.
-		_, err := fmt.Fprintf(out, "session %s has already ended (%s)\n", name, describeOutcome(cur))
+		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(cur)))
 		return err
 	case cur.Status == sessiondir.StatusEnding:
 		_, err := fmt.Fprintf(out, "session %s is ending\n", name)

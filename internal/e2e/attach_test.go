@@ -41,7 +41,7 @@ func TestAttachDetachReattach(t *testing.T) {
 	// ~. at the start of a line detaches; the shell in the pane comes back.
 	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
 	require.NoError(t, term.SendKeys(h.ctx, "~."))
-	require.NoError(t, h.waitForText(term, "detached from session "+name, 10*time.Second))
+	require.NoError(t, h.waitForText(term, "upterm: detached; the session continues", 10*time.Second))
 	require.NoError(t, h.waitForText(term, "DETACH_STATUS=0", 10*time.Second), "a detach must exit 0")
 
 	// The session survived the detach: the attach terminal can come back and
@@ -64,7 +64,7 @@ func TestAttachDetachReattach(t *testing.T) {
 	// the attach: nothing is typed into the handover, where an input read
 	// abandoned by the exiting attach could still swallow it.
 	require.NoError(t, term.SendLine(h.ctx, "exit 3"))
-	require.NoError(t, h.waitForText(term, "session "+name+" ended (status 3)", 10*time.Second))
+	require.NoError(t, h.waitForText(term, "upterm: the session ended with status 3", 10*time.Second))
 	require.NoError(t, h.waitForText(term, "STATUS=3", 10*time.Second))
 
 	// And the host says only that. A command's exit status arrives as an
@@ -183,7 +183,7 @@ func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 
 	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
 	require.NoError(t, term.SendKeys(h.ctx, "~."))
-	require.NoError(t, h.waitForText(term, "detached from session "+name, 10*time.Second))
+	require.NoError(t, h.waitForText(term, "upterm: detached; the session continues", 10*time.Second))
 
 	require.Eventually(t, func() bool {
 		content, err := term.Capture(h.ctx)
@@ -263,7 +263,7 @@ func TestAttachSuspendsAndResumes(t *testing.T) {
 
 	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
 	require.NoError(t, term.SendKeys(h.ctx, "~."))
-	require.NoError(t, h.waitForText(term, "detached from session "+name, 10*time.Second))
+	require.NoError(t, h.waitForText(term, "upterm: detached; the session continues", 10*time.Second))
 
 	// fg's own exit status is the resumed attach's, once it returns.
 	require.NoError(t, term.SendLine(h.ctx, "echo FG_STATUS=$?"))
