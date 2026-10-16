@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -50,6 +51,16 @@ type Client struct {
 	// reading its socket.
 	dial func(ctx context.Context, socket string) (net.Conn, error)
 }
+
+// Seams for a test of the order the daemon's cause is read in; nil outside
+// tests, and read by Run before the request loop starts. requestLoopHold runs
+// on the loop's goroutine before it handles anything, and the loop goes on
+// when it returns; sessionEndedHook runs in Run once the session's end is in
+// hand, before the cause is taken.
+var (
+	requestLoopHold  func()
+	sessionEndedHook func()
+)
 
 // Run attaches and returns when the attachment ends. An error means the client
 // never attached; once attached, every ending is a Result.
@@ -109,7 +120,16 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	_ = raw.SetDeadline(time.Time{})
-	client := ssh.NewClient(conn, chans, reqs)
+	// The connection's global requests are read here, not by NewClient, which
+	// would refuse every one of them: the daemon sends one that has to be
+	// answered. NewClient is given a queue that is already closed, so its own
+	// handler returns at once and this is the only reader of reqs.
+	holdLoop, sessionEnded := requestLoopHold, sessionEndedHook
+	ends := newEndReader(reqs)
+	go ends.run(holdLoop)
+	noRequests := make(chan *ssh.Request)
+	close(noRequests)
+	client := ssh.NewClient(conn, chans, noRequests)
 	defer func() { _ = client.Close() }()
 
 	res, err := (&Terminal{
@@ -127,10 +147,144 @@ func (c *Client) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if sessionEnded != nil {
+		sessionEnded()
+	}
+	// A cause explains a status, so only an exit has one. A connection that
+	// went away after the request but before any status is a disconnect, and
+	// the cause the daemon sent is not what this client saw happen.
+	var cause Cause
+	if res.Reason == Exited {
+		// The status can be here before the loop has handled the request that
+		// came ahead of it: the daemon sends the status after waiting for the
+		// reply only up to a bound. So the cause is taken only once every
+		// request queued so far has been handled.
+		ends.drain(endDrainTimeout)
+		cause = ends.cause()
+	}
 	// One attachment is all a Client makes, so there is no next one to hand
 	// Stdout over to: a write still in flight is left where it is, and a
 	// restore the drain abandoned stays unwritten, as it always has.
-	return Result{Reason: res.Reason, Status: res.Status}, nil
+	return Result{Reason: res.Reason, Status: res.Status, Cause: cause}, nil
+}
+
+// endDrainTimeout bounds the wait for the request loop to catch up once the
+// session has ended. Handling a request is decoding it and writing a reply
+// of a few bytes; this only matters when that write is parked on a daemon
+// that has stopped reading its socket, which must not keep Run from
+// returning with the status it already has.
+const endDrainTimeout = time.Second
+
+// endReader answers the connection's global requests and keeps the cause the
+// daemon gives for ending the session.
+type endReader struct {
+	reqs <-chan *ssh.Request
+	// asks is how drain gets the loop's attention, with a channel the loop
+	// closes once it has caught up. Unbuffered: the loop takes one only
+	// between requests, so a request being handled is finished first.
+	asks chan chan struct{}
+	done chan struct{} // closed when the loop has returned
+
+	mu  sync.Mutex
+	end *upterm.SessionEnd // the first one the daemon sent
+}
+
+func newEndReader(reqs <-chan *ssh.Request) *endReader {
+	return &endReader{reqs: reqs, asks: make(chan chan struct{}), done: make(chan struct{})}
+}
+
+// run handles requests until the connection ends. hold, if not nil, is a
+// test's: it runs before anything is handled.
+func (e *endReader) run(hold func()) {
+	defer close(e.done)
+	if hold != nil {
+		hold()
+	}
+	for {
+		select {
+		case req, ok := <-e.reqs:
+			if !ok {
+				return
+			}
+			e.handle(req)
+		case caughtUp := <-e.asks:
+			// What is queued when the ask is taken: everything that came in
+			// before it was made is either handled already or in the queue,
+			// and only this loop takes from the queue, so each of these
+			// receives has a request waiting.
+			for n := len(e.reqs); n > 0; n-- {
+				if req, ok := <-e.reqs; ok {
+					e.handle(req)
+				}
+			}
+			close(caughtUp)
+		}
+	}
+}
+
+// handle keeps the daemon's session-end request and says so in its reply, and
+// refuses everything else, as x/crypto's own handler would.
+func (e *endReader) handle(req *ssh.Request) {
+	if req.Type != upterm.SessionEndRequestType {
+		_ = req.Reply(false, nil)
+		return
+	}
+	var end upterm.SessionEnd
+	if err := ssh.Unmarshal(req.Payload, &end); err != nil {
+		// Not a payload this client knows, so nothing it can report.
+		_ = req.Reply(false, nil)
+		return
+	}
+	e.mu.Lock()
+	if e.end == nil {
+		e.end = &end
+	}
+	e.mu.Unlock()
+	_ = req.Reply(true, nil)
+}
+
+// drain returns once the loop has handled every request that was queued when
+// it was called, or the loop has ended -- the connection is gone and nothing
+// more will be queued -- or bound has passed.
+func (e *endReader) drain(bound time.Duration) {
+	timeout := time.NewTimer(bound)
+	defer timeout.Stop()
+	caughtUp := make(chan struct{})
+	select {
+	case e.asks <- caughtUp:
+	case <-e.done:
+		return
+	case <-timeout.C:
+		return
+	}
+	select {
+	case <-caughtUp:
+	case <-e.done:
+	case <-timeout.C:
+	}
+}
+
+// cause is what the daemon said ended the session; CauseNone when it said
+// nothing, or a cause this client has no kind for, which is never guessed at.
+func (e *endReader) cause() Cause {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.end == nil {
+		return Cause{}
+	}
+	switch e.end.Cause {
+	case upterm.CauseExited:
+		return Cause{Kind: CauseExited}
+	case upterm.CauseStopped:
+		return Cause{Kind: CauseStopped}
+	case upterm.CauseSignaled:
+		return Cause{Kind: CauseSignaled, Signal: e.end.Signal}
+	case upterm.CauseCanceled:
+		return Cause{Kind: CauseCanceled}
+	case upterm.CauseJoinTimeout:
+		return Cause{Kind: CauseJoinTimeout}
+	}
+	return Cause{}
 }
 
 // ErrHostKeyMismatch is what Run's error wraps when the door presented a key

@@ -114,11 +114,45 @@ func (r Reason) String() string {
 	return fmt.Sprintf("reason(%d)", int(r))
 }
 
-// Result is how an attachment ended. Status is meaningful only for Exited.
-// Released and Unrestored are Terminal.Run's; Client.Run leaves them zero.
+// CauseKind is why the daemon ended a session, as it said so itself.
+type CauseKind int
+
+const (
+	// CauseNone: the daemon said nothing. An older daemon never does, and a
+	// newer one may give a cause this client does not know; either way no
+	// reason is guessed.
+	CauseNone CauseKind = iota
+	// CauseExited: the command ended on its own, and Status is its own.
+	CauseExited
+	// CauseStopped: the session was stopped (upterm session stop).
+	CauseStopped
+	// CauseSignaled: the daemon, or the command on its own, was killed by a
+	// signal; Cause.Signal says which.
+	CauseSignaled
+	// CauseCanceled: the daemon's run was cancelled.
+	CauseCanceled
+	// CauseJoinTimeout: no guest joined within the join timeout. The status
+	// is 0, which is why a cause is needed to tell this from an ordinary exit.
+	CauseJoinTimeout
+)
+
+// Cause is why the daemon ended the session, when it said. Kind is CauseNone
+// when it did not.
+type Cause struct {
+	Kind   CauseKind
+	Signal string // the SSH name without "SIG" ("TERM"), for CauseSignaled
+}
+
+// Result is how an attachment ended. Status and Cause are meaningful only for
+// Exited. Released and Unrestored are Terminal.Run's; Client.Run leaves them
+// zero. Cause is Client.Run's, which reads it from the connection's global
+// requests; Terminal.Run leaves it zero.
 type Result struct {
 	Reason Reason
 	Status int
+	// Cause is why the daemon ended the session, ahead of the status: the
+	// status alone cannot say, and for 0 it says nothing at all.
+	Cause Cause
 
 	// Released closes once no write from this session to Stdout is in
 	// flight: the output copy has returned, and so has every mode write. It
