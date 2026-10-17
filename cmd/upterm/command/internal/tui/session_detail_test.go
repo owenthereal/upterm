@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -623,6 +624,28 @@ func TestEveryCommandAndClientPrintsWhole(t *testing.T) {
 		"➤ SCP:\n    " + detail.SCPUpload + "\n    " + detail.SCPDownload + "\n" +
 		"\nConnected:\n  " + detail.ConnectedClients[0] + "\n  " + detail.ConnectedClients[1] + "\n"
 	assert.Equal(t, want, renderSessionDetail(detail, 80))
+}
+
+// A guest's version string is theirs to choose, and the view prints it as
+// text: an escape sequence or a control character in it comes out as '?',
+// the way ~? prints it, rather than reaching the terminal reading the view.
+func TestConnectedRowsPrintAGuestsVersionAsText(t *testing.T) {
+	detail := SessionDetail{
+		SessionID: "id",
+		ConnectedClients: []string{
+			"guest 203.0.113.7:51234 SSH-2.0-\x1b]0;owned\x07\x1b[2J\x9b1m\u009b2m\x00\x7f\r SHA256:def",
+		},
+	}
+
+	out := FormatSessionDetail(detail)
+	assert.Equal(t, "Session: id\n\n"+
+		"\nConnected:\n"+
+		"  guest 203.0.113.7:51234 SSH-2.0-?]0;owned??[2J?1m?2m??? SHA256:def\n", out)
+	for _, r := range out {
+		if r != '\n' {
+			require.False(t, unicode.IsControl(r), "%q in %q", r, out)
+		}
+	}
 }
 
 func Test_renderSessionDetail_ConnectedRow(t *testing.T) {

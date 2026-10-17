@@ -11,6 +11,7 @@ import (
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	uio "github.com/owenthereal/upterm/io"
 	"golang.org/x/term"
 )
 
@@ -433,12 +434,15 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 		}
 	}
 
-	// Connected clients, one per line.
+	// Connected clients, one per line. Each is printed as text: a guest's
+	// version string is theirs to choose, and their client sends whatever it
+	// likes there, escape sequences included. The view prints it the way ~?
+	// does; the JSON keeps it as the daemon reported it.
 	if len(detail.ConnectedClients) > 0 {
 		b.WriteString("\n")
 		b.WriteString(LabelStyle.Render("Connected:") + "\n")
 		for _, client := range detail.ConnectedClients {
-			writeWhole(&b, 2, ValueStyle, client)
+			writeWhole(&b, 2, ValueStyle, uio.PlainText(client))
 		}
 	}
 
