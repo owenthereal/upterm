@@ -42,6 +42,40 @@ func historyOf(e *emulation) [][]byte {
 	return lines
 }
 
+// scrollOff collects the lines that scroll off an emulator's main screen, as
+// the replay's history collects them: each through encodeLine, with the
+// columns it takes, up to its trailing blanks, and its text. A clear of
+// history, by ED 3 or RIS, empties it, and is counted.
+type scrollOff struct {
+	lines  [][]byte
+	widths []int
+	texts  []string
+	clears int
+}
+
+// collectScrollOff collects what scrolls off term's main screen from now on.
+func collectScrollOff(term *vt.Emulator) *scrollOff {
+	s := &scrollOff{}
+	term.SetScrollOffFunc(func(line uv.Line) {
+		enc, err := encodeLine(line, budget)
+		if err != nil {
+			panic(err)
+		}
+		end := len(line)
+		for end > 0 && line[end-1] == uv.EmptyCell {
+			end--
+		}
+		s.lines = append(s.lines, enc)
+		s.widths = append(s.widths, end)
+		s.texts = append(s.texts, line.String())
+	})
+	term.SetScrollbackClearFunc(func() {
+		s.lines, s.widths, s.texts = nil, nil, nil
+		s.clears++
+	})
+	return s
+}
+
 // sameState reports the first difference between two emulators, or "" when
 // there is none: their sizes, the screen showing, the cells and styles on
 // both screens (the hidden one included), the active screen's current
@@ -51,6 +85,12 @@ func historyOf(e *emulation) [][]byte {
 // pending single shift, the one
 // scroll region, the tab stops, REP's last character, a carried cluster, and
 // the history lines each side collected.
+//
+// A slot keeps the position it was saved at through a resize, even off the
+// screen, and DECRC clamps it as it moves there. A terminal fresh at this
+// size, given the slot's position, clamps it already, and DECRC restores the
+// same cell from both, so a slot's position is compared clamped to the
+// screen.
 func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
 	if a.Width() != b.Width() || a.Height() != b.Height() {
 		return fmt.Sprintf("size: %dx%d vs %dx%d", a.Width(), a.Height(), b.Width(), b.Height())
@@ -68,7 +108,7 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
 		if d := sameScreen(s.sa, s.sb); d != "" {
 			return s.name + " screen: " + d
 		}
-		if d := sameSlot(s.sa.SavedCursor(), s.sb.SavedCursor()); d != "" {
+		if d := sameSlot(clampSlot(s.sa), clampSlot(s.sb)); d != "" {
 			return s.name + " saved slot: " + d
 		}
 	}
@@ -150,6 +190,15 @@ func rgb(c color.Color) color.Color {
 		r, g, b, _ := c.RGBA()
 		return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 0xff}
 	}
+	return c
+}
+
+// clampSlot is scr's saved slot with its position where DECRC would move the
+// cursor: inside the screen. A slot holding origin mode is clamped to the
+// margins instead, but no render restores one.
+func clampSlot(scr *vt.Screen) vt.Cursor {
+	c := scr.SavedCursor()
+	c.X, c.Y = min(c.X, scr.Width()-1), min(c.Y, scr.Height()-1)
 	return c
 }
 
