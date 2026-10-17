@@ -526,9 +526,8 @@ func TestGuestPacerRegistersAGuestBeforeItCanReceiveOutput(t *testing.T) {
 }
 
 // Attachments are one transaction each, serialised: B cannot attach while A is
-// registered but not yet appended. Were it able to, A would be the pacer with
-// an empty queue, holding the gate open while B took output unpaced. And
-// registration order is attachment order, so A, attached first, paces.
+// registered but not yet appended, so one guest at a time is being attached.
+// And registration order is attachment order, so A, attached first, paces.
 func TestGuestPacerSerialisesAttachments(t *testing.T) {
 	p, writers := newTestPacer(t, time.Minute)
 	a := stuckSink(t, nil)
@@ -741,4 +740,412 @@ func TestGuestPacerDoesNotHoldAnAttachBehindAGatedWrite(t *testing.T) {
 
 	p.release()
 	requireReturns(t, done, 2*time.Second)
+}
+
+// renderMark heads every render a heldReplayer's emulation makes, so that a
+// guest's bytes say whether it was handed a reconstruction.
+const renderMark = "<render>"
+
+// ringBytes is what an emulatingPacer's ring holds before anyone joins.
+const ringBytes = "before"
+
+// heldReplayer is a Replayer a test holds inside Start: each Start reports
+// its capture on started, then waits for release, or for the join's ctx,
+// whose error it returns. Its emulation consumes all it is offered and hands
+// off at the end of it, and renders renderMark and the bytes it consumed.
+//
+// stuck, set before a join starts, has the emulation take nothing a Feed
+// offers it, as an emulation can't pass a resize inside a sequence the ring
+// ends in the middle of: until the rest of the sequence arrives, the resize
+// and everything after it wait in its tail.
+type heldReplayer struct {
+	started chan *uio.Capture
+	release chan struct{}
+	stuck   bool
+
+	mu  sync.Mutex
+	fed []uio.SizeEvent // every event a Feed offered, in order
+}
+
+func (r *heldReplayer) Start(ctx context.Context, _ time.Time, c *uio.Capture, _ termsize.Size) (uio.Emulation, error) {
+	r.started <- c
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	e := &heldEmulation{r: r, h: c.Start}
+	e.consume(c.Chunks, c.Sizes)
+	return e, nil
+}
+
+// fedEvents is every event a Feed offered, in order.
+func (r *heldReplayer) fedEvents() []uio.SizeEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uio.SizeEvent(nil), r.fed...)
+}
+
+type heldEmulation struct {
+	r          *heldReplayer
+	consumed   []byte
+	h, lastSeq uint64
+}
+
+func (e *heldEmulation) consume(chunks [][]byte, sizes []uio.SizeEvent) {
+	for _, c := range chunks {
+		e.consumed = append(e.consumed, c...)
+		e.h += uint64(len(c))
+	}
+	if len(sizes) > 0 {
+		e.lastSeq = sizes[len(sizes)-1].Seq
+	}
+}
+
+func (e *heldEmulation) Feed(chunks [][]byte, sizes []uio.SizeEvent) error {
+	e.r.mu.Lock()
+	e.r.fed = append(e.r.fed, sizes...)
+	e.r.mu.Unlock()
+	if !e.r.stuck {
+		e.consume(chunks, sizes)
+	}
+	return nil
+}
+
+func (e *heldEmulation) Handoff() (uint64, uint64) { return e.h, e.lastSeq }
+
+func (e *heldEmulation) Render() ([]byte, error) {
+	return append([]byte(renderMark), e.consumed...), nil
+}
+
+// emulatingPacer is a pacer whose fan-out reconstructs a joining terminal's
+// screen with a heldReplayer. The ring holds ringBytes, written at 80x24, and
+// passed is every write the pacer has let through to the fan-out.
+type emulatingPacer struct {
+	p        *guestPacer
+	writers  *uio.MultiWriter
+	r        *heldReplayer
+	passed   *recordingWriter
+	fellBack chan error // why each join that fell back did
+}
+
+func newEmulatingPacer(t *testing.T, stall time.Duration) *emulatingPacer {
+	t.Helper()
+	orig := pacingStallTimeout
+	pacingStallTimeout = stall
+	t.Cleanup(func() { pacingStallTimeout = orig })
+
+	e := &emulatingPacer{
+		writers:  uio.NewMultiWriter(uio.DefaultReplayBytes),
+		r:        &heldReplayer{started: make(chan *uio.Capture, 4), release: make(chan struct{})},
+		passed:   &recordingWriter{},
+		fellBack: make(chan error, 4),
+	}
+	e.writers.SetReplayer(e.r, func(err error) { e.fellBack <- err })
+	// The size the ring is written at, which a join's emulation starts from.
+	e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Default), true)
+	e.p = newGuestPacer(t.Context(), io.MultiWriter(e.passed, e.writers))
+	_, err := e.p.Write([]byte(ringBytes))
+	require.NoError(t, err)
+	return e
+}
+
+// join attaches sink through the pacer as the guest door does, with its
+// screen reconstructed for an 80x24 terminal by deadline, on a goroutine of
+// its own, and returns what the attach returns.
+func (e *emulatingPacer) join(t *testing.T, ctx context.Context, sink *uio.AsyncWriter, deadline time.Time) <-chan error {
+	t.Helper()
+	attached := make(chan error, 1)
+	go func() {
+		attached <- e.p.attach(ctx, sink, func() error {
+			return attachGuestOutput(ctx, deadline, e.writers, sink, termsize.Default)
+		})
+	}()
+	t.Cleanup(func() {
+		e.writers.Remove(sink)
+		e.p.remove(sink)
+		_ = sink.Close()
+	})
+	return attached
+}
+
+// awaitStart waits for a join's emulation to start, which is after its
+// capture and inside its attach: its guest is registered and its replay is
+// being made.
+func (e *emulatingPacer) awaitStart(t *testing.T) {
+	t.Helper()
+	select {
+	case <-e.r.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no join reached the replayer")
+	}
+}
+
+// requireNoFallback fails if any join fell back to the raw ring.
+func (e *emulatingPacer) requireNoFallback(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-e.fellBack:
+		t.Fatalf("a join fell back to the raw ring: %v", err)
+	default:
+	}
+}
+
+// flush waits until sink has delivered everything written to it.
+func flush(t *testing.T, sink *uio.AsyncWriter) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, sink.Flush(ctx))
+}
+
+// awaitClosed fails, rather than hangs, if ch is not closed within 2 s.
+func awaitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal(what)
+	}
+}
+
+// While the guest that paces is still being attached, its screen being
+// reconstructed, the command waits for it as it does for a backlog. What the
+// command writes meanwhile is what the join has to catch up on before it can
+// hand over, and a command that outran the reconstruction would have the join
+// fall back to the raw ring and lose output a paced guest is otherwise
+// guaranteed. So no write passes the pacer until the replay is released; then
+// the guest has the render and every byte written after its capture, once,
+// and nothing fell back.
+func TestGuestPacerHoldsTheCommandWhileItsGuestIsReplayed(t *testing.T) {
+	e := newEmulatingPacer(t, time.Minute)
+	got := &recordingWriter{}
+	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
+	e.awaitStart(t)
+
+	done := goWrite(t, e.p, func() {
+		for _, s := range []string{"during-1", "during-2", "during-3"} {
+			_, _ = e.p.Write([]byte(s))
+		}
+	})
+	requireHeld(t, e.p, done)
+	require.Equal(t, ringBytes, string(e.passed.bytes()), "a write passed the pacer while its guest was being replayed")
+
+	close(e.r.release)
+	require.NoError(t, awaitErr(t, attached))
+	requireReturns(t, done, 2*time.Second)
+
+	flush(t, sink)
+	require.Equal(t, renderMark+ringBytes+"during-1during-2during-3", string(got.bytes()),
+		"the guest missed or repeated output written after its capture")
+	e.requireNoFallback(t)
+}
+
+// A guest attached and caught up paces, and a second guest being replayed
+// behind it holds nothing. It is a follower, and its join catches up on what
+// the command writes meanwhile; only the pacer's attach holds the command.
+func TestGuestPacerAFollowerBeingReplayedHoldsNothing(t *testing.T) {
+	e := newEmulatingPacer(t, time.Minute)
+	first := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	attachPaced(t, e.p, e.writers, first)
+	flush(t, first)
+
+	got := &recordingWriter{}
+	second := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	attached := e.join(t, t.Context(), second, time.Now().Add(time.Minute))
+	e.awaitStart(t)
+
+	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	requireReturns(t, done, 2*time.Second)
+	require.Zero(t, e.p.holds.Load(), "a guest being replayed behind the pacer held the command")
+
+	close(e.r.release)
+	require.NoError(t, awaitErr(t, attached))
+	flush(t, second)
+	require.Equal(t, renderMark+ringBytes+"during", string(got.bytes()),
+		"the follower missed or repeated output written while it was replayed")
+	e.requireNoFallback(t)
+}
+
+// A guest that leaves while it is replayed ends the hold it put on the
+// command: its join is refused with its context's error, its registration
+// goes with it, and the write held for it goes through.
+func TestGuestPacerAGuestThatLeavesWhileReplayedReleasesTheCommand(t *testing.T) {
+	e := newEmulatingPacer(t, time.Minute)
+	ctx, leave := context.WithCancel(t.Context())
+	defer leave()
+	sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	attached := e.join(t, ctx, sink, time.Now().Add(time.Minute))
+	e.awaitStart(t)
+
+	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	requireHeld(t, e.p, done)
+
+	leave()
+	require.ErrorIs(t, awaitErr(t, attached), context.Canceled)
+	requireReturns(t, done, 2*time.Second)
+	require.Zero(t, registered(e.p), "a guest that left while it was replayed is still registered")
+	e.requireNoFallback(t)
+}
+
+// However an attach ends, the hold it put on the command ends with it:
+// attached (by the replay, or by the raw ring it falls back to: both return
+// nil), refused (as after Shutdown), failed (as a sink the replay overflows),
+// or a panic. A hold that outlived its attach would leave the command waiting
+// on a guest with nothing coming. Only an attached guest stays registered.
+func TestGuestPacerEndsTheHoldHoweverTheAttachEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		end      func() error
+		attached bool
+	}{
+		{name: "attached", end: func() error { return nil }, attached: true},
+		{name: "refused", end: func() error { return uio.ErrClosed }},
+		{name: "failed", end: func() error { return uio.ErrOverflow }},
+		{name: "panicked", end: func() error { panic("the attach panics") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newTestPacer(t, time.Minute)
+			inside, finish, over := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(over)
+				// The test's own panic, which the attach must not swallow.
+				defer func() { _ = recover() }()
+				_ = p.attach(t.Context(), newFakePaced(0), func() error {
+					close(inside)
+					<-finish
+					return tc.end()
+				})
+			}()
+			t.Cleanup(func() {
+				select {
+				case <-finish:
+				default:
+					close(finish)
+				}
+				<-over
+			})
+			awaitClosed(t, inside, "the attach never ran")
+
+			done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+			requireHeld(t, p, done)
+			close(finish)
+			awaitClosed(t, over, "the attach never returned")
+			requireReturns(t, done, 2*time.Second)
+			want := 0
+			if tc.attached {
+				want = 1
+			}
+			require.Equal(t, want, registered(p))
+		})
+	}
+}
+
+// The stall deadline judges a pacing guest by what it delivers, and a guest
+// still being attached has been handed nothing to deliver. Held for its
+// attach through five stall deadlines, it is never judged stalled, and once
+// attached and caught up the write goes.
+func TestGuestPacerNeverJudgesAGuestStalledWhileItIsAttached(t *testing.T) {
+	const stall = 20 * time.Millisecond
+	p, _ := newTestPacer(t, stall)
+	fake := newFakePaced(0)
+	inside, finish := make(chan struct{}), make(chan struct{})
+	attached := make(chan error, 1)
+	go func() {
+		attached <- p.attach(t.Context(), fake, func() error {
+			close(inside)
+			<-finish
+			return nil
+		})
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-finish:
+		default:
+			close(finish)
+		}
+	})
+	awaitClosed(t, inside, "the attach never ran")
+
+	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+	requireHeld(t, p, done)
+	// Not ordering anything: how long the write is held is the quantity.
+	time.Sleep(5 * stall)
+	require.Zero(t, fake.refusals(), "a guest being attached was judged stalled")
+	requireHeld(t, p, done)
+
+	close(finish)
+	require.NoError(t, awaitErr(t, attached))
+	requireReturns(t, done, 2*time.Second)
+}
+
+// The hold can't deadlock the join it waits for, because the handoff waits
+// for nothing the command has to write. With the command held throughout, a
+// resize committed while the guest's screen is being reconstructed is caught
+// up on, and one whose outcome comes after the reconstruction is released is
+// either waited for or caught up on, depending on which comes first: the pty
+// reports an outcome as its ioctl returns, writing nothing. The join's
+// deadline is a minute off, so a handoff that needed the command to write
+// would hang the attach past the bounded wait below rather than fall back.
+func TestGuestPacerHoldNeedsNoWriteToEnd(t *testing.T) {
+	e := newEmulatingPacer(t, time.Minute)
+	sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
+	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
+	e.awaitStart(t)
+	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	requireHeld(t, e.p, done)
+	require.Equal(t, ringBytes, string(e.passed.bytes()), "a write passed the pacer while its guest was being replayed")
+
+	committed, unresolved := termsize.Size{Cols: 45, Rows: 24}, termsize.Size{Cols: 40, Rows: 20}
+	e.writers.ResizeEnd(e.writers.ResizeBegin(committed), true)
+	seq := e.writers.ResizeBegin(unresolved)
+	close(e.r.release)
+	e.writers.ResizeEnd(seq, true)
+
+	require.NoError(t, awaitErr(t, attached), "the attach waited on the command it holds")
+	requireReturns(t, done, 2*time.Second)
+	var fed []termsize.Size
+	for _, ev := range e.r.fedEvents() {
+		fed = append(fed, ev.Size)
+	}
+	require.Equal(t, []termsize.Size{committed, unresolved}, fed, "the join didn't catch up on the resizes")
+	e.requireNoFallback(t)
+}
+
+// One handoff does wait on the command: an emulation that can't pass a resize
+// until a sequence the ring ends inside is complete, which takes more output.
+// Held, that never comes, and the join falls back to the raw ring at its
+// deadline, which ends the hold. So the join's deadline bounds any hold an
+// attach puts on the command.
+func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
+	e := newEmulatingPacer(t, time.Minute)
+	e.r.stuck = true
+	got := &recordingWriter{}
+	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	deadline := time.Now().Add(300 * time.Millisecond)
+	attached := e.join(t, t.Context(), sink, deadline)
+	e.awaitStart(t)
+	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	requireHeld(t, e.p, done)
+
+	// The guest's own resize, which the emulation can't pass without more
+	// output.
+	e.writers.ResizeEnd(e.writers.ResizeBegin(termsize.Size{Cols: 45, Rows: 24}), true)
+	close(e.r.release)
+
+	requireReturns(t, done, time.Until(deadline)+2*time.Second)
+	ended := time.Now()
+	require.False(t, ended.Before(deadline), "the hold ended before the join's deadline, so the join never needed output")
+	require.Less(t, ended.Sub(deadline), 50*time.Millisecond, "the hold outlived the join's deadline")
+	require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
+	select {
+	case err := <-e.fellBack:
+		require.ErrorIs(t, err, uio.ErrReplayDeadline)
+	default:
+		t.Fatal("the join didn't fall back")
+	}
+	flush(t, sink)
+	require.NotContains(t, string(got.bytes()), renderMark, "a join that fell back was handed a render")
+	require.Contains(t, string(got.bytes()), ringBytes+"during", "the guest missed output")
 }
