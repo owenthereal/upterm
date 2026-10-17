@@ -78,11 +78,14 @@ var (
 // emulation: an unresolved resize, which comes when the pty's ioctl returns;
 // output that ends the character or the sequence an offered resize fell
 // inside, which the emulation can't pass the resize before; or the permit,
-// which another join's emulation holds.
+// which another join's emulation holds. A deadline that passes after the
+// permit came but before the emulation starts says only that, since the
+// permit may have come at once.
 var (
 	errDeadlineAtAResize   = fmt.Errorf("%w waiting for a resize's outcome", ErrReplayDeadline)
 	errDeadlineInASequence = fmt.Errorf("%w waiting for the rest of a character or a sequence a resize fell inside", ErrReplayDeadline)
 	errDeadlineAtThePermit = fmt.Errorf("%w waiting for another join's emulation", ErrReplayDeadline)
+	errDeadlineBeforeStart = fmt.Errorf("%w before its emulation started", ErrReplayDeadline)
 )
 
 // errRenderTooLong keeps one delivery bounded in io itself, whatever the
@@ -247,8 +250,9 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 // has passed every resize it was offered (see rerender).
 func (j *join) start(c *Capture) {
 	if !time.Now().Before(j.deadline) {
-		// The permit came as the deadline passed.
-		j.err = errDeadlineAtThePermit
+		// The deadline passed between the capture and here, whichever way
+		// the permit came.
+		j.err = errDeadlineBeforeStart
 		return
 	}
 	j.err = guard(func() (err error) {
