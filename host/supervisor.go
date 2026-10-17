@@ -96,6 +96,11 @@ type supervisor struct {
 	// them.
 	events     []TunnelEvent
 	delivering bool
+	// routeMoved says a return that moved the route was replaced before it
+	// was delivered, and no return since has carried that on. The next one
+	// that goes out says the route moved: guests were not told at the time,
+	// and the connect string they have is the old one.
+	routeMoved bool
 }
 
 // run owns first and every tunnel after it, and returns only when ctx ends.
@@ -297,11 +302,23 @@ func (s *supervisor) install(t tunnel, resp *server.CreateSessionResponse, gener
 // the latest of those is kept: a newer event replaces one still waiting, since
 // a state already superseded isn't worth announcing late, and the latest says
 // where things stand. The event being delivered is not affected.
+//
+// What a replaced return said about the route is not lost with it: a return
+// that moved the connect string is remembered, and the next return to be kept
+// says so too, since it could not otherwise tell guests the command is the
+// same. The loss between two returns says nothing about the route.
 func (s *supervisor) report(e TunnelEvent) {
 	if s.onTunnel == nil {
 		return
 	}
 	s.mu.Lock()
+	if len(s.events) > 0 && s.events[0].Up && s.events[0].RouteChanged {
+		s.routeMoved = true
+	}
+	if e.Up {
+		e.RouteChanged = e.RouteChanged || s.routeMoved
+		s.routeMoved = false
+	}
 	s.events = append(s.events[:0], e)
 	start := !s.delivering
 	s.delivering = true

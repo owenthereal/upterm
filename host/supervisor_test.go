@@ -621,6 +621,62 @@ func TestSupervisorKeepsOnlyTheLatestEventWhileANotificationHangs(t *testing.T) 
 		"the one that was delivering, then the latest and nothing between")
 }
 
+// A return that was replaced while it waited may have been the one at which
+// the connect string moved. The return that is kept still says so: telling
+// guests they can join again with the same command, when the first return
+// changed it, would state what upterm has not confirmed. Once a return has
+// carried it the flag is spent, and a later return is told as it happened.
+func TestSupervisorKeepsAMovedRouteOfAReplacedReturn(t *testing.T) {
+	lost := TunnelEvent{Up: false, CanReconnect: true}
+	for _, tc := range []struct {
+		name     string
+		reported []TunnelEvent
+		want     TunnelEvent
+	}{
+		{"a moved return, a loss, a return that did not move",
+			[]TunnelEvent{{Up: true, RouteChanged: true}, lost, {Up: true}}, TunnelEvent{Up: true, RouteChanged: true}},
+		{"a moved return replaced by a return that did not move",
+			[]TunnelEvent{{Up: true, RouteChanged: true}, {Up: true}}, TunnelEvent{Up: true, RouteChanged: true}},
+		{"returns that did not move",
+			[]TunnelEvent{{Up: true}, lost, {Up: true}}, TunnelEvent{Up: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSupervisorFixture(t, true)
+			stuck, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			t.Cleanup(func() { once.Do(func() { close(release) }) })
+			var events []TunnelEvent
+			f.onTunnel(func(e TunnelEvent) {
+				if len(events) == 0 {
+					close(stuck)
+					<-release
+				}
+				events = append(events, e)
+			})
+
+			f.sup.report(lost)
+			select {
+			case <-stuck:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the loss was never delivered")
+			}
+			for _, e := range tc.reported {
+				f.sup.report(e)
+			}
+			once.Do(func() { close(release) })
+			f.awaitTunnelEvents(t, 2)
+			f.awaitNoMoreTunnelEvents(t)
+			require.Equal(t, []TunnelEvent{lost, tc.want}, events)
+
+			// What the kept return carried is spent: the next is its own.
+			f.sup.report(TunnelEvent{Up: true})
+			f.awaitTunnelEvents(t, 3)
+			f.awaitNoMoreTunnelEvents(t)
+			require.Equal(t, TunnelEvent{Up: true}, events[2])
+		})
+	}
+}
+
 func TestSupervisorDropsTheSessionKeyAfterAuthRefused(t *testing.T) {
 	f := newSupervisorFixture(t, true)
 	f.sup.sessionKeyFirst = true
