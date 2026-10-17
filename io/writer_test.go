@@ -302,6 +302,29 @@ func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.
 	require.Equal(t, "\x1b(0"+plain, late.String())
 }
 
+// A cursor restore puts G0 back to what its save held, or to ASCII when
+// nothing was saved, and a joiner whose ring starts after the designation, the
+// save and the restore has only the snapshot to say which. Given the last
+// ESC ( X instead, it drew the ring's q's as line drawing where the session's
+// terminal printed letters, or the other way round.
+func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"a restore with nothing saved", "\x1b(0\x1b8", ""},
+		{"a restore of a save", "\x1b(0\x1b7\x1b(B\x1b8", "\x1b(0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(16)
+			writeString(w, tc.stream)
+			plain := strings.Repeat("q", 16)
+			writeString(w, plain)
+
+			late := bytes.NewBuffer(nil)
+			require.NoError(t, w.Append(late))
+			require.Equal(t, tc.want+plain, late.String())
+		})
+	}
+}
+
 // A write larger than the ring drops everything queued and its own leading
 // bytes. Both left the ring, and the queued bytes left first: handing them to
 // the tracker the other way round makes it believe the older sequence is the
