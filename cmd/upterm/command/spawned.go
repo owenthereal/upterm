@@ -163,25 +163,28 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		SessionCreated: func(sess *api.GetSessionResponse) api.Accept_Decision {
 			created = sess
 			displayErr = s.display(ctx, sess, s.name)
-			// The key hint is said only on the terminal the attach client is
-			// about to take.
-			handover := displayErr == nil && !s.detach && s.keyHint != ""
+			// The attach client is about to take the terminal, and stderr is
+			// that terminal: hintOut, where whoever is at the keyboard is
+			// told things, is stderr exactly when stderr is a terminal.
+			stderrHandedOver := displayErr == nil && !s.detach && s.attachClient != nil && s.hintOut == s.stderr
 			if displayErr == nil && sess.GetOpen() {
 				// On stderr whatever the display was, the banner or nothing at
 				// all: stdout may be the JSON a script is reading.
 				//
-				// When stderr is that terminal, which is where the hint goes
-				// when it is one, the warning is written as the hint is, and
-				// for the same reason. Anywhere else stderr may be a pipe
-				// nobody drains, and nothing takes the terminal after it, so
-				// the write keeps its bound rather than hold the session.
-				if handover && s.hintOut == s.stderr {
+				// On a stderr about to be handed over, the warning is written
+				// as the key hint is, and for the same reason, whether or not
+				// there is a hint to say: with --escape-char none there is
+				// none, and the client takes the terminal all the same.
+				// Anywhere else stderr may be a pipe nobody drains, and nothing
+				// takes the terminal after it, so the write keeps its bound
+				// rather than hold the session.
+				if stderrHandedOver {
 					_, _ = io.WriteString(s.stderr, openSessionWarning+"\n")
 				} else {
 					logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
 				}
 			}
-			if handover {
+			if displayErr == nil && !s.detach && s.keyHint != "" {
 				// Last, so it is the line nearest the session it is about,
 				// and said once: the attached terminal is the session's from
 				// here, and nothing more is written into it unasked.

@@ -587,21 +587,25 @@ func (s *stoppedTerminal) String() string {
 	return s.buf.String()
 }
 
-// On a terminal the key hint, and the open-session warning ahead of it, are
-// written as the banner is, synchronously, and so before the attach client
-// takes the terminal. A write given up on at a bound would go on in the
-// background and land once a stopped terminal resumed, amid the session's
-// output and outside everything that keeps that output in turn.
+// On the terminal the attach client is about to take, the key hint, and the
+// open-session warning ahead of it, are written as the banner is,
+// synchronously, and so before the client takes it. A write given up on at a
+// bound would go on in the background and land once a stopped terminal
+// resumed, amid the session's output and outside everything that keeps that
+// output in turn. The warning is written so with no key hint too, as with
+// --escape-char none: the client takes the terminal all the same.
 func TestTheLinesBeforeTheSessionAreWrittenBeforeTheTerminalIsHandedOver(t *testing.T) {
 	hint := keyHint('~', false)
 	for _, tc := range []struct {
 		name string
 		open bool
+		hint string
 		stop string // the line the terminal stops at
 		want string
 	}{
-		{"the key hint", false, hint, hint + "\n"},
-		{"the open-session warning", true, openSessionWarning, openSessionWarning + "\n" + hint + "\n"},
+		{"the key hint", false, hint, hint, hint + "\n"},
+		{"the open-session warning", true, hint, openSessionWarning, openSessionWarning + "\n" + hint + "\n"},
+		{"the open-session warning with no key hint", true, "", openSessionWarning, openSessionWarning + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spawn, d := newScriptedDaemon(t)
@@ -620,7 +624,7 @@ func TestTheLinesBeforeTheSessionAreWrittenBeforeTheTerminalIsHandedOver(t *test
 			}, &stdout, &stderr)
 			// The terminal is stderr, which is where the hint goes when it is
 			// one.
-			s.stderr, s.keyHint, s.hintOut = terminal, hint, terminal
+			s.stderr, s.keyHint, s.hintOut = terminal, tc.hint, terminal
 			d.startup(t, "s")
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -652,37 +656,40 @@ func TestTheLinesBeforeTheSessionAreWrittenBeforeTheTerminalIsHandedOver(t *test
 	}
 }
 
-// Where the terminal isn't handed over from here, the open-session warning
-// keeps its bound: stderr may be a pipe nobody drains there, and a startup
-// held on it would hold the session. So for a detached session, one that says
-// no key hint, and one whose hint goes to stdout because stderr isn't the
-// terminal.
+// Where no terminal is handed over from here, or stderr isn't the one that
+// is, the open-session warning keeps its bound: stderr may be a pipe nobody
+// drains, and a startup held on it would hold the session. So for a detached
+// session, even with stderr a terminal, and for one whose stderr isn't the
+// terminal, with its key hint on stdout or with none.
 func TestTheOpenSessionWarningIsBoundedWhereTheTerminalIsNotHandedOver(t *testing.T) {
 	hint := keyHint('~', false)
 	for _, tc := range []struct {
-		name   string
-		detach bool
-		hint   string
+		name       string
+		detach     bool
+		onTerminal bool // stderr is the terminal, where the hint would go
+		hint       string
 	}{
-		{"detached", true, hint},
-		{"no key hint", false, ""},
-		{"the hint on stdout", false, hint},
+		{"detached", true, true, hint},
+		{"stderr isn't the terminal", false, false, hint},
+		{"stderr isn't the terminal, and no key hint", false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spawn, d := newScriptedDaemon(t)
 			d.open = true
 			attached := make(chan string, 1)
 			result := make(chan attach.Result, 1)
-			var client clientFunc
-			if !tc.detach {
-				client = fakeClient(attached, result)
-			}
+			// A client even when detached, which never starts one: it is the
+			// detach that says no terminal is handed over.
+			client := fakeClient(attached, result)
 			stopped := newStoppedTerminal(openSessionWarning)
 			t.Cleanup(stopped.Resume)
 			var stdout, stderr, hintOut bytes.Buffer
 			s := newSession(t, spawn, client, &stdout, &stderr)
 			s.detach = tc.detach
 			s.stderr, s.keyHint, s.hintOut = stopped, tc.hint, &hintOut
+			if tc.onTerminal {
+				s.hintOut = stopped
+			}
 			dec := d.startup(t, "s")
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -706,7 +713,11 @@ func TestTheOpenSessionWarningIsBoundedWhereTheTerminalIsNotHandedOver(t *testin
 			case <-time.After(5 * time.Second):
 				t.Fatal("the session was held on a stopped stderr")
 			}
-			require.Equal(t, tc.hint != "" && !tc.detach, strings.Contains(hintOut.String(), hint))
+			said := hintOut.String()
+			if tc.onTerminal {
+				said = stopped.String()
+			}
+			require.Equal(t, tc.hint != "" && !tc.detach, strings.Contains(said, hint))
 		})
 	}
 }
