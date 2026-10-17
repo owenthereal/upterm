@@ -1388,15 +1388,23 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 	}
 	for _, ignored := range []string{"\x1b[10;11r", "\x1b[10r"} {
 		t.Run(fmt.Sprintf("%q", ignored), func(t *testing.T) {
-			// The output starts inside the region, so every row it reaches is
-			// one the ring draws: the rows outside it stay blank, as a row
-			// drawn before the ring's first byte is unknown to a joiner.
+			// The session's output starts inside the region, so it draws
+			// nothing outside it. The joiner's emulation starts from the
+			// snapshot, whose DECSTBM homes the cursor to the top row, outside
+			// the region. So the ring has to start at a line's LF, which moves
+			// the cursor into the region before anything prints there: a ring
+			// that started inside a line would print the rest of it on the
+			// top row, where the session's terminal printed nothing, since
+			// what a terminal held before the ring's first byte is unknown to
+			// a joiner. Where the ring starts follows from the output's
+			// length, so it is checked.
 			head := "\x1b[2;5r" + ignored + "\x1b[2H"
 			stream := []byte(head + out.String())
 			capt := &capturing{r: New()}
 			joined, fellBack := fanOut(t, capt, stream, []uio.SizeEvent{event(1, 0, 80, 8)}, uio.DefaultReplayBytes)
 			require.NoError(t, fellBack)
 			require.Greater(t, capt.c.Start, uint64(len(head)), "the DECSTBMs are still in the ring")
+			require.Equal(t, byte('\n'), stream[capt.c.Start], "the ring starts inside a line")
 
 			region := uv.Rect(0, 1, 80, 4)
 			ref := vt.NewEmulator(80, 8)
