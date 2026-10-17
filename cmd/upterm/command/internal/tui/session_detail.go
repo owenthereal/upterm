@@ -73,8 +73,16 @@ type SessionDetail struct {
 	AuthorizedKeys   string
 	ConnectedClients []string
 	// Open is true when anyone with the session ID can join and nobody was
-	// asked: no allowlist, and started with --accept.
+	// asked: no allowlist, and started with --accept. It is what the JSON's
+	// open field reports; the view reads Access, which doesn't depend on
+	// whether anyone was asked.
 	Open bool
+
+	// Access is AccessAnyone (no allowlist) or AccessAllowlist; "" when
+	// unknown.
+	Access string
+	// Guests is what guests may do; nil when the daemon doesn't report it.
+	Guests *GuestPermissions
 
 	// Reconnect is "supported" or "unsupported" once the first connection has
 	// shown whether the relay lets a dropped session come back under the same
@@ -88,6 +96,60 @@ type SessionDetail struct {
 	TunnelReason  string
 	TunnelLostAt  time.Time
 	NextAttemptAt time.Time
+}
+
+// The values of SessionDetail.Access.
+const (
+	AccessAnyone    = "anyone"
+	AccessAllowlist = "allowlist"
+)
+
+// The values of GuestPermissions.FileTransfer, as the admin API reports them.
+const (
+	FileTransferOff       = "off"
+	FileTransferDownloads = "downloads"
+	FileTransferAll       = "all"
+)
+
+// GuestPermissions is what the host lets guests do, as the daemon reports it.
+type GuestPermissions struct {
+	ReadOnly         bool
+	FileTransfer     string // FileTransferOff, FileTransferDownloads or FileTransferAll
+	ApprovalRequired bool   // false whenever FileTransfer is FileTransferOff
+	LocalForwarding  bool
+}
+
+// guestsRow is the Guests row's value: whether guests can type, what they may
+// do with files, and whether they may forward ports, in that order. The last
+// clause is always there, read-only or not: forwarding is a setting of its own
+// that the daemon reports, so a watch-only row says it too rather than leaving
+// a guest to infer it.
+func guestsRow(p GuestPermissions) string {
+	typing := "can type"
+	if p.ReadOnly {
+		typing = "watch only"
+	}
+
+	approval := "allowed without asking"
+	if p.ApprovalRequired {
+		approval = "approval required"
+	}
+	var files string
+	switch p.FileTransfer {
+	case FileTransferOff:
+		files = "files: off"
+	case FileTransferDownloads:
+		files = "files: downloads only, " + approval
+	default:
+		files = "files: " + approval
+	}
+
+	forwarding := "no port forwarding"
+	if p.LocalForwarding {
+		forwarding = "port forwarding allowed"
+	}
+
+	return strings.Join([]string{typing, files, forwarding}, "; ")
 }
 
 // now is the clock the status text compares a next attempt against. A variable
@@ -230,6 +292,20 @@ func WrapProse(text string, width int) []string {
 	return wordWrapLines(text, width)
 }
 
+// writeWhole writes text indented, with no line of it cut. It is for what a
+// person copies out of the view, a command or a connected client's line: a
+// newline in the middle of a command would paste as two commands. A terminal
+// narrower than the line soft-wraps it, which a copy still reads as one line.
+// An embedded newline still starts a new line. Empty text writes nothing.
+func writeWhole(b *strings.Builder, indent int, style lipgloss.Style, text string) {
+	if text == "" {
+		return
+	}
+	for _, line := range strings.Split(text, "\n") {
+		b.WriteString(strings.Repeat(" ", indent) + style.Render(line) + "\n")
+	}
+}
+
 // renderWrappedRow renders a label: value row with wrapping, continuation lines indented
 func renderWrappedRow(b *strings.Builder, label string, value string, labelWidth int, valueWidth int, style lipgloss.Style) {
 	renderRow(b, label, wrapLines(value, valueWidth), labelWidth, style)
@@ -305,21 +381,25 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 		renderWrappedRow(&b, "Force Command:", detail.ForceCommand, labelWidth, valueWidth, ValueStyle)
 	}
 	if detail.Host != "" {
-		renderWrappedRow(&b, "Host:", detail.Host, labelWidth, valueWidth, ValueStyle)
+		renderWrappedRow(&b, "Relay:", detail.Host, labelWidth, valueWidth, ValueStyle)
 	}
 	if detail.AuthorizedKeys != "" {
 		renderWrappedRow(&b, "Authorized Keys:", detail.AuthorizedKeys, labelWidth, valueWidth, ValueStyle)
 	}
 	// Where the allowlist would be: its absence is what makes the session
-	// open, and nothing else on the screen says so.
-	if detail.Open {
+	// open, and nothing else on the screen says so. Whether the host was asked
+	// about the start doesn't change who can join, so it doesn't gate the row.
+	if detail.Access == AccessAnyone {
 		renderProseRow(&b, "Access:", "open: anyone with the session ID can join", labelWidth, valueWidth, ValueStyle)
 	}
+	// What those who can join may do. A daemon that doesn't report it has no
+	// row rather than one that guesses.
+	if detail.Guests != nil {
+		renderProseRow(&b, "Guests:", guestsRow(*detail.Guests), labelWidth, valueWidth, ValueStyle)
+	}
 
-	// Commands section - each command on its own line for readability
-	// Use wrapping to prevent truncation on narrow terminals
-	cmdIndent := 4
-	cmdWidth := max(width-cmdIndent-2, 20)
+	// Commands section - each command on its own line for readability.
+	const cmdIndent = 4
 
 	writeCommand := func(label, command string) {
 		// Every block is gated on the command it would print. Only a session
@@ -329,9 +409,7 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 			return
 		}
 		b.WriteString(LabelStyle.Render(label) + "\n")
-		for _, line := range wrapLines(command, cmdWidth) {
-			b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
-		}
+		writeWhole(&b, cmdIndent, CommandStyle, command)
 	}
 
 	// SFTP and SCP commands (only shown if SFTP is enabled)
@@ -349,25 +427,17 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 		if detail.SCPUpload != "" || detail.SCPDownload != "" {
 			b.WriteString(LabelStyle.Render("➤ SCP:") + "\n")
 			for _, cmd := range []string{detail.SCPUpload, detail.SCPDownload} {
-				for _, line := range wrapLines(cmd, cmdWidth) {
-					b.WriteString(strings.Repeat(" ", cmdIndent) + CommandStyle.Render(line) + "\n")
-				}
+				writeWhole(&b, cmdIndent, CommandStyle, cmd)
 			}
 		}
 	}
 
-	// Connected clients
+	// Connected clients, one per line.
 	if len(detail.ConnectedClients) > 0 {
 		b.WriteString("\n")
-		b.WriteString(LabelStyle.Render("Connected Clients:") + "\n")
+		b.WriteString(LabelStyle.Render("Connected:") + "\n")
 		for _, client := range detail.ConnectedClients {
-			for i, line := range wrapLines(client, width-4) {
-				indent := 2
-				if i > 0 {
-					indent = 4
-				}
-				b.WriteString(strings.Repeat(" ", indent) + ValueStyle.Render(line) + "\n")
-			}
+			writeWhole(&b, 2, ValueStyle, client)
 		}
 	}
 
