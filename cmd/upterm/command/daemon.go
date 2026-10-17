@@ -156,6 +156,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// host_keys` in startup.proto, and an older parent reads the list.
 	hostKeys := []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())), "\n")}
 
+	// The daemon is the one that knows what became of the session, so it is
+	// the one that tells the operator, by the session's name.
+	guests := guestNotifier(name)
+
 	var sessionID string
 	// A variable rather than a bare return, so the ready callback can ask the
 	// Host it belongs to for its join state.
@@ -201,8 +205,9 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 			}
 			return nil
 		},
-		ClientJoinedCallback:    clientJoinedCallback,
-		ClientLeftCallback:      clientLeftCallback,
+		ClientJoinedCallback:    guests.joined,
+		ClientLeftCallback:      guests.left,
+		TunnelCallback:          tunnelNotifier(name),
 		Logger:                  logger,
 		ReadOnly:                flagReadOnly,
 		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,

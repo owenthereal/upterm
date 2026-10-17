@@ -730,28 +730,58 @@ func mapUserAction(_ *cobra.Command, err error) error {
 }
 
 // notify raises a desktop notification. A var so a test can see what the
-// callbacks below decided to send, rather than pop a real notification on
+// notifiers below decided to send, rather than pop a real notification on
 // whoever is running the suite.
 var notify = beeep.Notify
 
-func clientJoinedCallback(c *api.Client) {
+// notification is the title and body of one desktop notification.
+type notification struct{ Title, Body string }
+
+// guestNotifier raises the desktop notifications for guests joining and
+// leaving the session it names. An operator may have several sessions
+// running, so each notification says which one it is about.
+type guestNotifier string
+
+func (n guestNotifier) joined(c *api.Client) {
 	// The host's own terminal is a client of the session now, and notifying
 	// the operator that they have joined their own session is noise.
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("Upterm Client Joined", notifyBody(c), icon.Upterm)
+	_ = notify("A guest joined "+string(n), clientDesc(c), icon.Upterm)
 }
 
-func clientLeftCallback(c *api.Client) {
+func (n guestNotifier) left(c *api.Client) {
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("Upterm Client Left", notifyBody(c), icon.Upterm)
+	_ = notify("A guest left "+string(n), clientDesc(c), icon.Upterm)
 }
 
-func notifyBody(c *api.Client) string {
-	return clientDesc(c)
+// tunnelNotification is the notification for a change in the session's
+// connection to the relay. Each text claims only what the event confirms:
+// that upterm is retrying, only when the relay can reconnect, and that the
+// connect string changed, only when the session came back at another node.
+func tunnelNotification(name string, e host.TunnelEvent) notification {
+	switch {
+	case !e.Up && e.CanReconnect:
+		return notification{name + " lost the relay", "Guests can't join while the relay is disconnected; upterm is retrying."}
+	case !e.Up:
+		return notification{name + " lost the relay", "This relay can't reconnect it; guests can't join until you restart the session."}
+	case e.RouteChanged:
+		return notification{name + " is back on the relay", "Its connect string changed; upterm session info " + name + " shows the new one."}
+	default:
+		return notification{name + " is back on the relay", "Guests can join again with the same command."}
+	}
+}
+
+// tunnelNotifier raises the notification for each change in the connection
+// to the relay of the session name.
+func tunnelNotifier(name string) func(host.TunnelEvent) {
+	return func(e host.TunnelEvent) {
+		n := tunnelNotification(name, e)
+		_ = notify(n.Title, n.Body, icon.Upterm)
+	}
 }
 
 // bannerFlushTimeout bounds how long startup waits for the banner to reach a

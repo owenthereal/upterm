@@ -648,6 +648,56 @@ func TestReconnectComesBackUnderTheSameID(t *testing.T) {
 	}
 }
 
+// receiveTunnelEvent is the next event a host's TunnelCallback was given.
+func receiveTunnelEvent(t *testing.T, events <-chan TunnelEvent) TunnelEvent {
+	t.Helper()
+	select {
+	case e := <-events:
+		return e
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tunnel event arrived")
+		return TunnelEvent{}
+	}
+}
+
+// The embedder hears of the loss while the gap is still open, once, and of the
+// return when the host is registered again, and the return says the connect
+// string is the one guests already have.
+func TestHostTellsItsCallbackTheTunnelIsLostAndBack(t *testing.T) {
+	events := make(chan TunnelEvent, 8)
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		f.h.TunnelCallback = func(e TunnelEvent) { events <- e }
+	})
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+
+	f.fwd.Redirect(closedAddr(t)) // hold the gap open
+	f.fwd.Cut()
+	require.Equal(t, TunnelEvent{Up: false, CanReconnect: true}, receiveTunnelEvent(t, events))
+	f.awaitStatus(t, sessiondir.StatusReconnecting, 5*time.Second)
+	require.Empty(t, events, "one loss for the outage, however many attempts fail")
+
+	f.fwd.Redirect(f.relay.addr("ssh"))
+	require.Equal(t, TunnelEvent{Up: true, RouteChanged: false}, receiveTunnelEvent(t, events))
+}
+
+// On a relay that can't take the session back, the loss is final: the
+// embedder is told so, and is never told the tunnel is back.
+func TestHostTellsItsCallbackAFinalLoss(t *testing.T) {
+	key, err := NewHostKey()
+	require.NoError(t, err)
+	fake := fakerelay.Start(t, key, fakerelay.RandomID)
+	events := make(chan TunnelEvent, 8)
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		f.fwd.Redirect(fake.Addr)
+		f.h.TunnelCallback = func(e TunnelEvent) { events <- e }
+	})
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+
+	f.fwd.Cut()
+	require.Equal(t, TunnelEvent{Up: false, CanReconnect: false}, receiveTunnelEvent(t, events))
+	require.Never(t, func() bool { return len(events) > 0 }, time.Second, 10*time.Millisecond)
+}
+
 // A relay gone silent, with both ends of the connection still open, is
 // noticed by the tunnel's own pings, at Reconnect's pace: PingInterval of
 // silence, and PingBound for an answer. KeepAliveDuration paces the guests'

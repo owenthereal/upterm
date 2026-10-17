@@ -148,6 +148,11 @@ type Host struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	// TunnelCallback is told when the tunnel to the relay is lost, and when
+	// it is back. It is called on a goroutine of the host's own, one event at
+	// a time and in the order they happened, so a callback that takes a while
+	// delays only the events behind it, not the redial.
+	TunnelCallback func(TunnelEvent)
 	// HideClientIP keeps a guest's address out of its forced command's
 	// SSH_CONNECTION and SSH_CLIENT.
 	HideClientIP bool
@@ -1038,6 +1043,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		supported:       rt.ReconnectSupported(),
 		sessionKeyFirst: rt.SessionKeyRedial() && !c.IdentitiesOnly,
 		logger:          logger,
+		onTunnel:        c.TunnelCallback,
 	}
 
 	var g run.Group

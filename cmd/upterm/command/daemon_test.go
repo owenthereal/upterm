@@ -425,6 +425,32 @@ func TestBuildDaemonHostRefusesAnEmptyName(t *testing.T) {
 	require.ErrorContains(t, err, "without a session name")
 }
 
+// TestBuildDaemonHostNotifiesByName pins that the daemon is what tells the
+// operator what became of the session, and says which session it was: the
+// guests' arrivals and departures, and the loss of the relay and its return.
+func TestBuildDaemonHostNotifiesByName(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+	var titles []string
+	swapNotify(t, func(title, _ string, _ any) error { titles = append(titles, title); return nil })
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	child := bootstrap.NewChild(a, nil)
+	t.Cleanup(func() { _ = child.Close() })
+	h, err := buildDaemonHost(context.Background(), "build", testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+
+	guest := &api.Client{Kind: api.Client_GUEST}
+	h.ClientJoinedCallback(guest)
+	h.ClientLeftCallback(guest)
+	h.TunnelCallback(host.TunnelEvent{Up: false, CanReconnect: true})
+	h.TunnelCallback(host.TunnelEvent{Up: true})
+	require.Equal(t, []string{
+		"A guest joined build", "A guest left build",
+		"build lost the relay", "build is back on the relay",
+	}, titles)
+}
+
 // TestBuildDaemonHostHidesClientIPs pins that --hide-client-ip reaches the
 // session, which keeps a guest's address out of its forced command's
 // environment as well as out of what upterm prints.
