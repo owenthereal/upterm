@@ -432,6 +432,8 @@ func TestSpawnedSessionDetachSaysWhatIsWrongWhenNotReady(t *testing.T) {
 	}{
 		{"the record says why", true, sessiondir.TunnelReasonReconnectUnsupported,
 			"Session s is running in the background. " + hint + " Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"a hint that starts with the product's name keeps it lowercase", true, sessiondir.TunnelReasonNetwork,
+			"Session s is running in the background. upterm can't reach the relay; it keeps retrying. Attach with upterm attach s; stop it with upterm session stop s.\n"},
 		{"the record doesn't say", true, "",
 			"Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n"},
 		{"the record is another launch's", false, sessiondir.TunnelReasonReconnectUnsupported,

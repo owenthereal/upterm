@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -483,9 +484,11 @@ func recordedStatusHint(ctx context.Context, name, launchID string) string {
 
 // capitalized is s with its first letter in upper case. The view's hints are
 // written to follow a "Hint:" label, so they begin in lower case, and
-// --detach's line puts one after a full stop instead.
+// --detach's line puts one after a full stop instead. A hint that begins with
+// the product's name keeps it as it is: upterm is written in lower case
+// wherever it stands.
 func capitalized(s string) string {
-	if s == "" {
+	if s == "" || strings.HasPrefix(s, "upterm") {
 		return s
 	}
 	r, size := utf8.DecodeRuneInString(s)
