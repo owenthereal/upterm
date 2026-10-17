@@ -121,7 +121,8 @@ func Test_Host_StopHangsUpTheShellsJobs(t *testing.T) {
 	started := time.Now()
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(outcomeTimeout):
 		t.Fatal("host did not return after cancellation")
 	}

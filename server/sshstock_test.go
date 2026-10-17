@@ -63,7 +63,8 @@ func stockTestProxy(t *testing.T, timeout time.Duration, dialer connDialer, opti
 	t.Cleanup(func() {
 		_ = proxy.Shutdown()
 		select {
-		case <-done:
+		case err := <-done:
+			require.True(t, isRequestedStop(err), "Serve after Shutdown must report the stop it was asked for, got %v", err)
 		case <-time.After(time.Second):
 			t.Error("proxy did not stop")
 		}
@@ -651,7 +652,8 @@ func TestStockSSHUpstreamStagesAreBounded(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- client.Wait() }()
 			select {
-			case <-done:
+			case err := <-done:
+				require.ErrorIs(t, err, io.EOF, "the proxy closes the connection; it does not reset it")
 			case <-time.After(2 * time.Second):
 				t.Fatal("upstream establishment or error delivery exceeded budget")
 			}

@@ -60,7 +60,8 @@ func TestStartSSHProxyProtocolOptional(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			require.NoError(t, err, "a server told to stop reports a clean stop")
 		case <-time.After(5 * time.Second):
 			t.Error("server did not stop")
 		}

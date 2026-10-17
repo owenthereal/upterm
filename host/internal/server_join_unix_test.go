@@ -829,7 +829,7 @@ func (r *joinRig) holdTheGate(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		close(release)
-		<-attached
+		require.ErrorIs(t, <-attached, errNoReplay, "the attach ends with what its append returned")
 		_ = holder.Close()
 	})
 	select {

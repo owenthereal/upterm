@@ -220,12 +220,13 @@ func TestAdminShutdownBoundsPendingRPC(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		// Release the held stream before reporting a regression.
 		cancel()
-		<-done
-		t.Fatal("Shutdown ignored its context while a real RPC was pending")
+		err := <-done
+		t.Fatalf("Shutdown ignored its context while a real RPC was pending (it then returned %v)", err)
 	}
 	require.Error(t, stream.RecvMsg(&api.GetSessionResponse{}), "forced shutdown closes the accepted stream")
 	select {
-	case <-served:
+	case err := <-served:
+		require.NoError(t, err, "Serve reports a stop Shutdown asked for as nil")
 	case <-time.After(time.Second):
 		t.Fatal("Serve did not stop")
 	}
@@ -263,7 +264,8 @@ func TestAdminShutdownBoundsBlockedHandler(t *testing.T) {
 				defer cancel()
 				_ = s.Shutdown(ctx)
 				select {
-				case <-served:
+				case err := <-served:
+					require.NoError(t, err, "Serve reports a stop Shutdown asked for as nil")
 				case <-time.After(time.Second):
 					t.Error("Serve did not return after handler release")
 				}
@@ -287,7 +289,8 @@ func TestAdminShutdownBoundsBlockedHandler(t *testing.T) {
 			if closeClient {
 				require.NoError(t, conn.Close())
 				select {
-				case <-rpcDone:
+				case err := <-rpcDone:
+					require.Error(t, err, "closing the client must fail the RPC it left in flight")
 				case <-rpcCtx.Done():
 					t.Fatal("client close did not end RPC")
 				}
