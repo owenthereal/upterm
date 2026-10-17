@@ -91,8 +91,9 @@ func (r *renderer) draw() {
 		_ = enc.put(crlf)
 	}
 	r.screen(t.MainScreen())
-	// The hidden alternate screen's trip uses the main screen's slot, so it
-	// comes before that slot is set.
+	// The hidden alternate screen's trip saves the cursor in the main
+	// screen's slot and restores it from there, so it comes before that slot
+	// is set.
 	if !t.IsAltScreen() {
 		r.hiddenAlt()
 	}
@@ -129,27 +130,32 @@ func (r *renderer) screen(scr *vt.Screen) {
 // hiddenAlt rebuilds the alternate screen while the main screen shows, when
 // there is anything to rebuild: its cells, which a later ?47h shows as they
 // are; its saved slot; and its kitty keyboard stack, which a push changes only
-// while that screen shows. It goes there and back by ?47, which carries the
-// cursor both ways, inside an ESC 7 and ESC 8 of the main screen's slot that
-// put the pen, link and charsets back after it.
+// while that screen shows.
+//
+// It goes there and back by ?1049, not ?47: Alacritty and Windows Terminal
+// have ?1049 but ignore ?47, so on them a trip by ?47 would erase the main
+// screen just drawn and draw the alternate screen over it.
+// ?1049h saves the cursor in the main screen's slot, as ESC 7 does, then
+// switches and clears; ?1049l switches back and restores the cursor from that
+// slot, as ESC 8 does, so the pen, link and charsets after the trip are those
+// before it.
 func (r *renderer) hiddenAlt() {
 	enc, alt := r.enc, r.term.AltScreen()
 	if !hasCells(alt) && defaultSlot(alt.SavedCursor()) && r.parts.HiddenAltKeys == nil {
 		return
 	}
-	_ = enc.save(mainScreen)
-	_ = enc.put("\x1b[?47h")
-	// ?47h shows whatever the joiner's terminal last left there, and ED 2
-	// erases in the pen's background.
+	// ?1049h clears what the joiner's terminal last left there, which xterm
+	// does in the pen's background, as ED 2 does, so the pen goes to the
+	// default first. The clear then leaves the blank screen the rows are
+	// drawn on, and no ED 2 is needed after it.
 	_ = enc.penTo(uv.Style{})
-	_ = enc.put("\x1b[2J")
+	_ = enc.saveBy("\x1b[?1049h", mainScreen)
 	r.screen(alt)
 	if !defaultSlot(alt.SavedCursor()) {
 		r.slot(alt, altScreen)
 	}
 	_ = enc.bytes(r.parts.HiddenAltKeys)
-	_ = enc.put("\x1b[?47l")
-	_ = enc.restore(mainScreen)
+	_ = enc.restoreBy("\x1b[?1049l", mainScreen)
 }
 
 // slot sets the saved slot of scr, the screen showing, to what a DECRC there

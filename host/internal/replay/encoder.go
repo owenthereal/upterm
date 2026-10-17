@@ -176,7 +176,13 @@ func (e *encoder) saveBy(seq string, screen int) error {
 // restore writes ESC 8, setting the model back from the slot of screen, the
 // one showing.
 func (e *encoder) restore(screen int) error {
-	if err := e.put("\x1b8"); err != nil {
+	return e.restoreBy("\x1b8", screen)
+}
+
+// restoreBy writes seq, a sequence that restores the cursor from screen's
+// slot as DECRC does, and sets the model back from there.
+func (e *encoder) restoreBy(seq string, screen int) error {
+	if err := e.put(seq); err != nil {
 		return err
 	}
 	s := e.slot[screen]

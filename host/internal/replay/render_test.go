@@ -246,7 +246,61 @@ func TestReplayReconstructsTheHiddenAlternateScreen(t *testing.T) {
 	t.Run("its kitty stack", func(t *testing.T) {
 		render, err := renderAt(t, 80, 24, "main\r\n\x1b[?47h\x1b[>1u\x1b[?47l")
 		require.NoError(t, err)
-		require.Regexp(t, regexp.MustCompile(`\x1b\[\?47h.*\x1b\[>1u.*\x1b\[\?47l`), string(render))
+		require.Regexp(t, regexp.MustCompile(`\x1b\[\?1049h.*\x1b\[>1u.*\x1b\[\?1049l`), string(render))
+	})
+}
+
+// afterAnEditor is a shell session in which an editor ran and exited: ?1049l
+// leaves the editor's last screen on the hidden alternate screen, which the
+// render rebuilds.
+const afterAnEditor = "$ ls\r\nfile1 file2\r\n$ vim notes\r\n" +
+	"\x1b[?1049h\x1b[H\x1b[34mVIM LINE 1\r\nVIM LINE 2\r\n~\x1b[m\x1b[?1049l$ "
+
+// without47 is p as a terminal that has ?1049 but not ?47 reads it, as
+// Alacritty and Windows Terminal do: ?47h and ?47l do nothing.
+func without47(p []byte) []byte {
+	p = bytes.ReplaceAll(p, []byte("\x1b[?47h"), nil)
+	return bytes.ReplaceAll(p, []byte("\x1b[?47l"), nil)
+}
+
+// The render goes to the hidden alternate screen and back by ?1049, never by
+// ?47, which some terminals with ?1049 ignore: on one of those, a trip by ?47
+// would erase the shell's screen and draw the editor's in its place. Its save
+// and restore are the main screen's slot's, as ESC 7 and ESC 8 are, so a live
+// DECRC on either screen still restores what the session saved there.
+func TestReplayRebuildsTheHiddenAlternateScreenBy1049(t *testing.T) {
+	t.Run("the trip's switch", func(t *testing.T) {
+		render, err := renderAt(t, 80, 24, afterAnEditor)
+		require.NoError(t, err)
+		require.NotContains(t, string(render), "\x1b[?47h")
+		require.NotContains(t, string(render), "\x1b[?47l")
+		require.Regexp(t, regexp.MustCompile(`\x1b\[\?1049h.*VIM LINE 2.*\x1b\[\?1049l`), string(render))
+	})
+
+	t.Run("on a terminal with ?47", func(t *testing.T) {
+		j := joinAt(t, 80, 24, afterAnEditor)
+		j.then(t, "\x1b8X")
+		j.then(t, "\x1b[?47h\x1b8Y")
+		require.Equal(t, "YIM LINE 1", j.b.AltScreen().Line(0).String())
+		j.then(t, "\x1b[?47l\r\n$ ")
+	})
+
+	t.Run("on a terminal without ?47", func(t *testing.T) {
+		e := startFor(t, captureOf(afterAnEditor, event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+		render, err := e.Render()
+		require.NoError(t, err)
+		h, _ := e.Handoff()
+		a, aHist := newReference(80, 24)
+		_, _ = a.WriteString(afterAnEditor)
+		b, bHist := newReference(80, 24)
+		_, _ = b.Write(without47(render))
+		_, _ = b.WriteString(afterAnEditor[h:])
+		require.Empty(t, sameState(a, b, *aHist, *bHist), "the render: %q", render)
+		require.Equal(t, "$ vim notes", b.MainScreen().Line(2).String())
+		for _, term := range []*vt.Emulator{a, b} {
+			_, _ = term.WriteString("echo hi\r\nhi\r\n$ ")
+		}
+		require.Empty(t, sameState(a, b, *aHist, *bHist))
 	})
 }
 
@@ -514,7 +568,7 @@ func TestReplayFailsWhenAnASCIIReprintDisagreesWithREP(t *testing.T) {
 // should be the one showing at the end.
 func TestReplayInstallsTheOneRegionAfterBothBuffers(t *testing.T) {
 	for _, tc := range []struct{ name, stream, lastSwitch string }{
-		{"set on the alternate screen", "main\r\n\x1b[?1049h\x1b[2;10r\x1b[Halt\x1b[?1049l", "\x1b[?47l"},
+		{"set on the alternate screen", "main\r\n\x1b[?1049h\x1b[2;10r\x1b[Halt\x1b[?1049l", "\x1b[?1049l"},
 		{"shown on the alternate screen", "main\r\n\x1b[2;10r\x1b[?1049h\x1b[Halt", "\x1b[?1049h"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
