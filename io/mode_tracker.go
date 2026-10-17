@@ -288,12 +288,16 @@ type ModeTracker struct {
 	// DCS, keep open, taking what follows as more of it. It is over only at a
 	// terminator every terminal shares: ST, or BEL for an OSC.
 	//
+	// escAs: what the intermediates of the sequence escFinal waits on make
+	// it, so its final byte can be read as a terminal reads it.
+	//
 	// afterESC: the byte before was ESC, for recognising ST.
 	//
 	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
 	// waits for. A character is a sequence too: text written in the middle of
 	// one is drawn as a replacement character where both were meant.
 	escFinal    bool
+	escAs       escKind
 	unended     stringKind
 	afterESC    bool
 	utf8Pending int
@@ -353,6 +357,30 @@ const (
 	skAPC             // ESC _
 	skSOS             // ESC X
 )
+
+// escKind is what an ESC sequence's intermediates make it, for the watch,
+// which reads a sequence's final byte as a terminal does: intermediates
+// collected, and a control character executed where it stands without being
+// part of the sequence.
+type escKind int
+
+const (
+	ekPlain     escKind = iota // no intermediate: the final byte is the sequence, as in ESC n
+	ekG0                       // ESC ( or ESC $ (: a set designated into G0
+	ekMultibyte                // ESC $ alone: a multibyte set into G0, at the final byte
+	ekOther                    // anything else: a set into G1 to G3, or no designation at all
+)
+
+// then is k with the intermediate b after it.
+func (k escKind) then(b byte) escKind {
+	switch {
+	case k == ekG0, b == '(' && (k == ekPlain || k == ekMultibyte):
+		return ekG0
+	case b == '$' && k == ekPlain:
+		return ekMultibyte
+	}
+	return ekOther
+}
 
 func NewModeTracker() *ModeTracker {
 	return &ModeTracker{decPrivate: map[int]bool{}, candidates: []marginCandidate{{}}}
@@ -519,12 +547,14 @@ func (m *ModeTracker) InSequence() bool {
 }
 
 // NonASCIICharset reports whether text written now would be drawn in a
-// character set other than ASCII: G0 designated as anything else (ESC ( 0,
-// DEC Special Graphics, draws letters as line pieces, and a national set
-// swaps some of them), or a locking shift that put G1, G2 or G3 in use --
-// SO, LS2 (ESC n) or LS3 (ESC o) -- and no shift-in (SI) since, whatever
-// those sets hold. A RIS or a DECSTR puts both back. Text written there is
-// not inside a sequence, but it isn't read as the text it is either.
+// character set other than ASCII: G0 designated as anything but ESC ( B as
+// written (ESC ( 0, DEC Special Graphics, draws letters as line pieces, and a
+// national set swaps some of them; a set with an intermediate of its own, a
+// multibyte one, or ESC ( B with a control inside it is taken as not ASCII
+// too), or a locking shift that put G1, G2 or G3 in use -- SO, LS2 (ESC n)
+// or LS3 (ESC o) -- and no shift-in (SI) since, whatever those sets hold. A
+// RIS or a DECSTR puts both back. Text written there is not inside a
+// sequence, but it isn't read as the text it is either.
 //
 // SO and SI are taken wherever a terminal executes them, which is everywhere
 // but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
@@ -568,24 +598,39 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// one, which its bookkeeping can afford and this can't: what follows is
 	// still the sequence's on the terminal.
 	executed := (b < 0x20 && !cancel && b != 0x1b) || b == 0x7f
+	final := b >= 0x30 && b <= 0x7e
+	// The ESC sequence b is the final byte of, if it is one, and what the
+	// sequence was, for watchCharsets: the shifts, RIS and the designations
+	// are read from it.
+	ended, endedAs := false, ekPlain
 	// An ESC sequence past its intermediates ends at its final byte, and CAN,
 	// SUB or the ESC of another sequence abandons it. Anything else -- a
 	// control character, which a terminal executes there, DEL, or another
 	// intermediate -- leaves it waiting.
-	if m.escFinal && (cancel || b == 0x1b || (b >= 0x30 && b <= 0x7e)) {
-		m.escFinal = false
+	if m.escFinal {
+		switch {
+		case final:
+			ended, endedAs = true, m.escAs
+			m.escFinal = false
+		case cancel || b == 0x1b:
+			m.escFinal = false
+		case intermediate:
+			m.escAs = m.escAs.then(b)
+		}
 	}
 	switch m.state {
 	case msEsc:
 		// "(" is the parser's own msCharset.
 		if (intermediate && b != '(') || executed {
-			m.escFinal = true
+			m.waitFinal(ekPlain, b)
+		} else if final {
+			ended = true
 		}
 	case msCharset:
 		// A designation with an intermediate of its own, such as ESC ( % 5,
 		// which the parser drops as not a designator at all.
 		if intermediate || executed {
-			m.escFinal = true
+			m.waitFinal(ekG0, b)
 		}
 	case msString:
 		if cancel {
@@ -598,7 +643,9 @@ func (m *ModeTracker) watchSequence(b byte) {
 			// reads both as more of it.
 			m.unended = m.kind
 			if (intermediate && b != '(') || executed {
-				m.escFinal = true
+				m.waitFinal(ekPlain, b)
+			} else if final {
+				ended = true
 			}
 		}
 	}
@@ -607,7 +654,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 	}
 	m.afterESC = b == 0x1b
 
-	m.watchCharsets(b, ground)
+	m.watchCharsets(b, ground, ended, endedAs)
 
 	// A lead byte says how many continuation bytes follow it; anything but a
 	// continuation byte ends the character, complete or not.
@@ -627,14 +674,26 @@ func (m *ModeTracker) watchSequence(b byte) {
 	}
 }
 
+// waitFinal has the watch wait for the final byte of an ESC sequence of kind
+// k, which b, an intermediate or a control a terminal executes there, has
+// kept from ending.
+func (m *ModeTracker) waitFinal(k escKind, b byte) {
+	m.escFinal = true
+	m.escAs = k
+	if b >= 0x20 && b <= 0x2f {
+		m.escAs = k.then(b)
+	}
+}
+
 // watchCharsets keeps NonASCIICharset's view of the character sets, and the
-// single shift InSequence waits out, from the state b arrives in, reading
-// each sequence where the parser does: a designation as the parser completes
-// it, RIS, the shifts after ESC and DECSTR at their final bytes, and SO and SI
-// wherever a terminal executes them. watchSequence calls it once it has
-// decided whether b falls inside an unended string; ground is that b arrived
-// outside every sequence.
-func (m *ModeTracker) watchCharsets(b byte, ground bool) {
+// single shift InSequence waits out, from the state b arrives in. It reads
+// each sequence as a terminal does: an ESC sequence at its final byte,
+// whatever controls were executed inside it (ended is that b is one, and
+// endedAs what its intermediates made it); ESC ( B as the parser completes
+// it; DECSTR at its final byte; and SO and SI wherever a terminal executes
+// them. watchSequence calls it once it has decided whether b falls inside an
+// unended string; ground is that b arrived outside every sequence.
+func (m *ModeTracker) watchCharsets(b byte, ground, ended bool, endedAs escKind) {
 	// A string the program ended ambiguously is still open on a terminal that
 	// keeps it so, which takes whatever a DEC parser reads as putting ASCII
 	// back as more of the string, and is still in the graphics once ST comes.
@@ -648,30 +707,40 @@ func (m *ModeTracker) watchCharsets(b byte, ground bool) {
 		// waits on past them.
 		m.singleShift = false
 	}
+	if ended {
+		switch endedAs {
+		case ekPlain:
+			// The final bytes that are a sequence of their own after ESC,
+			// also after an ESC that abandoned a string. The locking shifts
+			// into GR (ESC ~, ESC } and ESC |) reach only 8-bit bytes, which
+			// a UTF-8 terminal doesn't read as GR, so they are left alone.
+			switch b {
+			case 'c': // RIS
+				if lower {
+					m.gl, m.g0Graphics = 0, false
+				}
+			case 'n': // LS2
+				m.gl = 2
+			case 'o': // LS3
+				m.gl = 3
+			case 'N', 'O': // SS2, SS3
+				m.singleShift = true
+			}
+		case ekG0, ekMultibyte:
+			// A set into G0 that isn't ESC ( B as written: one with an
+			// intermediate of its own, a multibyte one, or one with a control
+			// executed inside it. None of them is taken as ASCII.
+			m.g0Graphics = true
+		}
+	}
 	switch m.state {
 	case msString:
 		// A string ignores SO and SI, or hands them to its handler, and
 		// nothing else inside it is a sequence.
 		return
-	case msEsc, msStringEsc:
-		// Final bytes after ESC, which the parser takes after an ESC that
-		// abandoned a string too. The locking shifts into GR (ESC ~, ESC }
-		// and ESC |) reach only 8-bit bytes, which a UTF-8 terminal doesn't
-		// read as GR, so they are left alone.
-		switch b {
-		case 'c': // RIS
-			if lower {
-				m.gl, m.g0Graphics = 0, false
-			}
-		case 'n': // LS2
-			m.gl = 2
-		case 'o': // LS3
-			m.gl = 3
-		case 'N', 'O': // SS2, SS3
-			m.singleShift = true
-		}
 	case msCharset:
-		// A G0 designation, at the byte the parser completes one at.
+		// A G0 designation, at the byte the parser completes one at: ASCII
+		// only as ESC ( B.
 		if b >= 0x30 && b <= 0x7e {
 			if b != 'B' {
 				m.g0Graphics = true

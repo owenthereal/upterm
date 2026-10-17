@@ -1650,3 +1650,47 @@ func TestAShiftToG2OrG3IsNotASCII(t *testing.T) {
 		require.False(t, m.NonASCIICharset(), "%q shifts nothing in for longer", shift)
 	}
 }
+
+// A G0 designation is ASCII only as ESC ( B exactly. Everything else
+// designated into G0 is taken as a set other than ASCII, cautiously: one
+// with an intermediate of its own (ESC ( % 5, DEC Supplemental), a multibyte
+// one (ESC $ B, ESC $ ( B), one with a control executed inside it, and any
+// other final. A designation into G1 to G3 leaves G0 as it was, and putting
+// ASCII back waits for the end of an ambiguously ended string as before.
+func TestEveryG0DesignationButESCParenBIsNotASCII(t *testing.T) {
+	for _, in := range []string{"\x1b(%5", "\x1b$B", "\x1b$@", "\x1b$(B", "\x1b$(D", "\x1b(\n0", "\x1b\r(0", "\x1b(\rB",
+		"\x1b(%5\x1b]0;t\x1b(B\x1b\\"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x1b(B", "\x1b$)B", "\x1b)%5", "\x1b*%5", "\x1b(%5\x1b(B", "\x1b$B\x1bc", "\x1b$(B\x1b[!p"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+}
+
+// A control character inside an ESC sequence is executed there, and the
+// sequence goes on to its final byte, as a DEC parser has it: ESC CR n is LS2
+// as ESC n is, and so for LS3, the single shifts and RIS. The RIS puts ASCII
+// back only outside an ambiguously ended string, as a bare one does.
+func TestAShiftPastAnExecutedControlStillShifts(t *testing.T) {
+	for _, in := range []string{"\x1b*0\x1b\rn", "\x1b\x7fo", "\x1b\r\nn", "\x1b]0;t\x1b\rn\x1b\\", "\x0e\x1b]0;t\x1b\rc\x1b\\"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x0e\x1b\rc", "\x1b(0\x1b\x7fc", "\x1bn\x1b\rc", "\x1b \rn"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, shift := range []string{"\x1b\rN", "\x1b\x7fO"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(shift))
+		require.True(t, m.InSequence(), "%q waits for its character", shift)
+		_, _ = m.Write([]byte("x"))
+		require.False(t, m.InSequence(), "%q: its character has come", shift)
+	}
+}
