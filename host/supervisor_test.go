@@ -573,6 +573,54 @@ func TestSupervisorRedialsWhileANotificationIsStuck(t *testing.T) {
 		"delivered in the order they happened, though the first was slow")
 }
 
+// A notification that never returns holds up the events behind it, and a
+// relay that flaps meanwhile must not make that a queue growing without
+// bound, or a burst of stale announcements once the callback returns. The one
+// being delivered is theirs; of the rest only the latest is kept, since it says
+// where things stand.
+func TestSupervisorKeepsOnlyTheLatestEventWhileANotificationHangs(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	stuck, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) {
+		if len(events) == 0 {
+			close(stuck)
+			<-release
+		}
+		events = append(events, e)
+	})
+	pending := func() int {
+		f.sup.mu.Lock()
+		defer f.sup.mu.Unlock()
+		return len(f.sup.events)
+	}
+
+	lost := TunnelEvent{Up: false, CanReconnect: true}
+	f.sup.report(lost)
+	select {
+	case <-stuck:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loss was never delivered")
+	}
+	require.Zero(t, pending(), "the event being delivered is not pending")
+
+	// The relay flaps while the callback hangs.
+	f.sup.report(TunnelEvent{Up: true})
+	require.Equal(t, 1, pending())
+	f.sup.report(TunnelEvent{Up: false, CanReconnect: false})
+	require.Equal(t, 1, pending(), "a newer event replaces the pending one")
+	f.sup.report(TunnelEvent{Up: true, RouteChanged: true})
+	require.Equal(t, 1, pending(), "a newer event replaces the pending one")
+
+	once.Do(func() { close(release) })
+	f.awaitTunnelEvents(t, 2)
+	f.awaitNoMoreTunnelEvents(t)
+	require.Equal(t, []TunnelEvent{lost, {Up: true, RouteChanged: true}}, events,
+		"the one that was delivering, then the latest and nothing between")
+}
+
 func TestSupervisorDropsTheSessionKeyAfterAuthRefused(t *testing.T) {
 	f := newSupervisorFixture(t, true)
 	f.sup.sessionKeyFirst = true

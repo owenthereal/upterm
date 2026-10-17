@@ -151,7 +151,9 @@ type Host struct {
 	// TunnelCallback is told when the tunnel to the relay is lost, and when
 	// it is back. It is called on a goroutine of the host's own, one event at
 	// a time and in the order they happened, so a callback that takes a while
-	// delays only the events behind it, not the redial.
+	// delays only the events behind it, not the redial. Of the events that
+	// happen while it is still busy with one, only the latest is kept: it says
+	// where things stand.
 	TunnelCallback func(TunnelEvent)
 	// HideClientIP keeps a guest's address out of its forced command's
 	// SSH_CONNECTION and SSH_CLIENT.

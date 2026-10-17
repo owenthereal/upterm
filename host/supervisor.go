@@ -83,15 +83,17 @@ type supervisor struct {
 	// uniformly random part of it.
 	jitter func(time.Duration) time.Duration
 	logger *slog.Logger
-	// onTunnel, if set, is told of each loss and return. See report. It is
+	// onTunnel, if set, is told of the losses and returns. See report. It is
 	// set before the first tunnel can be lost, and never changed after: Run
 	// sets it before run starts, and a test before it drops the tunnel.
 	onTunnel func(TunnelEvent)
 
 	mu  sync.Mutex
 	cur tunnel // the tunnel the guest door is served on
-	// events are the reports onTunnel has not been given yet, and delivering
-	// says a goroutine is giving them.
+	// events are the reports onTunnel has not been given yet: at most one,
+	// the latest, since a callback that hangs would otherwise let a flapping
+	// relay grow it without bound. delivering says a goroutine is giving
+	// them.
 	events     []TunnelEvent
 	delivering bool
 }
@@ -291,13 +293,16 @@ func (s *supervisor) install(t tunnel, resp *server.CreateSessionResponse, gener
 //
 // Events are delivered one at a time and in the order they were reported, by
 // a goroutine that exists only while there are events to deliver. A callback
-// that never returns holds up the events behind it and nothing else.
+// that never returns holds up the events behind it and nothing else, and only
+// the latest of those is kept: a newer event replaces one still waiting, since
+// a state already superseded isn't worth announcing late, and the latest says
+// where things stand. The event being delivered is not affected.
 func (s *supervisor) report(e TunnelEvent) {
 	if s.onTunnel == nil {
 		return
 	}
 	s.mu.Lock()
-	s.events = append(s.events, e)
+	s.events = append(s.events[:0], e)
 	start := !s.delivering
 	s.delivering = true
 	s.mu.Unlock()
