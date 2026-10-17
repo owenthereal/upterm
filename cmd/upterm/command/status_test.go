@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func TestStatusUnavailableStillShowsTheKeys(t *testing.T) {
 	releaseAtEnd(t, dir)
 	silent := filepath.Join(t.TempDir(), "admin.sock") // nothing listens
 	start := time.Now()
-	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: silent, Escape: '~', Suspend: true})
+	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: silent, Escape: '~', Suspend: true}, nil)
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.Equal(t, []string{"upterm: session status unavailable", keysLineWithSuspend}, lines)
 }
@@ -59,7 +60,7 @@ func TestStatusFromADaemonThatNeverAnswersIsBounded(t *testing.T) {
 	}()
 
 	start := time.Now()
-	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true})
+	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true}, nil)
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.Equal(t, []string{"upterm: session status unavailable", keysLineWithSuspend}, lines)
 }
@@ -88,7 +89,7 @@ func TestStatusLinesForAReadySession(t *testing.T) {
 			if hidden {
 				addr1, addr2 = "[redacted]", "[redacted]"
 			}
-			lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true})
+			lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true}, nil)
 			require.Equal(t, []string{
 				"upterm: session s: 2 guests; the relay is connected",
 				"upterm:   guest " + addr1 + " SSH-2.0-OpenSSH_10.3 SHA256:abcd",
@@ -109,12 +110,50 @@ func TestStatusLinesForAReconnectingSession(t *testing.T) {
 	rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "s")
 	require.NoError(t, err)
 
-	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket, Escape: '~', Suspend: true})
+	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket, Escape: '~', Suspend: true}, nil)
 	require.Len(t, lines, 4)
 	require.Equal(t, "upterm: session s: 0 guests; the relay is disconnected since "+tui.ClockTime(out.lostAt)+" (network)", lines[0])
 	require.Regexp(t, `^upterm: guests can't join while the relay is disconnected; next try in 3[56][0-9]{2} s$`, lines[1])
 	require.Equal(t, "upterm: guests join with: upterm join ssh://sid-3@127.0.0.1:2222", lines[2])
 	require.Equal(t, keysLineWithSuspend, lines[3])
+}
+
+// A status that is unavailable says why in the log, with the session's name:
+// the lines say only that it is, and nothing else would.
+func TestStatusSaysWhyItIsUnavailableInTheLog(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  func(t *testing.T) statusSource
+		why  string
+	}{
+		{"no record", func(t *testing.T) statusSource {
+			return statusSource{Name: "s", LaunchID: "l", AdminSocket: filepath.Join(t.TempDir(), "admin.sock")}
+		}, "no record"},
+		{"another launch", func(t *testing.T) statusSource {
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			return statusSource{Name: "s", LaunchID: "another-launch", AdminSocket: dir.AdminSocket()}
+		}, "another launch"},
+		{"a daemon that isn't there", func(t *testing.T) statusSource {
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			return statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: filepath.Join(t.TempDir(), "admin.sock")}
+		}, "asking the daemon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			src := tc.src(t)
+			logs := &capturingHandler{}
+
+			lines := statusLines(context.Background(), src, slog.New(logs))
+			require.Equal(t, "upterm: session status unavailable", lines[0])
+			recs := logs.captured()
+			require.Len(t, recs, 1)
+			require.Equal(t, slog.LevelDebug, recs[0].Level)
+			require.Equal(t, "s", recs[0].Attrs["session"])
+			require.Contains(t, recs[0].Attrs["reason"], tc.why)
+		})
+	}
 }
 
 // The name can pass to another launch while this terminal is attached: what
@@ -125,7 +164,7 @@ func TestStatusOfAnotherLaunchIsUnavailable(t *testing.T) {
 	rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "s")
 	require.NoError(t, err)
 
-	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: "another-launch", AdminSocket: rec.AdminSocket, Escape: '~'})
+	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: "another-launch", AdminSocket: rec.AdminSocket, Escape: '~'}, nil)
 	require.Equal(t, []string{"upterm: session status unavailable", "upterm: keys: ~. detach  ~~ send ~  ~? this list"}, lines)
 }
 

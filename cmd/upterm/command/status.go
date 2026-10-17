@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/utils"
 )
 
@@ -56,33 +58,61 @@ type statusView struct {
 // status is unavailable and only the keys follow. Nothing is guessed: a
 // daemon that doesn't answer is not zero guests, and a record that can't be
 // read is not a healthy relay.
-func statusLines(ctx context.Context, src statusSource) []string {
+//
+// Why it is unavailable goes to logger, at debug level and bounded, with the
+// session's name: the lines say only that it is. A nil logger logs nothing.
+func statusLines(ctx context.Context, src statusSource, logger *slog.Logger) []string {
 	ctx, cancel := context.WithTimeout(ctx, statusLookupTimeout)
 	defer cancel()
 	// On a goroutine of its own, so the bound holds whatever a step does with
 	// ctx: a record on a filesystem that has stopped answering honours none.
+	// The reason is logged there, before the view is handed over, so a lookup
+	// the bound gave up on still says why once it ends.
 	found := make(chan statusView, 1)
-	go func() { found <- lookupStatus(ctx, src) }()
+	go func() {
+		v, why := lookupStatus(ctx, src)
+		if why != nil {
+			logStatusUnavailable(logger, src.Name, why)
+		}
+		found <- v
+	}()
 	v := statusView{Name: src.Name, Unavailable: true}
 	select {
 	case v = <-found:
 	case <-ctx.Done():
+		logStatusUnavailable(logger, src.Name, fmt.Errorf("no answer within %s", statusLookupTimeout))
 	}
 	return renderStatus(v, src.Escape, src.Suspend)
+}
+
+// logStatusUnavailable logs why ~? found the session's status unavailable.
+func logStatusUnavailable(logger *slog.Logger, name string, why error) {
+	logging.LogWithin(logger, slog.LevelDebug, logging.LogBound, "session status unavailable", "session", name, "reason", why)
 }
 
 // lookupStatus reads src's session from its record and its daemon, each
 // checked against the launch this terminal is attached to: the name can pass
 // to another launch while it is, and that one is not this terminal's session.
-func lookupStatus(ctx context.Context, src statusSource) statusView {
+// The view is unavailable whenever the error, which says why, is not nil.
+func lookupStatus(ctx context.Context, src statusSource) (statusView, error) {
 	unavailable := statusView{Name: src.Name, Unavailable: true}
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), src.Name)
-	if err != nil || rec == nil || !held || src.LaunchID == "" || rec.LaunchID != src.LaunchID {
-		return unavailable
+	switch {
+	case err != nil:
+		return unavailable, fmt.Errorf("reading the session's record: %w", err)
+	case rec == nil:
+		return unavailable, errors.New("no record of the session")
+	case !held:
+		return unavailable, errors.New("the session has ended")
+	case src.LaunchID == "" || rec.LaunchID != src.LaunchID:
+		return unavailable, errors.New("the record is another launch's")
 	}
 	sess, err := adminSession(ctx, src.AdminSocket)
-	if err != nil || !sameLaunch(rec, sess) {
-		return unavailable
+	if err != nil {
+		return unavailable, fmt.Errorf("asking the daemon: %w", err)
+	}
+	if !sameLaunch(rec, sess) {
+		return unavailable, errors.New("the daemon answered for another launch")
 	}
 
 	v := statusView{Name: src.Name}
@@ -97,7 +127,7 @@ func lookupStatus(ctx context.Context, src statusSource) statusView {
 	default:
 		// Starting or ending: neither says what the relay is doing for
 		// guests, and a status this upterm doesn't know isn't guessed at.
-		return unavailable
+		return unavailable, fmt.Errorf("the record's status is %q", rec.Status)
 	}
 	for _, c := range sess.GetConnectedClients() {
 		// The session's own terminals are not guests, as countGuests has it.
@@ -116,7 +146,7 @@ func lookupStatus(ctx context.Context, src statusSource) statusView {
 			}
 		}
 	}
-	return v
+	return v, nil
 }
 
 // adminSession asks the daemon at socket for its session, over a connection
