@@ -635,10 +635,13 @@ func (o *output) abandon() {
 // write they go out in, so that they arrive whole and are never split across
 // the session's chunks. The write starts with \r\n too, as OpenSSH's ~? does,
 // so the first line is a line of its own rather than the end of whatever the
-// cursor was on, a shell's prompt as often as not. It returns false once the
-// slot is closed — teardown has begun, and a lookup finishing now has nowhere
-// to go — when an offer is already waiting in it, or when there is nothing to
-// show. taken closes once the lines are gone from the slot.
+// cursor was on, a shell's prompt as often as not. Each line erases the rest
+// of its row (ESC [ K) before its break: the program's text on that row, a
+// full-screen editor's intro among it, would otherwise trail the line. It
+// returns false once the slot is closed — teardown has begun, and a lookup
+// finishing now has nowhere to go — when an offer is already waiting in it, or
+// when there is nothing to show. taken closes once the lines are gone from the
+// slot.
 //
 // An offer already waiting is kept, not replaced: its taken is what its own
 // showStatus waits on, and an offer put over it would leave that one waiting
@@ -648,7 +651,8 @@ func (o *output) abandon() {
 // chose — a guest's SSH version is whatever its client sent — and the
 // tracker never sees them, so a status that started a sequence or set a mode
 // of its own would leave the terminal where the tracker doesn't know it is,
-// and the session's next bytes inside whatever it opened.
+// and the session's next bytes inside whatever it opened. The erase is
+// upterm's own, written after the text is made plain, and sets no mode.
 func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 	if len(lines) == 0 {
 		return nil, false
@@ -656,7 +660,7 @@ func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 	p := []byte("\r\n")
 	for _, l := range lines {
 		p = append(p, uio.PlainText(l)...)
-		p = append(p, '\r', '\n')
+		p = append(p, "\x1b[K\r\n"...)
 	}
 	o.statusMu.Lock()
 	defer o.statusMu.Unlock()

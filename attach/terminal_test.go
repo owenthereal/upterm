@@ -908,7 +908,7 @@ func TestStatusLinesTakeTheOutputTurn(t *testing.T) {
 	// A door that writes 1 KiB chunks of 'x' without pause; the client types
 	// "\r~?" mid-flood with a Status hook returning two marker lines.
 	out := runFloodWithStatus(t, []string{"upterm: STATUS-ONE", "upterm: STATUS-TWO"})
-	i := strings.Index(out, "upterm: STATUS-ONE\r\nupterm: STATUS-TWO\r\n")
+	i := strings.Index(out, "upterm: STATUS-ONE\x1b[K\r\nupterm: STATUS-TWO\x1b[K\r\n")
 	require.GreaterOrEqual(t, i, 0, "status lines arrive whole and together")
 }
 
@@ -1048,7 +1048,7 @@ func TestStatusLinesCarryNoControls(t *testing.T) {
 	waitFor(t, func() bool { return sink.String() == "ready" }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
 	require.NoError(t, err)
-	want := "ready\r\nupterm:   guest SSH-2.0-?[?1049h?]0;x? ?1m ?2m??…\r\n"
+	want := "ready\r\nupterm:   guest SSH-2.0-?[?1049h?]0;x? ?1m ?2m??…\x1b[K\r\n"
 	waitFor(t, func() bool { return sink.String() == want }, "the status never reached the terminal as text")
 	cancel()
 	awaitResult(t, done)
@@ -1079,7 +1079,24 @@ func TestStatusWaitsOutACharacterAndAGraphicsCharset(t *testing.T) {
 // prompt, its first line would otherwise follow the prompt on the same line.
 func TestStatusStartsOnALineOfItsOwn(t *testing.T) {
 	out := runPausedWithStatus(t, "$ ", "", []string{"upterm: STATUS"})
-	require.Contains(t, out, "$ \r\nupterm: STATUS\r\n")
+	require.Contains(t, out, "$ \r\nupterm: STATUS\x1b[K\r\n")
+}
+
+// Each line erases the rest of its row before its line break: what the
+// program had drawn on that row, vim's intro text among it, would otherwise
+// trail the line. The erase is upterm's own, written after the line's text is
+// made plain, so it is not among the controls taken out of the text.
+func TestEveryStatusLineClearsTheRestOfItsRow(t *testing.T) {
+	lines := []string{"upterm: ONE", "upterm: TWO", "upterm: THREE\x1b[K"}
+	o := &output{statusClosing: make(chan struct{})}
+	_, ok := o.offerStatus(lines)
+	require.True(t, ok)
+	p := string(o.status.p)
+	require.Equal(t, "\r\nupterm: ONE\x1b[K\r\nupterm: TWO\x1b[K\r\nupterm: THREE?[K\x1b[K\r\n", p)
+	require.Equal(t, len(lines), strings.Count(p, "\x1b[K\r\n"), "every line is followed by an erase and its break: %q", p)
+	require.Equal(t, len(lines)+1, strings.Count(p, "\r\n"), "the leading break and one per line, and no other: %q", p)
+	require.Equal(t, len(lines), strings.Count(p, "\x1b[K"), "an erase from a line's own text is not one: %q", p)
+	o.closeStatus()
 }
 
 // A dropped status costs only that press: once the program has left the
@@ -1151,7 +1168,7 @@ func TestOfferStatusRefusesAnOfferWhileOneWaits(t *testing.T) {
 		t.Fatal("the waiting offer was let go")
 	default:
 	}
-	require.Equal(t, "\r\nupterm: ONE\r\n", string(o.status.p))
+	require.Equal(t, "\r\nupterm: ONE\x1b[K\r\n", string(o.status.p))
 
 	o.closeStatus()
 	awaitClosed(t, first, "closing the slot did not let the waiting offer go")
