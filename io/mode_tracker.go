@@ -291,6 +291,11 @@ type ModeTracker struct {
 	// escAs: what the intermediates of the sequence escFinal waits on make
 	// it, so its final byte can be read as a terminal reads it.
 	//
+	// csiPending: a CSI begun by a "[" after an ESC and controls a terminal
+	// executed there, which the parser, having dropped the sequence at the
+	// control, reads as text. It waits for the CSI's final byte. A string
+	// begun that way is unended from its start: see beginPastControls.
+	//
 	// afterESC: the byte before was ESC, for recognising ST.
 	//
 	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
@@ -298,6 +303,7 @@ type ModeTracker struct {
 	// one is drawn as a replacement character where both were meant.
 	escFinal    bool
 	escAs       escKind
+	csiPending  bool
 	unended     stringKind
 	afterESC    bool
 	utf8Pending int
@@ -531,7 +537,9 @@ func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 // (any intermediate 0x20-0x2F: ESC ( ) * + - . / # % SP, of which the parser
 // completes only "("; or a control character or DEL, which a terminal
 // executes or ignores there without ending the sequence); in a CSI; in an OSC, DCS, PM,
-// APC or SOS string; after a string the program ended ambiguously -- by CAN,
+// APC or SOS string; in a CSI or string begun after such a control, which a
+// DEC parser begins there and the tracker's own parser reads as text; after
+// a string the program ended ambiguously -- by CAN,
 // SUB or an ESC that isn't ST -- which a DEC parser ends there but kitty and
 // tmux keep open (see TerminalQueryFilter); inside a UTF-8 character whose
 // continuation bytes haven't all come; or after a single shift, SS2 (ESC N)
@@ -543,7 +551,7 @@ func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 // program's sequence on any terminal. The tracker's own mode bookkeeping keeps
 // the DEC reading: only this is conservative.
 func (m *ModeTracker) InSequence() bool {
-	return m.state != msNormal || m.escFinal || m.unended != skNone || m.utf8Pending > 0 || m.singleShift
+	return m.state != msNormal || m.escFinal || m.csiPending || m.unended != skNone || m.utf8Pending > 0 || m.singleShift
 }
 
 // NonASCIICharset reports whether text written now would be drawn in a
@@ -589,7 +597,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// Whether b arrives outside every sequence, where a terminal draws it as
 	// a character or executes it as a control: read before anything below
 	// moves the state on.
-	ground := m.state == msNormal && !m.escFinal
+	ground := m.state == msNormal && !m.escFinal && !m.csiPending
 	cancel := b == 0x18 || b == 0x1a
 	intermediate := b >= 0x20 && b <= 0x2f
 	// A control character (0x00-0x1F) other than CAN, SUB and ESC is executed
@@ -599,6 +607,12 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// still the sequence's on the terminal.
 	executed := (b < 0x20 && !cancel && b != 0x1b) || b == 0x7f
 	final := b >= 0x30 && b <= 0x7e
+	// A CSI the parser didn't see begin ends at its final byte, and CAN, SUB
+	// or an ESC abandons it. Anything else -- a parameter, an intermediate, or
+	// a control executed there -- is more of it.
+	if m.csiPending && ((b >= 0x40 && b <= 0x7e) || cancel || b == 0x1b) {
+		m.csiPending = false
+	}
 	// The ESC sequence b is the final byte of, if it is one, and what the
 	// sequence was, for watchCharsets: the shifts, RIS and the designations
 	// are read from it.
@@ -612,6 +626,9 @@ func (m *ModeTracker) watchSequence(b byte) {
 		case final:
 			ended, endedAs = true, m.escAs
 			m.escFinal = false
+			if m.escAs == ekPlain {
+				m.beginPastControls(b)
+			}
 		case cancel || b == 0x1b:
 			m.escFinal = false
 		case intermediate:
@@ -671,6 +688,40 @@ func (m *ModeTracker) watchSequence(b byte) {
 		}
 	default:
 		m.utf8Pending = 0
+	}
+}
+
+// beginPastControls follows the CSI or string b begins on a DEC parser, as
+// the final byte of an ESC with controls executed inside it and no
+// intermediate: the parser dropped the sequence at the control, and reads
+// what follows as text.
+//
+// The string is taken as unended from its start. That is what unended means
+// -- open until a terminator every terminal shares, ST or BEL for an OSC,
+// whatever ends it ambiguously first -- and so what this string is on a
+// terminal that reads it as one. A string already open that only ST ends
+// stays the one waited for.
+func (m *ModeTracker) beginPastControls(b byte) {
+	var kind stringKind
+	switch b {
+	case '[':
+		m.csiPending = true
+		return
+	case ']':
+		kind = skOSC
+	case 'P':
+		kind = skDCS
+	case 'X':
+		kind = skSOS
+	case '^':
+		kind = skPM
+	case '_':
+		kind = skAPC
+	default:
+		return
+	}
+	if m.unended == skNone || m.unended == skOSC {
+		m.unended = kind
 	}
 }
 

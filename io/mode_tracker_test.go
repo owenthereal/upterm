@@ -1694,3 +1694,49 @@ func TestAShiftPastAnExecutedControlStillShifts(t *testing.T) {
 		require.False(t, m.InSequence(), "%q: its character has come", shift)
 	}
 }
+
+// After ESC and controls executed inside it, a "[" begins a CSI on a DEC
+// parser, and "]", "P", "X", "^" or "_" an OSC, DCS, SOS, PM or APC string,
+// though the tracker's own parser dropped the sequence at the control. The
+// output is in a sequence until that CSI's final byte, or until the string's
+// terminator, ST or BEL for an OSC, with a string ended ambiguously -- by
+// CAN, SUB or an ESC that isn't ST -- still open until then, as any string
+// is. An intermediate before the "[" makes it an ESC sequence's final byte
+// instead.
+func TestASequenceBegunPastAnExecutedControlIsFollowed(t *testing.T) {
+	for _, tc := range []struct{ inside, out string }{
+		{"\x1b\n[?1000", "l"},
+		{"\x1b\r\n[1;2", "H"},
+		{"\x1b\n]0;t", "\x07"},
+		{"\x1b\n]0;t", "\x1b\\"},
+		{"\x1b\rPq", "\x1b\\"},
+		{"\x1b\rPq\x07", "\x1b\\"},
+		{"\x1b\r_x", "\x1b\\"},
+		{"\x1b\r]0;t\x18", "\x07"},
+		{"\x1b\r]0;t\x1b[m", "\x1b\\"},
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(tc.inside))
+		require.True(t, m.InSequence(), "%q", tc.inside)
+		_, _ = m.Write([]byte(tc.out))
+		require.False(t, m.InSequence(), "%q", tc.inside+tc.out)
+	}
+	for _, in := range []string{"\x1b\r[?10\x18", "\x1b\r[?10\x1a", "\x1b\r[?10\x1b[m", "\x1b \r[", "\x1b\r[?1000\x0fl"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.InSequence(), "%q", in)
+	}
+
+	// Inside such a string an SI is the string's, as it is in any other.
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x0e\x1b\r]0;\x0f\x07"))
+	require.True(t, m.NonASCIICharset())
+
+	// Begun inside a DCS a terminal may still hold open, an OSC that BEL ends
+	// doesn't end the DCS: only ST does.
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPq\x18\x1b\r]0;t\x07"))
+	require.True(t, m.InSequence(), "the DCS may still be open")
+	_, _ = m.Write([]byte("\x1b\\"))
+	require.False(t, m.InSequence())
+}
