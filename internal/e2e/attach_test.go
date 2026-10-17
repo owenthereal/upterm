@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/owenthereal/tmux"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,11 +148,14 @@ func TestAttachLeavesTheTerminalAsItFoundIt(t *testing.T) {
 // alternate screen is one whose shell has lost everything printed before the
 // attach, draws over a program's screen, and has no cursor to show for it.
 //
-// Asserted through what the user would see: capture-pane reads the screen the
-// pane is showing, so a marker printed before the attach is readable
-// afterwards only if the pane is back on the normal screen. The check before
-// the detach is what makes that mean something — without it, a session that
-// never reached the alternate screen would pass this test.
+// Asserted through the state tmux keeps for the pane's terminal, its screen,
+// mouse reporting and cursor, rather than through the text in view: the join
+// draws the session's screen from the top of the pane, scrolling whatever the
+// pane showed before the attach into its scrollback, so whether that text is
+// in view says nothing about which screen the pane is on. It has to be there
+// to scroll back to, though. The check before the detach is what makes the
+// rest mean something — without it, a session that never reached the
+// alternate screen would pass this test.
 func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 	h := newTestHarness(t, 200)
 	name := fmt.Sprintf("e2e-alt-%d", time.Now().UnixNano()%1_000_000)
@@ -176,20 +180,32 @@ func TestDetachingFromAFullScreenSessionRestoresTheTerminal(t *testing.T) {
 	// where the terminal cannot restore itself.
 	require.NoError(t, term.SendLine(h.ctx, `printf '\033[?1049h\033[?25l\033[?1000hFULL_SCREEN\n'`))
 	require.NoError(t, h.waitForText(term, "FULL_SCREEN", 10*time.Second))
-	onAlt, err := term.Capture(h.ctx)
-	require.NoError(t, err)
-	require.NotContains(t, onAlt, marker,
-		"the session never reached the alternate screen, so what follows would prove nothing")
+	// Eventually, because the line typed above holds FULL_SCREEN too, so the
+	// wait can end before the printf has run.
+	paneShows := func(format, want, msg string) {
+		t.Helper()
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			got, err := h.paneFormat(term, format)
+			require.NoError(c, err)
+			assert.Equal(c, want, got, "%s", format)
+		}, 10*time.Second, 100*time.Millisecond, msg)
+	}
+	paneShows("#{alternate_on}", "1",
+		"the pane never reached the alternate screen, so the checks after the detach would prove nothing")
 
 	require.NoError(t, term.SendKeys(h.ctx, "Enter"))
 	require.NoError(t, term.SendKeys(h.ctx, "~."))
 	require.NoError(t, h.waitForText(term, "upterm: detached; the session continues", 10*time.Second))
 
-	require.Eventually(t, func() bool {
-		content, err := term.Capture(h.ctx)
-		return err == nil && strings.Contains(content, marker)
+	paneShows("#{alternate_on}", "0", "the pane is still on the alternate screen after the detach")
+	paneShows("#{mouse_any_flag}", "0", "the pane still reports the mouse after the detach")
+	paneShows("#{cursor_flag}", "1", "the pane's cursor is still hidden after the detach")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		content, err := h.captureWithHistory(term)
+		require.NoError(c, err)
+		assert.Contains(c, content, marker)
 	}, 10*time.Second, 100*time.Millisecond,
-		"the terminal was handed back on the session's alternate screen, with everything before the attach out of sight")
+		"what the pane showed before the attach is gone from both its screen and its scrollback")
 }
 
 // TestAttachSuspendsAndResumes drives ~^Z through a real terminal, because

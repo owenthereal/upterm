@@ -238,6 +238,21 @@ func (h *testHarness) waitForText(pane *tmux.Pane, expected string, timeout time
 	return fmt.Errorf("timeout waiting for %q after %v\nPane content:\n%s", expected, timeout, content)
 }
 
+// paneFormat expands a tmux format for pane, such as "#{alternate_on}": state
+// tmux keeps for the terminal it emulates there, which no capture of the
+// pane's text shows. It runs tmux as the library does, on the same server.
+func (h *testHarness) paneFormat(pane *tmux.Pane, format string) (string, error) {
+	out, err := exec.CommandContext(h.ctx, "tmux", "display-message", "-p", "-t", pane.Id, format).Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// captureWithHistory reads pane's text with its scrollback: everything a user
+// can still scroll back to, not only what is on the screen.
+func (h *testHarness) captureWithHistory(pane *tmux.Pane) (string, error) {
+	out, err := exec.CommandContext(h.ctx, "tmux", "capture-pane", "-p", "-S", "-", "-t", pane.Id).Output()
+	return string(out), err
+}
+
 // waitForReady polls `session info` until the named session is ready. A
 // foreground host prints "SSH:" when the server creates the session, before
 // its attach socket is bound and the keys to pin it are published, so an
