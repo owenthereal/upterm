@@ -1275,7 +1275,7 @@ func feedSized(term *vt.Emulator, p []byte, start uint64, size termsize.Size, si
 // terminal that does. It is "" when they agree, and when the ring was empty
 // and nothing was captured.
 //
-// G0 is compared only when no saved cursor is restored after the last
+// G0 is compared unless a saved cursor is restored after the last
 // designation of G0. DECRC restores the charsets DECSC saved with the cursor,
 // or a terminal's defaults from a slot nothing saved, but the tracker keeps
 // only the last ESC ( and no saved cursor, so after a DECRC its G0 is
@@ -1316,7 +1316,8 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 	}
 	restored := max(bytes.LastIndex(stream, []byte("\x1b8")), bytes.LastIndex(stream, []byte("\x1b[?1049l")),
 		bytes.LastIndex(stream, []byte("\x1b[?1048l")))
-	if a, _, _ := ref.Charsets(); restored < 0 || restored < bytes.LastIndex(stream, []byte("\x1b(")) {
+	designated := bytes.LastIndex(stream, []byte("\x1b("))
+	if a, _, _ := ref.Charsets(); designated < 0 || restored < designated {
 		if b, _, _ := primed.Charsets(); a[0] != b[0] {
 			return fmt.Sprintf("G0: %q vs %q", a[0], b[0])
 		}
@@ -1361,6 +1362,10 @@ func requirePrimes(t *testing.T, stream []byte, sizes []uio.SizeEvent, ring int,
 // given the ring agrees with the one given the whole stream on everything
 // the tracker models.
 func TestTrackerSnapshotPrimesWhatItModels(t *testing.T) {
+	// A stream that designates no G0 compares it, saved cursor or not: only
+	// a designation of G0 that a DECRC follows leaves G0 to the slot.
+	requirePrimes(t, []byte("\x1b)0\x1b7text\x1b8\r\nmore text\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 8,
+		"a DECRC with no G0 designation")
 	seed := *propertySeed
 	for i := range 500 {
 		rnd := rand.New(rand.NewPCG(seed, 1<<32|uint64(i)))
