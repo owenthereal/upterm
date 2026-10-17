@@ -273,6 +273,35 @@ type ModeTracker struct {
 	overflow bool // current sequence ran past its cap; discard it
 	state    modeState
 	kind     stringKind // which string sequence msString is inside
+
+	// What InSequence knows beyond state, which keeps the DEC reading the
+	// bookkeeping above is built on. watchSequence keeps them, ahead of step.
+	//
+	// escFinal: an ESC sequence has had its intermediates (0x20-0x2F), or a
+	// control character or DEL a terminal executes or ignores inside it, and
+	// waits for its final byte. The parser completes only a G0 designation,
+	// leaves every other one at its introducer and drops one at a control,
+	// which costs it nothing: none of them is a mode it tracks.
+	//
+	// unended: a string the program ended ambiguously -- by CAN, SUB or an ESC
+	// that isn't ST -- which a DEC parser ends there and kitty, and tmux for a
+	// DCS, keep open, taking what follows as more of it. It is over only at a
+	// terminator every terminal shares: ST, or BEL for an OSC.
+	//
+	// afterESC: the byte before was ESC, for recognising ST.
+	//
+	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
+	// waits for. A character is a sequence too: text written in the middle of
+	// one is drawn as a replacement character where both were meant.
+	escFinal    bool
+	unended     stringKind
+	afterESC    bool
+	utf8Pending int
+
+	// shiftOut: an SO (0x0E) put G1 in use, and no SI (0x0F), RIS or DECSTR
+	// has put G0 back since. For NonASCIICharset alone: G1's charset isn't
+	// tracked, and nothing is replayed for it.
+	shiftOut bool
 }
 
 type modeState int
@@ -454,6 +483,39 @@ func (m *ModeTracker) uncertain() bool {
 // and no sequence overflowed past its bound either.
 func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 
+// InSequence reports whether the output seen so far may have left the
+// terminal inside an escape sequence, where text written now would be read as
+// part of it: after ESC; in an ESC sequence still waiting for its final byte
+// (any intermediate 0x20-0x2F: ESC ( ) * + - . / # % SP, of which the parser
+// completes only "("; or a control character or DEL, which a terminal
+// executes or ignores there without ending the sequence); in a CSI; in an OSC, DCS, PM,
+// APC or SOS string; after a string the program ended ambiguously -- by CAN,
+// SUB or an ESC that isn't ST -- which a DEC parser ends there but kitty and
+// tmux keep open (see TerminalQueryFilter); or inside a UTF-8 character whose
+// continuation bytes haven't all come. An ambiguous string stays "inside"
+// until a terminator every terminal shares: ST (ESC \), or BEL for an OSC.
+//
+// It is AtGround's cautious form, for a writer that must not land inside the
+// program's sequence on any terminal. The tracker's own mode bookkeeping keeps
+// the DEC reading: only this is conservative.
+func (m *ModeTracker) InSequence() bool {
+	return m.state != msNormal || m.escFinal || m.unended != skNone || m.utf8Pending > 0
+}
+
+// NonASCIICharset reports whether text written now would be drawn in a
+// character set other than ASCII: G0 designated as anything else (ESC ( 0,
+// DEC Special Graphics, draws letters as line pieces, and a national set
+// swaps some of them), or a shift-out (SO) that put G1 in use and no shift-in
+// (SI) since. A RIS or a DECSTR puts both back. Text written there is not
+// inside a sequence, but it isn't read as the text it is either.
+//
+// SO and SI are taken wherever a terminal executes them, which is everywhere
+// but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
+// them to its handler.
+func (m *ModeTracker) NonASCIICharset() bool {
+	return m.shiftOut || (len(m.charsetG0) == 3 && m.charsetG0[2] != 'B')
+}
+
 // bufferedBytes reports the parser's current accumulation: both the CSI
 // parameters it is collecting and the raw partial of the same sequence, which
 // is what a test asking whether an unterminated sequence can grow the parser
@@ -464,9 +526,89 @@ func (m *ModeTracker) bufferedBytes() int { return len(m.seq) + len(m.partial) }
 // alters the stream; callers use it as an observer, not a filter.
 func (m *ModeTracker) Write(p []byte) (int, error) {
 	for _, b := range p {
+		m.watchSequence(b)
 		m.step(b)
 	}
 	return len(p), nil
+}
+
+// watchSequence keeps what InSequence knows beyond the parser's state, from
+// the state b arrives in, before step moves it on.
+func (m *ModeTracker) watchSequence(b byte) {
+	cancel := b == 0x18 || b == 0x1a
+	intermediate := b >= 0x20 && b <= 0x2f
+	// A control character (0x00-0x1F) other than CAN, SUB and ESC is executed
+	// inside an ESC sequence, and DEL ignored there; the sequence goes on
+	// waiting for its final byte either way. The parser drops the sequence at
+	// one, which its bookkeeping can afford and this can't: what follows is
+	// still the sequence's on the terminal.
+	executed := (b < 0x20 && !cancel && b != 0x1b) || b == 0x7f
+	// An ESC sequence past its intermediates ends at its final byte, and CAN,
+	// SUB or the ESC of another sequence abandons it. Anything else -- a
+	// control character, which a terminal executes there, DEL, or another
+	// intermediate -- leaves it waiting.
+	if m.escFinal && (cancel || b == 0x1b || (b >= 0x30 && b <= 0x7e)) {
+		m.escFinal = false
+	}
+	switch m.state {
+	case msEsc:
+		// "(" is the parser's own msCharset.
+		if (intermediate && b != '(') || executed {
+			m.escFinal = true
+		}
+	case msCharset:
+		// A designation with an intermediate of its own, such as ESC ( % 5,
+		// which the parser drops as not a designator at all.
+		if intermediate || executed {
+			m.escFinal = true
+		}
+	case msString:
+		if cancel {
+			m.unended = m.kind
+		}
+	case msStringEsc:
+		if b != '\\' {
+			// The ESC was not ST's: the parser resyncs on b as the start of
+			// a new sequence, and a terminal that keeps the string open
+			// reads both as more of it.
+			m.unended = m.kind
+			if (intermediate && b != '(') || executed {
+				m.escFinal = true
+			}
+		}
+	}
+	if m.unended != skNone && ((m.afterESC && b == '\\') || (b == 0x07 && m.unended == skOSC)) {
+		m.unended = skNone
+	}
+	m.afterESC = b == 0x1b
+
+	// SO and SI wherever a terminal executes them: everywhere but inside a
+	// string, which ignores them or hands them to its handler.
+	if m.state != msString {
+		switch b {
+		case 0x0e:
+			m.shiftOut = true
+		case 0x0f:
+			m.shiftOut = false
+		}
+	}
+
+	// A lead byte says how many continuation bytes follow it; anything but a
+	// continuation byte ends the character, complete or not.
+	switch {
+	case b >= 0xc2 && b <= 0xdf:
+		m.utf8Pending = 1
+	case b >= 0xe0 && b <= 0xef:
+		m.utf8Pending = 2
+	case b >= 0xf0 && b <= 0xf4:
+		m.utf8Pending = 3
+	case b >= 0x80 && b <= 0xbf:
+		if m.utf8Pending > 0 {
+			m.utf8Pending--
+		}
+	default:
+		m.utf8Pending = 0
+	}
 }
 
 func (m *ModeTracker) step(b byte) {
@@ -676,6 +818,7 @@ func (m *ModeTracker) resetToDefaults() {
 	m.altVia = 0
 	m.clearRegions()
 	m.charsetG0 = nil
+	m.shiftOut = false
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
 	m.modifyOtherKeys = nil
@@ -697,7 +840,9 @@ func (m *ModeTracker) softReset() {
 		delete(m.decPrivate, n)
 	}
 	m.clearRegions()
+	// DECSTR designates ASCII and puts G0 back in use.
 	m.charsetG0 = nil
+	m.shiftOut = false
 	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
 	// The protocol is kitty's, so its reset is the one to follow here.
 	m.mainKeys = keyStack{}

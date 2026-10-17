@@ -25,16 +25,18 @@ var localClientDrainTimeout = 5 * time.Second
 // attachLocalTerminal attaches the local terminal to a session's attach
 // socket in the shape lt describes, holding raw mode and following resizes
 // for exactly as long as the attachment lasts. keys is the daemon's host
-// keys, kept beside socket since the two travel together.
-func attachLocalTerminal(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
-	return attachLocalTerminalWith(ctx, socket, keys, lt, escape, stdin, stdout, tty.Owned, logger)
+// keys, kept beside socket since the two travel together. src is the session
+// ~? reports on; its keys are filled in here, from escape and whether this
+// terminal can be suspended.
+func attachLocalTerminal(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, src statusSource, stdin, stdout *os.File, logger *slog.Logger) (attach.Result, error) {
+	return attachLocalTerminalWith(ctx, socket, keys, lt, escape, src, stdin, stdout, tty.Owned, logger)
 }
 
 // attachLocalTerminalWith is attachLocalTerminal with the foreground-ownership
 // predicate injected, for the reason withRawTerminal takes one: job control
 // cannot be staged in-process, so a test that needs raw mode to be restored
 // has no way to be the foreground of the pty pair it opened.
-func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
+func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.PublicKey, lt localTerminal, escape byte, src statusSource, stdin, stdout *os.File, owned func(*os.File) bool, logger *slog.Logger) (attach.Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -62,6 +64,11 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	if suspendSupported && suspendAvailable() {
 		client.Suspend = func() (termsize.Size, bool) { return suspendLocalTerminal(raw, stdout, stopSelf) }
 	}
+	// ~? only here, where keystrokes are read, and so in raw mode, which its
+	// \r\n-ended lines are written for. The keys it lists are this
+	// terminal's: its escape character, and ~^Z only where it suspends.
+	src.Escape, src.Suspend = escape, client.Suspend != nil
+	client.Status = func(ctx context.Context) []string { return statusLines(ctx, src, logger) }
 	return client.Run(ctx)
 }
 

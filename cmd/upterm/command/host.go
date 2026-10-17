@@ -652,12 +652,18 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 		// stdout is the JSON; the banner would be noise in it.
 		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
 	}
-	var attachClient clientFunc
+	var (
+		attachClient clientFunc
+		hint         string
+	)
 	if !flagDetach {
-		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey, src statusSource) (attach.Result, error) {
 			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
-			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
+			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, src, os.Stdin, os.Stdout, logger)
 		}
+		// The terminal is classified the way the client classifies it, so
+		// the hint names keys only where the client will act on them.
+		hint = hostKeyHint(classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term), opts.escape, os.Getenv("SSH_TTY") != "")
 	}
 	warning := logWarningFor(c.Context())
 	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
@@ -673,6 +679,8 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			spawn:        hostSpawn,
 			display:      display,
 			attachClient: attachClient,
+			keyHint:      hint,
+			hintOut:      hintOut(os.Stderr, os.Stdout),
 			logger:       logger,
 			logWarning:   warning,
 		}
@@ -724,28 +732,58 @@ func mapUserAction(_ *cobra.Command, err error) error {
 }
 
 // notify raises a desktop notification. A var so a test can see what the
-// callbacks below decided to send, rather than pop a real notification on
+// notifiers below decided to send, rather than pop a real notification on
 // whoever is running the suite.
 var notify = beeep.Notify
 
-func clientJoinedCallback(c *api.Client) {
+// notification is the title and body of one desktop notification.
+type notification struct{ Title, Body string }
+
+// guestNotifier raises the desktop notifications for guests joining and
+// leaving the session it names. An operator may have several sessions
+// running, so each notification says which one it is about.
+type guestNotifier string
+
+func (n guestNotifier) joined(c *api.Client) {
 	// The host's own terminal is a client of the session now, and notifying
 	// the operator that they have joined their own session is noise.
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("Upterm Client Joined", notifyBody(c), icon.Upterm)
+	_ = notify("A guest joined "+string(n), clientDesc(c), icon.Upterm)
 }
 
-func clientLeftCallback(c *api.Client) {
+func (n guestNotifier) left(c *api.Client) {
 	if !shouldNotifyClient(c) {
 		return
 	}
-	_ = notify("Upterm Client Left", notifyBody(c), icon.Upterm)
+	_ = notify("A guest left "+string(n), clientDesc(c), icon.Upterm)
 }
 
-func notifyBody(c *api.Client) string {
-	return clientDesc(c)
+// tunnelNotification is the notification for a change in the session's
+// connection to the relay. Each text claims only what the event confirms:
+// that upterm is retrying, only when the relay can reconnect, and that the
+// connect string changed, only when the session came back at another node.
+func tunnelNotification(name string, e host.TunnelEvent) notification {
+	switch {
+	case !e.Up && e.CanReconnect:
+		return notification{name + " lost the relay", "Guests can't join while the relay is disconnected; upterm is retrying."}
+	case !e.Up:
+		return notification{name + " lost the relay", "This relay can't reconnect it; guests can't join until you restart the session."}
+	case e.RouteChanged:
+		return notification{name + " is back on the relay", "Its connect string changed; upterm session info " + name + " shows the new one."}
+	default:
+		return notification{name + " is back on the relay", "Guests can join again with the same command."}
+	}
+}
+
+// tunnelNotifier raises the notification for each change in the connection
+// to the relay of the session name.
+func tunnelNotifier(name string) func(host.TunnelEvent) {
+	return func(e host.TunnelEvent) {
+		n := tunnelNotification(name, e)
+		_ = notify(n.Title, n.Body, icon.Upterm)
+	}
 }
 
 // bannerFlushTimeout bounds how long startup waits for the banner to reach a
@@ -771,9 +809,9 @@ const bannerFlushTimeout = 2 * time.Second
 // synchronous write keeps the banner ahead of everything the session prints
 // after it.
 //
-// The version warning host.Run prints is deliberately left synchronous. It
-// runs just before this callback, so it is the first thing written to an empty
-// pipe, and a few hundred bytes is smaller than any pipe buffer.
+// The warnings said ahead of the banner are not written here: the daemon
+// sends them to the parent before it reports the session created, and the
+// parent prints them on stderr, one line each, in the order they arrive.
 //
 // logger may be nil, which is the package default rather than silence: a
 // banner nobody received is the kind of thing an operator is looking for when
@@ -820,22 +858,27 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	}
 	detail.Name = name
 
-	// With --accept, just print session info and continue (no interactive confirmation needed)
+	// The logger root.go put in the context: it writes to upterm's log
+	// file, which is where an operator goes to find out what became of a
+	// startup. Nil until some caller sets one up, which printBanner reads
+	// as the package default.
+	var logger *slog.Logger
+	if l := uptermctx.Logger(ctx); l != nil {
+		logger = l.Logger
+	}
+	// Printed once, whether or not anyone is asked: the prompt below
+	// redraws its own line and nothing above it, so the banner is not
+	// repainted under it on every redraw, and what it prints stays in the
+	// scrollback as --accept's does.
+	printBanner(logger, detail)
+
+	// With --accept, nobody is asked.
 	if flagAccept {
-		// The logger root.go put in the context: it writes to upterm's log
-		// file, which is where an operator goes to find out what became of a
-		// startup. Nil until some caller sets one up, which printBanner reads
-		// as the package default.
-		var logger *slog.Logger
-		if l := uptermctx.Logger(ctx); l != nil {
-			logger = l.Logger
-		}
-		printBanner(logger, detail)
 		return nil
 	}
 
 	// Run interactive TUI for confirmation (TTY is guaranteed by early check in shareRunE)
-	model := tui.NewHostSessionModel(detail, false)
+	model := tui.NewHostSessionModel(false)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	return confirmationOutcome(p.Run())

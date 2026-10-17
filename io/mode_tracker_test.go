@@ -1439,3 +1439,96 @@ func TestAResizeHeardInOrderResetsOnlyWhereTheSizeChanges(t *testing.T) {
 		require.Empty(t, m.Snapshot())
 	})
 }
+
+// A string a program ended with CAN, SUB or an ESC that isn't ST is over for a
+// DEC parser and still open for kitty, and for tmux's DCS. InSequence takes
+// the cautious reading: it is still open until ST, or BEL for an OSC, which
+// end it for every terminal.
+func TestAnAmbiguouslyEndedStringStaysUnsafeUntilST(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPq\x18")) // a DCS the program "ended" with CAN
+	require.True(t, m.InSequence(), "kitty and tmux may still be inside the DCS")
+	require.True(t, m.AtGround(), "the bookkeeping keeps the DEC reading")
+	_, _ = m.Write([]byte("more"))
+	require.True(t, m.InSequence())
+	_, _ = m.Write([]byte("\x1b\\")) // ST: every terminal is out now
+	require.False(t, m.InSequence())
+
+	o := NewModeTracker()
+	_, _ = o.Write([]byte("\x1b]0;t\x1a")) // an OSC ended by SUB
+	require.True(t, o.InSequence())
+	_, _ = o.Write([]byte("\x07")) // BEL ends an OSC everywhere
+	require.False(t, o.InSequence())
+
+	e := NewModeTracker()
+	_, _ = e.Write([]byte("\x1b]0;t\x1b[m")) // an OSC ended by an ESC that isn't ST
+	require.True(t, e.InSequence())
+	_, _ = e.Write([]byte("\x1b\\"))
+	require.False(t, e.InSequence())
+
+	d := NewModeTracker()
+	_, _ = d.Write([]byte("\x1bPq\x18\x07")) // BEL ends an OSC, not a DCS
+	require.True(t, d.InSequence())
+}
+
+func TestInSequenceKnowsEveryPendingFinalByte(t *testing.T) {
+	for _, partial := range []string{"\x1b", "\x1b(", "\x1b)", "\x1b*", "\x1b+", "\x1b-", "\x1b.", "\x1b/", "\x1b#", "\x1b%", "\x1b ", "\x1b(%", "\x1b%/", "\x1b[?1000", "\x1b]0;tit", "\x1bPq"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\x1b(B", "\x1b)0", "\x1b#8", "\x1b%G", "\x1b%/G", "\x1b(%5", "\x1b[?1000l", "\x1b]0;t\x07", "\x1b]0;t\x1b\\", "\x1b)\x18", "plain"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// A character split at a chunk's end is a sequence of its own: text written
+// before its continuation bytes would land inside it, and the terminal would
+// draw a replacement character where both were meant.
+func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
+	for _, partial := range []string{"\xc3", "\xe2", "\xe2\x94", "\xf0\x9f\x98", "ok \xe2\x94"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\xc3\xa9", "\xe2\x94\x80", "\xf0\x9f\x98\x80", "\xe2\x94x", "\x80", "\xc0\x80", "\xff"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// A control character inside an ESC sequence is executed where it stands,
+// and the sequence goes on waiting for its final byte, as a DEC parser has
+// it. The tracker's own bookkeeping drops the sequence there, but the
+// terminal hasn't.
+func TestInSequenceWaitsPastAControlInsideAnEscape(t *testing.T) {
+	for _, partial := range []string{"\x1b\r", "\x1b\x07", "\x1b\x7f", "\x1b(\x7f", "\x1b(\r", "\x1b\r(", "\x1b\r\n", "\x1b]0;t\x1b\r\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\x1b\rB", "\x1b(\x7fB", "\x1b(\n0", "\x1b\r\x18", "\x1b\r\x1a"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// Text written while G0 is DEC Special Graphics, or while a shift-out has put
+// G1 in use, is drawn as line pieces: "upterm" comes out as box corners until
+// the program designates ASCII again or shifts back in.
+func TestNonASCIICharsetIsWhileTextIsntDrawnAsASCII(t *testing.T) {
+	for _, in := range []string{"\x1b(0", "\x1b(A", "\x0e", "\x1b(B\x0e", "\x1b[1\x0e"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"plain", "\x1b(B", "\x1b(0\x1b(B", "\x0e\x0f", "\x1b(0\x1bc", "\x0e\x1bc", "\x1b(0\x1b[!p", "\x0e\x1b[!p", "\x1b]0;\x0e\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+}

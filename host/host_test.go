@@ -1601,6 +1601,97 @@ func TestGetSessionSaysWhetherTheSessionIsOpen(t *testing.T) {
 	}
 }
 
+// The first look at a session and every later `session info` say what it is
+// called, how its tunnel is doing and what guests may do with it. The tunnel's
+// state is read for each answer, from the same facts the record is written from.
+func TestSessionReportsItsNameStateAndPermissions(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.ReadOnly = true
+	f.h.AllowLocalTCPForwarding = true
+	f.h.FileTransferApprovalRequired = true
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+	get := func() *api.GetSessionResponse {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		sess, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
+		require.NoError(t, err)
+		return sess
+	}
+
+	reconnect := f.record(t).Reconnect
+	require.NotEmpty(t, reconnect, "the relay has shown whether it derives session IDs by the time the session is ready")
+	for _, tc := range []struct {
+		what       string
+		sess       *api.GetSessionResponse
+		wantStatus string
+	}{
+		{"as created", f.created, sessiondir.StatusStarting},
+		{"as GetSession reports it", get(), sessiondir.StatusReady},
+	} {
+		require.Equal(t, "deadline", tc.sess.GetName(), tc.what)
+		require.Equal(t, tc.wantStatus, tc.sess.GetStatus(), tc.what)
+		require.Equal(t, reconnect, tc.sess.GetReconnect(), tc.what)
+		require.True(t, tc.sess.GetStartConfirmed(), "%s: nobody passed --accept", tc.what)
+		require.True(t, tc.sess.GetReadOnly(), tc.what)
+		require.True(t, tc.sess.GetLocalForwarding(), tc.what)
+		require.Equal(t, "downloads", tc.sess.GetFileTransfer(), tc.what)
+		require.True(t, tc.sess.GetFileTransferApprovalRequired(), tc.what)
+		require.Nil(t, tc.sess.TunnelLostAtUnixNano, "%s: the tunnel has not dropped", tc.what)
+		require.Nil(t, tc.sess.NextAttemptAtUnixNano, tc.what)
+	}
+
+	lostAt := time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC)
+	nextAt := lostAt.Add(2 * time.Second)
+	state := f.h.state.Load()
+	state.tunnelReconnecting(lostAt, sessiondir.TunnelReasonNetwork, "EOF", nextAt)
+	sess := get()
+	require.Equal(t, sessiondir.StatusReconnecting, sess.GetStatus())
+	require.Equal(t, sessiondir.TunnelReasonNetwork, sess.GetTunnelReason())
+	require.Equal(t, lostAt.UnixNano(), sess.GetTunnelLostAtUnixNano())
+	require.Equal(t, nextAt.UnixNano(), sess.GetNextAttemptAtUnixNano())
+
+	state.tunnelUp()
+	sess = get()
+	require.Equal(t, sessiondir.StatusReady, sess.GetStatus())
+	require.Empty(t, sess.GetTunnelReason())
+	require.Nil(t, sess.TunnelLostAtUnixNano, "an outage that ended is not reported")
+	require.Nil(t, sess.NextAttemptAtUnixNano)
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
+// Accepted unasked, with file transfer off, the session reports both: nobody
+// confirmed it, and nothing waits on the host's dialog because nothing can
+// be transferred.
+func TestSessionReportsAcceptedWithNoFileTransfer(t *testing.T) {
+	f := newJoinTimeoutHost(t)
+	f.h.AutoAccept = true
+	f.h.SFTPDisabled = true
+	f.h.FileTransferApprovalRequired = true
+	f.start(t)
+	awaitJoinTimeoutSignal(t, f.ready, "readiness")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	live, err := f.admin(t).GetSession(ctx, &api.GetSessionRequest{})
+	require.NoError(t, err)
+	for what, sess := range map[string]*api.GetSessionResponse{"as created": f.created, "as GetSession reports it": live} {
+		require.NotNil(t, sess.StartConfirmed, what)
+		require.False(t, sess.GetStartConfirmed(), what)
+		require.False(t, sess.GetReadOnly(), what)
+		require.False(t, sess.GetLocalForwarding(), what)
+		require.Equal(t, "off", sess.GetFileTransfer(), what)
+		require.NotNil(t, sess.FileTransferApprovalRequired, what)
+		require.False(t, sess.GetFileTransferApprovalRequired(), what)
+	}
+
+	f.finish(t, "0")
+	require.NoError(t, f.result(t))
+}
+
 func TestJoinTimeoutIsPublishedPendingThenCounting(t *testing.T) {
 	f := newJoinTimeoutHost(t)
 	f.h.JoinTimeout = time.Hour

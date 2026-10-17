@@ -1523,17 +1523,24 @@ func parseURL(str string) (u *url.URL, scheme string, host string, port string, 
 
 		err = nil
 		host = u.Host
-		switch u.Scheme {
-		case "ssh":
-			port = "22"
-		case "ws":
-			port = "80"
-		case "wss":
-			port = "443"
-		}
+		port = defaultPort(u.Scheme)
 	}
 
 	return
+}
+
+// defaultPort is the port a relay URL of the scheme means when it names none:
+// ssh 22, ws 80, wss 443. It is empty for any other scheme.
+func defaultPort(scheme string) string {
+	switch scheme {
+	case "ssh":
+		return "22"
+	case "ws":
+		return "80"
+	case "wss":
+		return "443"
+	}
+	return ""
 }
 
 // buildSessionDetail returns session detail for TUI display
@@ -1549,11 +1556,21 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		return tui.SessionDetail{}, err
 	}
 
-	var hostPort string
-	if port == "" || port == "80" || port == "443" {
-		hostPort = host
-	} else {
-		hostPort = host + ":" + port
+	// The Relay row leaves out the port only when it is the scheme's own, so a
+	// wss relay on 80 or an ssh relay on 443 still says which port it is on.
+	// The commands below keep the port whatever it is: a guest has to dial it.
+	// net.JoinHostPort puts an IPv6 relay's brackets back (ssh://[::1]:2222),
+	// and they stay when the port is then left out. It is given u.Hostname,
+	// the address without brackets, because host keeps them for a URL that
+	// names no port.
+	relay := u.Scheme + "://" + net.JoinHostPort(u.Hostname(), port)
+	if port == "" || port == defaultPort(scheme) {
+		relay = strings.TrimSuffix(relay, ":"+port)
+	}
+
+	access := tui.AccessAllowlist
+	if len(sess.AuthorizedKeys) == 0 {
+		access = tui.AccessAnyone
 	}
 
 	var sshCmd string
@@ -1601,7 +1618,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		SessionID:        sess.SessionId,
 		Command:          strings.Join(sess.Command, " "),
 		ForceCommand:     strings.Join(sess.ForceCommand, " "),
-		Host:             u.Scheme + "://" + hostPort,
+		Host:             relay,
 		JoinCommand:      joinCommand(u, user, host, port),
 		SSHCommand:       sshCmd,
 		SFTPEnabled:      sftpEnabled,
@@ -1611,7 +1628,33 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 		Open:             sess.GetOpen(),
+		Access:           access,
+		Guests:           guestPermissions(sess),
 	}, nil
+}
+
+// guestPermissions is what guests may do, as the daemon reports it, or nil when
+// it doesn't. A daemon that reports permissions sets all five of their fields
+// together, so a response missing any one is an older daemon's: those fields
+// are unknown, not false, and a row built from them would tell guests they
+// can't do what nobody said they can't. A file_transfer value this version
+// doesn't know is left unreported too, rather than guessed at.
+func guestPermissions(sess *api.GetSessionResponse) *tui.GuestPermissions {
+	if sess.StartConfirmed == nil || sess.ReadOnly == nil || sess.FileTransfer == nil ||
+		sess.FileTransferApprovalRequired == nil || sess.LocalForwarding == nil {
+		return nil
+	}
+	switch sess.GetFileTransfer() {
+	case tui.FileTransferOff, tui.FileTransferDownloads, tui.FileTransferAll:
+	default:
+		return nil
+	}
+	return &tui.GuestPermissions{
+		ReadOnly:         sess.GetReadOnly(),
+		FileTransfer:     sess.GetFileTransfer(),
+		ApprovalRequired: sess.GetFileTransferApprovalRequired(),
+		LocalForwarding:  sess.GetLocalForwarding(),
+	}
 }
 
 // joinCommand is the `upterm join` line for relay u, with the user, host and

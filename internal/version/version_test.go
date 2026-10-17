@@ -191,6 +191,33 @@ func TestCheckCompatibility(t *testing.T) {
 	}
 }
 
+// A mismatch says which side is ahead, from the versions as parsed rather
+// than as strings, so the warning can say who has to upgrade; a relay whose
+// version can't be read is neither.
+func TestCheckCompatibilitySaysWhichSideIsAhead(t *testing.T) {
+	orig := Version
+	t.Cleanup(func() { Version = orig })
+	Version = "1.2.0"
+
+	for _, tc := range []struct {
+		sshVersion string
+		want       Direction
+	}{
+		{"SSH-2.0-uptermd-2.0.0", RelayNewer},
+		{"SSH-2.0-uptermd-10.0.0", RelayNewer},
+		{"SSH-2.0-uptermd-0.38.0", RelayOlder},
+		{"SSH-2.0-uptermd-0.99.99-rc.1", RelayOlder},
+		{"SSH-2.0-Go", RelayUnknown},
+		{"SSH-2.0-uptermd-not-a-version", RelayUnknown},
+	} {
+		t.Run(tc.sshVersion, func(t *testing.T) {
+			r := CheckCompatibility(tc.sshVersion)
+			require.False(t, r.Compatible, "the warning fires where it always has")
+			require.Equal(t, tc.want, r.Direction)
+		})
+	}
+}
+
 func TestServerSSHVersion(t *testing.T) {
 	expected := "SSH-2.0-uptermd-" + Version
 	actual := ServerSSHVersion()

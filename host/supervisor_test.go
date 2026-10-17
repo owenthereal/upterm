@@ -227,6 +227,7 @@ func (j *jitterLog) got() []time.Duration {
 }
 
 type supervisorFixture struct {
+	t        *testing.T
 	sup      *supervisor
 	first    *fakeTunnel
 	script   *script
@@ -239,6 +240,10 @@ type supervisorFixture struct {
 
 	agentsMu sync.Mutex
 	agents   []*fakeAgent
+
+	// delivered counts the tunnel events onTunnel's func has returned from.
+	eventsMu  sync.Mutex
+	delivered int
 }
 
 func newSupervisorSigner(t *testing.T) ssh.Signer {
@@ -257,6 +262,7 @@ func newSupervisorFixture(t *testing.T, supported bool) *supervisorFixture {
 	t.Helper()
 	sessionKey, recorded := newSupervisorSigner(t), newSupervisorSigner(t)
 	f := &supervisorFixture{
+		t:       t,
 		first:   newFakeTunnel(t, true),
 		script:  &script{t: t, sessionID: supervisorSessionID, sessionKey: sessionKey},
 		route:   &internal.SessionRoute{},
@@ -359,6 +365,84 @@ func (f *supervisorFixture) allAgents() []*fakeAgent {
 	return append([]*fakeAgent(nil), f.agents...)
 }
 
+// onTunnel has the supervisor report its tunnel events to fn, which runs on
+// the goroutine that delivers them, one event at a time and in order. Call it
+// before the tunnel is dropped. The events fn has returned from are counted
+// for awaitTunnelEvents, which is also what makes what fn recorded safe to
+// read.
+func (f *supervisorFixture) onTunnel(fn func(TunnelEvent)) {
+	f.sup.onTunnel = func(e TunnelEvent) {
+		fn(e)
+		f.eventsMu.Lock()
+		f.delivered++
+		f.eventsMu.Unlock()
+	}
+}
+
+// awaitTunnelEvents waits until onTunnel's func has returned from n events.
+func (f *supervisorFixture) awaitTunnelEvents(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.eventsMu.Lock()
+		got := f.delivered
+		f.eventsMu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d tunnel events were delivered, not %d", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitNoMoreTunnelEvents waits for every event the supervisor has reported
+// to be delivered. Once run has returned it reports no more, so what onTunnel
+// recorded is then everything there will be.
+func (f *supervisorFixture) awaitNoMoreTunnelEvents(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.sup.mu.Lock()
+		idle := !f.sup.delivering && len(f.sup.events) == 0
+		f.sup.mu.Unlock()
+		if idle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the supervisor never finished delivering its tunnel events")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// failAttempts scripts the next n attempts to fail the way a relay that is
+// down does, which is worth retrying.
+func (f *supervisorFixture) failAttempts(n int) {
+	f.script.mu.Lock()
+	defer f.script.mu.Unlock()
+	for range n {
+		f.script.steps = append(f.script.steps, func(context.Context) (tunnel, error) {
+			return nil, &net.OpError{Op: "dial", Err: errors.New("refused")}
+		})
+	}
+}
+
+// succeedOn scripts the next attempt to succeed with a new tunnel, which it
+// returns, registered at node for user. Every attempt that succeeds reports
+// the registration the last call named, so the script wants one node at a time.
+func (f *supervisorFixture) succeedOn(node, user string) *fakeTunnel {
+	tun := newFakeTunnel(f.t, true)
+	f.script.mu.Lock()
+	defer f.script.mu.Unlock()
+	f.script.steps = append(f.script.steps, func(context.Context) (tunnel, error) { return tun, nil })
+	f.script.response = func(uint64) *server.CreateSessionResponse {
+		return &server.CreateSessionResponse{SessionID: f.script.sessionID, NodeAddr: node, SshUser: user}
+	}
+	return tun
+}
+
 func TestSupervisorRedialsWithTheNextGenerationEveryTime(t *testing.T) {
 	f := newSupervisorFixture(t, true /* supported */)
 	next := newFakeTunnel(t, true)
@@ -377,6 +461,116 @@ func TestSupervisorRedialsWithTheNextGenerationEveryTime(t *testing.T) {
 	rec := f.record(t)
 	require.Zero(t, rec.TunnelReason, "cleared when the tunnel is up")
 	require.True(t, f.first.closed.Load())
+}
+
+func TestSupervisorReportsTheLossOnceAndTheMove(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) { events = append(events, e) })
+	f.failAttempts(3)
+	f.succeedOn("node-2:22", "user-2")
+	f.first.drop(io.EOF)
+	f.awaitTunnelEvents(t, 2)
+	require.Equal(t, []TunnelEvent{{Up: false, CanReconnect: true}, {Up: true, RouteChanged: true}}, events,
+		"one loss for the whole outage, however many attempts it took, then the return")
+	f.awaitStatus(t, sessiondir.StatusReady, 2*time.Second)
+	require.Len(t, f.script.generations(), 4, "three attempts failed and a fourth succeeded")
+}
+
+func TestSupervisorReportsWhetherTheConnectStringMoved(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		node, user string
+		moved      bool
+	}{
+		{"the same node and user", "node-1:22", "user-1", false},
+		{"another node", "node-2:22", "user-1", true},
+		{"another user", "node-1:22", "user-2", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSupervisorFixture(t, true)
+			var events []TunnelEvent
+			f.onTunnel(func(e TunnelEvent) { events = append(events, e) })
+			f.succeedOn(tc.node, tc.user)
+			f.first.drop(io.EOF)
+			f.awaitTunnelEvents(t, 2)
+			require.Equal(t, []TunnelEvent{{Up: false, CanReconnect: true}, {Up: true, RouteChanged: tc.moved}}, events)
+			node, user := f.route.Get()
+			require.Equal(t, []string{tc.node, tc.user}, []string{node, user}, "the route is the one the relay answered with")
+		})
+	}
+}
+
+func TestSupervisorReportsEachOutage(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) { events = append(events, e) })
+	second := f.succeedOn("node-1:22", "user-1")
+	f.first.drop(io.EOF)
+	f.awaitTunnelEvents(t, 2)
+	awaitWatched(t, second)
+
+	f.failAttempts(1)
+	f.succeedOn("node-3:22", "user-3")
+	second.drop(io.EOF)
+	f.awaitTunnelEvents(t, 4)
+	require.Equal(t, []TunnelEvent{
+		{Up: false, CanReconnect: true}, {Up: true},
+		{Up: false, CanReconnect: true}, {Up: true, RouteChanged: true},
+	}, events)
+}
+
+func TestSupervisorSaysNothingOfTheFirstConnection(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) { events = append(events, e) })
+	awaitWatched(t, f.first)
+	f.cancel()
+	f.awaitReturn(t)
+	f.awaitNoMoreTunnelEvents(t)
+	require.Empty(t, events, "the first tunnel is not one that came back")
+}
+
+func TestSupervisorReportsAFinalLossOnceAndNoReturn(t *testing.T) {
+	f := newSupervisorFixture(t, false /* supported */)
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) { events = append(events, e) })
+	f.first.drop(io.EOF)
+	f.awaitTunnelEvents(t, 1)
+	f.awaitStatus(t, sessiondir.StatusDisconnected, 2*time.Second)
+	f.cancel()
+	f.awaitReturn(t)
+	f.awaitNoMoreTunnelEvents(t)
+	require.Equal(t, []TunnelEvent{{Up: false, CanReconnect: false}}, events)
+	require.Empty(t, f.script.generations(), "nothing is redialled")
+}
+
+func TestSupervisorRedialsWhileANotificationIsStuck(t *testing.T) {
+	f := newSupervisorFixture(t, true)
+	stuck, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	var events []TunnelEvent
+	f.onTunnel(func(e TunnelEvent) {
+		if !e.Up {
+			close(stuck)
+			<-release
+		}
+		events = append(events, e)
+	})
+	f.succeedOn("node-2:22", "user-2")
+	f.first.drop(io.EOF)
+	select {
+	case <-stuck:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loss was never reported")
+	}
+	f.awaitStatus(t, sessiondir.StatusReady, 2*time.Second)
+
+	once.Do(func() { close(release) })
+	f.awaitTunnelEvents(t, 2)
+	require.Equal(t, []TunnelEvent{{Up: false, CanReconnect: true}, {Up: true, RouteChanged: true}}, events,
+		"delivered in the order they happened, though the first was slow")
 }
 
 func TestSupervisorDropsTheSessionKeyAfterAuthRefused(t *testing.T) {

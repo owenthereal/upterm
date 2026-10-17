@@ -98,3 +98,43 @@ func TestEscapeFilter_DetachWinsOverAnEarlierSuspendInTheSameRead(t *testing.T) 
 	require.Equal(t, EscapeDetach, action)
 	require.Equal(t, "\r\r", string(out))
 }
+
+func TestEscapeFilterStatusOnlyAtLineStart(t *testing.T) {
+	f := NewEscapeFilter('~', true, WithStatus())
+	out, action := f.Feed([]byte("echo a~?b\r"))
+	require.Equal(t, "echo a~?b\r", string(out))
+	require.Equal(t, EscapeNone, action)
+	out, action = f.Feed([]byte("~?"))
+	require.Empty(t, out)
+	require.Equal(t, EscapeStatus, action)
+	out, _ = f.Feed([]byte("~~?"))
+	require.Equal(t, "~?", string(out))
+}
+
+// ~? leaves the filter at a line start, as ~^Z does: nothing was sent, so the
+// line the session sees is still the one it was, and ~. works next.
+func TestEscapeFilterStatusKeepsTheLineStart(t *testing.T) {
+	f := NewEscapeFilter('~', true, WithStatus())
+	out, action := f.Feed([]byte("\r~?"))
+	require.Equal(t, "\r", string(out))
+	require.Equal(t, EscapeStatus, action)
+	out, action = f.Feed([]byte("~."))
+	require.Empty(t, out)
+	require.Equal(t, EscapeDetach, action)
+}
+
+// join is unchanged: without the option both bytes are the session's.
+func TestWithoutTheOptionTildeQuestionIsInput(t *testing.T) {
+	f := NewEscapeFilter('~', false)
+	out, action := f.Feed([]byte("~?"))
+	require.Equal(t, "~?", string(out))
+	require.Equal(t, EscapeNone, action)
+}
+
+// --escape-char none disables ~? with every other escape.
+func TestEscapeFilterDisabledPassesTildeQuestion(t *testing.T) {
+	f := NewEscapeFilter(0, true, WithStatus())
+	out, action := f.Feed([]byte("\r~?"))
+	require.Equal(t, "\r~?", string(out))
+	require.Equal(t, EscapeNone, action)
+}

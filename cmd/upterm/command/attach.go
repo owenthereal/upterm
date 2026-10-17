@@ -80,6 +80,10 @@ the log for which); 255 if it could not attach.`,
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},
 	}
 	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
+	// ~? lists the session's guests, so attach hides their addresses on the
+	// same flag, environment variable and config key as every other command
+	// that prints them: each command reads only the flags it registers.
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	return cmd
 }
 
@@ -234,7 +238,8 @@ func attachRunE(c *cobra.Command, args []string) error {
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
-	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, os.Stdin, os.Stdout, logger.Logger)
+	src := statusSource{Name: name, LaunchID: t.LaunchID, AdminSocket: t.AdminSocket}
+	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, src, os.Stdin, os.Stdout, logger.Logger)
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, t.Status, err)}
 	}

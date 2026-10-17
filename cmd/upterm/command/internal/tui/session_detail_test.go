@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -192,7 +193,7 @@ func Test_FormatSessionDetail_name(t *testing.T) {
 // environment: a name, a status and a command, and nothing else.
 //
 // Everything such a session cannot fill in has to be absent rather than blank.
-// A title with no session ID after it, a "Host:" with nothing after it and an
+// A title with no session ID after it, a "Relay:" with nothing after it and an
 // "➤ SSH:" heading over an empty line read as a session that is broken, when
 // what it is is a session running somewhere this shell cannot reach.
 func Test_FormatSessionDetail_withoutALiveAnswer(t *testing.T) {
@@ -206,7 +207,7 @@ func Test_FormatSessionDetail_withoutALiveAnswer(t *testing.T) {
 	assert.Contains(t, output, "starting")
 	assert.Contains(t, output, "Session: build-shell",
 		"with no session ID, the title carries the name the session was looked up by")
-	assert.NotContains(t, output, "Host:")
+	assert.NotContains(t, output, "Relay:")
 	assert.NotContains(t, output, "SSH:")
 	assert.NotContains(t, output, "SFTP:")
 
@@ -227,7 +228,7 @@ func Test_FormatSessionDetail_withoutALiveAnswer(t *testing.T) {
 	assert.Contains(t, live, "Session: sid-1")
 	assert.Contains(t, live, "Status:")
 	assert.Contains(t, live, "ready")
-	assert.Contains(t, live, "Host:")
+	assert.Contains(t, live, "Relay:")
 	assert.Contains(t, live, "SSH:")
 }
 
@@ -242,14 +243,14 @@ func TestJoinLinePrintsAboveSSH(t *testing.T) {
 		SSHCommand:  "ssh abc@h",
 	}
 	assert.Equal(t, "Session: abc\n\n"+
-		row("Host:", "ssh://h:22")+
+		row("Relay:", "ssh://h:22")+
 		"\n➤ Join:\n    upterm join ssh://abc@h\n"+
 		"➤ SSH:\n    ssh abc@h\n",
 		renderSessionDetail(detail, 80))
 
 	detail.SSHCommand = ""
 	assert.Equal(t, "Session: abc\n\n"+
-		row("Host:", "ssh://h:22")+
+		row("Relay:", "ssh://h:22")+
 		"\n➤ Join:\n    upterm join ssh://abc@h\n",
 		renderSessionDetail(detail, 80))
 }
@@ -310,7 +311,7 @@ func Test_renderSessionDetail_Reconnecting(t *testing.T) {
 		row("Status:", "reconnecting — relay_key_changed since "+clock(lost)+", next attempt "+clock(next)) +
 		row("Hint:", "the relay's key differs from the one this session started with; not accepted. If the change is legitimate, restart the session.") +
 		row("Command:", "bash") +
-		row("Host:", "ssh://example.com:22") +
+		row("Relay:", "ssh://example.com:22") +
 		"\n➤ SSH:\n    ssh sid-1@example.com\n"
 	assert.Equal(t, want, got)
 }
@@ -462,8 +463,9 @@ func Test_renderSessionDetail_RowsByStatus(t *testing.T) {
 	assert.NotContains(t, reconnecting, "Reconnect:", "a relay that supports it has nothing to add")
 }
 
-// An open session -- no allowlist, and nobody asked -- says so wherever its
-// detail is shown: the banner at start and every `session info` after.
+// A session with no allowlist says so wherever its detail is shown: the banner
+// at start and every `session info` after. Whether the host was asked about
+// the start does not change who can join, so it does not gate the row.
 func Test_FormatSessionDetail_open(t *testing.T) {
 	detail := SessionDetail{
 		SessionID:  "test123",
@@ -472,10 +474,201 @@ func Test_FormatSessionDetail_open(t *testing.T) {
 		SSHCommand: "ssh test123@example.com",
 	}
 
-	assert.NotContains(t, FormatSessionDetail(detail), "Access:", "a session that is not open")
+	assert.NotContains(t, FormatSessionDetail(detail), "Access:", "access not known")
 
+	detail.Access = AccessAllowlist
+	assert.NotContains(t, FormatSessionDetail(detail), "Access:", "an allowlist says who can join in Authorized Keys")
+
+	for _, open := range []bool{false, true} {
+		detail.Access = AccessAnyone
+		detail.Open = open
+		assert.Contains(t, FormatSessionDetail(detail), row("Access:", "open: anyone with the session ID can join"), "open=%t", open)
+	}
+
+	detail.Access = ""
 	detail.Open = true
-	output := FormatSessionDetail(detail)
-	assert.Contains(t, output, "Access:")
-	assert.Contains(t, output, "open: anyone with the session ID can join")
+	assert.NotContains(t, FormatSessionDetail(detail), "Access:", "the legacy flag alone is not the row's source")
+}
+
+func TestAccessShowsWheneverAnyoneCanJoin(t *testing.T) {
+	d := SessionDetail{SessionID: "id", Access: "anyone"}
+	require.Contains(t, FormatSessionDetail(d), row("Access:", "open: anyone with the session ID can join"))
+	d.Access = "allowlist"
+	require.NotContains(t, FormatSessionDetail(d), "Access:")
+}
+
+func TestGuestsRow(t *testing.T) {
+	require.Equal(t, "can type; files: approval required; no port forwarding",
+		guestsRow(GuestPermissions{FileTransfer: "all", ApprovalRequired: true}))
+	require.Equal(t, "watch only; files: downloads only, approval required; no port forwarding",
+		guestsRow(GuestPermissions{ReadOnly: true, FileTransfer: "downloads", ApprovalRequired: true}))
+	require.Equal(t, "can type; files: allowed without asking; port forwarding allowed",
+		guestsRow(GuestPermissions{FileTransfer: "all", LocalForwarding: true}))
+	require.Equal(t, "can type; files: off; no port forwarding",
+		guestsRow(GuestPermissions{FileTransfer: "off"}))
+}
+
+// A file transfer value the view doesn't know is said to be unknown, never
+// read as transfers allowed without asking. guestPermissions passes only the
+// three it knows, so this is the row's own guard.
+func TestGuestsRowReadsNoUnknownTransferAsAllowed(t *testing.T) {
+	for _, v := range []string{"", "uploads"} {
+		require.Equal(t, "can type; files: unknown; no port forwarding", guestsRow(GuestPermissions{FileTransfer: v}), "%q", v)
+	}
+}
+
+// Test_guestsRow_EveryCombination: each of the four settings changes its own
+// clause and no other, so a guest reading the row is told about each of them.
+// Forwarding is a setting of its own, so every row ends with its clause,
+// watch-only or not.
+func Test_guestsRow_EveryCombination(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		for _, transfer := range []string{FileTransferOff, FileTransferDownloads, FileTransferAll} {
+			for _, approval := range []bool{false, true} {
+				for _, forwarding := range []bool{false, true} {
+					p := GuestPermissions{ReadOnly: readOnly, FileTransfer: transfer, ApprovalRequired: approval, LocalForwarding: forwarding}
+					parts := strings.Split(guestsRow(p), "; ")
+					require.Len(t, parts, 3, "%+v: %q", p, guestsRow(p))
+
+					wantTyping := "can type"
+					if readOnly {
+						wantTyping = "watch only"
+					}
+					assert.Equal(t, wantTyping, parts[0], "%+v", p)
+
+					waits := "allowed without asking"
+					if approval {
+						waits = "approval required"
+					}
+					wantFiles := map[string]string{
+						FileTransferOff:       "files: off",
+						FileTransferDownloads: "files: downloads only, " + waits,
+						FileTransferAll:       "files: " + waits,
+					}[transfer]
+					assert.Equal(t, wantFiles, parts[1], "%+v", p)
+
+					wantForwarding := "no port forwarding"
+					if forwarding {
+						wantForwarding = "port forwarding allowed"
+					}
+					assert.Equal(t, wantForwarding, parts[2], "%+v", p)
+				}
+			}
+		}
+	}
+}
+
+// The Guests row sits after the access it qualifies and before the commands
+// that let guests in, and exists only for a daemon that reported permissions.
+func Test_renderSessionDetail_GuestsRowPosition(t *testing.T) {
+	detail := SessionDetail{
+		Name:           "demo",
+		Status:         "ready",
+		SessionID:      "sid-1",
+		Command:        "bash",
+		ForceCommand:   "tmux attach",
+		Host:           "ssh://example.com",
+		AuthorizedKeys: "alice:\n- SHA256:abc",
+		Access:         AccessAnyone,
+		SSHCommand:     "ssh sid-1@example.com",
+		Guests:         &GuestPermissions{FileTransfer: FileTransferAll, ApprovalRequired: true},
+	}
+
+	want := "Session: sid-1\n\n" +
+		row("Name:", "demo") +
+		row("Status:", "ready") +
+		row("Command:", "bash") +
+		row("Force Command:", "tmux attach") +
+		row("Relay:", "ssh://example.com") +
+		row("Authorized Keys:", "alice:") +
+		row("", "- SHA256:abc") +
+		row("Access:", "open: anyone with the session ID can join") +
+		row("Guests:", "can type; files: approval required; no port forwarding") +
+		"\n➤ SSH:\n    ssh sid-1@example.com\n"
+	assert.Equal(t, want, renderSessionDetail(detail, 80))
+
+	detail.Guests = nil
+	assert.NotContains(t, renderSessionDetail(detail, 80), "Guests:", "a daemon that did not report permissions gets no row")
+}
+
+// pinTerminal makes the view think stdout is a terminal, which is when it wraps.
+func pinTerminal(t *testing.T) {
+	t.Helper()
+	stdoutIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdoutIsTerminal = func() bool { return false } })
+}
+
+func TestCommandsAreNeverHardWrapped(t *testing.T) {
+	pinTerminal(t)
+	long := "ssh -o ProxyCommand='upterm proxy '\\''wss://id:bm9kZQ==@relay.example.com'\\''' id:bm9kZQ==@relay.example.com:443"
+	out := renderSessionDetail(SessionDetail{SessionID: "id", SSHCommand: long}, 80)
+	require.Contains(t, out, "    "+long+"\n")
+}
+
+// Commands and connected clients are what a person copies out of the view, so
+// they are never cut: each is one line, and a terminal narrower than it
+// soft-wraps it where a copy still gets it whole.
+func TestEveryCommandAndClientPrintsWhole(t *testing.T) {
+	pinTerminal(t)
+
+	long := func(s string) string { return s + " " + strings.Repeat("x", 120) }
+	detail := SessionDetail{
+		SessionID:   "id",
+		JoinCommand: long("upterm join"),
+		SSHCommand:  long("ssh"),
+		SFTPEnabled: true,
+		SFTPCommand: long("sftp"),
+		SCPUpload:   long("scp <local>"),
+		SCPDownload: long("scp <remote>"),
+		ConnectedClients: []string{
+			long("guest 203.0.113.7:51234 SSH-2.0-OpenSSH_9.6"),
+			long("forward 203.0.113.8:51235 SSH-2.0-OpenSSH_9.6"),
+		},
+	}
+
+	want := "Session: id\n\n" +
+		"\n➤ Join:\n    " + detail.JoinCommand + "\n" +
+		"➤ SSH:\n    " + detail.SSHCommand + "\n" +
+		"➤ SFTP:\n    " + detail.SFTPCommand + "\n" +
+		"➤ SCP:\n    " + detail.SCPUpload + "\n    " + detail.SCPDownload + "\n" +
+		"\nConnected:\n  " + detail.ConnectedClients[0] + "\n  " + detail.ConnectedClients[1] + "\n"
+	assert.Equal(t, want, renderSessionDetail(detail, 80))
+}
+
+// A guest's version string is theirs to choose, and the view prints it as
+// text: an escape sequence or a control character in it comes out as '?',
+// the way ~? prints it, rather than reaching the terminal reading the view.
+func TestConnectedRowsPrintAGuestsVersionAsText(t *testing.T) {
+	detail := SessionDetail{
+		SessionID: "id",
+		ConnectedClients: []string{
+			"guest 203.0.113.7:51234 SSH-2.0-\x1b]0;owned\x07\x1b[2J\x9b1m\u009b2m\x00\x7f\r SHA256:def",
+		},
+	}
+
+	out := FormatSessionDetail(detail)
+	assert.Equal(t, "Session: id\n\n"+
+		"\nConnected:\n"+
+		"  guest 203.0.113.7:51234 SSH-2.0-?]0;owned??[2J?1m?2m??? SHA256:def\n", out)
+	for _, r := range out {
+		if r != '\n' {
+			require.False(t, unicode.IsControl(r), "%q in %q", r, out)
+		}
+	}
+}
+
+func Test_renderSessionDetail_ConnectedRow(t *testing.T) {
+	detail := SessionDetail{
+		SessionID:        "id",
+		ConnectedClients: []string{"host local SSH-2.0-upterm-attach SHA256:abc", "guest 203.0.113.7:51234 SSH-2.0-OpenSSH_9.6 SHA256:def"},
+	}
+
+	out := renderSessionDetail(detail, 80)
+	assert.Equal(t, "Session: id\n\n"+
+		"\nConnected:\n"+
+		"  host local SSH-2.0-upterm-attach SHA256:abc\n"+
+		"  guest 203.0.113.7:51234 SSH-2.0-OpenSSH_9.6 SHA256:def\n", out)
+
+	detail.ConnectedClients = nil
+	assert.NotContains(t, renderSessionDetail(detail, 80), "Connected")
 }

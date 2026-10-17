@@ -40,6 +40,18 @@ var inputBacklogLimit = 1 << 20
 // in progress. Nil outside tests.
 var testHookFeeding func()
 
+// testHookTracker, when a test sets it, is handed the output's mode tracker as
+// Run creates it, so that the test can read what the client recorded once
+// Released has closed. Nil outside tests.
+var testHookTracker func(*uio.ModeTracker)
+
+// statusSafeTimeout bounds how long ~?'s lines wait for the session's output
+// to leave an escape sequence before they are dropped. It is about as long as
+// the lookup that produced them is given: lines that can't be shown by then
+// would arrive long after the key that asked for them. A var so a test can
+// shorten it.
+var statusSafeTimeout = time.Second
+
 // Pty is a pty request: the terminal type and geometry the client's own
 // terminal has. A client that requests one is eligible to be the session's
 // primary client; one that does not is a viewer.
@@ -84,6 +96,17 @@ type Terminal struct {
 	// OnReady runs once, after the shell request is confirmed and before the
 	// first byte of output is written to Stdout. Nil does nothing.
 	OnReady func()
+
+	// Status returns the lines ~? prints into this terminal, never into the
+	// session: the session's status and the keys, each without its line
+	// ending. It runs on a goroutine of its own, so the input is never held
+	// up by it, and is given a context that ends with the attachment; it
+	// should be bounded all the same, since lines that come late are lines
+	// nobody is waiting for. nil leaves ~? as ordinary input, which is what
+	// join wants. It is offered only when the terminal's modes are tracked
+	// (Pty set): without them there is no telling whether text written now
+	// would land inside the session's own escape sequence.
+	Status func(ctx context.Context) []string
 
 	Logger *slog.Logger
 }
@@ -161,17 +184,19 @@ type Result struct {
 	Cause Cause
 
 	// Released closes once no write from this session to Stdout is in
-	// flight: the output copy has returned, and so has every mode write. It
-	// is already closed when Terminal.Run returns, except after a drain or a
-	// mode write that timed out, whose write is still parked.
+	// flight: the output copy has returned, and so has every mode write and
+	// every status write ~? made. It is already closed when Terminal.Run
+	// returns, except after a drain or a mode write that timed out, or with
+	// a status write still parked, whose write is still in flight.
 	Released <-chan struct{}
 	// Unrestored is the mode restore left unwritten because the output was
 	// abandoned with the terminal in the session's modes: the drain timed
 	// out, a suspend could not take the output from a write parked on the
-	// terminal, or the write that put the modes back after a suspend did
-	// not finish. Empty otherwise: the restore was written or attempted, the
-	// process came back without the terminal, or there is no pty and so no
-	// modes.
+	// terminal, the write that put the modes back after a suspend did not
+	// finish, or the restore could not take the output from a status write
+	// parked on the terminal. Empty otherwise: the restore was written or
+	// attempted, the process came back without the terminal, or there is no
+	// pty and so no modes.
 	Unrestored []byte
 }
 
@@ -299,12 +324,16 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	// failed write to Stdout; a read ending, however it ends, is nil, and
 	// Wait says what it meant.
 	var (
-		o       = &output{w: t.Stdout, turn: make(chan struct{}, 1), released: make(chan struct{})}
+		o = &output{w: t.Stdout, turn: make(chan struct{}, 1), released: make(chan struct{}),
+			statusClosing: make(chan struct{})}
 		copied  = make(chan struct{})
 		copyErr error
 	)
 	if t.Pty != nil {
 		o.modes = uio.NewModeTracker()
+		if testHookTracker != nil {
+			testHookTracker(o.modes)
+		}
 	}
 	o.writing()
 	go func() {
@@ -396,6 +425,10 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		}, func(error) { cancel() })
 	}
 	_ = g.Run()
+	// Nothing more is shown for ~? from here: the attachment is over, and a
+	// lookup still under way finds the slot closed. Before the tail, so that
+	// the drain writes no status either, and so before Stdout is released.
+	o.closeStatus()
 
 	// The tail. The channel's remaining bytes are readable after its close,
 	// and Wait can return before the copy has read them.
@@ -417,13 +450,43 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		//
 		// Here rather than in the copy goroutine because only this path has
 		// seen it end, which leaves the tracker free: a suspend, its one
-		// other user, ended with the group. On the timeout below the copy
+		// other writer, ended with the group. On the timeout below the copy
 		// may still be inside a write to a terminal that is not taking
 		// bytes, which is the one case where writing more is the wrong
 		// answer anyway.
+		//
+		// On the turn, like every other write, within what is left of the
+		// same budget: a status write may still own the output, parked on a
+		// terminal that stopped, and a restore written beside it could land
+		// in the middle of it once the terminal resumes. If the turn doesn't
+		// come, the output is abandoned as on the drain's timeout, the
+		// restore unwritten and handed back. The turn is not given back:
+		// nothing writes after the restore.
+		//
+		// A turn that is free is taken first, whatever is left of the
+		// budget: with copied and the timer both ready, one select between
+		// the turn and the timer would pick either at random, and could give
+		// up a restore nothing stood in the way of. Only a turn something
+		// holds is waited for, within the budget.
 		if !o.abandoned.Load() {
 			if restore := o.restore(); len(restore) > 0 {
-				o.writeWithin(tail.C, restore, logger)
+				taken := false
+				select {
+				case o.turn <- struct{}{}:
+					taken = true
+				default:
+					select {
+					case o.turn <- struct{}{}:
+						taken = true
+					case <-tail.C:
+					}
+				}
+				if taken {
+					o.writeWithin(tail.C, restore, logger)
+				} else {
+					o.abandon()
+					logging.WarnWithin(logger, logging.LogBound, "abandoning the terminal's mode restore: a status write still holds the output", "timeout", outputDrainTimeout)
+				}
 			}
 		}
 	case <-tail.C:
@@ -444,10 +507,10 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	return *result, nil
 }
 
-// output is one Run's hold on Stdout. Three things write to it — the copy of
-// the session's output, a suspend's two mode writes and the restore on the
-// way out — and output keeps them in turn, and says when the last of them
-// has returned.
+// output is one Run's hold on Stdout. Four things write to it — the copy of
+// the session's output, a suspend's two mode writes, ~?'s status and the
+// restore on the way out — and output keeps them in turn, and says when the
+// last of them has returned.
 type output struct {
 	w io.Writer
 
@@ -459,17 +522,19 @@ type output struct {
 	// trackerMu is the tracker's own lock. uio.ModeTracker is not safe for
 	// concurrent use, and abandon, giving up on a copy parked in a write,
 	// reads the tracker without waiting for turn. Held only around the
-	// tracker — in the copy and in abandon, with the abandoned check or set
-	// that goes with it — and never across a write to w.
+	// tracker — in the copy, in abandon and in takeStatus, with the abandoned
+	// check or set that goes with it — and never across a write to w.
 	trackerMu sync.Mutex
 	// Whose turn it is to write to w: the copy's for each chunk, a suspend's
-	// for as long as the terminal is out of the session's modes. A channel
-	// rather than a mutex so that a suspend can give up waiting for it.
+	// for as long as the terminal is out of the session's modes, a status's
+	// until its write has returned, and the restore's on the way out. A
+	// channel rather than a mutex so that a writer can give up waiting for
+	// it.
 	turn chan struct{}
 	// Once set, no write to w is started but the one for a chunk the copy
-	// had already fed, which abandon's restore undoes; a write already in
-	// flight cannot be interrupted without owning the descriptor. Released
-	// waits for both.
+	// had already fed, which abandon's restore undoes, or for a status
+	// already taken, which sets no mode; a write already in flight cannot be
+	// interrupted without owning the descriptor. Released waits for them.
 	abandoned atomic.Bool
 	// unrestored is the restore abandon left unwritten, under trackerMu.
 	unrestored []byte
@@ -478,6 +543,23 @@ type output struct {
 	inFlight int           // goroutines writing to w, or about to
 	sealed   bool          // release has been called
 	released chan struct{} // closed once sealed with nothing in flight
+
+	// The ~? status waiting to be written: one slot, served where the
+	// terminal will read it as text, by whoever holds turn there — the copy
+	// at a chunk's end, or showStatus while the output is idle. statusMu is
+	// taken inside trackerMu, never the other way round, and never across a
+	// write.
+	statusMu      sync.Mutex
+	status        *statusOffer // nil when nothing is waiting
+	statusClosed  bool
+	statusClosing chan struct{} // closed by closeStatus
+}
+
+// statusOffer is one ~?'s lines, as the one write they are made in, and what
+// closes once they are gone from the slot: written, dropped, or discarded.
+type statusOffer struct {
+	p     []byte
+	taken chan struct{}
 }
 
 // writing counts a goroutine about to write to w; wrote counts it out once
@@ -547,6 +629,199 @@ func (o *output) abandon() {
 		return
 	}
 	o.unrestored = o.modes.Restore()
+}
+
+// offerStatus puts lines in the status slot, each \r\n-ended, as the one
+// write they go out in, so that they arrive whole and are never split across
+// the session's chunks. The write starts with \r\n too, as OpenSSH's ~? does,
+// so the first line is a line of its own rather than the end of whatever the
+// cursor was on, a shell's prompt as often as not. Each line erases the rest
+// of its row (ESC [ K) before its break: the program's text on that row, a
+// full-screen editor's intro among it, would otherwise trail the line. It
+// returns false once the slot is closed — teardown has begun, and a lookup
+// finishing now has nowhere to go — when an offer is already waiting in it, or
+// when there is nothing to show. taken closes once the lines are gone from the
+// slot.
+//
+// An offer already waiting is kept, not replaced: its taken is what its own
+// showStatus waits on, and an offer put over it would leave that one waiting
+// on a channel nothing closes.
+//
+// The lines are text alone, as uio.PlainText has it. They carry what others
+// chose — a guest's SSH version is whatever its client sent — and the
+// tracker never sees them, so a status that started a sequence or set a mode
+// of its own would leave the terminal where the tracker doesn't know it is,
+// and the session's next bytes inside whatever it opened. The erase is
+// upterm's own, written after the text is made plain, and sets no mode.
+func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
+	if len(lines) == 0 {
+		return nil, false
+	}
+	p := []byte("\r\n")
+	for _, l := range lines {
+		p = append(p, uio.PlainText(l)...)
+		p = append(p, "\x1b[K\r\n"...)
+	}
+	o.statusMu.Lock()
+	defer o.statusMu.Unlock()
+	if o.statusClosed || o.status != nil {
+		return nil, false
+	}
+	offer := &statusOffer{p: p, taken: make(chan struct{})}
+	o.status = offer
+	return offer.taken, true
+}
+
+// takeStatus hands the waiting status to a caller holding turn, if the
+// terminal would read it as text here: the output has not been abandoned, and
+// the session's output has left the terminal outside every sequence, on
+// InSequence's cautious reading, and in ASCII. The session's output can stop
+// inside an OSC, a CSI, a DCS, a charset designation or a UTF-8 character at a
+// chunk's end, and text written there would be read as part of it; and with
+// DEC Special Graphics in G0, or after a shift-out, text is drawn as line
+// pieces. Otherwise the status stays in the slot, for a later chunk's end or
+// for its bound to drop it.
+//
+// The charset is waited out rather than switched: an ESC ( B or an SI written
+// ahead of the status would leave the terminal in ASCII while the program,
+// and the tracker, believe it is still in graphics.
+//
+// Nothing ever cancels the session's sequence to make room: no CAN, no ST.
+// Terminals disagree on where a cancelled string ends (kitty keeps an OSC open
+// at CAN), and cancelling ESC [ ? 1000 before its "l" would leave mouse
+// reporting on with the tracker recording it off.
+//
+// counted says whether the caller is already counted in flight, as the copy
+// is. One that is not is counted here, in the same hold of statusMu as the
+// take: a take that closeStatus did not stop is then always a write Released
+// waits for.
+func (o *output) takeStatus(counted bool) []byte {
+	if o.modes == nil {
+		return nil
+	}
+	o.trackerMu.Lock()
+	defer o.trackerMu.Unlock()
+	if o.abandoned.Load() || o.modes.InSequence() || o.modes.NonASCIICharset() {
+		return nil
+	}
+	o.statusMu.Lock()
+	defer o.statusMu.Unlock()
+	offer := o.status
+	if offer == nil {
+		return nil
+	}
+	o.status = nil
+	close(offer.taken)
+	if !counted {
+		o.writing()
+	}
+	return offer.p
+}
+
+// dropStatus drops the offer taken belongs to, if it is still in the slot, and
+// logs why. Bounded, like every diagnostic on a path a stopped terminal can
+// reach.
+func (o *output) dropStatus(taken <-chan struct{}, logger *slog.Logger, why string, bound time.Duration) {
+	o.statusMu.Lock()
+	offer := o.status
+	dropped := offer != nil && offer.taken == taken
+	if dropped {
+		o.status = nil
+		close(offer.taken)
+	}
+	o.statusMu.Unlock()
+	if dropped {
+		logging.WarnWithin(logger, logging.LogBound, "not showing the session's status: "+why, "timeout", bound)
+	}
+}
+
+// closeStatus closes the slot, before Run releases Stdout: a status still in
+// it is discarded, so is the result of a lookup that finishes later, and no
+// status write starts from here on. One already taken is a write in flight,
+// which Released waits for like any other; it may land later, on a terminal
+// that resumes, as an abandoned copy's may.
+func (o *output) closeStatus() {
+	o.statusMu.Lock()
+	defer o.statusMu.Unlock()
+	if o.statusClosed {
+		return
+	}
+	o.statusClosed = true
+	if o.status != nil {
+		close(o.status.taken)
+		o.status = nil
+	}
+	close(o.statusClosing)
+}
+
+// showStatus is ~?: it asks Status for the lines and puts them on the
+// terminal where they land as text, or drops them. It runs on a goroutine of
+// its own, never the input's, so that neither a lookup nor a terminal that
+// has stopped taking bytes ever holds up ~. or the session's end.
+//
+// The copy writes the lines at the end of a chunk, on the turn it already
+// holds, once the session's output is outside every sequence and in ASCII, as
+// takeStatus has it. With the output idle nothing would, so this takes the
+// turn the way a suspend does, within turnWait (outputDrainTimeout) because
+// the copy may be parked in a write to a terminal that has stopped, and
+// writes them itself if the output is there. If it is not, the lines wait for
+// the copy to come out of it, within safeWait (statusSafeTimeout) of being
+// offered; past either bound they are dropped, and the input carries on. A
+// dropped status shows nothing, the one case ~? does, and pressing it again
+// works once the program has moved on.
+//
+// A write of its own owns the output until it returns, not until a deadline:
+// a write cannot be interrupted, and a turn given back at a deadline would let
+// the session's next chunk race the status bytes still parked on the
+// terminal. The copy waits for the turn meanwhile, which costs nothing: it
+// would be parked on the same stopped terminal. The write is counted in
+// flight, so Released waits for it.
+func (t *Terminal) showStatus(ctx context.Context, o *output, safeWait, turnWait time.Duration, logger *slog.Logger) {
+	taken, ok := o.offerStatus(t.Status(ctx))
+	if !ok {
+		return
+	}
+	safe := time.NewTimer(safeWait)
+	defer safe.Stop()
+	wait := time.NewTimer(turnWait)
+	defer wait.Stop()
+	select {
+	case o.turn <- struct{}{}:
+	case <-taken:
+		// Written at the end of a chunk while this waited.
+		return
+	case <-wait.C:
+		o.dropStatus(taken, logger, "the terminal is not taking output", turnWait)
+		return
+	case <-o.statusClosing:
+		return
+	}
+	if p := o.takeStatus(false); p != nil {
+		err := writeAll(o.w, p)
+		o.wrote()
+		<-o.turn
+		if err != nil {
+			logging.WarnWithin(logger, logging.LogBound, "could not show the session's status", "error", err)
+		}
+		return
+	}
+	<-o.turn
+	select {
+	case <-taken:
+	case <-safe.C:
+		o.dropStatus(taken, logger, "the session's output stayed inside an escape sequence", safeWait)
+	case <-o.statusClosing:
+	}
+}
+
+// writeAll writes p to w, a short write being a failed one, as io.Copy has
+// it.
+func writeAll(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 // suspend stops the process and puts the session back in step with the
@@ -693,6 +968,11 @@ func (o *output) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 // terminal to itself while it is out of the session's modes; the check and
 // the feed are one hold of trackerMu, so an abandon, the tail's or a
 // suspend's, reads the tracker either before a chunk or after all of it.
+//
+// A chunk's end is also where a waiting ~? status goes, on the same turn, if
+// the chunk left the terminal outside every sequence and in ASCII: written
+// whole, and never between two halves of the session's output. A failed
+// status write is a failed write to Stdout like any other.
 func copyOutput(r io.Reader, o *output) error {
 	buf := make([]byte, 32<<10)
 	for {
@@ -712,13 +992,15 @@ func copyOutput(r io.Reader, o *output) error {
 				<-o.turn
 				return nil
 			}
-			nw, werr := o.w.Write(buf[:n])
+			werr := writeAll(o.w, buf[:n])
+			if werr == nil {
+				if p := o.takeStatus(true); p != nil {
+					werr = writeAll(o.w, p)
+				}
+			}
 			<-o.turn
 			if werr != nil {
 				return werr
-			}
-			if nw != n {
-				return io.ErrShortWrite
 			}
 		}
 		if rerr != nil {
@@ -748,7 +1030,18 @@ func copyOutput(r io.Reader, o *output) error {
 // anything has cancelled: the attachment is ending either way, and the
 // connection close that follows cancellation says so.
 func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io.Writer, o *output, logger *slog.Logger) (detached bool) {
-	filter := NewEscapeFilter(t.Escape, t.Suspend != nil)
+	var opts []EscapeOption
+	if t.Status != nil && o.modes != nil {
+		opts = append(opts, WithStatus())
+	}
+	filter := NewEscapeFilter(t.Escape, t.Suspend != nil, opts...)
+	// One ~? at a time: one pressed while another is still being looked up
+	// or written is dropped, so a terminal that has stopped taking bytes
+	// collects no goroutines however often it is pressed. Its bounds are read
+	// here, once: a showStatus can outlive Run, and a test that shortens one
+	// puts it back once Run has returned.
+	var showing atomic.Bool
+	safeWait, turnWait := statusSafeTimeout, outputDrainTimeout
 	buf := make([]byte, 4096)
 	r := uio.NewContextReader(ctx, t.Stdin)
 
@@ -796,6 +1089,15 @@ func (t *Terminal) forwardInput(ctx context.Context, sess *ssh.Session, stdin io
 				dropped = true
 				logging.WarnWithin(logger, logging.LogBound, "dropping input: the session is not taking it",
 					"backlog-bytes", inputBacklogLimit)
+			}
+			if action == EscapeStatus && showing.CompareAndSwap(false, true) {
+				// Off this goroutine, which has to stay free for ~. and for
+				// the session's end, however long the lookup and the
+				// terminal take.
+				go func() {
+					defer showing.Store(false)
+					t.showStatus(ctx, o, safeWait, turnWait, logger)
+				}()
 			}
 			if action == EscapeSuspend && !t.suspend(sess, o, logger) {
 				flush()
