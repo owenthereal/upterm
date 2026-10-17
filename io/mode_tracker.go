@@ -300,17 +300,22 @@ type ModeTracker struct {
 
 	// The character sets as NonASCIICharset sees them, cautiously: what the
 	// terminal may be drawing text in, on any terminal's reading of the
-	// output. shiftOut is that an SO (0x0E) put G1 in use; g0Graphics, that G0
-	// was designated a set other than ASCII.
+	// output. gl is the set a locking shift last invoked into GL, 0 to 3 for
+	// G0 to G3: SI (0x0F) for G0, SO (0x0E) for G1, LS2 (ESC n) and LS3 (ESC o)
+	// for G2 and G3. What G1 to G3 hold isn't tracked, so each is taken as a
+	// set other than ASCII. g0Graphics is that G0 was designated one.
+	// singleShift is an SS2 (ESC N) or SS3 (ESC O) still waiting for the one
+	// character it draws from G2 or G3.
 	//
-	// Anything may set them, but only what every terminal takes as putting
-	// ASCII back clears them: an SI (0x0F), an ESC ( B, a RIS or a DECSTR
-	// inside an unended string is the string's on a terminal that keeps it
-	// open, so there it clears nothing, and they wait for one outside that
-	// window. charsetG0 keeps the parser's DEC reading, for the replay; these
-	// are for NonASCIICharset alone, and nothing is replayed from them.
-	shiftOut   bool
-	g0Graphics bool
+	// Anything may raise them, but only what every terminal takes as putting
+	// ASCII back lowers them: an SI, an ESC ( B, a RIS or a DECSTR inside an
+	// unended string is the string's on a terminal that keeps it open, so
+	// there it lowers nothing, and they wait for one outside that window.
+	// charsetG0 keeps the parser's DEC reading, for the replay; these are for
+	// NonASCIICharset and InSequence alone, and nothing is replayed from them.
+	gl          int
+	g0Graphics  bool
+	singleShift bool
 }
 
 type modeState int
@@ -500,23 +505,26 @@ func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 // executes or ignores there without ending the sequence); in a CSI; in an OSC, DCS, PM,
 // APC or SOS string; after a string the program ended ambiguously -- by CAN,
 // SUB or an ESC that isn't ST -- which a DEC parser ends there but kitty and
-// tmux keep open (see TerminalQueryFilter); or inside a UTF-8 character whose
-// continuation bytes haven't all come. An ambiguous string stays "inside"
+// tmux keep open (see TerminalQueryFilter); inside a UTF-8 character whose
+// continuation bytes haven't all come; or after a single shift, SS2 (ESC N)
+// or SS3 (ESC O), whose character hasn't come, which would draw the first
+// character written now from G2 or G3. An ambiguous string stays "inside"
 // until a terminator every terminal shares: ST (ESC \), or BEL for an OSC.
 //
 // It is AtGround's cautious form, for a writer that must not land inside the
 // program's sequence on any terminal. The tracker's own mode bookkeeping keeps
 // the DEC reading: only this is conservative.
 func (m *ModeTracker) InSequence() bool {
-	return m.state != msNormal || m.escFinal || m.unended != skNone || m.utf8Pending > 0
+	return m.state != msNormal || m.escFinal || m.unended != skNone || m.utf8Pending > 0 || m.singleShift
 }
 
 // NonASCIICharset reports whether text written now would be drawn in a
 // character set other than ASCII: G0 designated as anything else (ESC ( 0,
 // DEC Special Graphics, draws letters as line pieces, and a national set
-// swaps some of them), or a shift-out (SO) that put G1 in use and no shift-in
-// (SI) since. A RIS or a DECSTR puts both back. Text written there is not
-// inside a sequence, but it isn't read as the text it is either.
+// swaps some of them), or a locking shift that put G1, G2 or G3 in use --
+// SO, LS2 (ESC n) or LS3 (ESC o) -- and no shift-in (SI) since, whatever
+// those sets hold. A RIS or a DECSTR puts both back. Text written there is
+// not inside a sequence, but it isn't read as the text it is either.
 //
 // SO and SI are taken wherever a terminal executes them, which is everywhere
 // but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
@@ -526,7 +534,7 @@ func (m *ModeTracker) InSequence() bool {
 // the graphics are kept through it. What would leave ASCII is taken there all
 // the same.
 func (m *ModeTracker) NonASCIICharset() bool {
-	return m.shiftOut || m.g0Graphics
+	return m.gl != 0 || m.g0Graphics
 }
 
 // bufferedBytes reports the parser's current accumulation: both the CSI
@@ -548,6 +556,10 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 // watchSequence keeps what InSequence knows beyond the parser's state, from
 // the state b arrives in, before step moves it on.
 func (m *ModeTracker) watchSequence(b byte) {
+	// Whether b arrives outside every sequence, where a terminal draws it as
+	// a character or executes it as a control: read before anything below
+	// moves the state on.
+	ground := m.state == msNormal && !m.escFinal
 	cancel := b == 0x18 || b == 0x1a
 	intermediate := b >= 0x20 && b <= 0x2f
 	// A control character (0x00-0x1F) other than CAN, SUB and ESC is executed
@@ -595,7 +607,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 	}
 	m.afterESC = b == 0x1b
 
-	m.watchCharsets(b)
+	m.watchCharsets(b, ground)
 
 	// A lead byte says how many continuation bytes follow it; anything but a
 	// continuation byte ends the character, complete or not.
@@ -615,12 +627,14 @@ func (m *ModeTracker) watchSequence(b byte) {
 	}
 }
 
-// watchCharsets keeps NonASCIICharset's view of the character sets, from the
-// state b arrives in, reading each sequence where the parser does: a
-// designation as the parser completes it, RIS and DECSTR at their final
-// bytes, and SO and SI wherever a terminal executes them. watchSequence calls
-// it once it has decided whether b falls inside an unended string.
-func (m *ModeTracker) watchCharsets(b byte) {
+// watchCharsets keeps NonASCIICharset's view of the character sets, and the
+// single shift InSequence waits out, from the state b arrives in, reading
+// each sequence where the parser does: a designation as the parser completes
+// it, RIS, the shifts after ESC and DECSTR at their final bytes, and SO and SI
+// wherever a terminal executes them. watchSequence calls it once it has
+// decided whether b falls inside an unended string; ground is that b arrived
+// outside every sequence.
+func (m *ModeTracker) watchCharsets(b byte, ground bool) {
 	// A string the program ended ambiguously is still open on a terminal that
 	// keeps it so, which takes whatever a DEC parser reads as putting ASCII
 	// back as more of the string, and is still in the graphics once ST comes.
@@ -628,16 +642,33 @@ func (m *ModeTracker) watchCharsets(b byte) {
 	// it waits for the same thing outside it. Whatever raises it is no less
 	// cautious there, and raises it.
 	lower := m.unended == skNone
+	if ground && b >= 0x20 && b != 0x7f {
+		// The character a single shift draws from G2 or G3, which spends it.
+		// A control character draws nothing, and DEL is ignored: the shift
+		// waits on past them.
+		m.singleShift = false
+	}
 	switch m.state {
 	case msString:
 		// A string ignores SO and SI, or hands them to its handler, and
 		// nothing else inside it is a sequence.
 		return
 	case msEsc, msStringEsc:
-		// RIS, which the parser takes after an ESC that abandoned a string
-		// too.
-		if b == 'c' && lower {
-			m.shiftOut, m.g0Graphics = false, false
+		// Final bytes after ESC, which the parser takes after an ESC that
+		// abandoned a string too. The locking shifts into GR (ESC ~, ESC }
+		// and ESC |) reach only 8-bit bytes, which a UTF-8 terminal doesn't
+		// read as GR, so they are left alone.
+		switch b {
+		case 'c': // RIS
+			if lower {
+				m.gl, m.g0Graphics = 0, false
+			}
+		case 'n': // LS2
+			m.gl = 2
+		case 'o': // LS3
+			m.gl = 3
+		case 'N', 'O': // SS2, SS3
+			m.singleShift = true
 		}
 	case msCharset:
 		// A G0 designation, at the byte the parser completes one at.
@@ -652,15 +683,15 @@ func (m *ModeTracker) watchCharsets(b byte) {
 		// DECSTR, as finishCSI reads it: it designates ASCII and puts G0
 		// back in use.
 		if b == 'p' && lower && !m.overflow && len(m.seq) == 1 && m.seq[0] == '!' {
-			m.shiftOut, m.g0Graphics = false, false
+			m.gl, m.g0Graphics = 0, false
 		}
 	}
 	switch b {
 	case 0x0e:
-		m.shiftOut = true
+		m.gl = 1
 	case 0x0f:
 		if lower {
-			m.shiftOut = false
+			m.gl = 0
 		}
 	}
 }

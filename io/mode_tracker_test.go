@@ -1606,3 +1606,47 @@ func TestNothingInsideAnAmbiguouslyEndedStringPutsASCIIBack(t *testing.T) {
 		require.False(t, m.NonASCIICharset(), "outside any string: %q", in)
 	}
 }
+
+// G2 and G3 are character sets too: a program can designate graphics into
+// G2 (ESC * 0) and invoke it into GL with LS2 (ESC n), or G3 with LS3 (ESC o),
+// and text is drawn from them until an SI puts G0 back. What G1 to G3 hold
+// isn't tracked, so NonASCIICharset takes any of them as not ASCII. A single
+// shift, SS2 (ESC N) or SS3 (ESC O), draws just the next character from G2 or
+// G3, which leaves the output unsafe until that character has come. The
+// locking shifts into GR (ESC ~, ESC }, ESC |) reach only 8-bit bytes, which a
+// UTF-8 terminal doesn't read that way.
+func TestAShiftToG2OrG3IsNotASCII(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1b*0\x1bn"))
+	require.True(t, m.NonASCIICharset(), "G2 in GL")
+	require.False(t, m.InSequence())
+	_, _ = m.Write([]byte("\x0f"))
+	require.False(t, m.NonASCIICharset(), "an SI puts G0 back")
+	_, _ = m.Write([]byte("\x1bo"))
+	require.True(t, m.NonASCIICharset(), "G3 in GL")
+	_, _ = m.Write([]byte("\x0f"))
+	require.False(t, m.NonASCIICharset())
+
+	for _, in := range []string{"\x1bn", "\x1bo", "\x0e\x1bn", "\x1bn\x1b(B",
+		"\x1bn\x1b]0;t\x1bc\x1b\\", "\x1bo\x1b]0;t\x1b[!p\x1b\\", "\x1bn\x1b]0;t\x1b\x0f\x1b\\"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x1bn\x0f", "\x1bo\x1bc", "\x1bn\x1b[!p", "\x1b~", "\x1b}", "\x1b|", "\x1b]0;n\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+
+	for _, shift := range []string{"\x1bN", "\x1bO"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(shift))
+		require.True(t, m.InSequence(), "%q waits for its character", shift)
+		_, _ = m.Write([]byte("\r"))
+		require.True(t, m.InSequence(), "%q: a control character draws nothing", shift)
+		_, _ = m.Write([]byte("x"))
+		require.False(t, m.InSequence(), "%q: its character has come", shift)
+		require.False(t, m.NonASCIICharset(), "%q shifts nothing in for longer", shift)
+	}
+}

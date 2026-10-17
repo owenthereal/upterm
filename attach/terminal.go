@@ -678,9 +678,9 @@ func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 // InSequence's cautious reading, and in ASCII. The session's output can stop
 // inside an OSC, a CSI, a DCS, a charset designation or a UTF-8 character at a
 // chunk's end, and text written there would be read as part of it; and with
-// DEC Special Graphics in G0, or after a shift-out, text is drawn as line
-// pieces. Otherwise the status stays in the slot, for a later chunk's end or
-// for its bound to drop it.
+// DEC Special Graphics in G0, or after a shift to G1, G2 or G3, text is drawn
+// as line pieces. Otherwise the status stays in the slot, for a later chunk's
+// end or for its bound to drop it.
 //
 // The charset is waited out rather than switched: an ESC ( B or an SI written
 // ahead of the status would leave the terminal in ASCII while the program,
