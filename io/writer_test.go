@@ -302,6 +302,59 @@ func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.
 	require.Equal(t, "\x1b(0"+plain, late.String())
 }
 
+// A cursor restore puts G0 back to what its save held, or to ASCII when
+// nothing was saved, and a joiner whose ring starts after the designation, the
+// save and the restore has only the snapshot to say which. Given the last
+// ESC ( X instead, it drew the ring's q's as line drawing where the session's
+// terminal printed letters, or the other way round.
+func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"a restore with nothing saved", "\x1b(0\x1b8", ""},
+		{"a restore of a save", "\x1b(0\x1b7\x1b(B\x1b8", "\x1b(0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(16)
+			writeString(w, tc.stream)
+			plain := strings.Repeat("q", 16)
+			writeString(w, plain)
+
+			late := bytes.NewBuffer(nil)
+			require.NoError(t, w.Append(late))
+			require.Equal(t, tc.want+plain, late.String())
+		})
+	}
+}
+
+// ?1049l restores the cursor ?1049h saved, G0 with it, and the ?1049h a
+// joiner is replayed saves the joiner's own: whatever G0 it has at the switch.
+// So the snapshot designates the G0 the session saved ahead of its ?1049h,
+// and the alternate screen's after. Given only the alternate screen's, a
+// joiner to a session that entered the alternate screen in line drawing and
+// left it in the live stream came back in ASCII. io has no terminal emulator,
+// so a tracker fed what the joiner was sent stands in for its terminal: it
+// follows G0 through saves and restores as xterm does.
+func Test_MultiWriter_JoinerLeavesTheAlternateScreenWithTheSavedG0(t *testing.T) {
+	w := NewMultiWriter(16)
+	const entered = "\x1b(0\x1b[?1049h\x1b(B"
+	writeString(w, entered)
+	plain := strings.Repeat("q", 16)
+	writeString(w, plain)
+
+	late := bytes.NewBuffer(nil)
+	require.NoError(t, w.Append(late))
+	const left = "\x1b[?1049lq"
+	writeString(w, left)
+
+	joiner, session := NewModeTracker(), NewModeTracker()
+	_, _ = joiner.Write(late.Bytes())
+	_, _ = session.Write([]byte(entered + plain + left))
+	require.Equal(t, "\x1b(0", string(session.Snapshot()), "the session's terminal is back in line drawing")
+	require.Equal(t, string(session.Snapshot()), string(joiner.Snapshot()), "and so is the joiner's")
+
+	require.Equal(t, "\x1b(0"+"\x1b[?1049h"+"\x1b(B"+plain+left, late.String(),
+		"line drawing designated for the switch to save, then the alternate screen's ASCII")
+}
+
 // A write larger than the ring drops everything queued and its own leading
 // bytes. Both left the ring, and the queued bytes left first: handing them to
 // the tracker the other way round makes it believe the older sequence is the
