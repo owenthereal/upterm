@@ -103,9 +103,10 @@ func (r *renderer) draw() {
 		r.slot(t.MainScreen(), mainScreen)
 	}
 	// The tracker's modes, but for autowrap, which goes off only after the
-	// last wrap reprint, and its kitty keyboard stack for the main screen,
-	// which shows.
+	// last wrap reprint; the report modes it doesn't know; and its kitty
+	// keyboard stack for the main screen, which shows.
 	_ = enc.bytes(r.parts.Modes)
+	r.reportModes()
 	_ = enc.bytes(r.parts.MainKeys)
 	r.alt()
 	r.tabStops()
@@ -320,6 +321,19 @@ func (r *renderer) cursor() (reprinted int) {
 	return -1
 }
 
+// reportModes sets the modes that make the terminal send reports unasked and
+// that the tracker doesn't know, after the tracker's own and by number, as the
+// tracker would send them if it did.
+func (r *renderer) reportModes() {
+	t := r.term
+	if t.Mode(ansi.ModeLightDark).IsSet() {
+		_ = r.enc.put(ansi.SetModeLightDark)
+	}
+	if t.Mode(ansi.ModeInBandResize).IsSet() {
+		_ = r.enc.put(ansi.SetModeInBandResize)
+	}
+}
+
 // continuation sets the state that decides how the next bytes are read and
 // that neither moves the cursor nor clears a pending wrap, after the last
 // print, which the charsets would remap and insert mode would shift: the
@@ -379,8 +393,21 @@ func decscusr(style vt.CursorStyle, blink bool) string {
 var (
 	modeReverseVideo = ansi.DECMode(5)
 
-	// restoredModes are restored with the continuation state.
-	restoredModes = map[ansi.DECMode]bool{modeReverseVideo: true, ansi.ModeNumericKeypad: true}
+	// restoredModes are restored by the render itself, apart from the
+	// tracker's modes: reverse video and the keypad with the continuation
+	// state, the others after the tracker's modes (see reportModes).
+	restoredModes = map[ansi.DECMode]bool{
+		modeReverseVideo:       true,
+		ansi.ModeNumericKeypad: true,
+		// ?2031: after this, the terminal reports a change of its colour
+		// scheme, light or dark, unasked. The program asked for those
+		// reports, and a raw replay passes the mode through.
+		ansi.ModeLightDark: true,
+		// ?2048: after this, the terminal reports a change of its size
+		// unasked, in the input stream. The program asked for those reports,
+		// and a raw replay passes the mode through.
+		ansi.ModeInBandResize: true,
+	}
 
 	// ignoredModes are left as the joiner's terminal has them: neither
 	// restored nor a reason to fall back, since none changes where output
@@ -531,9 +558,10 @@ func (e *emulation) unrestored(parts uio.ReplayParts) string {
 //
 // It restores the tracker's modes, which the emulator agrees on (see
 // consistent), the screen switch the tracker says entered the alternate
-// screen, insert mode, the keypad and reverse video. So a switch mode set
-// otherwise than as that one entry leaves it is one; so are DECLRMM, which
-// changes what CSI s means, and any other mode the tracker doesn't know.
+// screen, insert mode, the keypad, reverse video and the report modes. So a
+// switch mode set otherwise than as that one entry leaves it is one; so are
+// DECLRMM, which changes what CSI s means, and any other mode the tracker
+// doesn't know.
 func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 	modes := e.term.Modes()
 	for _, m := range slices.SortedFunc(maps.Keys(modes), compareModes) {

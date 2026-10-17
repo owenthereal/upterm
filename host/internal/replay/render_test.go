@@ -818,6 +818,46 @@ func TestReplayJoinsAConPTYSession(t *testing.T) {
 	require.True(t, strings.HasSuffix(got.String(), "C:\\Users\\guest>"), "%q", got.String())
 }
 
+// Claude Code and nvim ask for colour-scheme reports (?2031) as they start,
+// after which the terminal reports each change unasked. A join to either
+// renders instead of falling back until their startup leaves the ring, and
+// sets the mode, since the program asked for the reports and the raw replay
+// passes the mode through.
+func TestReplayRestoresTheColourSchemeReports(t *testing.T) {
+	for _, tc := range []struct{ name, stream string }{
+		{"Claude Code", "\x1b[?25l\x1b[?1004h\x1b[?2004h\x1b[?2026h\x1b[?2031h" +
+			"\x1b[2J\x1b[H\x1b[1mClaude Code\x1b[m\r\n\r\n> Try \"fix the failing test\"\r\n"},
+		{"nvim", "\x1b[?1h\x1b[?25l\x1b[?1002h\x1b[?1004h\x1b[?1006h\x1b[?1049h\x1b[?2004h\x1b[?2026h\x1b[?2031h" +
+			"\x1b[H\x1b[2J~\r\n~\r\n~\x1b[H\x1b[?25h"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := joinAt(t, 80, 24, tc.stream)
+			require.Contains(t, string(j.render), "\x1b[?2031h")
+			require.True(t, j.b.Mode(ansi.ModeLightDark).IsSet())
+		})
+	}
+}
+
+// The same for in-band resize reports (?2048), after which the terminal
+// reports its size changes unasked.
+func TestReplayRestoresTheInBandResizeReports(t *testing.T) {
+	j := joinAt(t, 80, 24, "\x1b[?2048h$ ls\r\nREADME\r\n$ ")
+	require.Contains(t, string(j.render), "\x1b[?2048h")
+	require.True(t, j.b.Mode(ansi.ModeInBandResize).IsSet())
+}
+
+// The report modes go out with the tracker's, in number order after them,
+// as focus reporting does; and a program that turned them off again leaves
+// the joiner's terminal as it is.
+func TestReplaySetsTheReportModesWithTheTrackers(t *testing.T) {
+	j := joinAt(t, 80, 24, "\x1b[?2048h\x1b[?2031h\x1b[?2004h\x1b[?1004h$ ls\r\n")
+	require.Contains(t, string(j.render), "\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[?2048h")
+
+	j = joinAt(t, 80, 24, "\x1b[?2031h\x1b[?2048h$ ls\r\n\x1b[?2031l\x1b[?2048l")
+	require.NotContains(t, string(j.render), "\x1b[?2031")
+	require.NotContains(t, string(j.render), "\x1b[?2048")
+}
+
 // ?1048h is xterm's DECSC by another name, not a mode: its bit, which
 // nothing reads back, is ignored, and the slot it filled is restored with
 // the saved cursors, for ESC 8 and ?1048l alike.

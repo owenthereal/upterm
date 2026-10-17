@@ -359,10 +359,12 @@ func (g *streamGen) erase() {
 	}
 }
 
-// The DEC private modes the tracker tracks, apart from the screen switches,
-// and those the render leaves as the joiner's terminal has them.
+// The DEC private modes the tracker tracks, apart from the screen switches;
+// those the render restores itself, which make the terminal send reports
+// unasked; and those the render leaves as the joiner's terminal has them.
 var (
 	trackedModes = []int{1, 7, 25, 1000, 1002, 1003, 1004, 1005, 1006, 2004}
+	reportNums   = []int{2031, 2048}
 	ignoredNums  = []int{12, 2026, 1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061, 9001}
 )
 
@@ -381,6 +383,8 @@ func (g *streamGen) mode() {
 		g.put("\x1b[?5" + hl)
 	case r < 75:
 		g.put(g.one("\x1b=", "\x1b>", "\x1b[?66h", "\x1b[?66l"))
+	case r < 80:
+		g.putf("\x1b[?%d%s", reportNums[g.rnd.IntN(len(reportNums))], hl)
 	case r < 92:
 		g.putf("\x1b[?%d%s", ignoredNums[g.rnd.IntN(len(ignoredNums))], hl)
 	default:
