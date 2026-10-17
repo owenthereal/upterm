@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/logging"
 	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -548,6 +550,91 @@ func TestTheKeyHintFollowsTheBanner(t *testing.T) {
 		require.Empty(t, hintOut.String())
 		require.NotContains(t, stdout.String()+stderr.String(), hint)
 	})
+}
+
+// stoppedTerminal is a terminal that has stopped taking output: a write parks
+// until it is resumed, then is taken whole. entered closes as the first write
+// parks, and written once it has returned.
+type stoppedTerminal struct {
+	resumed, entered, written chan struct{}
+	resume, enter, wrote      sync.Once
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newStoppedTerminal() *stoppedTerminal {
+	return &stoppedTerminal{resumed: make(chan struct{}), entered: make(chan struct{}), written: make(chan struct{})}
+}
+
+func (s *stoppedTerminal) Write(p []byte) (int, error) {
+	s.enter.Do(func() { close(s.entered) })
+	<-s.resumed
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.wrote.Do(func() { close(s.written) })
+	return s.buf.Write(p)
+}
+
+func (s *stoppedTerminal) Resume() { s.resume.Do(func() { close(s.resumed) }) }
+
+func (s *stoppedTerminal) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// On a terminal the key hint is written as the banner is, synchronously, and
+// so before the attach client takes the terminal. A write given up on at a
+// bound would go on in the background and land once a stopped terminal
+// resumed, amid the session's output and outside everything that keeps that
+// output in turn.
+func TestTheKeyHintIsWrittenBeforeTheTerminalIsHandedOver(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	attached := make(chan string, 1)
+	result := make(chan attach.Result, 1)
+	hint := newStoppedTerminal()
+	t.Cleanup(hint.Resume)
+	var early atomic.Bool
+	client := fakeClient(attached, result)
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, func(ctx context.Context, socket string, keys []ssh.PublicKey, src statusSource) (attach.Result, error) {
+		select {
+		case <-hint.written:
+		default:
+			early.Store(true)
+		}
+		return client(ctx, socket, keys, src)
+	}, &stdout, &stderr)
+	s.keyHint, s.hintOut = keyHint('~', false), hint
+	d.startup(t, "s")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ran := make(chan error, 1)
+	go func() { ran <- s.run(ctx) }()
+
+	select {
+	case <-hint.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the key hint was never written")
+	}
+	select {
+	case <-attached:
+		t.Fatal("the attach client started while the key hint was still being written")
+	case <-time.After(5 * logging.LogBound):
+	}
+	hint.Resume()
+	select {
+	case <-attached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attach client never started")
+	}
+	require.False(t, early.Load(), "the key hint's write returned before the client started")
+	require.Equal(t, keyHint('~', false)+"\n", hint.String())
+
+	d.start()
+	result <- attach.Result{Reason: attach.Exited}
+	require.NoError(t, <-ran)
 }
 
 // fakeClient attaches on cue and ends how it is told.

@@ -172,7 +172,15 @@ func (s *spawnedSession) run(ctx context.Context) error {
 				// Last, so it is the line nearest the session it is about,
 				// and said once: the attached terminal is the session's from
 				// here, and nothing more is written into it unasked.
-				logging.WriteWithin(s.hintOut, logging.LogBound, s.keyHint+"\n")
+				//
+				// Synchronously, as the banner is on a terminal, which is the
+				// only place the hint is said: a terminal drains itself, and
+				// the write returns before the accept that starts the attach
+				// client. A write given up on at a bound would go on in the
+				// background and could land, once a stopped terminal resumed,
+				// amid the session's output, outside the output's turns and
+				// unseen by its mode tracker.
+				_, _ = io.WriteString(s.hintOut, s.keyHint+"\n")
 			}
 			switch {
 			case displayErr == nil:
