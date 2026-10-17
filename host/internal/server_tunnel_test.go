@@ -157,7 +157,8 @@ func Test_Server_TunnelLossDoesNotKillCommand(t *testing.T) {
 	require.NoError(t, ln.Close())
 
 	select {
-	case <-stopped:
+	case err := <-stopped:
+		require.ErrorIs(t, err, net.ErrClosed, "the guest server stopped because its listener was closed")
 	case <-time.After(10 * time.Second):
 		t.Fatal("guest server stop was not reported")
 	}
@@ -165,7 +166,8 @@ func Test_Server_TunnelLossDoesNotKillCommand(t *testing.T) {
 	awaitLine("SURVIVED")
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "the command ran to its end after the tunnel was lost")
 	case <-ctx.Done():
 		t.Fatal("server did not finish")
 	}
@@ -215,7 +217,8 @@ func Test_Server_CommandExitDoesNotReportTunnelLoss(t *testing.T) {
 	awaitLine("READY")
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "a command-led exit ends the server cleanly")
 	case <-ctx.Done():
 		t.Fatal("server did not finish")
 	}

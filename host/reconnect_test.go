@@ -121,7 +121,8 @@ func startRelay(t *testing.T, key ssh.Signer, opts ...relayOption) *reconnectRel
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-served:
+		case err := <-served:
+			require.NoError(t, err, "a relay told to stop reports a clean stop")
 		case <-time.After(10 * time.Second):
 			t.Error("the relay did not stop")
 		}

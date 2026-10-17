@@ -95,7 +95,8 @@ func Test_Host_IdentitySignsOnceAndTheDoorsUseTheSessionKey(t *testing.T) {
 
 	require.EqualValues(t, 1, once.calls.Load(), "the identity signed for the tunnel and nothing else")
 	cancel()
-	<-done
+	runErr := <-done
+	require.ErrorIs(t, runErr, context.Canceled)
 }
 
 // Test_Host_AllowlistedRelayChecksTheIdentityNotTheSessionKey: the relay's
@@ -131,7 +132,8 @@ func Test_Host_AllowlistedRelayChecksTheIdentityNotTheSessionKey(t *testing.T) {
 		require.NoError(t, guest.Join(session, "ssh://"+run.relay.SSHAddr()))
 		t.Cleanup(guest.Close)
 		cancel()
-		<-done
+		runErr := <-done
+		require.ErrorIs(t, runErr, context.Canceled)
 	})
 
 	t.Run("an unlisted identity is refused", func(t *testing.T) {

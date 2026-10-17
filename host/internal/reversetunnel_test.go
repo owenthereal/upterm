@@ -69,7 +69,8 @@ func TestReverseTunnelAuthentication(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			require.NoError(t, err, "a relay told to stop reports a clean stop")
 		case <-time.After(5 * time.Second):
 			t.Error("server did not stop")
 		}
@@ -220,7 +221,8 @@ func startTestRelay(t *testing.T, opts ...func(*server.Server)) testRelay {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			require.NoError(t, err, "a relay told to stop reports a clean stop")
 		case <-time.After(5 * time.Second):
 			t.Error("server did not stop")
 		}

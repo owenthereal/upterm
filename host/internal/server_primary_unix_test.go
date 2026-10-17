@@ -380,8 +380,8 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 		floodErr <- err
 	}()
 	select {
-	case <-floodErr:
-		t.Fatal("the flood write completed: the pty is not parking the input actor")
+	case err := <-floodErr:
+		t.Fatalf("the flood write completed: the pty is not parking the input actor: %v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 	aGate.pauseReads()
@@ -407,7 +407,8 @@ func TestAStalledPrimaryWithParkedInputIsReplaced(t *testing.T) {
 		t.Fatal("the stalled primary's transport was never closed")
 	}
 	select {
-	case <-floodErr:
+	case err := <-floodErr:
+		require.Error(t, err, "the parked write cannot have completed; it ends with the transport")
 	case <-time.After(harnessTimeout):
 		t.Fatal("the flood write was never released after transport closure")
 	}
@@ -447,8 +448,8 @@ func TestTeardownIsNotHeldByParkedInputAndQueuedOutput(t *testing.T) {
 		floodErr <- err
 	}()
 	select {
-	case <-floodErr:
-		t.Fatal("the flood write completed: nothing is parked, so this would pass for the wrong reason")
+	case err := <-floodErr:
+		t.Fatalf("the flood write completed: nothing is parked, so this would pass for the wrong reason: %v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 	// Keep A's output drained, so nothing but the parked write is in play.
@@ -505,8 +506,8 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 		floodErr <- err
 	}()
 	select {
-	case <-floodErr:
-		t.Fatal("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason")
+	case err := <-floodErr:
+		t.Fatalf("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason: %v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
@@ -514,7 +515,8 @@ func TestAPrimaryThatHangsUpWithParkedInputIsReplaced(t *testing.T) {
 	require.NoError(t, aGate.Close())
 
 	select {
-	case <-floodErr:
+	case err := <-floodErr:
+		require.Error(t, err, "the parked write cannot have completed; it ends with the transport")
 	case <-time.After(harnessTimeout):
 		t.Fatal("the flood write was never released")
 	}
@@ -557,8 +559,8 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 		floodErr <- err
 	}()
 	select {
-	case <-floodErr:
-		t.Fatal("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason")
+	case err := <-floodErr:
+		t.Fatalf("the flood write completed: the pty is not parking the input actor, so this test would pass for the wrong reason: %v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
@@ -566,7 +568,8 @@ func TestAHungUpPrimaryStopsConstrainingTheSize(t *testing.T) {
 	require.NoError(t, aGate.Close())
 
 	select {
-	case <-floodErr:
+	case err := <-floodErr:
+		require.Error(t, err, "the parked write cannot have completed; it ends with the transport")
 	case <-time.After(harnessTimeout):
 		t.Fatal("the flood write was never released")
 	}

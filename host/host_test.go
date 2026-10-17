@@ -685,7 +685,8 @@ func newJoinTimeoutHost(t *testing.T) *joinTimeoutHost {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-relayDone:
+		case err := <-relayDone:
+			require.NoError(t, err, "a relay told to stop reports a clean stop")
 		case <-time.After(10 * time.Second):
 			t.Error("relay did not stop")
 		}

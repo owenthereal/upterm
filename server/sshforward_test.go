@@ -784,7 +784,8 @@ func TestSSHRejectChannelsBoundedThroughBufferedWrites(t *testing.T) {
 		done <- rejectSSHChannels(ctx, sshPeer{conn, conn.channels, requests}, errors.New("upstream unavailable"))
 	}()
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "rejecting the open that is answered at once succeeds")
 	case <-time.After(5 * time.Second):
 		t.Fatal("rejection outlived its deadline; a stalled peer pins the connection")
 	}
@@ -888,7 +889,7 @@ func TestSSHForwardPassesOnARejectionFromAPeerThatThenLeft(t *testing.T) {
 		node.end()      // which rejected it, then left
 		synctest.Wait() // forwardSSH has done all it does before the rejection is handed back
 		close(node.answered)
-		<-done
+		require.ErrorIs(t, <-done, io.EOF, "forwardSSH ends with the node's transport ending")
 		select {
 		case rejection := <-rejected:
 			require.Equal(t, &ssh.OpenChannelError{Reason: ssh.ConnectionFailed, Message: "upstream has no session"}, rejection)

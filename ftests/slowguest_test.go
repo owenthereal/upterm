@@ -15,6 +15,7 @@ import (
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -384,7 +385,9 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	// even if the guest were left stranded on uptermd, which is what the
 	// forwarder's watchdog prevents.
 	select {
-	case <-closed:
+	case err := <-closed:
+		var missing *ssh.ExitMissingError
+		require.ErrorAs(t, err, &missing, "a dropped guest's session ends without an exit status")
 	case <-time.After(guestDropTimeout):
 		t.Fatal("the stalled guest was never disconnected")
 	}

@@ -357,7 +357,8 @@ func TestRunDaemonProcessAbandonsWhenTheParentLeavesEarly(t *testing.T) {
 	}
 	require.NoError(t, b.Close())
 	select {
-	case <-done:
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "the run was cancelled when the parent left")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the daemon did not stop when its parent left")
 	}
@@ -647,7 +648,7 @@ func TestBuildDaemonHostTellsTheParentWhichPrivateKeyItSkipped(t *testing.T) {
 	// Closing the child ends the exchange, so the parent's Run returns and
 	// everything it printed is in the builder.
 	require.NoError(t, child.Close())
-	<-parentDone
+	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone, "the exchange ended because the child closed it")
 
 	require.Contains(t, printed.String(), "warning: skipping private key "+bad,
 		"the operator is told which key is not being used")
