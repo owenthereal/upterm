@@ -123,6 +123,30 @@ func FuzzReplay(f *testing.F) {
 	})
 }
 
+// FuzzReplayGenerated is the property, fuzzed through the generator: the
+// fuzzer's bytes drive genCase, the stream, its cut, its suffix and io's
+// offers, so every case stays in the vocabulary the tracker and the emulator
+// both read. There, as in the property test, the two disagreeing, or a
+// handoff point that carries a cluster, fails it, where FuzzReplay's raw
+// bytes reach what the tracker leaves out by design.
+func FuzzReplayGenerated(f *testing.F) {
+	for i := range 8 {
+		rnd := rand.New(rand.NewPCG(*propertySeed, 1<<35|uint64(i)))
+		b := make([]byte, 64)
+		for j := range b {
+			b[j] = byte(rnd.Uint32())
+		}
+		f.Add(b)
+	}
+	f.Fuzz(func(t *testing.T, entropy []byte) {
+		setBudget(t, 64<<20)
+		c := genCase(rand.New(newFuzzSource(entropy)))
+		if fail := c.run(time.Minute).failure(); fail != "" {
+			t.Fatalf("%s\n%s", fail, c.repro())
+		}
+	})
+}
+
 // fuzzSource is a rand.Source that draws from the fuzzer's bytes while they
 // last, eight to a number, and then from a PCG seeded by them, so a mutated
 // input changes the stream genStream writes where the mutated bytes are
