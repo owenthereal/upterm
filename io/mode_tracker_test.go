@@ -1532,3 +1532,42 @@ func TestNonASCIICharsetIsWhileTextIsntDrawnAsASCII(t *testing.T) {
 		require.False(t, m.NonASCIICharset(), "%q", in)
 	}
 }
+
+// A string the program ended ambiguously -- by CAN, SUB or an ESC that isn't
+// ST -- is one terminals disagree about. The tracker reads it as over; kitty,
+// and tmux for a DCS, keep it open and take what follows as more of it,
+// ignoring an SI there. So an SI inside that window does not put G0 back as
+// far as NonASCIICharset can tell: the shift-out stays, and with it the
+// status that would be drawn through G1 as graphics once ST ends the string.
+// An SO there may still set it, and an SI outside the window clears it.
+func TestShiftOutSurvivesAShiftInInsideAnAmbiguouslyEndedString(t *testing.T) {
+	for _, tc := range []struct{ name, ambiguous string }{
+		{"an ESC that isn't ST", "\x1b]0;t\x1b\x0f"},
+		{"CAN", "\x1b]0;t\x18\x0f"},
+		{"SUB", "\x1b]0;t\x1a\x0f"},
+		{"a DCS", "\x1bPq\x1b\x0f"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, _ = m.Write([]byte("\x0e" + tc.ambiguous))
+			require.True(t, m.InSequence(), "the string is still open")
+			require.True(t, m.NonASCIICharset(), "the SI inside it is the string's")
+
+			_, _ = m.Write([]byte("\x1b\\"))
+			require.False(t, m.InSequence(), "ST ends the string")
+			require.True(t, m.NonASCIICharset(), "G1 is still in use")
+
+			_, _ = m.Write([]byte("\x0f"))
+			require.False(t, m.NonASCIICharset(), "an SI outside the string puts G0 back")
+		})
+	}
+
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x0e\x0f"))
+	require.False(t, m.NonASCIICharset(), "an SI outside any string")
+
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1b]0;t\x1b\x0e\x1b\\"))
+	require.False(t, m.InSequence())
+	require.True(t, m.NonASCIICharset(), "an SO inside the window still shifts out")
+}

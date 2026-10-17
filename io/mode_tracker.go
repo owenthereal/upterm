@@ -299,8 +299,9 @@ type ModeTracker struct {
 	utf8Pending int
 
 	// shiftOut: an SO (0x0E) put G1 in use, and no SI (0x0F), RIS or DECSTR
-	// has put G0 back since. For NonASCIICharset alone: G1's charset isn't
-	// tracked, and nothing is replayed for it.
+	// has put G0 back since; an SI inside an unended string is not known to
+	// have. For NonASCIICharset alone: G1's charset isn't tracked, and
+	// nothing is replayed for it.
 	shiftOut bool
 }
 
@@ -511,7 +512,8 @@ func (m *ModeTracker) InSequence() bool {
 //
 // SO and SI are taken wherever a terminal executes them, which is everywhere
 // but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
-// them to its handler.
+// them to its handler. A string ended ambiguously counts as one until it is
+// over, for an SI: the shift-out is kept through it.
 func (m *ModeTracker) NonASCIICharset() bool {
 	return m.shiftOut || (len(m.charsetG0) == 3 && m.charsetG0[2] != 'B')
 }
@@ -583,13 +585,20 @@ func (m *ModeTracker) watchSequence(b byte) {
 	m.afterESC = b == 0x1b
 
 	// SO and SI wherever a terminal executes them: everywhere but inside a
-	// string, which ignores them or hands them to its handler.
+	// string, which ignores them or hands them to its handler. A string the
+	// program ended ambiguously is still inside one on a terminal that keeps
+	// it open, where an SI is the string's and G1 stays in use once ST comes,
+	// so there it is not taken as putting G0 back: the shift-out waits for an
+	// SI outside that window. An SO there is no less conservative, and still
+	// sets it.
 	if m.state != msString {
 		switch b {
 		case 0x0e:
 			m.shiftOut = true
 		case 0x0f:
-			m.shiftOut = false
+			if m.unended == skNone {
+				m.shiftOut = false
+			}
 		}
 	}
 
