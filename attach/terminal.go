@@ -462,12 +462,28 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		// come, the output is abandoned as on the drain's timeout, the
 		// restore unwritten and handed back. The turn is not given back:
 		// nothing writes after the restore.
+		//
+		// A turn that is free is taken first, whatever is left of the
+		// budget: with copied and the timer both ready, one select between
+		// the turn and the timer would pick either at random, and could give
+		// up a restore nothing stood in the way of. Only a turn something
+		// holds is waited for, within the budget.
 		if !o.abandoned.Load() {
 			if restore := o.restore(); len(restore) > 0 {
+				taken := false
 				select {
 				case o.turn <- struct{}{}:
+					taken = true
+				default:
+					select {
+					case o.turn <- struct{}{}:
+						taken = true
+					case <-tail.C:
+					}
+				}
+				if taken {
 					o.writeWithin(tail.C, restore, logger)
-				case <-tail.C:
+				} else {
 					o.abandon()
 					logging.WarnWithin(logger, logging.LogBound, "abandoning the terminal's mode restore: a status write still holds the output", "timeout", outputDrainTimeout)
 				}

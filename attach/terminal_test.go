@@ -1156,3 +1156,28 @@ func TestOfferStatusRefusesAnOfferWhileOneWaits(t *testing.T) {
 	o.closeStatus()
 	awaitClosed(t, first, "closing the slot did not let the waiting offer go")
 }
+
+// The restore is written whenever the turn is free, however little of the
+// tail's budget is left: only a status write still holding the output is a
+// reason to give it up. With the budget spent as the copy ends, the copy's
+// end and the timer are ready together, many times over.
+func TestTheRestoreIsNotGivenUpWhileTheTurnIsFree(t *testing.T) {
+	old := outputDrainTimeout
+	outputDrainTimeout = time.Nanosecond
+	t.Cleanup(func() { outputDrainTimeout = old })
+
+	for i := range 50 {
+		door := serveDoor(t, func(s gssh.Session) {
+			_, _ = io.WriteString(s, "\x1b[?1049h")
+			_ = s.Exit(0)
+		})
+		logs := &syncSink{}
+		res, err := (&Terminal{Stdout: io.Discard, Escape: '~',
+			Pty:    &Pty{Term: "xterm", Size: termsize.Default},
+			Logger: slog.New(slog.NewTextHandler(logs, nil)),
+		}).Run(context.Background(), dialDoor(t, door), time.Now().Add(testTimeout))
+		require.NoError(t, err)
+		awaitClosed(t, res.Released, "Released never closed")
+		require.NotContains(t, logs.String(), "a status write still holds the output", "run %d: no status write was ever made", i)
+	}
+}
