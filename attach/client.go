@@ -231,16 +231,27 @@ func (e *endReader) handle(req *ssh.Request) {
 	}
 	var end sessionEnd
 	if err := ssh.Unmarshal(req.Payload, &end); err != nil {
-		// Not a payload this client knows, so nothing it can report.
+		// Not a payload this client knows, so the reply says it wasn't
+		// read. The daemon still said why the session ended, so what is
+		// kept is a session end with no cause this client knows, not
+		// nothing: the status alone is not the whole story. Kept empty, not
+		// as decoded, since a payload that fails part way leaves what came
+		// before the failure behind.
+		e.keep(upterm.SessionEnd{})
 		_ = req.Reply(false, nil)
 		return
 	}
-	e.mu.Lock()
-	if e.end == nil {
-		e.end = &upterm.SessionEnd{Cause: end.Cause, Signal: end.Signal}
-	}
-	e.mu.Unlock()
+	e.keep(upterm.SessionEnd{Cause: end.Cause, Signal: end.Signal})
 	_ = req.Reply(true, nil)
+}
+
+// keep holds end as the session's, unless the daemon sent one before it.
+func (e *endReader) keep(end upterm.SessionEnd) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.end == nil {
+		e.end = &end
+	}
 }
 
 // sessionEnd is upterm.SessionEnd as this client reads it: the fields it
@@ -275,8 +286,9 @@ func (e *endReader) drain(bound time.Duration) {
 	}
 }
 
-// cause is what the daemon said ended the session; CauseNone when it said
-// nothing, or a cause this client has no kind for, which is never guessed at.
+// cause is what the daemon said ended the session: CauseNone when it said
+// nothing, and CauseUnknown when it gave a cause this client has no kind for,
+// or one it couldn't read, which is never guessed at.
 func (e *endReader) cause() Cause {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -295,7 +307,7 @@ func (e *endReader) cause() Cause {
 	case upterm.CauseJoinTimeout:
 		return Cause{Kind: CauseJoinTimeout}
 	}
-	return Cause{}
+	return Cause{Kind: CauseUnknown}
 }
 
 // ErrHostKeyMismatch is what Run's error wraps when the door presented a key

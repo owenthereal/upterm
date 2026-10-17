@@ -118,9 +118,8 @@ func (r Reason) String() string {
 type CauseKind int
 
 const (
-	// CauseNone: the daemon said nothing. An older daemon never does, and a
-	// newer one may give a cause this client does not know; either way no
-	// reason is guessed.
+	// CauseNone: the daemon said nothing, as one from before the session-end
+	// request does. The status is then all there is to go on.
 	CauseNone CauseKind = iota
 	// CauseExited: the command ended on its own, and Status is its own.
 	CauseExited
@@ -134,6 +133,11 @@ const (
 	// CauseJoinTimeout: no guest joined within the join timeout. The status
 	// is 0, which is why a cause is needed to tell this from an ordinary exit.
 	CauseJoinTimeout
+	// CauseUnknown: the daemon said why, but not in words this client knows:
+	// a cause from a later daemon, or a payload this client can't decode. No
+	// reason is guessed, and the status isn't taken for the command's either,
+	// since the cause may be one that says it isn't.
+	CauseUnknown
 )
 
 // Cause is why the daemon ended the session, when it said. Kind is CauseNone

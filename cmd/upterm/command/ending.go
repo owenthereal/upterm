@@ -43,7 +43,9 @@ func endedFromRecord(rec *sessiondir.Record) ended {
 
 // endedFromResult reads the daemon's cause ahead of the status, which alone
 // can't say: a stop and a signal both give 1, and a join timeout gives 0. No
-// cause, from an older daemon, is an exit with the status it sent.
+// cause, from an older daemon, is an exit with the status it sent. A cause
+// this upterm doesn't know is a reason it didn't record, never the status,
+// which that cause may be saying isn't the command's.
 func endedFromResult(res attach.Result) ended {
 	switch res.Cause.Kind {
 	case attach.CauseStopped:
@@ -54,6 +56,8 @@ func endedFromResult(res attach.Result) ended {
 		return ended{Reason: sessiondir.ReasonCanceled}
 	case attach.CauseJoinTimeout:
 		return ended{Reason: sessiondir.ReasonJoinTimeout}
+	case attach.CauseUnknown:
+		return ended{Reason: sessiondir.ReasonUnknown}
 	}
 	status := res.Status
 	return ended{Reason: sessiondir.ReasonExited, Status: &status}

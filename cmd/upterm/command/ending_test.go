@@ -107,6 +107,12 @@ func TestEndLineFromAnAttachResult(t *testing.T) {
 			"upterm: the session ended for a reason upterm didn't record", "upterm: the session ended for a reason upterm didn't record"},
 		{"canceled", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseCanceled}},
 			"upterm: the session ended for a reason upterm didn't record", "upterm: the session ended for a reason upterm didn't record"},
+		// The daemon said why, in words this upterm doesn't know: the status
+		// is not the command's to report.
+		{"a cause this upterm doesn't know", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseUnknown}},
+			"upterm: the session ended for a reason upterm didn't record", "upterm: the session ended for a reason upterm didn't record"},
+		{"a cause this upterm doesn't know, with 0", attach.Result{Reason: attach.Exited, Cause: attach.Cause{Kind: attach.CauseUnknown}},
+			"upterm: the session ended for a reason upterm didn't record", "upterm: the session ended for a reason upterm didn't record"},
 		{"stopped", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseStopped}},
 			"upterm: the session was stopped", "upterm: the session was stopped"},
 		{"join timeout", attach.Result{Reason: attach.Exited, Cause: attach.Cause{Kind: attach.CauseJoinTimeout}},

@@ -1871,8 +1871,9 @@ func TestEveryCauseTheDaemonNamesIsReadAsItsKind(t *testing.T) {
 		{"canceled", upterm.SessionEnd{Cause: upterm.CauseCanceled}, Cause{Kind: CauseCanceled}},
 		{"join timeout", upterm.SessionEnd{Cause: upterm.CauseJoinTimeout}, Cause{Kind: CauseJoinTimeout}},
 		// A newer daemon's cause is not one this client knows; guessing
-		// would put words in the daemon's mouth.
-		{"a cause from a newer daemon", upterm.SessionEnd{Cause: "evicted", Signal: "TERM"}, Cause{}},
+		// would put words in the daemon's mouth. It is still a cause, which
+		// the status alone doesn't explain.
+		{"a cause from a newer daemon", upterm.SessionEnd{Cause: "evicted", Signal: "TERM"}, Cause{Kind: CauseUnknown}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			door := serveDoor(t, func(s gssh.Session) {
@@ -1897,9 +1898,10 @@ func sendRawSessionEnd(t *testing.T, s gssh.Session, payload []byte) bool {
 	return ok
 }
 
-// A payload this client cannot decode says nothing it can report, and the
-// client says so in its reply.
-func TestAnUndecodableCauseGivesNoCause(t *testing.T) {
+// A payload this client cannot decode is still the daemon saying why the
+// session ended, in words this client can't read: a cause it doesn't know, and
+// the client says in its reply that it couldn't read it.
+func TestAnUndecodableCauseIsACauseThisClientDoesNotKnow(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		payload []byte
@@ -1916,7 +1918,7 @@ func TestAnUndecodableCauseGivesNoCause(t *testing.T) {
 			res := runClient(t, door)
 			require.Equal(t, Exited, res.Reason)
 			require.Equal(t, 1, res.Status)
-			require.Equal(t, Cause{}, res.Cause)
+			require.Equal(t, Cause{Kind: CauseUnknown}, res.Cause)
 			require.False(t, <-replies, "the client took a payload it could not read")
 		})
 	}
