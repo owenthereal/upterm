@@ -163,8 +163,8 @@ type join struct {
 
 	em  Emulation
 	err error // why the replay failed, once it has
-	// render is the render as of h and lastSeq, the emulation's handoff, when
-	// lastSeq is offeredSeq; before that, rerender makes none.
+	// render is the render as of h and lastSeq, the emulation's handoff, or
+	// nil while the emulation has yet to pass a resize it was offered.
 	render []byte
 	h      uint64
 	// lastSeq is the last event the emulation has passed.
@@ -230,7 +230,8 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 	}, false, nil
 }
 
-// start runs the emulation's Start and its first render, outside every lock.
+// start runs the emulation's Start, outside every lock, and renders it if it
+// has passed every resize it was offered (see rerender).
 func (j *join) start(c *Capture) {
 	if !time.Now().Before(j.deadline) {
 		// The permit came as the deadline passed.
@@ -246,8 +247,8 @@ func (j *join) start(c *Capture) {
 	}
 }
 
-// feed offers the emulation more of the stream and renders it again,
-// outside every lock.
+// feed offers the emulation more of the stream, outside every lock, and
+// renders it again once it has passed every resize offered so far.
 func (j *join) feed(chunks [][]byte, sizes []SizeEvent) {
 	j.err = guard(func() error { return j.em.Feed(chunks, sizes) })
 	if j.err == nil {
@@ -270,6 +271,9 @@ func (j *join) rerender() error {
 		}
 		j.h, j.lastSeq = h, lastSeq
 		if lastSeq < j.offeredSeq {
+			// Nor is an older render kept: one as of an earlier point is
+			// never to be handed over.
+			j.render = nil
 			return nil
 		}
 		render, err := j.em.Render()

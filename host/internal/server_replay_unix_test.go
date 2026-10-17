@@ -149,10 +149,11 @@ func (l *sessionLog) await(t *testing.T, marker string) string {
 // size would carry out in other places.
 var cursorMoves = []string{"\x1b[H", "\x1b[1A"}
 
-// The session is 80x24, held there by a viewer, and its command draws a
-// status line and then redraws it in place, as an ink-style renderer does:
-// up a row, the row erased, the line drawn again. A 45x30 guest gets the
-// screen that redraw left, at its own size: one RING-MARK, its row cut at 45
+// The session is at its 80x24 start size, which a viewer doesn't change, and
+// its command draws a status line and then redraws it in place, as an
+// ink-style renderer does: up a row, the row erased, the line drawn again. A
+// 45x30 guest, the first terminal, takes the pty to its own size, and gets the
+// screen that redraw left at that size: one RING-MARK, its row cut at 45
 // columns, as a terminal that doesn't reflow cuts it. Replayed raw, the same
 // bytes would wrap the line at 45 and redraw only the half the cursor went
 // back up to, leaving two. So the guest's first bytes hold none of the ring's
@@ -177,8 +178,8 @@ func TestASmallerGuestGetsTheEmulatedScreen(t *testing.T) {
 // terminal of that size, its first bytes leave the same cells, cursor and
 // scrolled-off lines as the ring does fed to another. The ring scrolls,
 // styles text, moves the cursor, erases, and ends in text with no newline.
-// The bytes are a reconstruction, not the ring: the viewer, which keeps the
-// session at its size, is handed the ring.
+// The bytes are a reconstruction, not the ring, which the viewer, counting
+// towards no size, is handed.
 func TestAnEqualGuestGetsExactGeometry(t *testing.T) {
 	var first strings.Builder
 	first.WriteString(`\033[1;31mRED\033[m plain\n`)

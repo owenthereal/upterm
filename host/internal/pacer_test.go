@@ -1092,6 +1092,45 @@ func TestGuestPacerEndsTheHoldHoweverTheAttachEnds(t *testing.T) {
 	}
 }
 
+// The session stopping ends a hold for a guest still being attached, as it
+// ends any other, without waiting for the attach: the pacer's context ending,
+// as the command's does when the session is stopped, or the command exiting.
+// The attach here never returns, so nothing else can end the hold.
+func TestGuestPacerAPendingHoldEndsWithTheSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(p *guestPacer, cancel context.CancelFunc)
+	}{
+		{"the session's context ends", func(_ *guestPacer, cancel context.CancelFunc) { cancel() }},
+		{"the command exits", func(p *guestPacer, _ context.CancelFunc) { p.release() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			p, _ := newTestPacerWithContext(t, ctx, time.Minute)
+			inside, finish := make(chan struct{}), make(chan struct{})
+			attached := make(chan error, 1)
+			go func() {
+				attached <- p.attach(t.Context(), newFakePaced(0), func() error {
+					close(inside)
+					<-finish
+					return nil
+				})
+			}()
+			t.Cleanup(func() {
+				close(finish)
+				require.NoError(t, <-attached, "the attach failed once it was let finish")
+			})
+			awaitClosed(t, inside, "the attach never ran")
+
+			done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
+			requireHeld(t, p, done)
+			tc.stop(p, cancel)
+			requireReturns(t, done, 2*time.Second)
+		})
+	}
+}
+
 // The stall deadline judges a pacing guest by what it delivers, and a guest
 // still being attached has been handed nothing to deliver. Held for its
 // attach through five stall deadlines, it is never judged stalled, and once
@@ -1189,7 +1228,12 @@ func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
 	requireReturns(t, done, time.Until(deadline)+2*time.Second)
 	ended := time.Now()
 	require.False(t, ended.Before(deadline), "the hold ended before the join's deadline, so the join never needed output")
-	require.Less(t, ended.Sub(deadline), 50*time.Millisecond, "the hold outlived the join's deadline")
+	// The hold ends within milliseconds of the deadline, under -race too. One
+	// that outlived the fallback would have nothing to end it here before the
+	// bound above gives up, two seconds on: the stall timeout is a minute, and
+	// a pending guest has none. Half a second leaves a loaded runner room and
+	// stays well short of that.
+	require.Less(t, ended.Sub(deadline), 500*time.Millisecond, "the hold outlived the join's deadline")
 	require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
 	select {
 	case err := <-e.fellBack:
