@@ -22,11 +22,21 @@ type ended struct {
 	LogPath      string // the session's log, for a startup that failed
 }
 
+// endedFromRecord reads the signal's number where the record has one. A
+// record written before records carried it has only the signal's description
+// ("terminated"), and the number is found from that, so the lines still name
+// the signal.
 func endedFromRecord(rec *sessiondir.Record) ended {
+	number := rec.SignalNumber
+	if number == nil && rec.Signal != "" {
+		if n, ok := signalNumber(rec.Signal); ok {
+			number = &n
+		}
+	}
 	return ended{
 		Reason:       rec.Reason,
 		Status:       rec.ExitCode,
-		SignalNumber: rec.SignalNumber,
+		SignalNumber: number,
 		LogPath:      rec.LogPath,
 	}
 }

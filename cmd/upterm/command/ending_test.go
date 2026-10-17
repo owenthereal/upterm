@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/owenthereal/upterm/attach"
@@ -136,6 +137,36 @@ func TestAnUnnamedSignalIsToldByItsNumber(t *testing.T) {
 	require.Equal(t, `session "s" has already ended by signal 40`, refusalLine("s", e))
 	require.Equal(t, "upterm: the session ended by signal 40", endLine(e, false))
 	require.Equal(t, "upterm: the session ended by signal 40", endLine(e, true))
+}
+
+// A record written before records carried a signal's number names the signal
+// only as Go describes it, "terminated", and its lines still name the signal.
+// A description no signal here has names nothing, so the lines say upterm
+// didn't record why.
+func TestARecordWithoutASignalNumberIsToldByItsDescription(t *testing.T) {
+	for _, tc := range []struct {
+		name, record           string
+		wait, already, refusal string
+	}{
+		{"a description this system gives", `{"reason":"signaled","signal":"terminated"}`,
+			"session s ended by signal SIGTERM",
+			"session s has already ended by signal SIGTERM",
+			`session "s" has already ended by signal SIGTERM`},
+		{"a description no signal here has", `{"reason":"signaled","signal":"eaten by a grue"}`,
+			"session s ended for a reason upterm didn't record",
+			"session s has already ended for a reason upterm didn't record",
+			`session "s" has already ended for a reason upterm didn't record`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec sessiondir.Record
+			require.NoError(t, json.Unmarshal([]byte(tc.record), &rec))
+			require.Nil(t, rec.SignalNumber, "the record carries no number")
+			e := endedFromRecord(&rec)
+			require.Equal(t, tc.wait, waitLine("s", e))
+			require.Equal(t, tc.already, alreadyEndedLine("s", e))
+			require.Equal(t, tc.refusal, refusalLine("s", e))
+		})
+	}
 }
 
 func TestDisconnectNeverSendsYouToAnotherSession(t *testing.T) {

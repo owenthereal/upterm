@@ -23,3 +23,17 @@ func signalName(n int) string {
 	}
 	return strconv.Itoa(n)
 }
+
+// signalNumber is the number of the signal described as description, the way
+// syscall.Signal's String does ("terminated"): all that a record written
+// before records carried the number says of its signal. false for any other
+// description. The signals asked are the ones signalName names, which cover
+// every signal a record written here can name.
+func signalNumber(description string) (int, bool) {
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM} {
+		if sig.String() == description {
+			return int(sig), true
+		}
+	}
+	return 0, false
+}
