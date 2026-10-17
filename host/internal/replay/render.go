@@ -53,10 +53,10 @@ func (e *emulation) render() ([]byte, error) {
 	if enc.err != nil {
 		return nil, enc.err
 	}
-	first, size := e.hist.newest(budget - len(preamble) - len(enc.buf))
+	from, size := e.hist.newest(budget - len(preamble) - len(enc.buf))
 	out := make([]byte, 0, len(preamble)+size+len(enc.buf))
 	out = append(out, preamble...)
-	out = e.hist.appendFrom(out, first)
+	out = e.hist.appendFrom(out, from)
 	return append(out, enc.buf...), nil
 }
 

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/owenthereal/x/ansi"
@@ -449,9 +448,8 @@ func TestReplaySetsUpTheEmulator(t *testing.T) {
 }
 
 // The history keeps the newest lines that fit its budget, each
-// costing its bytes, the CRLF the render follows it with and the length the
-// history keeps of it; a line over the whole budget is dropped, and the clear
-// function empties it.
+// costing its bytes and the CRLF the render follows it with; a line over the
+// whole budget is dropped, and the clear function empties it.
 func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	line := func(s string) uv.Line {
 		l := uv.NewLine(20)
@@ -460,8 +458,8 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 		}
 		return l
 	}
-	// "aaa" costs 3 + 2 + 4: two such lines fit, and a third pushes one out.
-	h := history{max: 18}
+	// "aaa" costs 3 + 2: two such lines fit, and a third pushes one out.
+	h := history{max: 10}
 	for _, s := range []string{"aaa", "bbb", "ccc"} {
 		h.push(line(s))
 	}
@@ -479,22 +477,21 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("eee")}, collect(&h))
 }
 
-// The history takes at most its budget, its own bookkeeping
-// included, even of lines that cost the render only their CRLF.
-func TestHistoryBookkeepingStaysWithinItsBudget(t *testing.T) {
+// The history takes at most its budget, and keeps as many lines as fit
+// it, even of lines that cost the render only their CRLF.
+func TestHistoryStaysWithinItsBudget(t *testing.T) {
 	h := history{max: budget}
 	blank := uv.NewLine(8)
 	// Three times what it keeps, so the oldest lines have gone, twice over.
-	for range 3 * budget / (len(crlf) + 4) {
+	for range 3 * budget / len(crlf) {
 		h.push(blank)
 	}
 	kept := 0
 	for range h.all() {
 		kept++
 	}
-	require.Equal(t, budget/(len(crlf)+4), kept)
-	require.LessOrEqual(t, len(h.data)+len(h.lens)*int(unsafe.Sizeof(h.lens[0])), budget)
-	require.LessOrEqual(t, h.cost, budget)
+	require.Equal(t, budget/len(crlf), kept)
+	require.LessOrEqual(t, len(h.data), budget)
 }
 
 func collect(h *history) [][]byte {

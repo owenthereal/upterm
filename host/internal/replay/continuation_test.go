@@ -1446,7 +1446,10 @@ func heldLines(term *vt.Emulator, off *scrollOff) []string {
 
 // A plain shell session with no resizes, the common case, joined through a
 // fan-out: with the whole session in the ring, the joiner's history and
-// screen hold every line of it, in order.
+// screen hold every line of it, in order. With the ring full, they hold its
+// newest lines, in order, to the session's last, and leave out at most
+// 2 KiB of the oldest the ring held, which the rest of the render's budget
+// is spent on. The ring's first line can start partway, and then is held so.
 func TestReplayPlainShellKeepsEveryLine(t *testing.T) {
 	join := func(t *testing.T, stream []byte) (*vt.Emulator, *scrollOff, uint64) {
 		t.Helper()
@@ -1467,6 +1470,22 @@ func TestReplayPlainShellKeepsEveryLine(t *testing.T) {
 		require.Equal(t, lines, heldLines(b, off))
 	})
 
+	t.Run("a full ring", func(t *testing.T) {
+		stream, lines, starts := shellOutput(320 << 10)
+		b, off, start := join(t, stream)
+		held := heldLines(b, off)
+		require.NotEmpty(t, held)
+		first := len(lines) - len(held)
+		require.Equal(t, lines[first+1:], held[1:], "the newest lines, to the last")
+		require.True(t, strings.HasSuffix(lines[first], held[0]), "%q isn't %q or its end", held[0], lines[first])
+		if held[0] != lines[first] {
+			// The ring starts inside that line, so it leaves out nothing.
+			require.Less(t, int(start), starts[first+1])
+			return
+		}
+		require.GreaterOrEqual(t, starts[first], int(start))
+		require.LessOrEqual(t, starts[first]-int(start), 2<<10, "the oldest lines the ring held, left out")
+	})
 }
 
 // Wide characters, combining marks and ZWJ emoji, in history and on the

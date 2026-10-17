@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"iter"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -9,97 +10,86 @@ import (
 // crlf follows each history line in the render.
 const crlf = "\r\n"
 
-// lineCost is what a line costs the history besides its bytes: the CRLF the
-// render follows it with, and the length the history keeps of it, a uint32.
-const lineCost = len(crlf) + 4
-
 // history keeps the newest lines that scrolled off the emulator's main
-// screen, each encoded as it left, within a budget: a line costs
-// its bytes and lineCost, and the oldest lines go to keep the total within
-// max. So both the render's share and the history's own bookkeeping stay
-// within the budget, even for a flood of blank lines, which
-// cost nothing else.
+// screen, each encoded as it left and followed by the CRLF the render
+// follows it with, within a budget: the oldest lines go to keep the total
+// within max. So the history takes at most its budget, and holds as many
+// lines as a render of that budget carries, even of a flood of blank lines,
+// which cost a CRLF each.
 //
-// The lines are kept end to end in one buffer, with their lengths, rather
-// than a slice each: a short line would cost more in its own allocation and
-// slice header than in its bytes. A line is never longer than the budget,
-// so its length fits 32 bits.
+// The lines are kept end to end in one buffer, rather than a slice each: a
+// short line would cost more in its own allocation and slice header than in
+// its bytes. The CRLFs are what mark where each line ends, since no line
+// holds one of its own: a cell holds no control, and neither does a link's
+// URL, as the parser leaves the C0 controls out of an OSC string.
 type history struct {
 	max  int
-	data []byte   // the lines kept, oldest first
-	lens []uint32 // the length of each, oldest first
-	cost int      // what they cost: their bytes and lineCost each
+	data []byte // the lines kept, oldest first, each followed by a CRLF
 	enc  encoder
 }
 
 // push encodes line and keeps it, dropping the oldest lines past the
-// budget. A line that alone costs more than the budget is dropped itself:
-// no render could hold it. It runs inside the emulator's Write, as its
-// scroll-off function, and the line is the screen's own storage, so it is
-// encoded here and never kept.
+// budget. A line that alone, with its CRLF, costs more than the budget is
+// dropped itself: no render could hold it. It runs inside the emulator's
+// Write, as its scroll-off function, and the line is the screen's own
+// storage, so it is encoded here and never kept.
 func (h *history) push(line uv.Line) {
-	h.enc.reset(max(h.max-lineCost, 0))
+	h.enc.reset(max(h.max-len(crlf), 0))
 	if h.enc.row(line) != nil {
 		return
 	}
-	n := len(h.enc.buf)
-	h.data = append(h.data, h.enc.buf...)
-	h.lens = append(h.lens, uint32(n))
-	h.cost += n + lineCost
-	for h.cost > h.max {
-		n := int(h.lens[0])
-		h.data, h.lens = h.data[n:], h.lens[1:]
-		h.cost -= n + lineCost
+	h.data = append(append(h.data, h.enc.buf...), crlf...)
+	if over := len(h.data) - h.max; over > 0 {
+		h.data = h.data[h.lineAt(over):]
 	}
+}
+
+// lineAt is where the first line that starts at or after off starts: the
+// end of the CRLF that ends at or after off, or the end of the history.
+func (h *history) lineAt(off int) int {
+	switch {
+	case off <= 0:
+		return 0
+	case off >= len(h.data):
+		return len(h.data)
+	}
+	from := max(off-len(crlf), 0)
+	i := bytes.Index(h.data[from:], []byte(crlf))
+	if i < 0 {
+		return len(h.data)
+	}
+	return from + i + len(crlf)
 }
 
 // clear forgets every line, as ED 3 and RIS clear history.
 func (h *history) clear() {
-	h.data, h.lens, h.cost = nil, nil, 0
+	h.data = nil
 }
 
-// all yields the lines kept, oldest first. Each is the history's own storage,
-// valid until the next push or clear.
+// all yields the lines kept, oldest first, without their CRLFs. Each is the
+// history's own storage, valid until the next push or clear.
 func (h *history) all() iter.Seq[[]byte] {
 	return func(yield func([]byte) bool) {
-		off := 0
-		for _, n := range h.lens {
-			end := off + int(n)
-			if !yield(h.data[off:end:end]) {
+		for rest := h.data; len(rest) > 0; {
+			i := bytes.Index(rest, []byte(crlf))
+			if !yield(rest[:i:i]) {
 				return
 			}
-			off = end
+			rest = rest[i+len(crlf):]
 		}
 	}
 }
 
-// newest returns the first of the newest lines that fit in room, each with
-// the CRLF the render follows it with, and the bytes they take, CRLFs
-// included. Lines are kept whole, so the history a render carries is cut
-// at a line.
-func (h *history) newest(room int) (first, size int) {
-	first = len(h.lens)
-	for first > 0 {
-		n := int(h.lens[first-1]) + len(crlf)
-		if size+n > room {
-			break
-		}
-		size += n
-		first--
-	}
-	return first, size
+// newest returns where the newest lines that fit in room start, each with
+// the CRLF the render follows it with, and the bytes they take. Lines are
+// kept whole, so the history a render carries is cut at a line.
+func (h *history) newest(room int) (from, size int) {
+	from = h.lineAt(len(h.data) - room)
+	return from, len(h.data) - from
 }
 
-// appendFrom appends the lines from first on, oldest first, each followed by
-// a CRLF.
-func (h *history) appendFrom(out []byte, first int) []byte {
-	off := 0
-	for i, n := range h.lens {
-		end := off + int(n)
-		if i >= first {
-			out = append(append(out, h.data[off:end]...), crlf...)
-		}
-		off = end
-	}
-	return out
+// appendFrom appends the lines from from on, oldest first, each followed by
+// its CRLF.
+func (h *history) appendFrom(out []byte, from int) []byte {
+	return append(out, h.data[from:]...)
 }
