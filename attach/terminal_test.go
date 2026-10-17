@@ -989,6 +989,118 @@ func TestTheRestoreWaitsForAStatusWriteThatOwnsTheOutput(t *testing.T) {
 	require.NotContains(t, out[at:], "\x1b[?1049l", "no restore bytes spliced after the status began")
 }
 
+// failOnSink is a terminal whose first write containing mark fails: with an
+// error, or short, taking all but its last byte and reporting no error. Every
+// other write is taken whole. hit closes at the failed write.
+type failOnSink struct {
+	mark  string
+	short bool
+	hit   chan struct{}
+	once  sync.Once
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newFailOnSink(mark string, short bool) *failOnSink {
+	return &failOnSink{mark: mark, short: short, hit: make(chan struct{})}
+}
+
+func (s *failOnSink) Write(p []byte) (int, error) {
+	fail := false
+	if bytes.Contains(p, []byte(s.mark)) {
+		s.once.Do(func() { fail = true })
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case !fail:
+		return s.buf.Write(p)
+	case s.short:
+		n, _ := s.buf.Write(p[:len(p)-1])
+		close(s.hit)
+		return n, nil
+	default:
+		close(s.hit)
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (s *failOnSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// runFailedWrite runs a session that writes "ready" and then stays quiet, so
+// the output is idle, on stdout. Unless "ready" is stdout's mark, the client
+// types "\r~?" once it is in, with a Status hook answering at once. It hands
+// back the Result and how long Run took to return after the failed write,
+// failing the test if Run is still attached well past it.
+func runFailedWrite(t *testing.T, stdout *failOnSink) (Result, time.Duration) {
+	t.Helper()
+	door := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "ready")
+		<-s.Context().Done()
+	})
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := runStatusTerminal(t, ctx, door, stdout, pr, answering([]string{"upterm: STATUS"}, make(chan struct{})))
+
+	if stdout.mark != "ready" {
+		waitFor(t, func() bool { return strings.Contains(stdout.String(), "ready") }, "the session's output never reached the terminal")
+		_, err := pw.Write([]byte("\r~?"))
+		require.NoError(t, err)
+	}
+	awaitClosed(t, stdout.hit, "the write that fails was never made")
+	failed := time.Now()
+	select {
+	case res := <-done:
+		return res, time.Since(failed)
+	case <-time.After(3 * time.Second):
+		t.Fatal("still attached after a failed write to stdout")
+		return Result{}, 0
+	}
+}
+
+// A status written while the output is idle is a write to Stdout like the
+// copy's, and Stdout failing under it is the terminal going away all the
+// same: the attachment ends as it does when the copy's own write fails, and
+// at once, rather than staying attached to a terminal nothing reaches. A
+// short write is a failed one, as it is for the copy.
+func TestAFailedStatusWriteEndsTheAttachmentAsAFailedCopyDoes(t *testing.T) {
+	copyFailed, _ := runFailedWrite(t, newFailOnSink("ready", false))
+	require.Equal(t, Detached, copyFailed.Reason)
+	for _, tc := range []struct {
+		name  string
+		short bool
+	}{
+		{"an error", false},
+		{"a short write", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, took := runFailedWrite(t, newFailOnSink("upterm: STATUS", tc.short))
+			require.Equal(t, copyFailed.Reason, res.Reason, "the reason a failed copy gives")
+			require.Less(t, took, time.Second)
+		})
+	}
+}
+
+// Once a status write has failed, the copy stops as it does at a failed write
+// of its own: the session's next chunk is neither written nor fed to the
+// tracker.
+func TestTheCopyWritesNothingAfterAFailedStatusWrite(t *testing.T) {
+	sink := &syncSink{}
+	o := &output{w: sink, modes: uio.NewModeTracker(), turn: make(chan struct{}, 1),
+		released: make(chan struct{}), statusClosing: make(chan struct{}), failed: make(chan struct{})}
+	o.fail()
+	require.NoError(t, copyOutput(strings.NewReader("\x1b[?1049hLATER"), o))
+	require.Empty(t, sink.String())
+	require.Empty(t, o.restore(), "the chunk never written is not fed")
+}
+
 func TestALookupFinishingAfterDetachWritesNothing(t *testing.T) {
 	// The Status hook blocks until released; the client types "~?" then "~.".
 	stdout, release := runStatusReleasedAfterDetach(t)

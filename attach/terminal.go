@@ -320,14 +320,13 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	// — a stopped terminal, a pipe nobody drains — must not keep Run from
 	// returning once the session is gone. It owns Stdout only until
 	// abandoned: a write already in flight cannot be interrupted without
-	// owning the descriptor, but no later one is started. copyErr is a
-	// failed write to Stdout; a read ending, however it ends, is nil, and
-	// Wait says what it meant.
+	// owning the descriptor, but no later one is started. A failed write to
+	// Stdout, the copy's or a status's, closes o.failed; a read ending,
+	// however it ends, is no failure, and Wait says what it meant.
 	var (
 		o = &output{w: t.Stdout, turn: make(chan struct{}, 1), released: make(chan struct{}),
-			statusClosing: make(chan struct{})}
-		copied  = make(chan struct{})
-		copyErr error
+			statusClosing: make(chan struct{}), failed: make(chan struct{})}
+		copied = make(chan struct{})
 	)
 	if t.Pty != nil {
 		o.modes = uio.NewModeTracker()
@@ -337,7 +336,9 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 	}
 	o.writing()
 	go func() {
-		copyErr = copyOutput(stdout, o)
+		if err := copyOutput(stdout, o); err != nil {
+			o.fail()
+		}
 		// Counted out before copied says so: the tail goes from copied to
 		// Released without waiting on this goroutine.
 		o.wrote()
@@ -365,16 +366,15 @@ func (t *Terminal) Run(ctx context.Context, client *ssh.Client, setupBy time.Tim
 		// Stdout going away is this terminal detaching — EPIPE from a pipe
 		// whose reader left, an error from a terminal that closed — and
 		// nothing on the session's side would ever report it: with a quiet
-		// command nothing else moves. On an ordinary EOF this parks; Wait
-		// is what classifies the session's end.
+		// command nothing else moves. Whichever write finds it says so: the
+		// copy's, or a status's written while the output is idle, when
+		// the copy has nothing to write and would never find out. On an
+		// ordinary EOF this parks; Wait is what classifies the session's
+		// end.
 		g.Add(func() error {
 			select {
-			case <-copied:
-				if copyErr != nil {
-					record(Result{Reason: Detached})
-					return nil
-				}
-				<-ctx.Done()
+			case <-o.failed:
+				record(Result{Reason: Detached})
 			case <-ctx.Done():
 			}
 			return nil
@@ -538,6 +538,11 @@ type output struct {
 	abandoned atomic.Bool
 	// unrestored is the restore abandon left unwritten, under trackerMu.
 	unrestored []byte
+	// failed closes once a write to w has failed or come up short, whichever
+	// writer's it was: the copy's, or a status's. It is Stdout going away,
+	// which Run reports as a detach, and the copy writes nothing after it.
+	failed   chan struct{}
+	failOnce sync.Once
 
 	mu       sync.Mutex
 	inFlight int           // goroutines writing to w, or about to
@@ -590,6 +595,20 @@ func (o *output) release() <-chan struct{} {
 		close(o.released)
 	}
 	return o.released
+}
+
+// fail records that a write to w failed or came up short. The first call
+// closes failed; a later one finds it closed.
+func (o *output) fail() { o.failOnce.Do(func() { close(o.failed) }) }
+
+// hasFailed reports whether a write to w has failed.
+func (o *output) hasFailed() bool {
+	select {
+	case <-o.failed:
+		return true
+	default:
+		return false
+	}
 }
 
 // restore and snapshot are the tracker's, taken under trackerMu; nil without
@@ -776,6 +795,11 @@ func (o *output) closeStatus() {
 // terminal. The copy waits for the turn meanwhile, which costs nothing: it
 // would be parked on the same stopped terminal. The write is counted in
 // flight, so Released waits for it.
+//
+// A write of its own that fails, or comes up short, is Stdout failing as the
+// copy's would be, and the attachment ends the same way: as a detach, with
+// the copy writing nothing more (see fail). With the output idle the copy has
+// nothing to write, and would never find out on its own.
 func (t *Terminal) showStatus(ctx context.Context, o *output, safeWait, turnWait time.Duration, logger *slog.Logger) {
 	taken, ok := o.offerStatus(t.Status(ctx))
 	if !ok {
@@ -798,6 +822,11 @@ func (t *Terminal) showStatus(ctx context.Context, o *output, safeWait, turnWait
 	}
 	if p := o.takeStatus(false); p != nil {
 		err := writeAll(o.w, p)
+		if err != nil {
+			// Before the turn is given back, so the copy never takes it
+			// without seeing the failure.
+			o.fail()
+		}
 		o.wrote()
 		<-o.turn
 		if err != nil {
@@ -957,7 +986,10 @@ func (o *output) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 // copyOutput copies the session's output into o's writer until the session's
 // side ends or a write fails, checking abandoned before every write. It
 // returns the write error — a short write is one, as io.Copy has it — and
-// nil for every way the read can end.
+// nil for every way the read can end. A status's write that failed while
+// the output was idle ends it too, at the next chunk, which is neither fed
+// nor written: Stdout is going away, and the copy stops as it does at a
+// failed write of its own.
 //
 // The tracker, when there is one, observes everything on its way to the
 // terminal, so that the terminal can be put back afterwards. It is fed what
@@ -979,6 +1011,10 @@ func copyOutput(r io.Reader, o *output) error {
 		n, rerr := r.Read(buf)
 		if n > 0 {
 			o.turn <- struct{}{}
+			if o.hasFailed() {
+				<-o.turn
+				return nil
+			}
 			o.trackerMu.Lock()
 			abandoned := o.abandoned.Load()
 			if !abandoned && o.modes != nil {
