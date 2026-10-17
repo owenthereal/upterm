@@ -134,6 +134,11 @@ type Host struct {
 	// the session ID can join, and nobody was asked. GetSessionResponse.open
 	// reports that; it changes nothing about who may join.
 	AutoAccept bool
+	// FileTransferApprovalRequired says each guest file transfer waits for
+	// the host's desktop dialog (no --accept). The daemon sets it, with the
+	// SFTPPermissionChecker that shows the dialog. It is reported to readers
+	// of the session and changes nothing about what is allowed.
+	FileTransferApprovalRequired bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
 	ProxyURL   *url.URL
@@ -772,6 +777,20 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// The same emptiness the guest door admits anyone on.
 		Open: c.AutoAccept && len(aks) == 0,
 	}
+	internal.Permissions{
+		AutoAccept:                   c.AutoAccept,
+		ReadOnly:                     c.ReadOnly,
+		SFTPDisabled:                 c.SFTPDisabled,
+		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
+		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
+	}.Report(session)
+	// The name the session holds, which is not c.Name when Run was handed a
+	// socket (the name is then ignored) or generated one (c.Name is empty).
+	var sessionName string
+	if c.SessionDir != nil {
+		sessionName = c.SessionDir.Name()
+	}
+	internal.DescribeSession(session, sessionName, state.snapshot)
 
 	if c.SessionCreatedCallback != nil {
 		if err := c.SessionCreatedCallback(ctx, session); err != nil {
@@ -876,6 +895,8 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			return setJoinTimeoutResponse(res)
 		},
 		JoinState: func() *api.JoinState { return apiJoinState(joins.snapshot()) },
+		Name:      sessionName,
+		State:     state.snapshot,
 	}
 	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
 		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)

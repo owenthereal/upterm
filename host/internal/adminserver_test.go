@@ -409,3 +409,166 @@ func TestGetSessionReportsTheJoinStateAndLaunch(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, resp.GetJoinState(), "a server with no join state reports none")
 }
+
+// adminServerOptions describes the session an admin server speaks for. The
+// permission options go on the startup response the server copies them from,
+// as the host puts them there; Name and State are the server's own.
+type adminServerOptions struct {
+	Name             string
+	ReadOnly         bool
+	SFTPDisabled     bool
+	ApprovalRequired bool
+	State            func() SessionState
+}
+
+func newAdminServer(t *testing.T, o adminServerOptions) *adminServiceServer {
+	t.Helper()
+	session := &api.GetSessionResponse{SessionId: "session-1"}
+	Permissions{
+		ReadOnly:                     o.ReadOnly,
+		SFTPDisabled:                 o.SFTPDisabled,
+		FileTransferApprovalRequired: o.ApprovalRequired,
+	}.Report(session)
+	return &adminServiceServer{Session: session, ClientRepo: NewClientRepo(), Name: o.Name, State: o.State}
+}
+
+func getSession(t *testing.T, s *adminServiceServer) *api.GetSessionResponse {
+	t.Helper()
+	resp, err := s.GetSession(context.Background(), &api.GetSessionRequest{})
+	require.NoError(t, err)
+	return resp
+}
+
+func TestGetSessionReportsTheNewFields(t *testing.T) {
+	at := time.Date(2026, 10, 12, 9, 30, 0, 123, time.UTC)
+	srv := newAdminServer(t, adminServerOptions{Name: "build", ReadOnly: true, SFTPDisabled: false, ApprovalRequired: true,
+		State: func() SessionState {
+			return SessionState{Status: "reconnecting", Reconnect: "supported", TunnelReason: "network", LostAt: at}
+		}})
+	resp := getSession(t, srv)
+	require.Equal(t, "build", resp.GetName())
+	require.Equal(t, "reconnecting", resp.GetStatus())
+	require.Equal(t, "supported", resp.GetReconnect())
+	require.Equal(t, "network", resp.GetTunnelReason())
+	require.Equal(t, "downloads", resp.GetFileTransfer())
+	require.True(t, resp.GetReadOnly())
+	require.True(t, resp.GetFileTransferApprovalRequired())
+	require.Equal(t, at.UnixNano(), resp.GetTunnelLostAtUnixNano())
+}
+
+func TestAnOlderDaemonsAnswerIsUnknownNotFalse(t *testing.T) {
+	var old api.GetSessionResponse // as a daemon from before the fields
+	require.Nil(t, old.Name)
+	require.Nil(t, old.ReadOnly)
+	require.Nil(t, old.FileTransferApprovalRequired)
+}
+
+// A time that is zero is not a moment: it is an outage that has not begun or
+// an attempt that is not scheduled, and it is absent rather than the epoch.
+func TestGetSessionLeavesTimesUnsetWhenZero(t *testing.T) {
+	lostAt := time.Date(2026, 10, 12, 9, 30, 0, 0, time.FixedZone("UTC+9", 9*60*60))
+	nextAt := lostAt.Add(time.Second)
+
+	for _, tc := range []struct {
+		name         string
+		state        SessionState
+		wantLostAt   *int64
+		wantNextTime *int64
+	}{
+		{name: "no outage", state: SessionState{Status: "ready"}},
+		{name: "lost for good", state: SessionState{Status: "disconnected", LostAt: lostAt},
+			wantLostAt: ptr(lostAt.UnixNano())},
+		{name: "being redialled", state: SessionState{Status: "reconnecting", LostAt: lostAt, NextAttemptAt: nextAt},
+			wantLostAt: ptr(lostAt.UnixNano()), wantNextTime: ptr(nextAt.UnixNano())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := getSession(t, newAdminServer(t, adminServerOptions{State: func() SessionState { return tc.state }}))
+			require.Equal(t, tc.wantLostAt, resp.TunnelLostAtUnixNano)
+			require.Equal(t, tc.wantNextTime, resp.NextAttemptAtUnixNano)
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// Without a supervisor to ask, the live fields are unknown, not ready and not
+// empty; a session with no name has none to report. What the host decided at
+// startup is still known.
+func TestGetSessionWithoutStateOrNameLeavesThemUnset(t *testing.T) {
+	resp := getSession(t, newAdminServer(t, adminServerOptions{}))
+	require.Nil(t, resp.Name)
+	require.Nil(t, resp.Status)
+	require.Nil(t, resp.Reconnect)
+	require.Nil(t, resp.TunnelReason)
+	require.Nil(t, resp.TunnelLostAtUnixNano)
+	require.Nil(t, resp.NextAttemptAtUnixNano)
+
+	require.NotNil(t, resp.StartConfirmed)
+	require.NotNil(t, resp.ReadOnly)
+	require.NotNil(t, resp.FileTransfer)
+	require.NotNil(t, resp.FileTransferApprovalRequired)
+	require.NotNil(t, resp.LocalForwarding)
+}
+
+// The state is read for each answer, so a session whose tunnel drops and
+// returns is reported as it is then, not as it was when the server started.
+func TestGetSessionReadsTheStateForEachAnswer(t *testing.T) {
+	state := SessionState{Status: "ready"}
+	srv := newAdminServer(t, adminServerOptions{State: func() SessionState { return state }})
+	require.Equal(t, "ready", getSession(t, srv).GetStatus())
+
+	state = SessionState{Status: "reconnecting", TunnelReason: "network", LostAt: time.Unix(1, 0)}
+	resp := getSession(t, srv)
+	require.Equal(t, "reconnecting", resp.GetStatus())
+	require.Equal(t, "network", resp.GetTunnelReason())
+}
+
+// Permissions are one derivation, and every answer carries what it says.
+func TestPermissionsSayWhatGuestsMayDo(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		p            Permissions
+		wantConfirm  bool
+		wantReadOnly bool
+		wantForward  bool
+		wantTransfer string
+		wantApproval bool
+	}{
+		{name: "nothing set", wantConfirm: true, wantTransfer: "all"},
+		{name: "approval wanted", p: Permissions{FileTransferApprovalRequired: true},
+			wantConfirm: true, wantTransfer: "all", wantApproval: true},
+		{name: "read-only", p: Permissions{ReadOnly: true},
+			wantConfirm: true, wantReadOnly: true, wantTransfer: "downloads"},
+		{name: "read-only, approval wanted", p: Permissions{ReadOnly: true, FileTransferApprovalRequired: true},
+			wantConfirm: true, wantReadOnly: true, wantTransfer: "downloads", wantApproval: true},
+		{name: "no sftp", p: Permissions{SFTPDisabled: true},
+			wantConfirm: true, wantTransfer: "off"},
+		// Nothing is transferred, so nothing waits on the host.
+		{name: "no sftp, approval wanted", p: Permissions{SFTPDisabled: true, FileTransferApprovalRequired: true},
+			wantConfirm: true, wantTransfer: "off"},
+		{name: "no sftp outranks read-only", p: Permissions{SFTPDisabled: true, ReadOnly: true, FileTransferApprovalRequired: true},
+			wantConfirm: true, wantReadOnly: true, wantTransfer: "off"},
+		{name: "accepted unasked", p: Permissions{AutoAccept: true}, wantTransfer: "all"},
+		{name: "local forwarding", p: Permissions{AllowLocalTCPForwarding: true},
+			wantConfirm: true, wantForward: true, wantTransfer: "all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r api.GetSessionResponse
+			tc.p.Report(&r)
+
+			// Every field is set, so that a reader can tell this daemon
+			// from one that predates them.
+			require.NotNil(t, r.StartConfirmed)
+			require.NotNil(t, r.ReadOnly)
+			require.NotNil(t, r.LocalForwarding)
+			require.NotNil(t, r.FileTransfer)
+			require.NotNil(t, r.FileTransferApprovalRequired)
+
+			require.Equal(t, tc.wantConfirm, r.GetStartConfirmed())
+			require.Equal(t, tc.wantReadOnly, r.GetReadOnly())
+			require.Equal(t, tc.wantForward, r.GetLocalForwarding())
+			require.Equal(t, tc.wantTransfer, r.GetFileTransfer())
+			require.Equal(t, tc.wantApproval, r.GetFileTransferApprovalRequired())
+		})
+	}
+}

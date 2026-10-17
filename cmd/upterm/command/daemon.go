@@ -138,8 +138,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	}
 
 	var sftpPermissionChecker sftp.PermissionChecker = &DialogPermissionChecker{}
+	fileTransferApprovalRequired := true
 	if flagAccept {
 		sftpPermissionChecker = &AutoAllowPermissionChecker{}
+		fileTransferApprovalRequired = false
 	}
 
 	// Generated here rather than left to Run: the parent pins the door's keys
@@ -209,6 +211,9 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Term:                    opts.term,
 		SFTPDisabled:            flagNoSFTP,
 		SFTPPermissionChecker:   sftpPermissionChecker,
+		// Set where the checker is chosen, so that what readers are told is
+		// what a guest's transfer will do.
+		FileTransferApprovalRequired: fileTransferApprovalRequired,
 		// A foreground parent attaches before the command starts; a detached
 		// one has nothing to attach.
 		AwaitInitialClient: !flagDetach,

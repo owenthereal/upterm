@@ -492,9 +492,22 @@ type GetSessionResponse struct {
 	// asked: there is no allowlist, and the session was started with --accept,
 	// so nobody confirmed it either. It describes the session and changes
 	// nothing about who may join. False from daemons before this field.
-	Open          bool `protobuf:"varint,12,opt,name=open,proto3" json:"open,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Open bool `protobuf:"varint,12,opt,name=open,proto3" json:"open,omitempty"`
+	// The fields below are each optional: a daemon from before one leaves it
+	// unset, and a reader must treat unset as unknown, never as false or empty.
+	Name                         *string `protobuf:"bytes,13,opt,name=name,proto3,oneof" json:"name,omitempty"`                                                                       // the session's name
+	Status                       *string `protobuf:"bytes,14,opt,name=status,proto3,oneof" json:"status,omitempty"`                                                                   // starting, ready, reconnecting, disconnected, ending
+	Reconnect                    *string `protobuf:"bytes,15,opt,name=reconnect,proto3,oneof" json:"reconnect,omitempty"`                                                             // supported, unsupported
+	TunnelReason                 *string `protobuf:"bytes,16,opt,name=tunnel_reason,json=tunnelReason,proto3,oneof" json:"tunnel_reason,omitempty"`                                   // why the tunnel is down, one of sessiondir's TunnelReason values; empty when it is up
+	TunnelLostAtUnixNano         *int64  `protobuf:"varint,17,opt,name=tunnel_lost_at_unix_nano,json=tunnelLostAtUnixNano,proto3,oneof" json:"tunnel_lost_at_unix_nano,omitempty"`    // UTC; unset when the tunnel is up
+	NextAttemptAtUnixNano        *int64  `protobuf:"varint,18,opt,name=next_attempt_at_unix_nano,json=nextAttemptAtUnixNano,proto3,oneof" json:"next_attempt_at_unix_nano,omitempty"` // UTC; unset when no attempt is scheduled
+	StartConfirmed               *bool   `protobuf:"varint,19,opt,name=start_confirmed,json=startConfirmed,proto3,oneof" json:"start_confirmed,omitempty"`                            // the host answered the start prompt, rather than passing --accept
+	ReadOnly                     *bool   `protobuf:"varint,20,opt,name=read_only,json=readOnly,proto3,oneof" json:"read_only,omitempty"`
+	FileTransfer                 *string `protobuf:"bytes,21,opt,name=file_transfer,json=fileTransfer,proto3,oneof" json:"file_transfer,omitempty"`                                                      // off, downloads, all
+	FileTransferApprovalRequired *bool   `protobuf:"varint,22,opt,name=file_transfer_approval_required,json=fileTransferApprovalRequired,proto3,oneof" json:"file_transfer_approval_required,omitempty"` // each guest file transfer waits for the host's dialog
+	LocalForwarding              *bool   `protobuf:"varint,23,opt,name=local_forwarding,json=localForwarding,proto3,oneof" json:"local_forwarding,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *GetSessionResponse) Reset() {
@@ -607,6 +620,83 @@ func (x *GetSessionResponse) GetLaunchId() string {
 func (x *GetSessionResponse) GetOpen() bool {
 	if x != nil {
 		return x.Open
+	}
+	return false
+}
+
+func (x *GetSessionResponse) GetName() string {
+	if x != nil && x.Name != nil {
+		return *x.Name
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetStatus() string {
+	if x != nil && x.Status != nil {
+		return *x.Status
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetReconnect() string {
+	if x != nil && x.Reconnect != nil {
+		return *x.Reconnect
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetTunnelReason() string {
+	if x != nil && x.TunnelReason != nil {
+		return *x.TunnelReason
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetTunnelLostAtUnixNano() int64 {
+	if x != nil && x.TunnelLostAtUnixNano != nil {
+		return *x.TunnelLostAtUnixNano
+	}
+	return 0
+}
+
+func (x *GetSessionResponse) GetNextAttemptAtUnixNano() int64 {
+	if x != nil && x.NextAttemptAtUnixNano != nil {
+		return *x.NextAttemptAtUnixNano
+	}
+	return 0
+}
+
+func (x *GetSessionResponse) GetStartConfirmed() bool {
+	if x != nil && x.StartConfirmed != nil {
+		return *x.StartConfirmed
+	}
+	return false
+}
+
+func (x *GetSessionResponse) GetReadOnly() bool {
+	if x != nil && x.ReadOnly != nil {
+		return *x.ReadOnly
+	}
+	return false
+}
+
+func (x *GetSessionResponse) GetFileTransfer() string {
+	if x != nil && x.FileTransfer != nil {
+		return *x.FileTransfer
+	}
+	return ""
+}
+
+func (x *GetSessionResponse) GetFileTransferApprovalRequired() bool {
+	if x != nil && x.FileTransferApprovalRequired != nil {
+		return *x.FileTransferApprovalRequired
+	}
+	return false
+}
+
+func (x *GetSessionResponse) GetLocalForwarding() bool {
+	if x != nil && x.LocalForwarding != nil {
+		return *x.LocalForwarding
 	}
 	return false
 }
@@ -847,7 +937,7 @@ const file_api_proto_rawDesc = "" +
 	"\tJoinState\x12#\n" +
 	"\rtimeout_nanos\x18\x01 \x01(\x03R\ftimeoutNanos\x12,\n" +
 	"\x12deadline_unix_nano\x18\x02 \x01(\x03R\x10deadlineUnixNano\x12>\n" +
-	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\xba\x03\n" +
+	"\x1cfirst_guest_joined_unix_nano\x18\x03 \x01(\x03R\x18firstGuestJoinedUnixNano\"\x8b\t\n" +
 	"\x12GetSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -863,7 +953,32 @@ const file_api_proto_rawDesc = "" +
 	"join_state\x18\n" +
 	" \x01(\v2\x0e.api.JoinStateR\tjoinState\x12\x1b\n" +
 	"\tlaunch_id\x18\v \x01(\tR\blaunchId\x12\x12\n" +
-	"\x04open\x18\f \x01(\bR\x04open\"a\n" +
+	"\x04open\x18\f \x01(\bR\x04open\x12\x17\n" +
+	"\x04name\x18\r \x01(\tH\x00R\x04name\x88\x01\x01\x12\x1b\n" +
+	"\x06status\x18\x0e \x01(\tH\x01R\x06status\x88\x01\x01\x12!\n" +
+	"\treconnect\x18\x0f \x01(\tH\x02R\treconnect\x88\x01\x01\x12(\n" +
+	"\rtunnel_reason\x18\x10 \x01(\tH\x03R\ftunnelReason\x88\x01\x01\x12;\n" +
+	"\x18tunnel_lost_at_unix_nano\x18\x11 \x01(\x03H\x04R\x14tunnelLostAtUnixNano\x88\x01\x01\x12=\n" +
+	"\x19next_attempt_at_unix_nano\x18\x12 \x01(\x03H\x05R\x15nextAttemptAtUnixNano\x88\x01\x01\x12,\n" +
+	"\x0fstart_confirmed\x18\x13 \x01(\bH\x06R\x0estartConfirmed\x88\x01\x01\x12 \n" +
+	"\tread_only\x18\x14 \x01(\bH\aR\breadOnly\x88\x01\x01\x12(\n" +
+	"\rfile_transfer\x18\x15 \x01(\tH\bR\ffileTransfer\x88\x01\x01\x12J\n" +
+	"\x1ffile_transfer_approval_required\x18\x16 \x01(\bH\tR\x1cfileTransferApprovalRequired\x88\x01\x01\x12.\n" +
+	"\x10local_forwarding\x18\x17 \x01(\bH\n" +
+	"R\x0flocalForwarding\x88\x01\x01B\a\n" +
+	"\x05_nameB\t\n" +
+	"\a_statusB\f\n" +
+	"\n" +
+	"_reconnectB\x10\n" +
+	"\x0e_tunnel_reasonB\x1b\n" +
+	"\x19_tunnel_lost_at_unix_nanoB\x1c\n" +
+	"\x1a_next_attempt_at_unix_nanoB\x12\n" +
+	"\x10_start_confirmedB\f\n" +
+	"\n" +
+	"_read_onlyB\x10\n" +
+	"\x0e_file_transferB\"\n" +
+	" _file_transfer_approval_requiredB\x13\n" +
+	"\x11_local_forwarding\"a\n" +
 	"\rAuthorizedKey\x126\n" +
 	"\x17public_key_fingerprints\x18\x01 \x03(\tR\x15publicKeyFingerprints\x12\x18\n" +
 	"\acomment\x18\x02 \x01(\tR\acomment\"\xac\x02\n" +
@@ -949,6 +1064,7 @@ func file_api_proto_init() {
 	if File_api_proto != nil {
 		return
 	}
+	file_api_proto_msgTypes[6].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
