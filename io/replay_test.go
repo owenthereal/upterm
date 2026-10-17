@@ -1154,7 +1154,8 @@ func TestCatchUpNeverOffersAnEventTwice(t *testing.T) {
 // When a catch-up would offer the emulation nothing new, the join waits for
 // more output, the deadline or ctx, rather than feeding and rendering again
 // in a loop: a quiet stream with an event left in the replayer's tail
-// renders at most twice before handing off or falling back.
+// renders once, at Start, before handing off or falling back. The catch-up
+// that leaves the event in the tail renders nothing.
 func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
 	waits := joinWaits(t)
 	entered, gate := make(chan *Capture, 1), make(chan struct{})
@@ -1182,9 +1183,55 @@ func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
 	}
 	require.NoError(t, within(t, done, "the join"))
 	require.Equal(t, []error{ErrReplayDeadline}, fallbacks.all())
-	require.Equal(t, 2, r.renderCount(), "Start's render and the one catch-up's")
+	require.Equal(t, 1, r.renderCount(), "Start's render, and none while the event is in the tail")
 	require.Len(t, r.feeds(), 1)
 	require.Equal(t, "Aa", string(joiner.bytes()), "today's replay")
+}
+
+// The emulation renders only once it has passed every resize it was
+// offered. Until then it is at a size older than the stream's, which a joiner
+// sized to the newest may not hold. Here the joiner's own resize is in the
+// capture but stays in the emulation's tail, as a resize inside a character
+// the ring ends in the middle of does: Start renders nothing, the join waits
+// for output, and the output that lets the emulation pass the resize brings
+// the one render, which the join hands over.
+func TestAppendSizedRendersNothingBeforeTheNewestOfferedResize(t *testing.T) {
+	waits := joinWaits(t)
+	r := &fakeReplayer{}
+	var seq uint64
+	var early atomic.Bool // a render made with the resize in the tail
+	r.render = func(_ uint64, consumed []byte) ([]byte, error) {
+		r.mu.Lock()
+		inTail := r.tail[seq]
+		r.mu.Unlock()
+		if inTail {
+			early.Store(true)
+		}
+		return []byte("<" + string(consumed) + ">"), nil
+	}
+	r.feed = func(int, [][]byte, []SizeEvent) error {
+		// The rest of the character, which lets the emulation pass the resize.
+		r.leaveInTail(seq, false)
+		return nil
+	}
+	w, fallbacks := joinable(DefaultReplayBytes, r)
+	resize(w, at80x24)
+	writeString(w, "A")
+	seq = w.ResizeBegin(at45x30)
+	w.ResizeEnd(seq, true)
+	r.leaveInTail(seq, true)
+
+	var joiner recordingWriter
+	done := joinAsync(w, t.Context(), far(), &joiner)
+	require.Equal(t, waitOutput, within(t, waits, "the wait for output"))
+	require.Zero(t, r.renderCount(), "a render was made at a size older than the joiner's resize")
+
+	writeString(w, "B")
+	require.NoError(t, within(t, done, "the join"))
+	require.False(t, early.Load(), "a render was made with the joiner's resize in the emulation's tail")
+	require.Equal(t, 1, r.renderCount())
+	require.Equal(t, "<AB>", string(joiner.bytes()))
+	require.Empty(t, fallbacks.all())
 }
 
 // io falls back when a render is longer than DefaultReplayBytes, so one

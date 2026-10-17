@@ -161,9 +161,11 @@ type join struct {
 	// it if not.
 	heldBack bool
 
-	em     Emulation
-	err    error  // why the replay failed, once it has
-	render []byte // the render as of h and lastSeq, the emulation's handoff
+	em  Emulation
+	err error // why the replay failed, once it has
+	// render is the render as of h and lastSeq, the emulation's handoff, when
+	// lastSeq is offeredSeq; before that, rerender makes none.
+	render []byte
 	h      uint64
 	// lastSeq is the last event the emulation has passed.
 	lastSeq uint64
@@ -253,10 +255,23 @@ func (j *join) feed(chunks [][]byte, sizes []SizeEvent) {
 	}
 }
 
-// rerender renders the emulation, and reads the handoff point the render is
-// as of.
+// rerender reads the handoff point the emulation has reached, and renders
+// it once the emulation has passed every resize it was offered. Until then
+// the emulation is at a size older than the stream's, which the joiner, sized
+// to the newest, may not hold: a resize inside a character or a sequence the
+// stream so far ends in the middle of waits in the emulation's tail for the
+// rest of it. So there is no render yet, and the handoff waits for the output
+// that lets the emulation pass the resize, or falls back at the deadline.
 func (j *join) rerender() error {
 	return guard(func() error {
+		h, lastSeq := j.em.Handoff()
+		if h > j.offeredEnd || lastSeq > j.offeredSeq {
+			return errHandoffOutOfRange
+		}
+		j.h, j.lastSeq = h, lastSeq
+		if lastSeq < j.offeredSeq {
+			return nil
+		}
 		render, err := j.em.Render()
 		if err != nil {
 			return err
@@ -265,10 +280,6 @@ func (j *join) rerender() error {
 			return errRenderTooLong
 		}
 		j.render = render
-		j.h, j.lastSeq = j.em.Handoff()
-		if j.h > j.offeredEnd || j.lastSeq > j.offeredSeq {
-			return errHandoffOutOfRange
-		}
 		return nil
 	})
 }

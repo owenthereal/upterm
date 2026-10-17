@@ -1216,57 +1216,163 @@ func (r startSignal) Start(ctx context.Context, deadline time.Time, c *uio.Captu
 	return r.Replayer.Start(ctx, deadline, c, size)
 }
 
-// A pty read can split a character, and the ring end inside it, here after
-// two of ✳'s three bytes. A joiner's resize then lands inside the character,
-// and the session's emulation can't pass the resize until the third byte
-// arrives, in the command's next write. That write is under the low mark, so
-// the pacer lets it through on behalf of the guest being replayed, and the
-// join hands over at once, emulated, rather than waiting out its deadline, a
-// minute off, to fall back.
-//
-// The joiner is larger than the pty, as one is that joins a session no
-// smaller terminal holds: the pty grows to it, and the render the emulation
-// makes before it has passed the resize is at the old size, which the
-// joiner's terminal contains.
-func TestGuestPacerLetsAJoinFinishACharacterTheRingEndsInside(t *testing.T) {
-	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	started := make(chan struct{}, 1)
-	fellBack := make(chan error, 4)
-	writers.SetReplayer(startSignal{replay.New(), started}, func(err error) { fellBack <- err })
-	writers.ResizeEnd(writers.ResizeBegin(termsize.Default), true)
-	p := newGuestPacer(t.Context(), writers)
-	_, err := p.Write([]byte("prompt\r\n\xe2\x9c"))
-	require.NoError(t, err)
-	joiner := termsize.Size{Cols: 100, Rows: 40}
-	writers.ResizeEnd(writers.ResizeBegin(joiner), true)
+// splitCharacter is a fan-out with the session's own replayer whose ring, at
+// 80x24, ends inside a character, as a pty read can split one: after two of
+// ✳'s three bytes. rest is the command's next write, which completes it.
+// Each Start is announced on started, and each fallback's reason on fellBack.
+type splitCharacter struct {
+	writers  *uio.MultiWriter
+	started  chan struct{}
+	fellBack chan error
+}
 
-	got := &recordingWriter{}
-	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+const splitCharacterRest = "\xb3 done\r\n"
+
+func newSplitCharacter(t *testing.T) *splitCharacter {
+	t.Helper()
+	c := &splitCharacter{
+		writers:  uio.NewMultiWriter(uio.DefaultReplayBytes),
+		started:  make(chan struct{}, 1),
+		fellBack: make(chan error, 4),
+	}
+	c.writers.SetReplayer(startSignal{replay.New(), c.started}, func(err error) { c.fellBack <- err })
+	c.writers.ResizeEnd(c.writers.ResizeBegin(termsize.Default), true)
+	_, err := c.writers.Write([]byte("prompt\r\n\xe2\x9c"))
+	require.NoError(t, err)
+	return c
+}
+
+// join resizes the pty to joiner's terminal, so that the resize lands inside
+// the split character, then attaches sink with join, on a goroutine of its
+// own, and returns once the join's emulation has started.
+func (c *splitCharacter) join(t *testing.T, joiner termsize.Size, sink *uio.AsyncWriter, join func() error) <-chan error {
+	t.Helper()
+	c.writers.ResizeEnd(c.writers.ResizeBegin(joiner), true)
 	t.Cleanup(func() {
-		writers.Remove(sink)
-		p.remove(sink)
+		c.writers.Remove(sink)
 		_ = sink.Close()
 	})
 	attached := make(chan error, 1)
-	go func() {
-		attached <- p.attach(t.Context(), sink, func() error {
-			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), writers, sink, joiner)
-		})
-	}()
+	go func() { attached <- join() }()
 	select {
-	case <-started:
+	case <-c.started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no join reached the replayer")
 	}
+	return attached
+}
 
-	done := goWrite(t, p, func() { _, _ = p.Write([]byte("\xb3 done\r\n")) })
-	requireReturns(t, done, 2*time.Second)
-	require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+// requireNoFallback fails if the join fell back.
+func (c *splitCharacter) requireNoFallback(t *testing.T) {
+	t.Helper()
 	select {
-	case err := <-fellBack:
+	case err := <-c.fellBack:
 		t.Fatalf("the join fell back to the raw ring: %v", err)
 	default:
 	}
+}
+
+// requireReconstructed checks that sink was handed the screen, completed
+// character and all, rather than the raw ring.
+func requireReconstructed(t *testing.T, sink *uio.AsyncWriter, got *recordingWriter) {
+	t.Helper()
 	flush(t, sink)
-	require.False(t, strings.HasPrefix(string(got.bytes()), "prompt"), "the guest was handed the raw ring")
+	sent := string(got.bytes())
+	require.False(t, strings.HasPrefix(sent, "prompt"), "the guest was handed the raw ring")
+	require.Contains(t, sent, "\u2733 done", "the screen lost the character")
+}
+
+// A joiner's resize that lands inside a split character can't be passed by
+// the emulation until the character's third byte arrives, in the command's
+// next write. That write is under the low mark, so the pacer lets it through
+// on behalf of the guest being replayed, and the join hands over at once,
+// emulated, rather than waiting out its deadline, a minute off, to fall back.
+func TestGuestPacerLetsAJoinFinishACharacterTheRingEndsInside(t *testing.T) {
+	c := newSplitCharacter(t)
+	p := newGuestPacer(t.Context(), c.writers)
+	joiner := termsize.Size{Cols: 100, Rows: 40}
+	got := &recordingWriter{}
+	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	t.Cleanup(func() { p.remove(sink) })
+	attached := c.join(t, joiner, sink, func() error {
+		return p.attach(t.Context(), sink, func() error {
+			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
+		})
+	})
+
+	done := goWrite(t, p, func() { _, _ = p.Write([]byte(splitCharacterRest)) })
+	requireReturns(t, done, 2*time.Second)
+	require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+	c.requireNoFallback(t)
+	requireReconstructed(t, sink, got)
+}
+
+// A joiner smaller than the pty is not held by the screen at the pty's old
+// size, and until the emulation has passed the joiner's own resize that is
+// the only size it has. So it renders nothing until then: the join waits for
+// the character's third byte, which lets the emulation pass the resize, and
+// hands over the screen at the joiner's size. Through the pacer, for a guest
+// that paces, and with no pacer, for a session with a primary.
+func TestAJoinWhoseResizeLandsInsideACharacterHandsOverAtItsSize(t *testing.T) {
+	joiner := termsize.Size{Cols: 45, Rows: 24}
+	t.Run("a guest that paces, no primary", func(t *testing.T) {
+		c := newSplitCharacter(t)
+		p := newGuestPacer(t.Context(), c.writers)
+		got := &recordingWriter{}
+		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		t.Cleanup(func() { p.remove(sink) })
+		attached := c.join(t, joiner, sink, func() error {
+			return p.attach(t.Context(), sink, func() error {
+				return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
+			})
+		})
+
+		done := goWrite(t, p, func() { _, _ = p.Write([]byte(splitCharacterRest)) })
+		requireReturns(t, done, 2*time.Second)
+		require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+		c.requireNoFallback(t)
+		requireReconstructed(t, sink, got)
+	})
+	t.Run("a primary, no pacer", func(t *testing.T) {
+		c := newSplitCharacter(t)
+		// The primary is written synchronously, inside the fan-out.
+		primary := &recordingWriter{}
+		require.NoError(t, c.writers.Append(primary))
+		got := &recordingWriter{}
+		sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+		attached := c.join(t, joiner, sink, func() error {
+			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), c.writers, sink, joiner)
+		})
+
+		_, err := c.writers.Write([]byte(splitCharacterRest))
+		require.NoError(t, err)
+		require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+		c.requireNoFallback(t)
+		requireReconstructed(t, sink, got)
+	})
+}
+
+// The same joiner, with the character's third byte never coming: the join
+// falls back to the raw ring at its deadline, for running out of time, and
+// not at once for a render at the pty's old size, which it never makes.
+func TestAJoinWhoseResizeLandsInsideACharacterFallsBackAtItsDeadline(t *testing.T) {
+	c := newSplitCharacter(t)
+	joiner := termsize.Size{Cols: 45, Rows: 24}
+	got := &recordingWriter{}
+	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	deadline := time.Now().Add(300 * time.Millisecond)
+	attached := c.join(t, joiner, sink, func() error {
+		return attachGuestOutput(t.Context(), deadline, c.writers, sink, joiner)
+	})
+
+	require.NoError(t, awaitErr(t, attached), "a join that falls back is attached")
+	require.False(t, time.Now().Before(deadline), "the join fell back before its deadline")
+	select {
+	case err := <-c.fellBack:
+		require.ErrorIs(t, err, uio.ErrReplayDeadline)
+	default:
+		t.Fatal("the join didn't fall back")
+	}
+	flush(t, sink)
+	require.True(t, strings.HasPrefix(string(got.bytes()), "prompt"), "the guest wasn't handed the raw ring")
 }
