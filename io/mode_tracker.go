@@ -219,6 +219,12 @@ type ModeTracker struct {
 	altScreen bool
 	altVia    int // 47, 1047 or 1049
 
+	// savedBy1049 is whether the alternate screen showing was entered from
+	// the normal one by ?1049h, which saved the normal screen's cursor on the
+	// way. A ?47h or ?1047h there after it changes altVia and not that: a
+	// ?1049l still restores the save. Only meaningful while altScreen is set.
+	savedBy1049 bool
+
 	// The scrolling region is the whole terminal's, as in xterm, and no screen
 	// switch changes it. A terminal decides a DECSTBM at its height, so the
 	// tracker hears resizes too, and while eviction has crossed resizes whose
@@ -254,6 +260,14 @@ type ModeTracker struct {
 	// Only G0 is kept, because only G0 is tracked.
 	mainSavedG0 []byte
 	altSavedG0  []byte
+
+	// leftRightMargins is DECLRMM, ?69, which makes a bare CSI s set the
+	// left and right margins rather than save the cursor. It is the
+	// terminal's, not a screen's, as in xterm, where it is one bit of the
+	// terminal's flags. It is kept only to tell those two apart: the
+	// margins it enables aren't tracked, so it is neither replayed nor reset
+	// on the way out.
+	leftRightMargins bool
 
 	// The kitty keyboard protocol's flag stacks. The protocol gives each
 	// screen buffer its own, so that a full-screen program can push what it
@@ -995,6 +1009,9 @@ func (m *ModeTracker) step(b byte) {
 			m.openPartial()
 		}
 	case msEsc:
+		if isExecuted(b) {
+			return
+		}
 		switch b {
 		case 0x1b:
 			// ESC ESC: restart rather than fall out of sync.
@@ -1046,6 +1063,8 @@ func (m *ModeTracker) step(b byte) {
 			m.state = msEsc
 			m.reset()
 			m.openPartial()
+		case isExecuted(b):
+			// Acted on, and the designation goes on.
 		case b < 0x30 || b > 0x7e:
 			// Not a designator at all; no charset was selected.
 			m.state = msNormal
@@ -1112,9 +1131,19 @@ func (m *ModeTracker) step(b byte) {
 			m.appendString(b)
 		}
 	case msStringEsc:
-		if b == '\\' {
+		switch {
+		case b == '\\':
 			// ST, which ends any of them.
 			m.endString()
+			return
+		case b == 0x07 && m.kind == skOSC:
+			// xterm keeps the string open across the ESC, and a BEL read
+			// there still ends an OSC.
+			m.endString()
+			return
+		case isExecuted(b):
+			// The ESC is still waiting for the byte that ends the string or
+			// opens a sequence.
 			return
 		}
 		// Anything else and the string was abandoned, which is how a
@@ -1128,6 +1157,15 @@ func (m *ModeTracker) step(b byte) {
 		m.step(b)
 	}
 }
+
+// isExecuted reports a byte a terminal acts on inside an escape sequence
+// without leaving it: a C0 control, executed where it stands, or DEL, which is
+// ignored. xterm's esc_table and the tables that designate a charset
+// (VTPrsTbl.c) share their C0 column with its CSI tables, as the DEC parser
+// does. Neither is part of the sequence or replayed with it: the session's
+// terminal has already acted on it. ESC is not one, since it restarts a
+// sequence, and CAN and SUB, which end one, step handles first.
+func isExecuted(b byte) bool { return (b < 0x20 && b != 0x1b) || b == 0x7f }
 
 // startString enters a string sequence, whose payload the tracker consumes
 // without interpreting it: those bytes are a title, a URL or a clipboard, not
@@ -1195,9 +1233,11 @@ func (m *ModeTracker) resetToDefaults() {
 	clear(m.decPrivate)
 	m.altScreen = false
 	m.altVia = 0
+	m.savedBy1049 = false
 	m.clearRegions()
 	m.charsetG0 = nil
 	m.mainSavedG0 = nil
+	m.leftRightMargins = false
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
 	m.modifyOtherKeys = nil
@@ -1224,6 +1264,8 @@ func (m *ModeTracker) softReset() {
 	// reset, so the slot of the screen showing holds ASCII. The other
 	// screen's is left alone.
 	*m.savedG0() = nil
+	// And it resets DECLRMM, as RIS does.
+	m.leftRightMargins = false
 	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
 	// The protocol is kitty's, so its reset is the one to follow here.
 	m.mainKeys = keyStack{}
@@ -1294,6 +1336,10 @@ func (m *ModeTracker) finishCSI(final byte) {
 				}
 				continue
 			}
+			if n == 69 {
+				m.leftRightMargins = set
+				continue
+			}
 			if _, ok := restorable[n]; !ok {
 				continue
 			}
@@ -1303,6 +1349,11 @@ func (m *ModeTracker) finishCSI(final byte) {
 					// of the screen showing: the normal one, unless the
 					// alternate one already is.
 					m.saveCursor()
+				}
+				if set && !m.altScreen {
+					// Entered from the normal screen: by ?1049h, which has
+					// just saved its cursor, or by a mode that saves nothing.
+					m.savedBy1049 = n == 1049
 				}
 				m.altScreen = set
 				if set {
@@ -1328,12 +1379,11 @@ func (m *ModeTracker) finishCSI(final byte) {
 			m.softReset()
 		}
 	case 's':
-		// SCOSC, while DECLRMM (?69) is reset; while it is set, this is
-		// DECSLRM, which sets the left and right margins instead. The tracker
-		// doesn't follow ?69, so it goes by the form each is sent in: SCOSC
-		// bare, and DECSLRM with the margins as parameters. With a prefix it
-		// is neither: CSI ? s is XTSAVE.
-		if len(params) == 0 {
+		// SCOSC, while DECLRMM (?69) is reset, and only bare: xterm saves on
+		// a CSI s with no parameter at all. While ?69 is set it is DECSLRM,
+		// the left and right margins, bare or not. With a prefix it is
+		// neither: CSI ? s is XTSAVE.
+		if len(params) == 0 && !m.leftRightMargins {
 			m.saveCursor()
 		}
 	case 'u':
@@ -1735,17 +1785,25 @@ func (m *ModeTracker) Snapshot() []byte {
 	}
 	var savedG0 []byte
 	if m.altActive() {
-		if m.altVia == 1049 {
+		if m.altVia == 1049 || (m.savedBy1049 && len(m.mainSavedG0) > 0) {
 			// ?1049h saves the cursor, G0 with it, for the session's ?1049l
 			// to restore, and the joiner's ?1049h saves the joiner's. So the
 			// G0 the session saved is designated just ahead of it, which
 			// costs no save of its own and changes nothing the joiner sees.
+			// When a ?47h or ?1047h came after it, saving nothing, the
+			// ?1049h is replayed ahead of that mode anyway, as the session
+			// sent it, and that mode finds the joiner on the alternate screen
+			// already -- unless the save holds ASCII, which a joiner's slot
+			// that nothing filled restores too.
 			savedG0 = m.mainSavedG0
 			out = append(out, savedG0...)
+			out = appendMode(out, 1049, true)
 		}
-		// Replayed through the mode that entered, so a joiner is left in the
-		// state the session's own "l" will match.
-		out = appendMode(out, m.altVia, true)
+		if m.altVia != 1049 {
+			// Replayed through the mode that entered last, so a joiner is
+			// left in the state the session's own "l" will match.
+			out = appendMode(out, m.altVia, true)
+		}
 		out = kittyPushes(out, m.altKeys)
 	}
 	out = append(out, m.charsetG0...)
@@ -1777,7 +1835,8 @@ type ReplayParts struct {
 // so the pushes come alone.
 //
 // It doesn't carry the normal screen's saved G0 either, which Snapshot
-// designates ahead of a ?1049h.
+// designates ahead of a ?1049h, nor the ?1049h Snapshot replays for it ahead
+// of a ?47h or ?1047h that came after one.
 func (m *ModeTracker) ReplayParts() ReplayParts {
 	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
 	for n, def := range restorable {

@@ -651,11 +651,9 @@ func TestEachScreenRestoresFromItsOwnSlot(t *testing.T) {
 // and ?1048l, and SCOSC and SCORC, which xterm's charproc.c runs as
 // CursorSave and CursorRestore too (CASE_ANSI_SC and CASE_ANSI_RC).
 //
-// CSI s is SCOSC only while DECLRMM (?69) is reset; set, it is DECSLRM, the
-// left and right margins. The tracker doesn't follow ?69, so it takes a bare
-// CSI s, the form SCOSC is sent in, for a save, and one with parameters, the
-// form DECSLRM is sent in, for margins: as it takes a bare CSI u, and only a
-// bare one, for SCORC.
+// xterm saves on CSI s, and restores on CSI u, only with no parameter at all
+// (only_default), so a CSI s with parameters is no save even while DECLRMM
+// (?69) is reset; see TestDECLRMMMakesABareCSIsMargins for while it is set.
 func TestEveryCursorSaveAndRestoreFormCarriesG0(t *testing.T) {
 	saves := []struct{ name, seq string }{{"DECSC", "\x1b7"}, {"?1048h", "\x1b[?1048h"}, {"SCOSC", "\x1b[s"}}
 	restores := []struct{ name, seq string }{{"DECRC", "\x1b8"}, {"?1048l", "\x1b[?1048l"}, {"SCORC", "\x1b[u"}, {"?1049l", "\x1b[?1049l"}}
@@ -708,6 +706,98 @@ func TestResetsRefillTheSlotOfTheScreenTheySaveOn(t *testing.T) {
 		{"DECSTR on the alternate screen", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b(0\x1b8", "\x1b(0\x1b[?1049h\x1b(B"},
 		{"DECSTR on the alternate screen keeps the normal screen's slot", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b[?1049l", "\x1b(0"},
 		{"DECSTR on the normal screen keeps the alternate screen's slot", "\x1b[?1047h\x1b(A\x1b7\x1b[?1047l\x1b[!p\x1b[?1047h\x1b8", "\x1b[?1047h\x1b(A"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+}
+
+// While DECLRMM (?69) is set, xterm takes a bare CSI s for DECSLRM, margins
+// at their defaults, and not for a save (charproc.c, CASE_ANSI_SC, which tests
+// IsLeftRightMode first). CSI u is a restore either way: CASE_ANSI_RC doesn't
+// look at the mode. The mode is one bit of the terminal's flags, not one per
+// screen, and ReallyReset clears it for RIS and DECSTR alike
+// (resetMarginMode). The tracker keeps it only to tell the two apart, so it
+// replays nothing of it, nor resets it on the way out.
+func TestDECLRMMMakesABareCSIsMargins(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"set, CSI s is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", ""},
+		{"reset, it is one again", "\x1b[?69h\x1b[?69l\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
+		{"one for both screens", "\x1b[?69h\x1b[?1049h\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?1049h"},
+		{"set on the alternate screen, still set on the normal one", "\x1b[?1047h\x1b[?69h\x1b[?1047l\x1b(0\x1b[s\x1b(B\x1b[u", ""},
+		{"CSI u is still a restore", "\x1b[?69h\x1b(0\x1b7\x1b(B\x1b[u", "\x1b(0"},
+		{"RIS resets it", "\x1b[?69h\x1bc\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
+		{"DECSTR resets it", "\x1b[?69h\x1b[!p\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+	t.Run("not replayed or reset", func(t *testing.T) {
+		m := NewModeTracker()
+		_, err := m.Write([]byte("\x1b[?69h"))
+		require.NoError(t, err)
+		require.Empty(t, m.Snapshot())
+		require.Empty(t, m.Restore())
+	})
+}
+
+// In an escape sequence, as in a CSI, a C0 control is executed where it
+// stands and the sequence goes on, and DEL is ignored: the C0 column of
+// xterm's esc_table and of the tables that designate a charset (VTPrsTbl.c)
+// leaves the parser where it was. So ESC BEL 7 is DECSC, ESC BS ( BEL 0
+// designates line drawing, and an ESC inside a string that a C0 follows is
+// still waiting for the byte that ends the string or opens a sequence. The
+// tracker fell back to ground at the control instead, and missed the save, the
+// restore or the designation behind it. Neither control is part of the
+// sequence, so neither is replayed with it.
+//
+// A joiner's replay never met this: the filter in front of the ring moves
+// the control out ahead of the escape. A tracker fed output as it is written
+// did, as attach's and the host's per-guest one are.
+func TestAC0ControlInsideAnEscapeIsExecutedAndTheEscapeGoesOn(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"a save", "\x1b(0\x1b\x077\x1b(B\x1b8", "\x1b(0"},
+		{"a restore", "\x1b(0\x1b7\x1b(B\x1b\x7f8", "\x1b(0"},
+		{"a designation", "\x1b\x08(\x070", "\x1b(0"},
+		{"a designation past DEL", "\x1b(\x7f0", "\x1b(0"},
+		{"a save after a string's ESC", "\x1b(0\x1bPq\x1b\x087\x1b(B\x1b8", "\x1b(0"},
+		{"the partial leaves the control out", "\x1b\x07", "\x1b"},
+		{"and so does a designation's", "\x1b(\x07", "\x1b("},
+		// xterm ends an OSC at BEL, even after an ESC: the string survives
+		// the ESC (charproc.c, CASE_BELL, with string_mode still ANSI_OSC).
+		{"an OSC's BEL after its ESC still ends it", "\x1b(0\x1b]0;t\x1b\x077\x1b(B\x1b8", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+}
+
+// ?1049h saves the normal screen's cursor on its way to the alternate screen,
+// and a ?47h or ?1047h after it, there already, changes nothing of that: the
+// session's ?1049l still restores it. The snapshot replays the switch through
+// the mode that entered last, so after one of those it replays the ?1049h
+// ahead of it, with the saved G0 designated first, for the joiner's ?1049h to
+// save the same. A ?47h or ?1047h from the normal screen saves nothing, and
+// nothing is replayed for it.
+func TestTheSaveA1049hMadeOutlivesARedundantSwitch(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"?47h", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B"},
+		{"?1047h", "\x1b(0\x1b[?1049h\x1b[?1047h", "\x1b(0\x1b[?1049h\x1b[?1047h\x1b(0"},
+		{"?47h from the normal screen", "\x1b(0\x1b7\x1b[?47h", "\x1b[?47h\x1b(0"},
+		{"?47h after leaving", "\x1b(0\x1b[?1049h\x1b[?47l\x1b[?47h", "\x1b[?47h\x1b(0"},
+		{"?1049h on the alternate screen still replays the normal screen's save", "\x1b(0\x1b7\x1b[?47h\x1b[?1049h", "\x1b(0\x1b[?1049h\x1b(0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewModeTracker()

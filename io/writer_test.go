@@ -307,10 +307,14 @@ func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.
 // save and the restore has only the snapshot to say which. Given the last
 // ESC ( X instead, it drew the ring's q's as line drawing where the session's
 // terminal printed letters, or the other way round.
+//
+// Which bytes are a save matters as much: a bare CSI s while DECLRMM (?69) is
+// set is margins, not a save.
 func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
 	for _, tc := range []struct{ name, stream, want string }{
 		{"a restore with nothing saved", "\x1b(0\x1b8", ""},
 		{"a restore of a save", "\x1b(0\x1b7\x1b(B\x1b8", "\x1b(0"},
+		{"a CSI s under DECLRMM is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewMultiWriter(16)
@@ -330,29 +334,37 @@ func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
 // So the snapshot designates the G0 the session saved ahead of its ?1049h,
 // and the alternate screen's after. Given only the alternate screen's, a
 // joiner to a session that entered the alternate screen in line drawing and
-// left it in the live stream came back in ASCII. io has no terminal emulator,
-// so a tracker fed what the joiner was sent stands in for its terminal: it
-// follows G0 through saves and restores as xterm does.
+// left it in the live stream came back in ASCII. A ?47h after the ?1049h,
+// on the alternate screen already, changes nothing of the save, so the
+// snapshot replays the ?1049h ahead of it. io has no terminal emulator, so a
+// tracker fed what the joiner was sent stands in for its terminal: it follows
+// G0 through saves and restores as xterm does.
 func Test_MultiWriter_JoinerLeavesTheAlternateScreenWithTheSavedG0(t *testing.T) {
-	w := NewMultiWriter(16)
-	const entered = "\x1b(0\x1b[?1049h\x1b(B"
-	writeString(w, entered)
-	plain := strings.Repeat("q", 16)
-	writeString(w, plain)
+	for _, tc := range []struct{ name, entered, snapshot string }{
+		{"?1049h", "\x1b(0\x1b[?1049h\x1b(B", "\x1b(0\x1b[?1049h\x1b(B"},
+		{"?1049h, then ?47h", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewMultiWriter(16)
+			writeString(w, tc.entered)
+			plain := strings.Repeat("q", 16)
+			writeString(w, plain)
 
-	late := bytes.NewBuffer(nil)
-	require.NoError(t, w.Append(late))
-	const left = "\x1b[?1049lq"
-	writeString(w, left)
+			late := bytes.NewBuffer(nil)
+			require.NoError(t, w.Append(late))
+			const left = "\x1b[?1049lq"
+			writeString(w, left)
 
-	joiner, session := NewModeTracker(), NewModeTracker()
-	_, _ = joiner.Write(late.Bytes())
-	_, _ = session.Write([]byte(entered + plain + left))
-	require.Equal(t, "\x1b(0", string(session.Snapshot()), "the session's terminal is back in line drawing")
-	require.Equal(t, string(session.Snapshot()), string(joiner.Snapshot()), "and so is the joiner's")
+			joiner, session := NewModeTracker(), NewModeTracker()
+			_, _ = joiner.Write(late.Bytes())
+			_, _ = session.Write([]byte(tc.entered + plain + left))
+			require.Equal(t, "\x1b(0", string(session.Snapshot()), "the session's terminal is back in line drawing")
+			require.Equal(t, string(session.Snapshot()), string(joiner.Snapshot()), "and so is the joiner's")
 
-	require.Equal(t, "\x1b(0"+"\x1b[?1049h"+"\x1b(B"+plain+left, late.String(),
-		"line drawing designated for the switch to save, then the alternate screen's ASCII")
+			require.Equal(t, tc.snapshot+plain+left, late.String(),
+				"line drawing designated for the switch to save, then the alternate screen's ASCII")
+		})
+	}
 }
 
 // A write larger than the ring drops everything queued and its own leading
