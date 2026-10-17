@@ -47,7 +47,8 @@ func historyOf(e *emulation) [][]byte {
 // both screens (the hidden one included), the active screen's current
 // cursor (position, pen, link, pending wrap; the other screen's is never seen
 // again), both screens' saved slots, compared by what DECRC would
-// restore, the modes, the charsets and a pending single shift, the one
+// restore, the modes but those the render ignores, the charsets and a
+// pending single shift, the one
 // scroll region, the tab stops, REP's last character, a carried cluster, and
 // the history lines each side collected.
 func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
@@ -173,7 +174,9 @@ func sameSlot(a, b vt.Cursor) string {
 }
 
 // sameModes compares two emulators' modes by whether each is set: a mode one
-// side never heard of is as unset as one the other reset.
+// side never heard of is as unset as one the other reset. The modes the
+// render ignores are left out, as it leaves them as the joiner's terminal
+// has them.
 func sameModes(a, b ansi.Modes) string {
 	modes := slices.Collect(maps.Keys(a))
 	for m := range b {
@@ -182,6 +185,9 @@ func sameModes(a, b ansi.Modes) string {
 		}
 	}
 	for _, m := range modes {
+		if dec, ok := m.(ansi.DECMode); ok && ignoredModes[dec] {
+			continue
+		}
 		if a[m].IsSet() != b[m].IsSet() {
 			return fmt.Sprintf("mode %v: %v vs %v", m, a[m], b[m])
 		}

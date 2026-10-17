@@ -369,13 +369,55 @@ func decscusr(style vt.CursorStyle, blink bool) string {
 	return "\x1b[" + strconv.Itoa(n) + " q"
 }
 
-// The DEC private modes the render treats apart from the tracker's: reverse
-// video and the keypad, which it restores; the cursor's blink and a
-// synchronized update, which are appearance only and not replayed.
+// The DEC private modes the render treats apart from the tracker's.
 var (
 	modeReverseVideo = ansi.DECMode(5)
-	restoredModes    = map[ansi.DECMode]bool{modeReverseVideo: true, ansi.ModeNumericKeypad: true}
-	appearanceModes  = map[ansi.DECMode]bool{ansi.DECMode(12): true, ansi.ModeSynchronizedOutput: true}
+
+	// restoredModes are restored with the continuation state.
+	restoredModes = map[ansi.DECMode]bool{modeReverseVideo: true, ansi.ModeNumericKeypad: true}
+
+	// ignoredModes are left as the joiner's terminal has them: neither
+	// restored nor a reason to fall back, since none changes where output
+	// lands, what the screen or the cursor hold, or what the terminal sends
+	// unasked. The raw replay restores none of them either. Most change only
+	// how the terminal encodes the keyboard or the mouse, which the joiner's
+	// own terminal does for the joiner, and a program that relies on one
+	// sends it again (readline sends ?1034h at every prompt where the
+	// terminfo entry has it, as xterm-256color's does).
+	ignoredModes = map[ansi.DECMode]bool{
+		// The cursor's blink: appearance only.
+		ansi.DECMode(12): true,
+		// A synchronized update, which only holds back the drawing.
+		ansi.ModeSynchronizedOutput: true,
+		// Set, xterm's DECSC; reset, its DECRC: actions, not a mode. Nothing
+		// reads the bit back, and the slot the save filled is restored with
+		// the saved cursors.
+		ansi.ModeSaveCursor: true,
+		// On the alternate screen, the mouse wheel sends cursor up and down
+		// keys instead of scrolling the terminal's own view.
+		ansi.DECMode(1007): true,
+		// Mouse reports in urxvt's decimal encoding.
+		ansi.DECMode(1015): true,
+		// The Meta key sets the eighth bit of keyboard input.
+		ansi.DECMode(1034): true,
+		// Special modifiers for the Alt and NumLock keys.
+		ansi.DECMode(1035): true,
+		// Meta sends ESC before the key it modifies.
+		ansi.DECMode(1036): true,
+		// The editing keypad's Delete key sends DEL.
+		ansi.DECMode(1037): true,
+		// Alt sends ESC before the key it modifies.
+		ansi.DECMode(1039): true,
+		// The function keys as terminfo or termcap, Sun, HP and SCO keyboards
+		// send them.
+		ansi.DECMode(1050): true,
+		ansi.DECMode(1051): true,
+		ansi.DECMode(1052): true,
+		ansi.DECMode(1053): true,
+		// The keyboard of X11R6's xterm, and a VT220's.
+		ansi.DECMode(1060): true,
+		ansi.DECMode(1061): true,
+	}
 )
 
 // eligible fails the render, before anything is written, for a joiner that
@@ -441,14 +483,13 @@ func (e *emulation) unrestored(parts uio.ReplayParts) string {
 
 // unrestoredMode names the first mode, DEC modes first, then by number, that
 // is set otherwise than as it starts and that the render neither restores
-// nor leaves out as appearance only, or "".
+// nor ignores (see ignoredModes), or "".
 //
 // It restores the tracker's modes, which the emulator agrees on (see
 // consistent), the screen switch the tracker says entered the alternate
 // screen, insert mode, the keypad and reverse video. So a switch mode set
-// otherwise than as that one entry leaves it is one; so are 1048, whose save
-// the slot holds but whose mode the render doesn't set, DECLRMM, which
-// changes what CSI s means, and any mode the tracker doesn't know.
+// otherwise than as that one entry leaves it is one; so are DECLRMM, which
+// changes what CSI s means, and any other mode the tracker doesn't know.
 func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 	modes := e.term.Modes()
 	for _, m := range slices.SortedFunc(maps.Keys(modes), compareModes) {
@@ -461,7 +502,7 @@ func (e *emulation) unrestoredMode(p uio.ReplayParts) string {
 			continue
 		}
 		n := int(dec)
-		if _, tracked := p.DECModes[n]; tracked || restoredModes[dec] || appearanceModes[dec] {
+		if _, tracked := p.DECModes[n]; tracked || restoredModes[dec] || ignoredModes[dec] {
 			continue
 		}
 		switch dec {

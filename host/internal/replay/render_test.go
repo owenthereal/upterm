@@ -303,7 +303,8 @@ func TestReplayFailsOnUnsupportedState(t *testing.T) {
 		{"a wrap off the last column", full + "\x1b[Z", "a pending wrap off the last column"},
 		{"a mode it doesn't restore", "\x1b[?1001htext\r\n", "mode ?1001"},
 		{"DECLRMM with no margins", "\x1b[?69htext\r\n", "mode ?69"},
-		{"1048's save", "\x1b[?1048htext\r\n", "mode ?1048"},
+		{"reverse wraparound", "\x1b[?45htext\r\n", "mode ?45"},
+		{"a mode no terminal has", "\x1b[?9999htext\r\n", "mode ?9999"},
 		{"an ANSI mode", "\x1b[2htext\r\n", "mode 2"},
 		{"a screen switch left set", "\x1b[?1049htext\r\n\x1b[?47l", "mode ?1049"},
 	} {
@@ -707,4 +708,47 @@ func requireAfterTheReprints(t *testing.T, render []byte, seq string) {
 	reprints := regexp.MustCompile(`\x1b\[\d+;4H[^\x1b]`).FindAllIndex(render, -1)
 	require.NotEmpty(t, reprints)
 	require.Greater(t, bytes.Index(render, []byte(seq)), reprints[len(reprints)-1][0], "%q", render)
+}
+
+// A mode that only changes how the terminal encodes the keyboard or the
+// mouse is neither restored nor a reason to fall back: the join renders
+// without it, as the raw replay does too. readline sends ?1034h, the meta
+// key's, at every prompt where the terminfo entry has it, as
+// xterm-256color's does.
+func TestReplayIgnoresInputOnlyModes(t *testing.T) {
+	for _, n := range []int{1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061} {
+		t.Run(fmt.Sprintf("?%d", n), func(t *testing.T) {
+			set := fmt.Sprintf("\x1b[?%dh", n)
+			j := joinAt(t, 80, 24, set+"$ ls\r\n")
+			require.NotContains(t, string(j.render), set)
+		})
+	}
+
+	t.Run("a join at a bash prompt", func(t *testing.T) {
+		w := uio.NewMultiWriter(1 << 10)
+		var fellBack []error
+		w.SetReplayer(New(), func(err error) { fellBack = append(fellBack, err) })
+		w.Pinned(joiner)
+		_, _ = w.Write([]byte("$ ls\r\nREADME\r\n\x1b[?1034h$ "))
+
+		var got bytes.Buffer
+		require.NoError(t, w.AppendSized(t.Context(), time.Now().Add(time.Minute), joiner, &got))
+		require.Empty(t, fellBack)
+		require.NotContains(t, got.String(), "\x1b[?1034h", "the raw ring")
+		require.True(t, strings.HasSuffix(got.String(), "$ "), "%q", got.String())
+	})
+}
+
+// ?1048h is xterm's DECSC by another name, not a mode: its bit, which
+// nothing reads back, is ignored, and the slot it filled is restored with
+// the saved cursors, for ESC 8 and ?1048l alike.
+func TestReplayIgnoresTheSaveCursorMode(t *testing.T) {
+	j := joinAt(t, 80, 24, "\x1b[3;5H\x1b[31m\x1b[?1048h\x1b[m\x1b[Htext\r\n")
+	require.NotContains(t, string(j.render), "1048")
+	j.then(t, "\x1b8X")
+	x := cellAt(j.b, 4, 2)
+	require.Equal(t, "X", x.Content)
+	require.Equal(t, fgOf("\x1b[31m"), x.Style.Fg)
+	j.then(t, "\x1b[m\x1b[H\x1b[?1048lY")
+	require.Equal(t, "Y", cellAt(j.b, 4, 2).Content)
 }
