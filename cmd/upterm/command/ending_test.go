@@ -103,6 +103,9 @@ func TestEndLineFromAnAttachResult(t *testing.T) {
 			"upterm: the session ended with status 3", "upterm: the session ended with status 3"},
 		{"signalled", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseSignaled, Signal: "TERM"}},
 			"upterm: the session ended by signal SIGTERM", "upterm: the session ended by signal SIGTERM"},
+		// A signal with no name is sent by its number.
+		{"signalled, by number", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseSignaled, Signal: "40"}},
+			"upterm: the session ended by signal 40", "upterm: the session ended by signal 40"},
 		{"signalled, no name", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseSignaled}},
 			"upterm: the session ended for a reason upterm didn't record", "upterm: the session ended for a reason upterm didn't record"},
 		{"canceled", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseCanceled}},

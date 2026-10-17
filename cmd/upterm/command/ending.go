@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/owenthereal/upterm/attach"
@@ -18,7 +19,7 @@ type ended struct {
 	Reason       string // a sessiondir.Reason*
 	Status       *int   // the exit status, when exited
 	SignalNumber *int   // when signalled, from the record
-	SSHSignal    string // when signalled, from an attach.Cause ("TERM")
+	SSHSignal    string // when signalled, from an attach.Cause ("TERM", or "40" for one with no name)
 	LogPath      string // the session's log, for a startup that failed
 }
 
@@ -106,6 +107,11 @@ func (e ended) signal() string {
 	case e.SignalNumber != nil:
 		return signalName(*e.SignalNumber)
 	case e.SSHSignal != "":
+		// The daemon sends a signal with no name by its number, which
+		// reads as an unnamed signal in a record does.
+		if strings.Trim(e.SSHSignal, "0123456789") == "" {
+			return e.SSHSignal
+		}
 		return "SIG" + e.SSHSignal
 	}
 	return ""

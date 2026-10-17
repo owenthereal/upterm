@@ -645,6 +645,8 @@ func TestShutdownCauseIsWhatWasPublished(t *testing.T) {
 			kind: shutdownStopped, want: upterm.SessionEnd{Cause: upterm.CauseStopped}},
 		{name: "signaled", published: testShutdownSignal(syscall.SIGTERM), stop: context.Background(),
 			kind: shutdownSignaled, want: upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "TERM"}},
+		{name: "signaled by a signal with no name", published: testShutdownSignal(40), stop: context.Background(),
+			kind: shutdownSignaled, want: upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "40"}},
 		{name: "join timeout", published: ErrJoinTimeout, stop: context.Background(),
 			kind: shutdownJoinTimeout, want: upterm.SessionEnd{Cause: upterm.CauseJoinTimeout}},
 		{name: "cancelled", published: errors.Join(context.Canceled, context.Canceled), stop: context.Background(),
@@ -668,6 +670,17 @@ func TestShutdownCauseIsWhatWasPublished(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A shared command killed on its own by a signal is told to the session's
+// terminals by the signal's name, as SSH spells it, or, for a signal with no
+// name -- a real-time one on Linux -- by its number, as its record tells it.
+func TestACommandsSignalIsSentByNameOrNumber(t *testing.T) {
+	number := func(n int) *int { return &n }
+	require.Equal(t, upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "TERM"},
+		commandEnd(CommandResult{Signal: syscall.SIGTERM.String(), SignalNumber: number(int(syscall.SIGTERM))}))
+	require.Equal(t, upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "40"},
+		commandEnd(CommandResult{Signal: syscall.Signal(40).String(), SignalNumber: number(40)}))
 }
 
 // A command's end is ordered against the shutdown where both are recorded: a

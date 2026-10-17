@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -44,11 +45,22 @@ func (k shutdownKind) end(sig syscall.Signal) upterm.SessionEnd {
 	case shutdownStopped:
 		return upterm.SessionEnd{Cause: upterm.CauseStopped}
 	case shutdownSignaled:
-		return upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: sshSignalName(sig)}
+		return upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: endSignal(sig)}
 	case shutdownCanceled:
 		return upterm.SessionEnd{Cause: upterm.CauseCanceled}
 	}
 	return upterm.SessionEnd{Cause: upterm.CauseExited}
+}
+
+// endSignal is sig as a session-end request names it: as SSH spells it,
+// without "SIG" ("TERM"), or, for a signal with no name -- a real-time one on
+// Linux -- its number ("40"), so that a terminal can still say which signal
+// it was, as the session's record does.
+func endSignal(sig syscall.Signal) string {
+	if name := sshSignalName(sig); name != "" {
+		return name
+	}
+	return strconv.Itoa(int(sig))
 }
 
 // shutdownCause classifies the session's shutdown cause: the one published
@@ -195,7 +207,7 @@ func commandEnd(r CommandResult) upterm.SessionEnd {
 	case r.Exited:
 		return upterm.SessionEnd{Cause: upterm.CauseExited}
 	case r.SignalNumber != nil:
-		return upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: sshSignalName(syscall.Signal(*r.SignalNumber))}
+		return upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: endSignal(syscall.Signal(*r.SignalNumber))}
 	}
 	// No outcome of its own to tell -- it never started, or its end was
 	// never confirmed -- so it is the reason upterm didn't record.

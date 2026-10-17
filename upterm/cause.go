@@ -22,8 +22,10 @@ const SessionEndReplyBound = time.Second
 // decodes into its own struct with these fields first and a final
 // `ssh:"rest"` field, not into this one.
 type SessionEnd struct {
-	Cause  string // one of the Cause* values
-	Signal string // SSH signal name without "SIG" ("TERM") for CauseSignaled, else ""
+	Cause string // one of the Cause* values
+	// For CauseSignaled, the signal's SSH name without "SIG" ("TERM"), or,
+	// for a signal with no name, its number in decimal ("40"); else "".
+	Signal string
 }
 
 const (

@@ -143,8 +143,10 @@ const (
 // Cause is why the daemon ended the session, when it said. Kind is CauseNone
 // when it did not.
 type Cause struct {
-	Kind   CauseKind
-	Signal string // the SSH name without "SIG" ("TERM"), for CauseSignaled
+	Kind CauseKind
+	// For CauseSignaled, the daemon's name for the signal: the SSH name
+	// without "SIG" ("TERM"), or the number of one with no name ("40").
+	Signal string
 }
 
 // Result is how an attachment ended. Status and Cause are meaningful only for
