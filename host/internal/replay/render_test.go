@@ -770,7 +770,7 @@ func requireAfterTheReprints(t *testing.T, render []byte, seq string) {
 // sends ?1034h, the meta key's, at every prompt where the terminfo entry has
 // it, as xterm-256color's does.
 func TestReplayIgnoresInputOnlyModes(t *testing.T) {
-	for _, n := range []int{1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061} {
+	for _, n := range []int{1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061, 9001} {
 		t.Run(fmt.Sprintf("?%d", n), func(t *testing.T) {
 			set := fmt.Sprintf("\x1b[?%dh", n)
 			j := joinAt(t, 80, 24, set+"$ ls\r\n")
@@ -791,6 +791,28 @@ func TestReplayIgnoresInputOnlyModes(t *testing.T) {
 		require.NotContains(t, got.String(), "\x1b[?1034h", "the raw ring")
 		require.True(t, strings.HasSuffix(got.String(), "$ "), "%q", got.String())
 	})
+}
+
+// ConPTY starts every Windows session with a DA1, which the ring's query
+// filter takes out, then focus reporting and win32-input-mode: a join to it
+// renders, restores focus reporting, and leaves win32-input-mode, which only
+// changes how the keyboard is encoded, as the joiner's terminal has it.
+func TestReplayJoinsAConPTYSession(t *testing.T) {
+	w := uio.NewMultiWriter(1 << 10)
+	var fellBack []error
+	w.SetReplayer(New(), func(err error) { fellBack = append(fellBack, err) })
+	w.Pinned(joiner)
+	_, _ = w.Write([]byte("\x1b[c\x1b[?1004h\x1b[?9001h"))
+	_, _ = w.Write([]byte("Microsoft Windows [Version 10.0.22631.4602]\r\n" +
+		"(c) Microsoft Corporation. All rights reserved.\r\n\r\nC:\\Users\\guest>"))
+
+	var got bytes.Buffer
+	require.NoError(t, w.AppendSized(t.Context(), time.Now().Add(time.Minute), joiner, &got))
+	require.Empty(t, fellBack)
+	require.True(t, strings.HasPrefix(got.String(), preamble), "the render, not the raw ring: %q", got.String())
+	require.Contains(t, got.String(), "\x1b[?1004h")
+	require.NotContains(t, got.String(), "9001")
+	require.True(t, strings.HasSuffix(got.String(), "C:\\Users\\guest>"), "%q", got.String())
 }
 
 // ?1048h is xterm's DECSC by another name, not a mode: its bit, which

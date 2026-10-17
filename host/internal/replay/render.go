@@ -424,6 +424,9 @@ var (
 		// The keyboard of X11R6's xterm, and a VT220's.
 		ansi.DECMode(1060): true,
 		ansi.DECMode(1061): true,
+		// win32-input-mode: keys as Windows' own key events. ConPTY sets it as
+		// it starts, and takes keyboard input either way.
+		ansi.DECMode(9001): true,
 	}
 )
 
