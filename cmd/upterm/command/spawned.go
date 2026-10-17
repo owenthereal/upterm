@@ -14,10 +14,13 @@ import (
 
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
+	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/utils"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 type spawnFunc func(spawnOptions) (net.Conn, *os.Process, error)
@@ -50,6 +53,12 @@ type spawnedSession struct {
 	logger       *slog.Logger
 	logWarning   *logWarning // the run's, shared by every spawn in it
 	logOff       bool        // the spawn couldn't open logPath
+
+	// keyHint is what a foreground session says once it has started, after
+	// the banner, on hintOut; "" says nothing. A detached session never says
+	// it: there is no terminal attached to press the keys in.
+	keyHint string
+	hintOut io.Writer
 }
 
 // loggedTo is the log the daemon's output went to, or "" when the spawn
@@ -152,6 +161,12 @@ func (s *spawnedSession) run(ctx context.Context) error {
 				// all: stdout may be the JSON a script is reading.
 				logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
 			}
+			if displayErr == nil && !s.detach && s.keyHint != "" {
+				// Last, so it is the line nearest the session it is about,
+				// and said once: the attached terminal is the session's from
+				// here, and nothing more is written into it unasked.
+				logging.WriteWithin(s.hintOut, logging.LogBound, s.keyHint+"\n")
+			}
 			switch {
 			case displayErr == nil:
 				return api.Accept_ACCEPTED
@@ -233,7 +248,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 	}
 
 	if s.detach {
-		return s.printStarted(claimed, created, outcome.Started)
+		return s.printStarted(ctx, claimed, created, outcome.Started)
 	}
 	if clientDone == nil {
 		// Started without ever being told listening: not a daemon this
@@ -311,6 +326,42 @@ func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.C
 // anyone with the session ID can join, with nobody asked.
 const openSessionWarning = "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys"
 
+// keyHint is the line a foreground upterm host says after the banner: the
+// keys its escape character gives the attached terminal. Nothing with
+// --escape-char none, which gives it none.
+//
+// Run over ssh, the outer client's own ~ escape takes ~. and ~? first, so with
+// SSH_TTY set and upterm's escape ~ the line says how to get them past it.
+// SSH_TTY can't tell which escape that client uses -- ssh -e none has none --
+// so the line names the keys upterm's escape gives, and the doubled ones only
+// as what ssh's default calls for. With another escape there is nothing to
+// get past.
+func keyHint(escape byte, sshTTY bool) string {
+	if escape == 0 {
+		return ""
+	}
+	e := string(escape)
+	hint := "upterm: " + e + ". detaches, " + e + "? shows the session's status and keys"
+	if sshTTY && escape == '~' {
+		hint += "; with ssh's default ~ escape, type ~~. and ~~?"
+	}
+	return hint
+}
+
+// hintOut is where the key hint goes: to whoever is at the keyboard, so
+// stderr when it is a terminal, else stdout when that is one, as join's
+// questions do. With neither a terminal there is nobody at one to tell, and a
+// line about keys in a log or a pipe is only noise there.
+func hintOut(stderr, stdout *os.File) io.Writer {
+	switch {
+	case term.IsTerminal(int(stderr.Fd())):
+		return stderr
+	case term.IsTerminal(int(stdout.Fd())):
+		return stdout
+	}
+	return io.Discard
+}
+
 func parseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 	keys := make([]ssh.PublicKey, 0, len(lines))
 	for _, l := range lines {
@@ -328,12 +379,22 @@ func parseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 
 // printStarted is --detach's output: the JSON session info a script parses,
 // or one line saying how to reach the session.
-func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSessionResponse, st *api.Started) error {
+func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed, sess *api.GetSessionResponse, st *api.Started) error {
 	if claimed == nil {
 		return fmt.Errorf("session %s started but the daemon never reported its claim%s", s.name, seeLog(" (see %s)", s.loggedTo()))
 	}
 	if !s.jsonOut {
-		_, err := fmt.Fprintf(s.stdout, "Session %s is running in the background. Attach with 'upterm attach %s'; stop it with 'upterm session stop %s'.\n", s.name, s.name, s.name)
+		line := fmt.Sprintf("Session %s is running in the background.", s.name)
+		// A session that isn't ready is running, but not in the way the
+		// sentence alone suggests: guests can't reach it. What the view's
+		// Hint row would say about that goes right after it.
+		if st.GetStatus() != sessiondir.StatusReady {
+			if hint := recordedStatusHint(ctx, s.name, claimed.LaunchId); hint != "" {
+				line += " " + hint
+			}
+		}
+		line += fmt.Sprintf(" Attach with upterm attach %s; stop it with upterm session stop %s.\n", s.name, s.name)
+		_, err := io.WriteString(s.stdout, line)
 		return err
 	}
 	// Refused rather than printed empty, and refused here rather than beside
@@ -384,4 +445,23 @@ func (s *spawnedSession) printStarted(claimed *api.Claimed, sess *api.GetSession
 	enc := json.NewEncoder(s.stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(info)
+}
+
+// statusHintTimeout bounds the record read behind --detach's hint: the
+// session is up and the line is all that is left to print, so a registry
+// that is slow to answer costs the hint, not the exit.
+const statusHintTimeout = time.Second
+
+// recordedStatusHint is the view's Hint for launchID's status as its record
+// has it now: the record has the reason the tunnel is down, which the daemon's
+// report doesn't carry. "" when the record can't be read in time, is another
+// launch's, or doesn't say.
+func recordedStatusHint(ctx context.Context, name, launchID string) string {
+	ctx, cancel := context.WithTimeout(ctx, statusHintTimeout)
+	defer cancel()
+	rec, _, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+	if err != nil || rec == nil || rec.LaunchID != launchID {
+		return ""
+	}
+	return tui.StatusHint(tui.SessionDetail{Status: rec.Status, TunnelReason: rec.TunnelReason})
 }

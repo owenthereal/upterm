@@ -95,6 +95,28 @@ func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename st
 	}, nil
 }
 
+// RelayWarningKind is what a RelayWarning is about.
+type RelayWarningKind int
+
+const (
+	// NoReconnect is a relay that can't take a session back: one that
+	// registers sessions under IDs of its own. If the tunnel drops, guests
+	// can't reach the session again until it is restarted.
+	NoReconnect RelayWarningKind = iota
+	// CertNotValidForServer is a relay whose certificate isn't valid for the
+	// host the session dialled, so a redial, which is pinned to it, would be
+	// refused.
+	CertNotValidForServer
+)
+
+// RelayWarning is what RelayWarningCallback is told.
+type RelayWarning struct {
+	Kind RelayWarningKind
+	// Host is the hostname the certificate isn't valid for, for
+	// CertNotValidForServer; empty otherwise.
+	Host string
+}
+
 type Host struct {
 	Host string
 	// KeepAliveDuration paces the guest sshd's keepalive to each guest. The
@@ -205,6 +227,16 @@ type Host struct {
 	// incompatible with this host's. Nil logs the mismatch and nothing more:
 	// the daemon has no terminal to print to.
 	VersionWarningCallback func(*version.CompatibilityResult)
+	// RelayWarningCallback is called with what the first connection showed
+	// about the relay that will matter if the tunnel drops: that it can't
+	// take the session back, or that its certificate doesn't name the host a
+	// redial would dial. Nil logs it and nothing more, as for
+	// VersionWarningCallback.
+	//
+	// Called at most once, on Run's own goroutine, after
+	// VersionWarningCallback and before SessionCreatedCallback, so whoever
+	// prints it prints it ahead of the session; it must not block.
+	RelayWarningCallback func(RelayWarning)
 
 	// AwaitInitialClient defers starting the command until the first host
 	// client's output subscription is installed, and defers serving guests
@@ -501,11 +533,11 @@ var ClaimTimeout = 10 * time.Second
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) (runErr error) {
 	// First, before anything here can write a byte. Whatever a
-	// SessionCreatedCallback prints, and whatever a VersionWarningCallback
-	// prints, goes out well before the signal actor is assembled, and for an
-	// embedder whose reader has gone away a single one of those writes is
-	// fatal. See InstallSignalPolicy; calling it again from setupSignalHandler
-	// is free.
+	// SessionCreatedCallback prints, and whatever a VersionWarningCallback or
+	// a RelayWarningCallback prints, goes out well before the signal actor is
+	// assembled, and for an embedder whose reader has gone away a single one
+	// of those writes is fatal. See InstallSignalPolicy; calling it again from
+	// setupSignalHandler is free.
 	InstallSignalPolicy()
 
 	// Admin stop has its own cause; external parent cancellation remains distinct.
@@ -747,12 +779,20 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	logger.Info("Established reverse tunnel")
 
 	// Said now, once, rather than at the first drop, where all there would
-	// be to say is that a redial failed.
+	// be to say is that a redial failed. Told to the caller as well as
+	// logged, and before the session is created, so the operator reads it
+	// before the session starts rather than above it later.
 	if !rt.ReconnectSupported() {
 		logger.Warn("this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted")
+		if c.RelayWarningCallback != nil {
+			c.RelayWarningCallback(RelayWarning{Kind: NoReconnect})
+		}
 	} else if err := relayAuthority.CheckRedial(u.Host); err != nil {
 		logger.Warn(fmt.Sprintf("the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", u.Hostname()),
 			"error", err)
+		if c.RelayWarningCallback != nil {
+			c.RelayWarningCallback(RelayWarning{Kind: CertNotValidForServer, Host: u.Hostname()})
+		}
 	}
 
 	// Where guests reach the session now. A redial may register it on
@@ -1445,26 +1485,4 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 	}
 
 	return apiAks
-}
-
-// DisplayVersionWarning prints a formatted version mismatch warning to the
-// given writer. Run no longer prints it — a daemon has no terminal — so this
-// is for a caller that does, from VersionWarningCallback.
-func DisplayVersionWarning(out io.Writer, logger *slog.Logger, result *version.CompatibilityResult) {
-	messages := []struct {
-		text     string
-		debugMsg string
-	}{
-		{"[WARNING] VERSION MISMATCH DETECTED\n", "failed to display version warning header"},
-		{result.Message + "\n", "failed to display version warning message"},
-		{fmt.Sprintf("Host version:   %s\n", result.HostVersion), "failed to display host version"},
-		{fmt.Sprintf("Server version: %s\n", result.ServerVersion), "failed to display server version"},
-		{"\nThis may cause compatibility issues. Consider updating to matching versions.\n\n", "failed to display version warning footer"},
-	}
-
-	for _, msg := range messages {
-		if _, err := fmt.Fprint(out, msg.text); err != nil {
-			logger.Debug(msg.debugMsg, "error", err)
-		}
-	}
 }

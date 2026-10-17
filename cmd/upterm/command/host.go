@@ -652,12 +652,16 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 		// stdout is the JSON; the banner would be noise in it.
 		display = func(context.Context, *api.GetSessionResponse, string) error { return nil }
 	}
-	var attachClient clientFunc
+	var (
+		attachClient clientFunc
+		hint         string
+	)
 	if !flagDetach {
 		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
 			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
 			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
 		}
+		hint = keyHint(opts.escape, os.Getenv("SSH_TTY") != "")
 	}
 	warning := logWarningFor(c.Context())
 	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {
@@ -673,6 +677,8 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			spawn:        hostSpawn,
 			display:      display,
 			attachClient: attachClient,
+			keyHint:      hint,
+			hintOut:      hintOut(os.Stderr, os.Stdout),
 			logger:       logger,
 			logWarning:   warning,
 		}
@@ -771,9 +777,9 @@ const bannerFlushTimeout = 2 * time.Second
 // synchronous write keeps the banner ahead of everything the session prints
 // after it.
 //
-// The version warning host.Run prints is deliberately left synchronous. It
-// runs just before this callback, so it is the first thing written to an empty
-// pipe, and a few hundred bytes is smaller than any pipe buffer.
+// The warnings said ahead of the banner are not written here: the daemon
+// sends them to the parent before it reports the session created, and the
+// parent prints them on stderr, one line each, in the order they arrive.
 //
 // logger may be nil, which is the package default rather than silence: a
 // banner nobody received is the kind of thing an operator is looking for when
@@ -820,22 +826,27 @@ func displaySession(ctx context.Context, session *api.GetSessionResponse, name s
 	}
 	detail.Name = name
 
-	// With --accept, just print session info and continue (no interactive confirmation needed)
+	// The logger root.go put in the context: it writes to upterm's log
+	// file, which is where an operator goes to find out what became of a
+	// startup. Nil until some caller sets one up, which printBanner reads
+	// as the package default.
+	var logger *slog.Logger
+	if l := uptermctx.Logger(ctx); l != nil {
+		logger = l.Logger
+	}
+	// Printed once, whether or not anyone is asked: the prompt below
+	// redraws its own line and nothing above it, so the banner is not
+	// repainted under it on every redraw, and what it prints stays in the
+	// scrollback as --accept's does.
+	printBanner(logger, detail)
+
+	// With --accept, nobody is asked.
 	if flagAccept {
-		// The logger root.go put in the context: it writes to upterm's log
-		// file, which is where an operator goes to find out what became of a
-		// startup. Nil until some caller sets one up, which printBanner reads
-		// as the package default.
-		var logger *slog.Logger
-		if l := uptermctx.Logger(ctx); l != nil {
-			logger = l.Logger
-		}
-		printBanner(logger, detail)
 		return nil
 	}
 
 	// Run interactive TUI for confirmation (TTY is guaranteed by early check in shareRunE)
-	model := tui.NewHostSessionModel(detail, false)
+	model := tui.NewHostSessionModel(false)
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 
 	return confirmationOutcome(p.Run())

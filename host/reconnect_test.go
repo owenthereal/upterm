@@ -751,14 +751,53 @@ func TestReconnectWithAPortlessWebSocketURL(t *testing.T) {
 // redial, and the host says so once, as soon as the first connection is up,
 // rather than at the first drop.
 func TestRunWarnsAtStartWhenARedialWouldBeRefused(t *testing.T) {
+	var seen func() []any
 	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
 		_, port, err := net.SplitHostPort(f.fwd.Addr())
 		require.NoError(t, err)
 		f.h.Host = "ssh://localhost:" + port
+		seen = recordRelayWarnings(f)
 	})
 	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 	want := "the relay's certificate isn't valid for localhost, so a reconnect would be refused; use the relay's own hostname in --server"
 	require.Equal(t, 1, strings.Count(f.logs.String(), want), f.logs.String())
+	require.Equal(t, []any{RelayWarning{Kind: CertNotValidForServer, Host: "localhost"}, "created"}, seen(),
+		"the caller is told once, before the session is created, so the operator reads it before the banner")
+}
+
+// A relay that can take a session back, and whose certificate names the host
+// dialled, is nothing to warn about.
+func TestRunDoesNotWarnAboutARelayThatCanReconnect(t *testing.T) {
+	var seen func() []any
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) { seen = recordRelayWarnings(f) })
+	f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
+	require.Equal(t, []any{"created"}, seen())
+}
+
+// recordRelayWarnings has f's Host record each RelayWarningCallback, and the
+// moment SessionCreatedCallback runs as "created", in the order Run makes
+// them; what it returns reads the record so far.
+func recordRelayWarnings(f *reconnectHost) func() []any {
+	var (
+		mu   sync.Mutex
+		seen []any
+	)
+	f.h.RelayWarningCallback = func(w RelayWarning) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, w)
+	}
+	f.onCreated = func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, "created")
+		return nil
+	}
+	return func() []any {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]any(nil), seen...)
+	}
 }
 
 // A relay that registers sessions under IDs of its own can't take a session
@@ -768,12 +807,18 @@ func TestReconnectOnAnUnsupportedRelay(t *testing.T) {
 	key, err := NewHostKey()
 	require.NoError(t, err)
 	fake := fakerelay.Start(t, key, fakerelay.RandomID)
-	f := newReconnectHost(t, "ssh", func(f *reconnectHost) { f.fwd.Redirect(fake.Addr) })
+	var seen func() []any
+	f := newReconnectHost(t, "ssh", func(f *reconnectHost) {
+		f.fwd.Redirect(fake.Addr)
+		seen = recordRelayWarnings(f)
+	})
 
 	rec := f.awaitStatus(t, sessiondir.StatusReady, 5*time.Second)
 	require.Equal(t, sessiondir.ReconnectUnsupported, rec.Reconnect)
 	warning := `level=WARN msg="this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted"`
 	require.Equal(t, 1, strings.Count(f.logs.String(), warning), "warned once, at the start:\n%s", f.logs.String())
+	require.Equal(t, []any{RelayWarning{Kind: NoReconnect}, "created"}, seen(),
+		"the caller is told once, before the session is created, so the operator reads it before the banner")
 	require.Equal(t, 1, fake.Connections())
 
 	f.fwd.Cut()

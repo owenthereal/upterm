@@ -414,8 +414,121 @@ func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {
 	dec := d.startup(t, "s")
 	go func() { <-dec; d.start() }()
 	require.NoError(t, s.run(context.Background()))
-	require.Contains(t, stdout.String(), "upterm attach s")
-	require.Contains(t, stdout.String(), "upterm session stop s")
+	require.Equal(t, "Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n", stdout.String())
+}
+
+// A session that is up but not ready -- its tunnel down by the time it
+// reported readiness -- is not "running" the way a ready one is, and the line
+// says what the view's Hint row would, from the record of the launch this
+// process started. A record that doesn't say, or is another launch's, adds
+// nothing.
+func TestSpawnedSessionDetachSaysWhatIsWrongWhenNotReady(t *testing.T) {
+	const hint = "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."
+	for _, tc := range []struct {
+		name      string
+		ownLaunch bool
+		reason    string
+		want      string
+	}{
+		{"the record says why", true, sessiondir.TunnelReasonReconnectUnsupported,
+			"Session s is running in the background. " + hint + " Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"the record doesn't say", true, "",
+			"Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"the record is another launch's", false, sessiondir.TunnelReasonReconnectUnsupported,
+			"Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			require.NoError(t, dir.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusDisconnected
+				r.TunnelReason = tc.reason
+			}))
+
+			spawn, d := newScriptedDaemon(t)
+			if tc.ownLaunch {
+				d.launchID = dir.LaunchID()
+			}
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach = true
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.startWith(sessiondir.StatusDisconnected) }()
+
+			require.NoError(t, s.run(context.Background()))
+			require.Equal(t, tc.want, stdout.String())
+		})
+	}
+}
+
+func TestKeyHint(t *testing.T) {
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys", keyHint('~', false))
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys; with ssh's default ~ escape, type ~~. and ~~?", keyHint('~', true))
+	require.Equal(t, "upterm: ^. detaches, ^? shows the session's status and keys", keyHint('^', true))
+	require.Empty(t, keyHint(0, true))
+}
+
+// The key hint is the last thing upterm host says before the session: after
+// the banner, and after the warning an open session gets. Only a foreground
+// session the operator started is told it: a detached one has no keys to
+// press, and a declined one has no session.
+func TestTheKeyHintFollowsTheBanner(t *testing.T) {
+	hint := keyHint('~', false)
+	for _, tc := range []struct {
+		name    string
+		open    bool
+		decline bool
+		want    string
+	}{
+		{"started", false, false, "BANNER\n" + hint + "\n"},
+		{"started open", true, false, "BANNER\n" + openSessionWarning + "\n" + hint + "\n"},
+		{"declined", false, true, "BANNER\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spawn, d := newScriptedDaemon(t)
+			d.open = tc.open
+			attached := make(chan string, 1)
+			result := make(chan attach.Result, 1)
+			// One buffer for everything this process says, so the order is
+			// what the operator would read.
+			var out bytes.Buffer
+			s := newSession(t, spawn, fakeClient(attached, result), &out, &out)
+			s.keyHint, s.hintOut = hint, &out
+			s.display = func(context.Context, *api.GetSessionResponse, string) error {
+				out.WriteString("BANNER\n")
+				if tc.decline {
+					return UserDiscardedError{}
+				}
+				return nil
+			}
+			d.startup(t, "s")
+			if !tc.decline {
+				go func() {
+					<-attached
+					d.start()
+					result <- attach.Result{Reason: attach.Exited}
+				}()
+			}
+
+			_ = s.run(context.Background())
+			require.Equal(t, tc.want, out.String())
+		})
+	}
+
+	t.Run("detached", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr, hintOut bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		s.keyHint, s.hintOut = hint, &hintOut
+		dec := d.startup(t, "s")
+		go func() { <-dec; d.start() }()
+
+		require.NoError(t, s.run(context.Background()))
+		require.Empty(t, hintOut.String())
+		require.NotContains(t, stdout.String()+stderr.String(), hint)
+	})
 }
 
 // fakeClient attaches on cue and ends how it is told.

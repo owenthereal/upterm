@@ -134,6 +134,31 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 	return nil
 }
 
+// upgradeAdvice is how the version warning tells the operator to upgrade this
+// upterm, from the checks upgrade makes before replacing it: upgrade itself
+// when it could replace this binary, the owning package manager's command
+// when one is confirmed, and otherwise the way it was installed. A check that
+// can't answer is not an answer, so it gets the last of those too: the
+// warning names only what upterm confirmed.
+func upgradeAdvice() string {
+	const theWayItWasInstalled = "upgrade it the way it was installed"
+	target, err := runningBinary()
+	if err != nil {
+		return theWayItWasInstalled
+	}
+	o, owned, err := confirmedOwner(target, systemProbes)
+	switch {
+	case err != nil:
+		return theWayItWasInstalled
+	case owned:
+		return "upgrade with " + o.Upgrade
+	}
+	if err := writableDir(target); err != nil {
+		return theWayItWasInstalled
+	}
+	return "upgrade with upterm upgrade"
+}
+
 // downloadProxy draws the download's progress bar on f when f is a terminal.
 // The bar is made of escape sequences and keeps writing to the stdout it
 // started on, so for a pipe or a file there is none.

@@ -21,6 +21,8 @@ import (
 	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/testhelpers/fakerelay"
+	"github.com/owenthereal/upterm/internal/version"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -655,7 +657,141 @@ func TestBuildDaemonHostTellsTheParentWhichPrivateKeyItSkipped(t *testing.T) {
 	require.NoError(t, child.Close())
 	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone, "the exchange ended because the child closed it")
 
-	require.Contains(t, printed.String(), "warning: skipping private key "+bad,
-		"the operator is told which key is not being used")
+	require.Contains(t, printed.String(), "upterm: warning: skipping private key "+bad+": ",
+		"the operator is told which key is not being used, on one line that says it is upterm's warning")
 	_ = err // whether the build then succeeds depends on the fallback key and is not this test's concern
+}
+
+// daemonPrints builds the daemon's Host with its parent on the far end of a
+// pipe, hands it to use, and returns everything the parent printed by the
+// time use returned.
+func daemonPrints(t *testing.T, name string, use func(*host.Host)) string {
+	t.Helper()
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	var printed strings.Builder
+	parent := bootstrap.NewParent(b, nil, &printed, nil)
+	parentDone := make(chan error, 1)
+	go func() {
+		_, err := parent.Run(context.Background(), bootstrap.Handlers{})
+		parentDone <- err
+	}()
+
+	child := bootstrap.NewChild(a, nil)
+	h, err := buildDaemonHost(context.Background(), name, testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+	use(h)
+	// Closing the child ends the exchange, so the parent's Run returns and
+	// everything it printed is in the builder.
+	require.NoError(t, child.Close())
+	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone)
+	return printed.String()
+}
+
+func TestVersionAdviceFollowsTheDirection(t *testing.T) {
+	newer := &version.CompatibilityResult{HostVersion: "v0.38.0", ServerVersion: "v1.0.0", Direction: version.RelayNewer}
+	require.Equal(t, "upterm: warning: the relay runs uptermd v1.0.0 and this is upterm v0.38.0; upgrade with upterm upgrade", versionWarning(newer, "upgrade with upterm upgrade"))
+	older := &version.CompatibilityResult{HostVersion: "v1.0.0", ServerVersion: "v0.38.0", Direction: version.RelayOlder}
+	require.Equal(t, "upterm: warning: the relay runs uptermd v0.38.0, older than this upterm (v1.0.0); its operator can upgrade it", versionWarning(older, "ignored"))
+	unknown := &version.CompatibilityResult{HostVersion: "v1.0.0", ServerVersion: "unknown", Direction: version.RelayUnknown}
+	require.Equal(t, "upterm: warning: the relay didn't report a version upterm understands; this is upterm v1.0.0", versionWarning(unknown, "ignored"))
+}
+
+// The daemon says a version mismatch on the operator's terminal as one line,
+// with the upgrade advice only when it is this upterm that is behind: the
+// ownership check behind the advice isn't run for a relay that is.
+func TestTheDaemonSaysAVersionMismatchInOneLine(t *testing.T) {
+	hostCmd()
+	daemonTestRoots(t)
+
+	t.Run("the relay is newer", func(t *testing.T) {
+		withRunningBinary(t, "/opt/homebrew/Cellar/upterm/0.38.0/bin/upterm")
+		printed := daemonPrints(t, "newer", func(h *host.Host) {
+			h.VersionWarningCallback(&version.CompatibilityResult{HostVersion: "v0.38.0", ServerVersion: "v1.0.0", Direction: version.RelayNewer})
+		})
+		require.Equal(t, "upterm: warning: the relay runs uptermd v1.0.0 and this is upterm v0.38.0; upgrade with brew upgrade upterm\n", printed)
+	})
+
+	t.Run("the relay is older", func(t *testing.T) {
+		withRunningBinaryFunc(t, func() (string, error) {
+			t.Error("the advice was looked up for a relay that is behind")
+			return "", errors.New("not asked")
+		})
+		printed := daemonPrints(t, "older", func(h *host.Host) {
+			h.VersionWarningCallback(&version.CompatibilityResult{HostVersion: "v1.0.0", ServerVersion: "v0.38.0", Direction: version.RelayOlder})
+		})
+		require.Equal(t, "upterm: warning: the relay runs uptermd v0.38.0, older than this upterm (v1.0.0); its operator can upgrade it\n", printed)
+	})
+}
+
+func TestRelayWarningLines(t *testing.T) {
+	require.Equal(t, "upterm: warning: this relay doesn't support reconnecting; if the connection drops, guests can't reach this session until you restart it",
+		relayWarningLine(host.RelayWarning{Kind: host.NoReconnect}))
+	require.Equal(t, "upterm: warning: the relay's certificate isn't valid for relay.example.com, so a reconnect would be refused; use the relay's own hostname in --server",
+		relayWarningLine(host.RelayWarning{Kind: host.CertNotValidForServer, Host: "relay.example.com"}))
+}
+
+// What the relay's first answer turned up -- that it can't take a session
+// back, and that its version isn't one upterm understands -- reaches the
+// operator's terminal ahead of the banner, so it is read before the session
+// starts rather than found above it later.
+func TestRelayWarningsReachTheHostBeforeTheBanner(t *testing.T) {
+	printed := runDaemonAgainstUnsupportedRelay(t)
+	banner := strings.Index(printed, bannerMarker)
+	require.NotEqual(t, -1, banner, printed)
+	for _, line := range []string{
+		"upterm: warning: this relay doesn't support reconnecting; if the connection drops, guests can't reach this session until you restart it\n",
+		// The fake relay speaks Go's own SSH version string.
+		"upterm: warning: the relay didn't report a version upterm understands; this is upterm v" + version.Current().String() + "\n",
+	} {
+		require.Equal(t, 1, strings.Count(printed, line), printed)
+		require.Less(t, strings.Index(printed, line), banner, "said after the banner:\n%s", printed)
+	}
+}
+
+// bannerMarker is what runDaemonAgainstUnsupportedRelay's parent prints where
+// upterm host prints the banner: when it is told the session was created.
+const bannerMarker = "<banner>\n"
+
+// runDaemonAgainstUnsupportedRelay runs the daemon's Host against a relay
+// that can't take a session back, up to the session's creation, and returns
+// everything its parent printed, with bannerMarker where upterm host would
+// print the banner. The parent declines the session there, so nothing past
+// the banner runs.
+func runDaemonAgainstUnsupportedRelay(t *testing.T) string {
+	t.Helper()
+	hostCmd()
+	daemonTestRoots(t)
+
+	key, err := host.NewHostKey()
+	require.NoError(t, err)
+	relay := fakerelay.Start(t, key, fakerelay.RandomID)
+	origServer, origSkip := flagServer, flagSkipHostKeyCheck
+	flagServer, flagSkipHostKeyCheck = "ssh://"+relay.Addr, true
+	t.Cleanup(func() { flagServer, flagSkipHostKeyCheck = origServer, origSkip })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	var printed strings.Builder
+	parent := bootstrap.NewParent(b, nil, &printed, nil)
+	parentDone := make(chan error, 1)
+	go func() {
+		_, err := parent.Run(ctx, bootstrap.Handlers{
+			SessionCreated: func(*api.GetSessionResponse) api.Accept_Decision {
+				printed.WriteString(bannerMarker)
+				return api.Accept_DECLINED
+			},
+		})
+		parentDone <- err
+	}()
+
+	child := bootstrap.NewChild(a, nil)
+	h, err := buildDaemonHost(ctx, "relaywarn", testHostOptions(), child, discardLogger())
+	require.NoError(t, err)
+	require.ErrorAs(t, h.Run(ctx), new(UserDiscardedError))
+	require.NoError(t, child.Close())
+	require.ErrorIs(t, <-parentDone, bootstrap.ErrDaemonGone)
+	return printed.String()
 }

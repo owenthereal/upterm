@@ -357,3 +357,51 @@ func quietStdout(t *testing.T) {
 		_ = null.Close()
 	})
 }
+
+// The version warning's upgrade advice says only what upterm has confirmed,
+// with the same checks upgrade makes before replacing anything: upgrade
+// itself where it could replace this binary, the command of the package
+// manager that owns it, and otherwise the way it was installed -- which is
+// also the advice when a check couldn't answer.
+func TestUpgradeAdvice(t *testing.T) {
+	const yourWay = "upgrade it the way it was installed"
+	withProbes := func(t *testing.T, p probes) {
+		orig := systemProbes
+		t.Cleanup(func() { systemProbes = orig })
+		systemProbes = p
+	}
+
+	t.Run("a binary upgrade can replace", func(t *testing.T) {
+		withRunningBinary(t, aStandaloneBinary(t))
+		require.Equal(t, "upgrade with upterm upgrade", upgradeAdvice())
+	})
+
+	t.Run("a binary Homebrew owns", func(t *testing.T) {
+		withRunningBinary(t, "/opt/homebrew/Cellar/upterm/0.38.0/bin/upterm")
+		require.Equal(t, "upgrade with brew upgrade upterm", upgradeAdvice())
+	})
+
+	t.Run("a binary a dpkg package owns", func(t *testing.T) {
+		bin := aStandaloneBinary(t)
+		withRunningBinary(t, bin)
+		withProbes(t, probes{dpkgOwns: func(path string) (bool, error) { return path == bin, nil }})
+		require.Equal(t, "upgrade with apt", upgradeAdvice())
+	})
+
+	t.Run("a binary nothing owns, in a directory upterm can't write", func(t *testing.T) {
+		withRunningBinary(t, aStandaloneBinary(t))
+		withWritableDir(t, func(string) error { return fs.ErrPermission })
+		require.Equal(t, yourWay, upgradeAdvice())
+	})
+
+	t.Run("a package database that can't be asked", func(t *testing.T) {
+		withRunningBinary(t, aStandaloneBinary(t))
+		withProbes(t, probes{rpmOwns: func(string) (bool, error) { return false, errors.New("rpm failed") }})
+		require.Equal(t, yourWay, upgradeAdvice())
+	})
+
+	t.Run("a binary upterm can't find", func(t *testing.T) {
+		withRunningBinaryFunc(t, func() (string, error) { return "", errors.New("no such file") })
+		require.Equal(t, yourWay, upgradeAdvice())
+	})
+}
