@@ -24,6 +24,13 @@ func TestServerPreservesPTYOutput(t *testing.T) {
 			if mode == "forced command" {
 				srv.ForceCommand = command
 			}
+			if mode == "shared replay" {
+				// The ring's own bytes, as the raw replay hands them to a
+				// viewer and to every join that falls back. A terminal's join
+				// is otherwise handed a reconstruction of the screen, which
+				// is other bytes by design.
+				installReplayer(t, nil)
+			}
 			h := startHost(t, srv)
 
 			ready := make([]byte, len("READY"))
