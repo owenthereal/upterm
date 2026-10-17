@@ -1072,20 +1072,19 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 				logger.Warn("reverse tunnel stopped serving guests; command continues", "error", err)
 			},
 		}
-		served := make(chan struct{})
 		g.Add(func() error {
-			defer close(served)
 			return sshServer.ServeWithContext(ctx, guestDoor, attachLn)
 		}, func(err error) {
 			// Only the winning group error reaches attached clients, and it
 			// is published to the session before the cancellation that
 			// starts its teardown, so that every client, and every command's
-			// end, is measured against it. Not when the winner is the
-			// server's own return: the session ended on its own, and that is
-			// not a shutdown.
-			select {
-			case <-served:
-			default:
+			// end, is measured against it. Only a shutdown is published, and
+			// what is one is told by the error, not by whether the server
+			// has returned: a stop can win the group as the command ends on
+			// its own, and the server's return then comes before this runs.
+			// Anything else, the server's own return among them, is left to
+			// the handlers' reading of the cancellation below.
+			if isShutdown(err) {
 				sshServer.PublishShutdown(err)
 			}
 			cancel(err)
@@ -1350,50 +1349,12 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 
 	err = g.Run()
 
-	// The command's own outcome, and the cause that initiated teardown, are
-	// two different questions. Precedence is explicit because the wait status
-	// cannot answer the second: our own teardown kills the command, so a
-	// requested shutdown surfaces as a signal on Unix and as an ordinary
-	// non-zero exit on Windows.
-	res := sshServer.CommandResult()
-	var hostSignal hostSignalError
-	switch {
-	case errors.Is(err, errJoinTimeout):
-		// The group winner alone identifies why teardown happened.
+	out := classifyRun(err, sshServer.CommandResult(), abandonedBy(ctx) && !closed(cmdReady))
+	runReason, runExitCode, runSignal, runSignalNumber = out.reason, out.exitCode, out.signal, out.signalNumber
+	if runReason == sessiondir.ReasonJoinTimeout {
 		// The timeout that fired, which `session set` may have replaced
 		// since launch.
 		logger.Info("no guest joined within the join timeout; session ended", "timeout", joins.snapshot().Timeout)
-		runReason = sessiondir.ReasonJoinTimeout
-	case errors.Is(err, errSessionStopped):
-		runReason = sessiondir.ReasonStopped
-	case errors.As(err, &hostSignal):
-		runReason = sessiondir.ReasonSignaled
-		runSignal = hostSignal.signal.String()
-		n := int(hostSignal.signal)
-		runSignalNumber = &n
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		runReason = sessiondir.ReasonCanceled
-		if abandonedBy(ctx) && !closed(cmdReady) {
-			runReason = sessiondir.ReasonStartupAbandoned
-		}
-	case errors.Is(err, internal.ErrNoInitialClient):
-		// Nobody attached, so nothing ran and nothing failed: the session
-		// was abandoned before its command started.
-		runReason = sessiondir.ReasonStartupAbandoned
-	case errors.Is(err, errReadyUnpublished):
-		// Ahead of the command's result, which here says only what teardown
-		// did to it.
-		runReason = sessiondir.ReasonStartupFailed
-	case res.Exited:
-		code := res.Code
-		runExitCode = &code
-		runReason = sessiondir.ReasonExited
-	case res.Signal != "":
-		runSignal = res.Signal
-		runSignalNumber = res.SignalNumber
-		runReason = sessiondir.ReasonSignaled
-	default:
-		runReason = sessiondir.ReasonStartupFailed
 	}
 
 	if errors.Is(err, errJoinTimeout) {

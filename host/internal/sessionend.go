@@ -194,9 +194,12 @@ func sendSessionEnd(conn *ssh.ServerConn, end upterm.SessionEnd) {
 	}
 }
 
-// endedOnItsOwn reports whether r is the outcome of a command that ended on
-// its own -- exited, or was killed by a signal -- before any shutdown.
-func (r CommandResult) endedOnItsOwn() bool {
+// EndedOnItsOwn reports whether r is the outcome of a command that ended on
+// its own -- exited, or was killed by a signal -- before any shutdown. A
+// session whose shared command did ended for that: its clients are sent the
+// command's status, and host records the command's outcome, whatever
+// shutdown came after.
+func (r CommandResult) EndedOnItsOwn() bool {
 	return (r.Exited || r.SignalNumber != nil) && !r.EndedAfterShutdown
 }
 
@@ -231,7 +234,7 @@ func (h *sessionHandler) endingCause() (kind shutdownKind, sig syscall.Signal, r
 	}
 	if commandDone && h.commandResult != nil {
 		res = h.commandResult()
-		if res.endedOnItsOwn() {
+		if res.EndedOnItsOwn() {
 			kind, sig = shutdownNone, 0
 		}
 	}
