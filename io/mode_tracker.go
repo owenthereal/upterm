@@ -286,7 +286,9 @@ type ModeTracker struct {
 	// unended: a string the program ended ambiguously -- by CAN, SUB or an ESC
 	// that isn't ST -- which a DEC parser ends there and kitty, and tmux for a
 	// DCS, keep open, taking what follows as more of it. It is over only at a
-	// terminator every terminal shares: ST, or BEL for an OSC.
+	// terminator every terminal shares: ST, or BEL for an OSC. A window title
+	// (ESC k), which the parser doesn't know as a string, is one from its
+	// start. See openUnended.
 	//
 	// escAs: what the intermediates of the sequence escFinal waits on make
 	// it, so its final byte can be read as a terminal reads it.
@@ -296,7 +298,9 @@ type ModeTracker struct {
 	// control, reads as text. It waits for the CSI's final byte. A string
 	// begun that way is unended from its start: see beginPastControls.
 	//
-	// afterESC: the byte before was ESC, for recognising ST.
+	// afterESC: the byte before was an ESC that isn't the second of a pair,
+	// for recognising ST. tmux escapes an ESC inside its passthrough DCS by
+	// doubling it, so there ESC ESC \ is an ESC and a backslash, not ST.
 	//
 	// utf8Pending: the continuation bytes the last UTF-8 lead byte still
 	// waits for. A character is a sequence too: text written in the middle of
@@ -317,15 +321,26 @@ type ModeTracker struct {
 	// singleShift is an SS2 (ESC N) or SS3 (ESC O) still waiting for the one
 	// character it draws from G2 or G3.
 	//
-	// Anything may raise them, but only what every terminal takes as putting
-	// ASCII back lowers them: an SI, an ESC ( B, a RIS or a DECSTR inside an
-	// unended string is the string's on a terminal that keeps it open, so
-	// there it lowers nothing, and they wait for one outside that window.
-	// charsetG0 keeps the parser's DEC reading, for the replay; these are for
-	// NonASCIICharset and InSequence alone, and nothing is replayed from them.
-	gl          int
-	g0Graphics  bool
-	singleShift bool
+	// Anything may raise them, but only what every mainstream terminal takes
+	// as putting ASCII back lowers them: an SI, an ESC ( B, or a RIS straight
+	// after its ESC, and none of them inside an unended string, which is the
+	// string's on a terminal that keeps it open. A DECSTR lowers nothing,
+	// since tmux ignores it, and nor does a RIS with a control inside it,
+	// since kitty abandons the ESC there. charsetG0 keeps the parser's DEC
+	// reading, for the replay; these are for NonASCIICharset and InSequence
+	// alone, and nothing is replayed from them.
+	//
+	// savedGL and savedG0Graphics are the sets a cursor save took with it, as
+	// cautiously: a save outside an unended string, straight after its ESC
+	// or as a CSI whose parameters are read, replaces them; any other save
+	// merges with them, not ASCII if either side is; a RIS that lowers the
+	// sets clears them; and a restore only ever raises gl and g0Graphics from
+	// them, never lowers them.
+	gl              int
+	g0Graphics      bool
+	singleShift     bool
+	savedGL         int
+	savedG0Graphics bool
 }
 
 type modeState int
@@ -352,16 +367,19 @@ const (
 // ordinary characters far more often than they are introducers: honouring them
 // would swallow real text to catch a sequence almost nothing sends. A program
 // that does send them goes unrecorded, like anything else the tracker does not
-// recognise.
+// recognise. That reason is about those bytes as raw bytes alone: the same
+// controls encoded as UTF-8 characters, U+0080 to U+009F, are not followed
+// either, for a reason of their own (see watchSequence).
 type stringKind int
 
 const (
-	skNone stringKind = iota
-	skOSC             // ESC ]
-	skDCS             // ESC P
-	skPM              // ESC ^
-	skAPC             // ESC _
-	skSOS             // ESC X
+	skNone  stringKind = iota
+	skOSC              // ESC ]
+	skDCS              // ESC P
+	skPM               // ESC ^
+	skAPC              // ESC _
+	skSOS              // ESC X
+	skTitle            // ESC k, tmux's and GNU screen's window title: the watch's alone
 )
 
 // escKind is what an ESC sequence's intermediates make it, for the watch,
@@ -371,7 +389,8 @@ const (
 type escKind int
 
 const (
-	ekPlain     escKind = iota // no intermediate: the final byte is the sequence, as in ESC n
+	ekPlain     escKind = iota // the final byte straight after ESC, as in ESC n
+	ekControls                 // no intermediate, but controls executed between ESC and the final byte
 	ekG0                       // ESC ( or ESC $ (: a set designated into G0
 	ekMultibyte                // ESC $ alone: a multibyte set into G0, at the final byte
 	ekOther                    // anything else: a set into G1 to G3, or no designation at all
@@ -379,13 +398,22 @@ const (
 
 // then is k with the intermediate b after it.
 func (k escKind) then(b byte) escKind {
+	none := k == ekPlain || k == ekControls
 	switch {
-	case k == ekG0, b == '(' && (k == ekPlain || k == ekMultibyte):
+	case k == ekG0, b == '(' && (none || k == ekMultibyte):
 		return ekG0
-	case b == '$' && k == ekPlain:
+	case b == '$' && none:
 		return ekMultibyte
 	}
 	return ekOther
+}
+
+// ending is the sequence the byte the watch reads is the final byte of, if
+// any, as watchCharsets reads it.
+type ending struct {
+	esc bool    // an ESC sequence
+	as  escKind // what its intermediates, or the controls inside it, made it
+	csi bool    // a CSI begun past executed controls (see csiPending)
 }
 
 func NewModeTracker() *ModeTracker {
@@ -541,11 +569,14 @@ func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 // DEC parser begins there and the tracker's own parser reads as text; after
 // a string the program ended ambiguously -- by CAN,
 // SUB or an ESC that isn't ST -- which a DEC parser ends there but kitty and
-// tmux keep open (see TerminalQueryFilter); inside a UTF-8 character whose
+// tmux keep open (see TerminalQueryFilter); in a window title, ESC k, which
+// tmux and GNU screen read as a string; inside a UTF-8 character whose
 // continuation bytes haven't all come; or after a single shift, SS2 (ESC N)
 // or SS3 (ESC O), whose character hasn't come, which would draw the first
-// character written now from G2 or G3. An ambiguous string stays "inside"
-// until a terminator every terminal shares: ST (ESC \), or BEL for an OSC.
+// character written now from G2 or G3. An ambiguous string, and a title,
+// stay "inside" until a terminator every terminal shares: ST (ESC \), or BEL
+// for an OSC. An ESC \ whose ESC is the second of a pair is no ST: tmux
+// escapes an ESC inside its passthrough by doubling it.
 //
 // It is AtGround's cautious form, for a writer that must not land inside the
 // program's sequence on any terminal. The tracker's own mode bookkeeping keeps
@@ -561,16 +592,18 @@ func (m *ModeTracker) InSequence() bool {
 // multibyte one, or ESC ( B with a control inside it is taken as not ASCII
 // too), or a locking shift that put G1, G2 or G3 in use -- SO, LS2 (ESC n)
 // or LS3 (ESC o) -- and no shift-in (SI) since, whatever those sets hold. A
-// RIS or a DECSTR puts both back. Text written there is not inside a
-// sequence, but it isn't read as the text it is either.
+// RIS straight after its ESC puts both back; a DECSTR isn't taken as doing
+// so, since tmux ignores it. A cursor restore puts back the sets its save
+// took, and is taken only as raising them. Text written there is not inside
+// a sequence, but it isn't read as the text it is either.
 //
 // SO and SI are taken wherever a terminal executes them, which is everywhere
 // but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
 // them to its handler. A string ended ambiguously counts as one until it is
-// over, for whatever would put ASCII back -- an SI, an ESC ( B, a RIS or a
-// DECSTR: a terminal that keeps the string open takes it as the string's, so
-// the graphics are kept through it. What would leave ASCII is taken there all
-// the same.
+// over, for whatever would put ASCII back -- an SI, an ESC ( B or a RIS: a
+// terminal that keeps the string open takes it as the string's, so the
+// graphics are kept through it. What would leave ASCII is taken there all the
+// same.
 func (m *ModeTracker) NonASCIICharset() bool {
 	return m.gl != 0 || m.g0Graphics
 }
@@ -591,8 +624,28 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// watchSequence keeps what InSequence knows beyond the parser's state, from
-// the state b arrives in, before step moves it on.
+// watchSequence keeps what InSequence and NonASCIICharset know beyond the
+// parser's state, from the state b arrives in, before step moves it on.
+//
+// It has limits, each where following a terminal further costs more than it
+// is worth. The controls from U+0080 to U+009F, encoded as UTF-8 characters,
+// aren't followed: some terminals honour them and others don't, and following
+// them would leave the guard unsafe for good on the terminals that don't. Nor
+// is an ESC followed by a character outside ASCII, which terminals disagree
+// on too. VT52 mode, Tektronix mode, the printer controller, DOCS (ESC % @ and
+// its kin) and the Linux console's palette sequences aren't known, and the 5-
+// and 6-byte lead bytes of the original UTF-8 (0xF8 to 0xFD) aren't waited out
+// as characters. A plain CSI s is taken as a cursor save, which it isn't
+// under left and right margins mode, and 1048 as one on every terminal: a save
+// the terminal doesn't make still replaces the copy of the saved sets, and a
+// restore of the terminal's own older save can then draw in sets the copy
+// doesn't hold.
+//
+// And the guard can stay unsafe until the program's own explicit reset: after
+// a stray SO, ESC n or ESC o, until an SI; in a string only ST ends, until the
+// next ESC \ whose ESC isn't the second of a pair; and with a character set
+// raised by a designation or a restore, until an ESC ( B, an SI or a RIS
+// lowers it.
 func (m *ModeTracker) watchSequence(b byte) {
 	// Whether b arrives outside every sequence, where a terminal draws it as
 	// a character or executes it as a control: read before anything below
@@ -607,16 +660,17 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// still the sequence's on the terminal.
 	executed := (b < 0x20 && !cancel && b != 0x1b) || b == 0x7f
 	final := b >= 0x30 && b <= 0x7e
+	// The sequence b is the final byte of, if it is one, and what the
+	// sequence was, for watchCharsets: the shifts, RIS, the designations and
+	// the cursor saves are read from it.
+	var end ending
 	// A CSI the parser didn't see begin ends at its final byte, and CAN, SUB
 	// or an ESC abandons it. Anything else -- a parameter, an intermediate, or
 	// a control executed there -- is more of it.
 	if m.csiPending && ((b >= 0x40 && b <= 0x7e) || cancel || b == 0x1b) {
 		m.csiPending = false
+		end.csi = b >= 0x40 && b <= 0x7e
 	}
-	// The ESC sequence b is the final byte of, if it is one, and what the
-	// sequence was, for watchCharsets: the shifts, RIS and the designations
-	// are read from it.
-	ended, endedAs := false, ekPlain
 	// An ESC sequence past its intermediates ends at its final byte, and CAN,
 	// SUB or the ESC of another sequence abandons it. Anything else -- a
 	// control character, which a terminal executes there, DEL, or another
@@ -624,9 +678,9 @@ func (m *ModeTracker) watchSequence(b byte) {
 	if m.escFinal {
 		switch {
 		case final:
-			ended, endedAs = true, m.escAs
+			end.esc, end.as = true, m.escAs
 			m.escFinal = false
-			if m.escAs == ekPlain {
+			if m.escAs == ekControls {
 				m.beginPastControls(b)
 			}
 		case cancel || b == 0x1b:
@@ -641,7 +695,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 		if (intermediate && b != '(') || executed {
 			m.waitFinal(ekPlain, b)
 		} else if final {
-			ended = true
+			end.esc = true
 		}
 	case msCharset:
 		// A designation with an intermediate of its own, such as ESC ( % 5,
@@ -651,27 +705,35 @@ func (m *ModeTracker) watchSequence(b byte) {
 		}
 	case msString:
 		if cancel {
-			m.unended = m.kind
+			m.openUnended(m.kind)
 		}
 	case msStringEsc:
 		if b != '\\' {
 			// The ESC was not ST's: the parser resyncs on b as the start of
 			// a new sequence, and a terminal that keeps the string open
 			// reads both as more of it.
-			m.unended = m.kind
+			m.openUnended(m.kind)
 			if (intermediate && b != '(') || executed {
 				m.waitFinal(ekPlain, b)
 			} else if final {
-				ended = true
+				end.esc = true
 			}
 		}
+	}
+	if end.esc && (end.as == ekPlain || end.as == ekControls) && b == 'k' {
+		// A window title, which tmux and GNU screen read as a string only
+		// ST ends, and oh-my-zsh sends at every prompt under their TERM. The
+		// parser takes ESC k as a sequence done at the k.
+		m.openUnended(skTitle)
 	}
 	if m.unended != skNone && ((m.afterESC && b == '\\') || (b == 0x07 && m.unended == skOSC)) {
 		m.unended = skNone
 	}
-	m.afterESC = b == 0x1b
+	// Paired: the second ESC of two is the first's escape, not an ESC an ST
+	// begins with.
+	m.afterESC = b == 0x1b && !m.afterESC
 
-	m.watchCharsets(b, ground, ended, endedAs)
+	m.watchCharsets(b, ground, end)
 
 	// A lead byte says how many continuation bytes follow it; anything but a
 	// continuation byte ends the character, complete or not.
@@ -699,8 +761,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 // The string is taken as unended from its start. That is what unended means
 // -- open until a terminator every terminal shares, ST or BEL for an OSC,
 // whatever ends it ambiguously first -- and so what this string is on a
-// terminal that reads it as one. A string already open that only ST ends
-// stays the one waited for.
+// terminal that reads it as one.
 func (m *ModeTracker) beginPastControls(b byte) {
 	var kind stringKind
 	switch b {
@@ -720,6 +781,15 @@ func (m *ModeTracker) beginPastControls(b byte) {
 	default:
 		return
 	}
+	m.openUnended(kind)
+}
+
+// openUnended opens the window a string of kind leaves when it is ended
+// ambiguously, or begun where the parser doesn't see it, unless a window only
+// ST ends is open already: a string begun inside one is more of it on a
+// terminal that keeps it open, and the BEL that ends an OSC doesn't end the
+// string around it. So only no window, or an OSC's, is replaced.
+func (m *ModeTracker) openUnended(kind stringKind) {
 	if m.unended == skNone || m.unended == skOSC {
 		m.unended = kind
 	}
@@ -731,20 +801,62 @@ func (m *ModeTracker) beginPastControls(b byte) {
 func (m *ModeTracker) waitFinal(k escKind, b byte) {
 	m.escFinal = true
 	m.escAs = k
-	if b >= 0x20 && b <= 0x2f {
+	switch {
+	case b >= 0x20 && b <= 0x2f:
 		m.escAs = k.then(b)
+	case k == ekPlain:
+		m.escAs = ekControls
 	}
 }
 
-// watchCharsets keeps NonASCIICharset's view of the character sets, and the
-// single shift InSequence waits out, from the state b arrives in. It reads
-// each sequence as a terminal does: an ESC sequence at its final byte,
-// whatever controls were executed inside it (ended is that b is one, and
-// endedAs what its intermediates made it); ESC ( B as the parser completes
-// it; DECSTR at its final byte; and SO and SI wherever a terminal executes
-// them. watchSequence calls it once it has decided whether b falls inside an
-// unended string; ground is that b arrived outside every sequence.
-func (m *ModeTracker) watchCharsets(b byte, ground, ended bool, endedAs escKind) {
+// saveCharsets is a cursor save's, which takes the character sets with it:
+// replacing the copy when replace, and otherwise merging with it, not ASCII
+// if either side is.
+func (m *ModeTracker) saveCharsets(replace bool) {
+	if replace {
+		m.savedGL, m.savedG0Graphics = m.gl, m.g0Graphics
+		return
+	}
+	if m.savedGL == 0 {
+		m.savedGL = m.gl
+	}
+	m.savedG0Graphics = m.savedG0Graphics || m.g0Graphics
+}
+
+// restoreCharsets is a cursor restore's, from the copy: it only ever raises
+// what NonASCIICharset says, never lowers it, since the terminal's own save
+// may hold what the copy doesn't.
+func (m *ModeTracker) restoreCharsets() {
+	if m.gl == 0 {
+		m.gl = m.savedGL
+	}
+	m.g0Graphics = m.g0Graphics || m.savedG0Graphics
+}
+
+// savesCursor reports whether params, a DEC private mode set's or reset's,
+// name 1048 or 1049, which save the cursor when set and restore it when
+// reset. Read as finishCSI reads them.
+func savesCursor(params []byte) bool {
+	if len(params) == 0 || params[0] != '?' {
+		return false
+	}
+	for _, field := range bytes.Split(params[1:], []byte{';'}) {
+		if n, err := strconv.Atoi(string(field)); err == nil && (n == 1048 || n == 1049) {
+			return true
+		}
+	}
+	return false
+}
+
+// watchCharsets keeps NonASCIICharset's view of the character sets, the copy
+// a cursor save takes of them, and the single shift InSequence waits out,
+// from the state b arrives in. It reads each sequence as a terminal does: an
+// ESC sequence, or a CSI begun past executed controls, at its final byte,
+// which end says b is; ESC ( B as the parser completes it; a cursor save or
+// restore in a CSI at its final byte; and SO and SI wherever a terminal
+// executes them. watchSequence calls it once it has decided whether b falls
+// inside an unended string; ground is that b arrived outside every sequence.
+func (m *ModeTracker) watchCharsets(b byte, ground bool, end ending) {
 	// A string the program ended ambiguously is still open on a terminal that
 	// keeps it so, which takes whatever a DEC parser reads as putting ASCII
 	// back as more of the string, and is still in the graphics once ST comes.
@@ -758,17 +870,21 @@ func (m *ModeTracker) watchCharsets(b byte, ground, ended bool, endedAs escKind)
 		// waits on past them.
 		m.singleShift = false
 	}
-	if ended {
-		switch endedAs {
-		case ekPlain:
+	if end.esc {
+		switch end.as {
+		case ekPlain, ekControls:
 			// The final bytes that are a sequence of their own after ESC,
-			// also after an ESC that abandoned a string. The locking shifts
-			// into GR (ESC ~, ESC } and ESC |) reach only 8-bit bytes, which
-			// a UTF-8 terminal doesn't read as GR, so they are left alone.
+			// also after an ESC that abandoned a string, and past controls a
+			// DEC parser executes there. The locking shifts into GR (ESC ~,
+			// ESC } and ESC |) reach only 8-bit bytes, which a UTF-8
+			// terminal doesn't read as GR, so they are left alone.
 			switch b {
 			case 'c': // RIS
-				if lower {
+				// Only straight after its ESC: kitty abandons an ESC at a
+				// control, and a RIS past one resets nothing there.
+				if end.as == ekPlain && lower {
 					m.gl, m.g0Graphics = 0, false
+					m.savedGL, m.savedG0Graphics = 0, false
 				}
 			case 'n': // LS2
 				m.gl = 2
@@ -776,12 +892,26 @@ func (m *ModeTracker) watchCharsets(b byte, ground, ended bool, endedAs escKind)
 				m.gl = 3
 			case 'N', 'O': // SS2, SS3
 				m.singleShift = true
+			case '7': // DECSC
+				m.saveCharsets(end.as == ekPlain && lower)
+			case '8': // DECRC
+				m.restoreCharsets()
 			}
 		case ekG0, ekMultibyte:
 			// A set into G0 that isn't ESC ( B as written: one with an
 			// intermediate of its own, a multibyte one, or one with a control
 			// executed inside it. None of them is taken as ASCII.
 			m.g0Graphics = true
+		}
+	}
+	if end.csi {
+		// A CSI begun past a control, whose parameters the watch doesn't
+		// read: taken as whichever save or restore its final byte could be.
+		switch b {
+		case 's', 'h':
+			m.saveCharsets(false)
+		case 'u', 'l':
+			m.restoreCharsets()
 		}
 	}
 	switch m.state {
@@ -800,10 +930,17 @@ func (m *ModeTracker) watchCharsets(b byte, ground, ended bool, endedAs escKind)
 			}
 		}
 	case msCSI:
-		// DECSTR, as finishCSI reads it: it designates ASCII and puts G0
-		// back in use.
-		if b == 'p' && lower && !m.overflow && len(m.seq) == 1 && m.seq[0] == '!' {
-			m.gl, m.g0Graphics = 0, false
+		// A cursor save or restore: a plain CSI s or u (SCOSC, SCORC), or
+		// 1048 or 1049 set or reset. One whose parameters overflowed may
+		// have named either mode, so it is taken as a save merged, or a
+		// restore. A DECSTR lowers nothing here: tmux ignores it.
+		plain := len(m.seq) == 0 && (b == 's' || b == 'u')
+		modes := (b == 'h' || b == 'l') && (m.overflow || savesCursor(m.seq))
+		switch {
+		case (plain || modes) && (b == 's' || b == 'h'):
+			m.saveCharsets(lower && !m.overflow)
+		case plain || modes:
+			m.restoreCharsets()
 		}
 	}
 	switch b {

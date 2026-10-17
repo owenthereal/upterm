@@ -1521,12 +1521,12 @@ func TestInSequenceWaitsPastAControlInsideAnEscape(t *testing.T) {
 // G1 in use, is drawn as line pieces: "upterm" comes out as box corners until
 // the program designates ASCII again or shifts back in.
 func TestNonASCIICharsetIsWhileTextIsntDrawnAsASCII(t *testing.T) {
-	for _, in := range []string{"\x1b(0", "\x1b(A", "\x0e", "\x1b(B\x0e", "\x1b[1\x0e"} {
+	for _, in := range []string{"\x1b(0", "\x1b(A", "\x0e", "\x1b(B\x0e", "\x1b[1\x0e", "\x1b(0\x1b[!p", "\x0e\x1b[!p"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.True(t, m.NonASCIICharset(), "%q", in)
 	}
-	for _, in := range []string{"plain", "\x1b(B", "\x1b(0\x1b(B", "\x0e\x0f", "\x1b(0\x1bc", "\x0e\x1bc", "\x1b(0\x1b[!p", "\x0e\x1b[!p", "\x1b]0;\x0e\x07"} {
+	for _, in := range []string{"plain", "\x1b(B", "\x1b(0\x1b(B", "\x0e\x0f", "\x1b(0\x1bc", "\x0e\x1bc", "\x1b]0;\x0e\x07"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.False(t, m.NonASCIICharset(), "%q", in)
@@ -1576,7 +1576,8 @@ func TestShiftOutSurvivesAShiftInInsideAnAmbiguouslyEndedString(t *testing.T) {
 // back: a RIS, a DECSTR or an ESC ( B inside an ambiguously ended string is
 // the string's on a terminal that keeps it open, so the graphics are still
 // there once ST ends it, and NonASCIICharset keeps saying so. Outside any
-// such string each puts ASCII back, as it does on every terminal.
+// such string a RIS, an SI or an ESC ( B puts ASCII back, as it does on every
+// terminal; a DECSTR doesn't anywhere, since tmux ignores it.
 func TestNothingInsideAnAmbiguouslyEndedStringPutsASCIIBack(t *testing.T) {
 	for _, tc := range []struct{ name, graphics, inside string }{
 		{"a RIS after a shift-out", "\x0e", "\x1bc"},
@@ -1599,11 +1600,16 @@ func TestNothingInsideAnAmbiguouslyEndedStringPutsASCIIBack(t *testing.T) {
 		})
 	}
 
-	for _, in := range []string{"\x0e\x1bc", "\x0e\x1b[!p", "\x0e\x0f", "\x1b(0\x1bc", "\x1b(0\x1b[!p", "\x1b(0\x1b(B",
+	for _, in := range []string{"\x0e\x1bc", "\x0e\x0f", "\x1b(0\x1bc", "\x1b(0\x1b(B",
 		"\x0e\x1b]0;t\x1bc\x1b\\\x0f", "\x1b(0\x1b]0;t\x1b(B\x1b\\\x1b(B"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.False(t, m.NonASCIICharset(), "outside any string: %q", in)
+	}
+	for _, in := range []string{"\x0e\x1b[!p", "\x1b(0\x1b[!p"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "a DECSTR, outside any string: %q", in)
 	}
 }
 
@@ -1627,13 +1633,13 @@ func TestAShiftToG2OrG3IsNotASCII(t *testing.T) {
 	_, _ = m.Write([]byte("\x0f"))
 	require.False(t, m.NonASCIICharset())
 
-	for _, in := range []string{"\x1bn", "\x1bo", "\x0e\x1bn", "\x1bn\x1b(B",
+	for _, in := range []string{"\x1bn", "\x1bo", "\x0e\x1bn", "\x1bn\x1b(B", "\x1bn\x1b[!p",
 		"\x1bn\x1b]0;t\x1bc\x1b\\", "\x1bo\x1b]0;t\x1b[!p\x1b\\", "\x1bn\x1b]0;t\x1b\x0f\x1b\\"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.True(t, m.NonASCIICharset(), "%q", in)
 	}
-	for _, in := range []string{"\x1bn\x0f", "\x1bo\x1bc", "\x1bn\x1b[!p", "\x1b~", "\x1b}", "\x1b|", "\x1b]0;n\x07"} {
+	for _, in := range []string{"\x1bn\x0f", "\x1bo\x1bc", "\x1b~", "\x1b}", "\x1b|", "\x1b]0;n\x07"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.False(t, m.NonASCIICharset(), "%q", in)
@@ -1659,12 +1665,12 @@ func TestAShiftToG2OrG3IsNotASCII(t *testing.T) {
 // ASCII back waits for the end of an ambiguously ended string as before.
 func TestEveryG0DesignationButESCParenBIsNotASCII(t *testing.T) {
 	for _, in := range []string{"\x1b(%5", "\x1b$B", "\x1b$@", "\x1b$(B", "\x1b$(D", "\x1b(\n0", "\x1b\r(0", "\x1b(\rB",
-		"\x1b(%5\x1b]0;t\x1b(B\x1b\\"} {
+		"\x1b(%5\x1b]0;t\x1b(B\x1b\\", "\x1b$(B\x1b[!p"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.True(t, m.NonASCIICharset(), "%q", in)
 	}
-	for _, in := range []string{"\x1b(B", "\x1b$)B", "\x1b)%5", "\x1b*%5", "\x1b(%5\x1b(B", "\x1b$B\x1bc", "\x1b$(B\x1b[!p"} {
+	for _, in := range []string{"\x1b(B", "\x1b$)B", "\x1b)%5", "\x1b*%5", "\x1b(%5\x1b(B", "\x1b$B\x1bc"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.False(t, m.NonASCIICharset(), "%q", in)
@@ -1673,15 +1679,18 @@ func TestEveryG0DesignationButESCParenBIsNotASCII(t *testing.T) {
 
 // A control character inside an ESC sequence is executed there, and the
 // sequence goes on to its final byte, as a DEC parser has it: ESC CR n is LS2
-// as ESC n is, and so for LS3, the single shifts and RIS. The RIS puts ASCII
-// back only outside an ambiguously ended string, as a bare one does.
+// as ESC n is, and so for LS3 and the single shifts. A RIS with a control
+// inside it doesn't put ASCII back, though: kitty abandons the ESC at the
+// control, and only a bare RIS outside an ambiguously ended string is one
+// every terminal takes.
 func TestAShiftPastAnExecutedControlStillShifts(t *testing.T) {
-	for _, in := range []string{"\x1b*0\x1b\rn", "\x1b\x7fo", "\x1b\r\nn", "\x1b]0;t\x1b\rn\x1b\\", "\x0e\x1b]0;t\x1b\rc\x1b\\"} {
+	for _, in := range []string{"\x1b*0\x1b\rn", "\x1b\x7fo", "\x1b\r\nn", "\x1b]0;t\x1b\rn\x1b\\", "\x0e\x1b]0;t\x1b\rc\x1b\\",
+		"\x0e\x1b\rc", "\x1b(0\x1b\x7fc", "\x1bn\x1b\rc"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.True(t, m.NonASCIICharset(), "%q", in)
 	}
-	for _, in := range []string{"\x0e\x1b\rc", "\x1b(0\x1b\x7fc", "\x1bn\x1b\rc", "\x1b \rn"} {
+	for _, in := range []string{"\x1b \rn", "\x1bn\x1bc"} {
 		m := NewModeTracker()
 		_, _ = m.Write([]byte(in))
 		require.False(t, m.NonASCIICharset(), "%q", in)
@@ -1739,4 +1748,99 @@ func TestASequenceBegunPastAnExecutedControlIsFollowed(t *testing.T) {
 	require.True(t, m.InSequence(), "the DCS may still be open")
 	_, _ = m.Write([]byte("\x1b\\"))
 	require.False(t, m.InSequence())
+}
+
+// tmux's passthrough wraps a sequence meant for the outer terminal in a DCS,
+// with every ESC inside it doubled: ESC P tmux ; ... ESC ESC \ ... ESC \.
+// There ESC ESC is an escaped ESC, so the backslash after it ends nothing, and
+// the DCS is open until an ESC \ whose ESC isn't the second of a pair. An OSC
+// inside it doesn't make it one a BEL ends.
+func TestTmuxPassthroughIsOpenUntilItsOwnST(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPtmux;\x1b\x1b]52;c;x\x1b\x1b\\"))
+	require.True(t, m.InSequence(), "the inner ST is an escaped ESC and a backslash")
+	_, _ = m.Write([]byte("\x07"))
+	require.True(t, m.InSequence(), "the DCS is still the window, which no BEL ends")
+	_, _ = m.Write([]byte("\x1b\\"))
+	require.False(t, m.InSequence(), "the passthrough's own ST")
+
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPtmux;\x1b\x1b\x1b\\"))
+	require.False(t, m.InSequence(), "an escaped ESC, then ST")
+}
+
+// A window only ST ends -- a DCS, SOS, PM or APC left open -- stays one when
+// a string begun inside it is ended ambiguously too, an OSC included: the
+// BEL that would end the OSC doesn't end the string around it.
+func TestAWindowOnlySTEndsIsNeverTakenForAnOSCs(t *testing.T) {
+	for _, in := range []string{"\x1bPq\x18\x1b]0;t\x18\x07", "\x1bPq\x1b\x1b]0;t\x1b[m\x07", "\x1b_x\x1a\x1b]0;t\x1a\x07", "\x1bPq\x18\x1bk\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.InSequence(), "%q: still in the first string at the BEL", in)
+		_, _ = m.Write([]byte("\x1b\\"))
+		require.False(t, m.InSequence(), "%q: ST ends it", in)
+	}
+}
+
+// ESC k begins a window title on tmux and GNU screen, a string only ST ends,
+// which oh-my-zsh sends at every prompt under TERM=screen* or tmux*. The
+// parser takes it as an ESC sequence done at the k, so the watch opens it
+// itself: straight after ESC, after a string's ESC, and past executed
+// controls. With an intermediate before it, the k is that sequence's final
+// byte instead.
+func TestATitleStringIsOpenUntilST(t *testing.T) {
+	for _, in := range []string{"\x1bktitle", "\x1bktitle\x07", "\x1b]0;t\x1bktitle\x07", "\x1b\rktitle"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.InSequence(), "%q", in)
+		_, _ = m.Write([]byte("\x1b\\"))
+		require.False(t, m.InSequence(), "%q, then ST", in)
+	}
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1b k"))
+	require.False(t, m.InSequence())
+}
+
+// A cursor save -- ESC 7, a plain CSI s, or 1048 or 1049 set -- saves the
+// character sets too, and its restore -- ESC 8, a plain CSI u, or 1048 or 1049
+// reset -- puts them back. The watch keeps a copy of its own of what was
+// saved, and a restore from it only ever raises what NonASCIICharset says,
+// never lowers it. Outside an ambiguously ended string a save replaces the
+// copy; inside one, or past a control, it merges with it, not ASCII if
+// either is; and a RIS outside one clears it. A CSI begun past a control has
+// parameters the watch doesn't read, so one ending in s or h is taken as a
+// save, merged, and one ending in u or l as a restore.
+func TestARestoredCharsetIsNeverTakenAsLower(t *testing.T) {
+	for _, in := range []string{
+		"\x1b(0\x1b7\x1b(B\x1b8",
+		"\x1b(0\x1b[s\x1b(B\x1b[u",
+		"\x1b(0\x1b[?1049h\x1b(B\x1b[?1049l",
+		"\x1b(0\x1b[?1048h\x1b(B\x1b[?1048l",
+		"\x1b(0\x1b[?25;1049h\x1b(B\x1b[?1049;25l",
+		"\x0e\x1b7\x0f\x1b8",
+		"\x1b7\x1b(0\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b]0;t\x1b7\x1b\\\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b\n7\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b]0;t\x1bc\x1b\\\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b\rc\x1b8",
+		"\x1b(0\x1b\r[s\x1b(B\x1b\r[u",
+		"\x1b(0\x1b\r[?1049h\x1b(B\x1b\r[?1049l",
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{
+		"\x1b7\x1b(0\x1b(B\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b7\x1b8",
+		"\x1b(0\x1b7\x1bc\x1b8",
+		"\x1b(0\x1b[1;2s\x1b(B\x1b[u",
+		"\x1b(0\x1b7\x1b(B\x1b[>1u",
+		"\x1b(0\x1b7\x1b(B\x1b[?1047l",
+		"\x1b(0\x1b[?1049h\x1b(B",
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
 }
