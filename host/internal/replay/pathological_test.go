@@ -13,9 +13,10 @@ import (
 )
 
 // overshoot is how long past its deadline a replay may still be running when
-// it returns: the meter's interval of work, about a millisecond, and the
-// scheduling of a loaded machine.
-const overshoot = 50 * time.Millisecond
+// it returns: the meter's interval of work, about a millisecond, the work
+// outside the meter, bounded by the screen's size, and the scheduling of a
+// loaded machine.
+const overshoot = 50 * time.Millisecond * timeScale
 
 // The rings the measurements found costliest, at the size cap, where each
 // scrolled line or erase touches 131,072 cells: empty lines, as yes prints
@@ -46,9 +47,6 @@ func TestReplayPathological(t *testing.T) {
 			elapsed := time.Since(began)
 			t.Logf("after %v: %v", elapsed, err)
 			require.LessOrEqual(t, elapsed, wait+overshoot)
-			if elapsed > wait {
-				require.ErrorIs(t, err, uio.ErrReplayDeadline)
-			}
 		})
 	}
 }

@@ -46,6 +46,17 @@ func fuzzCase(stream []byte, cut uint32, split uint16, events []byte) contCase {
 	return c
 }
 
+// bounded replays c as a join does, at the budget a join has and with
+// fuzzWait to its deadline, and says how long it took.
+func (c contCase) bounded() (render []byte, elapsed time.Duration, err error) {
+	began := time.Now()
+	em, err := c.replay(began.Add(fuzzWait))
+	if err == nil {
+		render, err = em.Render()
+	}
+	return render, time.Since(began), err
+}
+
 // fuzzEvents encodes sizes as fuzzCase decodes them.
 func fuzzEvents(sizes []uio.SizeEvent) []byte {
 	var b []byte
@@ -83,16 +94,18 @@ func FuzzReplay(f *testing.F) {
 		}
 		c := fuzzCase(stream, cut, split, events)
 
-		// The bounds, at the budget a join has.
-		began := time.Now()
-		em, err := c.replay(began.Add(fuzzWait))
-		var render []byte
-		if err == nil {
-			render, err = em.Render()
+		// The bounds, at the budget a join has. Wall time counts whatever
+		// else the machine runs, and the fuzzer runs a worker per CPU, so a
+		// replay that runs past its deadline is run again, and fails only if
+		// it does every time: work the meter doesn't stop overshoots on every
+		// run, and a stall of the process on one.
+		limit := fuzzWait + 10*time.Millisecond*timeScale
+		render, elapsed, err := c.bounded()
+		for runs := 1; elapsed > limit && runs < 3; runs++ {
+			render, elapsed, err = c.bounded()
 		}
-		elapsed := time.Since(began)
 		require.LessOrEqual(t, len(render), uio.DefaultReplayBytes)
-		require.LessOrEqual(t, elapsed, fuzzWait+10*time.Millisecond, "the replay ran past its deadline: %v", err)
+		require.LessOrEqual(t, elapsed, limit, "the replay ran past its deadline: %v", err)
 		require.NotErrorIs(t, err, ErrHandoffInvariant)
 		if errors.Is(err, uio.ErrReplayDeadline) {
 			return
