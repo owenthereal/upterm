@@ -29,14 +29,17 @@ type scriptedDaemon struct {
 	child *bootstrap.Child
 	// open is what the session the daemon creates reports. Set before
 	// startup.
-	open  bool
-	ready chan struct{} // closed once spawn has built the child
-	gone  chan struct{} // closed when the child's watcher fires (parent left while armed)
+	open bool
+	// launchID is the launch the daemon claims, "launch-1" unless a case
+	// about the record sets it before startup.
+	launchID string
+	ready    chan struct{} // closed once spawn has built the child
+	gone     chan struct{} // closed when the child's watcher fires (parent left while armed)
 }
 
 func newScriptedDaemon(t *testing.T) (spawnFunc, *scriptedDaemon) {
 	t.Helper()
-	d := &scriptedDaemon{ready: make(chan struct{}), gone: make(chan struct{})}
+	d := &scriptedDaemon{launchID: "launch-1", ready: make(chan struct{}), gone: make(chan struct{})}
 	spawn := func(opts spawnOptions) (net.Conn, *os.Process, error) {
 		require.NotEmpty(t, opts.name)
 		require.NotEmpty(t, opts.logPath)
@@ -70,7 +73,7 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 	got := make(chan api.Accept_Decision, 1)
 	go func() {
 		child := d.await()
-		_ = child.Claimed(&api.Claimed{Name: name, LaunchId: "launch-1", AdminSocket: "/run/a.sock", AttachSocket: "/run/t.sock", LogPath: "/var/log/upterm.log", Pid: 4242})
+		_ = child.Claimed(&api.Claimed{Name: name, LaunchId: d.launchID, AdminSocket: "/run/a.sock", AttachSocket: "/run/t.sock", LogPath: "/var/log/upterm.log", Pid: 4242})
 		dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open})
 		got <- dec
 		if err != nil || dec != api.Accept_ACCEPTED {
@@ -191,6 +194,9 @@ func TestASpawnWithoutItsLogWarnsOnce(t *testing.T) {
 // A session whose spawn couldn't open the log points no line at it:
 // nothing of the session is in it. With the log, the lines still do.
 func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
+	// The disconnect below is checked against the record; there is none
+	// under these roots, so the check has no answer to give.
+	setupSessionRoots(t)
 	for _, logOff := range []bool{false, true} {
 		see := " (see /var/log/upterm.log)"
 		if logOff {
@@ -228,7 +234,42 @@ func TestASessionWithoutItsLogPointsNoLineAtIt(t *testing.T) {
 			result <- attach.Result{Reason: attach.Disconnected}
 		}()
 		_ = s.run(context.Background())
-		require.Contains(t, stderr.String(), "upterm: the local terminal was disconnected from session s"+see+"; the session continues", "log off: %v", logOff)
+		require.Contains(t, stderr.String(), "\r\nupterm: this terminal was disconnected"+see+"; upterm couldn't check the session. upterm session list shows what's running\r\n", "log off: %v", logOff)
+	}
+}
+
+// upterm host checks the launch it started, not the name: the session it
+// attached to is the one it may send the operator back to, and a name another
+// launch holds now is somebody else's session.
+func TestHostChecksTheLaunchItStartedAfterADisconnect(t *testing.T) {
+	setupSessionRoots(t)
+	dir := claimSession(t, "s")
+	releaseAtEnd(t, dir)
+	require.NoError(t, dir.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady }))
+
+	for _, tc := range []struct {
+		launch, want string
+	}{
+		{dir.LaunchID(), "upterm: this terminal was disconnected (see /var/log/upterm.log); the session is still running. Reattach with upterm attach s"},
+		{"launch-1", "upterm: this terminal was disconnected, and the session has ended (see /var/log/upterm.log); another session now uses the name s"},
+	} {
+		spawn, d := newScriptedDaemon(t)
+		d.launchID = tc.launch
+		attached := make(chan string, 1)
+		result := make(chan attach.Result, 1)
+		var stdout, stderr bytes.Buffer
+		s := newSession(t, spawn, fakeClient(attached, result), &stdout, &stderr)
+		d.startup(t, "s")
+		go func() {
+			<-attached
+			d.start()
+			result <- attach.Result{Reason: attach.Disconnected}
+		}()
+		var ec ExitCodeError
+		require.ErrorAs(t, s.run(context.Background()), &ec)
+		require.Equal(t, exitDisconnected, ec.Code)
+		require.NoError(t, ec.Err, "the line is the whole account")
+		require.Equal(t, "\r\n"+tc.want+"\r\n", stderr.String())
 	}
 }
 
@@ -355,8 +396,7 @@ func TestSpawnedSessionWarnsThatItIsOpen(t *testing.T) {
 
 			require.NoError(t, s.run(context.Background()))
 
-			require.Contains(t, stderr.String(), "session s is open: anyone with the session ID can join")
-			require.Contains(t, stderr.String(), "--authorized-user")
+			require.Equal(t, "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys\n", stderr.String())
 			if jsonOut {
 				var info sessionInfo
 				require.NoError(t, json.Unmarshal(stdout.Bytes(), &info))
@@ -395,35 +435,51 @@ func fakeClient(attached chan<- string, result <-chan attach.Result) clientFunc 
 }
 
 func TestSpawnedSessionForegroundExitStatuses(t *testing.T) {
+	// The disconnect is checked against the record, which these roots keep
+	// away from the real state directory.
+	setupSessionRoots(t)
+	// exitsWith is a case that ends with status code and, before it, one
+	// line or none.
+	exitsWith := func(code int, line string) func(*testing.T, error, string) {
+		return func(t *testing.T, err error, stderr string) {
+			if line == "" {
+				require.Empty(t, stderr)
+			} else {
+				require.Equal(t, "\r\n"+line+"\r\n", stderr)
+			}
+			if code == 0 {
+				require.NoError(t, err)
+				return
+			}
+			var ec ExitCodeError
+			require.ErrorAs(t, err, &ec)
+			require.Equal(t, code, ec.Code)
+			// The line is the whole account: a nil Err is what makes Exit
+			// print nothing more after it.
+			require.NoError(t, ec.Err)
+		}
+	}
 	for _, tc := range []struct {
 		name  string
 		res   attach.Result
 		check func(*testing.T, error, string)
 	}{
-		{"detached", attach.Result{Reason: attach.Detached}, func(t *testing.T, err error, stderr string) {
-			require.NoError(t, err)
-			require.Contains(t, stderr, "detached from session s")
-			require.Contains(t, stderr, "upterm session stop s")
-		}},
-		{"exited 0", attach.Result{Reason: attach.Exited, Status: 0}, func(t *testing.T, err error, _ string) {
-			require.NoError(t, err)
-		}},
-		{"exited 7", attach.Result{Reason: attach.Exited, Status: 7}, func(t *testing.T, err error, stderr string) {
-			var ec ExitCodeError
-			require.ErrorAs(t, err, &ec)
-			require.Equal(t, 7, ec.Code)
-			// Foreground host preserves its command-exit sentence; attach
-			// uses a generic session status. The nil Err makes host.go
-			// silence cobra so nothing else is printed after it.
-			require.Contains(t, stderr, "upterm: session s ended: command exited (status 7)")
-			require.NoError(t, ec.Err)
-		}},
-		{"disconnected", attach.Result{Reason: attach.Disconnected}, func(t *testing.T, err error, stderr string) {
-			var ec ExitCodeError
-			require.ErrorAs(t, err, &ec)
-			require.Equal(t, exitDisconnected, ec.Code)
-			require.Contains(t, stderr, "upterm attach s")
-		}},
+		{"detached", attach.Result{Reason: attach.Detached},
+			exitsWith(0, "upterm: detached; the session continues. Reattach with upterm attach s, or stop it with upterm session stop s")},
+		{"exited 0", attach.Result{Reason: attach.Exited, Status: 0, Cause: attach.Cause{Kind: attach.CauseExited}}, exitsWith(0, "")},
+		{"exited 0, an older daemon", attach.Result{Reason: attach.Exited, Status: 0}, exitsWith(0, "")},
+		{"exited 7", attach.Result{Reason: attach.Exited, Status: 7, Cause: attach.Cause{Kind: attach.CauseExited}},
+			exitsWith(7, "upterm: the session ended with status 7")},
+		{"exited 7, an older daemon", attach.Result{Reason: attach.Exited, Status: 7},
+			exitsWith(7, "upterm: the session ended with status 7")},
+		{"stopped", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseStopped}},
+			exitsWith(1, "upterm: the session was stopped")},
+		{"signalled", attach.Result{Reason: attach.Exited, Status: 1, Cause: attach.Cause{Kind: attach.CauseSignaled, Signal: "TERM"}},
+			exitsWith(1, "upterm: the session ended by signal SIGTERM")},
+		{"join timeout", attach.Result{Reason: attach.Exited, Status: 0, Cause: attach.Cause{Kind: attach.CauseJoinTimeout}},
+			exitsWith(0, "")},
+		{"disconnected", attach.Result{Reason: attach.Disconnected},
+			exitsWith(exitDisconnected, "upterm: this terminal was disconnected (see /var/log/upterm.log); upterm couldn't check the session. upterm session list shows what's running")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spawn, d := newScriptedDaemon(t)

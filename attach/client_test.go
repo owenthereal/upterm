@@ -1792,3 +1792,244 @@ func TestClientContextCancellationDetaches(t *testing.T) {
 		t.Fatal("cancellation did not end Run")
 	}
 }
+
+// serverConnOf is the SSH connection under a door session: the one the daemon
+// sends its global requests on.
+func serverConnOf(s gssh.Session) *ssh.ServerConn {
+	c, _ := s.Context().Value(gssh.ContextKeyConn).(*ssh.ServerConn)
+	return c
+}
+
+// sendSessionEnd sends the session-end request on s's connection and waits
+// for the client's reply, as the daemon does, and reports a client that did
+// not take it.
+func sendSessionEnd(t *testing.T, s gssh.Session, end upterm.SessionEnd) {
+	t.Helper()
+	ok, _, err := serverConnOf(s).SendRequest(upterm.SessionEndRequestType, true, ssh.Marshal(&end))
+	if err != nil {
+		t.Errorf("session-end request: %v", err)
+	} else if !ok {
+		t.Errorf("the client refused the session-end request")
+	}
+}
+
+// sendSessionEndNoWait sends it and goes on without the reply: the daemon
+// after upterm.SessionEndReplyBound.
+func sendSessionEndNoWait(t *testing.T, s gssh.Session, end upterm.SessionEnd) {
+	t.Helper()
+	conn := serverConnOf(s)
+	payload := ssh.Marshal(&end)
+	go func() { _, _, _ = conn.SendRequest(upterm.SessionEndRequestType, true, payload) }()
+}
+
+// runClient attaches a viewer to door and returns how it ended. Safe to call
+// from a goroutine: a failure to attach is reported with Errorf.
+func runClient(t *testing.T, door *fakeDoor) Result {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	res, err := (&Client{Socket: door.socket, HostKeys: door.pin(), Stdout: io.Discard}).Run(ctx)
+	if err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	return res
+}
+
+func TestResultCarriesTheDaemonsCause(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) {
+		sendSessionEnd(t, s, upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "TERM"})
+		_ = s.Exit(1)
+	})
+	res := runClient(t, door)
+	require.Equal(t, Exited, res.Reason)
+	require.Equal(t, 1, res.Status)
+	require.Equal(t, Cause{Kind: CauseSignaled, Signal: "TERM"}, res.Cause)
+}
+
+// Status 0 is a nil error from Wait and carries nothing, so the cause cannot
+// ride on the exit-status: a join timeout is the case that ends with 0.
+func TestAJoinTimeoutCauseSurvivesStatusZero(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) {
+		sendSessionEnd(t, s, upterm.SessionEnd{Cause: upterm.CauseJoinTimeout})
+		_ = s.Exit(0)
+	})
+	res := runClient(t, door)
+	require.Equal(t, Exited, res.Reason)
+	require.Equal(t, 0, res.Status)
+	require.Equal(t, CauseJoinTimeout, res.Cause.Kind)
+}
+
+func TestEveryCauseTheDaemonNamesIsReadAsItsKind(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  upterm.SessionEnd
+		want Cause
+	}{
+		{"exited", upterm.SessionEnd{Cause: upterm.CauseExited}, Cause{Kind: CauseExited}},
+		{"stopped", upterm.SessionEnd{Cause: upterm.CauseStopped}, Cause{Kind: CauseStopped}},
+		{"signaled", upterm.SessionEnd{Cause: upterm.CauseSignaled, Signal: "KILL"}, Cause{Kind: CauseSignaled, Signal: "KILL"}},
+		{"canceled", upterm.SessionEnd{Cause: upterm.CauseCanceled}, Cause{Kind: CauseCanceled}},
+		{"join timeout", upterm.SessionEnd{Cause: upterm.CauseJoinTimeout}, Cause{Kind: CauseJoinTimeout}},
+		// A newer daemon's cause is not one this client knows; guessing
+		// would put words in the daemon's mouth. It is still a cause, which
+		// the status alone doesn't explain.
+		{"a cause from a newer daemon", upterm.SessionEnd{Cause: "evicted", Signal: "TERM"}, Cause{Kind: CauseUnknown}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			door := serveDoor(t, func(s gssh.Session) {
+				sendSessionEnd(t, s, tc.end)
+				_ = s.Exit(1)
+			})
+			res := runClient(t, door)
+			require.Equal(t, Exited, res.Reason)
+			require.Equal(t, tc.want, res.Cause)
+		})
+	}
+}
+
+// sendRawSessionEnd sends the session-end request with payload as it is, and
+// returns the client's reply.
+func sendRawSessionEnd(t *testing.T, s gssh.Session, payload []byte) bool {
+	t.Helper()
+	ok, _, err := serverConnOf(s).SendRequest(upterm.SessionEndRequestType, true, payload)
+	if err != nil {
+		t.Errorf("session-end request: %v", err)
+	}
+	return ok
+}
+
+// A payload this client cannot decode is still the daemon saying why the
+// session ended, in words this client can't read: a cause it doesn't know, and
+// the client says in its reply that it couldn't read it.
+func TestAnUndecodableCauseIsACauseThisClientDoesNotKnow(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{"shorter than a length", []byte{0xff, 0xff}},
+		{"a cause with its signal missing", ssh.Marshal(&struct{ Cause string }{upterm.CauseStopped})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replies := make(chan bool, 1)
+			door := serveDoor(t, func(s gssh.Session) {
+				replies <- sendRawSessionEnd(t, s, tc.payload)
+				_ = s.Exit(1)
+			})
+			res := runClient(t, door)
+			require.Equal(t, Exited, res.Reason)
+			require.Equal(t, 1, res.Status)
+			require.Equal(t, Cause{Kind: CauseUnknown}, res.Cause)
+			require.False(t, <-replies, "the client took a payload it could not read")
+		})
+	}
+}
+
+// A later daemon may append fields to the payload. This client reads the ones
+// it knows and takes the cause all the same: were it to refuse the payload,
+// every stop a later daemon reported would read here as a plain status of 1.
+func TestACauseWithFieldsAppendedIsStillRead(t *testing.T) {
+	replies := make(chan bool, 1)
+	door := serveDoor(t, func(s gssh.Session) {
+		replies <- sendRawSessionEnd(t, s, ssh.Marshal(&struct {
+			Cause, Signal, Added string
+		}{upterm.CauseSignaled, "TERM", "a field from a later daemon"}))
+		_ = s.Exit(1)
+	})
+	res := runClient(t, door)
+	require.Equal(t, Exited, res.Reason)
+	require.Equal(t, Cause{Kind: CauseSignaled, Signal: "TERM"}, res.Cause)
+	require.True(t, <-replies, "the client refused a payload it could read")
+}
+
+// The cause explains a status; without a status there is nothing for it to
+// explain, and none is invented.
+func TestACauseWithoutAStatusIsADisconnect(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) {
+		sendSessionEnd(t, s, upterm.SessionEnd{Cause: upterm.CauseStopped})
+		_ = serverConnOf(s).Close() // gone before the exit-status
+	})
+	res := runClient(t, door)
+	require.Equal(t, Disconnected, res.Reason)
+	require.Equal(t, Cause{}, res.Cause)
+}
+
+func TestAnOlderDaemonGivesNoCause(t *testing.T) {
+	door := serveDoor(t, func(s gssh.Session) { _ = s.Exit(1) })
+	res := runClient(t, door)
+	require.Equal(t, Cause{}, res.Cause)
+}
+
+// Any other global request is refused, as x/crypto's own handler refuses it,
+// and the client goes on.
+func TestOtherGlobalRequestsAreRefused(t *testing.T) {
+	replies := make(chan bool, 1)
+	door := serveDoor(t, func(s gssh.Session) {
+		ok, _, err := serverConnOf(s).SendRequest("keepalive@openssh.com", true, nil)
+		if err != nil {
+			t.Errorf("keepalive: %v", err)
+		}
+		replies <- ok
+		_ = s.Exit(1)
+	})
+	res := runClient(t, door)
+	require.Equal(t, Result{Reason: Exited, Status: 1}, res)
+	require.False(t, <-replies)
+}
+
+// heldRequestLoop is the hold holdRequestLoop puts on the next Run: released
+// lets the request loop go on, and delivered closes when Run has the session's
+// end in hand.
+type heldRequestLoop struct {
+	released  chan struct{}
+	once      sync.Once
+	delivered chan struct{}
+}
+
+// holdRequestLoop parks the client's request loop before it handles anything,
+// which is a client that is suspended, or merely slow, when the daemon's reply
+// bound passes. The hold is lifted when the test ends if it has not been.
+func holdRequestLoop(t *testing.T) *heldRequestLoop {
+	t.Helper()
+	h := &heldRequestLoop{released: make(chan struct{}), delivered: make(chan struct{})}
+	requestLoopHold = func() { <-h.released }
+	sessionEndedHook = func() { close(h.delivered) }
+	t.Cleanup(func() {
+		requestLoopHold, sessionEndedHook = nil, nil
+		h.release() // never leave the loop parked
+	})
+	return h
+}
+
+// awaitStatusDelivered returns once Run has the session's end in hand: Wait
+// has returned inside it.
+func (h *heldRequestLoop) awaitStatusDelivered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.delivered:
+	case <-time.After(testTimeout):
+		t.Fatal("the status never reached the client")
+	}
+}
+
+func (h *heldRequestLoop) release() { h.once.Do(func() { close(h.released) }) }
+
+// The daemon waits for the reply only up to upterm.SessionEndReplyBound and
+// then sends the status regardless, so a client whose loop has not got to the
+// request yet can learn the session has ended first. The request was sent
+// first, and is in the queue by the time the status has been read, so it is
+// handled before the cause is taken.
+func TestACauseQueuedBehindASlowConsumerIsStillRead(t *testing.T) {
+	hold := holdRequestLoop(t) // the client's request loop blocks before handling anything
+	door := serveDoor(t, func(s gssh.Session) {
+		sendSessionEndNoWait(t, s, upterm.SessionEnd{Cause: upterm.CauseStopped}) // no reply will come in time
+		time.Sleep(upterm.SessionEndReplyBound + 100*time.Millisecond)            // the daemon's timeout passes
+		_ = s.Exit(1)                                                             // the status goes out anyway
+	})
+	done := make(chan Result, 1)
+	go func() { done <- runClient(t, door) }()
+	hold.awaitStatusDelivered(t) // Wait has returned inside Run
+	hold.release()
+	res := <-done
+	require.Equal(t, Exited, res.Reason)
+	require.Equal(t, Cause{Kind: CauseStopped}, res.Cause)
+}

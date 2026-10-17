@@ -8,7 +8,9 @@ import (
 	"crypto/rand"
 	"io"
 	"net"
+	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,6 +97,191 @@ func TestSharedPtyClientsReceiveTheCommandsExitStatus(t *testing.T) {
 	var guestExit *ssh.ExitError
 	require.ErrorAs(t, guestSess.Wait(), &guestExit)
 	require.Equal(t, 7, guestExit.ExitStatus(), "a guest on the shared pty must learn it too")
+}
+
+// Guests are never sent the session's end: it is for the session's own
+// terminals, the host's and attach's.
+func TestGuestsAreNeverSentTheCause(t *testing.T) {
+	h := startHost(t, &Server{Command: trapsHangupAndExits(0)})
+	guestConn, out, sess := h.connectGuestConn(t)
+	readUntil(t, out, "READY")
+
+	h.stopWith(t, ErrSessionStopped)
+
+	requireExitStatus(t, sess.Wait(), 1)
+	require.Empty(t, hostEnds(t, guestConn))
+}
+
+// A local client that never answers the session's end -- a terminal suspended
+// with ^Z -- is still sent its status, once the reply has had its bound and no
+// longer.
+func TestAClientThatNeverRepliesDoesntHoldTheStatus(t *testing.T) {
+	h := startHost(t, &Server{Command: trapsHangupAndExits(0)})
+	conn, out, sess := h.connectHostConnIgnoringRequests(t, newHostPty(t))
+	readUntil(t, out, "READY")
+
+	start := time.Now()
+	h.stopWith(t, ErrSessionStopped)
+
+	requireExitStatus(t, sess.Wait(), 1)
+	took := time.Since(start)
+	require.GreaterOrEqual(t, took, upterm.SessionEndReplyBound, "the status was sent without waiting for the reply")
+	require.Less(t, took, upterm.SessionEndReplyBound+time.Second)
+	require.Equal(t, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}, hostEnds(t, conn))
+}
+
+// A client that reaches the host door as the session ends is sent 1, and told
+// why, only when a shutdown overrode the session's status: a stop, a signal or
+// a cancellation. Otherwise it is sent 0 and no cause: one would say the
+// status was the command's, which it isn't, or name a join timeout whose
+// notice this client never saw.
+func TestALateHostClientIsToldWhyOnlyWhenAShutdownOverrodeItsStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		code  int
+		ends  []upterm.SessionEnd
+	}{
+		{"the command ended", nil, 0, nil},
+		{"join timeout", ErrJoinTimeout, 0, nil},
+		{"stopped", ErrSessionStopped, 1, []upterm.SessionEnd{{Cause: upterm.CauseStopped}}},
+		{"signalled", testShutdownSignal(syscall.SIGTERM), 1, []upterm.SessionEnd{{Cause: upterm.CauseSignaled, Signal: "TERM"}}},
+		{"cancelled", context.Canceled, 1, []upterm.SessionEnd{{Cause: upterm.CauseCanceled}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var order endOrder
+			order.publish(tc.cause)
+			h := &sessionHandler{kind: kindHost, order: &order, logger: discardLogger()}
+			log, sess := serveOneSession(t, h.exitLate)
+
+			requireExitStatus(t, sess.Wait(), tc.code)
+			if tc.ends == nil {
+				require.Empty(t, hostEnds(t, log))
+			} else {
+				require.Equal(t, tc.ends, hostEnds(t, log))
+			}
+		})
+	}
+}
+
+// serveOneSession serves handler on a door of its own over loopback, opens a
+// session to it with a shell, and returns that session and the requestLog
+// answering its connection's global requests.
+func serveOneSession(t *testing.T, handler gssh.Handler) (*requestLog, *ssh.Session) {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	srv := &gssh.Server{HostSigners: []gssh.Signer{signer}, Handler: handler}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-served
+	})
+
+	raw, err := net.DialTimeout("tcp", ln.Addr().String(), harnessTimeout)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	require.NoError(t, raw.SetDeadline(time.Now().Add(harnessTimeout)))
+	conn, chans, reqs, err := ssh.NewClientConn(raw, ln.Addr().String(), &ssh.ClientConfig{
+		User: "host", HostKeyCallback: ssh.FixedHostKey(signer.PublicKey()),
+	})
+	require.NoError(t, err)
+	log := &requestLog{}
+	client := ssh.NewClient(conn, chans, log.serve(reqs))
+	t.Cleanup(func() { _ = client.Close() })
+	sess, err := client.NewSession()
+	require.NoError(t, err)
+	require.NoError(t, sess.Shell())
+	return log, sess
+}
+
+// requestLog is a client's own loop over the global requests its connection
+// receives, in place of x/crypto's, which refuses every one. It keeps each
+// session-end request and answers it, as a client that knows the request
+// does -- or, ignoring, never answers it, as a suspended one doesn't -- and
+// refuses everything else, as x/crypto would.
+type requestLog struct {
+	ignore bool
+
+	mu   sync.Mutex
+	ends []upterm.SessionEnd
+}
+
+// withRequestLog has l answer the connection's global requests.
+func withRequestLog(l *requestLog) dialOption {
+	return func(c *dialConfig) { c.requests = l }
+}
+
+// serve runs the loop over reqs, and returns what x/crypto's client is handed
+// in their place: a channel already closed, so that its own loop ends at once.
+func (l *requestLog) serve(reqs <-chan *ssh.Request) <-chan *ssh.Request {
+	go func() {
+		for req := range reqs {
+			if req.Type != upterm.SessionEndRequestType {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			var end upterm.SessionEnd
+			if err := ssh.Unmarshal(req.Payload, &end); err != nil {
+				end = upterm.SessionEnd{Cause: "undecodable: " + err.Error()}
+			}
+			l.mu.Lock()
+			l.ends = append(l.ends, end)
+			l.mu.Unlock()
+			if !l.ignore {
+				_ = req.Reply(true, nil)
+			}
+		}
+	}()
+	none := make(chan *ssh.Request)
+	close(none)
+	return none
+}
+
+// hostEnds is every session-end request the connection was sent, in order.
+func hostEnds(t *testing.T, l *requestLog) []upterm.SessionEnd {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.ends)
+}
+
+// newHostPty is the terminal a local client attaches with.
+func newHostPty(t *testing.T) *hostPty {
+	t.Helper()
+	return &hostPty{term: "xterm", cols: 80, rows: 24}
+}
+
+// connectHostConn is connectHost with the connection's global requests
+// answered, and kept, by a requestLog.
+func (h *hostHarness) connectHostConn(t *testing.T, pty *hostPty) (*requestLog, io.Reader, *ssh.Session) {
+	t.Helper()
+	l := &requestLog{}
+	_, out, sess, _ := h.connectHostGated(t, pty, withRequestLog(l))
+	return l, out, sess
+}
+
+// connectHostConnIgnoringRequests is connectHostConn with the session-end
+// request read and never answered.
+func (h *hostHarness) connectHostConnIgnoringRequests(t *testing.T, pty *hostPty) (*requestLog, io.Reader, *ssh.Session) {
+	t.Helper()
+	l := &requestLog{ignore: true}
+	_, out, sess, _ := h.connectHostGated(t, pty, withRequestLog(l))
+	return l, out, sess
+}
+
+// connectGuestConn is connectGuestSession with the connection's global
+// requests answered, and kept, by a requestLog.
+func (h *hostHarness) connectGuestConn(t *testing.T) (*requestLog, io.Reader, *ssh.Session) {
+	t.Helper()
+	l := &requestLog{}
+	_, out, sess := h.connectGuestSession(t, withRequestLog(l))
+	return l, out, sess
 }
 
 // A connection is not a client. The host door authenticates a local process

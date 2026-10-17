@@ -117,6 +117,10 @@ type CommandResult struct {
 	Signal string
 	// SignalNumber is the originating Unix terminating signal, when available.
 	SignalNumber *int
+	// EndedAfterShutdown is whether the command's Wait returned after the
+	// session's shutdown was published: what it returned then may be only
+	// what the teardown made of it.
+	EndedAfterShutdown bool
 }
 
 // exitCode reports the status a PTY's process exited with, given the error

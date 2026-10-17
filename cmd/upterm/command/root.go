@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	uptermctx "github.com/owenthereal/upterm/internal/context"
 	"github.com/owenthereal/upterm/internal/logging"
@@ -192,19 +193,28 @@ func readsConfig(cmd *cobra.Command) bool {
 // The root's pre-run opens the log, and so does each spawn of upterm host's
 // daemon, so it is said once, by whichever finds it first, and only by
 // the parent: the daemon's stderr is that log, or the null device.
+//
+// It also remembers that it was told, for the lines that would point at the
+// log: one that couldn't be opened has nothing of this run in it.
 type logWarning struct {
 	w    io.Writer
 	once sync.Once
+	off  atomic.Bool
 }
 
 func (l *logWarning) warn(path string, err error) {
 	if isDaemonProcess() {
 		return
 	}
+	l.off.Store(true)
 	l.once.Do(func() {
 		_, _ = fmt.Fprintf(l.w, "upterm: warning: can't open the log file %s: %v; logging is off\n", path, logOpenReason(path, err))
 	})
 }
+
+// loggingOff reports whether this run was warned that its log couldn't be
+// opened.
+func (l *logWarning) loggingOff() bool { return l.off.Load() }
 
 // logWarningKey holds the run's *logWarning in the command's context.
 type logWarningKey struct{}

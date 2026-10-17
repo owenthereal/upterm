@@ -114,11 +114,51 @@ func (r Reason) String() string {
 	return fmt.Sprintf("reason(%d)", int(r))
 }
 
-// Result is how an attachment ended. Status is meaningful only for Exited.
-// Released and Unrestored are Terminal.Run's; Client.Run leaves them zero.
+// CauseKind is why the daemon ended a session, as it said so itself.
+type CauseKind int
+
+const (
+	// CauseNone: the daemon said nothing, as one from before the session-end
+	// request does. The status is then all there is to go on.
+	CauseNone CauseKind = iota
+	// CauseExited: the command ended on its own, and Status is its own.
+	CauseExited
+	// CauseStopped: the session was stopped (upterm session stop).
+	CauseStopped
+	// CauseSignaled: the daemon, or the command on its own, was killed by a
+	// signal; Cause.Signal says which.
+	CauseSignaled
+	// CauseCanceled: the daemon's run was cancelled.
+	CauseCanceled
+	// CauseJoinTimeout: no guest joined within the join timeout. The status
+	// is 0, which is why a cause is needed to tell this from an ordinary exit.
+	CauseJoinTimeout
+	// CauseUnknown: the daemon said why, but not in words this client knows:
+	// a cause from a later daemon, or a payload this client can't decode. No
+	// reason is guessed, and the status isn't taken for the command's either,
+	// since the cause may be one that says it isn't.
+	CauseUnknown
+)
+
+// Cause is why the daemon ended the session, when it said. Kind is CauseNone
+// when it did not.
+type Cause struct {
+	Kind CauseKind
+	// For CauseSignaled, the daemon's name for the signal: the SSH name
+	// without "SIG" ("TERM"), or the number of one with no name ("40").
+	Signal string
+}
+
+// Result is how an attachment ended. Status and Cause are meaningful only for
+// Exited. Released and Unrestored are Terminal.Run's; Client.Run leaves them
+// zero. Cause is Client.Run's, which reads it from the connection's global
+// requests; Terminal.Run leaves it zero.
 type Result struct {
 	Reason Reason
 	Status int
+	// Cause is why the daemon ended the session, ahead of the status: the
+	// status alone cannot say, and for 0 it says nothing at all.
+	Cause Cause
 
 	// Released closes once no write from this session to Stdout is in
 	// flight: the output copy has returned, and so has every mode write. It

@@ -55,6 +55,8 @@ type hostHarness struct {
 	// stop uses to end the session before the test does.
 	cancel  context.CancelFunc
 	stopped <-chan struct{}
+	// cancelWith ends it with a cause, as host does with the winning one.
+	cancelWith context.CancelCauseFunc
 }
 
 // startHost wires srv to a loopback listener, a host-door socket and a
@@ -127,7 +129,8 @@ func startHostWith(t *testing.T, srv *Server, setAuthority bool, wrap func(net.L
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = hostLn.Close() })
 
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancelWith := context.WithCancelCause(t.Context())
+	cancel := func() { cancelWith(nil) }
 	done := make(chan error, 1)
 	stopped := make(chan struct{})
 	go func() {
@@ -147,7 +150,7 @@ func startHostWith(t *testing.T, srv *Server, setAuthority bool, wrap func(net.L
 		attachSocket: hostLn.Addr().String(), hostListener: hostLn, srv: srv,
 		hostKey: srv.HostKey.PublicKey(), guestSigner: guestSigner, done: done,
 		relaySigner: signer,
-		cancel:      cancel, stopped: stopped}
+		cancel:      cancel, stopped: stopped, cancelWith: cancelWith}
 }
 
 // stop ends the session mid-test the way the test's own end does, by
@@ -196,6 +199,9 @@ func (h *hostHarness) dialGuest(t *testing.T, opts ...dialOption) (io.Writer, io
 	})
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if cfg.requests != nil {
+		reqs = cfg.requests.serve(reqs)
 	}
 	client := ssh.NewClient(conn, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
@@ -321,6 +327,9 @@ type dialConfig struct {
 	// window, when set, is the terminal size a guest's pty request carries
 	// instead of 80x24.
 	window termsize.Size
+	// requests, when set, answers the connection's global requests in place
+	// of x/crypto's own loop, and keeps what the daemon sent.
+	requests *requestLog
 }
 
 // withRekeyThreshold forces key renegotiation early, so a test can watch what
@@ -398,6 +407,9 @@ func (h *hostHarness) dialHostConn(t *testing.T, opts ...dialOption) (*ssh.Clien
 	})
 	require.NoError(t, err)
 	gated.transportID = hex.EncodeToString(conn.SessionID())
+	if cfg.requests != nil {
+		reqs = cfg.requests.serve(reqs)
+	}
 	client := ssh.NewClient(conn, chans, reqs)
 	t.Cleanup(func() { _ = client.Close() })
 	return client, gated

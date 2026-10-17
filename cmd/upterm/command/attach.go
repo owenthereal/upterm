@@ -116,28 +116,38 @@ func resolveAttachName(ctx context.Context, explicit string) (string, error) {
 	return "", fmt.Errorf("several sessions are running; name one: %s", strings.Join(names, ", "))
 }
 
-// attachTarget resolves a name to the socket to dial and the keys to pin it
-// with, and to the status the record had when it did. Starting, ready,
+// target is what attach read from a session's record: the socket to dial and
+// the keys to pin it with, the status the record had when it did, and the
+// launch and admin socket it belongs to.
+//
+// The status comes back because it is what explains a failed dial: see
+// attachFailure. The launch comes back because it is what a disconnect is
+// checked against: the name can pass to another session while this terminal
+// is attached, and the one to send it back to is the one it attached to.
+type target struct {
+	Socket, Status, LaunchID, AdminSocket string
+	Keys                                  []ssh.PublicKey
+}
+
+// attachTarget resolves a name to the session to attach to. Starting, ready,
 // reconnecting and disconnected (which a relay that can't reconnect leaves a
 // session in) are all attachable — the command is alive and the socket is
 // local, whatever the tunnel is doing — and a name nobody holds is not.
-//
-// The status comes back because it is what explains a failed dial: see
-// attachFailure.
-func attachTarget(ctx context.Context, name string) (string, []ssh.PublicKey, string, error) {
+func attachTarget(ctx context.Context, name string) (target, error) {
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
-		return "", nil, "", err
+		return target{}, err
 	}
 	if rec == nil {
-		return "", nil, "", fmt.Errorf("no session named %q", name)
+		return target{}, fmt.Errorf("no session named %q", name)
 	}
 	if !held {
-		return "", nil, "", fmt.Errorf("session %q has ended (%s)", name, describeOutcome(rec))
+		return target{}, errors.New(refusalLine(name, endedFromRecord(rec)))
 	}
+	t := target{Status: rec.Status, LaunchID: rec.LaunchID, AdminSocket: rec.AdminSocket}
 	noAttachSupport := fmt.Errorf("session %q was started by an upterm without attach support; restart it to attach", name)
 	if rec.AttachSocket == "" {
-		return "", nil, rec.Status, noAttachSupport
+		return t, noAttachSupport
 	}
 	// The keys are published when the attach door starts listening, which is
 	// also when its socket becomes dialable. So a record without them is
@@ -146,18 +156,19 @@ func attachTarget(ctx context.Context, name string) (string, []ssh.PublicKey, st
 	// from an upterm that predates attach. attachFailure tells those apart by
 	// the status, which is the same thing it tells a failed dial apart by.
 	if len(rec.HostKeys) == 0 {
-		return "", nil, rec.Status, attachFailure(name, rec.Status, noAttachSupport)
+		return t, attachFailure(name, rec.Status, noAttachSupport)
 	}
 	keys := make([]ssh.PublicKey, 0, len(rec.HostKeys))
 	for _, k := range rec.HostKeys {
 		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
 		if err != nil {
 			// Present but unreadable, which no amount of waiting fixes.
-			return "", nil, rec.Status, fmt.Errorf("session %q: its record names a host key that cannot be read; restart it to attach", name)
+			return t, fmt.Errorf("session %q: its record names a host key that cannot be read; restart it to attach", name)
 		}
 		keys = append(keys, key)
 	}
-	return rec.AttachSocket, keys, rec.Status, nil
+	t.Socket, t.Keys = rec.AttachSocket, keys
+	return t, nil
 }
 
 // attachFailure explains why an attachment could not be made.
@@ -180,22 +191,6 @@ func attachFailure(name, status string, err error) error {
 		return fmt.Errorf("session %q is still starting; try again in a moment", name)
 	}
 	return err
-}
-
-func describeOutcome(rec *sessiondir.Record) string {
-	if rec.ExitCode != nil {
-		return fmt.Sprintf("%s, status %d", rec.Reason, *rec.ExitCode)
-	}
-	if rec.Signal != "" {
-		return fmt.Sprintf("%s by %s", rec.Reason, rec.Signal)
-	}
-	return rec.Reason
-}
-
-// commandExitedMessage is the nonzero exit-status summary printed by
-// `upterm host`'s spawning parent.
-func commandExitedMessage(name string, status int) string {
-	return fmt.Sprintf("upterm: session %s ended: command exited (status %d)", name, status)
 }
 
 func attachExitError(name string, res attach.Result) error {
@@ -227,10 +222,9 @@ func attachRunE(c *cobra.Command, args []string) error {
 	// the attachment.
 	lookupCtx, cancelLookup := context.WithTimeout(c.Context(), sessionQueryTimeout)
 	name, err := resolveAttachName(lookupCtx, firstArg(args))
-	var socket, status string
-	var keys []ssh.PublicKey
+	var t target
 	if err == nil {
-		socket, keys, status, err = attachTarget(lookupCtx, name)
+		t, err = attachTarget(lookupCtx, name)
 	}
 	cancelLookup()
 	if err != nil {
@@ -240,35 +234,52 @@ func attachRunE(c *cobra.Command, args []string) error {
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
-	res, err := attachLocalTerminal(ctx, socket, keys, lt, escape, os.Stdin, os.Stdout, logger.Logger)
+	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, os.Stdin, os.Stdout, logger.Logger)
 	if err != nil {
-		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, status, err)}
+		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, t.Status, err)}
 	}
 
+	// Asked before the line is written, and only for a disconnect: the line
+	// advises a reattach only once the record says the session this terminal
+	// attached to is still the one running.
+	var after afterDisconnect
+	if res.Reason == attach.Disconnected {
+		after = checkAfterDisconnect(c.Context(), name, t.LaunchID)
+	}
 	// After raw mode, so it lands at a column of its own — and bounded,
 	// because stderr may be the terminal that just stopped.
-	logging.WriteWithin(os.Stderr, logging.LogBound, "\r\n"+attachEndLine(name, res)+"\r\n")
+	if line := attachEndLine(name, attachLogPath(c.Context()), res, after); line != "" {
+		logging.WriteWithin(os.Stderr, logging.LogBound, "\r\n"+line+"\r\n")
+	}
 	// The line above is the whole account of how this ended; the status
 	// returned below is for a script, not for a reader, and Exit prints
 	// nothing for it.
 	return attachExitError(name, res)
 }
 
-// attachEndLine is how an attachment ended, as its last line. A status of 0
-// isn't told, as upterm host's own line doesn't tell it (see spawned.go).
-func attachEndLine(name string, res attach.Result) string {
+// attachEndLine is how an attachment ended, as its last line, or "" when the
+// daemon's own notice in the stream already said it (a join timeout). after
+// is what checkAfterDisconnect found, for a disconnect, and logPath the log a
+// disconnect's line points at, or "" for none.
+func attachEndLine(name, logPath string, res attach.Result, after afterDisconnect) string {
 	switch res.Reason {
 	case attach.Detached:
-		return fmt.Sprintf("upterm: detached from session %s; the session continues", name)
+		return attachDetachedLine
 	case attach.Exited:
-		if res.Status == 0 {
-			return fmt.Sprintf("upterm: session %s ended", name)
-		}
-		return fmt.Sprintf("upterm: session %s ended (status %d)", name, res.Status)
+		return endLine(endedFromResult(res), true)
 	case attach.Disconnected:
-		return fmt.Sprintf("upterm: disconnected from session %s (see %s); reattach with 'upterm attach %s'", name, utils.UptermLogFilePath(), name)
+		return disconnectLine(name, logPath, after)
 	}
 	return ""
+}
+
+// attachLogPath is the log attach's lines point at: this run's, or "" when
+// the root's pre-run could not open it, since nothing of this run is in it.
+func attachLogPath(ctx context.Context) string {
+	if logWarningFor(ctx).loggingOff() {
+		return ""
+	}
+	return utils.UptermLogFilePath()
 }
 
 func firstArg(args []string) string {

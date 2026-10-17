@@ -150,7 +150,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 			if displayErr == nil && sess.GetOpen() {
 				// On stderr whatever the display was, the banner or nothing at
 				// all: stdout may be the JSON a script is reading.
-				logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning(s.name)+"\n")
+				logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
 			}
 			switch {
 			case displayErr == nil:
@@ -249,25 +249,43 @@ func (s *spawnedSession) run(ctx context.Context) error {
 	if out.err != nil {
 		return fmt.Errorf("could not attach the local terminal to session %s: %w", s.name, out.err)
 	}
+	// Each line is the whole story, so the error carries only the script
+	// exit code: an ExitCodeError with no message, for which Exit prints
+	// nothing.
 	switch out.res.Reason {
 	case attach.Detached:
-		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+detachedMessage(s.name)+"\r\n")
+		s.writeEndLine(detachedLine(s.name))
 		return nil
 	case attach.Exited:
+		// No line for an exit of 0, nor for a join timeout, whose notice
+		// the daemon has already put in the stream.
+		s.writeEndLine(endLine(endedFromResult(out.res), false))
 		if out.res.Status == 0 {
 			return nil
 		}
-		// Preserve the foreground host's command-exit message; attach uses a
-		// generic session status. The line is the whole story, so the error
-		// carries only the script exit code: an ExitCodeError with no
-		// message, for which Exit prints nothing.
-		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+commandExitedMessage(s.name, out.res.Status)+"\r\n")
 		return ExitCodeError{Code: out.res.Status}
 	case attach.Disconnected:
-		logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+localDisconnectMessage(s.name, s.loggedTo(), out.res)+"\r\n")
+		// The launch this process started, which the name may no longer
+		// be: the reattach advice is only for the session this terminal was
+		// attached to.
+		var launchID string
+		if claimed != nil {
+			launchID = claimed.LaunchId
+		}
+		s.writeEndLine(disconnectLine(s.name, s.loggedTo(), checkAfterDisconnect(ctx, s.name, launchID)))
 		return ExitCodeError{Code: exitDisconnected}
 	}
 	return nil
+}
+
+// writeEndLine writes the session's last line, if there is one, after raw mode
+// and so at a column of its own; bounded, because stderr may be the terminal
+// that just stopped.
+func (s *spawnedSession) writeEndLine(line string) {
+	if line == "" {
+		return
+	}
+	logging.WriteWithin(s.stderr, logging.LogBound, "\r\n"+line+"\r\n")
 }
 
 // drainClient waits for the attach client to finish and reports how it did.
@@ -291,14 +309,7 @@ func (s *spawnedSession) drainClient(done <-chan clientOutcome, cancel context.C
 
 // openSessionWarning is what upterm host says as an open session starts: one
 // anyone with the session ID can join, with nobody asked.
-func openSessionWarning(name string) string {
-	return fmt.Sprintf("upterm: warning: session %s is open: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys", name)
-}
-
-// detachedMessage is what upterm host prints when its own terminal leaves.
-func detachedMessage(name string) string {
-	return fmt.Sprintf("upterm: detached from session %s; the session continues; reattach with 'upterm attach %s' or stop it with 'upterm session stop %s'", name, name, name)
-}
+const openSessionWarning = "upterm: warning: anyone with the session ID can join; restrict who can with --authorized-user or --authorized-keys"
 
 func parseHostKeys(lines []string) ([]ssh.PublicKey, error) {
 	keys := make([]ssh.PublicKey, 0, len(lines))
