@@ -658,8 +658,8 @@ func TestMultiWriterShutdownFlushesAsyncMembers(t *testing.T) {
 	}()
 
 	select {
-	case <-shutdown:
-		t.Fatal("Shutdown returned before the sink drained")
+	case err := <-shutdown:
+		t.Fatalf("Shutdown returned before the sink drained: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 

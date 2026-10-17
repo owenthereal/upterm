@@ -384,7 +384,8 @@ func TestCommandRunEndsWhenOutputEndsWithoutCancellation(t *testing.T) {
 	go func() { done <- cmd.Run() }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.NoError(t, err, "an output actor that ends on its own ends cleanly")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after its output actor ended on its own")
 	}
@@ -478,7 +479,8 @@ func TestCommandRunClosesTheMasterBeforeTheProcessCanExit(t *testing.T) {
 	go func() { done <- cmd.Run() }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "the session was already over, and Run says so")
 	case <-time.After(bound):
 		t.Fatal("Run did not return once the pty master was closed")
 	}
@@ -572,7 +574,8 @@ func runCommandWithParkedReader(t *testing.T, sh, script string, grace, bound ti
 	cancel()
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "the session was cancelled, and Run says so")
 	case <-time.After(bound):
 		t.Fatal("Run did not return: a parked reader must not block any teardown step")
 	}

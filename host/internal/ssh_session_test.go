@@ -31,7 +31,7 @@ func TestRawSessionOutput(t *testing.T) {
 	go func() { done <- srv.Serve(ln) }()
 	defer func() {
 		_ = srv.Close()
-		<-done
+		require.ErrorIs(t, <-done, gssh.ErrServerClosed)
 	}()
 
 	raw, err := net.DialTimeout("tcp", ln.Addr().String(), 10*time.Second)

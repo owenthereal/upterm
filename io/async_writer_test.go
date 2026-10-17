@@ -177,8 +177,8 @@ func TestAsyncWriterOverflowDropsOnce(t *testing.T) {
 	require.ErrorIs(t, err, ErrOverflow, "the error must be sticky")
 
 	select {
-	case <-drops:
-		t.Fatal("onDrop fired more than once")
+	case err := <-drops:
+		t.Fatalf("onDrop fired more than once: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -405,8 +405,8 @@ func TestAsyncWriterStopsBetweenPiecesWhenClosed(t *testing.T) {
 		"a second piece must never start once Close has happened")
 
 	select {
-	case <-onDrop:
-		t.Fatal("Close must never invoke onDrop")
+	case err := <-onDrop:
+		t.Fatalf("Close must never invoke onDrop: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -576,8 +576,8 @@ func TestAsyncWriterAbortIfNoProgress(t *testing.T) {
 
 	require.False(t, a.AbortIfNoProgress(0, ErrStalled), "a second call on a dead writer must not abort again")
 	select {
-	case <-drops:
-		t.Fatal("onDrop fired a second time")
+	case err := <-drops:
+		t.Fatalf("onDrop fired a second time: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -727,8 +727,8 @@ func TestAsyncWriterFlushWaitsForDelivery(t *testing.T) {
 	}()
 
 	select {
-	case <-flushed:
-		t.Fatal("Flush returned before delivery completed")
+	case err := <-flushed:
+		t.Fatalf("Flush returned before delivery completed: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 

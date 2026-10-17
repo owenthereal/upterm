@@ -282,7 +282,8 @@ func TestServeAfterShutdownStopsImmediately(t *testing.T) {
 			go func() { done <- tt.serve(ln) }()
 
 			select {
-			case <-done:
+			case err := <-done:
+				require.True(t, isRequestedStop(err), "Serve after Shutdown must report the stop it was asked for, got %v", err)
 			case <-time.After(10 * time.Second):
 				t.Fatal("Serve kept running after Shutdown; nothing is left to stop it")
 			}
@@ -343,8 +344,8 @@ func TestServerShutdownWaitsForServingToStop(t *testing.T) {
 	go func() { done <- s.Shutdown() }()
 
 	select {
-	case <-done:
-		t.Fatal("Shutdown returned while serving was still running")
+	case err := <-done:
+		t.Fatalf("Shutdown returned while serving was still running: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 

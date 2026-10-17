@@ -1014,7 +1014,8 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		}
 		cancel(host.ErrSessionAbandoned)
 		select {
-		case <-done:
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
 		case <-time.After(outcomeTimeout):
 			t.Fatal("host did not return after cancellation")
 		}
@@ -1036,7 +1037,8 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		run.awaitAttachSocket(t) // the gate is open for business; nobody walks through it
 		cancel(host.ErrSessionAbandoned)
 		select {
-		case <-done:
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
 		case <-time.After(outcomeTimeout):
 			t.Fatal("host did not return after cancellation")
 		}
@@ -1096,7 +1098,8 @@ func Test_Host_PublishesStartupAbandonedWhenTheParentGoesAway(t *testing.T) {
 		go func() { done <- run.host.Run(ctx) }()
 		run.awaitAttachSocket(t)
 		cancel()
-		<-done
+		runErr := <-done
+		require.ErrorIs(t, runErr, context.Canceled)
 		require.Equal(t, sessiondir.ReasonCanceled, run.record(t).Reason)
 	})
 }
@@ -1118,7 +1121,8 @@ func Test_Host_PublishesTheAttachSocketAndServesIt(t *testing.T) {
 	out := run.attachViewer(t, ctx, sock)
 	awaitMarker(t, out, "ATTACHED")
 	cancel()
-	<-done
+	runErr := <-done
+	require.ErrorIs(t, runErr, context.Canceled)
 }
 
 // Test_Host_StopSessionRPCEndsTheSession: the admin socket's StopSession is
@@ -1174,7 +1178,8 @@ func Test_Host_StopSessionRPCEndsTheSession(t *testing.T) {
 	require.NoError(t, err)
 
 	select {
-	case <-done:
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "a stopped session ends with the cancellation Run's callers rely on")
 	case <-time.After(outcomeTimeout):
 		t.Fatal("host did not return after StopSession")
 	}

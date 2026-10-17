@@ -136,8 +136,8 @@ func TestAttachedClientIsReleasedWhenTheCommandFailsToStart(t *testing.T) {
 	waited := make(chan error, 1)
 	go func() { waited <- sess.Wait() }()
 	select {
-	case <-waited:
-		// Any status: that the session ended at all is the guarantee.
+	case err := <-waited:
+		_ = err // Any status: that the session ended at all is the guarantee.
 	case <-time.After(clientReleaseTimeout):
 		t.Fatal("a client attached to a command that never started was not released")
 	}

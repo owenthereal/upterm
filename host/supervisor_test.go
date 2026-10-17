@@ -609,7 +609,7 @@ func serveAdmin(t *testing.T, dir *sessiondir.Dir, session *api.GetSessionRespon
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = admin.Shutdown(ctx)
-		<-served
+		require.NoError(t, <-served, "Serve reports a stop Shutdown asked for as nil")
 	})
 	client := api.NewAdminServiceClient(conn)
 	return func() *api.GetSessionResponse {

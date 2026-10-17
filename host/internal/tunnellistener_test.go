@@ -326,8 +326,8 @@ func TestTunnelListenerCloseWakesAParkedAcceptWithoutWaitingOnTheInnerClose(t *t
 		<-inner.closing
 		require.ErrorIs(t, tunnelTestAcceptReturned(t, got).err, net.ErrClosed)
 		select {
-		case <-closed:
-			t.Fatal("Close returned before the inner listener's Close did")
+		case err := <-closed:
+			t.Fatalf("Close returned before the inner listener's Close did: %v", err)
 		default:
 		}
 
