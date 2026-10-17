@@ -712,9 +712,9 @@ func requireAfterTheReprints(t *testing.T, render []byte, seq string) {
 
 // A mode that only changes how the terminal encodes the keyboard or the
 // mouse is neither restored nor a reason to fall back: the join renders
-// without it, as the raw replay does too. readline sends ?1034h, the meta
-// key's, at every prompt where the terminfo entry has it, as
-// xterm-256color's does.
+// without it, as the raw replay's mode snapshot leaves it out. readline
+// sends ?1034h, the meta key's, at every prompt where the terminfo entry has
+// it, as xterm-256color's does.
 func TestReplayIgnoresInputOnlyModes(t *testing.T) {
 	for _, n := range []int{1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061} {
 		t.Run(fmt.Sprintf("?%d", n), func(t *testing.T) {

@@ -379,7 +379,8 @@ var (
 	// ignoredModes are left as the joiner's terminal has them: neither
 	// restored nor a reason to fall back, since none changes where output
 	// lands, what the screen or the cursor hold, or what the terminal sends
-	// unasked. The raw replay restores none of them either. Most change only
+	// unasked. The mode snapshot a raw replay starts with holds none of them
+	// either; only the ring's own bytes can carry one. Most change only
 	// how the terminal encodes the keyboard or the mouse, which the joiner's
 	// own terminal does for the joiner, and a program that relies on one
 	// sends it again (readline sends ?1034h at every prompt where the
