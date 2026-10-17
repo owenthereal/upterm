@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
@@ -26,6 +27,11 @@ const statusLookupTimeout = time.Second
 // and points at upterm session info for them.
 const statusGuestRows = 3
 
+// testHookStatusLookup, when a test sets it, runs on the lookup's goroutine
+// before the lookup itself, so that the test can hold a lookup the way a
+// record on a filesystem that has stopped answering does. Nil outside tests.
+var testHookStatusLookup func()
+
 // statusSource is what ~? reports on: the session's name, the launch this
 // terminal is attached to and the admin socket it answers at; and the keys
 // this terminal offers, its escape character and whether ~^Z suspends it.
@@ -33,6 +39,40 @@ type statusSource struct {
 	Name, LaunchID, AdminSocket string
 	Escape                      byte
 	Suspend                     bool
+	// lookups is the terminal's own, given by terminalStatus. Nil lets every
+	// lookup run.
+	lookups *statusLookups
+}
+
+// statusLookups keeps one ~? lookup outstanding at a time for the terminal
+// that owns it. The bound on a lookup frees the terminal, not the goroutine
+// doing it: a step that ignores its context, such as a read from a filesystem
+// that has stopped answering, stays parked past the bound, and a lookup
+// started for every ~? pressed meanwhile would pile up behind it.
+type statusLookups struct {
+	running atomic.Bool
+}
+
+// begin says whether a lookup may start now. It may when none is outstanding,
+// and that lookup then owns the permission until it calls end. A nil receiver
+// always allows one.
+func (l *statusLookups) begin() bool {
+	return l == nil || l.running.CompareAndSwap(false, true)
+}
+
+// end gives back the permission begin took.
+func (l *statusLookups) end() {
+	if l != nil {
+		l.running.Store(false)
+	}
+}
+
+// terminalStatus is the ~? hook of one terminal: statusLines for src, with
+// lookups of the terminal's own, so that however often it is pressed, one
+// lookup at most is outstanding for it.
+func terminalStatus(src statusSource, logger *slog.Logger) func(ctx context.Context) []string {
+	src.lookups = new(statusLookups)
+	return func(ctx context.Context) []string { return statusLines(ctx, src, logger) }
 }
 
 // statusView is what statusLines gathered; renderStatus turns it into ~?'s
@@ -59,21 +99,36 @@ type statusView struct {
 // daemon that doesn't answer is not zero guests, and a record that can't be
 // read is not a healthy relay.
 //
+// A lookup the bound gave up on may still be running when ~? is pressed
+// again, and there is only ever one: while it is, the answer is at once that
+// the status is unavailable, rather than another lookup that may park the
+// same way.
+//
 // Why it is unavailable goes to logger, at debug level and bounded, with the
 // session's name: the lines say only that it is. A nil logger logs nothing.
 func statusLines(ctx context.Context, src statusSource, logger *slog.Logger) []string {
+	if !src.lookups.begin() {
+		logStatusUnavailable(logger, src.Name, errors.New("the previous lookup is still running"))
+		return renderStatus(statusView{Name: src.Name, Unavailable: true}, src.Escape, src.Suspend)
+	}
 	ctx, cancel := context.WithTimeout(ctx, statusLookupTimeout)
 	defer cancel()
 	// On a goroutine of its own, so the bound holds whatever a step does with
 	// ctx: a record on a filesystem that has stopped answering honours none.
 	// The reason is logged there, before the view is handed over, so a lookup
-	// the bound gave up on still says why once it ends.
+	// the bound gave up on still says why once it ends. The next lookup is
+	// allowed from the same place, before the hand-over, so that a caller who
+	// has the view can already ask again.
 	found := make(chan statusView, 1)
 	go func() {
+		if h := testHookStatusLookup; h != nil {
+			h()
+		}
 		v, why := lookupStatus(ctx, src)
 		if why != nil {
 			logStatusUnavailable(logger, src.Name, why)
 		}
+		src.lookups.end()
 		found <- v
 	}()
 	v := statusView{Name: src.Name, Unavailable: true}

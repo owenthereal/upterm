@@ -6,6 +6,8 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +66,50 @@ func TestStatusFromADaemonThatNeverAnswersIsBounded(t *testing.T) {
 	lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true}, nil)
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.Equal(t, []string{"upterm: session status unavailable", keysLineWithSuspend}, lines)
+}
+
+// A lookup the bound has given up on is still running, parked where a step
+// that ignores its context parks, and ~? pressed again does not start another
+// behind it: every one of those would hold a goroutine and what it holds for
+// as long as the first does. The answer is at once the one a lookup that
+// timed out gives, and the terminal looks again once the first has returned.
+func TestStatusStartsNoSecondLookupWhileOneIsStillRunning(t *testing.T) {
+	setupSessionRoots(t)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	testHookStatusLookup = func() {
+		calls.Add(1)
+		<-release
+	}
+	t.Cleanup(func() { testHookStatusLookup = nil })
+	t.Cleanup(unblock)
+
+	logs := &capturingHandler{}
+	status := terminalStatus(statusSource{Name: "s", Escape: '~', Suspend: true}, slog.New(logs))
+	unavailable := []string{"upterm: session status unavailable", keysLineWithSuspend}
+
+	// The first lookup parks, and the bound frees the terminal from it.
+	require.Equal(t, unavailable, status(context.Background()))
+	require.Equal(t, int32(1), calls.Load())
+
+	start := time.Now()
+	lines := status(context.Background())
+	require.Less(t, time.Since(start), statusLookupTimeout/2, "the second answer does not wait for a lookup of its own")
+	require.Equal(t, unavailable, lines)
+	require.Equal(t, int32(1), calls.Load(), "no second lookup was started")
+	recs := logs.captured()
+	require.Len(t, recs, 2)
+	require.Equal(t, slog.LevelDebug, recs[1].Level)
+	require.Equal(t, "s", recs[1].Attrs["session"])
+	require.Contains(t, recs[1].Attrs["reason"], "still running")
+
+	unblock()
+	require.Eventually(t, func() bool {
+		status(context.Background())
+		return calls.Load() == 2
+	}, 5*time.Second, 10*time.Millisecond, "a lookup runs again once the parked one has returned")
 }
 
 // The record says how the relay is; the daemon says who is connected and how

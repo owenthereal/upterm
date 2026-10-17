@@ -68,7 +68,7 @@ func attachLocalTerminalWith(ctx context.Context, socket string, keys []ssh.Publ
 	// \r\n-ended lines are written for. The keys it lists are this
 	// terminal's: its escape character, and ~^Z only where it suspends.
 	src.Escape, src.Suspend = escape, client.Suspend != nil
-	client.Status = func(ctx context.Context) []string { return statusLines(ctx, src, logger) }
+	client.Status = terminalStatus(src, logger)
 	return client.Run(ctx)
 }
 
