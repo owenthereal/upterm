@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"maps"
 	"math/rand/v2"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -511,9 +512,10 @@ func (g *streamGen) lineDrawing() {
 	g.cut()
 }
 
-// region sets the scroll region, sometimes one a terminal ignores.
+// region sets the scroll region, sometimes one a terminal ignores, which
+// leaves the one before it.
 func (g *streamGen) region() {
-	switch g.rnd.IntN(5) {
+	switch g.rnd.IntN(6) {
 	case 0:
 		g.put("\x1b[r")
 	case 1:
@@ -522,6 +524,11 @@ func (g *streamGen) region() {
 		g.putf("\x1b[%dr", g.between(1, g.rows()+2))
 	case 3:
 		g.putf("\x1b[;%dr", g.between(1, g.rows()+2))
+	case 4:
+		// Its bottom is past the screen, so it is the screen's last row, which
+		// is above its top.
+		top := g.between(g.rows(), g.rows()+3)
+		g.putf("\x1b[%d;%dr\x1b[%d;%dr", g.between(1, 2), g.between(3, g.rows()), top, g.between(top+1, top+3))
 	default:
 		// apt's progress bar keeps the last row out of the region.
 		g.putf("\x1b7\x1b[0;%dr\x1b8\x1b[1A", g.rows()-1)
@@ -1400,33 +1407,37 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 // shellOutput is about n bytes of a shell session at 80 columns, none of its
 // lines wrapping: commands at a prompt, listings with names in colour as ls
 // colours them, numbered lines of output, so that a line lost or out of
-// place shows; then a prompt. lines is its text, line by line, and starts
-// is where each line starts in it.
-func shellOutput(n int) (stream []byte, lines []string, starts []int) {
+// place shows; then a prompt.
+func shellOutput(n int) []byte {
 	rnd := rand.New(rand.NewPCG(13, 0))
 	var b strings.Builder
 	for i := 0; b.Len() < n; i++ {
-		starts = append(starts, b.Len())
 		switch {
 		case i%20 == 0:
-			text := fmt.Sprintf("$ ls -la src/%d", i)
-			b.WriteString(text)
-			lines = append(lines, text)
+			fmt.Fprintf(&b, "$ ls -la src/%d", i)
 		case i%7 == 3:
-			const mode = "drwxr-xr-x  5 user staff  160 Oct 16 12:00 "
-			name := fmt.Sprintf("dir%05d", i)
-			b.WriteString(mode + "\x1b[1;34m" + name + "\x1b[0m")
-			lines = append(lines, mode+name)
+			fmt.Fprintf(&b, "drwxr-xr-x  5 user staff  160 Oct 16 12:00 \x1b[1;34mdir%05d\x1b[0m", i)
 		default:
-			text := fmt.Sprintf("%06d %s", i, strings.Repeat("x", 1+rnd.IntN(60)))
-			b.WriteString(text)
-			lines = append(lines, text)
+			fmt.Fprintf(&b, "%06d %s", i, strings.Repeat("x", 1+rnd.IntN(60)))
 		}
 		b.WriteString("\r\n")
 	}
-	starts = append(starts, b.Len())
 	b.WriteString("$ ")
-	return []byte(b.String()), append(lines, "$"), starts
+	return []byte(b.String())
+}
+
+// sgr matches the SGR sequences shellOutput writes.
+var sgr = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// textLines is the text of each line of p, a stretch of shellOutput's lines,
+// without its colours or its trailing blanks, as a terminal holds it, and
+// how many bytes of p each takes, its CRLF included.
+func textLines(p []byte) (lines []string, sizes []int) {
+	for raw := range bytes.SplitSeq(p, []byte(crlf)) {
+		lines = append(lines, strings.TrimRight(string(sgr.ReplaceAll(raw, nil)), " "))
+		sizes = append(sizes, len(raw)+len(crlf))
+	}
+	return lines, sizes
 }
 
 // heldLines is the text a terminal holds, oldest first: the lines that
@@ -1451,7 +1462,8 @@ func heldLines(term *vt.Emulator, off *scrollOff) []string {
 // screen hold every line of it, in order. With the ring full, they hold its
 // newest lines, in order, to the session's last, and leave out at most
 // 2 KiB of the oldest the ring held, which the rest of the render's budget
-// is spent on. The ring's first line can start partway, and then is held so.
+// is spent on: the ring's first line, partway through as the ring starts
+// there, counts as one of them.
 func TestReplayPlainShellKeepsEveryLine(t *testing.T) {
 	join := func(t *testing.T, stream []byte) (*vt.Emulator, *scrollOff, uint64) {
 		t.Helper()
@@ -1466,27 +1478,28 @@ func TestReplayPlainShellKeepsEveryLine(t *testing.T) {
 	}
 
 	t.Run("every line", func(t *testing.T) {
-		stream, lines, _ := shellOutput(200 << 10)
+		stream := shellOutput(200 << 10)
 		b, off, start := join(t, stream)
 		require.Zero(t, start, "the ring evicted some of the session")
+		lines, _ := textLines(stream)
 		require.Equal(t, lines, heldLines(b, off))
 	})
 
 	t.Run("a full ring", func(t *testing.T) {
-		stream, lines, starts := shellOutput(320 << 10)
+		stream := shellOutput(320 << 10)
 		b, off, start := join(t, stream)
+		// The ring starts inside one of the numbered lines, which hold no
+		// colours, so its text from there on is what the joiner is given.
+		lines, sizes := textLines(stream[start:])
 		held := heldLines(b, off)
-		require.NotEmpty(t, held)
-		first := len(lines) - len(held)
-		require.Equal(t, lines[first+1:], held[1:], "the newest lines, to the last")
-		require.True(t, strings.HasSuffix(lines[first], held[0]), "%q isn't %q or its end", held[0], lines[first])
-		if held[0] != lines[first] {
-			// The ring starts inside that line, so it leaves out nothing.
-			require.Less(t, int(start), starts[first+1])
-			return
+		left := len(lines) - len(held)
+		require.GreaterOrEqual(t, left, 0)
+		require.Equal(t, lines[left:], held, "the newest lines, to the last")
+		dropped := 0
+		for _, n := range sizes[:left] {
+			dropped += n
 		}
-		require.GreaterOrEqual(t, starts[first], int(start))
-		require.LessOrEqual(t, starts[first]-int(start), 2<<10, "the oldest lines the ring held, left out")
+		require.LessOrEqual(t, dropped, 2<<10, "the oldest lines the ring held, left out")
 	})
 }
 
