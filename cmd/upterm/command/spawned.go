@@ -163,12 +163,25 @@ func (s *spawnedSession) run(ctx context.Context) error {
 		SessionCreated: func(sess *api.GetSessionResponse) api.Accept_Decision {
 			created = sess
 			displayErr = s.display(ctx, sess, s.name)
+			// The key hint is said only on the terminal the attach client is
+			// about to take.
+			handover := displayErr == nil && !s.detach && s.keyHint != ""
 			if displayErr == nil && sess.GetOpen() {
 				// On stderr whatever the display was, the banner or nothing at
 				// all: stdout may be the JSON a script is reading.
-				logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
+				//
+				// When stderr is that terminal, which is where the hint goes
+				// when it is one, the warning is written as the hint is, and
+				// for the same reason. Anywhere else stderr may be a pipe
+				// nobody drains, and nothing takes the terminal after it, so
+				// the write keeps its bound rather than hold the session.
+				if handover && s.hintOut == s.stderr {
+					_, _ = io.WriteString(s.stderr, openSessionWarning+"\n")
+				} else {
+					logging.WriteWithin(s.stderr, logging.LogBound, openSessionWarning+"\n")
+				}
 			}
-			if displayErr == nil && !s.detach && s.keyHint != "" {
+			if handover {
 				// Last, so it is the line nearest the session it is about,
 				// and said once: the attached terminal is the session's from
 				// here, and nothing more is written into it unasked.
