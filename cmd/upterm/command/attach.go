@@ -80,6 +80,10 @@ the log for which); 255 if it could not attach.`,
 		Annotations: map[string]string{failureCodeAnnotation: strconv.Itoa(exitAttachFailed)},
 	}
 	cmd.Flags().StringVar(&flagEscapeChar, "escape-char", "~", "Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable.")
+	// ~? lists the session's guests, so attach hides their addresses on the
+	// same flag, environment variable and config key as every other command
+	// that prints them: each command reads only the flags it registers.
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 	return cmd
 }
 

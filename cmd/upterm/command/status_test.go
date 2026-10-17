@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,42 @@ func TestStatusLinesForAReconnectingSession(t *testing.T) {
 	require.Regexp(t, `^upterm: guests can't join while the relay is disconnected; next try in 3[56][0-9]{2} s$`, lines[1])
 	require.Equal(t, "upterm: guests join with: upterm join ssh://sid-3@127.0.0.1:2222", lines[2])
 	require.Equal(t, keysLineWithSuspend, lines[3])
+}
+
+// upterm attach reads --hide-client-ip, UPTERM_HIDE_CLIENT_IP and the config's
+// hide-client-ip as every other command that prints a guest's address does,
+// so ~? in an attached terminal hides what the host chose to hide.
+func TestAttachStatusHidesClientIPsAsConfigured(t *testing.T) {
+	for _, tc := range []struct{ name, env, config string }{
+		{"from the environment", "true", ""},
+		{"from the config", "", "hide-client-ip: true\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withClientIPs(t, false)
+			withConfig(t, tc.config)
+			t.Setenv("UPTERM_HIDE_CLIENT_IP", tc.env)
+			attach, _, err := Root().Find([]string{"attach"})
+			require.NoError(t, err)
+			_, _, err = bindFlagsToEnv(attach)
+			require.NoError(t, err)
+
+			setupSessionRoots(t)
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			require.NoError(t, dir.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid-1" }))
+			serveStubAdmin(t, dir.AdminSocket(), &api.GetSessionResponse{
+				SessionId: "sid-1", LaunchId: dir.LaunchID(), SshUser: "sid-1",
+				Host: "ssh://uptermd.example.com:22", NodeAddr: "127.0.0.1:2222",
+				ConnectedClients: []*api.Client{
+					{Kind: api.Client_GUEST, Addr: "1.2.3.4:5", Version: "SSH-2.0-OpenSSH_10.3", PublicKeyFingerprint: "SHA256:abcd"},
+				},
+			})
+
+			lines := statusLines(context.Background(), statusSource{Name: "s", LaunchID: dir.LaunchID(), AdminSocket: dir.AdminSocket(), Escape: '~', Suspend: true}, nil)
+			require.Contains(t, lines, "upterm:   guest [redacted] SSH-2.0-OpenSSH_10.3 SHA256:abcd")
+			require.NotContains(t, strings.Join(lines, "\n"), "1.2.3.4")
+		})
+	}
 }
 
 // A status that is unavailable says why in the log, with the session's name:
