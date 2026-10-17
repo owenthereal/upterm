@@ -494,6 +494,22 @@ func TestHistoryStaysWithinItsBudget(t *testing.T) {
 	require.LessOrEqual(t, len(h.data), budget)
 }
 
+// The history tells its lines apart by the CRLF the render follows each
+// with, which no line holds of its own: the parser leaves the C0 controls out
+// of an OSC string, so a line linked by an OSC 8 written with a CR LF inside
+// it scrolls off as one line, within the budget.
+func TestHistoryKeepsALinkedLineWhole(t *testing.T) {
+	h := history{max: 64}
+	term := vt.NewEmulator(10, 1)
+	term.SetScrollbackSize(0)
+	term.SetScrollOffFunc(h.push)
+	_, _ = term.WriteString("\x1b]8;;http://a\r\nb\x07x\r\n")
+	lines := collect(&h)
+	require.Len(t, lines, 1, "%q", h.data)
+	require.Contains(t, string(lines[0]), "x")
+	require.LessOrEqual(t, len(h.data), h.max)
+}
+
 func collect(h *history) [][]byte {
 	lines := [][]byte{}
 	for l := range h.all() {
