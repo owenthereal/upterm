@@ -4,6 +4,7 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -261,4 +262,54 @@ func TestAFallbackIsLoggedWithItsReason(t *testing.T) {
 	require.Contains(t, lines[0], `level=INFO msg="replay fell back to the raw ring" reason="replay: the render can't restore origin mode"`)
 	require.Contains(t, lines[1], `level=ERROR msg="replay fell back to the raw ring" reason="multiwriter: the replay panicked: boom"`)
 	require.Contains(t, lines[1], `the replayer's frame`)
+}
+
+// slowReplayer is the session's own replayer, slowed down: each Start waits
+// until the session's pacer holds the command, or for a second if it never
+// does, then emulates. It stands for an emulation that takes a while.
+type slowReplayer struct {
+	uio.Replayer
+	pacer *guestPacer // the session's, handed over as ServeWithContext builds it
+}
+
+func (r *slowReplayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
+	// Polled: the pacer announces nothing when it starts to hold.
+	for until := time.Now().Add(time.Second); r.pacer.waiting.Load() == 0 && time.Now().Before(until); {
+		time.Sleep(time.Millisecond)
+	}
+	return r.Replayer.Start(ctx, deadline, c, size)
+}
+
+// A command writing flat out, in a session with no primary, and a guest
+// joining it, which paces. While the guest's screen is reconstructed the
+// command is held to it, so the output since the capture stays within the
+// low mark and a write, and the guest is handed the reconstruction, which
+// starts with sequences. Without the hold, the second the slowed emulation
+// waits is far more output than the ring holds, the output since the capture
+// is evicted before the handoff, and the guest is handed the raw ring, in
+// which a command printing only "y" lines puts no sequence at all.
+func TestAGuestJoiningAFloodGetsItsScreenReconstructed(t *testing.T) {
+	// The budget covers the slowed emulation either way, so a join that
+	// falls back does so for the output it lost, not for time.
+	budget := uio.ReplayBudget
+	uio.ReplayBudget = 10 * time.Second
+	t.Cleanup(func() { uio.ReplayBudget = budget })
+	r := &slowReplayer{Replayer: replay.New()}
+	onGuestPacer = func(p *guestPacer) { r.pacer = p }
+	t.Cleanup(func() { onGuestPacer = nil })
+	installReplayer(t, r)
+	h := startHost(t, &Server{Command: []string{"yes"}})
+	// A viewer, which counts towards no size and paces nothing, sees the
+	// flood under way, so the ring holds output by the time the guest joins:
+	// a join to an empty ring has nothing to reconstruct. Then it drains the
+	// rest, so that it isn't dropped.
+	_, viewer, _ := h.connectHost(t, nil)
+	readUntil(t, viewer, "y\r\ny\r\n")
+	go func() { _, _ = io.Copy(io.Discard, viewer) }()
+
+	_, out := h.connectGuest(t, withWindow(desktop))
+	first := make([]byte, 64)
+	_, err := io.ReadFull(out, first)
+	require.NoError(t, err)
+	require.Contains(t, string(first), "\x1b[", "the guest was handed the raw ring")
 }

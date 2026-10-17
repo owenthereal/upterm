@@ -1,13 +1,17 @@
 package internal
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/host/internal/replay"
 	"github.com/owenthereal/upterm/internal/termsize"
 	uio "github.com/owenthereal/upterm/io"
 	"github.com/stretchr/testify/require"
@@ -909,12 +913,61 @@ func awaitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// pieces returns n writes of ptyWriteSize bytes, each of a byte of its own,
+// so that what a guest was handed shows which of them it got, and in what
+// order.
+func pieces(n int) [][]byte {
+	ps := make([][]byte, n)
+	for i := range ps {
+		ps[i] = bytes.Repeat([]byte{'a' + byte(i)}, ptyWriteSize)
+	}
+	return ps
+}
+
+// writeAll writes each of ps through p, in order.
+func writeAll(p *guestPacer, ps [][]byte) {
+	for _, b := range ps {
+		_, _ = p.Write(b)
+	}
+}
+
+// requirePassedWhilePending checks what the pacer let through since the ring
+// was written, all of it while the guest was pending: up to the low mark, and
+// past it by one write at most.
+func (e *emulatingPacer) requirePassedWhilePending(t *testing.T) {
+	t.Helper()
+	passed := len(e.passed.bytes()) - len(ringBytes)
+	require.GreaterOrEqual(t, passed, pacingLowWater, "the command was held before the low mark")
+	require.LessOrEqual(t, passed, pacingLowWater+ptyWriteSize,
+		"more than the low mark and one write passed while the guest was replayed")
+}
+
+// requireSent checks that sink delivered exactly want, without printing a
+// stream of hundreds of kilobytes.
+func requireSent(t *testing.T, got *recordingWriter, want string, msg string) {
+	t.Helper()
+	if sent := string(got.bytes()); sent != want {
+		t.Fatalf("%s: sent %s, want %s", msg, ends(sent), ends(want))
+	}
+}
+
+// ends is what a failure shows of a long stream: its length and its two ends.
+func ends(s string) string {
+	const n = 32
+	if len(s) <= 2*n {
+		return fmt.Sprintf("%d bytes %q", len(s), s)
+	}
+	return fmt.Sprintf("%d bytes %q...%q", len(s), s[:n], s[len(s)-n:])
+}
+
 // While the guest that paces is still being attached, its screen being
-// reconstructed, the command waits for it as it does for a backlog. What the
-// command writes meanwhile is what the join has to catch up on before it can
-// hand over, and a command that outran the reconstruction would have the join
-// fall back to the raw ring and lose output a paced guest is otherwise
-// guaranteed. So no write passes the pacer until the replay is released; then
+// reconstructed, the command is held to it as to a backlog: what passes on
+// its behalf is what the join will hand it as the gap, and the command waits
+// once that reaches the low mark. A command that outran the reconstruction
+// would have the join fall back to the raw ring and lose output a paced guest
+// is otherwise guaranteed, and the low mark's worth lets through the end of a
+// sequence the ring stops inside, which the join may need to hand over. So
+// at most the low mark and one write pass until the replay is released; then
 // the guest has the render and every byte written after its capture, once,
 // and nothing fell back.
 func TestGuestPacerHoldsTheCommandWhileItsGuestIsReplayed(t *testing.T) {
@@ -924,20 +977,17 @@ func TestGuestPacerHoldsTheCommandWhileItsGuestIsReplayed(t *testing.T) {
 	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
 	e.awaitStart(t)
 
-	done := goWrite(t, e.p, func() {
-		for _, s := range []string{"during-1", "during-2", "during-3"} {
-			_, _ = e.p.Write([]byte(s))
-		}
-	})
+	ps := pieces(4)
+	done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
 	requireHeld(t, e.p, done)
-	require.Equal(t, ringBytes, string(e.passed.bytes()), "a write passed the pacer while its guest was being replayed")
+	e.requirePassedWhilePending(t)
 
 	close(e.r.release)
 	require.NoError(t, awaitErr(t, attached))
 	requireReturns(t, done, 2*time.Second)
 
 	flush(t, sink)
-	require.Equal(t, renderMark+ringBytes+"during-1during-2during-3", string(got.bytes()),
+	requireSent(t, got, renderMark+ringBytes+string(bytes.Join(ps, nil)),
 		"the guest missed or repeated output written after its capture")
 	e.requireNoFallback(t)
 }
@@ -979,7 +1029,7 @@ func TestGuestPacerAGuestThatLeavesWhileReplayedReleasesTheCommand(t *testing.T)
 	attached := e.join(t, ctx, sink, time.Now().Add(time.Minute))
 	e.awaitStart(t)
 
-	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
 	requireHeld(t, e.p, done)
 
 	leave()
@@ -1028,7 +1078,7 @@ func TestGuestPacerEndsTheHoldHoweverTheAttachEnds(t *testing.T) {
 			})
 			awaitClosed(t, inside, "the attach never ran")
 
-			done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+			done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
 			requireHeld(t, p, done)
 			close(finish)
 			awaitClosed(t, over, "the attach never returned")
@@ -1068,7 +1118,7 @@ func TestGuestPacerNeverJudgesAGuestStalledWhileItIsAttached(t *testing.T) {
 	})
 	awaitClosed(t, inside, "the attach never ran")
 
-	done := goWrite(t, p, func() { _, _ = p.Write(make([]byte, ptyWriteSize)) })
+	done := goWrite(t, p, func() { produce(p, 3*ptyWriteSize) })
 	requireHeld(t, p, done)
 	// Not ordering anything: how long the write is held is the quantity.
 	time.Sleep(5 * stall)
@@ -1093,9 +1143,9 @@ func TestGuestPacerHoldNeedsNoWriteToEnd(t *testing.T) {
 	sink := uio.NewAsyncWriter(io.Discard, uio.DefaultGuestBufferSize, nil)
 	attached := e.join(t, t.Context(), sink, time.Now().Add(time.Minute))
 	e.awaitStart(t)
-	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	done := goWrite(t, e.p, func() { writeAll(e.p, pieces(3)) })
 	requireHeld(t, e.p, done)
-	require.Equal(t, ringBytes, string(e.passed.bytes()), "a write passed the pacer while its guest was being replayed")
+	e.requirePassedWhilePending(t)
 
 	committed, unresolved := termsize.Size{Cols: 45, Rows: 24}, termsize.Size{Cols: 40, Rows: 20}
 	e.writers.ResizeEnd(e.writers.ResizeBegin(committed), true)
@@ -1113,9 +1163,10 @@ func TestGuestPacerHoldNeedsNoWriteToEnd(t *testing.T) {
 	e.requireNoFallback(t)
 }
 
-// One handoff does wait on the command: an emulation that can't pass a resize
-// until a sequence the ring ends inside is complete, which takes more output.
-// Held, that never comes, and the join falls back to the raw ring at its
+// One handoff waits on the command: an emulation that can't pass a resize
+// until a sequence the ring ends inside is complete, when the rest of it
+// doesn't come within the low mark's worth the pacer lets through. Held past
+// that, the rest never comes, and the join falls back to the raw ring at its
 // deadline, which ends the hold. So the join's deadline bounds any hold an
 // attach puts on the command.
 func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
@@ -1126,7 +1177,8 @@ func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
 	deadline := time.Now().Add(300 * time.Millisecond)
 	attached := e.join(t, t.Context(), sink, deadline)
 	e.awaitStart(t)
-	done := goWrite(t, e.p, func() { _, _ = e.p.Write([]byte("during")) })
+	ps := pieces(3)
+	done := goWrite(t, e.p, func() { writeAll(e.p, ps) })
 	requireHeld(t, e.p, done)
 
 	// The guest's own resize, which the emulation can't pass without more
@@ -1146,6 +1198,75 @@ func TestGuestPacerHoldEndsByTheJoinsDeadline(t *testing.T) {
 		t.Fatal("the join didn't fall back")
 	}
 	flush(t, sink)
-	require.NotContains(t, string(got.bytes()), renderMark, "a join that fell back was handed a render")
-	require.Contains(t, string(got.bytes()), ringBytes+"during", "the guest missed output")
+	sent := string(got.bytes())
+	require.NotContains(t, sent, renderMark, "a join that fell back was handed a render")
+	require.True(t, strings.HasSuffix(sent, ringBytes+string(bytes.Join(ps, nil))),
+		"the guest missed output: sent %s", ends(sent))
+}
+
+// startSignal is a Replayer that says as each Start begins, which is inside
+// its join's attach: the guest is registered, and pending.
+type startSignal struct {
+	uio.Replayer
+	started chan struct{}
+}
+
+func (r startSignal) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
+	r.started <- struct{}{}
+	return r.Replayer.Start(ctx, deadline, c, size)
+}
+
+// A pty read can split a character, and the ring end inside it, here after
+// two of ✳'s three bytes. A joiner's resize then lands inside the character,
+// and the session's emulation can't pass the resize until the third byte
+// arrives, in the command's next write. That write is under the low mark, so
+// the pacer lets it through on behalf of the guest being replayed, and the
+// join hands over at once, emulated, rather than waiting out its deadline, a
+// minute off, to fall back.
+//
+// The joiner is larger than the pty, as one is that joins a session no
+// smaller terminal holds: the pty grows to it, and the render the emulation
+// makes before it has passed the resize is at the old size, which the
+// joiner's terminal contains.
+func TestGuestPacerLetsAJoinFinishACharacterTheRingEndsInside(t *testing.T) {
+	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+	started := make(chan struct{}, 1)
+	fellBack := make(chan error, 4)
+	writers.SetReplayer(startSignal{replay.New(), started}, func(err error) { fellBack <- err })
+	writers.ResizeEnd(writers.ResizeBegin(termsize.Default), true)
+	p := newGuestPacer(t.Context(), writers)
+	_, err := p.Write([]byte("prompt\r\n\xe2\x9c"))
+	require.NoError(t, err)
+	joiner := termsize.Size{Cols: 100, Rows: 40}
+	writers.ResizeEnd(writers.ResizeBegin(joiner), true)
+
+	got := &recordingWriter{}
+	sink := uio.NewAsyncWriter(got, uio.DefaultGuestBufferSize, nil)
+	t.Cleanup(func() {
+		writers.Remove(sink)
+		p.remove(sink)
+		_ = sink.Close()
+	})
+	attached := make(chan error, 1)
+	go func() {
+		attached <- p.attach(t.Context(), sink, func() error {
+			return attachGuestOutput(t.Context(), time.Now().Add(time.Minute), writers, sink, joiner)
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no join reached the replayer")
+	}
+
+	done := goWrite(t, p, func() { _, _ = p.Write([]byte("\xb3 done\r\n")) })
+	requireReturns(t, done, 2*time.Second)
+	require.NoError(t, awaitErr(t, attached), "the join waited for its deadline")
+	select {
+	case err := <-fellBack:
+		t.Fatalf("the join fell back to the raw ring: %v", err)
+	default:
+	}
+	flush(t, sink)
+	require.False(t, strings.HasPrefix(string(got.bytes()), "prompt"), "the guest was handed the raw ring")
 }
