@@ -96,19 +96,20 @@ func collectScrollOff(term *vt.Emulator) *scrollOff {
 // sameState reports the first difference between two emulators, or "" when
 // there is none: their sizes, the screen showing, the cells and styles on
 // both screens (the hidden one included), the active screen's current
-// cursor (position, pen, link, pending wrap; the other screen's is never seen
-// again), both screens' saved slots, compared by what DECRC would
+// cursor (position, pen, link, pending wrap, style; the other screen's is
+// never seen again), both screens' saved slots, compared by what DECRC would
 // restore, the modes but those the render ignores, the charsets and a
-// pending single shift, the one
-// scroll region, the tab stops, REP's last character, a carried cluster, and
-// the history lines each side collected.
+// pending single shift, the one scroll region, the tab stops, REP's last
+// character, a carried cluster, the title, and the history lines each side
+// collected. The title is what each one's Title callback last reported, as
+// the emulator keeps it behind no accessor: "" for one never set.
 //
 // A slot keeps the position it was saved at through a resize, even off the
 // screen, and DECRC clamps it as it moves there. A terminal fresh at this
 // size, given the slot's position, clamps it already, and DECRC restores the
 // same cell from both, so a slot's position is compared clamped to the
 // screen.
-func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
+func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
 	if a.Width() != b.Width() || a.Height() != b.Height() {
 		return fmt.Sprintf("size: %dx%d vs %dx%d", a.Width(), a.Height(), b.Width(), b.Height())
 	}
@@ -142,6 +143,9 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
 	if a.PendingWrap() != b.PendingWrap() {
 		return fmt.Sprintf("pending wrap: %v vs %v", a.PendingWrap(), b.PendingWrap())
 	}
+	if d := sameCursorStyle(a, b); d != "" {
+		return d
+	}
 	if d := sameModes(a.Modes(), b.Modes()); d != "" {
 		return d
 	}
@@ -165,10 +169,31 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte) string {
 	if a.Carrying() != b.Carrying() {
 		return fmt.Sprintf("carrying a cluster: %v vs %v", a.Carrying(), b.Carrying())
 	}
+	if aTitle != bTitle {
+		return fmt.Sprintf("title: %q vs %q", aTitle, bTitle)
+	}
 	if !slices.EqualFunc(aHist, bHist, bytes.Equal) {
 		return fmt.Sprintf("history: %q vs %q", aHist, bHist)
 	}
 	return ""
+}
+
+// sameCursorStyle compares the cursor's style, and whether it blinks.
+func sameCursorStyle(a, b *vt.Emulator) string {
+	sa, blinkA := a.CursorStyle()
+	sb, blinkB := b.CursorStyle()
+	if sa != sb || blinkA != blinkB {
+		return fmt.Sprintf("cursor style: %v blinking %v vs %v blinking %v", sa, blinkA, sb, blinkB)
+	}
+	return ""
+}
+
+// watchTitle has term report each title it is set to into title, and
+// returns title.
+func watchTitle(term *vt.Emulator) *string {
+	title := new(string)
+	term.SetCallbacks(vt.Callbacks{Title: func(s string) { *title = s }})
+	return title
 }
 
 // sameScreen compares two screens of one size cell by cell, styles by
@@ -269,7 +294,7 @@ func TestSameStateTellsColourTypesApart(t *testing.T) {
 		a, b := vt.NewEmulator(10, 2), vt.NewEmulator(10, 2)
 		_, _ = a.WriteString(sa)
 		_, _ = b.WriteString(sb)
-		return sameState(a, b, nil, nil)
+		return sameState(a, b, nil, nil, "", "")
 	}
 	require.Contains(t, differ("\x1b[31mx", "\x1b[38;5;1mx"), "cell 0,0")
 	require.Contains(t, differ("\x1b[31m", "\x1b[38;5;1m"), "pen")

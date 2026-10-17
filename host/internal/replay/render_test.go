@@ -32,9 +32,10 @@ func startFor(t *testing.T, c *uio.Capture, size termsize.Size) *emulation {
 // session's own terminal, fed the stream whole, and b a fresh terminal fed
 // the render, then the deferred tail raw, as io sends them.
 type joined struct {
-	render       []byte
-	a, b         *vt.Emulator
-	aHist, bHist *[][]byte
+	render         []byte
+	a, b           *vt.Emulator
+	aHist, bHist   *[][]byte
+	aTitle, bTitle *string
 }
 
 // joinAt emulates stream on a cols x rows terminal for a joiner of that
@@ -48,8 +49,10 @@ func joinAt(t *testing.T, cols, rows int, stream string) *joined {
 
 	j := &joined{render: render}
 	j.a, j.aHist = newReference(cols, rows)
+	j.aTitle = watchTitle(j.a)
 	_, _ = j.a.WriteString(stream)
 	j.b, j.bHist = newReference(cols, rows)
+	j.bTitle = watchTitle(j.b)
 	_, _ = j.b.Write(render)
 	_, _ = j.b.WriteString(stream[h:])
 	j.requireSame(t)
@@ -66,7 +69,7 @@ func (j *joined) then(t *testing.T, s string) {
 
 func (j *joined) requireSame(t *testing.T) {
 	t.Helper()
-	require.Empty(t, sameState(j.a, j.b, *j.aHist, *j.bHist), "the render: %q", j.render)
+	require.Empty(t, sameState(j.a, j.b, *j.aHist, *j.bHist, *j.aTitle, *j.bTitle), "the render: %q", j.render)
 }
 
 // renderAt is the render of stream emulated on a cols x rows terminal, for a
@@ -295,12 +298,12 @@ func TestReplayRebuildsTheHiddenAlternateScreenBy1049(t *testing.T) {
 		b, bHist := newReference(80, 24)
 		_, _ = b.Write(without47(render))
 		_, _ = b.WriteString(afterAnEditor[h:])
-		require.Empty(t, sameState(a, b, *aHist, *bHist), "the render: %q", render)
+		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""), "the render: %q", render)
 		require.Equal(t, "$ vim notes", b.MainScreen().Line(2).String())
 		for _, term := range []*vt.Emulator{a, b} {
 			_, _ = term.WriteString("echo hi\r\nhi\r\n$ ")
 		}
-		require.Empty(t, sameState(a, b, *aHist, *bHist))
+		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
 	})
 }
 
@@ -322,7 +325,7 @@ func TestReplayMarginsComeFromTheEmulator(t *testing.T) {
 		a.Resize(80, 30)
 		b, bHist := newReference(80, 30)
 		_, _ = b.Write(render)
-		require.Empty(t, sameState(a, b, *aHist, *bHist))
+		require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
 	})
 
 	t.Run("in the state the ring starts in", func(t *testing.T) {
@@ -437,7 +440,7 @@ func TestReplayBudget(t *testing.T) {
 		_, _ = a.WriteString(stream)
 		b, bHist := newReference(80, 5)
 		_, _ = b.Write(render)
-		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist))
+		require.Empty(t, sameState(a, b, (*aHist)[3:], *bHist, "", ""))
 	})
 
 	t.Run("the rest over it", func(t *testing.T) {
@@ -722,7 +725,7 @@ func TestReplayErasesTheJoinersAlternateScreen(t *testing.T) {
 			_, _ = b.WriteString("\x1b[?47h\x1b[H" + strings.Repeat("STALE", 16) + "\x1b[?47l\x1b[H")
 			_, _ = b.Write(render)
 			_, _ = b.WriteString(tc.show)
-			require.Empty(t, sameState(a, b, *aHist, *bHist))
+			require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
 		})
 	}
 }

@@ -88,6 +88,7 @@ var streamTokens = []token{
 	{4, (*streamGen).wrap},
 	{2, (*streamGen).ink},
 	{1, (*streamGen).title},
+	{1, (*streamGen).cursorStyle},
 	{2, (*streamGen).kitty},
 	{2, (*streamGen).misc},
 	{2, (*streamGen).resize},
@@ -118,6 +119,7 @@ var suffixTokens = []token{
 	{2, (*streamGen).mode},
 	{2, (*streamGen).saveRestore},
 	{2, (*streamGen).altProgram},
+	{1, (*streamGen).cursorStyle},
 	{1, (*streamGen).misc},
 }
 
@@ -689,6 +691,10 @@ func (g *streamGen) title() {
 	g.put(g.one("\x1b]0;", "\x1b]2;"), g.one(g.word(), "✳ Claude Code"), g.one("\x07", "\x1b\\"))
 }
 
+// cursorStyle sets the cursor's style by DECSCUSR: a block, an underline or
+// a bar, blinking or steady, or the default.
+func (g *streamGen) cursorStyle() { g.putf("\x1b[%d q", g.rnd.IntN(7)) }
+
 // kitty pushes, pops and sets the kitty keyboard flags, or sets
 // modifyOtherKeys, which the tracker keeps and x/vt ignores.
 func (g *streamGen) kitty() {
@@ -927,6 +933,7 @@ func (c contCase) run(wait time.Duration) contRun {
 	r.a.SetReplyFunc(func([]byte) {})
 	r.a.SetStopFunc(stop)
 	r.aOff = collectScrollOff(r.a)
+	aTitle := watchTitle(r.a)
 	var werr error
 	write := func(term *vt.Emulator, p []byte) {
 		if _, err := term.Write(p); err != nil && werr == nil {
@@ -956,6 +963,7 @@ func (c contCase) run(wait time.Duration) contRun {
 	r.b.SetReplyFunc(func([]byte) {})
 	r.b.SetStopFunc(stop)
 	r.bOff = collectScrollOff(r.b)
+	bTitle := watchTitle(r.b)
 	write(r.b, r.render)
 	nb, clears := len(r.bOff.lines), r.bOff.clears
 	write(r.b, c.prefix[h:])
@@ -972,7 +980,7 @@ func (c contCase) run(wait time.Duration) contRun {
 			aHist = append(slices.Clip(r.aOff.lines[:len(rendered)]), r.aOff.canon[len(rendered):]...)
 			bHist = append(slices.Clip(rendered), r.bOff.canon[nb:]...)
 		}
-		if d := sameState(r.a, r.b, aHist, bHist); d != "" {
+		if d := sameState(r.a, r.b, aHist, bHist, *aTitle, *bTitle); d != "" {
 			return when + ": " + d
 		}
 		if !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal) {
@@ -1416,7 +1424,7 @@ func TestEvictedRegionPrimesAFreshEmulator(t *testing.T) {
 
 			b := vt.NewEmulator(80, 8)
 			_, _ = b.Write(joined)
-			require.Empty(t, sameState(ref, b, nil, nil))
+			require.Empty(t, sameState(ref, b, nil, nil, "", ""))
 		})
 	}
 }
