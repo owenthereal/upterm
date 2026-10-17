@@ -380,12 +380,14 @@ func Test_ModeTracker_SnapshotIsBounded(t *testing.T) {
 	// stacks full, the normal screen's set before the modes switch to the
 	// alternate one; with no size known, the region is kept as written. The
 	// widest numbers are an unsigned 32-bit one's: kitty's flags come back as
-	// the seven bits kitty keeps, and modifyOtherKeys as it was written.
+	// the seven bits kitty keeps, and modifyOtherKeys as it was written. A G0
+	// designated before the switch is saved by its ?1049h and replayed ahead
+	// of it, as well as the one designated after.
 	widest := strconv.FormatUint(math.MaxUint32, 10)
 	var b strings.Builder
 	b.WriteString("\x1b[1;99999r")
 	b.WriteString(strings.Repeat("\x1b[>"+widest+"u", kittyStackDepth))
-	b.WriteString("\x1b[>4;" + widest + "m")
+	b.WriteString("\x1b[>4;" + widest + "m\x1b(0")
 	for _, mode := range restorableModes() {
 		fmt.Fprintf(&b, "\x1b[?%dh", mode)
 	}
@@ -597,17 +599,43 @@ func TestACursorRestoreBringsBackTheSavedG0(t *testing.T) {
 	require.Equal(t, "\x1b(B", string(m.Restore()), "a terminal leaving is put back to ASCII")
 }
 
+// Restore leaves the alternate screen through the mode that entered it, and
+// ?1049l restores the cursor ?1049h saved, G0 with it, so the G0 the terminal
+// ends at is the normal screen's saved one, not the alternate screen's. Going
+// by the alternate screen's, Restore left a terminal that entered in line
+// drawing and reset G0 there, by a restore with nothing saved or by DECSTR,
+// in line drawing, and sent a needless ESC ( B for the opposite. ?47 and ?1047
+// restore nothing, so the alternate screen's G0 is the one they leave.
+func TestRestoreEndsAtTheG0ItsOwnSequenceLeaves(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"a restore with nothing saved on the alternate screen", "\x1b(0\x1b[?1049h\x1b8", "\x1b[?1049l\x1b(B"},
+		{"DECSTR on the alternate screen", "\x1b(0\x1b[?1049h\x1b[!p", "\x1b[?1049l\x1b(B"},
+		{"?1049l brings back ASCII", "\x1b[?1049h\x1b(0", "\x1b[?1049l"},
+		{"?1047l keeps the alternate screen's G0", "\x1b[?1047h\x1b(0", "\x1b[?1047l\x1b(B"},
+		{"?1047l restores nothing", "\x1b(0\x1b7\x1b[?1047h\x1b8", "\x1b[?1047l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Restore()))
+		})
+	}
+}
+
 // xterm keeps a saved cursor per screen buffer, sc[whichBuf], and every save
 // and restore uses the slot of the screen showing at the time: ?1049h saves
 // before it switches, so on the normal screen, and ?1049l restores after it
 // switches back, so from the normal screen's slot too. ?1047 switches without
-// either. x/vt's vt/csi_mode.go, setMode, does the same.
+// either. x/vt's vt/csi_mode.go, setMode, does the same. While ?1049h is
+// what shows the alternate screen, the snapshot designates the normal
+// screen's saved G0 ahead of it, for the joiner's ?1049h to save.
 func TestEachScreenRestoresFromItsOwnSlot(t *testing.T) {
 	m := NewModeTracker()
 	for _, step := range []struct{ stream, want, why string }{
-		{"\x1b(A\x1b7\x1b(0\x1b[?1049h", "\x1b[?1049h\x1b(0", "?1049h saves the normal screen's G0, line drawing, over the UK saved before it"},
-		{"\x1b8", "\x1b[?1049h", "the alternate screen's slot is its own, and nothing has filled it"},
-		{"\x1b(A\x1b7\x1b(0\x1b8", "\x1b[?1049h\x1b(A", "the alternate screen restores its own save"},
+		{"\x1b(A\x1b7\x1b(0\x1b[?1049h", "\x1b(0\x1b[?1049h\x1b(0", "?1049h saves the normal screen's G0, line drawing, over the UK saved before it"},
+		{"\x1b8", "\x1b(0\x1b[?1049h\x1b(B", "the alternate screen's slot is its own, and nothing has filled it"},
+		{"\x1b(A\x1b7\x1b(0\x1b8", "\x1b(0\x1b[?1049h\x1b(A", "the alternate screen restores its own save"},
 		{"\x1b[?1049l", "\x1b(0", "?1049l restores the normal screen's slot, not the alternate's"},
 		{"\x1b[?1047h\x1b(B\x1b8", "\x1b[?1047h\x1b(A", "the alternate screen's slot outlives a trip away"},
 		{"\x1b[?1047l\x1b8", "\x1b(0", "and so does the normal screen's"},
@@ -677,7 +705,7 @@ func TestResetsRefillTheSlotOfTheScreenTheySaveOn(t *testing.T) {
 		{"RIS from the alternate screen", "\x1b(0\x1b[?1049h\x1b7\x1bc\x1b(0\x1b8", ""},
 		{"RIS keeps the alternate screen's slot", "\x1b[?1049h\x1b(0\x1b7\x1bc\x1b[?1047h\x1b8", "\x1b[?1047h\x1b(0"},
 		{"DECSTR", "\x1b(0\x1b7\x1b[!p\x1b(0\x1b8", ""},
-		{"DECSTR on the alternate screen", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b(0\x1b8", "\x1b[?1049h"},
+		{"DECSTR on the alternate screen", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b(0\x1b8", "\x1b(0\x1b[?1049h\x1b(B"},
 		{"DECSTR on the alternate screen keeps the normal screen's slot", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b[?1049l", "\x1b(0"},
 		{"DECSTR on the normal screen keeps the alternate screen's slot", "\x1b[?1047h\x1b(A\x1b7\x1b[?1047l\x1b[!p\x1b[?1047h\x1b8", "\x1b[?1047h\x1b(A"},
 	} {
@@ -977,8 +1005,9 @@ func Test_ModeTracker_KeyboardStateOrder(t *testing.T) {
 	require.Equal(t,
 		"\x1b[5;15r"+"\x1b[?2004h"+"\x1b[>1u"+"\x1b[>4;2m"+"\x1b[?1049h"+"\x1b[>3u"+"\x1b(0",
 		string(m.Snapshot()))
+	// The charset needs no reset: ?1049l brings back the ASCII ?1049h saved.
 	require.Equal(t,
-		"\x1b[<1u"+"\x1b[?1049l"+"\x1b[r"+"\x1b[?2004l"+"\x1b[<1u"+"\x1b[>4m"+"\x1b(B",
+		"\x1b[<1u"+"\x1b[?1049l"+"\x1b[r"+"\x1b[?2004l"+"\x1b[<1u"+"\x1b[>4m",
 		string(m.Restore()))
 }
 

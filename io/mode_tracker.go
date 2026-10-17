@@ -1665,7 +1665,14 @@ func (m *ModeTracker) Restore() []byte {
 		out = append(out, "\x1b[>4m"...)
 	}
 
-	if len(m.charsetG0) > 0 {
+	// The G0 the terminal holds after all of the above: ?1049l restores the
+	// one ?1049h saved, and nothing else here changes it, the trip to the
+	// alternate screen's stack saving and restoring it as it is.
+	g0 := m.charsetG0
+	if m.altActive() && m.altVia == 1049 {
+		g0 = m.mainSavedG0
+	}
+	if len(g0) > 0 {
 		// US ASCII into G0, which is where a terminal starts.
 		out = append(out, 0x1b, '(', 'B')
 	}
@@ -1676,13 +1683,13 @@ func (m *ModeTracker) Restore() []byte {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the screen switch, the region, the charset and
-// modifyOtherKeys, each one sequence of at most maxSequenceBytes parameters,
-// two kitty keyboard stacks of kittyStackDepth entries, and one partial
-// sequence. Only the partial is sized by the stream rather than by this file,
-// and its own bound is maxSequenceBytes for a mode sequence or maxStringBytes
-// for a string: the ceiling is a few kilobytes, not the hundreds of bytes
-// everything else comes to.
+// len(restorable) plus the screen switch, the region, the charset (twice, on
+// either side of a ?1049h) and modifyOtherKeys, each one sequence of at most
+// maxSequenceBytes parameters, two kitty keyboard stacks of kittyStackDepth
+// entries, and one partial sequence. Only the partial is sized by the stream
+// rather than by this file, and its own bound is maxSequenceBytes for a mode
+// sequence or maxStringBytes for a string: the ceiling is a few kilobytes,
+// not the hundreds of bytes everything else comes to.
 //
 // The order is the order the stream would have had to use to reach this
 // state: the margins, then the modes, then the normal screen's kitty keyboard
@@ -1705,6 +1712,15 @@ func (m *ModeTracker) Restore() []byte {
 // bytes then complete it on the joiner's terminal instead of printing as text
 // -- which is what they did when the trim boundary fell inside a sequence and
 // the snapshot said nothing about it.
+//
+// Of the saved cursors, only the one ?1049h saves on the normal screen is
+// replayed, as the G0 designated ahead of the switch, because the switch saves
+// the cursor anyway. Every other save is a limit: a restore in the ring whose
+// save was evicted -- ESC 8, ?1048l or CSI u after ESC 7, ?1048h or CSI s,
+// on either screen -- reads a slot on the joiner that nothing filled, and
+// gives ASCII where the session's gives what it saved. Filling one would take
+// a cursor save of the snapshot's own, which saves the joiner's cursor
+// position and pen as well, wherever they happen to be.
 func (m *ModeTracker) Snapshot() []byte {
 	out := m.candidates[len(m.candidates)-1].appendRegion(nil)
 	out = m.appendModes(out, 0)
@@ -1717,13 +1733,26 @@ func (m *ModeTracker) Snapshot() []byte {
 		out = kittyPushes(out, m.altKeys)
 		out = append(out, "\x1b[?47l\x1b8"...)
 	}
+	var savedG0 []byte
 	if m.altActive() {
+		if m.altVia == 1049 {
+			// ?1049h saves the cursor, G0 with it, for the session's ?1049l
+			// to restore, and the joiner's ?1049h saves the joiner's. So the
+			// G0 the session saved is designated just ahead of it, which
+			// costs no save of its own and changes nothing the joiner sees.
+			savedG0 = m.mainSavedG0
+			out = append(out, savedG0...)
+		}
 		// Replayed through the mode that entered, so a joiner is left in the
 		// state the session's own "l" will match.
 		out = appendMode(out, m.altVia, true)
 		out = kittyPushes(out, m.altKeys)
 	}
 	out = append(out, m.charsetG0...)
+	if len(m.charsetG0) == 0 && len(savedG0) > 0 {
+		// The joiner holds the saved G0 now, and the session ASCII.
+		out = append(out, "\x1b(B"...)
+	}
 	out = append(out, m.partial...)
 	return out
 }
@@ -1746,6 +1775,9 @@ type ReplayParts struct {
 // switch through AltVia and AltKeys, or HiddenAltKeys, which Snapshot pushes
 // on a trip to the alternate screen and back. The render builds its own trip,
 // so the pushes come alone.
+//
+// It doesn't carry the normal screen's saved G0 either, which Snapshot
+// designates ahead of a ?1049h.
 func (m *ModeTracker) ReplayParts() ReplayParts {
 	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
 	for n, def := range restorable {
