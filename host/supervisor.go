@@ -84,7 +84,8 @@ type supervisor struct {
 	jitter func(time.Duration) time.Duration
 	logger *slog.Logger
 	// onTunnel, if set, is told of each loss and return. See report. It is
-	// set before run starts.
+	// set before the first tunnel can be lost, and never changed after: Run
+	// sets it before run starts, and a test before it drops the tunnel.
 	onTunnel func(TunnelEvent)
 
 	mu  sync.Mutex

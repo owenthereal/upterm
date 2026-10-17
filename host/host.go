@@ -835,6 +835,10 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	if c.SessionDir != nil {
 		sessionName = c.SessionDir.Name()
 	}
+	// The status, reconnect and tunnel fields set here are a snapshot, taken
+	// as the session starts, for SessionCreatedCallback: they go stale as
+	// soon as the tunnel moves, and the admin server's GetSession computes
+	// them again for every answer rather than copying them from session.
 	internal.DescribeSession(session, sessionName, state.snapshot)
 
 	if c.SessionCreatedCallback != nil {
