@@ -1048,8 +1048,111 @@ func TestStatusLinesCarryNoControls(t *testing.T) {
 	waitFor(t, func() bool { return sink.String() == "ready" }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?"))
 	require.NoError(t, err)
-	want := "readyupterm:   guest SSH-2.0-?[?1049h?]0;x? ?1m ?2m??…\r\n"
+	want := "ready\r\nupterm:   guest SSH-2.0-?[?1049h?]0;x? ?1m ?2m??…\r\n"
 	waitFor(t, func() bool { return sink.String() == want }, "the status never reached the terminal as text")
 	cancel()
 	awaitResult(t, done)
+}
+
+// The status is text, and text is drawn as text only where the terminal is
+// in neither a character nor a graphics charset: written after half of a
+// UTF-8 character it would be read as the rest of it, and written while G0
+// is DEC Special Graphics, or after a shift-out, it would come out as line
+// pieces. The status waits for the program to finish the character, or to
+// put ASCII back.
+func TestStatusWaitsOutACharacterAndAGraphicsCharset(t *testing.T) {
+	for _, tc := range []struct{ name, before, after string }{
+		{"half a character", "\xe2\x94", "\x80"},
+		{"DEC Special Graphics in G0", "\x1b(0", "\x1b(B"},
+		{"a shift-out", "\x0e", "\x0f"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runPausedWithStatus(t, tc.before, tc.after, []string{"upterm: STATUS"})
+			back := strings.Index(out, tc.before+tc.after)
+			require.GreaterOrEqual(t, back, 0, "%q", out)
+			require.Greater(t, strings.Index(out, "upterm: STATUS"), back, "%q", out)
+		})
+	}
+}
+
+// The status starts a line of its own, wherever the cursor was: after a shell
+// prompt, its first line would otherwise follow the prompt on the same line.
+func TestStatusStartsOnALineOfItsOwn(t *testing.T) {
+	out := runPausedWithStatus(t, "$ ", "", []string{"upterm: STATUS"})
+	require.Contains(t, out, "$ \r\nupterm: STATUS\r\n")
+}
+
+// A dropped status costs only that press: once the program has left the
+// sequence that kept it out, ~? shows the status again.
+func TestStatusWorksAgainAfterADrop(t *testing.T) {
+	old := statusSafeTimeout
+	statusSafeTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { statusSafeTimeout = old })
+	// The door's own copy, for the reason runIdleMidSequenceWithStatus takes
+	// one.
+	bound := statusSafeTimeout
+
+	asked := make(chan struct{})
+	door := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "\x1b[?1000")
+		select {
+		case <-asked:
+		case <-s.Context().Done():
+			return
+		}
+		// Past the bound, so the first status is dropped before the
+		// sequence ends.
+		time.Sleep(bound + 300*time.Millisecond)
+		_, _ = io.WriteString(s, "l")
+		_, _ = io.WriteString(s, "AFTER")
+		<-s.Context().Done()
+	})
+	var calls atomic.Int32
+	status := func(context.Context) []string {
+		if calls.Add(1) == 1 {
+			close(asked)
+			return []string{"upterm: FIRST"}
+		}
+		return []string{"upterm: SECOND"}
+	}
+	sink := &syncSink{}
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStatusTerminal(t, ctx, door, sink, pr, status)
+
+	waitFor(t, func() bool { return strings.Contains(sink.String(), "\x1b[?1000") }, "the session's output never reached the terminal")
+	_, err := pw.Write([]byte("\r~?"))
+	require.NoError(t, err)
+	waitFor(t, func() bool { return strings.Contains(sink.String(), "AFTER") }, "the sequence's end never reached the terminal")
+	_, err = pw.Write([]byte("\r~?"))
+	require.NoError(t, err)
+	waitFor(t, func() bool { return strings.Contains(sink.String(), "upterm: SECOND") }, "the second ~? showed nothing")
+	cancel()
+	awaitResult(t, done)
+
+	out := sink.String()
+	require.NotContains(t, out, "upterm: FIRST", "dropped, never written inside the sequence")
+	require.Greater(t, strings.Index(out, "upterm: SECOND"), strings.Index(out, "\x1b[?1000lAFTER"), "%q", out)
+}
+
+// One offer at a time: an offer made while another still waits in the slot is
+// refused, and the one waiting stays, still to be written or dropped.
+func TestOfferStatusRefusesAnOfferWhileOneWaits(t *testing.T) {
+	o := &output{statusClosing: make(chan struct{})}
+	first, ok := o.offerStatus([]string{"upterm: ONE"})
+	require.True(t, ok)
+	second, ok := o.offerStatus([]string{"upterm: TWO"})
+	require.False(t, ok, "the slot is full")
+	require.Nil(t, second)
+	select {
+	case <-first:
+		t.Fatal("the waiting offer was let go")
+	default:
+	}
+	require.Equal(t, "\r\nupterm: ONE\r\n", string(o.status.p))
+
+	o.closeStatus()
+	awaitClosed(t, first, "closing the slot did not let the waiting offer go")
 }

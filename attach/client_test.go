@@ -2055,7 +2055,7 @@ func TestClientShowsItsStatusInThisTerminalOnly(t *testing.T) {
 	waitFor(t, func() bool { return out.String() == "ready" }, "the session's output never reached the terminal")
 	_, err := pw.Write([]byte("\r~?x"))
 	require.NoError(t, err)
-	waitFor(t, func() bool { return out.String() == "readyupterm: STATUS\r\n" }, "the status never reached the terminal")
+	waitFor(t, func() bool { return out.String() == "ready\r\nupterm: STATUS\r\n" }, "the status never reached the terminal")
 	waitFor(t, func() bool { return door.taken() == "\rx" }, "the session never got the keys around ~?")
 
 	cancel()

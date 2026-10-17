@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/oklog/run"
 	"github.com/owenthereal/upterm/internal/logging"
@@ -48,9 +46,10 @@ var testHookFeeding func()
 var testHookTracker func(*uio.ModeTracker)
 
 // statusSafeTimeout bounds how long ~?'s lines wait for the session's output
-// to leave an escape sequence before they are dropped. The lookup's own
-// bound, about: lines that can't be shown by then would arrive long after the
-// key that asked for them. A var so a test can shorten it.
+// to leave an escape sequence before they are dropped. It is about as long as
+// the lookup that produced them is given: lines that can't be shown by then
+// would arrive long after the key that asked for them. A var so a test can
+// shorten it.
 var statusSafeTimeout = time.Second
 
 // Pty is a pty request: the terminal type and geometry the client's own
@@ -618,30 +617,34 @@ func (o *output) abandon() {
 
 // offerStatus puts lines in the status slot, each \r\n-ended, as the one
 // write they go out in, so that they arrive whole and are never split across
-// the session's chunks. It returns false once the slot is closed — teardown
-// has begun, and a lookup finishing now has nowhere to go — or when there is
-// nothing to show. taken closes once the lines are gone from the slot.
+// the session's chunks. The write starts with \r\n too, as OpenSSH's ~? does,
+// so the first line is a line of its own rather than the end of whatever the
+// cursor was on, a shell's prompt as often as not. It returns false once the
+// slot is closed — teardown has begun, and a lookup finishing now has nowhere
+// to go — when an offer is already waiting in it, or when there is nothing to
+// show. taken closes once the lines are gone from the slot.
 //
-// The lines are text alone: every control character (0x00-0x1F, DEL and
-// 0x80-0x9F) and every byte that isn't UTF-8 goes out as '?'. They carry what others chose — a
-// guest's SSH version is whatever its client sent — and the tracker never
-// sees them, so a status that started a sequence or set a mode of its own
-// would leave the terminal where the tracker doesn't know it is, and the
-// session's next bytes inside whatever it opened.
+// An offer already waiting is kept, not replaced: its taken is what its own
+// showStatus waits on, and an offer put over it would leave that one waiting
+// on a channel nothing closes.
+//
+// The lines are text alone, as uio.PlainText has it. They carry what others
+// chose — a guest's SSH version is whatever its client sent — and the
+// tracker never sees them, so a status that started a sequence or set a mode
+// of its own would leave the terminal where the tracker doesn't know it is,
+// and the session's next bytes inside whatever it opened.
 func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
-	var p []byte
+	if len(lines) == 0 {
+		return nil, false
+	}
+	p := []byte("\r\n")
 	for _, l := range lines {
-		for _, r := range l {
-			if r == utf8.RuneError || unicode.IsControl(r) {
-				r = '?'
-			}
-			p = utf8.AppendRune(p, r)
-		}
+		p = append(p, uio.PlainText(l)...)
 		p = append(p, '\r', '\n')
 	}
 	o.statusMu.Lock()
 	defer o.statusMu.Unlock()
-	if o.statusClosed || len(p) == 0 {
+	if o.statusClosed || o.status != nil {
 		return nil, false
 	}
 	offer := &statusOffer{p: p, taken: make(chan struct{})}
@@ -652,10 +655,16 @@ func (o *output) offerStatus(lines []string) (taken <-chan struct{}, ok bool) {
 // takeStatus hands the waiting status to a caller holding turn, if the
 // terminal would read it as text here: the output has not been abandoned, and
 // the session's output has left the terminal outside every sequence, on
-// InSequence's cautious reading. The session's output can stop inside an OSC,
-// a CSI, a DCS or a charset designation at a chunk's end, and text written
-// there would be read as part of it. Otherwise the status stays in the slot,
-// for a later chunk's end or for its bound to drop it.
+// InSequence's cautious reading, and in ASCII. The session's output can stop
+// inside an OSC, a CSI, a DCS, a charset designation or a UTF-8 character at a
+// chunk's end, and text written there would be read as part of it; and with
+// DEC Special Graphics in G0, or after a shift-out, text is drawn as line
+// pieces. Otherwise the status stays in the slot, for a later chunk's end or
+// for its bound to drop it.
+//
+// The charset is waited out rather than switched: an ESC ( B or an SI written
+// ahead of the status would leave the terminal in ASCII while the program,
+// and the tracker, believe it is still in graphics.
 //
 // Nothing ever cancels the session's sequence to make room: no CAN, no ST.
 // Terminals disagree on where a cancelled string ends (kitty keeps an OSC open
@@ -672,7 +681,7 @@ func (o *output) takeStatus(counted bool) []byte {
 	}
 	o.trackerMu.Lock()
 	defer o.trackerMu.Unlock()
-	if o.abandoned.Load() || o.modes.InSequence() {
+	if o.abandoned.Load() || o.modes.InSequence() || o.modes.NonASCIICharset() {
 		return nil
 	}
 	o.statusMu.Lock()
@@ -731,12 +740,12 @@ func (o *output) closeStatus() {
 // has stopped taking bytes ever holds up ~. or the session's end.
 //
 // The copy writes the lines at the end of a chunk, on the turn it already
-// holds, once the session's output is outside every sequence. With the output
-// idle nothing would, so this takes the turn the way a suspend does, within
-// turnWait (outputDrainTimeout) because the copy may be parked in a write to
-// a terminal that has stopped, and writes them itself if the output is
-// outside every sequence. If it is inside one, the lines wait for the copy to
-// come to the end of it, within safeWait (statusSafeTimeout) of being
+// holds, once the session's output is outside every sequence and in ASCII, as
+// takeStatus has it. With the output idle nothing would, so this takes the
+// turn the way a suspend does, within turnWait (outputDrainTimeout) because
+// the copy may be parked in a write to a terminal that has stopped, and
+// writes them itself if the output is there. If it is not, the lines wait for
+// the copy to come out of it, within safeWait (statusSafeTimeout) of being
 // offered; past either bound they are dropped, and the input carries on. A
 // dropped status shows nothing, the one case ~? does, and pressing it again
 // works once the program has moved on.
@@ -941,9 +950,9 @@ func (o *output) writeWithin(deadline <-chan time.Time, p []byte, logger *slog.L
 // suspend's, reads the tracker either before a chunk or after all of it.
 //
 // A chunk's end is also where a waiting ~? status goes, on the same turn, if
-// the chunk left the terminal outside every sequence: written whole, and
-// never between two halves of the session's output. A failed status write is
-// a failed write to Stdout like any other.
+// the chunk left the terminal outside every sequence and in ASCII: written
+// whole, and never between two halves of the session's output. A failed
+// status write is a failed write to Stdout like any other.
 func copyOutput(r io.Reader, o *output) error {
 	buf := make([]byte, 32<<10)
 	for {
