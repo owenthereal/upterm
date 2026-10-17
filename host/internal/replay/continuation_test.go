@@ -805,6 +805,33 @@ type contCase struct {
 	// offers is how io offers the prefix: the end of what Start is offered,
 	// then of what each Feed is, the last len(prefix). nil is Start alone.
 	offers []int
+	// join is the joiner's terminal, or the zero size for one the size of
+	// the last event, which the render is at.
+	join termsize.Size
+}
+
+// joiner is the size of c's joiner's terminal.
+func (c contCase) joiner() termsize.Size {
+	if c.join == (termsize.Size{}) {
+		return c.sizes[len(c.sizes)-1].Size
+	}
+	return c.join
+}
+
+// largerThan draws a joiner's terminal larger than r, the render's size:
+// wider, taller, or both.
+func largerThan(rnd *rand.Rand, r termsize.Size) termsize.Size {
+	j := r
+	switch rnd.IntN(3) {
+	case 0:
+		j.Cols += 1 + rnd.IntN(40)
+	case 1:
+		j.Rows += 1 + rnd.IntN(20)
+	default:
+		j.Cols += 1 + rnd.IntN(40)
+		j.Rows += 1 + rnd.IntN(20)
+	}
+	return j
 }
 
 // genCase draws a case from rnd: a stream from genStream, cut half the time
@@ -845,8 +872,9 @@ func genCase(rnd *rand.Rand) contCase {
 
 // contRun is what a case came to: the two terminals, A, the session's own,
 // fed the prefix with its resizes, then the suffix, and B, a terminal fresh
-// at the render's size, fed the render, the deferred tail and the suffix;
-// and the outcome. A case that rendered and continued alike has none of
+// at the joiner's size, fed the render, the deferred tail and the suffix (a
+// joiner larger than the render, only the render, and A only up to the
+// handoff point); and the outcome. A case that rendered and held has none of
 // skip, bug and diff.
 type contRun struct {
 	a, b       *vt.Emulator
@@ -873,7 +901,7 @@ func eventsUpTo(sizes []uio.SizeEvent, offset int) int {
 
 // replay emulates c's prefix as io does: from the ring's first byte, with a
 // fresh tracker, by Start and then each Feed, offering each piece of the
-// prefix with the events in it, for a joiner the size of the last event.
+// prefix with the events in it, for c's joiner.
 func (c contCase) replay(deadline time.Time) (uio.Emulation, error) {
 	ends := c.offers
 	if ends == nil {
@@ -885,7 +913,7 @@ func (c contCase) replay(deadline time.Time) (uio.Emulation, error) {
 		Chunks: [][]byte{c.prefix[:ends[0]]},
 		Sizes:  c.sizes[:k],
 		End:    uint64(ends[0]),
-	}, c.sizes[len(c.sizes)-1].Size)
+	}, c.joiner())
 	for i := 1; err == nil && i < len(ends); i++ {
 		j := eventsUpTo(c.sizes, ends[i])
 		err = em.Feed([][]byte{c.prefix[ends[i-1]:ends[i]]}, c.sizes[k:j])
@@ -894,12 +922,14 @@ func (c contCase) replay(deadline time.Time) (uio.Emulation, error) {
 	return em, err
 }
 
-// run runs c: the replay, through io's Start and Feeds, of the prefix for a
-// joiner the size of its last event, which the render is at once every
+// run runs c: the replay, through io's Start and Feeds, of the prefix for
+// c's joiner, the render being at the size of the last event once every
 // event is passed; then A and B, and sameState between them before the
-// suffix and after it. The replay's history is kept whole, budget
-// permitting, so set the budget large. Everything stops at wait, which is a
-// skip.
+// suffix and after it. B is a terminal of the joiner's size: for one larger
+// than the render, the two are compared by sameStateInside at the handoff
+// point, before the deferred tail. The replay's history is kept whole,
+// budget permitting, so set the budget large. Everything stops at wait,
+// which is a skip.
 func (c contCase) run(wait time.Duration) contRun {
 	var r contRun
 	deadline := time.Now().Add(wait)
@@ -953,10 +983,18 @@ func (c contCase) run(wait time.Duration) contRun {
 		}
 	}
 	write(r.a, c.prefix[pos:h])
-	// A line of history wider than the render wraps when the render prints
+	// A line of history wider than the joiner wraps when the render prints
 	// it on B, as it would on any terminal of that width, so B's own
 	// scroll-off then holds more lines than the render emitted.
-	wider := slices.ContainsFunc(r.aOff.widths, func(w int) bool { return w > last.Size.Cols })
+	join := c.joiner()
+	wider := slices.ContainsFunc(r.aOff.widths, func(w int) bool { return w > join.Cols })
+	if join != last.Size {
+		if werr != nil {
+			r.skip = "the terminals ran out of time"
+			return r
+		}
+		return r.inside(join, rendered, *aTitle, wider, stop)
+	}
 	write(r.a, c.prefix[h:])
 
 	r.b = vt.NewEmulator(e.term.Width(), e.term.Height())
@@ -1001,6 +1039,29 @@ func (c contCase) run(wait time.Duration) contRun {
 	if werr != nil {
 		r.diff = ""
 		r.skip = "the terminals ran out of time"
+	}
+	return r
+}
+
+// inside compares r.a, the session's terminal at the handoff point, with B,
+// a terminal of join's size, larger than the render's, given the render:
+// sameStateInside, and B's own scroll-off, which holds the render's history
+// lines as A's holds them, unless one is wider than the joiner.
+func (r contRun) inside(join termsize.Size, rendered [][]byte, aTitle string, wider bool, stop func() bool) contRun {
+	r.b = vt.NewEmulator(join.Cols, join.Rows)
+	r.b.SetReplyFunc(func([]byte) {})
+	r.b.SetStopFunc(stop)
+	r.bOff = collectScrollOff(r.b)
+	bTitle := watchTitle(r.b)
+	if _, err := r.b.Write(r.render); err != nil || stop() {
+		r.skip = "the terminals ran out of time"
+		return r
+	}
+	switch d := sameStateInside(r.a, r.b, r.aOff.lines, rendered, aTitle, *bTitle); {
+	case d != "":
+		r.diff = "at the handoff: " + d
+	case !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal):
+		r.diff = fmt.Sprintf("at the handoff: the history B scrolled off: %q vs %q", r.aOff.canon, r.bOff.canon)
 	}
 	return r
 }
@@ -1071,7 +1132,11 @@ func (c contCase) repro() string {
 		}
 		fmt.Fprintf(&b, "event(%d, %d, %d, %d)", ev.Seq, ev.Offset, ev.Size.Cols, ev.Size.Rows)
 	}
-	fmt.Fprintf(&b, "},\n\tsuffix: []byte(%q),\n\toffers: %#v,\n}", c.suffix, c.offers)
+	fmt.Fprintf(&b, "},\n\tsuffix: []byte(%q),\n\toffers: %#v,\n", c.suffix, c.offers)
+	if c.join != (termsize.Size{}) {
+		fmt.Fprintf(&b, "\tjoin:   termsize.Size{Cols: %d, Rows: %d},\n", c.join.Cols, c.join.Rows)
+	}
+	b.WriteString("}")
 	return b.String()
 }
 
@@ -1149,7 +1214,7 @@ func (c contCase) without(i, n int) contCase {
 		}
 		return off
 	}
-	d := contCase{prefix: slices.Concat(c.prefix[:i], c.prefix[i+n:]), suffix: c.suffix}
+	d := contCase{prefix: slices.Concat(c.prefix[:i], c.prefix[i+n:]), suffix: c.suffix, join: c.join}
 	for _, ev := range c.sizes {
 		ev.Offset = uint64(move(int(ev.Offset)))
 		d.sizes = append(d.sizes, ev)
@@ -1184,11 +1249,32 @@ func renumber(sizes []uio.SizeEvent) []uio.SizeEvent {
 // tracker and the emulator disagreeing, or a handoff point that carries a
 // cluster, fails it at once, since neither is a fallback the stream asked for.
 func TestReplayContinuesEquivalently(t *testing.T) {
+	property(t, "rendered and continued alike", genCase)
+}
+
+// The property for a joiner larger than the render, as a joiner is when a
+// smaller client shares the session or the pty's size is pinned: B, a
+// terminal of the joiner's size given the render, holds at its top left what
+// A, the session's terminal, holds at the handoff point, and elsewhere what
+// the render leaves it (see sameStateInside). The cases are the main
+// property's, each with a larger joiner drawn after it.
+func TestReplayRendersInsideALargerJoiner(t *testing.T) {
+	property(t, "rendered alike inside the joiner", func(rnd *rand.Rand) contCase {
+		c := genCase(rnd)
+		c.join = largerThan(rnd, c.sizes[len(c.sizes)-1].Size)
+		return c
+	})
+}
+
+// property runs -replay.cases cases that draw draws from -replay.seed, and
+// fails on the first that rendered and didn't hold, with that case shrunk;
+// held says, in its log, what the others did.
+func property(t *testing.T, held string, draw func(*rand.Rand) contCase) {
 	setBudget(t, 64<<20)
 	seed, n := *propertySeed, *propertyCases
 	skipped := map[string]int{}
 	for i := range n {
-		c := genCase(rand.New(rand.NewPCG(seed, uint64(i))))
+		c := draw(rand.New(rand.NewPCG(seed, uint64(i))))
 		r := c.run(time.Minute)
 		if f := r.failure(); f != "" {
 			t.Fatalf("-replay.seed=%d, case %d: %s\nA minimal case that fails the same way:\n%s",
@@ -1204,8 +1290,8 @@ func TestReplayContinuesEquivalently(t *testing.T) {
 		total += skipped[why]
 		reasons = append(reasons, fmt.Sprintf("%d %s", skipped[why], why))
 	}
-	t.Logf("-replay.seed=%d: %d of %d cases (%.1f%%) rendered and continued alike; skipped: %s",
-		seed, n-total, n, 100*float64(n-total)/float64(n), strings.Join(reasons, "; "))
+	t.Logf("-replay.seed=%d: %d of %d cases (%.1f%%) %s; skipped: %s",
+		seed, n-total, n, 100*float64(n-total)/float64(n), held, strings.Join(reasons, "; "))
 	require.LessOrEqual(t, 5*total, n, "more than a fifth of the cases fell back")
 }
 

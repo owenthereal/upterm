@@ -143,6 +143,96 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) 
 	if a.PendingWrap() != b.PendingWrap() {
 		return fmt.Sprintf("pending wrap: %v vs %v", a.PendingWrap(), b.PendingWrap())
 	}
+	if ra, rb := a.ActiveScreen().ScrollRegion(), b.ActiveScreen().ScrollRegion(); ra != rb {
+		return fmt.Sprintf("scroll region: %v vs %v", ra, rb)
+	}
+	if ta, tb := a.TabStops(), b.TabStops(); !slices.Equal(ta, tb) {
+		return fmt.Sprintf("tab stops: %v vs %v", ta, tb)
+	}
+	return sameRest(a, b, aHist, bHist, aTitle, bTitle)
+}
+
+// sameStateInside is sameState for b, the terminal of a joiner larger than
+// a, the session's, given the render: the render sits at b's top left, and
+// the bytes after it were laid out for a's size, as they are for a live
+// client larger than the pty, so the two are compared at the handoff, where
+// the render is all b holds. a's cells, on both screens, are compared in b's
+// top left, and the rest of b is blank. Where the sizes part, b holds what
+// the render leaves it:
+//   - a wrap pending at the cursor only on a joiner as wide, since a wider
+//     live client has none;
+//   - each slot at the position it was saved at, which a's own size clamps
+//     there and b's here, but a slot's pending wrap only on a joiner as wide,
+//     set by a print in the last column of the row a's DECRC would restore;
+//   - b's own whole screen as the region where a's is its whole screen, and
+//     a's rows otherwise;
+//   - a stop every 8 columns of b's width where a's are a's default, and a's
+//     stops alone otherwise.
+func sameStateInside(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
+	w, h := a.Width(), a.Height()
+	if b.Width() < w || b.Height() < h {
+		return fmt.Sprintf("size: %dx%d isn't inside %dx%d", w, h, b.Width(), b.Height())
+	}
+	fits := b.Width() == w
+	if a.IsAltScreen() != b.IsAltScreen() {
+		return fmt.Sprintf("alternate screen showing: %v vs %v", a.IsAltScreen(), b.IsAltScreen())
+	}
+	for _, s := range []struct {
+		name   string
+		sa, sb *vt.Screen
+	}{
+		{"main", a.MainScreen(), b.MainScreen()},
+		{"alternate", a.AltScreen(), b.AltScreen()},
+	} {
+		if d := sameScreenInside(s.sa, s.sb); d != "" {
+			return s.name + " screen: " + d
+		}
+		c := s.sa.SavedCursor()
+		c.Saved.Wrap = c.Saved.Wrap && fits
+		if c.Saved.Wrap {
+			c.Y = min(c.Y, h-1)
+		}
+		c.X, c.Y = min(c.X, b.Width()-1), min(c.Y, b.Height()-1)
+		if d := sameSlot(c, s.sb.SavedCursor()); d != "" {
+			return s.name + " saved slot: " + d
+		}
+	}
+	ca, cb := a.ActiveScreen().Cursor(), b.ActiveScreen().Cursor()
+	if ca.Position != cb.Position {
+		return fmt.Sprintf("cursor: %v vs %v", ca.Position, cb.Position)
+	}
+	if canonical(ca.Pen) != canonical(cb.Pen) {
+		return fmt.Sprintf("pen: %+v vs %+v", ca.Pen, cb.Pen)
+	}
+	if ca.Link != cb.Link {
+		return fmt.Sprintf("link: %+v vs %+v", ca.Link, cb.Link)
+	}
+	if want := a.PendingWrap() && fits; b.PendingWrap() != want {
+		return fmt.Sprintf("pending wrap: %v, where %v is wanted", b.PendingWrap(), want)
+	}
+	ra, rb := a.ActiveScreen().ScrollRegion(), b.ActiveScreen().ScrollRegion()
+	want := uv.Rect(0, ra.Min.Y, b.Width(), ra.Dy())
+	if ra == uv.Rect(0, 0, w, h) {
+		want = uv.Rect(0, 0, b.Width(), b.Height())
+	}
+	if rb != want {
+		return fmt.Sprintf("scroll region: %v, where %v is wanted for %v", rb, want, ra)
+	}
+	stops := a.TabStops()
+	if slices.Equal(stops, defaultTabStops(w)) {
+		stops = defaultTabStops(b.Width())
+	}
+	if tb := b.TabStops(); !slices.Equal(stops, tb) {
+		return fmt.Sprintf("tab stops: %v, where %v is wanted", tb, stops)
+	}
+	return sameRest(a, b, aHist, bHist, aTitle, bTitle)
+}
+
+// sameRest is what sameState and sameStateInside compare alike, with no
+// regard to the screen's size: the cursor's style, the modes, the charsets
+// and a pending single shift, REP's last character, a carried cluster, the
+// title and the history.
+func sameRest(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) string {
 	if d := sameCursorStyle(a, b); d != "" {
 		return d
 	}
@@ -156,12 +246,6 @@ func sameState(a, b *vt.Emulator, aHist, bHist [][]byte, aTitle, bTitle string) 
 	}
 	if a.SingleShift() != b.SingleShift() {
 		return fmt.Sprintf("single shift: %d vs %d", a.SingleShift(), b.SingleShift())
-	}
-	if ra, rb := a.ActiveScreen().ScrollRegion(), b.ActiveScreen().ScrollRegion(); ra != rb {
-		return fmt.Sprintf("scroll region: %v vs %v", ra, rb)
-	}
-	if ta, tb := a.TabStops(), b.TabStops(); !slices.Equal(ta, tb) {
-		return fmt.Sprintf("tab stops: %v vs %v", ta, tb)
 	}
 	if a.LastChar() != b.LastChar() {
 		return fmt.Sprintf("REP's last character: %q vs %q", a.LastChar(), b.LastChar())
@@ -206,6 +290,27 @@ func sameScreen(a, b *vt.Screen) string {
 			ca.Style, cb.Style = canonical(ca.Style), canonical(cb.Style)
 			if ca != cb {
 				return fmt.Sprintf("cell %d,%d: %+v vs %+v", x, y, la[x], lb[x])
+			}
+		}
+	}
+	return ""
+}
+
+// sameScreenInside compares a's cells with those at b's top left, as
+// sameScreen does, and requires the rest of b, a screen at least as large,
+// to be blank.
+func sameScreenInside(a, b *vt.Screen) string {
+	for y := range b.Height() {
+		lb := b.Line(y)
+		for x := range lb {
+			if x < a.Width() && y < a.Height() {
+				ca, cb := *a.CellAt(x, y), lb[x]
+				ca.Style, cb.Style = canonical(ca.Style), canonical(cb.Style)
+				if ca != cb {
+					return fmt.Sprintf("cell %d,%d: %+v vs %+v", x, y, *a.CellAt(x, y), lb[x])
+				}
+			} else if lb[x] != uv.EmptyCell {
+				return fmt.Sprintf("cell %d,%d, outside %dx%d: %+v", x, y, a.Width(), a.Height(), lb[x])
 			}
 		}
 	}
