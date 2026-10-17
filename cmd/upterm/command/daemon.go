@@ -241,10 +241,11 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		// prints in the order it is told.
 		VersionWarningCallback: func(r *version.CompatibilityResult) {
 			// Only a relay ahead of this upterm calls for an upgrade here,
-			// and only then is it worth asking who installed upterm.
+			// and only then is it worth asking who installed upterm: bounded,
+			// since the banner waits on it.
 			var advice string
 			if r.Direction == version.RelayNewer {
-				advice = upgradeAdvice()
+				advice = upgradeAdviceWithin(logger)
 			}
 			child.Print(versionWarning(r, advice) + "\n")
 		},

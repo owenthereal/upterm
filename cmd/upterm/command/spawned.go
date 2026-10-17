@@ -11,6 +11,8 @@ import (
 	"os"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/owenthereal/upterm/attach"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
@@ -387,10 +389,11 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 		line := fmt.Sprintf("Session %s is running in the background.", s.name)
 		// A session that isn't ready is running, but not in the way the
 		// sentence alone suggests: guests can't reach it. What the view's
-		// Hint row would say about that goes right after it.
+		// Hint row would say about that goes right after it, as a sentence
+		// of its own.
 		if st.GetStatus() != sessiondir.StatusReady {
 			if hint := recordedStatusHint(ctx, s.name, claimed.LaunchId); hint != "" {
-				line += " " + hint
+				line += " " + capitalized(hint)
 			}
 		}
 		line += fmt.Sprintf(" Attach with upterm attach %s; stop it with upterm session stop %s.\n", s.name, s.name)
@@ -464,4 +467,15 @@ func recordedStatusHint(ctx context.Context, name, launchID string) string {
 		return ""
 	}
 	return tui.StatusHint(tui.SessionDetail{Status: rec.Status, TunnelReason: rec.TunnelReason})
+}
+
+// capitalized is s with its first letter in upper case. The view's hints are
+// written to follow a "Hint:" label, so they begin in lower case, and
+// --detach's line puts one after a full stop instead.
+func capitalized(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[size:]
 }

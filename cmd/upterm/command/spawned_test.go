@@ -420,10 +420,10 @@ func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {
 // A session that is up but not ready -- its tunnel down by the time it
 // reported readiness -- is not "running" the way a ready one is, and the line
 // says what the view's Hint row would, from the record of the launch this
-// process started. A record that doesn't say, or is another launch's, adds
-// nothing.
+// process started, as a sentence of its own. A record that doesn't say, or is
+// another launch's, adds nothing.
 func TestSpawnedSessionDetachSaysWhatIsWrongWhenNotReady(t *testing.T) {
-	const hint = "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."
+	const hint = "This relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."
 	for _, tc := range []struct {
 		name      string
 		ownLaunch bool

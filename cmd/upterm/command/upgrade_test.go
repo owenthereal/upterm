@@ -1,11 +1,13 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	ggh "github.com/google/go-github/v48/github"
 	"github.com/stretchr/testify/require"
@@ -404,4 +407,51 @@ func TestUpgradeAdvice(t *testing.T) {
 		withRunningBinaryFunc(t, func() (string, error) { return "", errors.New("no such file") })
 		require.Equal(t, yourWay, upgradeAdvice())
 	})
+}
+
+// The daemon looks the advice up before the banner, so a package database
+// that is slow to answer must not hold the banner: past the bound the advice
+// is the one that claims nothing, and the log says why.
+func TestUpgradeAdviceWithinGivesUpOnASlowLookup(t *testing.T) {
+	origTimeout := upgradeAdviceTimeout
+	t.Cleanup(func() { upgradeAdviceTimeout = origTimeout })
+	upgradeAdviceTimeout = 50 * time.Millisecond
+
+	withRunningBinary(t, aStandaloneBinary(t))
+	asked := make(chan struct{})
+	release := make(chan struct{})
+	orig := systemProbes
+	t.Cleanup(func() { systemProbes = orig })
+	systemProbes = probes{dpkgOwns: func(string) (bool, error) {
+		close(asked)
+		<-release
+		// Owned, so the lookup ends here once released, without reading
+		// anything a later cleanup restores.
+		return true, nil
+	}}
+	// Registered last, so it runs first: the lookup has read the package's
+	// vars by the time it is asked, and once released it reads no more.
+	t.Cleanup(func() { close(release) })
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	start := time.Now()
+	advice := upgradeAdviceWithin(logger)
+	elapsed := time.Since(start)
+	select {
+	case <-asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lookup never reached the package database")
+	}
+
+	require.Equal(t, "upgrade it the way it was installed", advice)
+	require.Less(t, elapsed, upgradeAdviceTimeout+500*time.Millisecond, "the bound didn't hold the lookup to it")
+	require.Contains(t, logs.String(), "level=DEBUG")
+	require.Contains(t, logs.String(), "timed out")
+}
+
+// A lookup that answers within the bound is the answer.
+func TestUpgradeAdviceWithinGivesTheLookupsAnswer(t *testing.T) {
+	withRunningBinary(t, "/opt/homebrew/Cellar/upterm/0.38.0/bin/upterm")
+	require.Equal(t, "upgrade with brew upgrade upterm", upgradeAdviceWithin(discardLogger()))
 }

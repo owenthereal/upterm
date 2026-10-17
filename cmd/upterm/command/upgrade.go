@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -141,7 +142,6 @@ func upgradeRunE(c *cobra.Command, args []string) error {
 // can't answer is not an answer, so it gets the last of those too: the
 // warning names only what upterm confirmed.
 func upgradeAdvice() string {
-	const theWayItWasInstalled = "upgrade it the way it was installed"
 	target, err := runningBinary()
 	if err != nil {
 		return theWayItWasInstalled
@@ -157,6 +157,34 @@ func upgradeAdvice() string {
 		return theWayItWasInstalled
 	}
 	return "upgrade with upterm upgrade"
+}
+
+// theWayItWasInstalled is the upgrade advice that claims nothing about how
+// upterm was installed.
+const theWayItWasInstalled = "upgrade it the way it was installed"
+
+// upgradeAdviceTimeout bounds upgradeAdviceWithin's lookup. A var so a test
+// can shorten it.
+var upgradeAdviceTimeout = time.Second
+
+// upgradeAdviceWithin is upgradeAdvice, given upgradeAdviceTimeout to answer.
+// The daemon asks for it before the banner, and the package databases behind
+// it take as long as they take: a lookup that hasn't answered by then gets the
+// advice that claims nothing, and is left to finish on its own, since nothing
+// it does needs undoing.
+func upgradeAdviceWithin(logger *slog.Logger) string {
+	// Buffered, so a lookup that answers late can still send and exit.
+	answer := make(chan string, 1)
+	go func() { answer <- upgradeAdvice() }()
+	timer := time.NewTimer(upgradeAdviceTimeout)
+	defer timer.Stop()
+	select {
+	case advice := <-answer:
+		return advice
+	case <-timer.C:
+		logger.Debug("the upgrade advice lookup timed out; advising to upgrade the way upterm was installed", "timeout", upgradeAdviceTimeout)
+		return theWayItWasInstalled
+	}
 }
 
 // downloadProxy draws the download's progress bar on f when f is a terminal.
