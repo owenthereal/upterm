@@ -1559,9 +1559,13 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 	// The Relay row leaves out the port only when it is the scheme's own, so a
 	// wss relay on 80 or an ssh relay on 443 still says which port it is on.
 	// The commands below keep the port whatever it is: a guest has to dial it.
-	relay := u.Scheme + "://" + host
-	if port != "" && port != defaultPort(scheme) {
-		relay += ":" + port
+	// net.JoinHostPort puts an IPv6 relay's brackets back (ssh://[::1]:2222),
+	// and they stay when the port is then left out. It is given u.Hostname,
+	// the address without brackets, because host keeps them for a URL that
+	// names no port.
+	relay := u.Scheme + "://" + net.JoinHostPort(u.Hostname(), port)
+	if port == "" || port == defaultPort(scheme) {
+		relay = strings.TrimSuffix(relay, ":"+port)
 	}
 
 	access := tui.AccessAllowlist

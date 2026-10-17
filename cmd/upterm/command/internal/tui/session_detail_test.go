@@ -508,6 +508,15 @@ func TestGuestsRow(t *testing.T) {
 		guestsRow(GuestPermissions{FileTransfer: "off"}))
 }
 
+// A file transfer value the view doesn't know is said to be unknown, never
+// read as transfers allowed without asking. guestPermissions passes only the
+// three it knows, so this is the row's own guard.
+func TestGuestsRowReadsNoUnknownTransferAsAllowed(t *testing.T) {
+	for _, v := range []string{"", "uploads"} {
+		require.Equal(t, "can type; files: unknown; no port forwarding", guestsRow(GuestPermissions{FileTransfer: v}), "%q", v)
+	}
+}
+
 // Test_guestsRow_EveryCombination: each of the four settings changes its own
 // clause and no other, so a guest reading the row is told about each of them.
 // Forwarding is a setting of its own, so every row ends with its clause,

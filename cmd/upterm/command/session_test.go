@@ -245,6 +245,24 @@ func TestRelayRowDropsOnlyTheSchemesOwnPort(t *testing.T) {
 	}
 }
 
+// An IPv6 relay keeps the brackets around its address, with or without the
+// port: without them, the address's colons and the port's run together.
+func TestRelayRowBracketsAnIPv6Relay(t *testing.T) {
+	for _, tc := range []struct{ server, want string }{
+		{"ssh://[::1]:2222", "ssh://[::1]:2222"},
+		{"ssh://[::1]:22", "ssh://[::1]"},
+		{"ssh://[::1]", "ssh://[::1]"},
+		{"wss://[2001:db8::1]:8443", "wss://[2001:db8::1]:8443"},
+		{"wss://[2001:db8::1]", "wss://[2001:db8::1]"},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			d, err := buildSessionDetailFor(tc.server)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.Host)
+		})
+	}
+}
+
 // The Relay row is the only place the displayed port is dropped. The ssh, sftp
 // and scp lines name the port a guest must dial, so they keep it whatever the
 // row says: 80 and 443 on ssh, and the port a ProxyCommand's target carries

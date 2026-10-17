@@ -141,8 +141,13 @@ func guestsRow(p GuestPermissions) string {
 		files = "files: off"
 	case FileTransferDownloads:
 		files = "files: downloads only, " + approval
-	default:
+	case FileTransferAll:
 		files = "files: " + approval
+	default:
+		// guestPermissions passes only the three values above. One this view
+		// doesn't know is not read as any of them, least of all as transfers
+		// allowed without asking.
+		files = "files: unknown"
 	}
 
 	forwarding := "no port forwarding"
