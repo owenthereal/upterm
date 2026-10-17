@@ -111,7 +111,7 @@ func TestExchangeInOrder(t *testing.T) {
 	require.Equal(t, "ready", out.Started.Status,
 		"the status the child published travels to the parent, which prints it")
 	require.Equal(t, []string{"claimed:n", "created:sid", "listening:/tmp/a.sock"}, events)
-	require.Equal(t, []string{"ssh-ed25519 AAAA"}, gotHostKeys, "the attach client (Task 5) pins exactly these host keys")
+	require.Equal(t, []string{"ssh-ed25519 AAAA"}, gotHostKeys, "the attach client pins exactly these host keys")
 
 	// The parent is done and closes; the child has disarmed, so its watcher
 	// says nothing.

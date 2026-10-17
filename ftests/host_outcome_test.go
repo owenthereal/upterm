@@ -518,10 +518,10 @@ func Test_Host_PublishesStartupFailure(t *testing.T) {
 }
 
 func Test_Host_PublishesCanceledOnCancellation(t *testing.T) {
-	// Review fix: this was skipped, and a skipped test guards nothing. It is
-	// also the one case the wait status cannot answer on its own — our own
-	// teardown kills the command, so without source-aware cancellation this
-	// reports "signaled" on Unix and a non-zero "exited" on Windows.
+	// This must not be skipped, since a skipped test guards nothing. It is also
+	// the one case the wait status cannot answer on its own — our own teardown
+	// kills the command, so without source-aware cancellation this reports
+	// "signaled" on Unix and a non-zero "exited" on Windows.
 	res := runHostUntilCancelled(t, shellCommand(t,
 		[]string{"sh", "-c", "echo READY; sleep 300"},
 		[]string{"cmd", "/c", "echo READY & ping -n 400 127.0.0.1 >nul"}), "READY")
@@ -806,8 +806,7 @@ func Test_Host_LostTunnelIsAStateNotAnOutcome(t *testing.T) {
 	go func() { done <- run.host.Run(ctx) }()
 
 	// A viewer attached before the loss, counting the markers it receives.
-	// Design item 6: the command and the local client both survive a tunnel
-	// that goes away.
+	// The command and the local client both survive a tunnel that goes away.
 	//
 	// The socket is awaited here rather than inside the goroutine below:
 	// awaitAttachSocket calls t.Fatal, which from a goroutine that is not the

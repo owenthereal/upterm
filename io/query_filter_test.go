@@ -645,8 +645,7 @@ func TestTerminalQueryFilter_MaxPendingBytesIsTheLargestHold(t *testing.T) {
 }
 
 // The largest Pending of all is a wrapper's inner drop: the saved head at the
-// wrapper's bound, the pending inner ESC re-encoded, and an unpaired raw ESC
-// (Owen, 2026-10-11).
+// wrapper's bound, the pending inner ESC re-encoded, and an unpaired raw ESC.
 func TestTerminalQueryFilter_PendingReachesItsMaximumInAWrapper(t *testing.T) {
 	// A wrapped kitty query whose deciding head is exactly 256 raw bytes.
 	h := "\x1bPtmux;\x1b\x1b_Gi=" + strings.Repeat("0", 238) + ",a=q;"
@@ -1033,21 +1032,20 @@ var wrapperCases = []filterCase{
 		want:  "\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b[6n\x1b\x1b\\\x1b\\",
 		limit: true},
 	{name: "leading inner bytes go with the dropped head", in: "\x1bPtmux;Y\x1b\x1b[6n\x1b\\", want: "\x1b\\"},
-	// Inner endings, read on decoded bytes (Owen, 2026-10-11).
+	// Inner endings, read on decoded bytes.
 	{name: "wrapped DCS query ended by CAN", in: "\x1bPtmux;\x1b\x1bP+q544e\x18X\x1b\\", want: "\x18X\x1b\\"},
 	{name: "wrapped OSC query ended by BEL", in: "\x1bPtmux;\x1b\x1b]11;?\x07X\x1b\\", want: "X\x1b\\"},
 	{name: "wrapped DCS query ended by an inner ESC", in: "\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b[1mX\x1b\\", want: "\x1b[1mX\x1b\\"},
 	{name: "wrapped held OSC cancelled", in: "\x1bPtmux;\x1b\x1b]0;t\x18X\x1b\\", want: "\x18X\x1b\\"},
 	{name: "wrapped CSI head cancelled before deciding passes", in: "\x1bPtmux;\x1b\x1b[6\x18X\x1b\\", want: "\x1bPtmux;\x1b\x1b[6\x18X\x1b\\"},
-	// Continuation must carry the inner parser's pending ESC (Owen,
-	// 2026-10-11); continuationCheck splits it at every byte, including right
-	// after the complete pair.
+	// Continuation must carry the inner parser's pending ESC; continuationCheck
+	// splits it at every byte, including right after the complete pair.
 	{name: "inner drop ended by an inner ESC, after a complete pair", in: "\x1bPtmux;\x1b\x1b_Ga=q;AAAA\x1b\x1b[31mX\x1b\\", want: "\x1b[31mX\x1b\\"},
 
 	// Before the first inner ESC, a CAN or SUB ends the wrapper, as it ends
-	// the DCS on a DEC terminal, which then prints what follows (Owen,
-	// 2026-10-11). The wrapper is held, so it is dropped whole, and the cancel
-	// goes out, as ESC and the cancel when a close is owed.
+	// the DCS on a DEC terminal, which then prints what follows. The wrapper is
+	// held, so it is dropped whole, and the cancel goes out, as ESC and the
+	// cancel when a close is owed.
 	{name: "a CAN before the first inner ESC ends the wrapper", in: "\x1bPtmux;\x18hello\x1b\x1b[6n\x1b\\", want: "\x18hello\x1b\\"},
 	{name: "a SUB before the first inner ESC ends the wrapper", in: "\x1bPtmux;\x1ahello\x1b\x1b[6n\x1b\\", want: "\x1ahello\x1b\\"},
 	{name: "a leading CAN settles a close owed", in: "\x1bPq#0\x1bPtmux;\x18hello", want: "\x1bPq#0\x1b\x18hello", kitty: true},

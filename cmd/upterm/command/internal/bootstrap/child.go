@@ -168,8 +168,9 @@ func (c *Child) Claimed(m *api.Claimed) error {
 	return c.send(&api.Startup{Msg: &api.Startup_Claimed{Claimed: m}})
 }
 
-// SessionCreated is gate 1 and 2 in one round trip: the parent shows the
-// session and answers with the operator's decision.
+// SessionCreated reports that the tunnel is up and the session registered, and
+// gets the operator's decision in the same round trip: the parent shows the
+// session and answers with it.
 func (c *Child) SessionCreated(sess *api.GetSessionResponse) (api.Accept_Decision, error) {
 	if err := c.send(&api.Startup{Msg: &api.Startup_SessionCreated{SessionCreated: &api.SessionCreated{Session: sess}}}); err != nil {
 		return 0, err
@@ -194,7 +195,8 @@ func (c *Child) Listening(socket string, hostKeys []string) error {
 // moment it is told the session is up must not be read as leaving it.
 func (c *Child) Disarm() { c.armed.Store(false) }
 
-// Started is gate 3. Disarm first.
+// Started reports that the command is running and the session's record has
+// been published. Disarm first.
 //
 // status is what the session's record says at this moment, and joinState the
 // join timeout as the daemon holds it, both of which the parent reports

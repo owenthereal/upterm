@@ -218,8 +218,8 @@ func TestHostSinkPromoteAtEveryBoundaryOfAWrappedString(t *testing.T) {
 }
 
 // A query that restarts at the drop's end must reach the new primary whole:
-// it is answering queries now. Owen's case: ST and CAN endings can't catch a
-// handoff that parses past the end.
+// it is answering queries now. The restarting ESC is the case: ST and CAN
+// endings can't catch a handoff that parses past the end.
 func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
 	for _, c := range []struct{ before, after, want string }{
 		{"\x1bP+q544e", "\x1bZhello", "\x1bZhello"}, // the restarting ESC in this write
@@ -228,8 +228,7 @@ func TestHostSinkPromoteMidDropKeepsTheQueryThatFollows(t *testing.T) {
 		{"\x1bP+q544e", "\x18hello", "\x18hello"}, // CAN goes raw
 		{"\x1bP+q544e", "\x1b\\hello", "hello"},   // ST is part of the drop
 		{"\x1bP+q544e\x1b", "\\hello", "hello"},
-		// Inside a wrapper, the resume point carried from the last write
-		// (Owen, 2026-10-11).
+		// Inside a wrapper, the resume point carried from the last write.
 		{"\x1bPtmux;\x1b\x1bP+q544e\x1b\x1b", "[6nhello\x1b\\", "\x1b[6nhello\x1b\\"},
 		{"\x1bPtmux;\x1b\x1bP+q544e\x1b", "\x1b[6nhello\x1b\\", "\x1b[6nhello\x1b\\"},
 		// A lone raw ESC x ends the wrapper during its inner drop, and the

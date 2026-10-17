@@ -40,7 +40,7 @@ const (
 // connection, and the wait for the hello on it. Neither covers more than a
 // process creation, a dial and twenty bytes — everything the daemon does that
 // can be slow, resolving keys and dialling the relay, happens after the hello
-// and is bounded by the exchange's own gates rather than by this.
+// and is bounded by the exchange itself rather than by this.
 const bootstrapTimeout = 10 * time.Second
 
 // spawnOptions describes the child. executable, args and env default to
@@ -231,7 +231,7 @@ func spawnDaemon(opts spawnOptions) (net.Conn, *os.Process, error) {
 
 	// A hello the child never sends would otherwise park this forever; the
 	// deadline is dropped again before the connection is handed on, because
-	// from here the exchange has its own gates.
+	// from here the exchange bounds itself.
 	if err := conn.SetReadDeadline(time.Now().Add(bootstrapTimeout)); err != nil {
 		_ = conn.Close()
 		kill()

@@ -217,7 +217,7 @@ func parseRawURLRef(s string) (UserRef, error) {
 	}
 	// ForceQuery as well as RawQuery: "https://git.corp.com/alice?" has an empty
 	// RawQuery yet still renders the "?" back out of url.String(), so the
-	// request would carry a query the spec forbids.
+	// request would carry a query a URL ref must not have.
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return UserRef{}, fmt.Errorf("%s: URL must not contain a query or fragment", s)
 	}

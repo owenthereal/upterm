@@ -77,13 +77,12 @@ func processGone(pid int) bool {
 	return false
 }
 
-// Test_Host_StopHangsUpTheShellsJobs is the design's acceptance test for a
-// stop: an interactive shell with one foreground and one background job. A
-// shell with job control puts each job in its own process group, so a
-// signal to the shell's group reaches the shell and nothing it launched —
-// except that bash, on SIGHUP, resends it to every job before exiting. So
-// only the shell can end these jobs, and that both are gone is the
-// assertion that matters.
+// Test_Host_StopHangsUpTheShellsJobs is the acceptance test for a stop: an
+// interactive shell with one foreground and one background job. A shell with
+// job control puts each job in its own process group, so a signal to the
+// shell's group reaches the shell and nothing it launched — except that bash,
+// on SIGHUP, resends it to every job before exiting. So only the shell can end
+// these jobs, and that both are gone is the assertion that matters.
 //
 // The elapsed bound below adds the second half: that the shell did it
 // without the teardown having to escalate. With StopGrace at ten seconds,

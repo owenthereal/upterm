@@ -49,7 +49,7 @@ message Claimed {
   int32 pid = 6;
 }
 
-// SessionCreated is gate 1: the tunnel is up and the session is registered.
+// SessionCreated: the tunnel is up and the session is registered.
 // The parent shows it and answers accept.
 message SessionCreated { GetSessionResponse session = 1; }
 
@@ -60,7 +60,7 @@ message Listening {
   repeated string host_keys = 2;
 }
 
-// Started is gate 3: the command is running and the session's record has
+// Started: the command is running and the session's record has
 // been published. The parent may exit.
 message Started {
   string session_id = 1;

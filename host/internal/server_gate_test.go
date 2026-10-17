@@ -32,8 +32,9 @@ func TestGateDefersTheCommandUntilTheFirstHostClientIsSubscribed(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "the command must not start before a host client is subscribed")
 
 	// An immediate-exit command and a client that attaches afterwards: the
-	// design's race. With the gate the client is subscribed before the first
-	// byte exists, so it sees the output and the status every time.
+	// race the gate exists to close. With the gate the client is subscribed
+	// before the first byte exists, so it sees the output and the status every
+	// time.
 	_, out, sess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, out, "hello")
 	var exit *ssh.ExitError

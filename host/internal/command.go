@@ -446,26 +446,25 @@ type outputFlusher interface {
 	FlushOutput() error
 }
 
-// terminate ends a command that has been told to stop, the design's own
-// sequence: SIGHUP to its process group, which a job-control shell forwards
-// to every job; if it stays past hangupGrace, close the pty master --
-// anything still holding the terminal open fails its reads and writes,
-// which collects processes that ignored the hangup, and is also what frees
-// a session leader a platform will otherwise block inside exit() while its
-// controlling terminal still holds output nobody has drained, since the
-// reader that was going to drain it stopped issuing new reads the moment
-// this session began ending; SIGTERM after another grace; SIGKILL to the
-// group, then the leader, after a third -- the design's boundary is
-// everything in the command's process group, plus everything that hangs up
-// when the pty goes, and a leader-only kill would leave its own children
-// behind exactly like the hangup and the term steps would if nothing
-// forwarded them. Where signals are unsupported it kills at once. Every
-// wait in here is bounded, including the one after the final kill --
-// terminate must return, with or without proof the process has actually
-// gone, because it runs on the actor's own execute and run.Group is
-// waiting for that to return before anything else can. A command still not
-// confirmed exited when terminate gives up is logged: Result() staying
-// zero for it is fine, but it should not also be silent.
+// terminate ends a command that has been told to stop, in this order: SIGHUP to
+// its process group, which a job-control shell forwards to every job; if it
+// stays past hangupGrace, close the pty master -- anything still holding the
+// terminal open fails its reads and writes, which collects processes that
+// ignored the hangup, and is also what frees a session leader a platform will
+// otherwise block inside exit() while its controlling terminal still holds
+// output nobody has drained, since the reader that was going to drain it
+// stopped issuing new reads the moment this session began ending; SIGTERM after
+// another grace; SIGKILL to the group, then the leader, after a third -- the
+// boundary is everything in the command's process group, plus everything that
+// hangs up when the pty goes, and a leader-only kill would leave its own
+// children behind exactly like the hangup and the term steps would if nothing
+// forwarded them. Where signals are unsupported it kills at once. Every wait in
+// here is bounded, including the one after the final kill -- terminate must
+// return, with or without proof the process has actually gone, because it runs
+// on the actor's own execute and run.Group is waiting for that to return before
+// anything else can. A command still not confirmed exited when terminate gives
+// up is logged: Result() staying zero for it is fine, but it should not also be
+// silent.
 //
 // The close is fired on its own goroutine rather than waited on, and this
 // is load-bearing, not a style choice. Read holds the pty's read lock for

@@ -231,7 +231,7 @@ const maxWrapHeld = 256
 //     was decided, so 256 at most. On top of them come the inner parser's
 //     pending ESC, the one that may begin the dropped string's ST, re-encoded
 //     as the ESC ESC it arrived as (2), and a raw ESC whose pair is still to
-//     come (1): 256 + 2 + 1 = 259 (Owen, 2026-10-11).
+//     come (1): 256 + 2 + 1 = 259.
 //
 // It matters because Pending is replayed to every joining writer after the
 // ring: what the filter holds is output no reader has seen yet, and it is held
@@ -453,7 +453,7 @@ func (f *TerminalQueryFilter) cancel(b byte) {
 		// Only the head's own ESC goes out, ahead of the cancel, as the close.
 		// So is a DCS held while it may be a tmux wrapper, and a wrapper
 		// before its first inner ESC, where a DEC terminal ends the DCS and
-		// prints what follows (Owen, 2026-10-11). Taken as the wrapper's
+		// prints what follows. Taken as the wrapper's
 		// payload instead, what followed was dropped with the wrapper when a
 		// query came after it: "ESC P tmux; CAN hello ESC ESC [6n ESC \" lost
 		// the hello.
@@ -793,7 +793,7 @@ func (f *TerminalQueryFilter) decideDCS() {
 // kitty, which ends any string at a BEL and takes control data without a ';',
 // decides it at a BEL too. kitty reads only to the first BEL, and the control
 // data before it is decided as kitty reads it. Deciding at every later BEL as
-// well is a deliberate superset (spec rule 11). A query found at any BEL drops
+// well is a deliberate superset. A query found at any BEL drops
 // the command, and the bytes after the BEL, which a DEC terminal reads as more
 // control data, can't undo that. A BEL that asks nothing is held as payload,
 // as a DEC terminal takes it.
@@ -1005,7 +1005,7 @@ func (f *TerminalQueryFilter) wrapMatchByte(b byte) {
 // the wrapper can pass as it came. Raw bytes decode in pairs after an ESC, as
 // tmux's DCS rules have it: ESC ESC is one inner ESC, ESC \ is the outer ST,
 // which ends the wrapper, and any other ESC x ends the wrapper too, as a DEC
-// terminal ends the DCS there (spec rule 11). So an ESC is held until the
+// terminal ends the DCS there. So an ESC is held until the
 // byte after it says which.
 //
 // The bytes before the first inner ESC are the wrapper's own: a DEC terminal

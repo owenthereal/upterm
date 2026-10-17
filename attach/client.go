@@ -1,7 +1,7 @@
 // Package attach is the local terminal's side of a session: an SSH client of
 // the session's attach socket. upterm host, upterm attach and the functional
-// tests all use it, so the local terminal is just another client in the code
-// rather than in a design document.
+// tests all use it, so the local terminal is just another client in the code,
+// not a special case beside it.
 package attach
 
 import (
