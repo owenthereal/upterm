@@ -24,10 +24,12 @@ import (
 )
 
 // The property's cases are drawn from a seed, so a failing case can be run
-// again, and more of them can be run than a test run has time for.
+// again, and more of them can be run than a test run has time for; and a
+// failing case is shrunk for a while before it is reported.
 var (
-	propertySeed  = flag.Uint64("replay.seed", 1, "the seed the continuation properties draw their cases from")
-	propertyCases = flag.Int("replay.cases", 2000, "how many cases TestReplayContinuesEquivalently runs")
+	propertySeed   = flag.Uint64("replay.seed", 1, "the seed the continuation properties draw their cases from")
+	propertyCases  = flag.Int("replay.cases", 2000, "how many cases TestReplayContinuesEquivalently runs")
+	propertyShrink = flag.Duration("replay.shrink", time.Minute, "how long a failing case of a continuation property is shrunk for")
 )
 
 // streamGen writes terminal output from rnd, a token at a time: the bytes,
@@ -1060,11 +1062,11 @@ func shrink(c contCase, kind string) contCase {
 }
 
 // shrinkCase returns a smaller case for which fails holds, as it does for c,
-// the smallest it finds in a minute: it cuts bytes from the suffix and from
-// the prefix, its events and offers moving with them, and drops events and
-// Feeds, for as long as fails holds.
+// the smallest it finds in the time -replay.shrink allows: it cuts bytes
+// from the suffix and from the prefix, its events and offers moving with
+// them, and drops events and Feeds, for as long as fails holds.
 func shrinkCase(c contCase, failing func(contCase) bool) contCase {
-	stop := time.Now().Add(time.Minute)
+	stop := time.Now().Add(*propertyShrink)
 	fails := func(d contCase) bool { return time.Now().Before(stop) && failing(d) }
 	if d := c; d.offers != nil {
 		if d.offers = nil; fails(d) {
