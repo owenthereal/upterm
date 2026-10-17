@@ -234,7 +234,8 @@ func attachRunE(c *cobra.Command, args []string) error {
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
-	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, os.Stdin, os.Stdout, logger.Logger)
+	src := statusSource{Name: name, LaunchID: t.LaunchID, AdminSocket: t.AdminSocket}
+	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, src, os.Stdin, os.Stdout, logger.Logger)
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, t.Status, err)}
 	}

@@ -2033,3 +2033,35 @@ func TestACauseQueuedBehindASlowConsumerIsStillRead(t *testing.T) {
 	require.Equal(t, Exited, res.Reason)
 	require.Equal(t, Cause{Kind: CauseStopped}, res.Cause)
 }
+
+// ~? is the Terminal's, with the Client's Status hook: the lines reach this
+// terminal, and nothing of the two keys reaches the session.
+func TestClientShowsItsStatusInThisTerminalOnly(t *testing.T) {
+	door := newRecordingDoor()
+	d := serveDoor(t, func(s gssh.Session) {
+		_, _ = io.WriteString(s, "ready")
+		door.handle(s)
+	})
+	var out syncSink
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	c := &Client{Socket: d.socket, HostKeys: d.pin(), Stdin: pr, Stdout: &out, Escape: '~',
+		Pty:    &Pty{Term: "xterm", Size: termsize.Default},
+		Status: func(context.Context) []string { return []string{"upterm: STATUS"} }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runAsync(t, ctx, c)
+
+	waitFor(t, func() bool { return out.String() == "ready" }, "the session's output never reached the terminal")
+	_, err := pw.Write([]byte("\r~?x"))
+	require.NoError(t, err)
+	waitFor(t, func() bool { return out.String() == "readyupterm: STATUS\r\n" }, "the status never reached the terminal")
+	waitFor(t, func() bool { return door.taken() == "\rx" }, "the session never got the keys around ~?")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("Run did not return after cancellation")
+	}
+}

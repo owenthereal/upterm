@@ -111,7 +111,7 @@ func TestAttachDetachesOnSIGTERMAndRestoresTheTerminal(t *testing.T) {
 	go func() {
 		// owned is injected as always-true: a pty pair is nobody's
 		// foreground, and what is under test is the signal, not ownership.
-		res, err := attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', tty, tty, func(*os.File) bool { return true }, discardLogger())
+		res, err := attachLocalTerminalWith(ctx, door.socket, []ssh.PublicKey{door.key}, lt, '~', statusSource{}, tty, tty, func(*os.File) bool { return true }, discardLogger())
 		require.NoError(t, err)
 		done <- res
 	}()

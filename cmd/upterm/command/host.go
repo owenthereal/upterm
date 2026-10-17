@@ -657,9 +657,9 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 		hint         string
 	)
 	if !flagDetach {
-		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+		attachClient = func(ctx context.Context, socket string, keys []ssh.PublicKey, src statusSource) (attach.Result, error) {
 			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
-			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, os.Stdin, os.Stdout, logger)
+			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, src, os.Stdin, os.Stdout, logger)
 		}
 		hint = keyHint(opts.escape, os.Getenv("SSH_TTY") != "")
 	}

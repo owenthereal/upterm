@@ -26,7 +26,11 @@ import (
 )
 
 type spawnFunc func(spawnOptions) (net.Conn, *os.Process, error)
-type clientFunc func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error)
+
+// clientFunc attaches the local terminal to the attach socket, pinned to
+// keys. src is the session the terminal's ~? reports on.
+type clientFunc func(ctx context.Context, socket string, keys []ssh.PublicKey, src statusSource) (attach.Result, error)
+
 type displayFunc func(ctx context.Context, sess *api.GetSessionResponse, name string) error
 
 // startedWaitTimeout bounds how long a foreground parent whose terminal has
@@ -194,6 +198,14 @@ func (s *spawnedSession) run(ctx context.Context) error {
 				_ = parent.Close()
 				return
 			}
+			// The launch this process started, which ~? checks what it reads
+			// against: the name can pass to another launch while this
+			// terminal is attached. Taken here, on the handlers' goroutine,
+			// which is the one Claimed wrote it on.
+			src := statusSource{Name: s.name}
+			if claimed != nil {
+				src.LaunchID, src.AdminSocket = claimed.LaunchId, claimed.AdminSocket
+			}
 			// From here a signal is a detach, exactly as it is for upterm
 			// attach; before here the default disposition ends this process,
 			// which closes the channel, which is abandonment.
@@ -201,7 +213,7 @@ func (s *spawnedSession) run(ctx context.Context) error {
 			clientCancel.Store(&cancelClient)
 			go func() {
 				defer cancelClient()
-				res, err := s.attachClient(clientCtx, l.AttachSocket, keys)
+				res, err := s.attachClient(clientCtx, l.AttachSocket, keys, src)
 				if err == nil {
 					// Attached and gone. If the command has not started yet
 					// the daemon still owes a verdict; wait for it, bounded.

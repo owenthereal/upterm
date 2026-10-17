@@ -192,14 +192,14 @@ func StatusText(detail SessionDetail) string {
 		parts = append(parts, detail.TunnelReason)
 	}
 	if !detail.TunnelLostAt.IsZero() {
-		parts = append(parts, "since "+clockTime(detail.TunnelLostAt))
+		parts = append(parts, "since "+ClockTime(detail.TunnelLostAt))
 	}
 	text := strings.Join(parts, " ")
 	if detail.NextAttemptAt.After(now()) {
 		if text != "" {
 			text += ", "
 		}
-		text += "next attempt " + clockTime(detail.NextAttemptAt)
+		text += "next attempt " + ClockTime(detail.NextAttemptAt)
 	}
 	if text == "" {
 		return detail.Status
@@ -207,7 +207,8 @@ func StatusText(detail SessionDetail) string {
 	return detail.Status + " — " + text
 }
 
-func clockTime(t time.Time) string { return t.Local().Format("15:04:05") }
+// ClockTime is t as the status text gives a time: local, to the second.
+func ClockTime(t time.Time) string { return t.Local().Format("15:04:05") }
 
 // StatusHint is what the user can do about the outage, for the statuses that
 // have one: a reconnecting session, and a disconnected one, whose reason says

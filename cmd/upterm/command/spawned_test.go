@@ -533,7 +533,7 @@ func TestTheKeyHintFollowsTheBanner(t *testing.T) {
 
 // fakeClient attaches on cue and ends how it is told.
 func fakeClient(attached chan<- string, result <-chan attach.Result) clientFunc {
-	return func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+	return func(ctx context.Context, socket string, keys []ssh.PublicKey, _ statusSource) (attach.Result, error) {
 		if len(keys) == 0 {
 			return attach.Result{}, errors.New("no keys")
 		}
@@ -676,13 +676,36 @@ func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {
 	require.ErrorContains(t, err, "/var/log/upterm.log", "the log is where the answer is")
 }
 
+// The terminal's ~? reports on the launch this process started, at the admin
+// socket that launch claimed: the name can pass to another launch while the
+// terminal is attached.
+func TestSpawnedSessionGivesItsTerminalTheLaunchItClaimed(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	attached := make(chan statusSource, 1)
+	client := func(_ context.Context, _ string, _ []ssh.PublicKey, src statusSource) (attach.Result, error) {
+		attached <- src
+		return attach.Result{Reason: attach.Detached}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, client, &stdout, &stderr)
+	d.startup(t, "s")
+	got := make(chan statusSource, 1)
+	go func() {
+		src := <-attached
+		d.start()
+		got <- src
+	}()
+	require.NoError(t, s.run(context.Background()))
+	require.Equal(t, statusSource{Name: "s", LaunchID: "launch-1", AdminSocket: "/run/a.sock"}, <-got)
+}
+
 // A terminal that never attached leaves the daemon with a gate nobody will
 // open; the parent closes its end at once so the daemon abandons now rather
 // than after its own timeout.
 func TestSpawnedSessionAbandonsWhenItsTerminalCannotAttach(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
-	client := func(context.Context, string, []ssh.PublicKey) (attach.Result, error) {
+	client := func(context.Context, string, []ssh.PublicKey, statusSource) (attach.Result, error) {
 		return attach.Result{}, errors.New("dial unix /run/t.sock: connection refused")
 	}
 	s := newSession(t, spawn, client, &stdout, &stderr)
@@ -715,7 +738,7 @@ func TestSpawnedSessionWaitsForItsTerminalWhenTheSessionFails(t *testing.T) {
 	var clientReturned, clientSawCancel atomic.Bool
 	// A client only a cancellation gets back, which is what a terminal
 	// holding raw mode with nothing left to read looks like.
-	client := func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+	client := func(ctx context.Context, socket string, keys []ssh.PublicKey, _ statusSource) (attach.Result, error) {
 		attached <- socket
 		<-ctx.Done()
 		clientSawCancel.Store(ctx.Err() != nil)
@@ -796,7 +819,7 @@ func TestSpawnedSessionWaitsForTheVerdictAfterAnEarlyDetach(t *testing.T) {
 func TestSpawnedSessionRefusesAnUnreadableHostKey(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
-	client := func(context.Context, string, []ssh.PublicKey) (attach.Result, error) {
+	client := func(context.Context, string, []ssh.PublicKey, statusSource) (attach.Result, error) {
 		t.Error("the client must not be started with keys that did not parse")
 		return attach.Result{}, nil
 	}
