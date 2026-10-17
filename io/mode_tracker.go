@@ -273,6 +273,24 @@ type ModeTracker struct {
 	overflow bool // current sequence ran past its cap; discard it
 	state    modeState
 	kind     stringKind // which string sequence msString is inside
+
+	// What InSequence knows beyond state, which keeps the DEC reading the
+	// bookkeeping above is built on. watchSequence keeps them, ahead of step.
+	//
+	// escFinal: an ESC sequence has had its intermediates (0x20-0x2F) and
+	// waits for its final byte. The parser completes only a G0 designation
+	// and leaves every other one at its introducer, which costs it nothing:
+	// none of them is a mode it tracks.
+	//
+	// unended: a string the program ended ambiguously -- by CAN, SUB or an ESC
+	// that isn't ST -- which a DEC parser ends there and kitty, and tmux for a
+	// DCS, keep open, taking what follows as more of it. It is over only at a
+	// terminator every terminal shares: ST, or BEL for an OSC.
+	//
+	// afterESC: the byte before was ESC, for recognising ST.
+	escFinal bool
+	unended  stringKind
+	afterESC bool
 }
 
 type modeState int
@@ -454,6 +472,23 @@ func (m *ModeTracker) uncertain() bool {
 // and no sequence overflowed past its bound either.
 func (m *ModeTracker) AtGround() bool { return m.state == msNormal }
 
+// InSequence reports whether the output seen so far may have left the
+// terminal inside an escape sequence, where text written now would be read as
+// part of it: after ESC; in an ESC sequence still waiting for its final byte
+// (any intermediate 0x20-0x2F: ESC ( ) * + - . / # % SP, of which the parser
+// completes only "("); in a CSI; in an OSC, DCS, PM, APC or SOS string; or
+// after a string the program ended ambiguously -- by CAN, SUB or an ESC that
+// isn't ST -- which a DEC parser ends there but kitty and tmux keep open (see
+// TerminalQueryFilter). An ambiguous string stays "inside" until a terminator
+// every terminal shares: ST (ESC \), or BEL for an OSC.
+//
+// It is AtGround's cautious form, for a writer that must not land inside the
+// program's sequence on any terminal. The tracker's own mode bookkeeping keeps
+// the DEC reading: only this is conservative.
+func (m *ModeTracker) InSequence() bool {
+	return m.state != msNormal || m.escFinal || m.unended != skNone
+}
+
 // bufferedBytes reports the parser's current accumulation: both the CSI
 // parameters it is collecting and the raw partial of the same sequence, which
 // is what a test asking whether an unterminated sequence can grow the parser
@@ -464,9 +499,55 @@ func (m *ModeTracker) bufferedBytes() int { return len(m.seq) + len(m.partial) }
 // alters the stream; callers use it as an observer, not a filter.
 func (m *ModeTracker) Write(p []byte) (int, error) {
 	for _, b := range p {
+		m.watchSequence(b)
 		m.step(b)
 	}
 	return len(p), nil
+}
+
+// watchSequence keeps what InSequence knows beyond the parser's state, from
+// the state b arrives in, before step moves it on.
+func (m *ModeTracker) watchSequence(b byte) {
+	cancel := b == 0x18 || b == 0x1a
+	intermediate := b >= 0x20 && b <= 0x2f
+	// An ESC sequence past its intermediates ends at its final byte, and CAN,
+	// SUB or the ESC of another sequence abandons it. Anything else -- a
+	// control character, which a terminal executes there, DEL, or another
+	// intermediate -- leaves it waiting.
+	if m.escFinal && (cancel || b == 0x1b || (b >= 0x30 && b <= 0x7e)) {
+		m.escFinal = false
+	}
+	switch m.state {
+	case msEsc:
+		// "(" is the parser's own msCharset.
+		if intermediate && b != '(' {
+			m.escFinal = true
+		}
+	case msCharset:
+		// A designation with an intermediate of its own, such as ESC ( % 5,
+		// which the parser drops as not a designator at all.
+		if intermediate {
+			m.escFinal = true
+		}
+	case msString:
+		if cancel {
+			m.unended = m.kind
+		}
+	case msStringEsc:
+		if b != '\\' {
+			// The ESC was not ST's: the parser resyncs on b as the start of
+			// a new sequence, and a terminal that keeps the string open
+			// reads both as more of it.
+			m.unended = m.kind
+			if intermediate && b != '(' {
+				m.escFinal = true
+			}
+		}
+	}
+	if m.unended != skNone && ((m.afterESC && b == '\\') || (b == 0x07 && m.unended == skOSC)) {
+		m.unended = skNone
+	}
+	m.afterESC = b == 0x1b
 }
 
 func (m *ModeTracker) step(b byte) {
