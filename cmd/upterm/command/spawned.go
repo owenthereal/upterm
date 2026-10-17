@@ -363,6 +363,19 @@ func keyHint(escape byte, sshTTY bool) string {
 	return hint
 }
 
+// hostKeyHint is keyHint for the terminal lt describes, or "" where its keys
+// don't work. The hint names ~. and ~?, so it is said only where both do:
+// stdin is read, in raw mode, because this process is its foreground, and
+// stdout is a terminal, the pty ~? needs to know it writes outside the
+// session's sequences. Piped (upterm host -- cmd | tee log), ~. works and ~?
+// doesn't; in the background, neither does.
+func hostKeyHint(lt localTerminal, escape byte, sshTTY bool) string {
+	if !lt.rawMode || lt.pty == nil {
+		return ""
+	}
+	return keyHint(escape, sshTTY)
+}
+
 // hintOut is where the key hint goes: to whoever is at the keyboard, so
 // stderr when it is a terminal, else stdout when that is one, as join's
 // questions do. With neither a terminal there is nobody at one to tell, and a

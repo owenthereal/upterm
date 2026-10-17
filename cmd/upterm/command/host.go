@@ -661,7 +661,9 @@ func runHostParent(c *cobra.Command, logger *slog.Logger, opts hostOptions) erro
 			lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term)
 			return attachLocalTerminal(ctx, socket, keys, lt, opts.escape, src, os.Stdin, os.Stdout, logger)
 		}
-		hint = keyHint(opts.escape, os.Getenv("SSH_TTY") != "")
+		// The terminal is classified the way the client classifies it, so
+		// the hint names keys only where the client will act on them.
+		hint = hostKeyHint(classifyTerminal(os.Stdin, os.Stdout, tty.Owned, opts.term), opts.escape, os.Getenv("SSH_TTY") != "")
 	}
 	warning := logWarningFor(c.Context())
 	err := runWithGeneratedNameRetry(logger, flagName, opts.command, func(name string) error {

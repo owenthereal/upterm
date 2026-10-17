@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -462,6 +464,21 @@ func TestSpawnedSessionDetachSaysWhatIsWrongWhenNotReady(t *testing.T) {
 			require.Equal(t, tc.want, stdout.String())
 		})
 	}
+}
+
+// The key hint names ~. and ~?, so it is said only to a terminal where both
+// work: one whose keystrokes this process reads (its stdin is the foreground's
+// own) and whose output is a terminal, which ~? needs to know it is writing
+// outside the session's sequences. Piped (upterm host -- cmd | tee log) or
+// in the background, the keys reach nothing.
+func TestHostKeyHintOnlyWhereTheKeysWork(t *testing.T) {
+	pty := &attach.Pty{Term: "xterm", Size: termsize.Default}
+	stdin := strings.NewReader("")
+	require.Equal(t, keyHint('~', true), hostKeyHint(localTerminal{pty: pty, stdin: stdin, rawMode: true}, '~', true))
+	require.Empty(t, hostKeyHint(localTerminal{stdin: stdin, rawMode: true}, '~', true), "stdout piped: ~. works and ~? doesn't")
+	require.Empty(t, hostKeyHint(localTerminal{pty: pty}, '~', true), "in the background: no keystroke is read")
+	require.Empty(t, hostKeyHint(localTerminal{}, '~', true), "neither")
+	require.Empty(t, hostKeyHint(localTerminal{pty: pty, stdin: stdin, rawMode: true}, 0, true), "--escape-char none")
 }
 
 func TestKeyHint(t *testing.T) {
