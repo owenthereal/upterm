@@ -567,6 +567,129 @@ func Test_ModeTracker_SaveCursorIsNotAMode(t *testing.T) {
 	require.Equal(t, "\x1b[?25h", string(m.Restore()), "and not restored on the way out")
 }
 
+// A cursor restore brings back the charsets its save held, and one from a slot
+// nothing saved gives ASCII: xterm's cursor.c, CursorRestore, and x/vt's
+// vt/csi_mode.go, restoreCursor. The tracker took the last ESC ( X for G0
+// whatever came after it, so once both were evicted a joiner was handed line
+// drawing the session's terminal had already left, and drew its next text in
+// it. This is the smallest stream that showed it, at the size it was found at,
+// through a ring of one byte.
+func TestACursorRestoreWithNothingSavedGivesASCII(t *testing.T) {
+	w := NewMultiWriter(1)
+	resize(w, termsize.Size{Cols: 89, Rows: 18})
+	writeString(w, "\x1b(0\x1b8{")
+
+	var snap string
+	withLog(w, func(_ *sizeLog, start uint64) {
+		require.Equal(t, uint64(5), start, "the ring holds only the {")
+		snap = string(w.modes.Snapshot())
+	})
+	require.NotContains(t, snap, "\x1b(0")
+	require.Empty(t, snap, "G0 is ASCII, which is where a joiner's terminal starts")
+}
+
+// A restore of a save brings back the G0 the save held, line drawing here,
+// and not the ASCII designated between them.
+func TestACursorRestoreBringsBackTheSavedG0(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1b(0\x1b7\x1b(B\x1b8"))
+	require.Equal(t, "\x1b(0", string(m.Snapshot()))
+	require.Equal(t, "\x1b(B", string(m.Restore()), "a terminal leaving is put back to ASCII")
+}
+
+// xterm keeps a saved cursor per screen buffer, sc[whichBuf], and every save
+// and restore uses the slot of the screen showing at the time: ?1049h saves
+// before it switches, so on the normal screen, and ?1049l restores after it
+// switches back, so from the normal screen's slot too. ?1047 switches without
+// either. x/vt's vt/csi_mode.go, setMode, does the same.
+func TestEachScreenRestoresFromItsOwnSlot(t *testing.T) {
+	m := NewModeTracker()
+	for _, step := range []struct{ stream, want, why string }{
+		{"\x1b(A\x1b7\x1b(0\x1b[?1049h", "\x1b[?1049h\x1b(0", "?1049h saves the normal screen's G0, line drawing, over the UK saved before it"},
+		{"\x1b8", "\x1b[?1049h", "the alternate screen's slot is its own, and nothing has filled it"},
+		{"\x1b(A\x1b7\x1b(0\x1b8", "\x1b[?1049h\x1b(A", "the alternate screen restores its own save"},
+		{"\x1b[?1049l", "\x1b(0", "?1049l restores the normal screen's slot, not the alternate's"},
+		{"\x1b[?1047h\x1b(B\x1b8", "\x1b[?1047h\x1b(A", "the alternate screen's slot outlives a trip away"},
+		{"\x1b[?1047l\x1b8", "\x1b(0", "and so does the normal screen's"},
+	} {
+		_, err := m.Write([]byte(step.stream))
+		require.NoError(t, err)
+		require.Equal(t, step.want, string(m.Snapshot()), step.why)
+	}
+}
+
+// Every save form fills the slot of the screen showing and every restore form
+// reads it, so a save of one form is restored by any: DECSC and DECRC, ?1048h
+// and ?1048l, and SCOSC and SCORC, which xterm's charproc.c runs as
+// CursorSave and CursorRestore too (CASE_ANSI_SC and CASE_ANSI_RC).
+//
+// CSI s is SCOSC only while DECLRMM (?69) is reset; set, it is DECSLRM, the
+// left and right margins. The tracker doesn't follow ?69, so it takes a bare
+// CSI s, the form SCOSC is sent in, for a save, and one with parameters, the
+// form DECSLRM is sent in, for margins: as it takes a bare CSI u, and only a
+// bare one, for SCORC.
+func TestEveryCursorSaveAndRestoreFormCarriesG0(t *testing.T) {
+	saves := []struct{ name, seq string }{{"DECSC", "\x1b7"}, {"?1048h", "\x1b[?1048h"}, {"SCOSC", "\x1b[s"}}
+	restores := []struct{ name, seq string }{{"DECRC", "\x1b8"}, {"?1048l", "\x1b[?1048l"}, {"SCORC", "\x1b[u"}, {"?1049l", "\x1b[?1049l"}}
+	snapshot := func(t *testing.T, stream string) string {
+		m := NewModeTracker()
+		_, err := m.Write([]byte(stream))
+		require.NoError(t, err)
+		return string(m.Snapshot())
+	}
+	for _, save := range saves {
+		for _, restore := range restores {
+			t.Run(save.name+" then "+restore.name, func(t *testing.T) {
+				require.Equal(t, "\x1b(0", snapshot(t, "\x1b(0"+save.seq+"\x1b(B"+restore.seq))
+			})
+		}
+	}
+	for _, restore := range restores {
+		t.Run(restore.name+" with nothing saved", func(t *testing.T) {
+			require.Empty(t, snapshot(t, "\x1b(0"+restore.seq))
+		})
+	}
+	t.Run("?1049h then DECRC", func(t *testing.T) {
+		require.Equal(t, "\x1b(0", snapshot(t, "\x1b(0\x1b[?1049h\x1b[?1047l\x1b(B\x1b8"))
+	})
+	for _, tc := range []struct{ name, seq string }{
+		{"DECSLRM, a CSI s with margins", "\x1b[2;40s"},
+		{"XTSAVE, a CSI ? s", "\x1b[?1s"},
+	} {
+		t.Run(tc.name+" is no save", func(t *testing.T) {
+			require.Empty(t, snapshot(t, "\x1b(0"+tc.seq+"\x1b8"))
+		})
+	}
+	t.Run("kitty's query, a CSI ? u, is no restore", func(t *testing.T) {
+		require.Equal(t, "\x1b(B", snapshot(t, "\x1b(0\x1b7\x1b(B\x1b[?u"), "G0 is still the ASCII designated after the save")
+	})
+}
+
+// RIS and DECSTR each end with a cursor save, of the charsets they have just
+// reset, so the slot it fills restores ASCII: xterm's charproc.c, ReallyReset,
+// whose x/vt counterparts are vt/esc.go's fullReset and softReset. RIS first
+// leaves the alternate screen (FromAlternate), so its save is the normal
+// screen's, and DECSTR's is the slot of the screen showing. Neither touches
+// the other screen's slot, which a restore there still brings back.
+func TestResetsRefillTheSlotOfTheScreenTheySaveOn(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"RIS", "\x1b(0\x1b7\x1bc\x1b(0\x1b8", ""},
+		{"RIS from the alternate screen", "\x1b(0\x1b[?1049h\x1b7\x1bc\x1b(0\x1b8", ""},
+		{"RIS keeps the alternate screen's slot", "\x1b[?1049h\x1b(0\x1b7\x1bc\x1b[?1047h\x1b8", "\x1b[?1047h\x1b(0"},
+		{"DECSTR", "\x1b(0\x1b7\x1b[!p\x1b(0\x1b8", ""},
+		{"DECSTR on the alternate screen", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b(0\x1b8", "\x1b[?1049h"},
+		{"DECSTR on the alternate screen keeps the normal screen's slot", "\x1b(0\x1b[?1049h\x1b(A\x1b7\x1b[!p\x1b[?1049l", "\x1b(0"},
+		{"DECSTR on the normal screen keeps the alternate screen's slot", "\x1b[?1047h\x1b(A\x1b7\x1b[?1047l\x1b[!p\x1b[?1047h\x1b8", "\x1b[?1047h\x1b(A"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+}
+
 // CAN and SUB cancel a sequence from any state on the DEC parser terminals
 // implement, and a terminal that has seen one is back at ground: what follows
 // prints. A tracker that stayed inside the sequence recorded that text as the
@@ -1306,10 +1429,11 @@ func TestCloneCopiesTheMarginCandidates(t *testing.T) {
 func TestCloneSharesNoReference(t *testing.T) {
 	m := NewModeTracker()
 	// No size yet, so the region is kept as written, a slice; then a
-	// candidate per crossed event. Both screens' kitty stacks, the charset,
+	// candidate per crossed event. Both screens' kitty stacks, the charset and
+	// both screens' saved G0, the normal screen's saved by ?1049h,
 	// modifyOtherKeys, and a CSI the stream stops inside, for the partial and
 	// the parameters.
-	_, _ = m.Write([]byte("\x1b[2;5r\x1b(0\x1b[>1u\x1b[?1049h\x1b[>2u\x1b[>4;1m\x1b[?25l"))
+	_, _ = m.Write([]byte("\x1b[2;5r\x1b(0\x1b[>1u\x1b[?1049h\x1b7\x1b[>2u\x1b[>4;1m\x1b[?25l"))
 	m.crossTentative(1, rows(4))
 	_, _ = m.Write([]byte("\x1b[?10"))
 
