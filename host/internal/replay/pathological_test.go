@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/x/vt"
 	"github.com/stretchr/testify/require"
 
 	"github.com/owenthereal/upterm/internal/termsize"
@@ -23,17 +24,23 @@ const overshoot = 50 * time.Millisecond * timeScale
 // them given an empty string, a background-coloured blank row per 9 bytes,
 // one REP of 100,000,000, and ED 2 after ED 2. Each renders, or fails at its
 // deadline, by the deadline and one meter interval.
+//
+// The floods are seconds of metered work, so each fails at its deadline,
+// having published nothing of the batch it stopped in. The REP renders: the
+// fork repeats a long REP cheaply, and it can finish past its deadline in
+// work the meter doesn't count, bounded by the screen's size.
 func TestReplayPathological(t *testing.T) {
 	const wait = 200 * time.Millisecond
 	for _, tc := range []struct {
-		name   string
-		stream []byte
+		name     string
+		stream   []byte
+		finishes bool
 	}{
-		{"yes ''", bytes.Repeat([]byte("\n"), uio.DefaultReplayBytes)},
-		{"coloured blank rows", bytes.Repeat([]byte("\x1b[41m\x1b[K\n"), uio.DefaultReplayBytes/9)},
+		{"yes ''", bytes.Repeat([]byte("\n"), uio.DefaultReplayBytes), false},
+		{"coloured blank rows", bytes.Repeat([]byte("\x1b[41m\x1b[K\n"), uio.DefaultReplayBytes/9), false},
 		// REP prints, so the line feed after it is what ends a batch.
-		{"ESC[100000000b", []byte("x\x1b[100000000b\n")},
-		{"ED 2 floods", bytes.Repeat([]byte("\x1b[2J"), uio.DefaultReplayBytes/4)},
+		{"ESC[100000000b", []byte("x\x1b[100000000b\n"), true},
+		{"ED 2 floods", bytes.Repeat([]byte("\x1b[2J"), uio.DefaultReplayBytes/4), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			began := time.Now()
@@ -47,6 +54,9 @@ func TestReplayPathological(t *testing.T) {
 			elapsed := time.Since(began)
 			t.Logf("after %v: %v", elapsed, err)
 			require.LessOrEqual(t, elapsed, wait+overshoot)
+			if !tc.finishes {
+				require.ErrorIs(t, err, uio.ErrReplayDeadline)
+			}
 		})
 	}
 }
@@ -79,4 +89,21 @@ func TestReplayStopsInsideAnED2Flood(t *testing.T) {
 	t.Logf("asked %d times, at most %v apart; returned %v after the deadline", len(asked), longest, returned.Sub(deadline))
 	require.LessOrEqual(t, returned.Sub(deadline), overshoot)
 	requireHandoff(t, e, 3, 1)
+}
+
+// Inside a batch, the meter asks the stop function at least once every
+// MeterInterval cell operations, whatever the clock says. 64 ED 2s at the
+// size cap are 64 times 131,072 cell writes, in one Write, so a stop function
+// that never says stop is asked at least that many over MeterInterval times.
+func TestReplayAsksTheStopFunctionEachMeterInterval(t *testing.T) {
+	const erases = 64
+	e := start(t, captureOf("x\r\n", event(1, 0, 512, 256)))
+	asks := 0
+	e.stop = func() bool {
+		asks++
+		return false
+	}
+	require.NoError(t, e.Feed([][]byte{bytes.Repeat([]byte("\x1b[2J"), erases)}, nil))
+	t.Logf("asked %d times", asks)
+	require.GreaterOrEqual(t, asks, erases*512*256/vt.MeterInterval)
 }
