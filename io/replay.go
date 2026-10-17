@@ -113,7 +113,7 @@ func (t *MultiWriter) SetReplayer(r Replayer, fallback func(error)) {
 // has left, and then attaches nothing: on every path, the raw ones included,
 // the hold of writeMu that would attach w is the one that finds ctx done. The
 // check waits for nothing, so a joiner with nothing to emulate is attached as
-// promptly as Append would (spec J2).
+// promptly as Append would.
 func (t *MultiWriter) AppendSized(ctx context.Context, deadline time.Time, size termsize.Size, w io.Writer) error {
 	if err := checkRemovable(w); err != nil {
 		return err
@@ -129,7 +129,7 @@ func (t *MultiWriter) AppendSized(ctx context.Context, deadline time.Time, size 
 	}
 	// One emulation at a time, the permit held from Start to the handoff's
 	// outcome and released on every one, so a guest rejoining in a loop
-	// costs the host one core, not one per join (spec A6).
+	// costs the host one core, not one per join.
 	switch err := t.acquire(ctx, deadline); {
 	case errors.Is(err, ErrReplayDeadline):
 		j.err = err
@@ -152,13 +152,13 @@ type join struct {
 
 	// What the emulation has been offered: the stream up to offeredEnd, and
 	// the events up to offeredSeq. losses is the size log's count at the
-	// capture: a change means coverage broke since (spec A1).
+	// capture: a change means coverage broke since.
 	offeredEnd, offeredSeq uint64
 	losses                 uint64
-	// heldBack is set while bytes the capture stopped short of, behind a
-	// resize whose outcome wasn't known yet, have yet to be offered: spec J5
-	// offers them once it is known, with the event if it committed and
-	// without it if not.
+	// heldBack is set while bytes the capture stopped short of, behind a resize
+	// whose outcome wasn't known yet, have yet to be offered: the handoff
+	// offers them once it is known, with the event if it committed and without
+	// it if not.
 	heldBack bool
 
 	em     Emulation
@@ -204,10 +204,11 @@ func (j *join) capture() (c *Capture, done bool, err error) {
 		return nil, true, t.attachRaw(j.w)
 	}
 
-	// Nothing past a resize whose outcome isn't known: the bytes after it
-	// were laid out at a size the emulation can't know yet, and feeding the
-	// event afterwards can't repair them (spec J3). Nor any committed event
-	// after it by Seq, even one at its offset (PF-9).
+	// Nothing past a resize whose outcome isn't known: the bytes after it were
+	// laid out at a size the emulation can't know yet, and feeding the event
+	// afterwards can't repair them. Nor any committed event after it by Seq,
+	// even one at its offset: it takes effect after the unresolved resize, so
+	// the emulation can't be given it before that one's outcome is known.
 	e0, below := end, uint64(math.MaxUint64)
 	if offset, seq, ok := t.sizes.firstUnresolved(); ok {
 		e0, below = min(end, offset), seq
@@ -318,10 +319,9 @@ type step struct {
 	sizes    []SizeEvent
 }
 
-// hold is one hold of writeMu at the handoff (spec J5): every resize
-// reported before it is in the reconstruction, or the join waits for it or
-// catches up on it, and every one after it reaches the joiner as a live
-// resize.
+// hold is one hold of writeMu at the handoff: every resize reported before it
+// is in the reconstruction, or the join waits for it or catches up on it, and
+// every one after it reaches the joiner as a live resize.
 func (j *join) hold() step {
 	t := j.t
 	var fellBack error
@@ -401,13 +401,13 @@ func (j *join) unofferedAt(offset uint64) bool {
 }
 
 // offer takes what the emulation hasn't been offered of the stream: the bytes
-// since offeredEnd, and the committed events after offeredSeq, the last
-// offered rather than the last passed, so an event still in the emulation's
-// tail is never offered twice (spec A9). hold runs it only once no event is
-// unresolved, so it offers everything to End: the bound at the first
-// unresolved event, by offset and by Seq, is the capture's to decide. An
-// unknown size among the events is the end of the emulation (spec A1).
-// Called with writeMu held.
+// since offeredEnd, and the committed events after offeredSeq, the last offered
+// rather than the last passed, so an event still in the emulation's tail is
+// never offered twice. hold runs it only once no event is unresolved, so it
+// offers everything to End: the bound at the first unresolved event, by offset
+// and by Seq, is the capture's to decide. An unknown size among the events is
+// the end of the emulation: the size the bytes after it were laid out at isn't
+// known, so offer returns ErrReplayCoverage. Called with writeMu held.
 func (j *join) offer() (chunks [][]byte, sizes []SizeEvent, err error) {
 	t := j.t
 	sizes = t.sizes.after(j.offeredSeq)
@@ -429,10 +429,11 @@ func (j *join) offer() (chunks [][]byte, sizes []SizeEvent, err error) {
 }
 
 // attach hands w the render, then gap, the ring from the handoff point on,
-// which the emulation never consumed, then the sequence the filter holds,
-// read now and never at the capture, and attaches w (spec J6). Called with
-// writeMu held, the same hold that found the emulation had passed every
-// event logged.
+// which the emulation never consumed, then the sequence the filter holds, and
+// attaches w. The sequence is read now and never at the capture: the filter
+// holds the start of what follows the ring's end, and the ring has grown since
+// the capture. Called with writeMu held, the same hold that found the
+// emulation had passed every event logged.
 func (j *join) attach(gap [][]byte) error {
 	t := j.t
 	if len(j.render) > 0 {

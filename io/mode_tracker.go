@@ -109,18 +109,19 @@ var restorable = map[int]bool{
 }
 
 // maxUnresolvedResizes bounds the resizes, crossed by eviction while still
-// waiting for their outcome, that the tracker keeps a margin candidate for
-// (spec A23). What it bounds is the candidates kept, not the events
+// waiting for their outcome, that the tracker keeps a margin candidate for.
+// Every DECSTBM is decided under each candidate, so without a bound a report
+// that stays stalled would keep adding candidates, and with them the work of
+// every DECSTBM. What it bounds is the candidates kept, not the events
 // unresolved: an event whose candidate a later commit removed costs nothing,
-// so it isn't counted. That is more precise than A22's wording, which counts
-// unresolved events, and the bound is the same. A resize is crossed
-// unresolved only once a ring's worth of output has followed its ResizeBegin
-// before its ResizeEnd, and a pty reports the two around a single ioctl:
-// reaching this is a stalled report, not a resize storm.
+// so it isn't counted. A resize is crossed unresolved only once a ring's
+// worth of output has followed its ResizeBegin before its ResizeEnd, and a
+// pty reports the two around a single ioctl: reaching this is a stalled
+// report, not a resize storm.
 const maxUnresolvedResizes = 16
 
 // marginCandidate is the terminal's size and scrolling region as one
-// outcome of the unresolved resizes eviction has crossed has them (spec A22).
+// outcome of the unresolved resizes eviction has crossed has them.
 type marginCandidate struct {
 	// after is the crossed resize this candidate assumes committed last, every
 	// later one deleted; 0 is none of them.
@@ -137,10 +138,9 @@ type marginCandidate struct {
 }
 
 // decstbm decides a DECSTBM, with its parameters top and bottom, 0 where
-// absent, as xterm's CASE_DECSTBM does at this candidate's height (spec A21):
-// top is 1 if 0; bottom is the height if 0 or past it; and the region is set
-// only if bottom > top, or else nothing changes. seq is the sequence as
-// written.
+// absent, as xterm's CASE_DECSTBM does at this candidate's height: top is 1
+// if 0; bottom is the height if 0 or past it; and the region is set only if
+// bottom > top, or else nothing changes. seq is the sequence as written.
 func (c *marginCandidate) decstbm(top, bottom int, seq []byte) {
 	height := heightOf(c.size)
 	if height == 0 {
@@ -218,20 +218,19 @@ type ModeTracker struct {
 	altScreen bool
 	altVia    int // 47, 1047 or 1049
 
-	// The scrolling region is the whole terminal's, as in xterm, and no
-	// screen switch changes it (spec A17). A terminal decides a DECSTBM at its
-	// height, so the tracker hears resizes too, and while eviction has crossed
-	// resizes whose outcome is unknown, the height is one of several. So
-	// candidates holds a state per outcome that matters, in Seq order (spec
-	// A22): the first assumes every crossed resize still unresolved was
-	// deleted, and each other that its own resize committed last. A resize
-	// heard committed in order resets the region whatever came before it, so
-	// it leaves one. There is always at least one.
+	// The scrolling region is the whole terminal's, as in xterm, and no screen
+	// switch changes it. A terminal decides a DECSTBM at its height, so the
+	// tracker hears resizes too, and while eviction has crossed resizes whose
+	// outcome is unknown, the height is one of several. So candidates holds a
+	// state per outcome that matters, in Seq order: the first assumes every
+	// crossed resize still unresolved was deleted, and each other that its own
+	// resize committed last. A resize heard committed in order resets the
+	// region whatever came before it, so it leaves one. There is always at
+	// least one.
 	candidates []marginCandidate
 	// overflowed is set while more crossed resizes are unresolved than the
 	// tracker keeps candidates for: candidates is then one bounded fallback
-	// state, and the region is uncertain until a resize heard in order (spec
-	// A23).
+	// state, and the region is uncertain until a resize heard in order.
 	overflowed bool
 	// marginsSet is whether a DECSTBM has been taken since the last RIS or
 	// DECSTR, decided or not, for Restore alone. Restore goes to guests' own
@@ -342,15 +341,14 @@ func (m *ModeTracker) Clone() *ModeTracker {
 	return &c
 }
 
-// Resized records the terminal's new size and resets the margin region, as
-// a terminal resets it on a resize. The size is what DECSTBM is decided
-// against (spec A21). Exported: the replay package's clone hears resizes
-// too.
+// Resized records the terminal's new size and resets the margin region, as a
+// terminal resets it on a resize. The size is what DECSTBM is decided against.
+// Exported: the replay package's clone hears resizes too.
 //
 // It is a resize the terminal is known to have made, heard where it fell in
 // the stream, so it settles the candidates: whichever crossed resize
 // committed last, this one came after it, and their outcomes change nothing
-// from here (spec A22).
+// from here.
 func (m *ModeTracker) Resized(size termsize.Size) {
 	m.candidates = append(m.candidates[:0], marginCandidate{size: size})
 	m.overflowed = false
@@ -358,18 +356,16 @@ func (m *ModeTracker) Resized(size termsize.Size) {
 
 // resizeHeard applies a committed resize to size that eviction reached in
 // order. Where the terminal already had that size it is no resize at all: the
-// pty sends no SIGWINCH, the terminal resets nothing, and the replay applies
-// no such event either (Task 7). Each candidate is its own terminal for this:
-// one at another size is reset to size and the whole screen, one at size
-// keeps its region, and only when every one resets is this Resized, which
-// settles them.
+// pty sends no SIGWINCH, the terminal resets nothing, and the replay applies no
+// such event either. Each candidate is its own terminal for this: one at
+// another size is reset to size and the whole screen, one at size keeps its
+// region, and only when every one resets is this Resized, which settles them.
 //
 // Overflowed, there is no comparing: the fallback's size is a guess at the
 // terminal's, and a skip decided against a guess could leave the tracker
 // certain and wrong. The pty reports a resize only when its size really
 // changes (a Setsize to the size it has reports nothing), so every committed
-// event is a resize that resets the margins, and it settles the tracker, as
-// spec A23 has it.
+// event is a resize that resets the margins, and it settles the tracker.
 func (m *ModeTracker) resizeHeard(size termsize.Size) {
 	if m.overflowed {
 		m.Resized(size)
@@ -389,9 +385,9 @@ func (m *ModeTracker) resizeHeard(size termsize.Size) {
 
 // crossTentative records that eviction reached resize seq, to size, before its
 // outcome. The bytes after it were written at size if it commits and at the
-// size before if it is deleted, and the tracker doesn't guess which (spec E3):
-// it adds a candidate, size and the whole screen, and the candidates already
-// kept stay, as its deleted branch, until resolve selects (spec A22).
+// size before if it is deleted, and the tracker doesn't guess which: it adds a
+// candidate, size and the whole screen, and the candidates already kept stay,
+// as its deleted branch, until resolve selects.
 //
 // The new candidate's region is the whole screen, as a terminal's is after
 // a resize, because no ResizeBegin is a same-size resize: the host's pty
@@ -400,7 +396,7 @@ func (m *ModeTracker) resizeHeard(size termsize.Size) {
 //
 // Past maxUnresolvedResizes the candidates give way to one fallback state,
 // which does guess: that each resize it crosses commits, since a resize's
-// ioctl rarely fails. The region is uncertain from then on (spec A23).
+// ioctl rarely fails. The region is uncertain from then on.
 func (m *ModeTracker) crossTentative(seq uint64, size termsize.Size) {
 	switch {
 	case m.overflowed:
@@ -438,8 +434,10 @@ func (m *ModeTracker) resolve(seq uint64, committed bool) {
 }
 
 // uncertain reports that the region can't be known yet: the candidates
-// disagree on it, or there were too many to keep. Every capture fails while
-// it is (spec A22).
+// disagree on it, or there were too many to keep. A capture fails while it is,
+// with ErrReplayMarginsUncertain, because a reconstruction gives the joiner
+// one region in its own place and there isn't one to give; the join falls
+// back to the raw ring.
 func (m *ModeTracker) uncertain() bool {
 	if m.overflowed {
 		return true
@@ -785,7 +783,7 @@ func (m *ModeTracker) finishCSI(final byte) {
 
 // decstbm applies a DECSTBM to every candidate, each deciding it at its own
 // height: candidates aren't merged, so a later DECSTBM that depends on the
-// height is still decided under each (spec A22).
+// height is still decided under each.
 //
 // Only an r sequence of plain numeric parameters is one. With a prefix or an
 // intermediate it is another sequence -- CSI ? r is XTRESTORE, CSI $ r is
@@ -1062,7 +1060,7 @@ func (m *ModeTracker) Restore() []byte {
 	// DECSTR, whatever the pty's height decided (see marginsSet), which
 	// covers every candidate's region too, since only a DECSTBM sets one:
 	// resetting margins a terminal doesn't have is harmless, and missing some
-	// is not (spec A23).
+	// is not.
 	if m.marginsSet {
 		out = append(out, 0x1b, '[', 'r')
 	}
@@ -1118,11 +1116,12 @@ func (m *ModeTracker) Restore() []byte {
 // showing. The margins are the terminal's, so no switch moves them.
 //
 // The region is defined while it is uncertain too, for the raw fallback,
-// which replays it then; a capture never does (spec A23). It is the
-// candidates' common region when they agree, which is the newest's; the
-// newest surviving candidate's when they disagree, the likeliest, since a
-// resize's ioctl rarely fails and so the newest crossed resize most likely
-// committed last; and the fallback's while overflowed, the only one kept.
+// which replays it then; a capture never does, as it fails while the region
+// is uncertain. It is the candidates' common region when they agree, which is
+// the newest's; the newest surviving candidate's when they disagree, the
+// likeliest, since a resize's ioctl rarely fails and so the newest crossed
+// resize most likely committed last; and the fallback's while overflowed, the
+// only one kept.
 //
 // The state as of the ring's first byte includes being partway through a
 // sequence, so the partial goes last, after the charset. The ring's first
@@ -1157,7 +1156,7 @@ func (m *ModeTracker) Snapshot() []byte {
 type ReplayParts struct {
 	DECModes      map[int]bool // each tracked DEC private mode, the alternate screen's aside, with its value
 	Modes         []byte       // those not at their default as CSI ? n h/l, in Snapshot's order, DECAWM (7) excluded
-	Autowrap      bool         // DECAWM; the render restores it last (spec A20)
+	Autowrap      bool         // DECAWM
 	MainKeys      []byte       // the main kitty stack's pushes, then modifyOtherKeys
 	HiddenAltKeys []byte       // the hidden alternate stack's pushes, while the main screen shows, or nil
 	AltVia        int          // 47, 1047 or 1049 while the alternate screen shows, else 0
@@ -1168,8 +1167,8 @@ type ReplayParts struct {
 // the partial, which a reconstruction gives in places of its own: Modes, with
 // DECAWM put back in its place when it is off, then MainKeys, then either the
 // switch through AltVia and AltKeys, or HiddenAltKeys, which Snapshot pushes
-// on a trip to the alternate screen and back. The render builds its own trip
-// (spec A5), so the pushes come alone.
+// on a trip to the alternate screen and back. The render builds its own trip,
+// so the pushes come alone.
 func (m *ModeTracker) ReplayParts() ReplayParts {
 	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
 	for n, def := range restorable {

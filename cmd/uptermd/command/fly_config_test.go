@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// flyEnv is the intended [env] block, transcribed here so this test can run
-// before Task 7 edits the TOML files. It pins behavior against the wrapper; it
-// does NOT prove the shipped TOML files contain these values. Task 7 adds
-// TestShippedFlyConfigsDecode, which reads the real files.
+// flyEnv is the intended [env] block, transcribed here so these tests don't
+// depend on the TOML files. It pins behavior against the wrapper; it does NOT
+// prove the shipped TOML files contain these values.
+// TestShippedFlyConfigsDecode does that: it reads the real files.
 var flyEnv = map[string]string{
 	"UPTERMD_SSH_ADDR":           "[::]:2222",
 	"UPTERMD_WS_ADDR":            "[::]:8080",

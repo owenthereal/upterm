@@ -213,8 +213,8 @@ func (l *sizeLog) wait(seq uint64) <-chan struct{} {
 // truncates the screen at 45, which 80 alone doesn't.
 //
 // An event the tracker m has already heard, eviction having crossed it before
-// its outcome, has its outcome passed on, to select among the candidates m
-// kept for it (spec A22). Called with writeMu held.
+// its outcome, has its outcome passed on, to select among the candidates m kept
+// for it. Called with writeMu held.
 func (l *sizeLog) apply(end uint64, m *ModeTracker) {
 	l.mu.Lock()
 	queue, ended := l.queue, l.ended
@@ -313,12 +313,12 @@ func (l *sizeLog) lose(n, seq uint64) {
 
 // hear feeds m the bytes p, which begin at stream offset offset, with each
 // logged event at or before their end that m hasn't heard yet placed where it
-// falls among them, in Seq order (spec E3): a committed one through
-// resizeHeard, which skips one of the size the terminal already has, and a
-// tentative one through crossTentative, its outcome to follow through apply.
-// One exactly at their end is heard too, since it is in effect at the byte
-// after them, the ring's first once they have left. A deleted event is no
-// longer logged, so it is never heard.
+// falls among them, in Seq order: a committed one through resizeHeard, which
+// skips one of the size the terminal already has, and a tentative one through
+// crossTentative, its outcome to follow through apply. One exactly at their end
+// is heard too, since it is in effect at the byte after them, the ring's first
+// once they have left. A deleted event is no longer logged, so it is never
+// heard.
 //
 // The log's own entry says whether an event is tentative: it is exactly while
 // apply hasn't applied an outcome to it, and an outcome ResizeEnd records

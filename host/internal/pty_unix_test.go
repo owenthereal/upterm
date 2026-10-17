@@ -42,8 +42,8 @@ func TestExitCodeExecExitStatus(t *testing.T) {
 	assert.Equal(t, 7, code)
 }
 
-// TestPtyKillDoesNotWaitOnTheLock pins R23's guard: Kill must not take the
-// pty's RWMutex. terminate can reach Kill while its own close is still
+// TestPtyKillDoesNotWaitOnTheLock pins that Kill must not take the pty's
+// RWMutex. terminate can reach Kill while its own close is still
 // pending, queued for the write lock behind a Read parked on the master, and
 // Go's sync.RWMutex holds every new reader behind a pending writer -- so a
 // Kill that took either lock would wait on a read that only the command's

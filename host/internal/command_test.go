@@ -311,15 +311,14 @@ func withHangupGrace(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { hangupGrace = orig })
 }
 
-// TestTerminateClosesTheMasterBetweenHangupAndTerm pins the design's own
-// step order for a process that ignores every signal it is sent: SIGHUP,
-// then -- once it stays past a grace -- the pty master closing, then
-// SIGTERM after another grace, then SIGKILL to the group and the leader
-// after a third. Dropping D11's omitted middle step is exactly what left a
-// session leader with nothing that could ever free it: neither SIGHUP nor
-// SIGTERM reaches a process stuck inside exit() waiting for its
-// controlling terminal's output to drain, and only closing the master
-// does.
+// TestTerminateClosesTheMasterBetweenHangupAndTerm pins the step order for a
+// process that ignores every signal it is sent: SIGHUP, then -- once it stays
+// past a grace -- the pty master closing, then SIGTERM after another grace,
+// then SIGKILL to the group and the leader after a third. Leaving out the
+// middle step, the close, is exactly what left a session leader with nothing
+// that could ever free it: neither SIGHUP nor SIGTERM reaches a process stuck
+// inside exit() waiting for its controlling terminal's output to drain, and
+// only closing the master does.
 func TestTerminateClosesTheMasterBetweenHangupAndTerm(t *testing.T) {
 	withHangupGrace(t, 20*time.Millisecond)
 
@@ -394,7 +393,7 @@ func TestCommandRunEndsWhenOutputEndsWithoutCancellation(t *testing.T) {
 		"the wait actor's own cancel must still drive terminate's escalation")
 }
 
-// closeThenExitPTY models the real R20 bug: a session leader a platform
+// closeThenExitPTY models the real hang: a session leader a platform
 // will not let finish exiting while its controlling terminal still holds
 // output nobody has drained. Signal and Kill do nothing to it -- the whole
 // point is that neither can end this state -- and only Close, the way a
@@ -443,8 +442,8 @@ func (p *closeThenExitPTY) Wait() error {
 	return nil
 }
 
-// TestCommandRunClosesTheMasterBeforeTheProcessCanExit pins the bug R20
-// fixes: a process that only finishes exiting once the pty master closes,
+// TestCommandRunClosesTheMasterBeforeTheProcessCanExit pins the fix for a
+// process that only finishes exiting once the pty master closes,
 // which SIGHUP and SIGTERM alone can never cause.
 //
 // grace and hangupGrace are both deliberately large relative to the bound
@@ -489,16 +488,16 @@ func TestCommandRunClosesTheMasterBeforeTheProcessCanExit(t *testing.T) {
 }
 
 // TestCommandRunSurvivesAParkedReaderDuringClose is the covering test for
-// this task (R20-R24): a real pty, a genuinely parked reader, and a
+// terminate's escalation: a real pty, a genuinely parked reader, and a
 // command that ignores signals terminate sends it. Neither fake above can
 // express this -- neither couples Read and Close through a lock -- so this
-// is what actually exercises the bugs the review found: sleep writes
-// nothing, so the output actor's own Read is truly blocked, holding the
-// pty's read lock for as long as that syscall stays parked, at the moment
-// cancellation abandons it. Against a synchronous close inside terminate
-// (R22) or a Kill that still took the pty lock (R23), the operation behind
-// that Read queues behind its lock forever and the escalation never
-// reaches SIGKILL -- terminate stays parked for the command's whole life.
+// is what actually exercises the hangs: sleep writes nothing, so the output
+// actor's own Read is truly blocked, holding the pty's read lock for as long
+// as that syscall stays parked, at the moment cancellation abandons it.
+// Against a synchronous close inside terminate or a Kill that still took the
+// pty lock, the operation behind that Read queues behind its lock forever and
+// the escalation never reaches SIGKILL -- terminate stays parked for the
+// command's whole life.
 func TestCommandRunSurvivesAParkedReaderDuringClose(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("trap and signal forwarding are POSIX shell behaviour")
@@ -517,19 +516,18 @@ func TestCommandRunSurvivesAParkedReaderDuringClose(t *testing.T) {
 	})
 
 	t.Run("ignoresHangupAndTerm", func(t *testing.T) {
-		// R23's own repro: only SIGKILL can end the leader. Before R23, the
-		// pending close's write lock starved Kill's own read lock exactly
-		// the way it once starved Signal, and terminate never reached
+		// Only SIGKILL can end the leader. Before Kill stopped taking the pty
+		// lock, a pending close's write lock starved Kill's own read lock
+		// exactly the way it once starved Signal, and terminate never reached
 		// SIGKILL either -- parked for the command's whole life.
 		//
-		// R24: the final SIGKILL must also reach the shell's own child, not
-		// just the leader. sleep runs backgrounded (sh -c does not give a
+		// The final SIGKILL must also reach the shell's own child, not just
+		// the leader. sleep runs backgrounded (sh -c does not give a
 		// non-interactive script job control, so the child stays in the
 		// leader's own process group rather than getting one of its own),
 		// its pid recorded to a file the way the shell-jobs ftest records
 		// its background job's pid, and wait keeps the leader parked on it
-		// -- so a leader-only kill would leave sleep running exactly as the
-		// reviewer observed.
+		// -- so a leader-only kill would leave sleep running behind it.
 		dir := t.TempDir()
 		childPidFile := filepath.Join(dir, "child.pid")
 		script := fmt.Sprintf("trap '' HUP TERM; sleep 20 & echo $! >%s; wait", childPidFile)

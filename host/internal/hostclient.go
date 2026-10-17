@@ -12,9 +12,9 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// The stall bound and the chunk it measures progress in. Provisional per the
-// design; vars so a test can shorten them. 4 KiB is one ring chunk and about
-// a screenful, so a healthy terminal completes one in milliseconds.
+// The stall bound and the chunk it measures progress in. Provisional; vars so
+// a test can shorten them. 4 KiB is one ring chunk and about a screenful, so a
+// healthy terminal completes one in milliseconds.
 var (
 	primaryStallTimeout = 5 * time.Second
 	primaryChunkSize    = 4096

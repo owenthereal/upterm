@@ -134,9 +134,9 @@ func Test_Record_HostKeysRoundTrip(t *testing.T) {
 }
 
 func Test_Record_PublicationIsAtomicUnderAConcurrentReader(t *testing.T) {
-	// Review fix: the previous version of this test had no concurrent reader,
-	// so its name promised more than it checked. Atomicity is only observable
-	// against someone reading while you write.
+	// Atomicity is only observable against someone reading while you write, so
+	// this test has a concurrent reader; without one its name would promise
+	// more than it checked.
 	runtimeRoot, stateRoot := roots(t)
 
 	d, err := claim(t, runtimeRoot, stateRoot, "demo")

@@ -1214,13 +1214,13 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// output
 
 		// The join begins here, and so does its budget for having the
-		// screen reconstructed (spec J1): time it spends waiting its turn,
+		// screen reconstructed: time it spends waiting its turn,
 		// behind another join's emulation at the pacer, is its own, so the
 		// deadline is taken before anything it can wait on.
 		deadline := time.Now().Add(uio.ReplayBudget)
 
 		// The pty's geometry follows the terminals watching it, and this
-		// one is counted before it attaches, not after (spec D8): the
+		// one is counted before it attaches, not after: the
 		// fan-out reconstructs a joiner's screen at the size the pty has
 		// when the join takes its capture, so the pty has to have the size
 		// this terminal gives it by then. Counted after, the reconstruction
@@ -1261,7 +1261,7 @@ func (h *sessionHandler) HandleSession(sess gssh.Session) {
 		// a panic. Nothing else would: the departures below that take a
 		// terminal out are actors, and a join that failed never starts
 		// them. One attached by the raw ring, after a replay that failed or
-		// panicked, is attached, and keeps its size (spec A11).
+		// panicked, is attached, and keeps its size.
 		attached := false
 		defer func() {
 			stop()
@@ -1758,8 +1758,7 @@ func attachGuestOutput(ctx context.Context, deadline time.Time, writers *uio.Mul
 // The pacer can also refuse, before the fan-out is reached: a guest that
 // leaves while it waits its turn there. attachGuestOutput's release never
 // runs then, and the sink, built before the wait, is released here instead,
-// or its goroutine would wait for a first write for the rest of the session
-// (spec A8).
+// or its goroutine would wait for a first write for the rest of the session.
 func (h *sessionHandler) attachGuest(ctx context.Context, deadline time.Time, sink *uio.AsyncWriter, size termsize.Size) error {
 	attach := func() error { return attachGuestOutput(ctx, deadline, h.writers, guestSink{sink}, size) }
 	if h.pacer == nil {

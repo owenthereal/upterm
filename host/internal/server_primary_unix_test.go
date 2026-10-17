@@ -81,7 +81,7 @@ func TestPromotionAfterThePrimaryLeavesLosesNothingAndUnfilters(t *testing.T) {
 	require.Contains(t, rest, "\x1b[6n", "B is the primary now; live queries reach it")
 }
 
-// D21: a pty viewer — `upterm host &`, displaying but not reading — is never
+// A pty viewer — `upterm host &`, displaying but not reading — is never
 // primary, whatever attached first. The interactive client that arrives
 // second is elected, and the viewer stays filtered.
 func TestAnInteractiveClientIsElectedOverAnEarlierViewer(t *testing.T) {
@@ -120,10 +120,10 @@ func TestAReattachingPrimaryDoesNotAnswerAReplayedQuery(t *testing.T) {
 	require.Contains(t, got, "before")
 }
 
-// Design item 4, the assertion that matters: a primary that stops reading is
-// disconnected within primaryStallTimeout, after which Append completes and
-// guests keep flowing. Append blocking is the deadlock the connection close
-// exists to avoid.
+// The assertion that matters: a primary that stops reading is disconnected
+// within primaryStallTimeout, after which Append completes and guests keep
+// flowing. Append blocking is the deadlock the connection close exists to
+// avoid.
 //
 // The primary is gated rather than merely idle, because only a client whose
 // mux has stopped can tell the recovery from its imitation: a host that closed
@@ -699,9 +699,9 @@ func TestSecondaryHostClientOverflowClosesTheConnection(t *testing.T) {
 	}
 }
 
-// Design item 3: pinned size, alternate screen and mouse mode set long ago,
-// more output than the ring holds, then an attach: the modes come from the
-// snapshot, the redraw comes from SIGWINCH, and the geometry does not move.
+// Pinned size, alternate screen and mouse mode set long ago, more output than
+// the ring holds, then an attach: the modes come from the snapshot, the redraw
+// comes from SIGWINCH, and the geometry does not move.
 func TestReattachAfterRolloverRestoresModesAndNudges(t *testing.T) {
 	flag := filepath.Join(t.TempDir(), "proceed")
 	h := startHost(t, &Server{

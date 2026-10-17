@@ -487,7 +487,7 @@ func (x *Claimed) GetPid() int32 {
 	return 0
 }
 
-// SessionCreated is gate 1: the tunnel is up and the session is registered.
+// SessionCreated: the tunnel is up and the session is registered.
 // The parent shows it and answers accept.
 type SessionCreated struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -587,7 +587,7 @@ func (x *Listening) GetHostKeys() []string {
 	return nil
 }
 
-// Started is gate 3: the command is running and the session's record has
+// Started: the command is running and the session's record has
 // been published. The parent may exit.
 type Started struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`

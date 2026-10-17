@@ -49,10 +49,10 @@ func Test_ModeTracker_ScrollRegionAndCharset(t *testing.T) {
 	require.Equal(t, "\x1b[5;20r\x1b(0", string(m.Snapshot()))
 }
 
-// Spec A17: a terminal has one scrolling region, which no screen switch
-// changes, as in xterm (SwitchBufs leaves top_marg and bot_marg). Kept per
-// screen, the region set on one screen went missing on the other, and later
-// line feeds and scrolls on a joiner landed where the session's didn't.
+// A terminal has one scrolling region, which no screen switch changes, as in
+// xterm (SwitchBufs leaves top_marg and bot_marg). Kept per screen, the region
+// set on one screen went missing on the other, and later line feeds and scrolls
+// on a joiner landed where the session's didn't.
 func TestMarginsSurviveBufferSwitches(t *testing.T) {
 	for _, via := range []int{1049, 47, 1047} {
 		t.Run(strconv.Itoa(via), func(t *testing.T) {
@@ -990,11 +990,11 @@ func TestCloneIsIndependent(t *testing.T) {
 // rows is a terminal of n rows, the dimension a DECSTBM is decided against.
 func rows(n int) termsize.Size { return termsize.Size{Cols: 80, Rows: n} }
 
-// Spec A21, Owen's: the tracker decides a DECSTBM as xterm's CASE_DECSTBM
-// does, at the height of the moment. Top is 1 if absent or 0; bottom is the
-// height if absent, 0 or past it; and the region is set only if bottom >
-// top, or else nothing changes. Stored as written, CSI 10;11r replaced 2;5,
-// though a terminal of 8 rows ignores it and keeps 2;5.
+// The tracker decides a DECSTBM as xterm's CASE_DECSTBM does, at the height of
+// the moment. Top is 1 if absent or 0; bottom is the height if absent, 0 or
+// past it; and the region is set only if bottom > top, or else nothing changes.
+// Stored as written, CSI 10;11r replaced 2;5, though a terminal of 8 rows
+// ignores it and keeps 2;5.
 func TestTrackerDecidesDECSTBMAtTheHeight(t *testing.T) {
 	m := NewModeTracker()
 	m.Resized(rows(8))
@@ -1064,11 +1064,11 @@ func TestDECSTBMWithNoKnownHeight(t *testing.T) {
 	require.Equal(t, "\x1b[10;11r", string(m.Snapshot()))
 }
 
-// Spec A23: candidates {none: 8, e1: 4, e2: 12}, CSI 2;6r (2;6, 2;4, 2;6),
-// then e1 commits, which removes "none" with e2 still unresolved: 2;4 and 2;6
-// remain. Snapshot, which the raw fallback replays, gives the newest
-// surviving candidate's, e2's, the likeliest; a "none" candidate is gone, and
-// the one now first is e1's. Restore resets the region.
+// Candidates {none: 8, e1: 4, e2: 12}, CSI 2;6r (2;6, 2;4, 2;6), then e1
+// commits, which removes "none" with e2 still unresolved: 2;4 and 2;6 remain.
+// Snapshot, which the raw fallback replays, gives the newest surviving
+// candidate's, e2's, the likeliest; a "none" candidate is gone, and the one now
+// first is e1's. Restore resets the region.
 func TestSnapshotAfterAPartialCommitment(t *testing.T) {
 	m := NewModeTracker()
 	m.Resized(rows(8))
@@ -1082,10 +1082,10 @@ func TestSnapshotAfterAPartialCommitment(t *testing.T) {
 	require.Equal(t, "\x1b[r", string(m.Restore()))
 }
 
-// Spec A23: Restore resets the region if any candidate has one, not only the
-// newest: resetting margins a terminal doesn't have is harmless, and missing
-// some leaves a guest's shell scrolling inside rows. Here the newest, e2's,
-// was crossed after the DECSTBM, so it has none.
+// Restore resets the region if any candidate has one, not only the newest:
+// resetting margins a terminal doesn't have is harmless, and missing some
+// leaves a guest's shell scrolling inside rows. Here the newest, e2's, was
+// crossed after the DECSTBM, so it has none.
 func TestRestoreResetsAnyCandidatesRegion(t *testing.T) {
 	m := NewModeTracker()
 	m.Resized(rows(8))
@@ -1099,11 +1099,11 @@ func TestRestoreResetsAnyCandidatesRegion(t *testing.T) {
 	require.Equal(t, "\x1b[r", string(m.Restore()))
 }
 
-// Spec A23: past 16 unresolved crossed events the tracker keeps one bounded
-// fallback state, the newest candidate at the overflow: the 17th's size and
-// the whole screen. While overflowed, each DECSTBM is decided at its height,
-// a crossed event is assumed to commit, outcomes change nothing, and the
-// tracker is uncertain, until a committed resize heard in order.
+// Past 16 unresolved crossed events the tracker keeps one bounded fallback
+// state, the newest candidate at the overflow: the 17th's size and the whole
+// screen. While overflowed, each DECSTBM is decided at its height, a crossed
+// event is assumed to commit, outcomes change nothing, and the tracker is
+// uncertain, until a committed resize heard in order.
 func TestSnapshotAfterAnOverflow(t *testing.T) {
 	m := NewModeTracker()
 	m.Resized(rows(8))
@@ -1174,9 +1174,9 @@ func TestAtGround(t *testing.T) {
 	}
 }
 
-// ReplayParts holds every tracked DEC private mode with its value (PF-10),
-// the alternate screen's aside, which AltVia covers; Modes, which a render
-// emits, holds only those off their default, as Snapshot does.
+// ReplayParts holds every tracked DEC private mode with its value, the
+// alternate screen's aside, which AltVia covers; Modes, which a render emits,
+// holds only those off their default, as Snapshot does.
 func TestReplayPartsHoldsEveryMode(t *testing.T) {
 	defaults := maps.Clone(restorable)
 	for n := range altScreenModes {
@@ -1200,9 +1200,9 @@ func TestReplayPartsHoldsEveryMode(t *testing.T) {
 	require.Equal(t, 1049, parts.AltVia)
 }
 
-// Rule 4: ReplayParts' pieces, reassembled around the screen switch and with
-// DECAWM put back in its place, are Snapshot's, less the region, the charset
-// and the partial, which the reconstruction gives in its own places.
+// ReplayParts' pieces, reassembled around the screen switch and with DECAWM put
+// back in its place, are Snapshot's, less the region, the charset and the
+// partial, which the reconstruction gives in its own places.
 func TestReplayPartsReassembleSnapshot(t *testing.T) {
 	const (
 		modes = "\x1b[?1h\x1b[?25l\x1b[?2004h"
@@ -1255,10 +1255,10 @@ func reassemble(p ReplayParts) string {
 	return out
 }
 
-// PF-22: a clone's candidates, fallback state and heights are its own. Each
-// is changed in place -- a resolve deletes from the list, a crossing while
-// overflowed rewrites the fallback -- so a list shared with the original
-// would carry one's outcomes into the other.
+// A clone's candidates, fallback state and heights are its own. Each is changed
+// in place -- a resolve deletes from the list, a crossing while overflowed
+// rewrites the fallback -- so a list shared with the original would carry one's
+// outcomes into the other.
 func TestCloneCopiesTheMarginCandidates(t *testing.T) {
 	t.Run("candidates", func(t *testing.T) {
 		m := NewModeTracker()
@@ -1425,7 +1425,7 @@ func TestAResizeHeardInOrderResetsOnlyWhereTheSizeChanges(t *testing.T) {
 
 	// Overflowed, the fallback's size is a guess, not the terminal's, so it
 	// decides nothing: the pty reports a resize only when its size changes,
-	// and every one resets the margins (spec A23).
+	// and every one resets the margins.
 	t.Run("overflowed, at the fallback's size", func(t *testing.T) {
 		m := NewModeTracker()
 		for seq := uint64(1); seq <= maxUnresolvedResizes+1; seq++ {

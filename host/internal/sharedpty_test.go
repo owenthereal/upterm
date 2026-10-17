@@ -75,8 +75,8 @@ func TestSharedPTYSetPublishesOnce(t *testing.T) {
 // to prove it landed first, on two independent queues (charm's own
 // handleRequests loop versus this handler's own input actor) with no cross
 // synchronization -- measured at roughly 1 failure in 20 runs. That is the
-// window the brief names as possibly unreachable reliably; this unit test is
-// the fallback it names for it.
+// window that cannot be reached reliably end to end; this unit test is the
+// fallback for it.
 func TestSharedPtySetsizeRecordsOrDelegatesAtomically(t *testing.T) {
 	s := newSharedPTY()
 

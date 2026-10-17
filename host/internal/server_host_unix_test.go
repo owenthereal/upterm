@@ -23,9 +23,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Design item 5: with --force-command, the host door reaches the original
-// command; a guest gets the forced one on its own pty with its queries
-// unfiltered.
+// With --force-command, the host door reaches the original command; a guest
+// gets the forced one on its own pty with its queries unfiltered.
 func TestHostDoorAttachesToTheOriginalCommandUnderForceCommand(t *testing.T) {
 	h := startHost(t, &Server{
 		Command:      readsALine("ORIGINAL", 0),
@@ -76,8 +75,8 @@ func TestGuestDoorStillRequiresAPty(t *testing.T) {
 	readUntil(t, out, "PTY is required")
 }
 
-// D19: when the session ends because the command exited, every shared-pty
-// client is closed with the command's status.
+// When the session ends because the command exited, every shared-pty client
+// is closed with the command's status.
 func TestSharedPtyClientsReceiveTheCommandsExitStatus(t *testing.T) {
 	h := startHost(t, &Server{Command: readsALine("READY", 7)})
 	in, out, hostSess := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
@@ -392,7 +391,7 @@ func TestHostDoorIgnoresReadOnly(t *testing.T) {
 	readUntil(t, out, "got:host-types")
 }
 
-// D17: the host door failing at runtime does not end the session.
+// The host door failing at runtime does not end the session.
 func TestHostDoorFailureDoesNotEndTheSession(t *testing.T) {
 	h := startHost(t, &Server{Command: readsALine("UP", 0)})
 	_, out, _ := h.connectHost(t, nil)
@@ -505,7 +504,7 @@ func TestASmallerTerminalLeavingRestoresTheSizeOverTheDoor(t *testing.T) {
 // its first resize. The only geometry an SSH client sends is in its pty
 // request, until somebody drags a window.
 //
-// Written to check a review's claim that it did not — and it does, from two
+// Written to check a suspicion that it did not — and it does, from two
 // places now: the registration in the handler, and charm seeding a session's
 // window channel with the pty request's own window, which the window-change
 // loop then reads. Kept because neither of those is this package's to

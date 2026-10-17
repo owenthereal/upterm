@@ -69,7 +69,7 @@ func TestBuildSessionDetailSSH(t *testing.T) {
 // else is quoted: zsh aborts on an unquoted [::1] as a glob that matches
 // nothing. Double quotes, which cmd.exe understands and single quotes it
 // passes through, unless the URL holds a character they don't keep literal.
-func TestBuildSessionDetailJoinCommand(t *testing.T) { // spec test 17
+func TestBuildSessionDetailJoinCommand(t *testing.T) {
 	for _, tc := range []struct {
 		host, user, want string
 		target           join.Target // what join makes of the advertised URL

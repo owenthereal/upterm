@@ -217,7 +217,7 @@ func TestTheJoinerResizesThePtyBeforeTheCapture(t *testing.T) {
 // waits for the fan-out's lock with nothing to emulate, a refusal at the
 // pacer's gate, a sink whose Write fails): the pty is back at the size
 // without the joiner. A Replayer that panics instead: the joiner gets the raw fallback,
-// is attached, and the pty keeps its size (spec A11).
+// is attached, and the pty keeps its size.
 //
 // Every outcome on both doors but the pacer's gate, which only guests pass.
 // An 80x24 terminal is attached throughout, so that the size without the
@@ -423,7 +423,7 @@ func TestAJoinerThatLeavesStopsConstrainingThePtyWhileTheFanOutIsHeld(t *testing
 // With a pacer: a join gated inside its Replayer holds the gate; a second
 // joiner disconnects while waiting; its handler returns within 50 ms, its
 // AsyncWriter is Closed, and the goroutine count is back to its baseline
-// within 1 s (its drain goroutine ended; spec A8).
+// within 1 s (its drain goroutine ended).
 //
 // The drain goroutine is the evidence of the Close: a sink that has been
 // handed nothing waits for its first write, and only a Close ends that wait.

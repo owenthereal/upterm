@@ -1193,8 +1193,8 @@ func marginsAt(w *MultiWriter) (snapshot string, uncertain bool) {
 	return snapshot, uncertain
 }
 
-// Spec A21 through the fan-out: the tracker hears the 8-row event before the
-// bytes it evicts after it, and decides each DECSTBM at that height.
+// Through the fan-out: the tracker hears the 8-row event before the bytes it
+// evicts after it, and decides each DECSTBM at that height.
 func TestEvictedDECSTBMKeepsTheAcceptedRegion(t *testing.T) {
 	w := NewMultiWriter(16)
 	resize(w, rows(8))
@@ -1207,9 +1207,9 @@ func TestEvictedDECSTBMKeepsTheAcceptedRegion(t *testing.T) {
 }
 
 // A resize resets the region on a terminal, so one the tracker hears in
-// order does too: priming never sets margins a resize already cleared (spec
-// E3). An event exactly at the ring's start is in effect there, so eviction
-// that reaches its offset crosses it.
+// order does too: priming never sets margins a resize already cleared. An
+// event exactly at the ring's start is in effect there, so eviction that
+// reaches its offset crosses it.
 func TestTrackerResetsMarginsAtAnEvictedResize(t *testing.T) {
 	for _, past := range []bool{false, true} {
 		t.Run(fmt.Sprintf("past=%t", past), func(t *testing.T) {
@@ -1233,11 +1233,10 @@ func TestTrackerResetsMarginsAtAnEvictedResize(t *testing.T) {
 	}
 }
 
-// Spec A22, Owen's: height 8, region 2;5; eviction crosses a tentative resize
-// to 4; CSI 2;6r is evicted after it, 2;6 at 8 and 2;4 at 4, so the region is
-// uncertain. The resize's outcome selects: failed, the region is the one
-// decided without it, 2;6, which marks alone lost (they primed 2;5);
-// committed, 2;4.
+// Height 8, region 2;5; eviction crosses a tentative resize to 4; CSI 2;6r is
+// evicted after it, 2;6 at 8 and 2;4 at 4, so the region is uncertain. The
+// resize's outcome selects: failed, the region is the one decided without it,
+// 2;6, which marks alone lost (they primed 2;5); committed, 2;4.
 func TestAFailedResizeSelectsTheRegionDecidedWithoutIt(t *testing.T) {
 	for _, tc := range []struct {
 		applied bool
@@ -1263,9 +1262,9 @@ func TestAFailedResizeSelectsTheRegionDecidedWithoutIt(t *testing.T) {
 	}
 }
 
-// Spec A22: candidates that agree aren't merged, and keep their heights, so a
-// later DECSTBM is still decided under each. CSI 1;3r is 1;3 at 8 and at 4;
-// CSI 2;6r after it isn't.
+// Candidates that agree aren't merged, and keep their heights, so a later
+// DECSTBM is still decided under each. CSI 1;3r is 1;3 at 8 and at 4; CSI 2;6r
+// after it isn't.
 func TestACommonDECSTBMKeepsTheHeightCandidates(t *testing.T) {
 	w := NewMultiWriter(16)
 	resize(w, rows(8))
@@ -1289,8 +1288,8 @@ func TestACommonDECSTBMKeepsTheHeightCandidates(t *testing.T) {
 	require.Equal(t, "\x1b[2;4r", snap)
 }
 
-// Spec A22: candidates that agree are no uncertainty. CSI 1;3r is 1;3 at 8
-// and at 4, so Snapshot carries it while the event is unresolved.
+// Candidates that agree are no uncertainty. CSI 1;3r is 1;3 at 8 and at 4, so
+// Snapshot carries it while the event is unresolved.
 func TestSnapshotUsesTheCommonRegion(t *testing.T) {
 	w := NewMultiWriter(16)
 	resize(w, rows(8))
@@ -1306,10 +1305,10 @@ func TestSnapshotUsesTheCommonRegion(t *testing.T) {
 	require.Equal(t, "\x1b[1;3r", snap)
 }
 
-// Spec A22: height 8; two tentative events crossed, to 4 then to 12, so the
-// candidates are 8, 4 and 12; CSI 2;6r gives 2;6, 2;4 and 2;6. Each pair of
-// outcomes, in either order, selects the region the terminal holds, and the
-// tracker is uncertain exactly while the candidates left disagree.
+// Height 8; two tentative events crossed, to 4 then to 12, so the candidates
+// are 8, 4 and 12; CSI 2;6r gives 2;6, 2;4 and 2;6. Each pair of outcomes, in
+// either order, selects the region the terminal holds, and the tracker is
+// uncertain exactly while the candidates left disagree.
 func TestEveryHeightCandidateDecides(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -1388,9 +1387,9 @@ func TestAnInOrderResizeCollapsesTheCandidates(t *testing.T) {
 	require.Equal(t, "\x1b[2;10r", snap)
 }
 
-// Spec A22 and A23: 16 crossed events still have a candidate each; a 17th
-// overflows into the bounded fallback state, which is uncertain through every
-// outcome, until a committed resize heard in order.
+// 16 crossed events still have a candidate each; a 17th overflows into the
+// bounded fallback state, which is uncertain through every outcome, until a
+// committed resize heard in order.
 func TestTooManyCandidatesStayUncertain(t *testing.T) {
 	w := NewMultiWriter(16)
 	resize(w, rows(8))
@@ -1559,7 +1558,7 @@ func TestEveryEventAtOneOffsetIsHeard(t *testing.T) {
 
 // A resize to the size the pty already has sends no SIGWINCH, and a terminal
 // resets nothing, so the tracker doesn't either, as the replay applies no
-// such event (Task 7).
+// such event.
 func TestASameSizeResizeResetsNothing(t *testing.T) {
 	w := NewMultiWriter(16)
 	resize(w, at80x24)

@@ -99,10 +99,10 @@ func TestGuestPlainPublicKeyIsRefused(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The MaxAuthTries bound the design documents: x/crypto counts a *rejected*
-// public-key query against MaxAuthTries, which charm.land/ssh leaves at
-// x/crypto's default of 6. A relay offers one certificate per signing key, so
-// the pinned key has to be among the first six.
+// The MaxAuthTries bound: x/crypto counts a *rejected* public-key query against
+// MaxAuthTries, which charm.land/ssh leaves at x/crypto's default of 6. A relay
+// offers one certificate per signing key, so the pinned key has to be among the
+// first six.
 func TestGuestSurvivesFiveRejectedOffersBeforeTheAcceptedOne(t *testing.T) {
 	authorized := testSigner(t)
 	h := startHost(t, &Server{
