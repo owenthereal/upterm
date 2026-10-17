@@ -432,7 +432,41 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if state := e.unrestored(parts); state != "" {
 		return rep{}, &IneligibleError{State: state}
 	}
+	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
+		return rep{}, &IneligibleError{State: "a wide character split in two"}
+	}
 	return e.repPlan()
+}
+
+// splitWide reports a row of scr that holds a wide character split in two: a
+// placeholder not right after the wide cell it belongs to, or a wide cell not
+// followed by its placeholders. A scroll inside left and right margins can
+// move half of a wide character across a margin, and no print draws what it
+// leaves, as printing a wide character brings its placeholders: the render
+// would draw another row. A screen the render doesn't draw holds nothing, so
+// both are checked.
+func splitWide(scr *vt.Screen) bool {
+	for y := range scr.Height() {
+		line := scr.Line(y)
+		owed := 0 // the placeholders the last wide cell has yet to be followed by
+		for x := range line {
+			switch w := line[x].Width; {
+			case w == 0:
+				if owed == 0 {
+					return true
+				}
+				owed--
+			case owed > 0:
+				return true
+			default:
+				owed = w - 1
+			}
+		}
+		if owed > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // unrestored names the first state, in a fixed order, that would change how

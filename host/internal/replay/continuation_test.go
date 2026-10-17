@@ -1700,3 +1700,40 @@ func TestReplayHistoryKeepsColoursTheRenderWritesAsRGB(t *testing.T) {
 	}
 	requireContinues(t, c, c.run(time.Minute))
 }
+
+// A scroll inside left and right margins can move half of a wide character
+// across a margin: its placeholder up a row on its own, or a blank over its
+// placeholder. No print draws either, as printing the character brings its
+// placeholder, so the render can't rebuild that row, and the join falls back,
+// on either screen, rather than continue from a different one.
+func TestReplayFailsOnAWideCharacterSplitInTwo(t *testing.T) {
+	setBudget(t, 64<<20)
+	const split = "\x1b[?69h\x1b[2s\x1b[64H中\nh\x1b[?69l"
+	for _, tc := range []struct {
+		name string
+		c    contCase
+	}{
+		{"its placeholder moved up a row", contCase{
+			prefix: []byte(split),
+			sizes:  []uio.SizeEvent{event(1, 0, 72, 29)},
+		}},
+		{"a blank over its placeholder", contCase{
+			prefix: []byte("中\x1b[?69h\x1b[2s\x1b[B\xe4\n \x1b[?69l"),
+			sizes:  []uio.SizeEvent{event(1, 0, 81, 2)},
+		}},
+		{"on the alternate screen", contCase{
+			prefix: []byte("main\r\n\x1b[?1049h" + split),
+			sizes:  []uio.SizeEvent{event(1, 0, 72, 29)},
+		}},
+		{"on the hidden alternate screen", contCase{
+			prefix: []byte("main\r\n\x1b[?47h" + split + "\x1b[?47l"),
+			sizes:  []uio.SizeEvent{event(1, 0, 72, 29)},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.c.run(time.Minute)
+			require.Empty(t, r.failure(), "%s", tc.c.repro())
+			require.Equal(t, "ineligible: a wide character split in two", r.skip)
+		})
+	}
+}
