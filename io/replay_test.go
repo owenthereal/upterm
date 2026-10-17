@@ -1182,10 +1182,97 @@ func TestCatchUpWaitsWhenThereIsNothingNewToOffer(t *testing.T) {
 		t.Fatal("the join never waited")
 	}
 	require.NoError(t, within(t, done, "the join"))
-	require.Equal(t, []error{ErrReplayDeadline}, fallbacks.all())
+	require.Equal(t, []error{errDeadlineInASequence}, fallbacks.all())
 	require.Equal(t, 1, r.renderCount(), "Start's render, and none while the event is in the tail")
 	require.Len(t, r.feeds(), 1)
 	require.Equal(t, "Aa", string(joiner.bytes()), "today's replay")
+}
+
+// A join that runs out of time says what it was doing: emulating, which is
+// ErrReplayDeadline itself, or waiting, for a resize's outcome, for the rest
+// of a character or a sequence a resize fell inside, or for another join's
+// emulation, each ErrReplayDeadline wrapped with what it waited for.
+func TestAppendSizedSaysWhatTheDeadlineCaughtTheJoinDoing(t *testing.T) {
+	const wait = 200 * time.Millisecond
+	for _, tc := range []struct {
+		name string
+		// join joins sink to w, set up by it to run out of time as the case
+		// says, and ends whatever it started once the join is over.
+		join func(t *testing.T, sink io.Writer) (*fallbackLog, error)
+		want error
+	}{
+		{"emulating", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
+			r := &fakeReplayer{start: func(_ int, _ context.Context, deadline time.Time, _ *Capture) error {
+				// A replayer that finishes, but only once the deadline has
+				// passed.
+				time.Sleep(time.Until(deadline) + 10*time.Millisecond)
+				return nil
+			}}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			resize(w, at80x24)
+			writeString(w, "A")
+			return fallbacks, w.AppendSized(t.Context(), time.Now().Add(wait), at80x24, sink)
+		}, ErrReplayDeadline},
+
+		{"waiting for a resize's outcome", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			w, fallbacks := joinable(DefaultReplayBytes, &fakeReplayer{start: parkedStart(entered, gate)})
+			resize(w, at80x24)
+			writeString(w, "A")
+			done := joinAsync(w, t.Context(), time.Now().Add(wait), sink)
+			within(t, entered, "Start")
+			seq := w.ResizeBegin(at45x30)
+			defer w.ResizeEnd(seq, true)
+			close(gate)
+			return fallbacks, within(t, done, "the join")
+		}, errDeadlineAtAResize},
+
+		{"waiting for the rest of a sequence", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
+			r := &fakeReplayer{}
+			w, fallbacks := joinable(DefaultReplayBytes, r)
+			resize(w, at80x24)
+			writeString(w, "A")
+			seq := w.ResizeBegin(at45x30)
+			w.ResizeEnd(seq, true)
+			// The resize fell inside a sequence the stream has yet to end.
+			r.leaveInTail(seq, true)
+			writeString(w, "\x1b[3")
+			return fallbacks, w.AppendSized(t.Context(), time.Now().Add(wait), at45x30, sink)
+		}, errDeadlineInASequence},
+
+		{"waiting for another join's emulation", func(t *testing.T, sink io.Writer) (*fallbackLog, error) {
+			entered, gate := make(chan *Capture, 1), make(chan struct{})
+			w, fallbacks := joinable(DefaultReplayBytes, &fakeReplayer{start: parkedStart(entered, gate)})
+			resize(w, at80x24)
+			writeString(w, "A")
+			var first recordingWriter
+			holder := joinAsync(w, t.Context(), far(), &first)
+			within(t, entered, "the first join's Start")
+			err := w.AppendSized(t.Context(), time.Now().Add(wait), at80x24, sink)
+			close(gate)
+			require.NoError(t, within(t, holder, "the first join"))
+			return fallbacks, err
+		}, errDeadlineAtThePermit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink recordingWriter
+			fallbacks, err := tc.join(t, &sink)
+			require.NoError(t, err)
+			errs := fallbacks.all()
+			require.Len(t, errs, 1)
+			require.Equal(t, tc.want, errs[0], "%v", errs[0])
+			require.ErrorIs(t, errs[0], ErrReplayDeadline)
+			require.NotEqual(t, byte('<'), firstByte(sink.bytes()), "the raw ring, not a render")
+		})
+	}
+}
+
+// firstByte is p's first byte, or 0.
+func firstByte(p []byte) byte {
+	if len(p) == 0 {
+		return 0
+	}
+	return p[0]
 }
 
 // The emulation renders only once it has passed every resize it was
