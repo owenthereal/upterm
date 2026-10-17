@@ -46,8 +46,16 @@ func historyOf(e *emulation) [][]byte {
 // the replay's history collects them: each through encodeLine, with the
 // columns it takes, up to its trailing blanks, and its text. A clear of
 // history, by ED 3 or RIS, empties it, and is counted.
+//
+// canon is each line encoded from its cells' canonical styles, as the render
+// can write them. A joiner that draws a line from the render and scrolls it
+// off again holds those, and encodes them by another path where a colour
+// changes type only (an opaque black next to a palette one, where the line
+// it was drawn from had a transparent black), so lines it drew compare by
+// canon.
 type scrollOff struct {
 	lines  [][]byte
+	canon  [][]byte
 	widths []int
 	texts  []string
 	clears int
@@ -61,16 +69,25 @@ func collectScrollOff(term *vt.Emulator) *scrollOff {
 		if err != nil {
 			panic(err)
 		}
+		drawn := slices.Clone(line)
+		for i := range drawn {
+			drawn[i].Style = canonical(drawn[i].Style)
+		}
+		canon, err := encodeLine(drawn, budget)
+		if err != nil {
+			panic(err)
+		}
 		end := len(line)
 		for end > 0 && line[end-1] == uv.EmptyCell {
 			end--
 		}
 		s.lines = append(s.lines, enc)
+		s.canon = append(s.canon, canon)
 		s.widths = append(s.widths, end)
 		s.texts = append(s.texts, line.String())
 	})
 	term.SetScrollbackClearFunc(func() {
-		s.lines, s.widths, s.texts = nil, nil, nil
+		s.lines, s.canon, s.widths, s.texts = nil, nil, nil, nil
 		s.clears++
 	})
 	return s

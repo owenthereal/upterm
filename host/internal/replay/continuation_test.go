@@ -962,17 +962,21 @@ func (c contCase) run(wait time.Duration) contRun {
 
 	// What B holds of history is the lines the render emitted, then what
 	// scrolled off B after them, unless the stream cleared history since,
-	// on both terminals.
+	// on both terminals. The render's lines encode the session's own cells,
+	// as A's do, so they compare exactly; a line B scrolled off, it may have
+	// drawn from the render's colours, so those compare as the render can
+	// write them (see scrollOff).
 	check := func(when string) string {
-		bHist := r.bOff.lines
-		if r.bOff.clears == clears {
-			bHist = append(slices.Clip(rendered), r.bOff.lines[nb:]...)
+		aHist, bHist := r.aOff.canon, r.bOff.canon
+		if r.bOff.clears == clears && len(r.aOff.lines) >= len(rendered) {
+			aHist = append(slices.Clip(r.aOff.lines[:len(rendered)]), r.aOff.canon[len(rendered):]...)
+			bHist = append(slices.Clip(rendered), r.bOff.canon[nb:]...)
 		}
-		if d := sameState(r.a, r.b, r.aOff.lines, bHist); d != "" {
+		if d := sameState(r.a, r.b, aHist, bHist); d != "" {
 			return when + ": " + d
 		}
-		if !wider && !slices.EqualFunc(r.aOff.lines, r.bOff.lines, bytes.Equal) {
-			return fmt.Sprintf("%s: the history B scrolled off: %q vs %q", when, r.aOff.lines, r.bOff.lines)
+		if !wider && !slices.EqualFunc(r.aOff.canon, r.bOff.canon, bytes.Equal) {
+			return fmt.Sprintf("%s: the history B scrolled off: %q vs %q", when, r.aOff.canon, r.bOff.canon)
 		}
 		return ""
 	}
@@ -1668,4 +1672,18 @@ func TestReplayKeepsEachFactOnceAcrossResizes(t *testing.T) {
 	for i := range facts + 1 {
 		require.Equal(t, 1, strings.Count(held, fmt.Sprintf("fact %02d", i)), "fact %02d in %s", i, held)
 	}
+}
+
+// A colour the render can only write as RGB, as a transparent one (SGR 38;1),
+// is the same colour to the joiner, and a history line in it, which the
+// joiner draws and scrolls off again, holds the same cells as the session's,
+// though the joiner's own encoding of it takes another path to the palette
+// black next to it.
+func TestReplayHistoryKeepsColoursTheRenderWritesAsRGB(t *testing.T) {
+	setBudget(t, 64<<20)
+	c := contCase{
+		prefix: []byte("\n\x1b[38;5;m8A\x1b[H\x1b[38;1m\nk\x1b[M"),
+		sizes:  []uio.SizeEvent{event(1, 0, 26, 16), event(2, 22, 25, 1)},
+	}
+	requireContinues(t, c, c.run(time.Minute))
 }
