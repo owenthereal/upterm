@@ -1571,3 +1571,38 @@ func TestShiftOutSurvivesAShiftInInsideAnAmbiguouslyEndedString(t *testing.T) {
 	require.False(t, m.InSequence())
 	require.True(t, m.NonASCIICharset(), "an SO inside the window still shifts out")
 }
+
+// The same holds for everything else a DEC parser takes as putting ASCII
+// back: a RIS, a DECSTR or an ESC ( B inside an ambiguously ended string is
+// the string's on a terminal that keeps it open, so the graphics are still
+// there once ST ends it, and NonASCIICharset keeps saying so. Outside any
+// such string each puts ASCII back, as it does on every terminal.
+func TestNothingInsideAnAmbiguouslyEndedStringPutsASCIIBack(t *testing.T) {
+	for _, tc := range []struct{ name, graphics, inside string }{
+		{"a RIS after a shift-out", "\x0e", "\x1bc"},
+		{"a DECSTR after a shift-out", "\x0e", "\x1b[!p"},
+		{"a RIS after CAN, after a shift-out", "\x0e", "\x18\x1bc"},
+		{"a RIS after a graphics G0", "\x1b(0", "\x1bc"},
+		{"a DECSTR after a graphics G0", "\x1b(0", "\x1b[!p"},
+		{"an ESC ( B after a graphics G0", "\x1b(0", "\x1b(B"},
+		{"an ESC ( B after SUB, after a graphics G0", "\x1b(0", "\x1a\x1b(B"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, _ = m.Write([]byte(tc.graphics + "\x1b]0;t" + tc.inside))
+			require.True(t, m.InSequence(), "the string is still open")
+			require.True(t, m.NonASCIICharset(), "what puts ASCII back is the string's")
+
+			_, _ = m.Write([]byte("\x1b\\"))
+			require.False(t, m.InSequence(), "ST ends the string")
+			require.True(t, m.NonASCIICharset(), "the graphics are still in use")
+		})
+	}
+
+	for _, in := range []string{"\x0e\x1bc", "\x0e\x1b[!p", "\x0e\x0f", "\x1b(0\x1bc", "\x1b(0\x1b[!p", "\x1b(0\x1b(B",
+		"\x0e\x1b]0;t\x1bc\x1b\\\x0f", "\x1b(0\x1b]0;t\x1b(B\x1b\\\x1b(B"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "outside any string: %q", in)
+	}
+}
