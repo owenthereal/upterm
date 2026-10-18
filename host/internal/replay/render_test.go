@@ -960,6 +960,42 @@ func TestReplayFailsOnAClipboardWriteTooLargeToReplay(t *testing.T) {
 	require.Empty(t, e.clips[0].pd)
 }
 
+// DECSCA's character protection, which x/vt doesn't keep, fails the render,
+// named, once the session turned it on: the cells printed under it are
+// protected from DECSED and DECSEL on the session's terminal, and wouldn't be
+// on the joiner's. x/vt can't say which cells those are, so protection turned
+// off again with nothing printed between fails it too. DECSCA reads only its
+// first parameter, as xterm does: 1 protects, 0 (the default) and 2 don't,
+// and any other value changes nothing. One that doesn't protect renders.
+func TestReplayFailsOnCharacterProtection(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"protected text", "\x1b[1\"qprotected\x1b[0\"q"},
+		{"protection left on", "\x1b[1\"q"},
+		{"protection turned off with nothing printed", "\x1b[1\"q\x1b[\"q"},
+		{"the first parameter protecting", "\x1b[1;0\"q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "character protection")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"DECSCA 0", "\x1b[0\"q"},
+		{"the default", "\x1b[\"q"},
+		{"DECSCA 2", "\x1b[2\"q"},
+		{"a value that changes nothing", "\x1b[3\"q"},
+		{"a later parameter protecting", "\x1b[0;1\"q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

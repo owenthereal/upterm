@@ -515,6 +515,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.dcs {
 		return rep{}, &IneligibleError{State: "a device control string"}
 	}
+	if e.protected {
+		return rep{}, &IneligibleError{State: "character protection"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

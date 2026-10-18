@@ -82,6 +82,9 @@ type emulation struct {
 	dcs bool
 	// clips are the stream's clipboard writes still in force.
 	clips clipboard
+	// protected is set once the stream has turned character protection on
+	// (see watchProtection).
+	protected bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -160,10 +163,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title, the colours and the clipboard kept, images
-// and device control strings noted, and the meter stopped by ctx or the
-// deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// to queries discarded, the title, the colours and the clipboard kept, images,
+// device control strings and character protection noted, and the meter
+// stopped by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -179,6 +182,7 @@ func (e *emulation) setUp() {
 	e.watchGraphics()
 	e.watchDCS()
 	e.watchClipboard()
+	e.watchProtection()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -372,6 +376,23 @@ func (e *emulation) watchClipboard() {
 		}
 		if pc, pd, ok := bytes.Cut(pt, []byte{';'}); ok && string(pd) != "?" {
 			e.clips.write(pc, pd)
+		}
+		return false
+	})
+}
+
+// watchProtection registers the handler that notes DECSCA (CSI Ps " q)
+// turning character protection on. The cells printed under it are protected
+// from DECSED and DECSEL on the session's terminal, and on a joiner given the
+// raw ring, but the render's rows don't carry protection, and x/vt keeps none,
+// of a cell or of the pen, so once it is on the render can't tell which cells
+// it covers. DECSCA reads only its first parameter, as xterm's does, and 1 is
+// the value that protects. x/vt has no DECSCA handler of its own; this
+// returns false all the same, as watchColours' do.
+func (e *emulation) watchProtection() {
+	e.term.RegisterCsiHandler(ansi.Command(0, '"', 'q'), func(params ansi.Params) bool {
+		if n, _, _ := params.Param(0, 0); n == 1 {
+			e.protected = true
 		}
 		return false
 	})
