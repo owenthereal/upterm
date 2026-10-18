@@ -331,11 +331,12 @@ type ModeTracker struct {
 	// alone, and nothing is replayed from them.
 	//
 	// savedGL and savedG0Graphics are the sets a cursor save took with it, as
-	// cautiously: a save outside an unended string, straight after its ESC
-	// or as a CSI whose parameters are read, replaces them; any other save
-	// merges with them, not ASCII if either side is; a RIS that lowers the
-	// sets clears them; and a restore only ever raises gl and g0Graphics from
-	// them, never lowers them.
+	// cautiously, one copy for both screens: a save on the main screen and
+	// outside an unended string, straight after its ESC or as a CSI whose
+	// parameters are read, replaces them; any other save merges with them,
+	// not ASCII if either side is; a RIS that lowers the sets clears them;
+	// and a restore only ever raises gl and g0Graphics from them, never
+	// lowers them.
 	gl              int
 	g0Graphics      bool
 	singleShift     bool
@@ -593,9 +594,9 @@ func (m *ModeTracker) InSequence() bool {
 // too), or a locking shift that put G1, G2 or G3 in use -- SO, LS2 (ESC n)
 // or LS3 (ESC o) -- and no shift-in (SI) since, whatever those sets hold. A
 // RIS straight after its ESC puts both back; a DECSTR isn't taken as doing
-// so, since tmux ignores it. A cursor restore puts back the sets its save
-// took, and is taken only as raising them. Text written there is not inside
-// a sequence, but it isn't read as the text it is either.
+// so, since tmux ignores it. A cursor restore can only raise it, from one
+// copy of the saved sets that both screens share. Text written there is not
+// inside a sequence, but it isn't read as the text it is either.
 //
 // SO and SI are taken wherever a terminal executes them, which is everywhere
 // but inside a string: an OSC, PM, APC or SOS ignores them, and a DCS hands
@@ -639,13 +640,17 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 // under left and right margins mode, and 1048 as one on every terminal: a save
 // the terminal doesn't make still replaces the copy of the saved sets, and a
 // restore of the terminal's own older save can then draw in sets the copy
-// doesn't hold.
+// doesn't hold. xterm, VTE and tmux also save and restore the cursor on CSI
+// Ps ; Ps s and CSI Ps u while that mode is off, and the watch reads only the
+// plain forms.
 //
 // And the guard can stay unsafe until the program's own explicit reset: after
 // a stray SO, ESC n or ESC o, until an SI; in a string only ST ends, until the
 // next ESC \ whose ESC isn't the second of a pair; and with a character set
 // raised by a designation or a restore, until an ESC ( B, an SI or a RIS
-// lowers it.
+// lowers it. Since the copy of the saved sets is one for both screens, a
+// program on the alternate screen that saves its cursor in graphics and
+// leaves in ASCII keeps the guard raised until such a reset too.
 func (m *ModeTracker) watchSequence(b byte) {
 	// Whether b arrives outside every sequence, where a terminal draws it as
 	// a character or executes it as a control: read before anything below
@@ -811,9 +816,11 @@ func (m *ModeTracker) waitFinal(k escKind, b byte) {
 
 // saveCharsets is a cursor save's, which takes the character sets with it:
 // replacing the copy when replace, and otherwise merging with it, not ASCII
-// if either side is.
+// if either side is. On the alternate screen it always merges: a terminal
+// keeps a saved cursor per screen, and leaving through 1049 restores the main
+// screen's, which the copy, one for both, still has to hold.
 func (m *ModeTracker) saveCharsets(replace bool) {
-	if replace {
+	if replace && !m.altScreen {
 		m.savedGL, m.savedG0Graphics = m.gl, m.g0Graphics
 		return
 	}

@@ -1806,15 +1806,19 @@ func TestATitleStringIsOpenUntilST(t *testing.T) {
 // reset -- puts them back. The watch keeps a copy of its own of what was
 // saved, and a restore from it only ever raises what NonASCIICharset says,
 // never lowers it. Outside an ambiguously ended string a save replaces the
-// copy; inside one, or past a control, it merges with it, not ASCII if
-// either is; and a RIS outside one clears it. A CSI begun past a control has
-// parameters the watch doesn't read, so one ending in s or h is taken as a
-// save, merged, and one ending in u or l as a restore.
+// copy; inside one, past a control, or on the alternate screen, it merges
+// with it, not ASCII if either is; and a RIS outside one clears it. The
+// alternate screen's save merges because a terminal keeps a saved cursor per
+// screen, and 1049 reset restores the main screen's, which the copy, one for
+// both, has to cover. A CSI begun past a control has parameters the watch
+// doesn't read, so one ending in s or h is taken as a save, merged, and one
+// ending in u or l as a restore.
 func TestARestoredCharsetIsNeverTakenAsLower(t *testing.T) {
 	for _, in := range []string{
 		"\x1b(0\x1b7\x1b(B\x1b8",
 		"\x1b(0\x1b[s\x1b(B\x1b[u",
 		"\x1b(0\x1b[?1049h\x1b(B\x1b[?1049l",
+		"\x1b(0\x1b[?1049h\x1b(B\x1b7\x1b[?1049l",
 		"\x1b(0\x1b[?1048h\x1b(B\x1b[?1048l",
 		"\x1b(0\x1b[?25;1049h\x1b(B\x1b[?1049;25l",
 		"\x0e\x1b7\x0f\x1b8",
