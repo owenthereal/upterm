@@ -777,6 +777,40 @@ func TestReplayFailsOnAChangedColour(t *testing.T) {
 	}
 }
 
+// An image the session drew, which the query filter lets into the ring, fails
+// the render, named, as x/vt draws none and the render has none to send: a
+// sixel, a kitty graphics command (an APC whose first byte is G) other than
+// the query the filter drops, and an iTerm2 inline image, whole or in parts.
+// Another APC, and an OSC 1337 that draws nothing, render.
+func TestReplayFailsOnTerminalGraphics(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a sixel", "\x1bPq#0;2;100;0;0#0~~-~~\x1b\\"},
+		{"a sixel with parameters", "\x1bP0;1;0q\"1;1;2;2#0~~\x1b\\"},
+		{"a kitty image", "\x1b_Ga=T,f=100,i=1;iVBORw0KGgo=\x1b\\"},
+		{"a kitty placement", "\x1b_Ga=p,i=1\x1b\\"},
+		{"an iTerm2 image", "\x1b]1337;File=inline=1;size=8:iVBORw0KGgo=\x07"},
+		{"an iTerm2 image in parts", "\x1b]1337;MultipartFile=inline=1\x07\x1b]1337;FilePart=iVBORw0KGgo=\x07\x1b]1337;FileEnd\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "terminal graphics")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a kitty graphics query", "\x1b_Gi=31,a=q;AAAA\x1b\\"},
+		{"another APC", "\x1b_Xan application's own\x1b\\"},
+		{"an OSC 1337 that draws nothing", "\x1b]1337;RequestAttention=yes\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

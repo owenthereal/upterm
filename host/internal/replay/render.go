@@ -481,6 +481,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.colours.changed() {
 		return rep{}, &IneligibleError{State: "a changed palette or dynamic colour"}
 	}
+	if e.graphics {
+		return rep{}, &IneligibleError{State: "terminal graphics"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

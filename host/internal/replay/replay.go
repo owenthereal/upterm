@@ -74,6 +74,8 @@ type emulation struct {
 	titled bool
 	// colours is what the stream changed of the terminal's colours.
 	colours colours
+	// graphics is set once the stream has drawn an image (see watchGraphics).
+	graphics bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -152,9 +154,9 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title and the colours kept, and the meter stopped
-// by ctx or the deadline. Each callback and handler runs inside the
-// emulator's Write and touches only the emulation.
+// to queries discarded, the title and the colours kept, images noted, and the
+// meter stopped by ctx or the deadline. Each callback and handler runs inside
+// the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -167,6 +169,7 @@ func (e *emulation) setUp() {
 	t.SetCallbacks(vt.Callbacks{Title: func(title string) { e.title, e.titled = title, true }})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
+	e.watchGraphics()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -220,6 +223,37 @@ func (e *emulation) watchColours() {
 			return false
 		})
 	}
+}
+
+// watchGraphics registers the handlers that note an image the stream drew: a
+// sixel (DCS q), a kitty graphics command (an APC whose first byte is G), or
+// an iTerm2 inline image (OSC 1337 File=, or its multipart form, which starts
+// with MultipartFile=). x/vt draws none of them, so the render has no image to
+// send, where a raw replay carries each to the joiner. Of these, the query
+// filter drops only kitty's query, a=q. x/vt keys a DCS handler by the
+// sequence's prefix, intermediate and final byte, so the sixel's, for a bare
+// q, sees neither DECRQSS ($ q) nor XTGETTCAP (+ q). x/vt has no handler of
+// its own for any of these; each returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchGraphics() {
+	t := e.term
+	t.RegisterDcsHandler('q', func(ansi.Params, []byte) bool {
+		e.graphics = true
+		return false
+	})
+	t.RegisterApcHandler(func(data []byte) bool {
+		if bytes.HasPrefix(data, []byte("G")) {
+			e.graphics = true
+		}
+		return false
+	})
+	t.RegisterOscHandler(1337, func(data []byte) bool {
+		_, arg, _ := bytes.Cut(data, []byte{';'})
+		if bytes.HasPrefix(arg, []byte("File=")) || bytes.HasPrefix(arg, []byte("MultipartFile=")) {
+			e.graphics = true
+		}
+		return false
+	})
 }
 
 // Feed offers the emulation more of the stream and runs on to the next
