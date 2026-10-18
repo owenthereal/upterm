@@ -1003,6 +1003,36 @@ func TestReplayFailsOnCharacterProtection(t *testing.T) {
 	}
 }
 
+// A selective erase the session sent, DECSED (CSI ? Ps J) or DECSEL
+// (CSI ? Ps K), fails the render, named: x/vt ignores both, so the cells the
+// session's terminal erased are still in the emulator, and the render would
+// draw them. ED and EL, which x/vt does erase by, render.
+func TestReplayFailsOnASelectiveErase(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"DECSED", "\x1b[?J"},
+		{"DECSED of the whole screen", "\x1b[?2J"},
+		{"DECSEL", "\x1b[?K"},
+		{"DECSEL of the whole line", "\x1b[?2K"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a selective erase")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"ED", "\x1b[2J"},
+		{"EL", "\x1b[K"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

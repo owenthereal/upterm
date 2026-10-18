@@ -518,6 +518,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.protected {
 		return rep{}, &IneligibleError{State: "character protection"}
 	}
+	if e.selective {
+		return rep{}, &IneligibleError{State: "a selective erase"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
