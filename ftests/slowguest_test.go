@@ -295,6 +295,7 @@ func testClientSlowGuestDropped(t *testing.T, hostURL, hostNodeAddr, clientJoinU
 	healthy := &Client{PrivateKeys: []string{ClientPrivateKey}}
 	require.NoError(t, healthy.Join(session, clientJoinURL))
 	defer healthy.Close()
+	awaitGuestsAttached(t, adminSocketFile, 2)
 
 	// Both readers must run *concurrently*, and must be started before the
 	// first go-ahead. Client.JoinWithContext pumps output into an unbuffered

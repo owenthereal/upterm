@@ -704,6 +704,7 @@ func testProxyConcurrentGuests(t *testing.T, hostShareURL, hostNodeAddr, clientJ
 		_, out := c.InputOutput()
 		scanners = append(scanners, scanner(out))
 	}
+	awaitGuestsAttached(t, adminSocketFile, guests)
 
 	// One line from the host must reach every guest.
 	hostInputCh <- `echo "broadcast"`
