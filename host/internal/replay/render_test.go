@@ -1034,11 +1034,27 @@ func TestReplayReplaysTheClipboard(t *testing.T) {
 	render, err := renderAt(t, 80, 24, "\x1b]52;c;?\x07text\r\n")
 	require.NoError(t, err)
 	require.NotContains(t, string(render), "\x1b]52;")
+
+	// A write the stream is still inside at the join reaches the joiner once,
+	// raw, after the render, and the rest of the stream completes it there:
+	// a short one the query filter still holds, and one past the filter's
+	// hold, which the ring ends inside, after the handoff point.
+	for _, data := range []string{"QQ==", strings.Repeat("A", 400)} {
+		head := "text\r\n\x1b]52;c;" + data
+		joined, fellBack := fanOut(t, New(), []byte(head), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.True(t, bytes.HasSuffix(joined, []byte("\x1b]52;c;"+data)), "%q", joined)
+		whole := append(joined, "\x07more\r\n"...)
+		require.Equal(t, 1, bytes.Count(whole, []byte("\x1b]52;")), "%q", whole)
+		require.Equal(t, selectionsOf([]byte(head+"\x07more\r\n")), selectionsOf(whole))
+	}
 }
 
 // A clipboard write the render can't fit in its budget with everything else
 // fails it, named; one longer than the whole budget keeps none of its bytes.
-// One that fits exactly renders.
+// One that fits exactly renders, and so does one too long that a later write
+// supersedes, where one it supersedes only in part still fails it.
 func TestReplayFailsOnAClipboardWriteTooLargeToReplay(t *testing.T) {
 	setBudget(t, 8<<10)
 	stream := func(n int) []byte {
@@ -1064,6 +1080,14 @@ func TestReplayFailsOnAClipboardWriteTooLargeToReplay(t *testing.T) {
 	require.Len(t, e.clips, 1)
 	require.True(t, e.clips[0].over)
 	require.Empty(t, e.clips[0].pd)
+
+	long := "\x1b]52;cp;" + strings.Repeat("A", budget) + "\x07"
+	joined, err = fanOut(t, New(), []byte("text\r\n"+long+"\x1b]52;pc;QQ==\x07more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	require.NoError(t, err)
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]52;pc;QQ==\x07")), "%q", joined)
+	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]52;")))
+	_, err = fanOut(t, New(), []byte("text\r\n"+long+"\x1b]52;c;QQ==\x07more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	requireIneligible(t, err, "a clipboard write too large to replay")
 }
 
 // DECSCA's character protection, which x/vt doesn't keep, fails the render,
