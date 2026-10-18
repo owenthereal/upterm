@@ -863,6 +863,105 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	}
 }
 
+// dcsLog is a logger for x/vt that records whether x/vt logged a DCS it has no
+// handler for, but for synchronized output's DCS form, DCS = 1 s or DCS = 2 s
+// with no data, which the emulation leaves unnoted. It reads x/vt's own
+// message, so it knows nothing of the keys the emulation registers.
+type dcsLog struct{ dropped, logged bool }
+
+func (l *dcsLog) Printf(format string, v ...any) {
+	if format != "unhandled sequence: DCS %q %q" || len(v) != 2 {
+		return
+	}
+	l.logged = true
+	head, _ := v[0].(string)
+	data, _ := v[1].([]byte)
+	if (head == "=1s" || head == "=2s") && len(data) == 0 {
+		return
+	}
+	l.dropped = true
+}
+
+// The emulation notes a DCS exactly when x/vt drops one, by x/vt's own log,
+// but for synchronized output's DCS form: for each introducer, 7-bit and
+// 8-bit, and each terminator, around every body of up to four bytes drawn
+// from C0 controls, DEL, a C1 byte, every prefix, parameter bytes, the
+// intermediates and the finals at each end of their ranges, and every such
+// body after an ESC; and around every header of at most a prefix, a
+// parameter and an intermediate before any byte from 0x30 to 0x7E, with data
+// or none. A key the emulation misses fails it, and so does a DCS x/vt comes
+// to handle itself, which it then no longer logs.
+func TestReplayNotesEveryDCSXVTDrops(t *testing.T) {
+	e := start(t, captureOf("", event(1, 0, 80, 24)))
+	log := &dcsLog{}
+	e.term.SetLogger(log)
+	alphabet := []byte{
+		0x00, 0x07, 0x08, 0x0d, 0x0e, 0x18, 0x1a, 0x7f, 0x80, // C0 controls, DEL and a C1 byte
+		'<', '=', '>', '?', // the prefixes, '?' also the last final after an intermediate
+		'0', '1', ';', ':', // parameters, '0' also the first final after an intermediate
+		0x20, 0x2f, // the intermediates' ends
+		0x40, 0x7e, 's', 'q', // finals
+	}
+	bodies := [][]byte{nil}
+	for n, from := 0, 0; n < 4; n++ {
+		to := len(bodies)
+		for _, b := range bodies[from:to] {
+			for _, c := range alphabet {
+				bodies = append(bodies, append(append([]byte(nil), b...), c))
+			}
+		}
+		from = to
+	}
+	for _, b := range bodies {
+		if len(b) < 4 {
+			bodies = append(bodies, append([]byte{0x1b}, b...))
+		}
+	}
+	inters := []byte{0} // none
+	for b := byte(0x20); b <= 0x2f; b++ {
+		inters = append(inters, b)
+	}
+	for _, prefix := range []string{"", "<", "=", ">", "?"} {
+		for _, param := range []string{"", "1"} {
+			for _, inter := range inters {
+				for final := byte(0x30); final <= 0x7e; final++ {
+					for _, data := range []string{"", "x"} {
+						b := []byte(prefix + param)
+						if inter != 0 {
+							b = append(b, inter)
+						}
+						bodies = append(bodies, append(append(b, final), data...))
+					}
+				}
+			}
+		}
+	}
+
+	var seq []byte
+	logged := 0
+	for _, intro := range []string{"\x1bP", "\x90"} {
+		for _, end := range []string{"\x1b\\", "\x9c"} {
+			for _, body := range bodies {
+				// A CAN after each puts the parser back in ground, whatever
+				// the body left it in, and dispatches nothing.
+				seq = append(append(append(append(seq[:0], intro...), body...), end...), 0x18)
+				e.dcs, log.dropped, log.logged = false, false, false
+				if _, err := e.term.Write(seq); err != nil {
+					t.Fatalf("%q: %v", seq, err)
+				}
+				if e.dcs != log.dropped {
+					t.Fatalf("%q: the emulation noted a DCS: %v; x/vt dropped one: %v", seq, e.dcs, log.dropped)
+				}
+				if log.logged {
+					logged++
+				}
+			}
+		}
+	}
+	t.Logf("%d sequences, %d with a DCS x/vt logged", 4*len(bodies), logged)
+	require.Positive(t, logged, "x/vt's log was read")
+}
+
 // selectionsOf is what xterm's selections hold once a terminal that holds
 // none is given p: each OSC 52 that writes one applied in turn, as xterm does.
 // An empty Pc names s and 0, a character xterm has no selection for names
