@@ -1685,10 +1685,11 @@ func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	if note := tui.ReconnectNote(detail); note != "" {
 		writeSummaryRow(w, "Reconnect:", note, 0)
 	}
-	// A session that is going or gone has an outcome. Until then the record
-	// holds only the placeholder it was claimed with, which reads as an
-	// outcome nobody recorded.
-	if info.Reason != "" && (info.Status == statusEnded || info.Status == sessiondir.StatusEnding) {
+	// Only a session that has ended has an outcome. Until then the record
+	// holds the placeholder it was claimed with, and publishing that teardown
+	// has begun leaves it there, so a reason before the end reads as one
+	// nobody recorded.
+	if info.Reason != "" && info.Status == statusEnded {
 		writeSummaryRow(w, "Reason:", info.Reason, 0)
 	}
 	if info.ExitCode != nil {
@@ -1802,15 +1803,24 @@ func currentRunE(c *cobra.Command, args []string) error {
 }
 
 // withReportedState adds to detail what the daemon says of itself: its name,
-// and, once the session isn't ready, its status and the outage behind it. All
-// of it is the daemon's own answer and never a record's, since this command
-// works from the socket alone; a daemon that sends none of it leaves the view
-// as it was. A ready session has no status row, as before, but a relay that
-// can't bring a dropped session back is said at every status.
+// and, once the session isn't ready, its status and the outage behind it, and
+// it takes the connect strings away where guests can't use them. All of it is
+// the daemon's own answer and never a record's, since this command works from
+// the socket alone; a daemon that sends none of it leaves the view as it was.
+// A ready session has no status row, as before, but a relay that can't bring a
+// dropped session back is said at every status.
 func withReportedState(detail tui.SessionDetail, sess *api.GetSessionResponse) tui.SessionDetail {
 	detail.Name = sess.GetName()
 	detail.Reconnect = sess.GetReconnect()
-	if st := sess.GetStatus(); st != "" && st != sessiondir.StatusReady {
+	st := sess.GetStatus()
+	// Where guests can't use a connect string, none is shown, as in
+	// `session info` and the JSON. A daemon that reports no status doesn't
+	// say, and keeps its lines.
+	if st != "" && !joinable(st) {
+		detail.JoinCommand, detail.SSHCommand = "", ""
+		detail.SFTPEnabled, detail.SFTPCommand, detail.SCPUpload, detail.SCPDownload = false, "", "", ""
+	}
+	if st != "" && st != sessiondir.StatusReady {
 		detail.Status = st
 		detail.TunnelReason = sess.GetTunnelReason()
 		detail.TunnelLostAt = unixNanoUTC(sess.GetTunnelLostAtUnixNano())

@@ -2912,6 +2912,22 @@ func TestAnAnsweringSessionIsJustReady(t *testing.T) {
 	require.NotContains(t, out, "not answering")
 }
 
+// The record holds a placeholder reason from the moment the name is claimed,
+// and publishing that teardown has begun doesn't touch it, so a session that is
+// ending still has the placeholder until it has ended. Printing it would give
+// an outcome nobody recorded.
+func TestAnEndingSessionsSummaryHasNoReason(t *testing.T) {
+	setupSessionRoots(t)
+	d := heldReady(t, "winding-down")
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusEnding }))
+	require.Equal(t, sessiondir.ReasonUnknown, d.Record().Reason, "the case needs the placeholder still in place")
+
+	out := runInfo(t, "winding-down")
+
+	require.Contains(t, out, viewRow("Status:", "ending"))
+	require.NotContains(t, out, "Reason:")
+}
+
 // An ended session's outcome is its reason, and its row stays.
 func TestAnEndedSessionsSummaryKeepsItsReason(t *testing.T) {
 	setupSessionRoots(t)

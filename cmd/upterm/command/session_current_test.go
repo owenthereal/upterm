@@ -295,3 +295,43 @@ func TestCurrentShowsAStatusThatIsNotReady(t *testing.T) {
 		})
 	}
 }
+
+// A connect string is shown only where guests can use it, as `session info`
+// and the JSON have it: a session that is starting, disconnected or ending has
+// none to offer, and a hint to restart it for a new one sits badly over one. A
+// daemon that reports no status doesn't say, so it keeps the lines it always
+// had.
+func TestCurrentShowsConnectStringsOnlyWhereGuestsCanJoin(t *testing.T) {
+	setupSessionRoots(t)
+
+	for _, tc := range []struct {
+		name   string
+		status *string
+		shown  bool
+	}{
+		{"ready", proto.String("ready"), true},
+		{"reconnecting", proto.String("reconnecting"), true},
+		{"no status", nil, true},
+		{"starting", proto.String("starting"), false},
+		{"disconnected", proto.String("disconnected"), false},
+		{"ending", proto.String("ending"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock := socketIn(t, "connect-"+strings.ReplaceAll(tc.name, " ", "-")+".sock")
+			serveStubAdmin(t, sock, &api.GetSessionResponse{
+				SessionId: "sid", Host: "ssh://127.0.0.1:2222", Status: tc.status,
+			})
+
+			stdout, _, code := runCurrent(t, sock)
+			require.Equal(t, 0, code)
+			for _, line := range []string{"➤ Join:", "➤ SSH:", "➤ SFTP:", "➤ SCP:"} {
+				if tc.shown {
+					require.Contains(t, stdout, line)
+				} else {
+					require.NotContains(t, stdout, line)
+				}
+			}
+			require.Equal(t, tc.shown, strings.Contains(stdout, "sid:@127.0.0.1"), "no command carries the session's user: %q", stdout)
+		})
+	}
+}
