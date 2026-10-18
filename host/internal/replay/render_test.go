@@ -838,20 +838,22 @@ func TestReplayRestoresTheColourSchemeReports(t *testing.T) {
 	}
 }
 
-// The same for in-band resize reports (?2048), after which the terminal
-// reports its size changes unasked.
-func TestReplayRestoresTheInBandResizeReports(t *testing.T) {
+// In-band resize reports (?2048) don't make a join fall back, and aren't
+// set on the joiner: setting them makes a terminal report its own size at
+// once, which from a joiner is not the session's.
+func TestReplayLeavesInBandResizeReportsOff(t *testing.T) {
 	j := joinAt(t, 80, 24, "\x1b[?2048h$ ls\r\nREADME\r\n$ ")
-	require.Contains(t, string(j.render), "\x1b[?2048h")
-	require.True(t, j.b.Mode(ansi.ModeInBandResize).IsSet())
+	require.NotContains(t, string(j.render), "\x1b[?2048")
+	require.False(t, j.b.Mode(ansi.ModeInBandResize).IsSet())
 }
 
-// The report modes go out with the tracker's, in number order after them,
-// as focus reporting does; and a program that turned them off again leaves
-// the joiner's terminal as it is.
+// The colour-scheme report mode goes out with the tracker's, after them, as
+// focus reporting does; and a program that turned it off again leaves the
+// joiner's terminal as it is.
 func TestReplaySetsTheReportModesWithTheTrackers(t *testing.T) {
 	j := joinAt(t, 80, 24, "\x1b[?2048h\x1b[?2031h\x1b[?2004h\x1b[?1004h$ ls\r\n")
-	require.Contains(t, string(j.render), "\x1b[?1004h\x1b[?2004h\x1b[?2031h\x1b[?2048h")
+	require.Contains(t, string(j.render), "\x1b[?1004h\x1b[?2004h\x1b[?2031h")
+	require.NotContains(t, string(j.render), "\x1b[?2048")
 
 	j = joinAt(t, 80, 24, "\x1b[?2031h\x1b[?2048h$ ls\r\n\x1b[?2031l\x1b[?2048l")
 	require.NotContains(t, string(j.render), "\x1b[?2031")

@@ -329,9 +329,6 @@ func (r *renderer) reportModes() {
 	if t.Mode(ansi.ModeLightDark).IsSet() {
 		_ = r.enc.put(ansi.SetModeLightDark)
 	}
-	if t.Mode(ansi.ModeInBandResize).IsSet() {
-		_ = r.enc.put(ansi.SetModeInBandResize)
-	}
 }
 
 // continuation sets the state that decides how the next bytes are read and
@@ -403,26 +400,28 @@ var (
 		// scheme, light or dark, unasked. The program asked for those
 		// reports, and a raw replay passes the mode through.
 		ansi.ModeLightDark: true,
-		// ?2048: after this, the terminal reports a change of its size
-		// unasked, in the input stream. The program asked for those reports,
-		// and a raw replay passes the mode through.
-		ansi.ModeInBandResize: true,
 	}
 
 	// ignoredModes are left as the joiner's terminal has them: neither
 	// restored nor a reason to fall back, since none changes where output
-	// lands, what the screen or the cursor hold, or what the terminal sends
-	// unasked. The mode snapshot a raw replay starts with holds none of them
-	// either; only the ring's own bytes can carry one. Most change only
-	// how the terminal encodes the keyboard or the mouse, which the joiner's
-	// own terminal does for the joiner, and a program that relies on one
-	// sends it again (readline sends ?1034h at every prompt where the
-	// terminfo entry has it, as xterm-256color's does).
+	// lands or what the screen or the cursor hold, and only one changes what
+	// the terminal sends unasked, whose reports would be wrong from a joiner
+	// (in-band resize, below). The mode snapshot a raw replay starts with
+	// holds none of them either; only the ring's own bytes can carry one.
+	// Most change only how the terminal encodes the keyboard or the mouse,
+	// which the joiner's own terminal does for the joiner, and a program
+	// that relies on one sends it again (readline sends ?1034h at every
+	// prompt where the terminfo entry has it, as xterm-256color's does).
 	ignoredModes = map[ansi.DECMode]bool{
 		// The cursor's blink: appearance only.
 		ansi.DECMode(12): true,
 		// A synchronized update, which only holds back the drawing.
 		ansi.ModeSynchronizedOutput: true,
+		// In-band resize reports: setting the mode makes a terminal report
+		// its size at once, and again on every change, in the input. From a
+		// joiner that is the joiner's own size, not the session's, which the
+		// program learns from the pty's resizes anyway.
+		ansi.ModeInBandResize: true,
 		// Set, xterm's DECSC; reset, its DECRC: actions, not a mode. Nothing
 		// reads the bit back, and the slot the save filled is restored with
 		// the saved cursors.

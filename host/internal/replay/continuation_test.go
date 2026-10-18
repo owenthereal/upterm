@@ -364,8 +364,8 @@ func (g *streamGen) erase() {
 // unasked; and those the render leaves as the joiner's terminal has them.
 var (
 	trackedModes = []int{1, 7, 25, 1000, 1002, 1003, 1004, 1005, 1006, 2004}
-	reportNums   = []int{2031, 2048}
-	ignoredNums  = []int{12, 2026, 1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061, 9001}
+	reportNums   = []int{2031}
+	ignoredNums  = []int{12, 2026, 1007, 1015, 1034, 1035, 1036, 1037, 1039, 1050, 1051, 1052, 1053, 1060, 1061, 2048, 9001}
 )
 
 // mode sets or resets a mode: mostly the ones the render restores or
