@@ -545,6 +545,7 @@ func TestContinuationStateLeavesThePendingWrap(t *testing.T) {
 		"\x1b[1 q", "\x1b[2 q", "\x1b[3 q", "\x1b[4 q", "\x1b[5 q", "\x1b[6 q",
 		"\x1b[?7l", "\x1b[m", "\x1b[1;4:3;38;2;1;2;3m",
 		"\x1b]8;;https://x.example\x07", "\x1b]8;id=1;\x07",
+		"\x1b]7;file://host/dir\x07", "\x1b]52;c;QQ==\x07",
 		"\x00",
 	} {
 		term := vt.NewEmulator(4, 2)
@@ -1568,6 +1569,9 @@ func TestReplayFailsOnARenditionTheRenderCantDraw(t *testing.T) {
 		{"not overlined", "\x1b[55m"},
 		{"no ideogram attribute", "\x1b[65m"},
 		{"neither superscript nor subscript", "\x1b[75m"},
+		{"a curly underline", "\x1b[4:3m"},
+		{"a double underline", "\x1b[4:2m"},
+		{"normal intensity after an underline", "\x1b[1;4;22m"},
 		{"an indexed foreground", "\x1b[38;5;53m"},
 		{"an indexed background", "\x1b[48;5;21m"},
 		{"an indexed underline colour", "\x1b[58;5;73m"},
