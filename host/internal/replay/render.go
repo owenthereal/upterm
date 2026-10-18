@@ -557,6 +557,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.undrawable {
 		return rep{}, &IneligibleError{State: "a rendition the render can't draw"}
 	}
+	if e.doubleSize {
+		return rep{}, &IneligibleError{State: "a double-size line"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

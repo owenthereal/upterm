@@ -1404,6 +1404,33 @@ func TestReplayFailsOnARenditionTheRenderCantDraw(t *testing.T) {
 	}
 }
 
+// A line the session made double-width or double-height, by DECDWL (ESC # 6)
+// or DECDHL (ESC # 3 for the top half, ESC # 4 for the bottom), fails the
+// render, named: x/vt keeps no line size, so the render would draw the line
+// single-width, where the session's terminal draws it twice as wide and
+// shows half as many of its columns. It still does once DECSWL (ESC # 5)
+// makes a line single-width again; DECSWL alone renders.
+func TestReplayFailsOnADoubleSizeLine(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the top half of a double-height line", "\x1b#3big"},
+		{"the bottom half of a double-height line", "\x1b#4big"},
+		{"a double-width line", "\x1b#6wide"},
+		{"a double-width line made single-width again", "\x1b#6wide\x1b#5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a double-size line")
+		})
+	}
+	t.Run("a single-width line", func(t *testing.T) {
+		require.NoError(t, join(t, "\x1b#5narrow"))
+	})
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

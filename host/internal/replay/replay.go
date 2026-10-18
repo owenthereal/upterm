@@ -95,8 +95,9 @@ type emulation struct {
 	// rendition (see watchSaves).
 	savedTitle, savedModes, savedRendition bool
 	// undrawable is set once the stream has set an attribute a cell doesn't
-	// keep (see watchRendition).
-	undrawable bool
+	// keep, and doubleSize once it has made a line double-width or
+	// double-height (see watchRendition).
+	undrawable, doubleSize bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -480,16 +481,30 @@ func (e *emulation) watchSaves() {
 	}
 }
 
-// watchRendition registers the SGR handler that notes the stream setting an
-// attribute a cell doesn't keep (see sgrUndrawable). x/vt's SGR, which keeps
-// the rest in the pen, runs after it, as it returns false.
+// watchRendition registers the handlers that note the stream drawing what
+// the render's cells can't: the SGR handler, for an attribute a cell doesn't
+// keep (see sgrUndrawable), which x/vt's SGR, keeping the rest in the pen,
+// runs after, as it returns false; and those for a line made double-width,
+// by DECDWL (ESC # 6), or double-height, by DECDHL (ESC # 3 and ESC # 4).
+// x/vt keeps no line size, so it draws such a line single-width, where the
+// session's terminal draws each character twice as wide and shows half the
+// line. DECSWL (ESC # 5) makes a line single-width, as every line starts.
+// x/vt has no ESC # handler of its own; these return false all the same, as
+// watchColours' do.
 func (e *emulation) watchRendition() {
-	e.term.RegisterCsiHandler('m', func(params ansi.Params) bool {
+	t := e.term
+	t.RegisterCsiHandler('m', func(params ansi.Params) bool {
 		if sgrUndrawable(params) {
 			e.undrawable = true
 		}
 		return false
 	})
+	for _, final := range []byte{'3', '4', '6'} {
+		t.RegisterEscHandler(ansi.Command(0, '#', final), func() bool {
+			e.doubleSize = true
+			return false
+		})
+	}
 }
 
 // sgrUndrawable reports whether params, an SGR's, set an attribute a cell
