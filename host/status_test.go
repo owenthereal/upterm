@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/require"
 )
@@ -291,6 +292,92 @@ func TestApplyTakesOneSnapshotWhileTheTunnelChanges(t *testing.T) {
 	wg.Wait()
 
 	require.Zero(t, torn, "records carried a status and an outage that disagree")
+}
+
+// snapshot is what the admin API reports, and it is the facts apply writes to
+// the record: the two cannot disagree about a session.
+func TestSnapshotSaysWhatApplyWrites(t *testing.T) {
+	lostAt := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	nextAt := lostAt.Add(time.Second)
+
+	for _, tc := range []struct {
+		name       string
+		set        func(*sessionState)
+		wantStatus string
+		wantReason string
+	}{
+		{name: "starting", set: func(*sessionState) {}, wantStatus: sessiondir.StatusStarting},
+		{name: "ready", set: func(s *sessionState) {
+			s.setPhase(phaseRunning)
+			s.setReconnect(true)
+		}, wantStatus: sessiondir.StatusReady},
+		{name: "reconnecting", set: func(s *sessionState) {
+			s.setPhase(phaseRunning)
+			s.setReconnect(true)
+			s.tunnelReconnecting(lostAt, sessiondir.TunnelReasonNetwork, "EOF", nextAt)
+		}, wantStatus: sessiondir.StatusReconnecting, wantReason: sessiondir.TunnelReasonNetwork},
+		{name: "lost for good", set: func(s *sessionState) {
+			s.setPhase(phaseRunning)
+			s.setReconnect(false)
+			s.tunnelLost(lostAt, "EOF")
+		}, wantStatus: sessiondir.StatusDisconnected, wantReason: sessiondir.TunnelReasonReconnectUnsupported},
+		{name: "ending in an outage", set: func(s *sessionState) {
+			s.setPhase(phaseRunning)
+			s.setReconnect(true)
+			s.tunnelReconnecting(lostAt, sessiondir.TunnelReasonRelayError, "no", nextAt)
+			s.setPhase(phaseEnding)
+		}, wantStatus: sessiondir.StatusEnding, wantReason: sessiondir.TunnelReasonRelayError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var s sessionState
+			tc.set(&s)
+
+			var r sessiondir.Record
+			s.apply(&r)
+			got := s.snapshot()
+			require.Equal(t, internal.SessionState{
+				Status: r.Status, Reconnect: r.Reconnect, TunnelReason: r.TunnelReason,
+				LostAt: r.TunnelLostAt, NextAttemptAt: r.NextAttemptAt,
+			}, got)
+			require.Equal(t, tc.wantStatus, got.Status)
+			require.Equal(t, tc.wantReason, got.TunnelReason)
+		})
+	}
+}
+
+// A snapshot is one reading of every field under the state's lock: one that
+// says reconnecting carries a whole outage, and a ready one carries none,
+// however the reads interleave with the supervisor's writes.
+func TestSnapshotTakesOneReadingWhileTheTunnelChanges(t *testing.T) {
+	var s sessionState
+	s.setPhase(phaseRunning)
+
+	const rounds = 20000
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range rounds {
+			now := time.Now()
+			s.tunnelReconnecting(now, sessiondir.TunnelReasonNetwork, "EOF", now.Add(time.Second))
+			s.tunnelUp()
+		}
+	}()
+
+	close(start)
+	var torn int
+	for range rounds {
+		st := s.snapshot()
+		reconnecting := st.Status == sessiondir.StatusReconnecting
+		if reconnecting != (st.TunnelReason != "") || reconnecting != !st.LostAt.IsZero() || reconnecting != !st.NextAttemptAt.IsZero() {
+			torn++
+		}
+	}
+	wg.Wait()
+
+	require.Zero(t, torn, "snapshots carried a status and an outage that disagree")
 }
 
 // The callback carries what the record says, not what the ready actor asked

@@ -19,7 +19,7 @@ func runPrompt(t *testing.T, msgs ...tea.Msg) (HostSessionModel, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	p := tea.NewProgram(NewHostSessionModel(SessionDetail{}, false),
+	p := tea.NewProgram(NewHostSessionModel(false),
 		tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutSignalHandler())
 	go func() {
 		for _, m := range msgs {
@@ -67,5 +67,24 @@ func TestAnInterruptedPromptReturnsErrInterrupted(t *testing.T) {
 
 // --accept never asks: its model is the accepted one.
 func TestAnAutoAcceptModelIsAccepted(t *testing.T) {
-	require.Equal(t, HostSessionConfirmAccepted, NewHostSessionModel(SessionDetail{}, true).Result())
+	require.Equal(t, HostSessionConfirmAccepted, NewHostSessionModel(true).Result())
+}
+
+// The banner is printed once, before the prompt, so all the prompt draws is
+// its own line; and once answered it draws nothing, which clears that line on
+// a y and leaves nothing behind on an n or a Ctrl-C.
+func TestThePromptDrawsOnlyItsOwnLine(t *testing.T) {
+	m := NewHostSessionModel(false)
+	require.Equal(t, "Start the session? [y/n]", m.View())
+
+	for name, key := range map[string]tea.KeyMsg{
+		"y":      {Type: tea.KeyRunes, Runes: []rune{'y'}},
+		"n":      {Type: tea.KeyRunes, Runes: []rune{'n'}},
+		"ctrl+c": {Type: tea.KeyCtrlC},
+	} {
+		t.Run(name, func(t *testing.T) {
+			answered, _ := m.Update(key)
+			require.Empty(t, answered.View())
+		})
+	}
 }

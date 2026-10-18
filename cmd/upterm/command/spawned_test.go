@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +20,8 @@ import (
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/bootstrap"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
+	"github.com/owenthereal/upterm/internal/logging"
+	"github.com/owenthereal/upterm/internal/termsize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -414,13 +418,313 @@ func TestSpawnedSessionDetachPrintsHowToAttach(t *testing.T) {
 	dec := d.startup(t, "s")
 	go func() { <-dec; d.start() }()
 	require.NoError(t, s.run(context.Background()))
-	require.Contains(t, stdout.String(), "upterm attach s")
-	require.Contains(t, stdout.String(), "upterm session stop s")
+	require.Equal(t, "Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n", stdout.String())
+}
+
+// A session that is up but not ready -- its tunnel down by the time it
+// reported readiness -- is not "running" the way a ready one is, and the line
+// says what the view's Hint row would, from the record of the launch this
+// process started, as a sentence of its own. A record that doesn't say, or is
+// another launch's, adds nothing.
+func TestSpawnedSessionDetachSaysWhatIsWrongWhenNotReady(t *testing.T) {
+	const hint = "This relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."
+	for _, tc := range []struct {
+		name      string
+		ownLaunch bool
+		reason    string
+		want      string
+	}{
+		{"the record says why", true, sessiondir.TunnelReasonReconnectUnsupported,
+			"Session s is running in the background. " + hint + " Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"a hint that starts with the product's name keeps it lowercase", true, sessiondir.TunnelReasonNetwork,
+			"Session s is running in the background. upterm can't reach the relay; it keeps retrying. Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"the record doesn't say", true, "",
+			"Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n"},
+		{"the record is another launch's", false, sessiondir.TunnelReasonReconnectUnsupported,
+			"Session s is running in the background. Attach with upterm attach s; stop it with upterm session stop s.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			require.NoError(t, dir.Update(func(r *sessiondir.Record) {
+				r.Status = sessiondir.StatusDisconnected
+				r.TunnelReason = tc.reason
+			}))
+
+			spawn, d := newScriptedDaemon(t)
+			if tc.ownLaunch {
+				d.launchID = dir.LaunchID()
+			}
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach = true
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.startWith(sessiondir.StatusDisconnected) }()
+
+			require.NoError(t, s.run(context.Background()))
+			require.Equal(t, tc.want, stdout.String())
+		})
+	}
+}
+
+// The key hint names ~. and ~?, so it is said only to a terminal where both
+// work: one whose keystrokes this process reads (its stdin is the foreground's
+// own) and whose output is a terminal, which ~? needs to know it is writing
+// outside the session's sequences. Piped (upterm host -- cmd | tee log) or
+// in the background, the keys reach nothing.
+func TestHostKeyHintOnlyWhereTheKeysWork(t *testing.T) {
+	pty := &attach.Pty{Term: "xterm", Size: termsize.Default}
+	stdin := strings.NewReader("")
+	require.Equal(t, keyHint('~', true), hostKeyHint(localTerminal{pty: pty, stdin: stdin, rawMode: true}, '~', true))
+	require.Empty(t, hostKeyHint(localTerminal{stdin: stdin, rawMode: true}, '~', true), "stdout piped: ~. works and ~? doesn't")
+	require.Empty(t, hostKeyHint(localTerminal{pty: pty}, '~', true), "in the background: no keystroke is read")
+	require.Empty(t, hostKeyHint(localTerminal{}, '~', true), "neither")
+	require.Empty(t, hostKeyHint(localTerminal{pty: pty, stdin: stdin, rawMode: true}, 0, true), "--escape-char none")
+}
+
+func TestKeyHint(t *testing.T) {
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys", keyHint('~', false))
+	require.Equal(t, "upterm: ~. detaches, ~? shows the session's status and keys; with ssh's default ~ escape, type ~~. and ~~?", keyHint('~', true))
+	require.Equal(t, "upterm: ^. detaches, ^? shows the session's status and keys", keyHint('^', true))
+	require.Empty(t, keyHint(0, true))
+}
+
+// The key hint is the last thing upterm host says before the session: after
+// the banner, and after the warning an open session gets. Only a foreground
+// session the operator started is told it: a detached one has no keys to
+// press, and a declined one has no session.
+func TestTheKeyHintFollowsTheBanner(t *testing.T) {
+	hint := keyHint('~', false)
+	for _, tc := range []struct {
+		name    string
+		open    bool
+		decline bool
+		want    string
+	}{
+		{"started", false, false, "BANNER\n" + hint + "\n"},
+		{"started open", true, false, "BANNER\n" + openSessionWarning + "\n" + hint + "\n"},
+		{"declined", false, true, "BANNER\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spawn, d := newScriptedDaemon(t)
+			d.open = tc.open
+			attached := make(chan string, 1)
+			result := make(chan attach.Result, 1)
+			// One buffer for everything this process says, so the order is
+			// what the operator would read.
+			var out bytes.Buffer
+			s := newSession(t, spawn, fakeClient(attached, result), &out, &out)
+			s.keyHint, s.hintOut = hint, &out
+			s.display = func(context.Context, *api.GetSessionResponse, string) error {
+				out.WriteString("BANNER\n")
+				if tc.decline {
+					return UserDiscardedError{}
+				}
+				return nil
+			}
+			d.startup(t, "s")
+			if !tc.decline {
+				go func() {
+					<-attached
+					d.start()
+					result <- attach.Result{Reason: attach.Exited}
+				}()
+			}
+
+			_ = s.run(context.Background())
+			require.Equal(t, tc.want, out.String())
+		})
+	}
+
+	t.Run("detached", func(t *testing.T) {
+		spawn, d := newScriptedDaemon(t)
+		var stdout, stderr, hintOut bytes.Buffer
+		s := newSession(t, spawn, nil, &stdout, &stderr)
+		s.detach = true
+		s.keyHint, s.hintOut = hint, &hintOut
+		dec := d.startup(t, "s")
+		go func() { <-dec; d.start() }()
+
+		require.NoError(t, s.run(context.Background()))
+		require.Empty(t, hintOut.String())
+		require.NotContains(t, stdout.String()+stderr.String(), hint)
+	})
+}
+
+// stoppedTerminal is a terminal that stops at the write containing mark:
+// that write parks until the terminal is resumed, then is taken whole, and
+// every other write is taken at once. entered closes as the marked write
+// parks.
+type stoppedTerminal struct {
+	mark             string
+	resumed, entered chan struct{}
+	resume, enter    sync.Once
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newStoppedTerminal(mark string) *stoppedTerminal {
+	return &stoppedTerminal{mark: mark, resumed: make(chan struct{}), entered: make(chan struct{})}
+}
+
+func (s *stoppedTerminal) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(s.mark)) {
+		s.enter.Do(func() { close(s.entered) })
+		<-s.resumed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *stoppedTerminal) Resume() { s.resume.Do(func() { close(s.resumed) }) }
+
+func (s *stoppedTerminal) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// On the terminal the attach client is about to take, the key hint, and the
+// open-session warning ahead of it, are written as the banner is,
+// synchronously, and so before the client takes it. A write given up on at a
+// bound would go on in the background and land once a stopped terminal
+// resumed, amid the session's output and outside everything that keeps that
+// output in turn. The warning is written so with no key hint too, as with
+// --escape-char none: the client takes the terminal all the same.
+func TestTheLinesBeforeTheSessionAreWrittenBeforeTheTerminalIsHandedOver(t *testing.T) {
+	hint := keyHint('~', false)
+	for _, tc := range []struct {
+		name string
+		open bool
+		hint string
+		stop string // the line the terminal stops at
+		want string
+	}{
+		{"the key hint", false, hint, hint, hint + "\n"},
+		{"the open-session warning", true, hint, openSessionWarning, openSessionWarning + "\n" + hint + "\n"},
+		{"the open-session warning with no key hint", true, "", openSessionWarning, openSessionWarning + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spawn, d := newScriptedDaemon(t)
+			d.open = tc.open
+			attached := make(chan string, 1)
+			result := make(chan attach.Result, 1)
+			terminal := newStoppedTerminal(tc.stop)
+			t.Cleanup(terminal.Resume)
+			var seen atomic.Pointer[string]
+			client := fakeClient(attached, result)
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, func(ctx context.Context, socket string, keys []ssh.PublicKey, src statusSource) (attach.Result, error) {
+				written := terminal.String()
+				seen.Store(&written)
+				return client(ctx, socket, keys, src)
+			}, &stdout, &stderr)
+			// The terminal is stderr, which is where the hint goes when it is
+			// one.
+			s.stderr, s.keyHint, s.hintOut = terminal, tc.hint, terminal
+			d.startup(t, "s")
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			ran := make(chan error, 1)
+			go func() { ran <- s.run(ctx) }()
+
+			select {
+			case <-terminal.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the line was never written")
+			}
+			select {
+			case <-attached:
+				t.Fatal("the attach client started while the line was still being written")
+			case <-time.After(5 * logging.LogBound):
+			}
+			terminal.Resume()
+			select {
+			case <-attached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the attach client never started")
+			}
+			require.Equal(t, tc.want, *seen.Load(), "written whole before the client started")
+
+			d.start()
+			result <- attach.Result{Reason: attach.Exited}
+			require.NoError(t, <-ran)
+		})
+	}
+}
+
+// Where no terminal is handed over from here, or stderr isn't the one that
+// is, the open-session warning keeps its bound: stderr may be a pipe nobody
+// drains, and a startup held on it would hold the session. So for a detached
+// session, even with stderr a terminal, and for one whose stderr isn't the
+// terminal, with its key hint on stdout or with none.
+func TestTheOpenSessionWarningIsBoundedWhereTheTerminalIsNotHandedOver(t *testing.T) {
+	hint := keyHint('~', false)
+	for _, tc := range []struct {
+		name       string
+		detach     bool
+		onTerminal bool // stderr is the terminal, where the hint would go
+		hint       string
+	}{
+		{"detached", true, true, hint},
+		{"stderr isn't the terminal", false, false, hint},
+		{"stderr isn't the terminal, and no key hint", false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spawn, d := newScriptedDaemon(t)
+			d.open = true
+			attached := make(chan string, 1)
+			result := make(chan attach.Result, 1)
+			// A client even when detached, which never starts one: it is the
+			// detach that says no terminal is handed over.
+			client := fakeClient(attached, result)
+			stopped := newStoppedTerminal(openSessionWarning)
+			t.Cleanup(stopped.Resume)
+			var stdout, stderr, hintOut bytes.Buffer
+			s := newSession(t, spawn, client, &stdout, &stderr)
+			s.detach = tc.detach
+			s.stderr, s.keyHint, s.hintOut = stopped, tc.hint, &hintOut
+			if tc.onTerminal {
+				s.hintOut = stopped
+			}
+			dec := d.startup(t, "s")
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			ran := make(chan error, 1)
+			go func() { ran <- s.run(ctx) }()
+
+			if tc.detach {
+				go func() { <-dec; d.start() }()
+			} else {
+				select {
+				case <-attached:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the attach client never started past a stopped stderr")
+				}
+				d.start()
+				result <- attach.Result{Reason: attach.Exited}
+			}
+			select {
+			case err := <-ran:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the session was held on a stopped stderr")
+			}
+			said := hintOut.String()
+			if tc.onTerminal {
+				said = stopped.String()
+			}
+			require.Equal(t, tc.hint != "" && !tc.detach, strings.Contains(said, hint))
+		})
+	}
 }
 
 // fakeClient attaches on cue and ends how it is told.
 func fakeClient(attached chan<- string, result <-chan attach.Result) clientFunc {
-	return func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+	return func(ctx context.Context, socket string, keys []ssh.PublicKey, _ statusSource) (attach.Result, error) {
 		if len(keys) == 0 {
 			return attach.Result{}, errors.New("no keys")
 		}
@@ -563,13 +867,36 @@ func TestSpawnedSessionReportsADaemonThatDied(t *testing.T) {
 	require.ErrorContains(t, err, "/var/log/upterm.log", "the log is where the answer is")
 }
 
+// The terminal's ~? reports on the launch this process started, at the admin
+// socket that launch claimed: the name can pass to another launch while the
+// terminal is attached.
+func TestSpawnedSessionGivesItsTerminalTheLaunchItClaimed(t *testing.T) {
+	spawn, d := newScriptedDaemon(t)
+	attached := make(chan statusSource, 1)
+	client := func(_ context.Context, _ string, _ []ssh.PublicKey, src statusSource) (attach.Result, error) {
+		attached <- src
+		return attach.Result{Reason: attach.Detached}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, client, &stdout, &stderr)
+	d.startup(t, "s")
+	got := make(chan statusSource, 1)
+	go func() {
+		src := <-attached
+		d.start()
+		got <- src
+	}()
+	require.NoError(t, s.run(context.Background()))
+	require.Equal(t, statusSource{Name: "s", LaunchID: "launch-1", AdminSocket: "/run/a.sock"}, <-got)
+}
+
 // A terminal that never attached leaves the daemon with a gate nobody will
 // open; the parent closes its end at once so the daemon abandons now rather
 // than after its own timeout.
 func TestSpawnedSessionAbandonsWhenItsTerminalCannotAttach(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
-	client := func(context.Context, string, []ssh.PublicKey) (attach.Result, error) {
+	client := func(context.Context, string, []ssh.PublicKey, statusSource) (attach.Result, error) {
 		return attach.Result{}, errors.New("dial unix /run/t.sock: connection refused")
 	}
 	s := newSession(t, spawn, client, &stdout, &stderr)
@@ -602,7 +929,7 @@ func TestSpawnedSessionWaitsForItsTerminalWhenTheSessionFails(t *testing.T) {
 	var clientReturned, clientSawCancel atomic.Bool
 	// A client only a cancellation gets back, which is what a terminal
 	// holding raw mode with nothing left to read looks like.
-	client := func(ctx context.Context, socket string, keys []ssh.PublicKey) (attach.Result, error) {
+	client := func(ctx context.Context, socket string, keys []ssh.PublicKey, _ statusSource) (attach.Result, error) {
 		attached <- socket
 		<-ctx.Done()
 		clientSawCancel.Store(ctx.Err() != nil)
@@ -683,7 +1010,7 @@ func TestSpawnedSessionWaitsForTheVerdictAfterAnEarlyDetach(t *testing.T) {
 func TestSpawnedSessionRefusesAnUnreadableHostKey(t *testing.T) {
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
-	client := func(context.Context, string, []ssh.PublicKey) (attach.Result, error) {
+	client := func(context.Context, string, []ssh.PublicKey, statusSource) (attach.Result, error) {
 		t.Error("the client must not be started with keys that did not parse")
 		return attach.Result{}, nil
 	}

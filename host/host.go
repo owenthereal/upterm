@@ -95,6 +95,28 @@ func newHostKeyCallback(stdin io.Reader, stdout io.Writer, knownHostsFilename st
 	}, nil
 }
 
+// RelayWarningKind is what a RelayWarning is about.
+type RelayWarningKind int
+
+const (
+	// NoReconnect is a relay that can't take a session back: one that
+	// registers sessions under IDs of its own. If the tunnel drops, guests
+	// can't reach the session again until it is restarted.
+	NoReconnect RelayWarningKind = iota
+	// CertNotValidForServer is a relay whose certificate isn't valid for the
+	// host the session dialled, so a redial, which is pinned to it, would be
+	// refused.
+	CertNotValidForServer
+)
+
+// RelayWarning is what RelayWarningCallback is told.
+type RelayWarning struct {
+	Kind RelayWarningKind
+	// Host is the hostname the certificate isn't valid for, for
+	// CertNotValidForServer; empty otherwise.
+	Host string
+}
+
 type Host struct {
 	Host string
 	// KeepAliveDuration paces the guest sshd's keepalive to each guest. The
@@ -126,6 +148,13 @@ type Host struct {
 	Logger                  *slog.Logger
 	ReadOnly                bool
 	AllowLocalTCPForwarding bool
+	// TunnelCallback is told when the tunnel to the relay is lost, and when
+	// it is back. It is called on a goroutine of the host's own, one event at
+	// a time and in the order they happened, so a callback that takes a while
+	// delays only the events behind it, not the redial. Of the events that
+	// happen while it is still busy with one, only the latest is kept: it says
+	// where things stand.
+	TunnelCallback func(TunnelEvent)
 	// HideClientIP keeps a guest's address out of its forced command's
 	// SSH_CONNECTION and SSH_CLIENT.
 	HideClientIP bool
@@ -134,6 +163,11 @@ type Host struct {
 	// the session ID can join, and nobody was asked. GetSessionResponse.open
 	// reports that; it changes nothing about who may join.
 	AutoAccept bool
+	// FileTransferApprovalRequired says each guest file transfer waits for
+	// the host's desktop dialog (no --accept). The daemon sets it, with the
+	// SFTPPermissionChecker that shows the dialog. It is reported to readers
+	// of the session and changes nothing about what is allowed.
+	FileTransferApprovalRequired bool
 	// ProxyURL, when non-nil, routes the connection to the upterm server
 	// through an HTTP proxy.
 	ProxyURL   *url.URL
@@ -200,6 +234,16 @@ type Host struct {
 	// incompatible with this host's. Nil logs the mismatch and nothing more:
 	// the daemon has no terminal to print to.
 	VersionWarningCallback func(*version.CompatibilityResult)
+	// RelayWarningCallback is called with what the first connection showed
+	// about the relay that will matter if the tunnel drops: that it can't
+	// take the session back, or that its certificate doesn't name the host a
+	// redial would dial. Nil logs it and nothing more, as for
+	// VersionWarningCallback.
+	//
+	// Called at most once, on Run's own goroutine, after
+	// VersionWarningCallback and before SessionCreatedCallback, so whoever
+	// prints it prints it ahead of the session; it must not block.
+	RelayWarningCallback func(RelayWarning)
 
 	// AwaitInitialClient defers starting the command until the first host
 	// client's output subscription is installed, and defers serving guests
@@ -496,11 +540,11 @@ var ClaimTimeout = 10 * time.Second
 // the path is what supplying it means.
 func (c *Host) Run(ctx context.Context) (runErr error) {
 	// First, before anything here can write a byte. Whatever a
-	// SessionCreatedCallback prints, and whatever a VersionWarningCallback
-	// prints, goes out well before the signal actor is assembled, and for an
-	// embedder whose reader has gone away a single one of those writes is
-	// fatal. See InstallSignalPolicy; calling it again from setupSignalHandler
-	// is free.
+	// SessionCreatedCallback prints, and whatever a VersionWarningCallback or
+	// a RelayWarningCallback prints, goes out well before the signal actor is
+	// assembled, and for an embedder whose reader has gone away a single one
+	// of those writes is fatal. See InstallSignalPolicy; calling it again from
+	// setupSignalHandler is free.
 	InstallSignalPolicy()
 
 	// Admin stop has its own cause; external parent cancellation remains distinct.
@@ -742,12 +786,20 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 	logger.Info("Established reverse tunnel")
 
 	// Said now, once, rather than at the first drop, where all there would
-	// be to say is that a redial failed.
+	// be to say is that a redial failed. Told to the caller as well as
+	// logged, and before the session is created, so the operator reads it
+	// before the session starts rather than above it later.
 	if !rt.ReconnectSupported() {
 		logger.Warn("this relay doesn't support reconnecting; if the tunnel drops, guests can't reach this session again until it is restarted")
+		if c.RelayWarningCallback != nil {
+			c.RelayWarningCallback(RelayWarning{Kind: NoReconnect})
+		}
 	} else if err := relayAuthority.CheckRedial(u.Host); err != nil {
 		logger.Warn(fmt.Sprintf("the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", u.Hostname()),
 			"error", err)
+		if c.RelayWarningCallback != nil {
+			c.RelayWarningCallback(RelayWarning{Kind: CertNotValidForServer, Host: u.Hostname()})
+		}
 	}
 
 	// Where guests reach the session now. A redial may register it on
@@ -772,6 +824,24 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		// The same emptiness the guest door admits anyone on.
 		Open: c.AutoAccept && len(aks) == 0,
 	}
+	internal.Permissions{
+		AutoAccept:                   c.AutoAccept,
+		ReadOnly:                     c.ReadOnly,
+		SFTPDisabled:                 c.SFTPDisabled,
+		AllowLocalTCPForwarding:      c.AllowLocalTCPForwarding,
+		FileTransferApprovalRequired: c.FileTransferApprovalRequired,
+	}.Report(session)
+	// The name the session holds, which is not c.Name when Run was handed a
+	// socket (the name is then ignored) or generated one (c.Name is empty).
+	var sessionName string
+	if c.SessionDir != nil {
+		sessionName = c.SessionDir.Name()
+	}
+	// The status, reconnect and tunnel fields set here are a snapshot, taken
+	// as the session starts, for SessionCreatedCallback: they go stale as
+	// soon as the tunnel moves, and the admin server's GetSession computes
+	// them again for every answer rather than copying them from session.
+	internal.DescribeSession(session, sessionName, state.snapshot)
 
 	if c.SessionCreatedCallback != nil {
 		if err := c.SessionCreatedCallback(ctx, session); err != nil {
@@ -876,6 +946,8 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			return setJoinTimeoutResponse(res)
 		},
 		JoinState: func() *api.JoinState { return apiJoinState(joins.snapshot()) },
+		Name:      sessionName,
+		State:     state.snapshot,
 	}
 	if err := adminServer.Listen(c.AdminSocketFile); err != nil {
 		logger.Error("Failed to bind the admin socket", "socket", c.AdminSocketFile, "error", err)
@@ -977,6 +1049,7 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 		supported:       rt.ReconnectSupported(),
 		sessionKeyFirst: rt.SessionKeyRedial() && !c.IdentitiesOnly,
 		logger:          logger,
+		onTunnel:        c.TunnelCallback,
 	}
 
 	var g run.Group
@@ -1424,26 +1497,4 @@ func toApiAuthorizedKeys(aks []*AuthorizedKey) []*api.AuthorizedKey {
 	}
 
 	return apiAks
-}
-
-// DisplayVersionWarning prints a formatted version mismatch warning to the
-// given writer. Run no longer prints it — a daemon has no terminal — so this
-// is for a caller that does, from VersionWarningCallback.
-func DisplayVersionWarning(out io.Writer, logger *slog.Logger, result *version.CompatibilityResult) {
-	messages := []struct {
-		text     string
-		debugMsg string
-	}{
-		{"[WARNING] VERSION MISMATCH DETECTED\n", "failed to display version warning header"},
-		{result.Message + "\n", "failed to display version warning message"},
-		{fmt.Sprintf("Host version:   %s\n", result.HostVersion), "failed to display host version"},
-		{fmt.Sprintf("Server version: %s\n", result.ServerVersion), "failed to display server version"},
-		{"\nThis may cause compatibility issues. Consider updating to matching versions.\n\n", "failed to display version warning footer"},
-	}
-
-	for _, msg := range messages {
-		if _, err := fmt.Fprint(out, msg.text); err != nil {
-			logger.Debug(msg.debugMsg, "error", err)
-		}
-	}
 }

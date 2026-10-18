@@ -524,7 +524,7 @@ func TestSessionInfo(t *testing.T) {
 	require.Contains(t, clean, "Session:", "TUI should show Session ID")
 	require.Contains(t, clean, "Command:", "TUI should show Command")
 	require.Contains(t, clean, "bash", "TUI should show the command being run")
-	require.Contains(t, clean, "Host:", "TUI should show Host")
+	require.Contains(t, clean, "Relay:", "TUI should show Relay")
 	require.Contains(t, clean, "SSH:", "TUI should show SSH")
 	require.Contains(t, clean, "SFTP:", "TUI should show SFTP")
 	require.Contains(t, clean, "SCP:", "TUI should show SCP")

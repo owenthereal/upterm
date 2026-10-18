@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // SessionRoute is where guests reach the session now: the latest
@@ -34,6 +35,81 @@ func (r *SessionRoute) Get() (nodeAddr, sshUser string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.nodeAddr, r.sshUser
+}
+
+// SessionState is what the supervisor knows, for the admin API.
+type SessionState struct {
+	Status, Reconnect, TunnelReason string
+	LostAt, NextAttemptAt           time.Time // zero when not reconnecting
+}
+
+// DescribeSession sets the fields of r that name the session and say how it
+// is doing. A session with no name has none to report, and with no state to
+// ask the supervisor for, the state is unknown: those fields stay unset. With
+// state, the strings are always set, empty when there is nothing to say, such
+// as the reason while the tunnel is up. A time that is zero is not a moment,
+// an outage that has not begun or an attempt that is not scheduled, so it is
+// unset, not the epoch.
+func DescribeSession(r *api.GetSessionResponse, name string, state func() SessionState) {
+	if name != "" {
+		r.Name = proto.String(name)
+	}
+	if state == nil {
+		return
+	}
+	st := state()
+	r.Status = proto.String(st.Status)
+	r.Reconnect = proto.String(st.Reconnect)
+	r.TunnelReason = proto.String(st.TunnelReason)
+	r.TunnelLostAtUnixNano = unixNano(st.LostAt)
+	r.NextAttemptAtUnixNano = unixNano(st.NextAttemptAt)
+}
+
+// unixNano is t as UTC nanoseconds since the epoch, or none for a zero t.
+func unixNano(t time.Time) *int64 {
+	if t.IsZero() {
+		return nil
+	}
+	return proto.Int64(t.UnixNano())
+}
+
+// The values of GetSessionResponse.file_transfer.
+const (
+	FileTransferOff       = "off"
+	FileTransferDownloads = "downloads"
+	FileTransferAll       = "all"
+)
+
+// Permissions is how the host started the session, as far as it decides what
+// guests may do.
+type Permissions struct {
+	// AutoAccept says nobody answered the start prompt (--accept).
+	AutoAccept              bool
+	ReadOnly                bool
+	SFTPDisabled            bool
+	AllowLocalTCPForwarding bool
+	// FileTransferApprovalRequired says each guest file transfer waits for
+	// the host's dialog. It means nothing when SFTP is disabled.
+	FileTransferApprovalRequired bool
+}
+
+// Report sets the permission fields of r. It is the one derivation of them:
+// the response the host builds at startup carries them, and GetSession copies
+// them from it, because they cannot change while the session runs.
+func (p Permissions) Report(r *api.GetSessionResponse) {
+	transfer := FileTransferAll
+	switch {
+	case p.SFTPDisabled:
+		transfer = FileTransferOff
+	case p.ReadOnly:
+		transfer = FileTransferDownloads
+	}
+	r.StartConfirmed = proto.Bool(!p.AutoAccept)
+	r.ReadOnly = proto.Bool(p.ReadOnly)
+	r.LocalForwarding = proto.Bool(p.AllowLocalTCPForwarding)
+	r.FileTransfer = proto.String(transfer)
+	// With no transfer there is nothing to wait for.
+	r.FileTransferApprovalRequired = proto.Bool(transfer != FileTransferOff && p.FileTransferApprovalRequired)
 }
 
 type AdminServer struct {
@@ -75,6 +151,13 @@ type AdminServer struct {
 	// JoinState reports the join timeout as the daemon holds it, for
 	// GetSession. Nil reports none.
 	JoinState func() *api.JoinState
+
+	// Name is the session's name, for GetSession. Empty reports none.
+	Name string
+
+	// State reports what the supervisor knows now, for GetSession. Nil
+	// reports none, which a reader sees as unknown.
+	State func() SessionState
 
 	srv *grpc.Server
 	ln  net.Listener
@@ -127,6 +210,8 @@ func (s *AdminServer) Serve(ctx context.Context) error {
 		OnStop:           s.OnStop,
 		OnSetJoinTimeout: s.OnSetJoinTimeout,
 		JoinState:        s.JoinState,
+		Name:             s.Name,
+		State:            s.State,
 	})
 	srv := s.srv
 	s.Unlock()
@@ -172,6 +257,8 @@ type adminServiceServer struct {
 	OnStop           func()
 	OnSetJoinTimeout func(time.Duration) *api.SetJoinTimeoutResponse
 	JoinState        func() *api.JoinState
+	Name             string
+	State            func() SessionState
 }
 
 func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionRequest) (*api.GetSessionResponse, error) {
@@ -179,7 +266,7 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 	if s.Route != nil {
 		nodeAddr, sshUser = s.Route.Get()
 	}
-	return &api.GetSessionResponse{
+	resp := &api.GetSessionResponse{
 		SessionId:        s.Session.SessionId,
 		Host:             s.Session.Host,
 		NodeAddr:         nodeAddr,
@@ -192,7 +279,16 @@ func (s *adminServiceServer) GetSession(ctx context.Context, in *api.GetSessionR
 		Open:             s.Session.Open,
 		JoinState:        s.joinState(),
 		LaunchId:         s.LaunchID,
-	}, nil
+
+		// What the host decided at startup, which the session cannot change.
+		StartConfirmed:               s.Session.StartConfirmed,
+		ReadOnly:                     s.Session.ReadOnly,
+		LocalForwarding:              s.Session.LocalForwarding,
+		FileTransfer:                 s.Session.FileTransfer,
+		FileTransferApprovalRequired: s.Session.FileTransferApprovalRequired,
+	}
+	DescribeSession(resp, s.Name, s.State)
+	return resp, nil
 }
 
 // joinState is the live join timeout, or none for a server that has none.

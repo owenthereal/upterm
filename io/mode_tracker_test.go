@@ -1439,3 +1439,412 @@ func TestAResizeHeardInOrderResetsOnlyWhereTheSizeChanges(t *testing.T) {
 		require.Empty(t, m.Snapshot())
 	})
 }
+
+// A string a program ended with CAN, SUB or an ESC that isn't ST is over for a
+// DEC parser and still open for kitty, and for tmux's DCS. InSequence takes
+// the cautious reading: it is still open until ST, or BEL for an OSC, which
+// end it for every terminal.
+func TestAnAmbiguouslyEndedStringStaysUnsafeUntilST(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPq\x18")) // a DCS the program "ended" with CAN
+	require.True(t, m.InSequence(), "kitty and tmux may still be inside the DCS")
+	require.True(t, m.AtGround(), "the bookkeeping keeps the DEC reading")
+	_, _ = m.Write([]byte("more"))
+	require.True(t, m.InSequence())
+	_, _ = m.Write([]byte("\x1b\\")) // ST: every terminal is out now
+	require.False(t, m.InSequence())
+
+	o := NewModeTracker()
+	_, _ = o.Write([]byte("\x1b]0;t\x1a")) // an OSC ended by SUB
+	require.True(t, o.InSequence())
+	_, _ = o.Write([]byte("\x07")) // BEL ends an OSC everywhere
+	require.False(t, o.InSequence())
+
+	e := NewModeTracker()
+	_, _ = e.Write([]byte("\x1b]0;t\x1b[m")) // an OSC ended by an ESC that isn't ST
+	require.True(t, e.InSequence())
+	_, _ = e.Write([]byte("\x1b\\"))
+	require.False(t, e.InSequence())
+
+	d := NewModeTracker()
+	_, _ = d.Write([]byte("\x1bPq\x18\x07")) // BEL ends an OSC, not a DCS
+	require.True(t, d.InSequence())
+}
+
+func TestInSequenceKnowsEveryPendingFinalByte(t *testing.T) {
+	for _, partial := range []string{"\x1b", "\x1b(", "\x1b)", "\x1b*", "\x1b+", "\x1b-", "\x1b.", "\x1b/", "\x1b#", "\x1b%", "\x1b ", "\x1b(%", "\x1b%/", "\x1b[?1000", "\x1b]0;tit", "\x1bPq"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\x1b(B", "\x1b)0", "\x1b#8", "\x1b%G", "\x1b%/G", "\x1b(%5", "\x1b[?1000l", "\x1b]0;t\x07", "\x1b]0;t\x1b\\", "\x1b)\x18", "plain"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// A character split at a chunk's end is a sequence of its own: text written
+// before its continuation bytes would land inside it, and the terminal would
+// draw a replacement character where both were meant.
+func TestInSequenceWaitsOutAPartialCharacter(t *testing.T) {
+	for _, partial := range []string{"\xc3", "\xe2", "\xe2\x94", "\xf0\x9f\x98", "ok \xe2\x94"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\xc3\xa9", "\xe2\x94\x80", "\xf0\x9f\x98\x80", "\xe2\x94x", "\x80", "\xc0\x80", "\xff"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// A control character inside an ESC sequence is executed where it stands,
+// and the sequence goes on waiting for its final byte, as a DEC parser has
+// it. The tracker's own bookkeeping drops the sequence there, but the
+// terminal hasn't.
+func TestInSequenceWaitsPastAControlInsideAnEscape(t *testing.T) {
+	for _, partial := range []string{"\x1b\r", "\x1b\x07", "\x1b\x7f", "\x1b(\x7f", "\x1b(\r", "\x1b\r(", "\x1b\r\n", "\x1b]0;t\x1b\r\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(partial))
+		require.True(t, m.InSequence(), "%q", partial)
+	}
+	for _, whole := range []string{"\x1b\rB", "\x1b(\x7fB", "\x1b(\n0", "\x1b\r\x18", "\x1b\r\x1a"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(whole))
+		require.False(t, m.InSequence(), "%q", whole)
+	}
+}
+
+// Text written while G0 is DEC Special Graphics, or while a shift-out has put
+// G1 in use, is drawn as line pieces: "upterm" comes out as box corners until
+// the program designates ASCII again or shifts back in.
+func TestNonASCIICharsetIsWhileTextIsntDrawnAsASCII(t *testing.T) {
+	for _, in := range []string{"\x1b(0", "\x1b(A", "\x0e", "\x1b(B\x0e", "\x1b[1\x0e", "\x1b(0\x1b[!p", "\x0e\x1b[!p"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"plain", "\x1b(B", "\x1b(0\x1b(B", "\x0e\x0f", "\x1b(0\x1bc", "\x0e\x1bc", "\x1b]0;\x0e\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+}
+
+// A string the program ended ambiguously -- by CAN, SUB or an ESC that isn't
+// ST -- is one terminals disagree about. The tracker reads it as over; kitty,
+// and tmux for a DCS, keep it open and take what follows as more of it,
+// ignoring an SI there. So an SI inside that window does not put G0 back as
+// far as NonASCIICharset can tell: the shift-out stays, and with it the
+// status that would be drawn through G1 as graphics once ST ends the string.
+// An SO there may still set it, and an SI outside the window clears it.
+func TestShiftOutSurvivesAShiftInInsideAnAmbiguouslyEndedString(t *testing.T) {
+	for _, tc := range []struct{ name, ambiguous string }{
+		{"an ESC that isn't ST", "\x1b]0;t\x1b\x0f"},
+		{"CAN", "\x1b]0;t\x18\x0f"},
+		{"SUB", "\x1b]0;t\x1a\x0f"},
+		{"a DCS", "\x1bPq\x1b\x0f"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, _ = m.Write([]byte("\x0e" + tc.ambiguous))
+			require.True(t, m.InSequence(), "the string is still open")
+			require.True(t, m.NonASCIICharset(), "the SI inside it is the string's")
+
+			_, _ = m.Write([]byte("\x1b\\"))
+			require.False(t, m.InSequence(), "ST ends the string")
+			require.True(t, m.NonASCIICharset(), "G1 is still in use")
+
+			_, _ = m.Write([]byte("\x0f"))
+			require.False(t, m.NonASCIICharset(), "an SI outside the string puts G0 back")
+		})
+	}
+
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x0e\x0f"))
+	require.False(t, m.NonASCIICharset(), "an SI outside any string")
+
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1b]0;t\x1b\x0e\x1b\\"))
+	require.False(t, m.InSequence())
+	require.True(t, m.NonASCIICharset(), "an SO inside the window still shifts out")
+}
+
+// The same holds for everything else a DEC parser takes as putting ASCII
+// back: a RIS, a DECSTR or an ESC ( B inside an ambiguously ended string is
+// the string's on a terminal that keeps it open, so the graphics are still
+// there once ST ends it, and NonASCIICharset keeps saying so. Outside any
+// such string a RIS, an SI or an ESC ( B puts ASCII back, as it does on every
+// terminal; a DECSTR doesn't anywhere, since tmux ignores it.
+func TestNothingInsideAnAmbiguouslyEndedStringPutsASCIIBack(t *testing.T) {
+	for _, tc := range []struct{ name, graphics, inside string }{
+		{"a RIS after a shift-out", "\x0e", "\x1bc"},
+		{"a DECSTR after a shift-out", "\x0e", "\x1b[!p"},
+		{"a RIS after CAN, after a shift-out", "\x0e", "\x18\x1bc"},
+		{"a RIS after a graphics G0", "\x1b(0", "\x1bc"},
+		{"a DECSTR after a graphics G0", "\x1b(0", "\x1b[!p"},
+		{"an ESC ( B after a graphics G0", "\x1b(0", "\x1b(B"},
+		{"an ESC ( B after SUB, after a graphics G0", "\x1b(0", "\x1a\x1b(B"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, _ = m.Write([]byte(tc.graphics + "\x1b]0;t" + tc.inside))
+			require.True(t, m.InSequence(), "the string is still open")
+			require.True(t, m.NonASCIICharset(), "what puts ASCII back is the string's")
+
+			_, _ = m.Write([]byte("\x1b\\"))
+			require.False(t, m.InSequence(), "ST ends the string")
+			require.True(t, m.NonASCIICharset(), "the graphics are still in use")
+		})
+	}
+
+	for _, in := range []string{"\x0e\x1bc", "\x0e\x0f", "\x1b(0\x1bc", "\x1b(0\x1b(B",
+		"\x0e\x1b]0;t\x1bc\x1b\\\x0f", "\x1b(0\x1b]0;t\x1b(B\x1b\\\x1b(B"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "outside any string: %q", in)
+	}
+	for _, in := range []string{"\x0e\x1b[!p", "\x1b(0\x1b[!p"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "a DECSTR, outside any string: %q", in)
+	}
+}
+
+// G2 and G3 are character sets too: a program can designate graphics into
+// G2 (ESC * 0) and invoke it into GL with LS2 (ESC n), or G3 with LS3 (ESC o),
+// and text is drawn from them until an SI puts G0 back. What G1 to G3 hold
+// isn't tracked, so NonASCIICharset takes any of them as not ASCII. A single
+// shift, SS2 (ESC N) or SS3 (ESC O), draws just the next character from G2 or
+// G3, which leaves the output unsafe until that character has come. The
+// locking shifts into GR (ESC ~, ESC }, ESC |) reach only 8-bit bytes, which a
+// UTF-8 terminal doesn't read that way.
+func TestAShiftToG2OrG3IsNotASCII(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1b*0\x1bn"))
+	require.True(t, m.NonASCIICharset(), "G2 in GL")
+	require.False(t, m.InSequence())
+	_, _ = m.Write([]byte("\x0f"))
+	require.False(t, m.NonASCIICharset(), "an SI puts G0 back")
+	_, _ = m.Write([]byte("\x1bo"))
+	require.True(t, m.NonASCIICharset(), "G3 in GL")
+	_, _ = m.Write([]byte("\x0f"))
+	require.False(t, m.NonASCIICharset())
+
+	for _, in := range []string{"\x1bn", "\x1bo", "\x0e\x1bn", "\x1bn\x1b(B", "\x1bn\x1b[!p",
+		"\x1bn\x1b]0;t\x1bc\x1b\\", "\x1bo\x1b]0;t\x1b[!p\x1b\\", "\x1bn\x1b]0;t\x1b\x0f\x1b\\"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x1bn\x0f", "\x1bo\x1bc", "\x1b~", "\x1b}", "\x1b|", "\x1b]0;n\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+
+	for _, shift := range []string{"\x1bN", "\x1bO"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(shift))
+		require.True(t, m.InSequence(), "%q waits for its character", shift)
+		_, _ = m.Write([]byte("\r"))
+		require.True(t, m.InSequence(), "%q: a control character draws nothing", shift)
+		_, _ = m.Write([]byte("x"))
+		require.False(t, m.InSequence(), "%q: its character has come", shift)
+		require.False(t, m.NonASCIICharset(), "%q shifts nothing in for longer", shift)
+	}
+}
+
+// A G0 designation is ASCII only as ESC ( B exactly. Everything else
+// designated into G0 is taken as a set other than ASCII, cautiously: one
+// with an intermediate of its own (ESC ( % 5, DEC Supplemental), a multibyte
+// one (ESC $ B, ESC $ ( B), one with a control executed inside it, and any
+// other final. A designation into G1 to G3 leaves G0 as it was, and putting
+// ASCII back waits for the end of an ambiguously ended string as before.
+func TestEveryG0DesignationButESCParenBIsNotASCII(t *testing.T) {
+	for _, in := range []string{"\x1b(%5", "\x1b$B", "\x1b$@", "\x1b$(B", "\x1b$(D", "\x1b(\n0", "\x1b\r(0", "\x1b(\rB",
+		"\x1b(%5\x1b]0;t\x1b(B\x1b\\", "\x1b$(B\x1b[!p"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x1b(B", "\x1b$)B", "\x1b)%5", "\x1b*%5", "\x1b(%5\x1b(B", "\x1b$B\x1bc"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+}
+
+// A control character inside an ESC sequence is executed there, and the
+// sequence goes on to its final byte, as a DEC parser has it: ESC CR n is LS2
+// as ESC n is, and so for LS3 and the single shifts. A RIS with a control
+// inside it doesn't put ASCII back, though: kitty abandons the ESC at the
+// control, and only a bare RIS outside an ambiguously ended string is one
+// every terminal takes.
+func TestAShiftPastAnExecutedControlStillShifts(t *testing.T) {
+	for _, in := range []string{"\x1b*0\x1b\rn", "\x1b\x7fo", "\x1b\r\nn", "\x1b]0;t\x1b\rn\x1b\\", "\x0e\x1b]0;t\x1b\rc\x1b\\",
+		"\x0e\x1b\rc", "\x1b(0\x1b\x7fc", "\x1bn\x1b\rc"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{"\x1b \rn", "\x1bn\x1bc"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, shift := range []string{"\x1b\rN", "\x1b\x7fO"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(shift))
+		require.True(t, m.InSequence(), "%q waits for its character", shift)
+		_, _ = m.Write([]byte("x"))
+		require.False(t, m.InSequence(), "%q: its character has come", shift)
+	}
+}
+
+// After ESC and controls executed inside it, a "[" begins a CSI on a DEC
+// parser, and "]", "P", "X", "^" or "_" an OSC, DCS, SOS, PM or APC string,
+// though the tracker's own parser dropped the sequence at the control. The
+// output is in a sequence until that CSI's final byte, or until the string's
+// terminator, ST or BEL for an OSC, with a string ended ambiguously -- by
+// CAN, SUB or an ESC that isn't ST -- still open until then, as any string
+// is. An intermediate before the "[" makes it an ESC sequence's final byte
+// instead.
+func TestASequenceBegunPastAnExecutedControlIsFollowed(t *testing.T) {
+	for _, tc := range []struct{ inside, out string }{
+		{"\x1b\n[?1000", "l"},
+		{"\x1b\r\n[1;2", "H"},
+		{"\x1b\n]0;t", "\x07"},
+		{"\x1b\n]0;t", "\x1b\\"},
+		{"\x1b\rPq", "\x1b\\"},
+		{"\x1b\rPq\x07", "\x1b\\"},
+		{"\x1b\r_x", "\x1b\\"},
+		{"\x1b\r]0;t\x18", "\x07"},
+		{"\x1b\r]0;t\x1b[m", "\x1b\\"},
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(tc.inside))
+		require.True(t, m.InSequence(), "%q", tc.inside)
+		_, _ = m.Write([]byte(tc.out))
+		require.False(t, m.InSequence(), "%q", tc.inside+tc.out)
+	}
+	for _, in := range []string{"\x1b\r[?10\x18", "\x1b\r[?10\x1a", "\x1b\r[?10\x1b[m", "\x1b \r[", "\x1b\r[?1000\x0fl"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.InSequence(), "%q", in)
+	}
+
+	// Inside such a string an SI is the string's, as it is in any other.
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x0e\x1b\r]0;\x0f\x07"))
+	require.True(t, m.NonASCIICharset())
+
+	// Begun inside a DCS a terminal may still hold open, an OSC that BEL ends
+	// doesn't end the DCS: only ST does.
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPq\x18\x1b\r]0;t\x07"))
+	require.True(t, m.InSequence(), "the DCS may still be open")
+	_, _ = m.Write([]byte("\x1b\\"))
+	require.False(t, m.InSequence())
+}
+
+// tmux's passthrough wraps a sequence meant for the outer terminal in a DCS,
+// with every ESC inside it doubled: ESC P tmux ; ... ESC ESC \ ... ESC \.
+// There ESC ESC is an escaped ESC, so the backslash after it ends nothing, and
+// the DCS is open until an ESC \ whose ESC isn't the second of a pair. An OSC
+// inside it doesn't make it one a BEL ends.
+func TestTmuxPassthroughIsOpenUntilItsOwnST(t *testing.T) {
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPtmux;\x1b\x1b]52;c;x\x1b\x1b\\"))
+	require.True(t, m.InSequence(), "the inner ST is an escaped ESC and a backslash")
+	_, _ = m.Write([]byte("\x07"))
+	require.True(t, m.InSequence(), "the DCS is still the window, which no BEL ends")
+	_, _ = m.Write([]byte("\x1b\\"))
+	require.False(t, m.InSequence(), "the passthrough's own ST")
+
+	m = NewModeTracker()
+	_, _ = m.Write([]byte("\x1bPtmux;\x1b\x1b\x1b\\"))
+	require.False(t, m.InSequence(), "an escaped ESC, then ST")
+}
+
+// A window only ST ends -- a DCS, SOS, PM or APC left open -- stays one when
+// a string begun inside it is ended ambiguously too, an OSC included: the
+// BEL that would end the OSC doesn't end the string around it.
+func TestAWindowOnlySTEndsIsNeverTakenForAnOSCs(t *testing.T) {
+	for _, in := range []string{"\x1bPq\x18\x1b]0;t\x18\x07", "\x1bPq\x1b\x1b]0;t\x1b[m\x07", "\x1b_x\x1a\x1b]0;t\x1a\x07", "\x1bPq\x18\x1bk\x07"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.InSequence(), "%q: still in the first string at the BEL", in)
+		_, _ = m.Write([]byte("\x1b\\"))
+		require.False(t, m.InSequence(), "%q: ST ends it", in)
+	}
+}
+
+// ESC k begins a window title on tmux and GNU screen, a string only ST ends,
+// which oh-my-zsh sends at every prompt under TERM=screen* or tmux*. The
+// parser takes it as an ESC sequence done at the k, so the watch opens it
+// itself: straight after ESC, after a string's ESC, and past executed
+// controls. With an intermediate before it, the k is that sequence's final
+// byte instead.
+func TestATitleStringIsOpenUntilST(t *testing.T) {
+	for _, in := range []string{"\x1bktitle", "\x1bktitle\x07", "\x1b]0;t\x1bktitle\x07", "\x1b\rktitle"} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.InSequence(), "%q", in)
+		_, _ = m.Write([]byte("\x1b\\"))
+		require.False(t, m.InSequence(), "%q, then ST", in)
+	}
+	m := NewModeTracker()
+	_, _ = m.Write([]byte("\x1b k"))
+	require.False(t, m.InSequence())
+}
+
+// A cursor save -- ESC 7, a plain CSI s, or 1048 or 1049 set -- saves the
+// character sets too, and its restore -- ESC 8, a plain CSI u, or 1048 or 1049
+// reset -- puts them back. The watch keeps a copy of its own of what was
+// saved, and a restore from it only ever raises what NonASCIICharset says,
+// never lowers it. Outside an ambiguously ended string a save replaces the
+// copy; inside one, past a control, or on the alternate screen, it merges
+// with it, not ASCII if either is; and a RIS outside one clears it. The
+// alternate screen's save merges because a terminal keeps a saved cursor per
+// screen, and 1049 reset restores the main screen's, which the copy, one for
+// both, has to cover. A CSI begun past a control has parameters the watch
+// doesn't read, so one ending in s or h is taken as a save, merged, and one
+// ending in u or l as a restore.
+func TestARestoredCharsetIsNeverTakenAsLower(t *testing.T) {
+	for _, in := range []string{
+		"\x1b(0\x1b7\x1b(B\x1b8",
+		"\x1b(0\x1b[s\x1b(B\x1b[u",
+		"\x1b(0\x1b[?1049h\x1b(B\x1b[?1049l",
+		"\x1b(0\x1b[?1049h\x1b(B\x1b7\x1b[?1049l",
+		"\x1b(0\x1b[?1048h\x1b(B\x1b[?1048l",
+		"\x1b(0\x1b[?25;1049h\x1b(B\x1b[?1049;25l",
+		"\x0e\x1b7\x0f\x1b8",
+		"\x1b7\x1b(0\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b]0;t\x1b7\x1b\\\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b\n7\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b]0;t\x1bc\x1b\\\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b\rc\x1b8",
+		"\x1b(0\x1b\r[s\x1b(B\x1b\r[u",
+		"\x1b(0\x1b\r[?1049h\x1b(B\x1b\r[?1049l",
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.True(t, m.NonASCIICharset(), "%q", in)
+	}
+	for _, in := range []string{
+		"\x1b7\x1b(0\x1b(B\x1b8",
+		"\x1b(0\x1b7\x1b(B\x1b7\x1b8",
+		"\x1b(0\x1b7\x1bc\x1b8",
+		"\x1b(0\x1b[1;2s\x1b(B\x1b[u",
+		"\x1b(0\x1b7\x1b(B\x1b[>1u",
+		"\x1b(0\x1b7\x1b(B\x1b[?1047l",
+		"\x1b(0\x1b[?1049h\x1b(B",
+	} {
+		m := NewModeTracker()
+		_, _ = m.Write([]byte(in))
+		require.False(t, m.NonASCIICharset(), "%q", in)
+	}
+}

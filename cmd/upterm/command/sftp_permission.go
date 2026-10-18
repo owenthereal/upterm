@@ -114,39 +114,7 @@ func (d *DialogPermissionChecker) showDialog(op sftp.Operation, client sftp.Clie
 		displayTarget = utils.ShortenHomePath(paths[1])
 	}
 
-	var msg string
-	switch op {
-	case sftp.OpDownload:
-		msg = fmt.Sprintf("Client [%s] wants to download:\n%s", clientID, displayPath)
-	case sftp.OpUpload:
-		msg = fmt.Sprintf("Client [%s] wants to upload:\n%s", clientID, displayPath)
-	case sftp.OpDelete, sftp.OpRmdir:
-		msg = fmt.Sprintf("Client [%s] wants to delete:\n%s", clientID, displayPath)
-	case sftp.OpMkdir:
-		msg = fmt.Sprintf("Client [%s] wants to create directory:\n%s", clientID, displayPath)
-	case sftp.OpRename:
-		if displayTarget != "" {
-			msg = fmt.Sprintf("Client [%s] wants to rename:\n%s → %s", clientID, displayPath, displayTarget)
-		} else {
-			msg = fmt.Sprintf("Client [%s] wants to rename:\n%s", clientID, displayPath)
-		}
-	case sftp.OpSymlink:
-		if displayTarget != "" {
-			msg = fmt.Sprintf("Client [%s] wants to create symlink:\n%s → %s", clientID, displayPath, displayTarget)
-		} else {
-			msg = fmt.Sprintf("Client [%s] wants to create symlink:\n%s", clientID, displayPath)
-		}
-	case sftp.OpLink:
-		if displayTarget != "" {
-			msg = fmt.Sprintf("Client [%s] wants to create hard link:\n%s → %s", clientID, displayPath, displayTarget)
-		} else {
-			msg = fmt.Sprintf("Client [%s] wants to create hard link:\n%s", clientID, displayPath)
-		}
-	case sftp.OpSetstat:
-		msg = fmt.Sprintf("Client [%s] wants to modify file attributes:\n%s", clientID, displayPath)
-	default:
-		msg = fmt.Sprintf("Client [%s] wants to %s:\n%s", clientID, op.String(), displayPath)
-	}
+	msg := transferPrompt(op, clientID, displayPath, displayTarget)
 
 	// Show question dialog with Allow/Allow All/Deny buttons
 	err := zenity.Question(msg,
@@ -168,6 +136,41 @@ func (d *DialogPermissionChecker) showDialog(op sftp.Operation, client sftp.Clie
 
 	// Other error (e.g., zenity not installed, no display)
 	return sftp.PermissionDenied, err
+}
+
+// transferPrompt is the question the dialog asks about one operation, naming
+// the guest by the fingerprint of its key. displayTarget is the second path of
+// an operation that has two, empty when it has one.
+func transferPrompt(op sftp.Operation, clientID, displayPath, displayTarget string) string {
+	switch op {
+	case sftp.OpDownload:
+		return fmt.Sprintf("Guest [%s] wants to download:\n%s", clientID, displayPath)
+	case sftp.OpUpload:
+		return fmt.Sprintf("Guest [%s] wants to upload:\n%s", clientID, displayPath)
+	case sftp.OpDelete, sftp.OpRmdir:
+		return fmt.Sprintf("Guest [%s] wants to delete:\n%s", clientID, displayPath)
+	case sftp.OpMkdir:
+		return fmt.Sprintf("Guest [%s] wants to create directory:\n%s", clientID, displayPath)
+	case sftp.OpRename:
+		if displayTarget != "" {
+			return fmt.Sprintf("Guest [%s] wants to rename:\n%s → %s", clientID, displayPath, displayTarget)
+		}
+		return fmt.Sprintf("Guest [%s] wants to rename:\n%s", clientID, displayPath)
+	case sftp.OpSymlink:
+		if displayTarget != "" {
+			return fmt.Sprintf("Guest [%s] wants to create symlink:\n%s → %s", clientID, displayPath, displayTarget)
+		}
+		return fmt.Sprintf("Guest [%s] wants to create symlink:\n%s", clientID, displayPath)
+	case sftp.OpLink:
+		if displayTarget != "" {
+			return fmt.Sprintf("Guest [%s] wants to create hard link:\n%s → %s", clientID, displayPath, displayTarget)
+		}
+		return fmt.Sprintf("Guest [%s] wants to create hard link:\n%s", clientID, displayPath)
+	case sftp.OpSetstat:
+		return fmt.Sprintf("Guest [%s] wants to modify file attributes:\n%s", clientID, displayPath)
+	default:
+		return fmt.Sprintf("Guest [%s] wants to %s:\n%s", clientID, op.String(), displayPath)
+	}
 }
 
 // AutoAllowPermissionChecker always allows operations (for --accept mode or testing).

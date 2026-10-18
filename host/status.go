@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/owenthereal/upterm/host/internal"
 	"github.com/owenthereal/upterm/host/sessiondir"
 )
 
@@ -141,6 +142,24 @@ func (s *sessionState) status() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return deriveStatus(s.phase, s.tunnel)
+}
+
+// snapshot is the state as the admin API reports it, read in one hold of the
+// state's lock as apply's is. It takes that lock and never touches the
+// record: apply takes the state's lock inside the record's, so a caller that
+// held the state's while reaching for the record's would deadlock against a
+// write. The admin API needs only the facts, not the record they are
+// published to.
+func (s *sessionState) snapshot() internal.SessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return internal.SessionState{
+		Status:        deriveStatus(s.phase, s.tunnel),
+		Reconnect:     s.reconnect,
+		TunnelReason:  s.reason,
+		LostAt:        s.lostAt,
+		NextAttemptAt: s.nextAt,
+	}
 }
 
 // apply writes the status and the tunnel's fields onto r from one snapshot of

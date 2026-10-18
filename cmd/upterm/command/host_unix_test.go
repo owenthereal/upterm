@@ -3,6 +3,7 @@
 package command
 
 import (
+	"io"
 	"os"
 	"testing"
 
@@ -46,4 +47,21 @@ func Test_confirmationTerminalError(t *testing.T) {
 			require.EqualError(t, err, "upterm host needs a terminal to ask before starting; pass --accept to start without asking")
 		})
 	}
+}
+
+// The key hint is for whoever is at the keyboard, so it goes to whichever of
+// stderr and stdout is the terminal, stderr first; with neither a terminal
+// there is nobody at one to tell.
+func TestHintGoesToTheTerminalWhenStderrIsAFile(t *testing.T) {
+	stderrFile, err := os.CreateTemp(t.TempDir(), "stderr")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stderrFile.Close() })
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stdoutFile.Close() })
+	_, tty := openPty(t)
+
+	require.Equal(t, io.Writer(tty), hintOut(stderrFile, tty))
+	require.Equal(t, io.Writer(tty), hintOut(tty, stderrFile))
+	require.Equal(t, io.Discard, hintOut(stderrFile, stdoutFile))
 }

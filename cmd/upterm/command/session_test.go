@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // testHostKeyLine returns a fresh key in authorized_keys form, for building
@@ -195,6 +196,224 @@ func TestSessionInfoSaysWhenTheSessionIsOpen(t *testing.T) {
 			}
 		})
 	}
+}
+
+// viewText is the session view with its whitespace collapsed, so what a test
+// looks for in it does not depend on the width of the terminal `go test` was run
+// from, where a long row soft-wraps at spaces.
+func viewText(d tui.SessionDetail) string {
+	return strings.Join(strings.Fields(tui.FormatSessionDetail(d)), " ")
+}
+
+// buildSessionDetailFor is buildSessionDetail over a session on the given relay.
+func buildSessionDetailFor(server string) (tui.SessionDetail, error) {
+	return buildSessionDetail(&api.GetSessionResponse{SessionId: "id", Host: server})
+}
+
+func TestRelayRowKeepsANonDefaultPort(t *testing.T) {
+	d, err := buildSessionDetailFor("wss://relay.example.com:80")
+	require.NoError(t, err)
+	require.Equal(t, "wss://relay.example.com:80", d.Host)
+}
+
+// The Relay row leaves out a port only when it is the one its scheme means by
+// itself. 80 and 443 are not defaults of every scheme: wss on 80 and ssh on
+// 443 are relays on a port that has to be said.
+func TestRelayRowDropsOnlyTheSchemesOwnPort(t *testing.T) {
+	for _, tc := range []struct{ server, want string }{
+		{"ssh://relay.test:22", "ssh://relay.test"},
+		{"ssh://relay.test", "ssh://relay.test"},
+		{"ssh://relay.test:2222", "ssh://relay.test:2222"},
+		{"ssh://relay.test:80", "ssh://relay.test:80"},
+		{"ssh://relay.test:443", "ssh://relay.test:443"},
+		{"ws://relay.test:80", "ws://relay.test"},
+		{"ws://relay.test", "ws://relay.test"},
+		{"ws://relay.test:8080", "ws://relay.test:8080"},
+		{"ws://relay.test:443", "ws://relay.test:443"},
+		{"ws://relay.test:22", "ws://relay.test:22"},
+		{"wss://relay.test:443", "wss://relay.test"},
+		{"wss://relay.test", "wss://relay.test"},
+		{"wss://relay.test:8443", "wss://relay.test:8443"},
+		{"wss://relay.test:80", "wss://relay.test:80"},
+		{"wss://relay.test:22", "wss://relay.test:22"},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			d, err := buildSessionDetailFor(tc.server)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.Host)
+		})
+	}
+}
+
+// An IPv6 relay keeps the brackets around its address, with or without the
+// port: without them, the address's colons and the port's run together.
+func TestRelayRowBracketsAnIPv6Relay(t *testing.T) {
+	for _, tc := range []struct{ server, want string }{
+		{"ssh://[::1]:2222", "ssh://[::1]:2222"},
+		{"ssh://[::1]:22", "ssh://[::1]"},
+		{"ssh://[::1]", "ssh://[::1]"},
+		{"wss://[2001:db8::1]:8443", "wss://[2001:db8::1]:8443"},
+		{"wss://[2001:db8::1]", "wss://[2001:db8::1]"},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			d, err := buildSessionDetailFor(tc.server)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.Host)
+		})
+	}
+}
+
+// The Relay row is the only place the displayed port is dropped. The ssh, sftp
+// and scp lines name the port a guest must dial, so they keep it whatever the
+// row says: 80 and 443 on ssh, and the port a ProxyCommand's target carries
+// for ws and wss.
+func TestBuildSessionDetailCommandsKeepEveryPort(t *testing.T) {
+	const proxy = `ssh -o ProxyCommand='upterm proxy '\''%s'\''' sid@%s`
+	type commands struct{ ssh, sftp, scpUpload, scpDownload string }
+	sshOn := func(port string) commands {
+		c := commands{ssh: "ssh sid@example.com", sftp: "sftp sid@example.com",
+			scpUpload: "scp <local> sid@example.com:<remote>", scpDownload: "scp sid@example.com:<remote> <local>"}
+		if port != "" {
+			c.ssh += " -p " + port
+			c.sftp = "sftp -P " + port + " sid@example.com"
+			c.scpUpload = "scp -P " + port + " <local> sid@example.com:<remote>"
+			c.scpDownload = "scp -P " + port + " sid@example.com:<remote> <local>"
+		}
+		return c
+	}
+
+	for _, tc := range []struct {
+		server string
+		want   commands
+	}{
+		{"ssh://example.com:22", sshOn("")},
+		{"ssh://example.com", sshOn("")},
+		{"ssh://example.com:80", sshOn("80")},
+		{"ssh://example.com:443", sshOn("443")},
+		{"ssh://example.com:2222", sshOn("2222")},
+		{"ws://example.com:80", commands{ssh: fmt.Sprintf(proxy, "ws://sid@example.com:80", "example.com:80")}},
+		{"ws://example.com", commands{ssh: fmt.Sprintf(proxy, "ws://sid@example.com", "example.com:80")}},
+		{"ws://example.com:443", commands{ssh: fmt.Sprintf(proxy, "ws://sid@example.com:443", "example.com:443")}},
+		{"wss://example.com:443", commands{ssh: fmt.Sprintf(proxy, "wss://sid@example.com:443", "example.com:443")}},
+		{"wss://example.com", commands{ssh: fmt.Sprintf(proxy, "wss://sid@example.com", "example.com:443")}},
+		{"wss://example.com:80", commands{ssh: fmt.Sprintf(proxy, "wss://sid@example.com:80", "example.com:80")}},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			d, err := buildSessionDetail(&api.GetSessionResponse{SessionId: "sid", Host: tc.server, SshUser: "sid"})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, commands{d.SSHCommand, d.SFTPCommand, d.SCPUpload, d.SCPDownload})
+			require.Equal(t, tc.want.sftp != "", d.SFTPEnabled)
+		})
+	}
+}
+
+// Anyone with the session ID can join exactly when there is no allowlist, and
+// the view says so whether or not the host was asked about the start. Open
+// stays as the narrower fact the JSON reports.
+func TestBuildSessionDetailAccess(t *testing.T) {
+	key := []*api.AuthorizedKey{{Comment: "alice", PublicKeyFingerprints: []string{"SHA256:abc"}}}
+	for _, tc := range []struct {
+		name string
+		keys []*api.AuthorizedKey
+		open bool
+		want string
+	}{
+		{"no allowlist, started with --accept", nil, true, tui.AccessAnyone},
+		{"no allowlist, the host was asked", nil, false, tui.AccessAnyone},
+		{"allowlist", key, false, tui.AccessAllowlist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := buildSessionDetail(&api.GetSessionResponse{Host: "ssh://example.com:22", SshUser: "sid", AuthorizedKeys: tc.keys, Open: tc.open})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.Access)
+			require.Equal(t, tc.open, d.Open)
+
+			require.Equal(t, tc.want == tui.AccessAnyone,
+				strings.Contains(viewText(d), "Access: open: anyone with the session ID can join"))
+		})
+	}
+}
+
+// permissionsResponse is what a daemon that reports what guests may do answers.
+func permissionsResponse(readOnly bool, fileTransfer string, approval, forwarding bool) *api.GetSessionResponse {
+	return &api.GetSessionResponse{
+		SessionId: "sid", Host: "ssh://example.com:22", SshUser: "sid",
+		StartConfirmed:               proto.Bool(true),
+		ReadOnly:                     proto.Bool(readOnly),
+		FileTransfer:                 proto.String(fileTransfer),
+		FileTransferApprovalRequired: proto.Bool(approval),
+		LocalForwarding:              proto.Bool(forwarding),
+	}
+}
+
+// A daemon that reports what guests may do gets a Guests row saying it. One
+// that doesn't, an older one, gets none: its answer has no field for it, and a
+// row built from the absent fields would claim guests can't do what it never
+// said they can't.
+func TestSessionViewShowsGuestsOnlyForADaemonThatReportsThem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sess *api.GetSessionResponse
+		want *tui.GuestPermissions
+		row  string // the view's Guests row
+	}{
+		{"can type, approval for files", permissionsResponse(false, "all", true, false),
+			&tui.GuestPermissions{FileTransfer: tui.FileTransferAll, ApprovalRequired: true},
+			"can type; files: approval required; no port forwarding"},
+		{"watch only", permissionsResponse(true, "downloads", true, false),
+			&tui.GuestPermissions{ReadOnly: true, FileTransfer: tui.FileTransferDownloads, ApprovalRequired: true},
+			"watch only; files: downloads only, approval required; no port forwarding"},
+		{"watch only with forwarding", permissionsResponse(true, "downloads", false, true),
+			&tui.GuestPermissions{ReadOnly: true, FileTransfer: tui.FileTransferDownloads, LocalForwarding: true},
+			"watch only; files: downloads only, allowed without asking; port forwarding allowed"},
+		{"files allowed, forwarding allowed", permissionsResponse(false, "all", false, true),
+			&tui.GuestPermissions{FileTransfer: tui.FileTransferAll, LocalForwarding: true},
+			"can type; files: allowed without asking; port forwarding allowed"},
+		{"files off", permissionsResponse(false, "off", false, false),
+			&tui.GuestPermissions{FileTransfer: tui.FileTransferOff},
+			"can type; files: off; no port forwarding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := buildSessionDetail(tc.sess)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, d.Guests)
+			require.Contains(t, viewText(d), "Guests: "+tc.row)
+		})
+	}
+
+	t.Run("an older daemon", func(t *testing.T) {
+		d, err := buildSessionDetail(&api.GetSessionResponse{SessionId: "sid", Host: "ssh://example.com:22", SshUser: "sid"})
+		require.NoError(t, err)
+		require.Nil(t, d.Guests)
+		require.NotContains(t, viewText(d), "Guests:")
+	})
+
+	// A supporting daemon sets all five together, so a response missing any
+	// one is not that: nil is unknown, and unknown is not "no".
+	for name, drop := range map[string]func(*api.GetSessionResponse){
+		"start_confirmed":                 func(r *api.GetSessionResponse) { r.StartConfirmed = nil },
+		"read_only":                       func(r *api.GetSessionResponse) { r.ReadOnly = nil },
+		"file_transfer":                   func(r *api.GetSessionResponse) { r.FileTransfer = nil },
+		"file_transfer_approval_required": func(r *api.GetSessionResponse) { r.FileTransferApprovalRequired = nil },
+		"local_forwarding":                func(r *api.GetSessionResponse) { r.LocalForwarding = nil },
+	} {
+		t.Run("without "+name, func(t *testing.T) {
+			sess := permissionsResponse(false, "all", false, false)
+			drop(sess)
+			d, err := buildSessionDetail(sess)
+			require.NoError(t, err)
+			require.Nil(t, d.Guests)
+			require.NotContains(t, viewText(d), "Guests:")
+		})
+	}
+
+	// A file_transfer value from a newer daemon is not one to guess at.
+	t.Run("a file_transfer value this version does not know", func(t *testing.T) {
+		d, err := buildSessionDetail(permissionsResponse(false, "uploads", false, false))
+		require.NoError(t, err)
+		require.Nil(t, d.Guests)
+		require.NotContains(t, viewText(d), "Guests:")
+	})
 }
 
 // Test_clientDesc_NamesTheDoorEachClientCameInBy pins the prefix every client

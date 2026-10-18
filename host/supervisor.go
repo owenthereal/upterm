@@ -39,6 +39,21 @@ var _ tunnel = (*internal.ReverseTunnel)(nil)
 // or an error and no tunnel: a failed attempt leaves nothing open.
 type attemptFunc func(ctx context.Context, generation uint64, signers []ssh.Signer) (tunnel, *server.CreateSessionResponse, error)
 
+// TunnelEvent says that guests could not reach the session through the relay,
+// or that they can again.
+type TunnelEvent struct {
+	// Up is false when the tunnel was lost and true when it is back.
+	Up bool
+	// CanReconnect, on a loss, says whether this relay lets the host
+	// reconnect. When it doesn't, the loss is final: guests can't join again
+	// until the session is restarted.
+	CanReconnect bool
+	// RouteChanged, on a return, says the relay registered the session at
+	// another node or user than before, so the connect string guests use is
+	// not the one they had.
+	RouteChanged bool
+}
+
 // supervisor keeps the session's tunnel up. When the tunnel is lost it
 // redials the relay under the same session ID and the next generation, on the
 // schedule its failures call for, and swaps each new tunnel in behind the
@@ -68,9 +83,24 @@ type supervisor struct {
 	// uniformly random part of it.
 	jitter func(time.Duration) time.Duration
 	logger *slog.Logger
+	// onTunnel, if set, is told of the losses and returns. See report. It is
+	// set before the first tunnel can be lost, and never changed after: Run
+	// sets it before run starts, and a test before it drops the tunnel.
+	onTunnel func(TunnelEvent)
 
 	mu  sync.Mutex
 	cur tunnel // the tunnel the guest door is served on
+	// events are the reports onTunnel has not been given yet: at most one,
+	// the latest, since a callback that hangs would otherwise let a flapping
+	// relay grow it without bound. delivering says a goroutine is giving
+	// them.
+	events     []TunnelEvent
+	delivering bool
+	// routeMoved says a return that moved the route was replaced before it
+	// was delivered, and no return since has carried that on. The next one
+	// that goes out says the route moved: guests were not told at the time,
+	// and the connect string they have is the old one.
+	routeMoved bool
 }
 
 // run owns first and every tunnel after it, and returns only when ctx ends.
@@ -80,8 +110,9 @@ type supervisor struct {
 // that, once the guest door served on it has drained, so a stopped session's
 // guests still get their output and their exit status. When run returns,
 // every goroutine it started has ended except the one waiting on the current
-// tunnel, which ends when that tunnel is closed. Nothing is published after
-// it returns.
+// tunnel, which ends when that tunnel is closed, and the one delivering
+// events to onTunnel, which ends when the last of them has been delivered.
+// Nothing is published after it returns.
 //
 // An error never ends it. On a relay that doesn't support reconnecting, the
 // first loss is published as final, the guest door is failed, and run waits
@@ -112,6 +143,7 @@ func (s *supervisor) run(ctx context.Context, first tunnel) {
 			s.logger.Warn("lost the tunnel, and this relay doesn't support reconnecting; guests can't reach this session again until it is restarted", "error", err)
 			s.state.tunnelLost(lostAt, errString(err))
 			s.publish()
+			s.report(TunnelEvent{Up: false, CanReconnect: false})
 			s.listener.Fail(err)
 			<-ctx.Done()
 			return
@@ -149,9 +181,14 @@ func (s *supervisor) reconnect(ctx context.Context, sched *schedule, deadline ti
 	// connection, the first wait after it is fast.
 	reason, lastErr := sessiondir.TunnelReasonNetwork, errString(lossErr)
 	wait := sched.next(transient)
-	for {
+	for first := true; ; first = false {
 		s.state.tunnelReconnecting(lostAt, reason, lastErr, time.Now().Add(wait))
 		s.publish()
+		if first {
+			// Once, for the outage, and after the record says so: whoever
+			// is told can ask what state the session is in and be answered.
+			s.report(TunnelEvent{Up: false, CanReconnect: true})
+		}
 		if !sleepCtx(ctx, wait) {
 			return nil, false
 		}
@@ -240,7 +277,9 @@ func (s *supervisor) install(t tunnel, resp *server.CreateSessionResponse, gener
 	// Its connection has already ended, so this is quick.
 	prev.Close()
 
+	prevNode, prevUser := s.route.Get()
 	s.route.Set(resp.NodeAddr, resp.SshUser)
+	moved := prevNode != resp.NodeAddr || prevUser != resp.SshUser
 	s.sessionKeyFirst = s.sessionKeyFirst && t.SessionKeyRedial()
 	if result := version.CheckCompatibility(string(t.ServerVersion())); !result.Compatible {
 		s.logger.Warn("server version mismatch", "message", result.Message,
@@ -248,8 +287,62 @@ func (s *supervisor) install(t tunnel, resp *server.CreateSessionResponse, gener
 	}
 	s.state.tunnelUp()
 	s.publish()
+	s.report(TunnelEvent{Up: true, RouteChanged: moved})
 	s.logger.Info("reconnected the tunnel", "generation", generation)
 	return true
+}
+
+// report tells onTunnel about e, and returns without waiting for it. A
+// callback may raise a desktop notification, which can take a while or hang,
+// and neither may hold up a redial or the lock of anything the redial needs.
+//
+// Events are delivered one at a time and in the order they were reported, by
+// a goroutine that exists only while there are events to deliver. A callback
+// that never returns holds up the events behind it and nothing else, and only
+// the latest of those is kept: a newer event replaces one still waiting, since
+// a state already superseded isn't worth announcing late, and the latest says
+// where things stand. The event being delivered is not affected.
+//
+// What a replaced return said about the route is not lost with it: a return
+// that moved the connect string is remembered, and the next return to be kept
+// says so too, since it could not otherwise tell guests the command is the
+// same. The loss between two returns says nothing about the route.
+func (s *supervisor) report(e TunnelEvent) {
+	if s.onTunnel == nil {
+		return
+	}
+	s.mu.Lock()
+	if len(s.events) > 0 && s.events[0].Up && s.events[0].RouteChanged {
+		s.routeMoved = true
+	}
+	if e.Up {
+		e.RouteChanged = e.RouteChanged || s.routeMoved
+		s.routeMoved = false
+	}
+	s.events = append(s.events[:0], e)
+	start := !s.delivering
+	s.delivering = true
+	s.mu.Unlock()
+	if start {
+		go s.deliver()
+	}
+}
+
+// deliver gives onTunnel each reported event, and returns once none is left.
+// It never holds mu while it calls onTunnel.
+func (s *supervisor) deliver() {
+	for {
+		s.mu.Lock()
+		if len(s.events) == 0 {
+			s.delivering = false
+			s.mu.Unlock()
+			return
+		}
+		e := s.events[0]
+		s.events = s.events[1:]
+		s.mu.Unlock()
+		s.onTunnel(e)
+	}
 }
 
 // current is the tunnel the guest door is served on. The session's owner

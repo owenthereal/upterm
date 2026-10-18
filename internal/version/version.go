@@ -174,7 +174,24 @@ type CompatibilityResult struct {
 	HostVersion   string
 	ServerVersion string
 	Message       string
+	// Direction is which side of a mismatch is ahead, and so who has to
+	// upgrade. Set only when Compatible is false: on a compatible result it
+	// is RelayUnknown, its zero value, and means nothing.
+	Direction Direction
 }
+
+// Direction is which side of a version mismatch is ahead.
+type Direction int
+
+const (
+	// RelayUnknown is a relay whose version upterm couldn't read: an older
+	// uptermd that didn't report one, or a server that isn't uptermd.
+	RelayUnknown Direction = iota
+	// RelayNewer is a relay ahead of this upterm.
+	RelayNewer
+	// RelayOlder is a relay behind this upterm.
+	RelayOlder
+)
 
 // CheckCompatibility checks if the server version is compatible with the current host version
 // Always returns a result - Compatible=false for unparseable server versions to indicate incompatibility
@@ -190,6 +207,7 @@ func CheckCompatibility(sshVersion string) *CompatibilityResult {
 			HostVersion:   hostVersionStr,
 			ServerVersion: "unknown",
 			Message:       "Unable to determine server version - possibly older upterm server or non-upterm server",
+			Direction:     RelayUnknown,
 		}
 	}
 
@@ -200,11 +218,18 @@ func CheckCompatibility(sshVersion string) *CompatibilityResult {
 	serverMajor := serverVersion.Segments()[0]
 
 	if hostMajor != serverMajor {
+		// The majors differ, so major.minor.patch settles which side is
+		// ahead; a prerelease or build suffix on either can't change that.
+		direction := RelayOlder
+		if serverVersion.Core().GreaterThan(hostVersion.Core()) {
+			direction = RelayNewer
+		}
 		return &CompatibilityResult{
 			Compatible:    false,
 			HostVersion:   hostVersionStr,
 			ServerVersion: serverVersionStr,
 			Message:       fmt.Sprintf("Major version mismatch: host %s, server %s", hostVersionStr, serverVersionStr),
+			Direction:     direction,
 		}
 	}
 

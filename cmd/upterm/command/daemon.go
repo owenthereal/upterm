@@ -112,7 +112,7 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 			// Not silent, as it was: the session goes on with some other key,
 			// and the operator should know which identity it is not using.
 			logger.Warn("skipping private key", "file", file, "error", err)
-			child.Print(fmt.Sprintf("warning: skipping private key %s: %v\n", file, err))
+			child.Print(fmt.Sprintf("upterm: warning: skipping private key %s: %v\n", file, err))
 		},
 	})
 	if err != nil {
@@ -138,8 +138,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	}
 
 	var sftpPermissionChecker sftp.PermissionChecker = &DialogPermissionChecker{}
+	fileTransferApprovalRequired := true
 	if flagAccept {
 		sftpPermissionChecker = &AutoAllowPermissionChecker{}
+		fileTransferApprovalRequired = false
 	}
 
 	// Generated here rather than left to Run: the parent pins the door's keys
@@ -153,6 +155,10 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 	// One key, but the wire field stays plural: it is `repeated string
 	// host_keys` in startup.proto, and an older parent reads the list.
 	hostKeys := []string{strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey())), "\n")}
+
+	// The daemon is the one that knows what became of the session, so it is
+	// the one that tells the operator, by the session's name.
+	guests := guestNotifier(name)
 
 	var sessionID string
 	// A variable rather than a bare return, so the ready callback can ask the
@@ -199,8 +205,9 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 			}
 			return nil
 		},
-		ClientJoinedCallback:    clientJoinedCallback,
-		ClientLeftCallback:      clientLeftCallback,
+		ClientJoinedCallback:    guests.joined,
+		ClientLeftCallback:      guests.left,
+		TunnelCallback:          tunnelNotifier(name),
 		Logger:                  logger,
 		ReadOnly:                flagReadOnly,
 		AllowLocalTCPForwarding: flagAllowLocalTCPForwarding,
@@ -209,6 +216,9 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 		Term:                    opts.term,
 		SFTPDisabled:            flagNoSFTP,
 		SFTPPermissionChecker:   sftpPermissionChecker,
+		// Set where the checker is chosen, so that what readers are told is
+		// what a guest's transfer will do.
+		FileTransferApprovalRequired: fileTransferApprovalRequired,
 		// A foreground parent attaches before the command starts; a detached
 		// one has nothing to attach.
 		AwaitInitialClient: !flagDetach,
@@ -231,9 +241,52 @@ func buildDaemonHost(ctx context.Context, name string, opts hostOptions, child *
 			// than inferring it from the flag.
 			_ = child.Started(sessionID, status, h.JoinState())
 		},
+		// Both are said on the operator's terminal before the banner: Run
+		// makes these calls before SessionCreatedCallback, and the parent
+		// prints in the order it is told.
 		VersionWarningCallback: func(r *version.CompatibilityResult) {
-			host.DisplayVersionWarning(child.Writer(), logger, r)
+			// Only a relay ahead of this upterm calls for an upgrade here,
+			// and only then is it worth asking who installed upterm: bounded,
+			// since the banner waits on it.
+			var advice string
+			if r.Direction == version.RelayNewer {
+				advice = upgradeAdviceWithin(logger)
+			}
+			child.Print(versionWarning(r, advice) + "\n")
+		},
+		RelayWarningCallback: func(w host.RelayWarning) {
+			if line := relayWarningLine(w); line != "" {
+				child.Print(line + "\n")
+			}
 		},
 	}
 	return h, nil
+}
+
+// versionWarning is what upterm host says when the relay's version doesn't
+// match its own: which side is ahead, and so who can fix it. advice is how
+// to upgrade this upterm, from upgradeAdvice, and is said only when this
+// upterm is the one behind.
+func versionWarning(r *version.CompatibilityResult, advice string) string {
+	switch r.Direction {
+	case version.RelayNewer:
+		return fmt.Sprintf("upterm: warning: the relay runs uptermd %s and this is upterm %s; %s", r.ServerVersion, r.HostVersion, advice)
+	case version.RelayOlder:
+		return fmt.Sprintf("upterm: warning: the relay runs uptermd %s, older than this upterm (%s); its operator can upgrade it", r.ServerVersion, r.HostVersion)
+	default:
+		return "upterm: warning: the relay didn't report a version upterm understands; this is upterm " + r.HostVersion
+	}
+}
+
+// relayWarningLine is what upterm host says, before the session starts,
+// about what its first connection showed of the relay; "" for a kind it has
+// no line for.
+func relayWarningLine(w host.RelayWarning) string {
+	switch w.Kind {
+	case host.NoReconnect:
+		return "upterm: warning: this relay doesn't support reconnecting; if the connection drops, guests can't reach this session until you restart it"
+	case host.CertNotValidForServer:
+		return fmt.Sprintf("upterm: warning: the relay's certificate isn't valid for %s, so a reconnect would be refused; use the relay's own hostname in --server", w.Host)
+	}
+	return ""
 }

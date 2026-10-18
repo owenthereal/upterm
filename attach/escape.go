@@ -14,36 +14,61 @@ const (
 	// attachment afterwards. Feed keeps going, so the rest of the read is
 	// still the session's.
 	EscapeSuspend
+	// EscapeStatus: the caller should show the session's status and keys in
+	// this terminal, and send the session nothing for it. Feed keeps going,
+	// as for a suspend.
+	EscapeStatus
 )
 
-// EscapeFilter recognises ssh's detach and suspend conventions in a stream of
-// keystrokes: an escape byte at the start of a line followed by '.' detaches;
-// followed by '^Z' (0x1a) suspends, when suspend is enabled; followed by
-// itself sends one literal escape byte; followed by anything else sends both.
-// "Start of a line" is the beginning of input or the byte after a CR or LF —
-// CR because a raw-mode terminal sends Enter as CR.
+// EscapeFilter recognises ssh's detach, suspend and help conventions in a
+// stream of keystrokes: an escape byte at the start of a line followed by '.'
+// detaches; followed by '^Z' (0x1a) suspends, when suspend is enabled;
+// followed by '?' asks for the session's status, when WithStatus offers it;
+// followed by itself sends one literal escape byte; followed by anything else
+// sends both. "Start of a line" is the beginning of input or the byte after a
+// CR or LF — CR because a raw-mode terminal sends Enter as CR.
 //
 // Bytes after a detach are dropped: they were typed at a terminal that is no
-// longer attached to anything. Bytes after a suspend are not: they are still
-// the session's, queued for delivery once the process resumes.
+// longer attached to anything. Bytes after a suspend or a status request are
+// not: they are still the session's, queued for delivery as usual.
 type EscapeFilter struct {
 	esc       byte
 	suspend   bool
+	status    bool
 	lineStart bool
 	pending   bool
 }
 
+// EscapeOption is a sequence an EscapeFilter offers beyond detach and suspend.
+type EscapeOption func(*EscapeFilter)
+
+// WithStatus offers esc followed by '?' as EscapeStatus. Without it the two
+// bytes reach the session like any other unrecognised pair, which is what a
+// client with no status of its own to show wants: join's filter is built
+// without it.
+func WithStatus() EscapeOption {
+	return func(f *EscapeFilter) { f.status = true }
+}
+
 // NewEscapeFilter returns a filter for esc. Zero disables it: Feed passes
-// everything through. suspend says whether esc followed by ^Z is offered;
-// when it is not, both bytes reach the session like any other unrecognised
-// pair.
-func NewEscapeFilter(esc byte, suspend bool) *EscapeFilter {
-	return &EscapeFilter{esc: esc, suspend: suspend, lineStart: true}
+// everything through, ~? included. suspend says whether esc followed by ^Z is
+// offered; when it is not, both bytes reach the session like any other
+// unrecognised pair.
+func NewEscapeFilter(esc byte, suspend bool, opts ...EscapeOption) *EscapeFilter {
+	f := &EscapeFilter{esc: esc, suspend: suspend, lineStart: true}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
 }
 
 // Feed filters p, returning what should reach the session and what escape
 // sequence, if any, completed. out may alias an internal buffer; copy it
 // before the next call if it must be kept.
+//
+// One action per read: a detach returns at once, and a suspend outranks a
+// status request in the same read, since the suspend is the one that changes
+// anything. Two escape sequences in one read do not come from a keyboard.
 func (f *EscapeFilter) Feed(p []byte) (out []byte, action EscapeAction) {
 	if f.esc == 0 {
 		return p, EscapeNone
@@ -71,6 +96,18 @@ func (f *EscapeFilter) Feed(p []byte) (out []byte, action EscapeAction) {
 				// Not offered here (no hook, or a platform with no job
 				// control): both bytes are the session's, like any other
 				// unrecognised pair.
+				out = append(out, f.esc)
+			case '?':
+				if f.status {
+					// Nothing reaches the session, so the line it sees is
+					// still at its start, and ~. works next, as after ~^Z.
+					f.lineStart = true
+					if action == EscapeNone {
+						action = EscapeStatus
+					}
+					continue
+				}
+				// Not offered (join): both bytes are the session's.
 				out = append(out, f.esc)
 			default:
 				out = append(out, f.esc)

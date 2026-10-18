@@ -76,6 +76,20 @@ message GetSessionResponse {
   // so nobody confirmed it either. It describes the session and changes
   // nothing about who may join. False from daemons before this field.
   bool open = 12;
+
+  // The fields below are each optional: a daemon from before one leaves it
+  // unset, and a reader must treat unset as unknown, never as false or empty.
+  optional string name = 13;                          // the session's name
+  optional string status = 14;                        // starting, ready, reconnecting, disconnected, ending
+  optional string reconnect = 15;                     // supported, unsupported
+  optional string tunnel_reason = 16;                 // why the tunnel is down, one of sessiondir's TunnelReason values; empty when it is up
+  optional int64 tunnel_lost_at_unix_nano = 17;       // UTC; unset when the tunnel is up
+  optional int64 next_attempt_at_unix_nano = 18;      // UTC; unset when no attempt is scheduled
+  optional bool start_confirmed = 19;                 // the host answered the start prompt, rather than passing --accept
+  optional bool read_only = 20;
+  optional string file_transfer = 21;                 // off, downloads, all
+  optional bool file_transfer_approval_required = 22; // each guest file transfer waits for the host's dialog
+  optional bool local_forwarding = 23;
 }
 
 message AuthorizedKey {

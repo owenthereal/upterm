@@ -41,6 +41,7 @@ upterm attach [NAME] [flags]
 ```
       --escape-char string   Escape character for detaching (ESC-CHAR followed by . at the start of a line) or suspending (ESC-CHAR followed by ^Z, Unix only), or 'none' to disable. (default "~")
   -h, --help                 help for attach
+      --hide-client-ip       Hide client IP addresses from output (auto-enabled in CI environments).
 ```
 
 ### Options inherited from parent commands

@@ -1324,7 +1324,7 @@ func promptOutcome(t *testing.T, msgs ...tea.Msg) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	p := tea.NewProgram(tui.NewHostSessionModel(tui.SessionDetail{}, false),
+	p := tea.NewProgram(tui.NewHostSessionModel(false),
 		tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutSignalHandler())
 	go func() {
 		for _, m := range msgs {

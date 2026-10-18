@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -23,15 +21,14 @@ const (
 	HostSessionConfirmInterrupted
 )
 
-// HostSessionModel handles both session display and confirmation for the host command.
-// It renders the session information and waits for user confirmation (y/n/Ctrl+C)
-// unless auto-accept is enabled.
+// HostSessionModel asks the host whether to start the session (y/n/Ctrl+C)
+// unless auto-accept is enabled. The banner is printed once before it runs,
+// so the prompt line is all it draws: a redraw repaints that line and nothing
+// above it.
 type HostSessionModel struct {
-	detail     SessionDetail
 	autoAccept bool
 	state      sessionState
 	result     HostSessionConfirmResult
-	width      int
 }
 
 // sessionState represents the current state of the host session prompt
@@ -44,8 +41,8 @@ const (
 	stateDone
 )
 
-// NewHostSessionModel creates a model for displaying session and getting confirmation
-func NewHostSessionModel(detail SessionDetail, autoAccept bool) HostSessionModel {
+// NewHostSessionModel creates a model that asks whether to start the session
+func NewHostSessionModel(autoAccept bool) HostSessionModel {
 	initialState := stateWaitingForConfirm
 	result := HostSessionConfirmUndecided
 	if autoAccept {
@@ -54,11 +51,9 @@ func NewHostSessionModel(detail SessionDetail, autoAccept bool) HostSessionModel
 	}
 
 	return HostSessionModel{
-		detail:     detail,
 		autoAccept: autoAccept,
 		state:      initialState,
 		result:     result,
-		width:      getTermWidth(),
 	}
 }
 
@@ -72,9 +67,6 @@ func (m HostSessionModel) Init() tea.Cmd {
 
 func (m HostSessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-
 	case tea.KeyMsg:
 		// Only handle input when waiting for confirmation
 		if m.state != stateWaitingForConfirm {
@@ -100,38 +92,14 @@ func (m HostSessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// View is the prompt while it waits, and nothing once it is answered: the
+// renderer clears the line on the way out, so a y leaves no trace of the
+// question above the session, and an n or a Ctrl-C leaves nothing at all.
 func (m HostSessionModel) View() string {
-	var b strings.Builder
-
-	// Session info
-	b.WriteString(renderSessionDetail(m.detail, m.width))
-
-	if !IsTTY() {
-		return b.String()
+	if m.state != stateWaitingForConfirm {
+		return ""
 	}
-
-	switch m.state {
-	case stateWaitingForConfirm:
-		b.WriteString("\n")
-		b.WriteString(FooterStyle.Render("Accept connections? [y/n] (or <ctrl-c> to force exit)"))
-		b.WriteString("\n")
-
-	case stateDone:
-		b.WriteString("\n")
-		switch m.result {
-		case HostSessionConfirmAccepted:
-			b.WriteString(CommandStyle.Render("Starting to accept connections..."))
-			b.WriteString("\n\n")
-			b.WriteString(FooterStyle.Render("💡 Run 'upterm session current' to display session info"))
-		case HostSessionConfirmRejected:
-			b.WriteString(FooterStyle.Render("Session discarded."))
-		case HostSessionConfirmInterrupted:
-			b.WriteString(FooterStyle.Render("Cancelled by user."))
-		}
-		b.WriteString("\n")
-	}
-
-	return b.String()
+	return FooterStyle.Render("Start the session? [y/n]")
 }
 
 // Result returns the confirmation result
