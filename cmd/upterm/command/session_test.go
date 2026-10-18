@@ -587,7 +587,36 @@ func claimSession(t *testing.T, name string) *sessiondir.Dir {
 // cases that deliberately keep the lock held while lookup runs.
 func releaseAtEnd(t *testing.T, d *sessiondir.Dir) {
 	t.Helper()
-	t.Cleanup(func() { _ = d.Release(context.Background()) })
+	t.Cleanup(func() { releaseOnce(d) })
+}
+
+// released holds the Dirs a test has given their name back. A Dir may be
+// released once: a second Release removes the directory of whichever session
+// has taken the name since, which is what a test that ends a session
+// (endHeld) and also asks for it to be released at the end would do.
+var released sync.Map
+
+// releaseOnce gives d's name back unless it already has been.
+func releaseOnce(d *sessiondir.Dir) {
+	if _, done := released.LoadOrStore(d, true); !done {
+		_ = d.Release(context.Background())
+	}
+}
+
+// endHeld ends d's session as a normal shutdown does -- the outcome published,
+// then the name given back -- and does it now, so that a test can let another
+// session take the name before it goes on. releaseAtEnd waits for the end of
+// the test.
+func endHeld(t *testing.T, d *sessiondir.Dir) {
+	t.Helper()
+
+	code := 3
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusEnding
+		r.Reason = sessiondir.ReasonExited
+		r.ExitCode = &code
+	}))
+	releaseOnce(d)
 }
 
 // buildStarting: claimed, lock held, and a host key published — the point
@@ -773,15 +802,7 @@ func runInfo(t *testing.T, name string) string {
 // then the name given back.
 func buildEndedAfterExit(t *testing.T, name string) {
 	t.Helper()
-
-	d := claimSession(t, name)
-	code := 3
-	require.NoError(t, d.Update(func(r *sessiondir.Record) {
-		r.Status = sessiondir.StatusEnding
-		r.Reason = sessiondir.ReasonExited
-		r.ExitCode = &code
-	}))
-	require.NoError(t, d.Release(context.Background()))
+	endHeld(t, claimSession(t, name))
 }
 
 // buildEndedAfterKill: what a SIGKILL leaves — the lock free and the record
@@ -836,6 +857,10 @@ type stubAdminServer struct {
 	// onSet, if set, answers SetJoinTimeout; nil answers Unimplemented, the
 	// way a daemon from before `session set` does.
 	onSet func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error)
+
+	// sawStop, if set, is told the launch every StopSession names, before it
+	// is accepted or refused.
+	sawStop func(launchID string)
 }
 
 // GetSession answers with the next response in the sequence and repeats the
@@ -862,8 +887,11 @@ func (s *stubAdminServer) StopSession(_ context.Context, in *api.StopSessionRequ
 	}
 	s.mu.Lock()
 	s.stoppedLaunchID = in.GetLaunchId()
-	expect := s.stopLaunchID
+	expect, saw := s.stopLaunchID, s.sawStop
 	s.mu.Unlock()
+	if saw != nil {
+		saw(in.GetLaunchId())
+	}
 	if in.GetLaunchId() != expect {
 		return nil, status.Errorf(codes.FailedPrecondition, "this socket holds launch %s; the request named %q", expect, in.GetLaunchId())
 	}
@@ -928,10 +956,43 @@ func serveStubAdminWithSet(t *testing.T, socket string, onSet func(*api.SetJoinT
 // heldReady claims name and publishes it ready, as a live daemon would.
 func heldReady(t *testing.T, name string) *sessiondir.Dir {
 	t.Helper()
+	return readyHeld(t, name, "sid")
+}
+
+// readyHeld is heldReady for a session with a chosen session ID, with no
+// admin socket answering: a case that needs one serves it, since the socket's
+// path is the name's and a second listener on it would fail.
+func readyHeld(t *testing.T, name, id string) *sessiondir.Dir {
+	t.Helper()
 	d := claimSession(t, name)
 	releaseAtEnd(t, d)
-	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = id }))
 	return d
+}
+
+// stubStopOn serves d's admin socket as the daemon of d's launch, which
+// accepts a stop naming that launch and refuses any other. onStop is told the
+// launch every StopSession names, accepted or not.
+func stubStopOn(t *testing.T, d *sessiondir.Dir, onStop func(launchID string)) {
+	t.Helper()
+	stub := serveStubAdminWithStop(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: d.Record().SessionID, Host: "ssh://127.0.0.1:2222"}, d.LaunchID(), func() {})
+	stub.mu.Lock()
+	stub.sawStop = onStop
+	stub.mu.Unlock()
+}
+
+// stubSetOn is stubStopOn for SetJoinTimeout: it accepts a change naming d's
+// launch, answering that the timeout is disabled, and refuses any other the
+// way the daemon does.
+func stubSetOn(t *testing.T, d *sessiondir.Dir, onSet func(launchID string)) {
+	t.Helper()
+	serveStubAdminWithSet(t, d.AdminSocket(), func(in *api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+		onSet(in.GetLaunchId())
+		if in.GetLaunchId() != d.LaunchID() {
+			return nil, status.Errorf(codes.FailedPrecondition, "this socket holds launch %s; the request named %q", d.LaunchID(), in.GetLaunchId())
+		}
+		return &api.SetJoinTimeoutResponse{Outcome: api.SetJoinTimeoutResponse_DISABLED, State: &api.JoinState{}}, nil
+	})
 }
 
 // captureStdout collects what fn prints. `session info` answers on stdout, so
@@ -973,7 +1034,7 @@ func captureStdout(t *testing.T, fn func()) string {
 func lookupJSON(t *testing.T, name string) map[string]any {
 	t.Helper()
 
-	info, _, err := lookup(context.Background(), name)
+	info, _, err := lookup(context.Background(), resolved{Name: name})
 	require.NoError(t, err)
 
 	raw, err := json.Marshal(info)
@@ -1014,7 +1075,7 @@ func Test_lookup_ReadyWithLiveSocket(t *testing.T) {
 	require.Equal(t, "upterm join ssh://sid-1:MTI3LjAuMC4xOjIyMjI=@127.0.0.1:2222", got["joinCommand"],
 		"and the join command beside it, for the same user and relay")
 
-	_, live, err := lookup(context.Background(), "ready")
+	_, live, err := lookup(context.Background(), resolved{Name: "ready"})
 	require.NoError(t, err)
 	require.NotNil(t, live, "a socket that answered for the recorded session hands its response back")
 	require.Equal(t, "sid-1", live.SessionId,
@@ -1086,7 +1147,7 @@ func Test_lookup_ReachesASocketUnderAnotherRuntimeRoot(t *testing.T) {
 	require.Equal(t, d.AttachSocket(), got["attachSocket"],
 		"and where a terminal from this shell would attach, which is equally not under this root")
 
-	_, live, err := lookup(context.Background(), "cron")
+	_, live, err := lookup(context.Background(), resolved{Name: "cron"})
 	require.NoError(t, err)
 	require.NotNil(t, live, "the validated response is handed back for the detail view")
 }
@@ -1111,7 +1172,7 @@ func Test_lookup_ReadyWithSocketAnsweringForAnotherSession(t *testing.T) {
 		Command:   []string{"bash"},
 	})
 
-	info, live, err := lookup(context.Background(), "mismatched")
+	info, live, err := lookup(context.Background(), resolved{Name: "mismatched"})
 	require.NoError(t, err)
 	require.Nil(t, live, "an answer about another session is not this session's live detail")
 	require.Empty(t, info.SSHCommand, "and none of it may reach the caller by another route")
@@ -1184,7 +1245,7 @@ func Test_lookup_Disconnected(t *testing.T) {
 		"a socket that answers for a disconnected session does not make it joinable")
 	require.NotContains(t, got, "joinCommand")
 
-	_, live, err := lookup(context.Background(), "disconnected")
+	_, live, err := lookup(context.Background(), resolved{Name: "disconnected"})
 	require.NoError(t, err)
 	require.Nil(t, live, "nothing the socket said may be printed as this session's live detail")
 }
@@ -1438,7 +1499,7 @@ func Test_tidySessions_PrunesOldRecords(t *testing.T) {
 func Test_lookup_UnknownName(t *testing.T) {
 	setupSessionRoots(t)
 
-	_, _, err := lookup(context.Background(), "never-claimed")
+	_, _, err := lookup(context.Background(), resolved{Name: "never-claimed"})
 	require.ErrorContains(t, err, "no session named")
 }
 
@@ -1985,7 +2046,7 @@ func TestSignalInfoAndWaitUseRecordedNumber(t *testing.T) {
 func TestNotFoundExitsFour(t *testing.T) {
 	setupSessionRoots(t)
 
-	_, _, err := lookup(context.Background(), "nobody")
+	_, _, err := lookup(context.Background(), resolved{Name: "nobody"})
 	var ec ExitCodeError
 	require.ErrorAs(t, err, &ec, "session info")
 	require.Equal(t, notFoundCode, ec.Code)
@@ -2280,7 +2341,7 @@ func Test_lookupTakesTheJoinStateFromTheDaemon(t *testing.T) {
 			serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
 				LaunchId: d.LaunchID(), JoinState: &api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: deadline.UnixNano()}})
 
-			info, live, err := lookup(context.Background(), name)
+			info, live, err := lookup(context.Background(), resolved{Name: name})
 			require.NoError(t, err)
 			require.Equal(t, "10m", info.JoinTimeout)
 			require.True(t, info.JoinDeadline.Equal(deadline))
@@ -2300,7 +2361,7 @@ func Test_lookupIgnoresAnAnswerForAnotherLaunch(t *testing.T) {
 	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
 		LaunchId: "another-launch", JoinState: &api.JoinState{TimeoutNanos: int64(time.Hour)}})
 
-	info, live, err := lookup(context.Background(), "raced-3")
+	info, live, err := lookup(context.Background(), resolved{Name: "raced-3"})
 	require.NoError(t, err)
 	require.Nil(t, live, "an answer for another launch is not this session's")
 	require.Equal(t, "1m", info.JoinTimeout)
@@ -2313,7 +2374,7 @@ func Test_lookupSaysWhenTheDaemonDidNotAnswer(t *testing.T) {
 		d := heldReady(t, "mute-3")
 		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.JoinTimeout = time.Minute }))
 
-		info, _, err := lookup(context.Background(), "mute-3")
+		info, _, err := lookup(context.Background(), resolved{Name: "mute-3"})
 		require.NoError(t, err)
 		require.Equal(t, "record", info.JoinStateSource)
 		require.Equal(t, "Join timeout: 1m (counts from readiness) (from the record; the session did not answer)", joinTimeoutLine(info))
@@ -2325,7 +2386,7 @@ func Test_lookupSaysWhenTheDaemonDidNotAnswer(t *testing.T) {
 		setupSessionRoots(t)
 		heldReady(t, "mute-4")
 
-		info, _, err := lookup(context.Background(), "mute-4")
+		info, _, err := lookup(context.Background(), resolved{Name: "mute-4"})
 		require.NoError(t, err)
 		require.Empty(t, info.JoinTimeout)
 		require.Equal(t, "record", info.JoinStateSource)
@@ -2339,7 +2400,7 @@ func Test_lookupSaysWhenTheDaemonConfirmsNone(t *testing.T) {
 	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222",
 		LaunchId: d.LaunchID(), JoinState: &api.JoinState{}})
 
-	info, _, err := lookup(context.Background(), "none-3")
+	info, _, err := lookup(context.Background(), resolved{Name: "none-3"})
 	require.NoError(t, err)
 	require.Empty(t, info.JoinTimeout)
 	require.Equal(t, "daemon", info.JoinStateSource)
@@ -2480,7 +2541,7 @@ func Test_lookup_Reconnecting(t *testing.T) {
 	setupSessionRoots(t)
 	out := buildReconnecting(t, "reconnecting", true)
 
-	info, live, err := lookup(context.Background(), "reconnecting")
+	info, live, err := lookup(context.Background(), resolved{Name: "reconnecting"})
 	require.NoError(t, err)
 	require.Equal(t, sessiondir.StatusReconnecting, info.Status)
 	require.NotEmpty(t, info.SSHCommand, "guests use the same connect string once the tunnel is back")
@@ -2519,7 +2580,7 @@ func Test_lookup_ReconnectingWithSocketAnsweringForAnotherSession(t *testing.T) 
 		Command:   []string{"bash"},
 	})
 
-	info, live, err := lookup(context.Background(), "mismatched")
+	info, live, err := lookup(context.Background(), resolved{Name: "mismatched"})
 	require.NoError(t, err)
 	require.Nil(t, live)
 	require.Empty(t, info.SSHCommand)
@@ -2531,7 +2592,7 @@ func Test_lookup_DisconnectedByRelay(t *testing.T) {
 	setupSessionRoots(t)
 	buildDisconnectedByRelay(t, "unsupported")
 
-	info, live, err := lookup(context.Background(), "unsupported")
+	info, live, err := lookup(context.Background(), resolved{Name: "unsupported"})
 	require.NoError(t, err)
 	require.Equal(t, sessiondir.StatusDisconnected, info.Status)
 	require.Empty(t, info.SSHCommand, "a disconnected session gets no connect string")
@@ -2785,4 +2846,247 @@ func Test_listSessions_RecordOnlyRowsCarryTheOutage(t *testing.T) {
 	require.Empty(t, unsupported.SSHCommand, "and a disconnected row is still no way to join")
 	require.Equal(t, sessiondir.ReconnectUnsupported, unsupported.Reconnect)
 	require.Equal(t, sessiondir.TunnelReasonReconnectUnsupported, unsupported.TunnelReason)
+}
+
+// An ID names a session where a name does, and names one launch of it.
+
+func TestAnIDResolvesToItsSession(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	r, err := resolveSession(context.Background(), "sid-1")
+	require.NoError(t, err)
+	require.Equal(t, resolved{Name: "build", LaunchID: a.LaunchID()}, r)
+}
+
+func TestAnExactNameIsNeverShadowedByAnID(t *testing.T) {
+	setupSessionRoots(t)
+	readyHeld(t, "build", "sid-1")
+	readyHeld(t, "sid-1", "zz") // a session *named* sid-1
+	r, err := resolveSession(context.Background(), "sid-1")
+	require.NoError(t, err)
+	require.Equal(t, resolved{Name: "sid-1"}, r) // by name: no launch pinned, as today
+}
+
+func TestAnEndedSessionResolvesByID(t *testing.T) {
+	setupSessionRoots(t)
+	endHeld(t, readyHeld(t, "old", "sid-old")) // record kept, lock released
+	rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), "old")
+	require.NoError(t, err)
+	require.Equal(t, "sid-old", rec.SessionID)
+	r, err := resolveSession(context.Background(), rec.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, "old", r.Name)
+	require.Equal(t, rec.LaunchID, r.LaunchID)
+}
+
+// Neither a name nor an ID is resolved to anything; the step that reads it
+// finds it missing, as it always has. In particular the empty argument is not
+// the empty session ID of a session that has not been given one yet.
+func TestWhatIsNeitherANameNorAnIDResolvesToNothing(t *testing.T) {
+	setupSessionRoots(t)
+	buildStarting(t, "starting") // no session ID yet
+	readyHeld(t, "build", "sid-1")
+
+	for _, arg := range []string{"", "sid", "sid-1 ", "SID-1", "nobody", "../build"} {
+		r, err := resolveSession(context.Background(), arg)
+		require.NoError(t, err, "%q", arg)
+		require.Equal(t, resolved{Name: arg}, r, "%q", arg)
+	}
+}
+
+func TestStopByIDStopsThatSession(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	var asked []string
+	stubStopOn(t, a, func(launch string) {
+		asked = append(asked, launch)
+		// What the daemon does: publish stopped and give the name back.
+		go func() {
+			_ = a.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusEnding; r.Reason = sessiondir.ReasonStopped })
+			releaseOnce(a)
+		}()
+	})
+	var out bytes.Buffer
+	require.NoError(t, stopSession(context.Background(), "sid-1", &out))
+	require.Equal(t, "session build stopped\n", out.String(), "the line names the session, not the argument")
+	require.Equal(t, []string{a.LaunchID()}, asked, "the request names the launch the ID belongs to")
+}
+
+func TestStopByIDNeverStopsTheSessionThatReusedTheName(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1") // launch A
+	var stopped []string
+	afterResolve = func() { // between resolution and Inspect
+		endHeld(t, a)
+		b := readyHeld(t, "build", "sid-2") // launch B takes the name
+		stubStopOn(t, b, func(launch string) { stopped = append(stopped, launch) })
+	}
+	t.Cleanup(func() { afterResolve = nil })
+	err := stopSession(context.Background(), "sid-1", io.Discard)
+	require.ErrorContains(t, err, "has been replaced since it was read")
+	require.Empty(t, stopped, "launch B was never asked to stop")
+}
+
+func TestSetByIDChangesThatSession(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	var set []string
+	stubSetOn(t, a, func(launch string) { set = append(set, launch) })
+	var out bytes.Buffer
+	require.NoError(t, setSession(context.Background(), "sid-1", 10*time.Minute, &out))
+	require.Equal(t, "session build: join timeout disabled\n", out.String())
+	require.Equal(t, []string{a.LaunchID()}, set, "the request names the launch the ID belongs to")
+}
+
+func TestSetByIDNeverChangesTheSessionThatReusedTheName(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	var set []string
+	afterResolve = func() {
+		endHeld(t, a)
+		b := readyHeld(t, "build", "sid-2")
+		stubSetOn(t, b, func(launch string) { set = append(set, launch) })
+	}
+	t.Cleanup(func() { afterResolve = nil })
+	err := setSession(context.Background(), "sid-1", 10*time.Minute, io.Discard)
+	require.ErrorContains(t, err, "has been replaced since it was read")
+	require.Empty(t, set, "launch B's join timeout was never changed")
+}
+
+// An ID whose session has ended answers from its record, like its name does.
+func TestStopAndSetByIDOfAnEndedSessionSayItEnded(t *testing.T) {
+	setupSessionRoots(t)
+	endHeld(t, readyHeld(t, "old", "sid-old"))
+
+	var out bytes.Buffer
+	require.NoError(t, stopSession(context.Background(), "sid-old", &out))
+	require.Equal(t, "session old has already ended with status 3\n", out.String())
+
+	out.Reset()
+	require.NoError(t, setSession(context.Background(), "sid-old", time.Minute, &out))
+	require.Equal(t, "session old has already ended with status 3\n", out.String())
+}
+
+func TestWaitByIDOfAnEndedSessionReportsItsOutcome(t *testing.T) {
+	setupSessionRoots(t)
+	endHeld(t, readyHeld(t, "old", "sid-old"))
+
+	var out bytes.Buffer
+	code, err := waitSession(context.Background(), "sid-old", &out)
+	require.NoError(t, err)
+	require.Equal(t, 3, code)
+	require.Equal(t, "session old ended\n", out.String())
+}
+
+func TestWaitByIDWaitsForThatSession(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = a.Update(func(r *sessiondir.Record) {
+			code := 5
+			r.Status = sessiondir.StatusEnding
+			r.Reason = sessiondir.ReasonExited
+			r.ExitCode = &code
+		})
+		releaseOnce(a)
+	}()
+
+	var out bytes.Buffer
+	code, err := waitSession(context.Background(), "sid-1", &out)
+	require.NoError(t, err)
+	require.Equal(t, 5, code)
+	require.Equal(t, "session build ended\n", out.String())
+}
+
+// The session given by ID is over, and the one holding its name is not it:
+// wait reports the first as ended, with nothing of the second's outcome, and
+// does not wait for the second to end.
+func TestWaitByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	afterResolve = func() {
+		endHeld(t, a)
+		readyHeld(t, "build", "sid-2")
+	}
+	t.Cleanup(func() { afterResolve = nil })
+
+	// Bounded, so that a wait that did follow the name onto the new session
+	// fails here instead of waiting for it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	code, err := waitSession(ctx, "sid-1", &out)
+	require.NoError(t, err)
+	require.Equal(t, waitUnavailableCode, code, "nothing is known of how it ended")
+	require.Equal(t, "session build ended for a reason upterm didn't record\n", out.String())
+}
+
+func TestInfoByIDIsInfoByName(t *testing.T) {
+	setupSessionRoots(t)
+	buildReady(t, "ready-1") // session ID sid-1
+
+	byName := runInfo(t, "ready-1")
+	require.Contains(t, byName, "ready-1")
+	require.Equal(t, byName, runInfo(t, "sid-1"), "the name printed is the session's, not the argument")
+}
+
+func TestInfoByIDOfAnEndedSession(t *testing.T) {
+	setupSessionRoots(t)
+	endHeld(t, readyHeld(t, "old", "sid-old"))
+
+	byName := runInfo(t, "old")
+	require.Contains(t, byName, "ended")
+	require.Equal(t, byName, runInfo(t, "sid-old"))
+}
+
+func TestInfoByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	afterResolve = func() {
+		endHeld(t, a)
+		b := readyHeld(t, "build", "sid-2")
+		serveStubAdmin(t, b.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", LaunchId: b.LaunchID(), Host: "ssh://127.0.0.1:2222"})
+	}
+	t.Cleanup(func() { afterResolve = nil })
+
+	out := runInfo(t, "sid-1")
+	require.Contains(t, out, "build")
+	require.Contains(t, out, "ended")
+	require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
+
+	// The same session as JSON: ended, its own launch, no admin socket to dial.
+	r := resolved{Name: "build", LaunchID: a.LaunchID()}
+	info, live, err := lookup(context.Background(), r)
+	require.NoError(t, err)
+	require.Nil(t, live)
+	require.Equal(t, statusEnded, info.Status)
+	require.Equal(t, "build", info.Name)
+	require.Equal(t, a.LaunchID(), info.LaunchID)
+	require.Empty(t, info.AdminSocket)
+	require.Empty(t, info.SessionID, "the replacement's ID is not this session's")
+}
+
+// Not found keeps each command's code and words, whether or not the argument
+// could have been an ID.
+func TestWhatNeitherANameNorAnIDIsNotFoundAsBefore(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+	readyHeld(t, "build", "sid-1")
+
+	for _, tc := range []struct {
+		args []string
+		code int
+		line string
+	}{
+		{[]string{"session", "info", "sid-2"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
+		{[]string{"session", "stop", "sid-2"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
+		{[]string{"session", "set", "sid-2", "--join-timeout", "1m"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
+		{[]string{"session", "wait", "sid-2"}, waitUnavailableCode, "upterm: no session named \"sid-2\" (a session that ended more than 168h0m0s ago is no longer retained)\n"},
+		{[]string{"attach", "sid-2"}, exitAttachFailed, "upterm: no session named \"sid-2\"\n"},
+	} {
+		_, stderr, code := runCLI(t, tc.args...)
+		require.Equal(t, tc.code, code, "%v", tc.args)
+		require.Equal(t, tc.line, stderr, "%v", tc.args)
+	}
 }

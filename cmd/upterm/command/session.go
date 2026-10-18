@@ -80,6 +80,101 @@ func errNoSession(name string) error {
 	return ExitCodeError{Code: notFoundCode, Err: fmt.Errorf("no session named %q", name)}
 }
 
+// resolved is what a session argument named: the session's name, and, when it
+// was given by ID, the launch that ID belongs to.
+//
+// The launch is what makes an ID name one session. A name is free the moment
+// its session ends, so a command that kept only the name could go on to stop
+// or change whichever session took it over. Every step after resolution
+// reads the record by name and checks it against LaunchID, when there is one:
+// see sameLaunchOrReplaced.
+type resolved struct {
+	Name string
+	// LaunchID is empty when the argument was a name, which names whatever
+	// launch holds it now, as it always has.
+	LaunchID string
+}
+
+// afterResolve, when a test sets it, runs between resolveSession and the
+// first read of the session it resolved, so that the test can end the session
+// and let another take its name at the one point that can happen. Nil outside
+// tests.
+var afterResolve func()
+
+// resolveSession is the session an argument names: an exact name when one
+// has a record, held or ended, else the session whose ID is exactly arg, with
+// its launch. An argument that is neither comes back as itself, to be found
+// missing by the step that reads it, which says so in its own words and exit
+// code.
+//
+// The name comes first because it always has: an ID that happens to be some
+// other session's name must not make that name unreachable. Both are exact.
+func resolveSession(ctx context.Context, arg string) (resolved, error) {
+	r, err := resolveArg(ctx, arg)
+	if err != nil {
+		return resolved{}, err
+	}
+	if afterResolve != nil {
+		afterResolve()
+	}
+	return r, nil
+}
+
+func resolveArg(ctx context.Context, arg string) (resolved, error) {
+	stateRoot := utils.UptermStateDir()
+
+	// What is not a valid name is not looked up as one: Inspect would refuse
+	// it, and the step that reads it will say why.
+	if sessiondir.ValidateName(arg) == nil {
+		rec, _, err := sessiondir.Inspect(ctx, stateRoot, arg)
+		if err != nil {
+			return resolved{}, err
+		}
+		if rec != nil {
+			return resolved{Name: arg}, nil
+		}
+	}
+
+	name, launchID, found, err := sessiondir.FindByID(ctx, stateRoot, arg)
+	if err != nil {
+		return resolved{}, err
+	}
+	if !found {
+		return resolved{Name: arg}, nil
+	}
+	return resolved{Name: name, LaunchID: launchID}, nil
+}
+
+// sameLaunchOrReplaced is the check every step after resolveSession makes of
+// the record it reads by name: when the argument was an ID, a record for any
+// other launch means the session it named has ended and its name was reused.
+// A name argument has no launch to check, so it passes.
+func sameLaunchOrReplaced(r resolved, rec *sessiondir.Record) error {
+	if r.LaunchID == "" || rec.LaunchID == r.LaunchID {
+		return nil
+	}
+	return fmt.Errorf("session %s was replaced: %s ended and %s holds the name now", r.Name, r.LaunchID, rec.LaunchID)
+}
+
+// goneRecord stands for a session given by ID whose name another launch holds
+// now. Its own record went when that launch claimed the name, and with it the
+// only account of how it ended, so this says that the session is over, which
+// the ID established, and nothing about how.
+func goneRecord(r resolved) *sessiondir.Record {
+	return &sessiondir.Record{Name: r.Name, LaunchID: r.LaunchID, Reason: sessiondir.ReasonUnknown}
+}
+
+// replacedNotStopped and replacedNotChanged are what `session stop` and
+// `session set` say when the session they were asked about is no longer the
+// one holding its name. Nothing was sent to the one that does.
+func replacedNotStopped(name string) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
+}
+
+func replacedNotChanged(name string) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+}
+
 // waitExitCode maps a finished session's recorded outcome onto this command's
 // exit status. Every reason is named; a default returning 0 would report an
 // outcome nobody established as a success, which is the one answer a waiter
@@ -281,11 +376,20 @@ as in the example below, then run 'upterm session wait NAME'.`,
 // the socket dies with the process, so it can never answer "did it finish".
 //
 // Bound to the launch resolved on entry. A name is reused, so the session
-// that answers at the end need not be the one the caller asked about.
-func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
+// that answers at the end need not be the one the caller asked about. Given an
+// ID, the launch is the one the ID names, from the start: a name that was
+// reused before the first read is reported as the session that ended, not
+// waited on.
+func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 	stateRoot := utils.UptermStateDir()
 
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return 0, err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -295,6 +399,9 @@ func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
 		// Absent means only "not found within retained history": Prune
 		// removes anything unheld and older than RecordRetention.
 		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, sessiondir.RecordRetention)
+	}
+	if sameLaunchOrReplaced(r, rec) != nil {
+		return finishWait(out, name, goneRecord(r))
 	}
 
 	waited := rec.LaunchID
@@ -379,9 +486,15 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 }
 
 // stopSession asks the session named to end and waits for it to have ended.
-func stopSession(ctx context.Context, name string, out io.Writer) error {
+func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -389,6 +502,13 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	}
 	if rec == nil {
 		return errNoSession(name)
+	}
+	// Before anything is sent: the stop below names the launch of the record
+	// just read, which is whatever holds the name now. Given an ID whose
+	// session has ended and whose name another took, that is the other
+	// session's launch, and its daemon would accept the stop.
+	if sameLaunchOrReplaced(r, rec) != nil {
+		return replacedNotStopped(name)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -433,7 +553,7 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		// below, for the reason Unimplemented is: it is an answer, and a
 		// guess from the record cannot improve on one.
 		if status.Code(err) == codes.FailedPrecondition {
-			return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
+			return replacedNotStopped(name)
 		}
 		if rec.Status == sessiondir.StatusStarting {
 			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
@@ -559,9 +679,15 @@ info NAME' shows what the session holds.`,
 
 // setSession sets the named session's join timeout and reports what the
 // session answered.
-func setSession(ctx context.Context, name string, joinTimeout time.Duration, out io.Writer) error {
+func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out io.Writer) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -569,6 +695,10 @@ func setSession(ctx context.Context, name string, joinTimeout time.Duration, out
 	}
 	if rec == nil {
 		return errNoSession(name)
+	}
+	// Before anything is sent, for stopSession's reason.
+	if sameLaunchOrReplaced(r, rec) != nil {
+		return replacedNotChanged(name)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -604,7 +734,7 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr 
 	case codes.Unimplemented:
 		return fmt.Errorf("session %s was started by an upterm older than 0.32.0 and cannot take a join timeout (%s); upgrading this upterm does not change a running session, so start it again with upterm 0.32.0 or newer", name, pidOf(rec))
 	case codes.FailedPrecondition:
-		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+		return replacedNotChanged(name)
 	case codes.Unavailable:
 		// Unreachable: the record may say where the session is.
 	default:
@@ -620,7 +750,7 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr 
 	case cur == nil:
 		return errNoSession(name)
 	case cur.LaunchID != rec.LaunchID:
-		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+		return replacedNotChanged(name)
 	case !curHeld:
 		// The name was released: the session is over.
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(cur)))
@@ -892,7 +1022,9 @@ const (
 	caveatUnreported = "the session's upterm does not report it"
 )
 
-// lookup resolves a session by name.
+// lookup reports a resolved session: the one holding its name or, for a
+// session given by ID whose name another launch has taken since, that session
+// as ended (see goneRecord).
 //
 // Record and ownership come from one Inspect call, under the registry lock. An
 // earlier draft read them separately, which could mix generations — A's record
@@ -910,8 +1042,8 @@ const (
 // Handing it back is what stops a caller that wants the full live detail from
 // asking again: a second query returns whatever holds the name at that
 // instant, which need not be the session the first one confirmed.
-func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
-	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+func lookup(ctx context.Context, r resolved) (sessionInfo, *api.GetSessionResponse, error) {
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), r.Name)
 	if err != nil {
 		return sessionInfo{}, nil, err
 	}
@@ -920,7 +1052,13 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		// No record at all, held or not: not found within retained history.
 		// Checked before either branch uses rec, which is the nil dereference
 		// the earlier draft had.
-		return sessionInfo{}, nil, errNoSession(name)
+		return sessionInfo{}, nil, errNoSession(r.Name)
+	}
+
+	if sameLaunchOrReplaced(r, rec) != nil {
+		// The session given by ID is over, whatever the record that holds its
+		// name now says about the one that took it.
+		return infoFromRecord(goneRecord(r), statusEnded), nil, nil
 	}
 
 	if !held {
@@ -1197,15 +1335,17 @@ func adminSocketFor(runtimeRoot string, rec *sessiondir.Record) (string, error) 
 }
 
 func infoRunE(c *cobra.Command, args []string) error {
-	name := args[0]
-
 	// One deadline for the whole lookup, which waits on the registry and then
 	// on the admin socket: budgeting them separately would let a name that is
 	// slow twice take twice as long.
 	ctx, cancel := context.WithTimeout(c.Context(), sessionQueryTimeout)
 	defer cancel()
 
-	info, live, err := lookup(ctx, name)
+	r, err := resolveSession(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	info, live, err := lookup(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -1228,7 +1368,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 	// name.
 	if live != nil {
 		if detail, err := buildSessionDetail(live); err == nil {
-			detail.Name = name
+			detail.Name = r.Name
 			// The status the lookup settled on, which the socket's answer does
 			// not carry: the summary below prints one for a session that has
 			// ended, and `session list` prints one for every row, so the one

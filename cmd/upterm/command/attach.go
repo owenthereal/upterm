@@ -97,27 +97,27 @@ func parseEscapeChar(s string) (byte, error) {
 	return s[0], nil
 }
 
-// resolveAttachName picks the session: the explicit name, or the only live
-// one.
-func resolveAttachName(ctx context.Context, explicit string) (string, error) {
+// resolveAttachName picks the session: the one the explicit argument names,
+// by name or by ID, or the only live one.
+func resolveAttachName(ctx context.Context, explicit string) (resolved, error) {
 	if explicit != "" {
-		return explicit, nil
+		return resolveSession(ctx, explicit)
 	}
 	live, err := sessiondir.ListLive(ctx, utils.UptermStateDir())
 	if err != nil {
-		return "", err
+		return resolved{}, err
 	}
 	switch len(live) {
 	case 0:
-		return "", errors.New("no running session to attach to; start one with 'upterm host' or name one to attach to")
+		return resolved{}, errors.New("no running session to attach to; start one with 'upterm host' or name one to attach to")
 	case 1:
-		return live[0].Name, nil
+		return resolved{Name: live[0].Name}, nil
 	}
 	var names []string
 	for _, r := range live {
 		names = append(names, r.Name)
 	}
-	return "", fmt.Errorf("several sessions are running; name one: %s", strings.Join(names, ", "))
+	return resolved{}, fmt.Errorf("several sessions are running; name one: %s", strings.Join(names, ", "))
 }
 
 // target is what attach read from a session's record: the socket to dial and
@@ -133,17 +133,25 @@ type target struct {
 	Keys                                  []ssh.PublicKey
 }
 
-// attachTarget resolves a name to the session to attach to. Starting, ready,
+// attachTarget resolves a session to the one to attach to. Starting, ready,
 // reconnecting and disconnected (which a relay that can't reconnect leaves a
 // session in) are all attachable — the command is alive and the socket is
 // local, whatever the tunnel is doing — and a name nobody holds is not.
-func attachTarget(ctx context.Context, name string) (target, error) {
+//
+// A session given by ID is attached to only while its launch still holds the
+// name: once it has ended and another has taken the name, the record found is
+// the other's, and its socket is not the session that was asked for.
+func attachTarget(ctx context.Context, r resolved) (target, error) {
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
 	if err != nil {
 		return target{}, err
 	}
 	if rec == nil {
 		return target{}, fmt.Errorf("no session named %q", name)
+	}
+	if sameLaunchOrReplaced(r, rec) != nil {
+		return target{}, errors.New(refusalLine(name, endedFromRecord(goneRecord(r))))
 	}
 	if !held {
 		return target{}, errors.New(refusalLine(name, endedFromRecord(rec)))
@@ -173,6 +181,13 @@ func attachTarget(ctx context.Context, name string) (target, error) {
 	}
 	t.Socket, t.Keys = rec.AttachSocket, keys
 	return t, nil
+}
+
+// attachStatusSource is what ~? reports on for an attachment: the resolved
+// session's name, since ~? looks the session up by name and an ID is not one,
+// and the launch and admin socket the record named when the target was read.
+func attachStatusSource(r resolved, t target) statusSource {
+	return statusSource{Name: r.Name, LaunchID: t.LaunchID, AdminSocket: t.AdminSocket}
 }
 
 // attachFailure explains why an attachment could not be made.
@@ -225,20 +240,23 @@ func attachRunE(c *cobra.Command, args []string) error {
 	// A deadline on the lookup — it waits on the registry lock — and none on
 	// the attachment.
 	lookupCtx, cancelLookup := context.WithTimeout(c.Context(), sessionQueryTimeout)
-	name, err := resolveAttachName(lookupCtx, firstArg(args))
+	r, err := resolveAttachName(lookupCtx, firstArg(args))
 	var t target
 	if err == nil {
-		t, err = attachTarget(lookupCtx, name)
+		t, err = attachTarget(lookupCtx, r)
 	}
 	cancelLookup()
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: err}
 	}
+	// The name, whatever the argument was: everything below looks the session
+	// up by name, and an ID is not one.
+	name := r.Name
 
 	ctx, cancel := notifyDetachSignals(c.Context())
 	defer cancel()
 	lt := classifyTerminal(os.Stdin, os.Stdout, tty.Owned, resolveTerm("", os.Getenv("TERM")))
-	src := statusSource{Name: name, LaunchID: t.LaunchID, AdminSocket: t.AdminSocket}
+	src := attachStatusSource(r, t)
 	res, err := attachLocalTerminal(ctx, t.Socket, t.Keys, lt, escape, src, os.Stdin, os.Stdout, logger.Logger)
 	if err != nil {
 		return ExitCodeError{Code: exitAttachFailed, Err: attachFailure(name, t.Status, err)}

@@ -587,6 +587,56 @@ func ListLive(ctx context.Context, stateRoot string) ([]Record, error) {
 	return live, nil
 }
 
+// FindByID returns the name and launch of the session, held or ended, whose
+// record has this session ID.
+//
+// Ended sessions count because a record outlives its owner, and the question
+// a caller asks with an ID -- how did that session end -- is the one a record
+// answers. The launch comes back with the name because a name is reused: a
+// caller that kept only the name could find a different session under it by
+// the time it acts.
+//
+// Under the results registry lock, for the reason Inspect gives, and an exact
+// match only: an ID is a handle, and a prefix that happened to be unique today
+// would name another session tomorrow. The empty ID matches nothing, though a
+// session that has not been given one yet has exactly that in its record.
+//
+// One bad entry is not a failed lookup, as it is not a failed listing: a
+// record that cannot be read is skipped.
+func FindByID(ctx context.Context, stateRoot, id string) (name, launchID string, found bool, err error) {
+	if id == "" {
+		return "", "", false, nil
+	}
+
+	resRoot := resultsRoot(stateRoot)
+	resReg, err := lockRegistry(ctx, resRoot)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer releaseRegistry(resReg)
+
+	entries, err := os.ReadDir(resRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() || ValidateName(e.Name()) != nil {
+			continue
+		}
+		rec, err := readRecordLocked(stateRoot, e.Name())
+		if err != nil || rec.SessionID != id {
+			continue
+		}
+		return e.Name(), rec.LaunchID, true, nil
+	}
+
+	return "", "", false, nil
+}
+
 // releaseKeepingDir drops both locks without removing anything, leaving
 // exactly what a crashed process leaves — a crash drops every lock the process
 // held, on both roots. It exists for tests and for the failure paths in Claim.
