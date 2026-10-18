@@ -1051,6 +1051,80 @@ func TestReplayReplaysTheClipboard(t *testing.T) {
 	}
 }
 
+// cwdOf is the working directory a terminal fed p was last told of, by
+// OSC 7, and whether it was told of one at all.
+func cwdOf(p []byte) (dir string, told bool) {
+	term := vt.NewEmulator(80, 24)
+	term.SetReplyFunc(func([]byte) {})
+	term.SetCallbacks(vt.Callbacks{WorkingDirectory: func(d string) { dir, told = d, true }})
+	_, _ = term.Write(p)
+	return dir, told
+}
+
+// The working directory the session last reported by OSC 7, which the query
+// filter lets into the ring and a raw replay hands the joiner with every
+// earlier one, ends on the joiner as it would: the render sends the last one,
+// as the stream sent it, ended by BEL, near its end, before the clipboard
+// writes. An empty one too, which clears it; one x/vt reads as no report, with
+// no ';' after the number, and a session that reported none, send none.
+func TestReplayReplaysTheWorkingDirectory(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		wantDir, wantTold := cwdOf([]byte(stream))
+		gotDir, gotTold := cwdOf(joined)
+		require.Equal(t, wantTold, gotTold, "told of one: %q", joined)
+		require.Equal(t, wantDir, gotDir, "%q", joined)
+		return joined
+	}
+
+	joined := join(t, "\x1b]7;file://host/first\x07text\r\n\x1b]7;file://host/the;last\x1b\\more\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]7;file://host/the;last\x07")), "%q", joined)
+	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]7;")), "%q", joined)
+
+	joined = join(t, "\x1b]52;c;QQ==\x07\x1b]7;file://host/dir\x07text\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]7;file://host/dir\x07\x1b]52;c;QQ==\x07")), "%q", joined)
+
+	for _, tc := range []struct {
+		name, stream string
+		sent         int
+	}{
+		{"none", "", 0},
+		{"an empty one", "\x1b]7;file://host/dir\x07\x1b]7;\x07", 1},
+		{"one with no ';'", "\x1b]7\x07", 0},
+		{"a number with a leading zero", "\x1b]07;file://host/dir\x07", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			require.Equal(t, tc.sent, bytes.Count(joined, []byte("\x1b]7;")), "%q", joined)
+		})
+	}
+}
+
+// A working directory the render can't fit in its budget with everything
+// else fails it, named; one that fits exactly renders.
+func TestReplayFailsOnAWorkingDirectoryTooLongToReplay(t *testing.T) {
+	setBudget(t, 8<<10)
+	join := func(t *testing.T, n int) ([]byte, error) {
+		t.Helper()
+		stream := "text\r\n\x1b]7;file://host/" + strings.Repeat("a", n) + "\x07more\r\n"
+		return fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	}
+	empty, err := join(t, 0)
+	require.NoError(t, err)
+	fits := budget - len(empty)
+
+	joined, err := join(t, fits)
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = join(t, fits+1)
+	requireIneligible(t, err, "a working directory too long to replay")
+	_, err = join(t, budget)
+	requireIneligible(t, err, "a working directory too long to replay")
+}
+
 // A write that supersedes every earlier one leaves none of them past the
 // clipboard's length, where its array would still hold their bytes.
 func TestReplayClipboardLetsGoOfSupersededWrites(t *testing.T) {

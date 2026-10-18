@@ -43,17 +43,22 @@ func (e *emulation) render() ([]byte, error) {
 	enc.reset(budget - len(preamble))
 	enc.stop = e.stop
 	r := renderer{
-		enc:    enc,
-		term:   e.term,
-		parts:  parts,
-		title:  e.title,
-		titled: e.titled,
-		rows:   e.join.Rows,
-		fits:   e.join.Cols == e.term.Width(),
-		rep:    rep,
-		clips:  e.clips,
+		enc:     enc,
+		term:    e.term,
+		parts:   parts,
+		title:   e.title,
+		titled:  e.titled,
+		rows:    e.join.Rows,
+		fits:    e.join.Cols == e.term.Width(),
+		rep:     rep,
+		cwd:     e.cwd,
+		cwdTold: e.cwdTold,
+		clips:   e.clips,
 	}
 	r.draw()
+	if r.cwdOver {
+		return nil, &IneligibleError{State: "a working directory too long to replay"}
+	}
 	if r.clipOver {
 		return nil, &IneligibleError{State: "a clipboard write too large to replay"}
 	}
@@ -92,6 +97,10 @@ type renderer struct {
 	// client doesn't.
 	fits bool
 	rep  rep
+	// cwd is the working directory to send, if cwdTold, and cwdOver says it
+	// didn't fit.
+	cwd              string
+	cwdTold, cwdOver bool
 	// clips are the clipboard writes to send, and clipOver says one didn't
 	// fit.
 	clips    clipboard
@@ -355,8 +364,9 @@ func (r *renderer) reportModes() {
 // that neither moves the cursor nor clears a pending wrap, after the last
 // print, which the charsets would remap and insert mode would shift: the
 // charsets, insert mode, the application keypad, reverse video, the title,
-// the cursor's style, autowrap, and the active pen and link. The clipboard
-// writes still in force, which change none of that, come last of all.
+// the cursor's style, autowrap, and the active pen and link. The working
+// directory and the clipboard writes still in force, which change none of
+// that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -392,9 +402,23 @@ func (r *renderer) continuation(reprinted int) {
 	cur := t.ActiveScreen().Cursor()
 	_ = enc.penTo(cur.Pen)
 	_ = enc.linkTo(cur.Link)
+	r.workingDirectory()
 	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
+	}
+}
+
+// workingDirectory writes the working directory the stream last reported, as
+// the stream sent it, ended by BEL: a raw replay hands the joiner every OSC 7
+// in the ring, which leave it at the last. One that doesn't fit the budget
+// with everything before it sets cwdOver instead, and the render fails on it.
+func (r *renderer) workingDirectory() {
+	if !r.cwdTold || r.enc.err != nil {
+		return
+	}
+	if r.enc.put("\x1b]7;", r.cwd, "\x07") != nil {
+		r.cwdOver = true
 	}
 }
 

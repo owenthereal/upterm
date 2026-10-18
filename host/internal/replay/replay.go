@@ -73,6 +73,10 @@ type emulation struct {
 	// as the raw ring would, where a stream that set none leaves it.
 	title  string
 	titled bool
+	// cwd is the working directory the stream last reported, by OSC 7, and
+	// cwdTold whether it reported one at all, as title and titled are.
+	cwd     string
+	cwdTold bool
 	// colours is what the stream changed of the terminal's colours.
 	colours colours
 	// graphics is set once the stream has drawn an image (see watchGraphics).
@@ -165,10 +169,11 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title, the colours and the clipboard kept, images,
-// device control strings, character protection and selective erases noted,
-// and the meter stopped by ctx or the deadline. Each callback and handler runs
-// inside the emulator's Write and touches only the emulation.
+// to queries discarded, the title, the working directory, the colours and the
+// clipboard kept, images, device control strings, character protection,
+// selective erases and saves noted, and the meter stopped by ctx or the
+// deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -178,7 +183,13 @@ func (e *emulation) setUp() {
 	t.SetScrollOffFunc(e.hist.push)
 	t.SetScrollbackClearFunc(e.hist.clear)
 	t.SetReplyFunc(func([]byte) {})
-	t.SetCallbacks(vt.Callbacks{Title: func(title string) { e.title, e.titled = title, true }})
+	t.SetCallbacks(vt.Callbacks{
+		Title: func(title string) { e.title, e.titled = title, true },
+		// x/vt keeps the directory too, as this string, which keeping it here
+		// doesn't copy: it is what follows the OSC's first ';', as the stream
+		// sent it, and an OSC 7 without one reports nothing.
+		WorkingDirectory: func(dir string) { e.cwd, e.cwdTold = dir, true },
+	})
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
 	e.watchGraphics()
