@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"encoding/binary"
 	"errors"
+	"flag"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -19,6 +21,21 @@ import (
 // an input that would run long meets it, and how far past it the replay runs
 // is measured.
 const fuzzWait = 50 * time.Millisecond
+
+// fuzzScale stretches a timing bound while fuzzing: the fuzzer runs a worker
+// per CPU, so a replay that reaches its deadline shares the machine with the
+// other workers' and waits its turn to stop. Without fuzzing, as when the
+// seed corpus runs as an ordinary test, it is 1. Work the meter doesn't stop
+// still overshoots by far more, and the meter's own stopping is checked by
+// counting its asks, with no clock.
+func fuzzScale() time.Duration {
+	for _, name := range []string{"test.fuzz", "test.fuzzworker"} {
+		if f := flag.Lookup(name); f != nil && f.Value.String() != "" && f.Value.String() != "false" {
+			return time.Duration(runtime.GOMAXPROCS(0))
+		}
+	}
+	return 1
+}
 
 // fuzzCase is the case FuzzReplay's input describes: the stream cut at cut,
 // what follows the cut its suffix; an event for each four bytes of events,
@@ -99,7 +116,7 @@ func FuzzReplay(f *testing.F) {
 		// replay that runs past its deadline is run again, and fails only if
 		// it does every time: work the meter doesn't stop overshoots on every
 		// run, and a stall of the process on one.
-		limit := fuzzWait + 10*time.Millisecond*timeScale
+		limit := fuzzWait + 10*time.Millisecond*timeScale*fuzzScale()
 		render, elapsed, err := c.bounded()
 		for runs := 1; elapsed > limit && runs < 3; runs++ {
 			render, elapsed, err = c.bounded()
