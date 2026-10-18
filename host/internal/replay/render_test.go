@@ -822,7 +822,9 @@ func TestReplayFailsOnTerminalGraphics(t *testing.T) {
 // 8-bit introducer, which the filter passes. An image in a tmux passthrough
 // is read as a DEC terminal reads it, the DCS ended by its first ESC and the
 // image a sequence of its own, so it is named as the image. The queries the
-// filter drops render.
+// filter drops render, and so does synchronized output's DCS form, DCS = 1 s
+// and DCS = 2 s, which only holds back the drawing, as ?2026 does; anything
+// else under its key doesn't.
 func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	join := func(t *testing.T, stream string) error {
 		t.Helper()
@@ -838,6 +840,9 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 		{"a private prefix", "\x1bP?1x\x1b\\"},
 		{"a parameter after the intermediate", "\x1bP$1x\x1b\\"},
 		{"an ESC first", "\x90\x1b[31mX\x1b\\"},
+		{"the synchronized output key with another value", "\x1bP=3s\x1b\\"},
+		{"the synchronized output key with two parameters", "\x1bP=1;2s\x1b\\"},
+		{"the synchronized output key with data", "\x1bP=1sx\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requireIneligible(t, join(t, tc.stream), "a device control string")
@@ -849,6 +854,8 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	for _, tc := range []struct{ name, stream string }{
 		{"DECRQSS", "\x1bP$qm\x1b\\"},
 		{"XTGETTCAP", "\x1bP+q544e\x1b\\"},
+		{"a synchronized update begun", "\x1bP=1s\x1b\\"},
+		{"a synchronized update ended", "\x1bP=2s\x1b\\"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, join(t, tc.stream))

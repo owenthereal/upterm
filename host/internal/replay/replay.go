@@ -278,6 +278,11 @@ func (e *emulation) watchGraphics() {
 // requests, DECRQSS, XTGETTCAP and XTGETXRES, before the ring. A sixel is one
 // too, which watchGraphics also notes.
 //
+// Synchronized output's DCS form, DCS = 1 s and DCS = 2 s, which begins and
+// ends an update, isn't noted: like ?2026, which the render ignores (see
+// ignoredModes), it only holds back the drawing. Its key gets a handler of its
+// own, which notes anything else sent under it.
+//
 // The key is the DCS's prefix, its last intermediate and its final byte. The
 // parser takes a prefix only as the first byte, one of < = > ?, and after an
 // intermediate any byte from 0 on as the final (a DEC terminal ignores such a
@@ -292,10 +297,19 @@ func (e *emulation) watchDCS() {
 		e.dcs = true
 		return false
 	}
+	sync := ansi.Command('=', 0, 's')
+	t.RegisterDcsHandler(sync, func(params ansi.Params, data []byte) bool {
+		if n, _, _ := params.Param(0, 0); len(params) != 1 || n != 1 && n != 2 || len(data) != 0 {
+			e.dcs = true
+		}
+		return false
+	})
 	t.RegisterDcsHandler(0, note)
 	for _, prefix := range []byte{0, '<', '=', '>', '?'} {
 		for final := byte(0x40); final <= 0x7e; final++ {
-			t.RegisterDcsHandler(ansi.Command(prefix, 0, final), note)
+			if cmd := ansi.Command(prefix, 0, final); cmd != sync {
+				t.RegisterDcsHandler(cmd, note)
+			}
 		}
 		for inter := byte(0x20); inter <= 0x2f; inter++ {
 			for final := byte(0x30); final <= 0x7e; final++ {
