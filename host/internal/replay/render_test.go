@@ -1277,6 +1277,41 @@ func TestReplayFailsOnASavedTitle(t *testing.T) {
 	}
 }
 
+// DEC private modes the session saved by XTSAVE (CSI ? Pm s) fail the
+// render, named: x/vt keeps none and ignores the XTRESTORE (CSI ? Pm r) that
+// puts them back, so the render can't tell what a later restore sets on the
+// session's terminal, and a joiner's terminal, which the save never reached,
+// would restore its own. Any XTSAVE counts, and still does once restored. A
+// restore alone renders: what it puts back was saved before the ring, which
+// neither a raw replay nor the render holds. So do SCOSC (CSI s), a CSI s
+// without the prefix, and the SCORC after it.
+func TestReplayFailsOnSavedDECModes(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"one mode saved", "\x1b[?1049s"},
+		{"several saved", "\x1b[?1;25;2004s"},
+		{"none named", "\x1b[?s"},
+		{"a save restored", "\x1b[?25s\x1b[?25l\x1b[?25r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "saved DEC modes")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a restore alone", "\x1b[?1049r"},
+		{"SCOSC", "\x1b[s"},
+		{"SCOSC and SCORC", "\x1b[5;5H\x1b[s\x1b[H\x1b[u"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

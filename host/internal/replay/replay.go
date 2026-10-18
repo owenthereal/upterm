@@ -89,8 +89,9 @@ type emulation struct {
 	// protected is set once the stream has turned character protection on,
 	// and selective once it has erased selectively (see watchProtection).
 	protected, selective bool
-	// savedTitle is set once the stream has pushed a title (see watchSaves).
-	savedTitle bool
+	// savedTitle is set once the stream has pushed a title, and savedModes
+	// once it has saved DEC modes (see watchSaves).
+	savedTitle, savedModes bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -441,17 +442,25 @@ func (e *emulation) watchProtection() {
 
 // watchSaves registers the handlers that note the stream saving state the
 // terminal keeps aside for a later sequence to put back: a title pushed onto
-// the title stack, by XTWINOPS 22 (CSI 22 ; Ps t), whichever names Ps saves.
-// x/vt keeps no such stack and ignores the pop, XTWINOPS 23, that restores
-// from it, so once a title is pushed the render can't tell what a pop on the
-// session's terminal puts back, and a joiner's terminal, which the push never
-// reached, would put back its own. x/vt has no CSI t handler of its own; this
-// returns false all the same, as watchColours' do.
+// the title stack, by XTWINOPS 22 (CSI 22 ; Ps t), whichever names Ps saves;
+// and DEC private modes saved by XTSAVE (CSI ? Pm s), whichever modes Pm
+// names. x/vt keeps neither and ignores what restores each, XTWINOPS 23 and
+// XTRESTORE (CSI ? Pm r), so once one is saved the render can't tell what a
+// restore on the session's terminal puts back, and a joiner's terminal, which
+// the save never reached, would put back its own. x/vt keys a CSI handler by
+// its prefix too, so XTSAVE's sees neither SCOSC nor DECSLRM, the bare CSI s.
+// x/vt has no handler of its own for either; these return false all the same,
+// as watchColours' do.
 func (e *emulation) watchSaves() {
-	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+	t := e.term
+	t.RegisterCsiHandler('t', func(params ansi.Params) bool {
 		if n, _, _ := params.Param(0, 0); n == 22 {
 			e.savedTitle = true
 		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command('?', 0, 's'), func(ansi.Params) bool {
+		e.savedModes = true
 		return false
 	})
 }

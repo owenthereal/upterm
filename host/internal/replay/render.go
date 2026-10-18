@@ -548,6 +548,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.savedTitle {
 		return rep{}, &IneligibleError{State: "a saved title"}
 	}
+	if e.savedModes {
+		return rep{}, &IneligibleError{State: "saved DEC modes"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
