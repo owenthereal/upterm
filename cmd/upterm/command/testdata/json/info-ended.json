@@ -1,0 +1,19 @@
+{
+  "clientCount": 0,
+  "command": "bash",
+  "countsKnown": false,
+  "exitCode": 3,
+  "guestCount": 0,
+  "joinStateSource": "record",
+  "launchId": "LAUNCH",
+  "name": "build",
+  "nextAttemptAt": "2026-10-13T12:00:30Z",
+  "pid": "PID",
+  "reason": "exited",
+  "reconnect": "supported",
+  "sessionId": "sid-1",
+  "status": "ended",
+  "tunnelError": "dial tcp 127.0.0.1:2222: connect: connection refused",
+  "tunnelLostAt": "2026-10-13T12:00:00Z",
+  "tunnelReason": "network"
+}

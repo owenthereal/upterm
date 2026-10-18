@@ -201,13 +201,130 @@ func waitExitCode(rec *sessiondir.Record) int {
 	}
 }
 
-// sessionTemplateData holds data for template output
-type sessionTemplateData struct {
+// currentInfo is what `session current -o json` prints and what its template
+// reads. It is its own struct rather than sessionInfo because its presence
+// rules differ field by field: the five keys the command has always printed
+// are always there, and everything the daemon's answer may not carry is left
+// out when it doesn't. It is built from that answer alone, so the command
+// needs no record and answers wherever the admin socket does.
+type currentInfo struct {
+	// The five keys the command has always printed, present even when empty,
+	// from fields every daemon sends. The template has always read them by
+	// these names.
 	SessionID    string `json:"sessionId"`
 	ClientCount  int    `json:"clientCount"`
 	Host         string `json:"host"`
 	Command      string `json:"command"`
 	ForceCommand string `json:"forceCommand"`
+
+	// Always present too, and from the same kind of field: the connected
+	// clients and the authorized keys, which every daemon sends. ClientCount
+	// includes the session's own terminals and GuestCount doesn't, as in
+	// `session info`. The counts are the daemon's, so CountsKnown is always
+	// true here. Access is "anyone" when there are no authorized keys, else
+	// "allowlist". ConnectedClients is left out when nobody is connected.
+	GuestCount       int      `json:"guestCount"`
+	CountsKnown      bool     `json:"countsKnown"`
+	Access           string   `json:"access"`
+	ConnectedClients []string `json:"connectedClients,omitempty"`
+
+	// From fields a daemon has sent since 0.32.0 (launch_id and join_state)
+	// and since 0.37.0 (open), read by `session info`'s rules: the launch only
+	// when the daemon claimed a name, open only when true, and the join
+	// fields only when join_state is there, with a guest's join disabling the
+	// timeout. Times are UTC.
+	LaunchID           string    `json:"launchId,omitempty"`
+	Open               bool      `json:"open,omitempty"`
+	JoinStateSource    string    `json:"joinStateSource,omitempty"`
+	JoinTimeout        string    `json:"joinTimeout,omitempty"`
+	JoinDeadline       time.Time `json:"joinDeadline,omitzero"`
+	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
+
+	// From the optional fields, which only a daemon newer than 0.38.0 sends.
+	// Each is left out when the daemon doesn't send it, and a string is left
+	// out when the daemon sends it empty too, which is how it says there is
+	// nothing to report: no reconnect before the relay has said, no reason
+	// while the tunnel is up. A false is the daemon's answer and is printed.
+	// Times are UTC.
+	Name                         string    `json:"name,omitempty"`
+	Status                       string    `json:"status,omitempty"`
+	Reconnect                    string    `json:"reconnect,omitempty"`
+	TunnelReason                 string    `json:"tunnelReason,omitempty"`
+	TunnelLostAt                 time.Time `json:"tunnelLostAt,omitzero"`
+	NextAttemptAt                time.Time `json:"nextAttemptAt,omitzero"`
+	StartConfirmed               *bool     `json:"startConfirmed,omitempty"`
+	ReadOnly                     *bool     `json:"readOnly,omitempty"`
+	FileTransfer                 string    `json:"fileTransfer,omitempty"`
+	FileTransferApprovalRequired *bool     `json:"fileTransferApprovalRequired,omitempty"`
+	LocalForwarding              *bool     `json:"localForwarding,omitempty"`
+
+	// The connect strings, built from the host and SSH user every daemon
+	// sends, but printed only when the status the daemon reports says guests
+	// can use them, which is `session info`'s rule: a disconnected session
+	// keeps a connect string that can't connect, and a daemon that doesn't
+	// report its status doesn't say whether its can.
+	SSHCommand  string `json:"sshCommand,omitempty"`
+	JoinCommand string `json:"joinCommand,omitempty"`
+}
+
+// currentInfoFrom builds currentInfo from the daemon's answer alone. The
+// join fields are read as `session info` reads a live answer
+// (withLiveJoinState), the claim rule included.
+func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
+	info := currentInfo{
+		SessionID:    sess.GetSessionId(),
+		ClientCount:  len(sess.GetConnectedClients()),
+		Host:         sess.GetHost(),
+		Command:      strings.Join(sess.GetCommand(), " "),
+		ForceCommand: strings.Join(sess.GetForceCommand(), " "),
+
+		GuestCount:  countGuests(sess.GetConnectedClients()),
+		CountsKnown: true,
+		Access:      accessOf(sess.GetAuthorizedKeys()),
+
+		LaunchID: sess.GetLaunchId(),
+		Open:     sess.GetOpen(),
+
+		Name:                         sess.GetName(),
+		Status:                       sess.GetStatus(),
+		Reconnect:                    sess.GetReconnect(),
+		TunnelReason:                 sess.GetTunnelReason(),
+		TunnelLostAt:                 unixNanoUTC(sess.GetTunnelLostAtUnixNano()),
+		NextAttemptAt:                unixNanoUTC(sess.GetNextAttemptAtUnixNano()),
+		StartConfirmed:               sess.StartConfirmed,
+		ReadOnly:                     sess.ReadOnly,
+		FileTransfer:                 sess.GetFileTransfer(),
+		FileTransferApprovalRequired: sess.FileTransferApprovalRequired,
+		LocalForwarding:              sess.LocalForwarding,
+	}
+	for _, c := range sess.GetConnectedClients() {
+		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
+	}
+
+	join := withLiveJoinState(sessionInfo{}, sess)
+	info.JoinStateSource = join.JoinStateSource
+	info.JoinTimeout = join.JoinTimeout
+	info.JoinDeadline = join.JoinDeadline
+	info.FirstGuestJoinedAt = join.FirstGuestJoinedAt
+
+	if joinable(info.Status) {
+		// A host URL that won't parse costs the connect strings, not the
+		// answer: the rest of it is still the daemon's.
+		if detail, err := buildSessionDetail(sess); err == nil {
+			info.SSHCommand = detail.SSHCommand
+			info.JoinCommand = detail.JoinCommand
+		}
+	}
+	return info
+}
+
+// unixNanoUTC is the moment n names, in UTC, or the zero time for 0, which
+// names none: the daemon leaves a time it doesn't have unset.
+func unixNanoUTC(n int64) time.Time {
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
 }
 
 func sessionCmd() *cobra.Command {
@@ -960,11 +1077,20 @@ type sessionInfo struct {
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	JoinCommand  string `json:"joinCommand,omitempty"`
-	ClientCount  int    `json:"clientCount"`
+	// Host is the relay the session was started against, as the daemon
+	// reports it (`session current` prints the same value under the same
+	// key). Absent unless the daemon answered for this launch.
+	Host        string `json:"host,omitempty"`
+	ClientCount int    `json:"clientCount"`
 	// GuestCount counts currently connected guests, including forwarding but
 	// excluding the session's own terminals. Scripts asking whether a terminal
 	// or SFTP guest ever joined should use FirstGuestJoinedAt.
-	GuestCount       int      `json:"guestCount"`
+	GuestCount int `json:"guestCount"`
+	// CountsKnown says whether the two counts came from the daemon. They are
+	// counted only for a joinable session whose daemon answered for this
+	// launch; otherwise they are 0, and false here is what tells that 0 from
+	// a session nobody has joined.
+	CountsKnown      bool     `json:"countsKnown"`
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
@@ -973,6 +1099,21 @@ type sessionInfo struct {
 	// Open is true when anyone with the session ID can join and nobody was
 	// asked: no allowlist, and started with --accept. Absent otherwise.
 	Open bool `json:"open,omitempty"`
+	// Access is who can join: "anyone" with the session ID, or the
+	// "allowlist". It comes from the authorized keys every daemon reports,
+	// so it is there whenever the daemon answered for this launch.
+	Access string `json:"access,omitempty"`
+	// What the host decided at startup, and guests may do: whether the host
+	// confirmed the start rather than passing --accept, read-only, which
+	// file transfers ("off", "downloads" or "all"), whether each transfer
+	// waits for the host's approval, and local port forwarding. Each is the
+	// daemon's own optional field, absent when the daemon doesn't report it:
+	// unknown, not false. A daemon that reports them reports false as false.
+	StartConfirmed               *bool  `json:"startConfirmed,omitempty"`
+	ReadOnly                     *bool  `json:"readOnly,omitempty"`
+	FileTransfer                 string `json:"fileTransfer,omitempty"`
+	FileTransferApprovalRequired *bool  `json:"fileTransferApprovalRequired,omitempty"`
+	LocalForwarding              *bool  `json:"localForwarding,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
 	// latched and never moved by a later join; zero and omitted when none
 	// ever did. Unlike this timestamp, guestCount includes forwarding
@@ -1109,6 +1250,7 @@ func heldInfo(ctx context.Context, runtimeRoot string, rec *sessiondir.Record) (
 		return info, nil, nil
 	}
 	info = withLiveJoinState(info, sess)
+	info = withSessionReport(info, sess)
 
 	// Only ready and reconnecting say the connect string is one anyone can
 	// act on: a reconnecting session comes back under the same one. After a
@@ -1168,8 +1310,34 @@ func withLiveJoinState(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 	return info
 }
 
+// withSessionReport adds what the daemon's answer says about the session as a
+// whole, true whatever its tunnel is doing: the relay it was started against,
+// who can join, and what guests may do. The last are the daemon's optional
+// fields, each taken only when it is there, so a daemon from before them
+// leaves them unknown rather than false.
+func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
+	info.Host = sess.GetHost()
+	info.Access = accessOf(sess.GetAuthorizedKeys())
+	info.StartConfirmed = sess.StartConfirmed
+	info.ReadOnly = sess.ReadOnly
+	info.FileTransfer = sess.GetFileTransfer()
+	info.FileTransferApprovalRequired = sess.FileTransferApprovalRequired
+	info.LocalForwarding = sess.LocalForwarding
+	return info
+}
+
+// accessOf is who can join a session with these authorized keys: anyone with
+// the session ID when there are none, else the allowlist.
+func accessOf(keys []*api.AuthorizedKey) string {
+	if len(keys) == 0 {
+		return tui.AccessAnyone
+	}
+	return tui.AccessAllowlist
+}
+
 // infoFromRecord reports what the record knows, under the status the caller
-// has decided on.
+// has decided on. Its times are given in UTC, whatever zone the record was
+// written in: the supervisor writes the tunnel's in local time.
 func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 	info := sessionInfo{
 		Name:               rec.Name,
@@ -1184,19 +1352,27 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		ExitCode:           rec.ExitCode,
 		Signal:             rec.Signal,
 		SignalNumber:       rec.SignalNumber,
-		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
-		Reconnect:          rec.Reconnect,
-		TunnelLostAt:       rec.TunnelLostAt,
-		TunnelReason:       rec.TunnelReason,
-		TunnelError:        rec.TunnelError,
-		NextAttemptAt:      rec.NextAttemptAt,
+		FirstGuestJoinedAt: rec.FirstGuestJoinedAt.UTC(),
 	}
+	info = withRecordedTunnel(info, rec)
 	if rec.JoinTimeout > 0 {
 		info.JoinTimeout = shortDuration(rec.JoinTimeout)
 	}
-	info.JoinDeadline = rec.JoinDeadline
+	info.JoinDeadline = rec.JoinDeadline.UTC()
 	info = withClaimRule(info)
 	info.JoinStateSource = joinStateFromRecord
+	return info
+}
+
+// withRecordedTunnel adds the record's account of the tunnel: whether the
+// relay reconnects, and the outage it is in or was in when it ended. Times
+// in UTC; a zero time stays zero, and is left out of the JSON.
+func withRecordedTunnel(info sessionInfo, rec *sessiondir.Record) sessionInfo {
+	info.Reconnect = rec.Reconnect
+	info.TunnelLostAt = rec.TunnelLostAt.UTC()
+	info.TunnelReason = rec.TunnelReason
+	info.TunnelError = rec.TunnelError
+	info.NextAttemptAt = rec.NextAttemptAt.UTC()
 	return info
 }
 
@@ -1293,6 +1469,7 @@ func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo 
 	info.ConnectedClients = detail.ConnectedClients
 	info.ClientCount = len(detail.ConnectedClients)
 	info.GuestCount = countGuests(sess.ConnectedClients)
+	info.CountsKnown = true
 	info.Open = detail.Open
 	return info
 }
@@ -1335,6 +1512,12 @@ func adminSocketFor(runtimeRoot string, rec *sessiondir.Record) (string, error) 
 }
 
 func infoRunE(c *cobra.Command, args []string) error {
+	// Checked before anything is read, so a format that cannot be answered
+	// fails the same whether or not the session exists.
+	if flagOutput != "" && flagOutput != "json" {
+		return fmt.Errorf("invalid output format %q: must be 'json'", flagOutput)
+	}
+
 	// One deadline for the whole lookup, which waits on the registry and then
 	// on the admin socket: budgeting them separately would let a name that is
 	// slow twice take twice as long.
@@ -1350,11 +1533,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 		return err
 	}
 
-	if flagOutput != "" {
-		if flagOutput != "json" {
-			return fmt.Errorf("invalid output format %q: must be 'json'", flagOutput)
-		}
-
+	if flagOutput == "json" {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(info)
@@ -1553,21 +1732,11 @@ func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) erro
 		return nil, fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
 	}
 
-	templateData := func(sess *api.GetSessionResponse) sessionTemplateData {
-		return sessionTemplateData{
-			SessionID:    sess.SessionId,
-			ClientCount:  len(sess.ConnectedClients),
-			Host:         sess.Host,
-			Command:      strings.Join(sess.Command, " "),
-			ForceCommand: strings.Join(sess.ForceCommand, " "),
-		}
-	}
-
 	if format == "json" {
 		return func(w io.Writer, sess *api.GetSessionResponse) error {
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
-			return enc.Encode(templateData(sess))
+			return enc.Encode(currentInfoFrom(sess))
 		}, nil
 	}
 
@@ -1581,7 +1750,7 @@ func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) erro
 	}
 
 	return func(w io.Writer, sess *api.GetSessionResponse) error {
-		return tmpl.Execute(w, templateData(sess))
+		return tmpl.Execute(w, currentInfoFrom(sess))
 	}, nil
 }
 
@@ -1756,11 +1925,6 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		relay = strings.TrimSuffix(relay, ":"+port)
 	}
 
-	access := tui.AccessAllowlist
-	if len(sess.AuthorizedKeys) == 0 {
-		access = tui.AccessAnyone
-	}
-
 	var sshCmd string
 	if scheme == "ssh" {
 		sshCmd = fmt.Sprintf("ssh %s@%s", user, host)
@@ -1816,7 +1980,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 		Open:             sess.GetOpen(),
-		Access:           access,
+		Access:           accessOf(sess.AuthorizedKeys),
 		Guests:           guestPermissions(sess),
 	}, nil
 }

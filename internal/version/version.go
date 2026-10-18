@@ -89,7 +89,9 @@ var (
 	Date      string // Build date
 )
 
-// BuildInfo contains version and build information
+// BuildInfo contains version and build information. It is what `upterm
+// version -o json` prints, so its JSON keys are read by scripts: add to them,
+// but don't rename or remove one.
 type BuildInfo struct {
 	Version   string `json:"version"`
 	GitCommit string `json:"git_commit,omitempty"`

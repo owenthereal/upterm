@@ -692,11 +692,16 @@ type tunnelOutage struct{ lostAt, nextAt time.Time }
 // answers — the host keeps its admin server up while it redials.
 func buildReconnecting(t *testing.T, name string, answers bool) tunnelOutage {
 	t.Helper()
+	return buildReconnectingAt(t, name, answers, time.Now().Add(-time.Minute).UTC().Truncate(time.Second))
+}
 
-	out := tunnelOutage{
-		lostAt: time.Now().Add(-time.Minute).UTC().Truncate(time.Second),
-		nextAt: time.Now().Add(time.Hour).UTC().Truncate(time.Second),
-	}
+// buildReconnectingAt is buildReconnecting for an outage that began at
+// lostAt, published in whatever zone lostAt is in, with the next attempt an
+// hour and a minute after it.
+func buildReconnectingAt(t *testing.T, name string, answers bool, lostAt time.Time) tunnelOutage {
+	t.Helper()
+
+	out := tunnelOutage{lostAt: lostAt, nextAt: lostAt.Add(time.Hour + time.Minute)}
 	d := claimSession(t, name)
 	releaseAtEnd(t, d)
 	require.NoError(t, d.Update(func(r *sessiondir.Record) {
@@ -1519,8 +1524,9 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 	// out which state it got. pid is among them because Claim records it and
 	// nothing ever clears it — it is what `kill` names when a session's socket
 	// has stopped answering. logPath is not: only a daemon publishes one, and
-	// these fixtures are claims without a daemon behind them.
-	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "joinStateSource"}
+	// these fixtures are claims without a daemon behind them. countsKnown is
+	// what says whether the two counts beside it were counted at all.
+	mandatory := []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "joinStateSource"}
 
 	for _, tc := range []struct {
 		name  string
@@ -1534,23 +1540,27 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// is held, so there is one.
 			name:  "starting",
 			build: buildStarting,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// The only state that can carry a connect string: a disconnected
 			// session's socket answers too, but it is never advertised as
-			// joinable.
+			// joinable. The daemon answered, so the relay and who can join
+			// are known; it is one from before the permission fields, so
+			// what guests may do is not.
 			name:  "ready",
 			build: buildReady,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "sessionId", "sshCommand", "joinCommand", "host", "access", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// A session ID and a socket that answers, because the host keeps
 			// its admin server up through a tunnel loss: the ID stays, and
-			// the live detail may not, since only ready is joinable.
+			// the live detail may not, since only ready is joinable. What the
+			// answer says about the session itself, its relay and who can
+			// join, is no less true for the tunnel being down.
 			name:  "disconnected",
 			build: buildDisconnected,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "sessionId", "adminSocket", "attachSocket", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "sessionId", "host", "access", "adminSocket", "attachSocket", "joinStateSource"},
 		},
 		{
 			// The only state that can carry an exit code, because it is the
@@ -1558,14 +1568,14 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// session, no socket path, since there is nothing left to dial.
 			name:  "exited",
 			build: buildEndedAfterExit,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "exitCode", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "exitCode", "joinStateSource"},
 		},
 		{
 			// Killed before it could publish an outcome: the same shape as a
 			// clean exit, minus the code nobody recorded.
 			name:  "killed",
 			build: buildEndedAfterKill,
-			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "pid", "command", "reason", "joinStateSource"},
+			want:  []string{"name", "launchId", "status", "clientCount", "guestCount", "countsKnown", "pid", "command", "reason", "joinStateSource"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1586,6 +1596,10 @@ func Test_sessionInfo_PublishesExactlyWhatEachStateCanAnswer(t *testing.T) {
 			// and exitCode are the two fields automation branches on.
 			require.NotContains(t, got, "signal",
 				"%s was not signalled and must not say it was", tc.name)
+
+			// Only a joinable session whose daemon answered has its clients
+			// counted; every other state's zeros are no answer, and say so.
+			require.Equal(t, tc.name == "ready", got["countsKnown"], tc.name)
 		})
 	}
 }

@@ -249,7 +249,7 @@ func TestRootAndGroupsReadNoConfig(t *testing.T) {
 func TestVersionHelpAndCompletionIgnoreABadConfig(t *testing.T) {
 	setupSessionRoots(t)
 	withConfig(t, "authorized-user: [unclosed\n")
-	for _, args := range [][]string{{"version"}, {"help", "host"}, {"completion", "bash"}, {"completion", "bash", "--no-descriptions"}, {"__complete", "session", "info", ""}} {
+	for _, args := range [][]string{{"version"}, {"version", "-o", "json"}, {"help", "host"}, {"completion", "bash"}, {"completion", "bash", "--no-descriptions"}, {"__complete", "session", "info", ""}} {
 		_, stderr, code := runCLI(t, args...)
 		require.Equal(t, 0, code, args)
 		require.NotContains(t, stderr, "failed to read config file", args)
