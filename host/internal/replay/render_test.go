@@ -1051,6 +1051,19 @@ func TestReplayReplaysTheClipboard(t *testing.T) {
 	}
 }
 
+// A write that supersedes every earlier one leaves none of them past the
+// clipboard's length, where its array would still hold their bytes.
+func TestReplayClipboardLetsGoOfSupersededWrites(t *testing.T) {
+	var c clipboard
+	c.write([]byte("c"), []byte("QQ=="))
+	c.write([]byte("p"), []byte("Qg=="))
+	c.write([]byte("cp"), []byte("Qw=="))
+	require.Equal(t, clipboard{{sel: 0b11, pc: "cp", pd: "Qw=="}}, c)
+	for _, w := range c[len(c):cap(c)] {
+		require.Zero(t, w)
+	}
+}
+
 // A clipboard write the render can't fit in its budget with everything else
 // fails it, named; one longer than the whole budget keeps none of its bytes.
 // One that fits exactly renders, and so does one too long that a later write

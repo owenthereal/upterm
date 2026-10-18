@@ -369,6 +369,9 @@ func (c *clipboard) write(pc, pd []byte) {
 			kept = append(kept, w)
 		}
 	}
+	// The writes dropped leave copies past kept's length, which would keep
+	// their bytes alive.
+	clear((*c)[len(kept):])
 	w := clipWrite{sel: sel}
 	if len("\x1b]52;;\x07")+len(pc)+len(pd) > budget {
 		w.over = true
