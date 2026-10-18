@@ -792,6 +792,40 @@ func buildEndedAfterDisconnected(t *testing.T, name string) {
 // localClock is a time as the status row prints it: local, to the second.
 func localClock(at time.Time) string { return at.Local().Format("15:04:05") }
 
+// viewRow is one labelled row as the session view prints it, label padded to
+// the view's column.
+func viewRow(label, value string) string { return fmt.Sprintf("%-18s%s\n", label, value) }
+
+// withLocal makes loc the local zone for the times the commands write. It
+// pins absTime's zone and leaves time.Local alone: every time.Now in the
+// process reads that, so swapping it fails under -race whenever a timer from
+// an earlier test is still running.
+func withLocal(t *testing.T, loc *time.Location) {
+	t.Helper()
+	orig := localZone
+	localZone = loc
+	t.Cleanup(func() { localZone = orig })
+}
+
+// Deadlines and past events are printed with their date and zone, since a
+// time of day alone doesn't say which day, or where.
+func TestAbsoluteTimesNameTheirZone(t *testing.T) {
+	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
+	withLocal(t, time.UTC)
+	require.Equal(t, "2026-10-12 05:31:02 UTC", absTime(at))
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	withLocal(t, la)
+	require.Equal(t, "2026-10-11 22:31:02 PDT", absTime(at))
+}
+
+// A zone with no abbreviation, as a machine without a zone database can have,
+// still reads as a zone: its offset, never an empty one.
+func TestAbsoluteTimesNameAZoneWithoutAName(t *testing.T) {
+	withLocal(t, time.FixedZone("", -7*60*60))
+	require.Equal(t, "2026-10-11 22:31:02 -0700", absTime(time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)))
+}
+
 // runInfo is `session info NAME` as a user runs it, and what it printed.
 func runInfo(t *testing.T, name string) string {
 	t.Helper()
@@ -1699,15 +1733,29 @@ func Test_stopSession(t *testing.T) {
 		require.NoError(t, stopSession(context.Background(), "beaten-1", &out))
 		require.Equal(t, "session beaten-1 has already ended\n", out.String())
 	})
-	t.Run("a held name whose socket does not answer names the pid", func(t *testing.T) {
+	t.Run("a held name whose socket does not answer names the pid and the log", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := claimSession(t, "mute-1")
 		releaseAtEnd(t, d)
-		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		logPath := filepath.Join(utils.UptermStateDir(), "mute-1.log")
+		require.NoError(t, d.Update(func(r *sessiondir.Record) {
+			r.Status = sessiondir.StatusReady
+			r.SessionID = "sid"
+			r.LogPath = logPath
+		}))
 		var out bytes.Buffer
 		err := stopSession(context.Background(), "mute-1", &out)
-		require.ErrorContains(t, err, "not answering on its admin socket")
-		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()))
+		require.EqualError(t, err, fmt.Sprintf("session mute-1 isn't answering on its admin socket (pid %d); see %s", os.Getpid(), logPath),
+			"no gRPC text in what a person reads")
+		require.Empty(t, out.String())
+	})
+	t.Run("a session with no log does not point at one", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := claimSession(t, "mute-1b")
+		releaseAtEnd(t, d)
+		require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusReady; r.SessionID = "sid" }))
+		err := stopSession(context.Background(), "mute-1b", io.Discard)
+		require.EqualError(t, err, fmt.Sprintf("session mute-1b isn't answering on its admin socket (pid %d)", os.Getpid()))
 	})
 	t.Run("a daemon that predates the RPC says so rather than blaming its socket", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -1722,7 +1770,7 @@ func Test_stopSession(t *testing.T) {
 		require.ErrorContains(t, err, "predates 'session stop'")
 		require.ErrorContains(t, err, fmt.Sprintf("pid %d", os.Getpid()),
 			"the operator has to be able to end it themselves")
-		require.NotContains(t, err.Error(), "not answering on its admin socket",
+		require.NotContains(t, err.Error(), "isn't answering on its admin socket",
 			"the socket answered; it is the method that is missing")
 	})
 	t.Run("a daemon that predates the RPC says so even while it is still starting", func(t *testing.T) {
@@ -2159,16 +2207,20 @@ func Test_setSession_failures(t *testing.T) {
 		err := setSession(context.Background(), "raced-2", time.Minute, io.Discard)
 		require.ErrorContains(t, err, "has been replaced since it was read")
 	})
-	t.Run("a held ready session that does not answer could not confirm", func(t *testing.T) {
+	t.Run("a held ready session that does not answer was not changed", func(t *testing.T) {
 		// An unreachable socket on a held name is not evidence of teardown:
 		// Unavailable can be transient, and reporting success here would
 		// leave a session running without the timeout its caller asked for.
+		// Nothing was sent either, which the text can say: the request never
+		// left.
 		setupSessionRoots(t)
 		heldReady(t, "mute-2")
 		var out bytes.Buffer
 		err := setSession(context.Background(), "mute-2", time.Minute, &out)
-		require.ErrorContains(t, err, "could not confirm the change to session mute-2")
+		require.EqualError(t, err, fmt.Sprintf("session mute-2 isn't answering on its admin socket (pid %d); nothing was changed", os.Getpid()))
 		require.Empty(t, out.String(), "nothing may read as success")
+		var ec ExitCodeError
+		require.False(t, errors.As(err, &ec), "exit 1, not a missing session")
 	})
 	t.Run("a held session whose record says ending is ending", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -2236,15 +2288,14 @@ func Test_setSession_failures(t *testing.T) {
 		require.ErrorAs(t, err, &ec)
 		require.Equal(t, notFoundCode, ec.Code)
 	})
-	t.Run("a timed-out request could not confirm, and says retrying restarts the window", func(t *testing.T) {
+	t.Run("a timed-out request could not confirm, and says it may have taken effect", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := heldReady(t, "slow-2")
 		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
 			return nil, status.Error(codes.DeadlineExceeded, "too slow")
 		})
 		err := setSession(context.Background(), "slow-2", time.Minute, io.Discard)
-		require.ErrorContains(t, err, "could not confirm the change")
-		require.ErrorContains(t, err, "restarts the window")
+		require.EqualError(t, err, "couldn't confirm the change to session slow-2; it may still have taken effect. upterm session info slow-2 shows what it holds")
 	})
 	t.Run("a session still starting says so", func(t *testing.T) {
 		setupSessionRoots(t)
@@ -2260,8 +2311,8 @@ func Test_setSession_failures(t *testing.T) {
 			return nil, status.Error(codes.Internal, "boom")
 		})
 		err := setSession(context.Background(), "odd-2", time.Minute, io.Discard)
-		require.ErrorContains(t, err, "could not confirm the change")
-		require.ErrorContains(t, err, "boom")
+		require.EqualError(t, err, "couldn't confirm the change to session odd-2; it may still have taken effect. upterm session info odd-2 shows what it holds",
+			"the daemon's own words are for --debug, not for a person")
 	})
 }
 
@@ -2272,6 +2323,7 @@ func TestSetCommandRejectsNoSettingAndANegativeTimeout(t *testing.T) {
 	}{
 		{[]string{"s1"}, "nothing to set"},
 		{[]string{"s1", "--join-timeout=-1m"}, "must not be negative"},
+		{[]string{"s1", "--join-timeout=-5m"}, "must not be negative, got -5m"},
 	} {
 		cmd := setCmd()
 		cmd.SetArgs(tc.args)
@@ -2391,7 +2443,7 @@ func Test_lookupSaysWhenTheDaemonDidNotAnswer(t *testing.T) {
 		info, _, err := lookup(context.Background(), resolved{Name: "mute-3"})
 		require.NoError(t, err)
 		require.Equal(t, "record", info.JoinStateSource)
-		require.Equal(t, "Join timeout: 1m (counts from readiness) (from the record; the session did not answer)", joinTimeoutLine(info))
+		require.Equal(t, "Join timeout: 1m (counts from readiness) (from the record; the session did not answer)", joinTimeoutText(info))
 	})
 	t.Run("nothing recorded", func(t *testing.T) {
 		// A timeout armed, its write failed, and the daemon then stopped
@@ -2404,7 +2456,7 @@ func Test_lookupSaysWhenTheDaemonDidNotAnswer(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, info.JoinTimeout)
 		require.Equal(t, "record", info.JoinStateSource)
-		require.Equal(t, "Join timeout: none recorded (from the record; the session did not answer)", joinTimeoutLine(info))
+		require.Equal(t, "Join timeout: none recorded (from the record; the session did not answer)", joinTimeoutText(info))
 	})
 }
 
@@ -2418,7 +2470,7 @@ func Test_lookupSaysWhenTheDaemonConfirmsNone(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, info.JoinTimeout)
 	require.Equal(t, "daemon", info.JoinStateSource)
-	require.Empty(t, joinTimeoutLine(info), "a confirmed none prints nothing")
+	require.Empty(t, joinTimeoutText(info), "a confirmed none prints nothing")
 }
 
 func TestInfoJSONNamesTheJoinFields(t *testing.T) {
@@ -2436,8 +2488,19 @@ func TestInfoJSONNamesTheJoinFields(t *testing.T) {
 	require.NotContains(t, string(raw), "caveat", "the caveat is for the human line only")
 }
 
+// joinTimeoutText is the join timeout's row as one string, label first, for
+// cases that read the wording and not the layout.
+func joinTimeoutText(info sessionInfo) string {
+	label, value := joinTimeoutRow(info)
+	if label == "" {
+		return ""
+	}
+	return label + " " + value
+}
+
 func TestJoinTimeoutLineSaysWhatHappened(t *testing.T) {
 	at := time.Date(2026, 9, 25, 12, 40, 0, 0, time.UTC)
+	when := absTime(at)
 	for _, tc := range []struct {
 		name string
 		info sessionInfo
@@ -2449,27 +2512,43 @@ func TestJoinTimeoutLineSaysWhatHappened(t *testing.T) {
 		{"none recorded, an upterm that does not report it", sessionInfo{Status: "ready", JoinStateSource: "record", joinCaveat: caveatUnreported},
 			"Join timeout: none recorded (from the record; the session's upterm does not report it)"},
 		{"counting", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"},
-			"Join deadline: 2026-09-25T12:40:00Z"},
+			"Join deadline: " + when},
 		{"pending", sessionInfo{Status: "starting", JoinTimeout: "10m", JoinStateSource: "daemon"},
 			"Join timeout: 10m (counts from readiness)"},
 		{"claimed", sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "record"},
-			"Join timeout: disabled (guest joined at 2026-09-25T12:40:00Z)"},
+			"Join timeout: disabled (guest joined at " + when + ")"},
 		{"counting, from the record", sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record", joinCaveat: caveatUnanswered},
-			"Join deadline: 2026-09-25T12:40:00Z (from the record; the session did not answer)"},
+			"Join deadline: " + when + " (from the record; the session did not answer)"},
 		{"ended by the timeout", sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record"},
-			"Join timeout: fired at 2026-09-25T12:40:00Z"},
+			"Join timeout: fired at " + when},
 		{"ended otherwise, deadline recorded", sessionInfo{Status: statusEnded, Reason: "unknown", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "record"},
-			"Join deadline: 2026-09-25T12:40:00Z (last recorded before the session ended)"},
+			"Join deadline: " + when + " (last recorded before the session ended)"},
 		{"ended otherwise, timeout recorded", sessionInfo{Status: statusEnded, Reason: "unknown", JoinTimeout: "10m", JoinStateSource: "record"},
 			"Join timeout: 10m (last recorded before the session ended)"},
 		{"ended, nothing recorded", sessionInfo{Status: statusEnded, Reason: "exited", JoinStateSource: "record"}, ""},
 		{"ended, claimed", sessionInfo{Status: statusEnded, Reason: "exited", FirstGuestJoinedAt: at, JoinStateSource: "record"},
-			"Join timeout: disabled (guest joined at 2026-09-25T12:40:00Z)"},
+			"Join timeout: disabled (guest joined at " + when + ")"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, joinTimeoutLine(tc.info))
+			require.Equal(t, tc.want, joinTimeoutText(tc.info))
 		})
 	}
+}
+
+// The wording above names the zone the reader lives in: the same instant is a
+// different line in Los Angeles than in UTC.
+func TestJoinTimeoutLineShowsTheDateAndZone(t *testing.T) {
+	at := time.Date(2026, 10, 12, 5, 31, 2, 0, time.UTC)
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	withLocal(t, la)
+
+	require.Equal(t, "Join deadline: 2026-10-11 22:31:02 PDT",
+		joinTimeoutText(sessionInfo{Status: "ready", JoinTimeout: "10m", JoinDeadline: at, JoinStateSource: "daemon"}))
+	require.Equal(t, "Join timeout: fired at 2026-10-11 22:31:02 PDT",
+		joinTimeoutText(sessionInfo{Status: statusEnded, Reason: "join_timeout", JoinDeadline: at, JoinStateSource: "record"}))
+	require.Equal(t, "Join timeout: disabled (guest joined at 2026-10-11 22:31:02 PDT)",
+		joinTimeoutText(sessionInfo{Status: "ready", FirstGuestJoinedAt: at, JoinStateSource: "daemon"}))
 }
 
 func TestSummaryPrintsTheJoinTimeoutLine(t *testing.T) {
@@ -2477,7 +2556,39 @@ func TestSummaryPrintsTheJoinTimeoutLine(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSessionSummary(sessionInfo{Name: "s1", Status: statusEnded, Reason: "join_timeout", JoinTimeout: "10m", JoinDeadline: at})
 	})
-	require.Contains(t, out, "Join timeout: fired at 2026-09-25T12:40:00Z")
+	require.Contains(t, out, viewRow("Join timeout:", "fired at "+absTime(at)), "a row of the view's, in its column")
+}
+
+// A live session's view carries the join row with the rows that describe the
+// session, above the commands and the connected guests.
+func TestLiveInfoHasTheJoinRowAboveTheConnectedGuests(t *testing.T) {
+	setupSessionRoots(t)
+	d := heldReady(t, "live-join")
+	deadline := time.Date(2026, 10, 12, 22, 31, 2, 0, time.UTC)
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId: "sid", Host: "ssh://127.0.0.1:2222", LaunchId: d.LaunchID(), Command: []string{"bash"},
+		ConnectedClients: []*api.Client{{Addr: "203.0.113.7:51234", Version: "SSH-2.0-OpenSSH_9.6"}},
+		JoinState:        &api.JoinState{TimeoutNanos: int64(10 * time.Minute), DeadlineUnixNano: deadline.UnixNano()},
+	})
+
+	out := runInfo(t, "live-join")
+
+	require.Contains(t, out, viewRow("Join deadline:", absTime(deadline)))
+	require.NotContains(t, out, "Join deadline: "+absTime(deadline), "not a line of its own outside the column")
+	require.Less(t, strings.Index(out, "Join deadline:"), strings.Index(out, "Connected:"))
+}
+
+// The retention is a week to a person, not 168h0m0s.
+func TestRetentionIsToldInDays(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		sessiondir.RecordRetention: "7 days",
+		24 * time.Hour:             "1 day",
+		48 * time.Hour:             "2 days",
+		36 * time.Hour:             "36h",
+		90 * time.Minute:           "1h30m",
+	} {
+		require.Equal(t, want, retentionText(d), "%v", d)
+	}
 }
 
 func TestShortDurationDropsZeroUnits(t *testing.T) {
@@ -2669,8 +2780,8 @@ func Test_infoRunE_ReconnectingSocketSilent(t *testing.T) {
 
 	out := runInfo(t, "silent")
 
-	require.Contains(t, out, "Status:    reconnecting — network since "+localClock(outage.lostAt)+", next attempt "+localClock(outage.nextAt)+"\n")
-	require.Contains(t, out, "Hint:      upterm can't reach the relay; it keeps retrying.\n")
+	require.Contains(t, out, viewRow("Status:", "reconnecting — network since "+localClock(outage.lostAt)+", next attempt "+localClock(outage.nextAt)))
+	require.Contains(t, out, viewRow("Hint:", "upterm can't reach the relay; it keeps retrying."))
 	require.NotContains(t, out, "ssh ", "no socket answered, so no connect string")
 	require.NotContains(t, out, "connection refused", "the raw error is for JSON")
 }
@@ -2683,9 +2794,9 @@ func Test_infoRunE_DisconnectedByRelay(t *testing.T) {
 
 	out := runInfo(t, "unsupported")
 
-	require.Contains(t, out, "Status:    disconnected\n")
-	require.Contains(t, out, "Hint:      this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.\n")
-	require.Contains(t, out, "Reconnect: unsupported by this relay\n")
+	require.Contains(t, out, viewRow("Status:", "disconnected"))
+	require.Contains(t, out, viewRow("Hint:", "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."))
+	require.Contains(t, out, viewRow("Reconnect:", "unsupported by this relay"))
 	require.NotContains(t, out, "ssh ", "nothing can reach a disconnected session")
 }
 
@@ -2700,7 +2811,7 @@ func Test_printSessionSummary_PastNextAttempt(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() { printSessionSummary(info) })
-	require.Contains(t, out, "Status:    reconnecting — network since "+localClock(lost)+"\n")
+	require.Contains(t, out, viewRow("Status:", "reconnecting — network since "+localClock(lost)))
 	require.NotContains(t, out, "next attempt")
 
 	raw, err := json.Marshal(info)
@@ -2713,7 +2824,7 @@ func Test_printSessionSummary_PastNextAttempt(t *testing.T) {
 // value; a width of 0, which is what a pipe gets, keeps each on one line. The
 // width is passed in, so none of this depends on stdout being a terminal.
 func Test_writeSessionSummary_WrapsStatusAndHint(t *testing.T) {
-	const indent = "           " // the summary's 11-column label
+	const indent = "                  " // the view's 18-column label
 
 	disconnected := sessionInfo{
 		Name: "n", Status: sessiondir.StatusDisconnected, Reconnect: sessiondir.ReconnectUnsupported,
@@ -2724,13 +2835,13 @@ func Test_writeSessionSummary_WrapsStatusAndHint(t *testing.T) {
 		var b strings.Builder
 		writeSessionSummary(&b, disconnected, 40)
 
-		require.Equal(t, "Name:      n\n"+
-			"Status:    disconnected\n"+
-			"Hint:      this relay doesn't support reconnecting,\n"+
+		require.Equal(t, viewRow("Name:", "n")+
+			viewRow("Status:", "disconnected")+
+			viewRow("Hint:", "this relay doesn't support reconnecting,")+
 			indent+"so guests can't reach this session\n"+
 			indent+"again. Restart it for a new connect\n"+
 			indent+"string.\n"+
-			"Reconnect: unsupported by this relay\n", b.String())
+			viewRow("Reconnect:", "unsupported by this relay"), b.String())
 	})
 
 	t.Run("the status wraps under its value", func(t *testing.T) {
@@ -2743,11 +2854,11 @@ func Test_writeSessionSummary_WrapsStatusAndHint(t *testing.T) {
 		var b strings.Builder
 		writeSessionSummary(&b, reconnecting, 30)
 
-		require.Equal(t, "Name:      n\n"+
-			"Status:    reconnecting — network since\n"+
+		require.Equal(t, viewRow("Name:", "n")+
+			viewRow("Status:", "reconnecting — network since")+
 			indent+localClock(lost)+", next attempt\n"+
 			indent+localClock(next)+"\n"+
-			"Hint:      upterm can't reach the relay;\n"+
+			viewRow("Hint:", "upterm can't reach the relay;")+
 			indent+"it keeps retrying.\n", b.String())
 	})
 
@@ -2755,18 +2866,71 @@ func Test_writeSessionSummary_WrapsStatusAndHint(t *testing.T) {
 		var b strings.Builder
 		writeSessionSummary(&b, disconnected, 0)
 
-		require.Equal(t, "Name:      n\n"+
-			"Status:    disconnected\n"+
-			"Hint:      this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.\n"+
-			"Reconnect: unsupported by this relay\n", b.String())
+		require.Equal(t, viewRow("Name:", "n")+
+			viewRow("Status:", "disconnected")+
+			viewRow("Hint:", "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string.")+
+			viewRow("Reconnect:", "unsupported by this relay"), b.String())
 	})
 
 	t.Run("an empty status still gets its row", func(t *testing.T) {
 		var b strings.Builder
 		writeSessionSummary(&b, sessionInfo{Name: "n"}, 40)
 
-		require.Equal(t, "Name:      n\nStatus:    \n", b.String())
+		require.Equal(t, viewRow("Name:", "n")+viewRow("Status:", ""), b.String())
 	})
+}
+
+// A session that is running has no outcome to give: the record holds a
+// placeholder for the reason, which is not something to read. And a ready
+// session that doesn't answer says so on its status, so a reader doesn't take
+// the record's word for what the daemon would have said.
+func TestARunningSessionsSummaryHasNoReason(t *testing.T) {
+	setupSessionRoots(t)
+	heldReady(t, "mute") // held, nothing answers
+	out := runInfo(t, "mute")
+	require.NotContains(t, out, "Reason:")
+	require.Contains(t, out, "Status:           ready (not answering)\n")
+}
+
+// Only a ready session is told apart this way: the other statuses already say
+// what is wrong, or that nothing is yet.
+func TestOnlyAReadySessionIsNotAnswering(t *testing.T) {
+	setupSessionRoots(t)
+	d := heldReady(t, "mute-start")
+	require.NoError(t, d.Update(func(r *sessiondir.Record) { r.Status = sessiondir.StatusStarting }))
+	out := runInfo(t, "mute-start")
+	require.Contains(t, out, viewRow("Status:", "starting"))
+	require.NotContains(t, out, "not answering")
+}
+
+// A session that answered has no caveat to give.
+func TestAnAnsweringSessionIsJustReady(t *testing.T) {
+	setupSessionRoots(t)
+	buildReadyOnRelay(t, "answers", sessiondir.ReconnectSupported)
+	out := runInfo(t, "answers")
+	require.Contains(t, out, viewRow("Status:", "ready"))
+	require.NotContains(t, out, "not answering")
+}
+
+// An ended session's outcome is its reason, and its row stays.
+func TestAnEndedSessionsSummaryKeepsItsReason(t *testing.T) {
+	setupSessionRoots(t)
+	buildEndedAfterExit(t, "finished")
+	out := runInfo(t, "finished")
+	require.Contains(t, out, viewRow("Status:", "ended"))
+	require.Contains(t, out, viewRow("Reason:", sessiondir.ReasonExited))
+	require.Contains(t, out, viewRow("Exit code:", "3"))
+}
+
+// A held session that cannot be dialled, with nothing sent, can say nothing was
+// changed; the same session answering a request it then doesn't confirm can't.
+func TestSetToASessionThatCantBeReachedChangesNothing(t *testing.T) {
+	setupSessionRoots(t)
+	heldReady(t, "mute-5")
+	err := setSession(context.Background(), "mute-5", time.Minute, io.Discard)
+	require.ErrorContains(t, err, "session mute-5 isn't answering on its admin socket")
+	require.ErrorContains(t, err, "nothing was changed")
+	require.NotContains(t, err.Error(), "rpc error")
 }
 
 // Test_infoRunE_EndedWhileReconnecting: the final record keeps its outage for
@@ -2777,7 +2941,7 @@ func Test_infoRunE_EndedWhileReconnecting(t *testing.T) {
 	buildEndedWhileReconnecting(t, "ended")
 
 	out := runInfo(t, "ended")
-	require.Contains(t, out, "Status:    ended\n")
+	require.Contains(t, out, viewRow("Status:", "ended"))
 	require.NotContains(t, out, "Hint:")
 	require.NotContains(t, out, "Reconnect:")
 	require.NotContains(t, out, "since")
@@ -2799,8 +2963,8 @@ func Test_infoRunE_EndedAfterDisconnected(t *testing.T) {
 	buildEndedAfterDisconnected(t, "ended")
 
 	out := runInfo(t, "ended")
-	require.Contains(t, out, "Status:    ended\n")
-	require.Contains(t, out, "Reconnect: unsupported by this relay\n")
+	require.Contains(t, out, viewRow("Status:", "ended"))
+	require.Contains(t, out, viewRow("Reconnect:", "unsupported by this relay"))
 	require.NotContains(t, out, "Hint:")
 	require.NotContains(t, out, "since")
 
@@ -3096,7 +3260,7 @@ func TestWhatNeitherANameNorAnIDIsNotFoundAsBefore(t *testing.T) {
 		{[]string{"session", "info", "sid-2"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
 		{[]string{"session", "stop", "sid-2"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
 		{[]string{"session", "set", "sid-2", "--join-timeout", "1m"}, notFoundCode, "upterm: no session named \"sid-2\"\n"},
-		{[]string{"session", "wait", "sid-2"}, waitUnavailableCode, "upterm: no session named \"sid-2\" (a session that ended more than 168h0m0s ago is no longer retained)\n"},
+		{[]string{"session", "wait", "sid-2"}, waitUnavailableCode, "upterm: no session named \"sid-2\" (a session that ended more than 7 days ago is no longer retained)\n"},
 		{[]string{"attach", "sid-2"}, exitAttachFailed, "upterm: no session named \"sid-2\"\n"},
 	} {
 		_, stderr, code := runCLI(t, tc.args...)

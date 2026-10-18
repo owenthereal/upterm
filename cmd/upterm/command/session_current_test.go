@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // runCurrent runs `upterm session current` with UPTERM_ADMIN_SOCKET set to
@@ -53,6 +55,11 @@ func TestSessionCurrentOutsideSession(t *testing.T) {
 
 	missing := socketIn(t, "gone.sock")
 
+	// A session that answers: the flag is what keeps this one from being asked,
+	// whatever the variable names.
+	live := socketIn(t, "live.sock")
+	serveStubAdmin(t, live, &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"})
+
 	// What a host killed with SIGKILL leaves: the file, and nobody listening.
 	stale := socketIn(t, "stale.sock")
 	ln, err := net.Listen("unix", stale)
@@ -73,6 +80,10 @@ func TestSessionCurrentOutsideSession(t *testing.T) {
 		{"no socket, template", "", tmpl, ""},
 		{"no socket, json", "", json, ""},
 		{"no socket, detail", "", nil, "upterm: not in an upterm session: $UPTERM_ADMIN_SOCKET is not set\n"},
+		{"empty flag, detail", live, []string{"--admin-socket", ""}, "upterm: not in an upterm session: --admin-socket is empty\n"},
+		{"empty flag, equals form", live, []string{"--admin-socket="}, "upterm: not in an upterm session: --admin-socket is empty\n"},
+		{"empty flag, template", live, []string{"--admin-socket", "", "-o", "go-template={{.ClientCount}}"}, ""},
+		{"empty flag, json", live, []string{"--admin-socket", "", "-o", "json"}, ""},
 		{"missing socket, template", missing, tmpl, ""},
 		{"missing socket, detail", missing, nil, "upterm: not in an upterm session: no session answers at " + missing + "\n"},
 		{"stale socket file, template", stale, tmpl, ""},
@@ -200,4 +211,87 @@ func TestSessionCurrentInSession(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got), "stdout: %q", stdout)
 	require.Equal(t, "sid", got["sessionId"])
 	require.EqualValues(t, 2, got["clientCount"])
+}
+
+// The name is the daemon's to give, in the daemon's own field.
+func TestCurrentShowsTheNameWhenTheDaemonGivesIt(t *testing.T) {
+	setupSessionRoots(t)
+	sock := socketIn(t, "named.sock")
+	serveStubAdmin(t, sock, &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222", Name: proto.String("build")})
+	stdout, _, code := runCurrent(t, sock)
+	require.Equal(t, 0, code)
+	require.Contains(t, stdout, "Name:             build\n")
+}
+
+// A daemon that sends none gets no row, even when a record on this machine
+// could say what the session is called.
+func TestCurrentNeverTakesTheNameFromARecord(t *testing.T) {
+	setupSessionRoots(t)
+	heldReady(t, "recorded") // a record for session ID "sid", on this machine
+	sock := socketIn(t, "unnamed.sock")
+	serveStubAdmin(t, sock, &api.GetSessionResponse{SessionId: "sid", Host: "ssh://127.0.0.1:2222"})
+	stdout, _, code := runCurrent(t, sock)
+	require.Equal(t, 0, code)
+	require.NotContains(t, stdout, "Name:")
+	require.NotContains(t, stdout, "recorded")
+}
+
+// A session that isn't ready says what it is and, when the tunnel is down,
+// why and what to do; a ready one has no status row, as before.
+func TestCurrentShowsAStatusThatIsNotReady(t *testing.T) {
+	setupSessionRoots(t)
+	lost := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	next := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+	for _, tc := range []struct {
+		name string
+		resp *api.GetSessionResponse
+		want []string
+		not  []string
+	}{
+		{"reconnecting", &api.GetSessionResponse{
+			Status:                proto.String("reconnecting"),
+			Reconnect:             proto.String("supported"),
+			TunnelReason:          proto.String("network"),
+			TunnelLostAtUnixNano:  proto.Int64(lost.UnixNano()),
+			NextAttemptAtUnixNano: proto.Int64(next.UnixNano()),
+		}, []string{
+			viewRow("Status:", "reconnecting — network since "+localClock(lost)+", next attempt "+localClock(next)),
+			viewRow("Hint:", "upterm can't reach the relay; it keeps retrying."),
+		}, []string{"Reconnect:"}},
+		{"disconnected", &api.GetSessionResponse{
+			Status:       proto.String("disconnected"),
+			Reconnect:    proto.String("unsupported"),
+			TunnelReason: proto.String("reconnect_unsupported"),
+		}, []string{
+			viewRow("Status:", "disconnected"),
+			viewRow("Hint:", "this relay doesn't support reconnecting, so guests can't reach this session again. Restart it for a new connect string."),
+			viewRow("Reconnect:", "unsupported by this relay"),
+		}, nil},
+		{"ending", &api.GetSessionResponse{Status: proto.String("ending")},
+			[]string{viewRow("Status:", "ending")}, []string{"Hint:"}},
+		{"ready", &api.GetSessionResponse{Status: proto.String("ready"), TunnelReason: proto.String("")},
+			nil, []string{"Status:", "Hint:"}},
+		{"ready on a relay that cannot reconnect", &api.GetSessionResponse{Status: proto.String("ready"), Reconnect: proto.String("unsupported")},
+			[]string{viewRow("Reconnect:", "unsupported by this relay")}, []string{"Status:", "Hint:"}},
+		{"a daemon that sends no status", &api.GetSessionResponse{},
+			nil, []string{"Status:", "Hint:", "Reconnect:", "Name:"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.resp.SessionId = "sid"
+			tc.resp.Host = "ssh://127.0.0.1:2222"
+			sock := socketIn(t, strings.ReplaceAll(tc.name, " ", "-")+".sock")
+			serveStubAdmin(t, sock, tc.resp)
+
+			stdout, stderr, code := runCurrent(t, sock)
+			require.Equal(t, 0, code)
+			require.Empty(t, stderr)
+			for _, want := range tc.want {
+				require.Contains(t, stdout, want)
+			}
+			for _, not := range tc.not {
+				require.NotContains(t, stdout, not)
+			}
+		})
+	}
 }
