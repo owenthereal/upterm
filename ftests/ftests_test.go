@@ -868,6 +868,11 @@ type Client struct {
 	// BannerCallback receives the banners the relay sends while the client
 	// authenticates, such as the one for a session with no host connected.
 	BannerCallback func(message string) error
+	// ClientVersion is the SSH version the client announces, x/crypto's own
+	// when empty, which makes it a plain ssh client to the relay. As
+	// upterm.JoinSSHClientVersion, it is told the relay's verdicts in the wire
+	// texts upterm join matches, rather than in sentences for a person.
+	ClientVersion string
 	// NoDrainStdout leaves the session's stdout unread, modelling a guest that
 	// has stopped draining its SSH channel. Its window fills, and the host's
 	// write to it blocks.
@@ -959,6 +964,7 @@ func (c *Client) JoinWithContext(ctx context.Context, session *api.GetSessionRes
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		BannerCallback:  c.BannerCallback,
+		ClientVersion:   c.ClientVersion,
 	}
 
 	u, err := url.Parse(clientJoinURL)

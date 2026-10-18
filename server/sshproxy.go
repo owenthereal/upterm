@@ -105,6 +105,12 @@ type hopRefusal struct{ err error }
 func (e *hopRefusal) Error() string { return e.err.Error() }
 func (e *hopRefusal) Unwrap() error { return e.err }
 
+// permHop is the permissions extension that marks a connection from another
+// relay node, presenting a guest's key. A hop announces x/crypto's default
+// version, as any Go client does, so the certificate it authenticated with is
+// what tells it apart from a plain ssh guest.
+const permHop = "upterm-hop"
+
 // bannerFor is the banner to send with err, the refusal of meta's connection,
 // or "" for none. A guest earns one only by a failed lookup of its session: the
 // session isn't stored (its host may be reconnecting, and about to store it
@@ -327,16 +333,17 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 // upstream goes. Stock SSH calls this for unsigned public-key queries as well,
 // and a successful query does not count against MaxAuthTries, so it must stay
 // cheap: no certificate minting, no upstream connection, and at most one read
-// of the session.
-func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, error) {
+// of the session. The flag reports, as authenticate's does, that the key is
+// another relay node's.
+func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequest, *upstreamTarget, bool, error) {
 	auth, key, hop, err := a.authenticate(conn, pk)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
 	target, err := a.resolve(conn)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	// TODO: simplify auth key validation by moving it to host validation only
 	if !target.admits(key) {
@@ -344,10 +351,10 @@ func (a proxyAuth) authorize(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthRequ
 		if hop {
 			err = &hopRefusal{err}
 		}
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
-	return auth, target, nil
+	return auth, target, hop, nil
 }
 
 // resolve finds where conn's upstream goes, reading the session at most once.
@@ -430,19 +437,24 @@ func (a proxyAuth) plan(conn ssh.ConnMetadata, target *upstreamTarget, creds []s
 // authorization so the decision and the attempt cannot disagree, and takes the
 // attempt's dial target, host-key policy and route from the one session read
 // that authorization made; that costs one extra session lookup, on success
-// only. It does not open a connection.
-func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRoute, error) {
-	auth, target, err := a.authorize(conn, pk)
+// only. It does not open a connection. The permissions it returns are the
+// client connection's, carrying permHop when the key is another relay node's.
+func (a proxyAuth) prepare(conn ssh.ConnMetadata, pk ssh.PublicKey) (*preparedRoute, *ssh.Permissions, error) {
+	auth, target, hop, err := a.authorize(conn, pk)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	signers, err := a.newUserCertSigners(conn, auth)
 	if err != nil {
-		return nil, fmt.Errorf("error creating cert signers: %w", err)
+		return nil, nil, fmt.Errorf("error creating cert signers: %w", err)
 	}
 
-	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), nil
+	perms := &ssh.Permissions{}
+	if hop {
+		perms.Extensions = map[string]string{permHop: ""}
+	}
+	return a.plan(conn, target, []ssh.AuthMethod{ssh.PublicKeys(signers...)}), perms, nil
 }
 
 // prepareFrom plans an attempt from sess, a snapshot of pk's session, with

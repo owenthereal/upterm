@@ -116,8 +116,9 @@ var errSSHChannelDrainStalled = errors.New("ssh: channel drain stalled after sou
 // returning. Ordinary transport completion first drains received channel data,
 // answers to channel opens and request tails toward the surviving peer; forced
 // cancellation closes both transports immediately to release blocked opens,
-// requests and writes.
-func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter) error {
+// requests and writes. rewrite, which may be nil, words the upstream's
+// rejections of the downstream's opens as the downstream is sent them.
+func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbortScope, aborts metrics.Counter, rewrite rejectionRewrite) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	draining := make(chan struct{})
@@ -142,9 +143,15 @@ func forwardSSH(ctx context.Context, downstream, upstream sshPeer, scope sshAbor
 	peers := []sshPeer{downstream, upstream}
 	for i, source := range peers {
 		destination := peers[1-i]
+		// The rejections the downstream is sent are those of its own opens. The
+		// downstream's rejections of the upstream's opens pass on as they are.
+		opens := forwarder
+		if i == 0 {
+			opens.rewrite = rewrite
+		}
 		workers.Go(func() { exited <- peerExit{i, source.conn.Wait()} })
 		workers.Go(func() {
-			forwarder.channels(destination.conn, source.channels, draining, channelsDone[i], opensDone[i])
+			opens.channels(destination.conn, source.channels, draining, channelsDone[i], opensDone[i])
 		})
 		workers.Go(func() {
 			finished := sync.OnceFunc(func() { close(requestsDone[i]) })
@@ -224,6 +231,10 @@ type sshForwarder struct {
 	// the watchdog on a timescale that does not dominate the suite.
 	drainTimeout time.Duration
 	abortGrace   time.Duration
+
+	// rewrite words a rejection the destination sends as the source is passed
+	// it. Nil passes every one on as it is.
+	rewrite rejectionRewrite
 }
 
 // A peer can pipeline channel opens without waiting for confirmation, and each
@@ -318,7 +329,7 @@ func (f sshForwarder) channel(destination ssh.Conn, incoming ssh.NewChannel, acc
 	if err != nil {
 		var rejection *ssh.OpenChannelError
 		if errors.As(err, &rejection) {
-			_ = incoming.Reject(rejection.Reason, rejection.Message)
+			_ = incoming.Reject(rejection.Reason, f.rewrite.apply(rejection.Message))
 		} else {
 			_ = incoming.Reject(ssh.ConnectionFailed, err.Error())
 		}
@@ -696,12 +707,30 @@ func (f sshForwarder) requests(destination sshRequestSender, incoming <-chan *ss
 	}
 }
 
+// rejectionRewrite words the message of a channel rejection for the peer it is
+// sent to. The relay's rejection texts are a wire contract that upterm join and
+// other relay nodes match, which leaves them terse for a person reading them in
+// plain ssh's "open failed" line; see rejectionRewriteFor.
+type rejectionRewrite func(msg string) string
+
+// apply is msg as r words it; a nil r leaves every message as it is.
+func (r rejectionRewrite) apply(msg string) string {
+	if r == nil {
+		return msg
+	}
+	return r(msg)
+}
+
 // rejectSSHChannels reports an upstream failure after downstream authentication
 // succeeded. The caller supplies a bounded context; while waiting for the first
 // channel, global requests are answered with the cause so they cannot freeze
 // the SSH mux and so peers that speak before opening a channel still learn why.
-// It owns downstream and returns after closing it and joining its workers.
-func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) error {
+// Channel opens are rejected with the cause as rewrite, which may be nil, words
+// it. A global request's reply keeps the cause's own text: a host reads it, and
+// OpenSSH ignores it. It owns downstream and returns after closing it and
+// joining its workers.
+func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error, rewrite rejectionRewrite) error {
+	message := rewrite.apply(cause.Error())
 	var workers sync.WaitGroup
 	finished := make(chan struct{})
 	workers.Go(func() {
@@ -729,7 +758,7 @@ func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) err
 		// writes, so a peer that has stopped reading can block them: the
 		// deadline watcher above stays armed until the transport is closed,
 		// because closing it is the only thing that releases such a write.
-		rejectBufferedSSHChannels(downstream.channels, cause)
+		rejectBufferedSSHChannels(downstream.channels, message)
 		_ = downstream.conn.Close()
 		close(finished)
 		// Release the mux's sender for opens that raced the close. These can no
@@ -749,20 +778,20 @@ func rejectSSHChannels(ctx context.Context, downstream sshPeer, cause error) err
 		if !ok {
 			return io.EOF
 		}
-		return channel.Reject(ssh.ConnectionFailed, cause.Error())
+		return channel.Reject(ssh.ConnectionFailed, message)
 	}
 }
 
-// rejectBufferedSSHChannels answers the opens the mux has already queued
-// without blocking on ones that may never arrive.
-func rejectBufferedSSHChannels(channels <-chan ssh.NewChannel, cause error) {
+// rejectBufferedSSHChannels answers the opens the mux has already queued, with
+// message, without blocking on ones that may never arrive.
+func rejectBufferedSSHChannels(channels <-chan ssh.NewChannel, message string) {
 	for {
 		select {
 		case channel, ok := <-channels:
 			if !ok {
 				return
 			}
-			_ = channel.Reject(ssh.ConnectionFailed, cause.Error())
+			_ = channel.Reject(ssh.ConnectionFailed, message)
 		default:
 			return
 		}
