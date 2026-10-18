@@ -98,6 +98,9 @@ type emulation struct {
 	// keep, and doubleSize once it has made a line double-width or
 	// double-height (see watchRendition).
 	undrawable, doubleSize bool
+	// statusLine is set once the stream has made a status line it can write
+	// to, or made it active (see watchStatusLine).
+	statusLine bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -178,9 +181,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // screen, the history kept through the scroll-off function instead, replies
 // to queries discarded, the title, the working directory, the colours and the
 // clipboard kept, images, device control strings, character protection,
-// selective erases and saves noted, and the meter stopped by ctx or the
-// deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// selective erases, saves, renditions and line sizes the cells can't hold,
+// and a status line noted, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -205,6 +209,7 @@ func (e *emulation) setUp() {
 	e.watchProtection()
 	e.watchSaves()
 	e.watchRendition()
+	e.watchStatusLine()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -502,6 +507,29 @@ func (e *emulation) watchRendition() {
 	for _, final := range []byte{'3', '4', '6'} {
 		t.RegisterEscHandler(ansi.Command(0, '#', final), func() bool {
 			e.doubleSize = true
+			return false
+		})
+	}
+}
+
+// watchStatusLine registers the handlers that note the stream making a status
+// line it can write to, by DECSSDT 2 (CSI 2 $ ~), or sending its output there,
+// by DECSASD 1 (CSI 1 $ }). x/vt has no status line, so it draws what the
+// program writes to one on the main display, where the session's terminal
+// shows it on a line of its own. Each reads only its first parameter, as
+// xterm's do. DECSSDT 1, the indicator line, which the terminal draws itself
+// and the program can't write to, isn't noted. x/vt has no handler of its own
+// for either; these return false all the same, as watchColours' do.
+func (e *emulation) watchStatusLine() {
+	t := e.term
+	for _, sel := range []struct {
+		final byte
+		ps    int
+	}{{'~', 2}, {'}', 1}} {
+		t.RegisterCsiHandler(ansi.Command(0, '$', sel.final), func(params ansi.Params) bool {
+			if n, _, _ := params.Param(0, 0); n == sel.ps {
+				e.statusLine = true
+			}
 			return false
 		})
 	}

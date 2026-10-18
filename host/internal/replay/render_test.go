@@ -1431,6 +1431,45 @@ func TestReplayFailsOnADoubleSizeLine(t *testing.T) {
 	})
 }
 
+// A status line the session made host-writable, by DECSSDT 2 (CSI 2 $ ~), or
+// sent its output to, by DECSASD 1 (CSI 1 $ }), fails the render, named: x/vt
+// has no status line, so what the program wrote there would be drawn on the
+// main display, or not at all, where the session's terminal shows it on a
+// line of its own. It still does once put away. Each reads only its first
+// parameter, as xterm's do. The rest render: no status line, the default;
+// the main display; and the indicator line, DECSSDT 1, which the terminal
+// draws itself and a program can't write to, so the render loses only the
+// line, not anything the program sent.
+func TestReplayFailsOnAStatusLine(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a host-writable status line", "\x1b[2$~"},
+		{"the status line active", "\x1b[1$}"},
+		{"a status line written and put away", "\x1b[2$~\x1b[1$}status\x1b[0$}\x1b[0$~"},
+		{"the first parameter selecting it", "\x1b[2;0$~"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a status line")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"no status line", "\x1b[0$~"},
+		{"the default type", "\x1b[$~"},
+		{"an indicator line", "\x1b[1$~"},
+		{"the main display", "\x1b[0$}"},
+		{"the default display", "\x1b[$}"},
+		{"a later parameter selecting it", "\x1b[0;1$}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // A synchronized update the session is inside at the handoff point, a frame
 // the program began with ?2026h and has yet to end, holds the session's
 // terminal's display until the program's own ?2026l, which the live bytes

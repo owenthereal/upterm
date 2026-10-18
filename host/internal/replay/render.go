@@ -579,6 +579,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.doubleSize {
 		return rep{}, &IneligibleError{State: "a double-size line"}
 	}
+	if e.statusLine {
+		return rep{}, &IneligibleError{State: "a status line"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
