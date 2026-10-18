@@ -343,7 +343,7 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 			},
 			ChannelHandlers: map[string]gssh.ChannelHandler{
 				"session":      rawSessionHandler,
-				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards),
+				"direct-tcpip": forwardingHandler(s.EventEmitter, s.Forwards, s.ReadOnly),
 			},
 			SubsystemHandlers: subsystemHandlers,
 			// Admits a guest's shell with the session's end, or refuses it

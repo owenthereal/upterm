@@ -198,6 +198,18 @@ func TestARefusedForwardNamesTheFlag(t *testing.T) {
 	require.Equal(t, "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding.", open.Message)
 }
 
+// A read-only session can't allow forwarding: the host would have to drop
+// --read-only to pass the flag, so the refusal says what the session is
+// instead of naming it.
+func TestAReadOnlySessionsRefusedForwardSaysSo(t *testing.T) {
+	h := startHost(t, &Server{Command: readsALine("READY", 0), ReadOnly: true})
+	_, err := h.guestClient(t).Dial("tcp", "127.0.0.1:1")
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, err, &open)
+	require.Equal(t, ssh.Prohibited, open.Reason)
+	require.Equal(t, "upterm: this session is read-only, so it doesn't allow port forwarding.", open.Message)
+}
+
 // A guest whose forced command can't start is told so on its stderr, and where
 // to find why: the host's log. The guest has a pty, and its terminal is raw,
 // so the line ends with a carriage return as well.
