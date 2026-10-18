@@ -1591,23 +1591,27 @@ func joinTimeoutRow(info sessionInfo) (label, value string) {
 
 // withLiveDetail adds what only a running session can answer: who is connected
 // and how to join them.
+//
+// Everything but the connect strings is the daemon's answer as it stands, so it
+// is taken whether or not the relay's URL parses. A URL that does not is a
+// reason to leave out the commands built from it, not the clients the daemon
+// listed: a count of none beside countsKnown false would say the daemon had
+// not answered, when it had.
 func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
-	detail, err := buildSessionDetail(sess)
-	if err != nil {
-		// The record's own view stands. A host URL we cannot parse is a reason
-		// to report less, not to fail a lookup that already has an answer.
-		return info
+	info.Command = strings.Join(sess.GetCommand(), " ")
+	info.ForceCommand = strings.Join(sess.GetForceCommand(), " ")
+	for _, c := range sess.GetConnectedClients() {
+		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
 	}
-
-	info.Command = detail.Command
-	info.ForceCommand = detail.ForceCommand
-	info.SSHCommand = detail.SSHCommand
-	info.JoinCommand = detail.JoinCommand
-	info.ConnectedClients = detail.ConnectedClients
-	info.ClientCount = len(detail.ConnectedClients)
-	info.GuestCount = countGuests(sess.ConnectedClients)
+	info.ClientCount = len(sess.GetConnectedClients())
+	info.GuestCount = countGuests(sess.GetConnectedClients())
 	info.CountsKnown = true
-	info.Open = detail.Open
+	info.Open = sess.GetOpen()
+
+	if detail, err := buildSessionDetail(sess); err == nil {
+		info.SSHCommand = detail.SSHCommand
+		info.JoinCommand = detail.JoinCommand
+	}
 	return info
 }
 

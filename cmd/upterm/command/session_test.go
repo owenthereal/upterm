@@ -1150,6 +1150,52 @@ func Test_lookup_CountsGuestsApartFromTheHostsOwnTerminal(t *testing.T) {
 	require.Equal(t, float64(1), got["guestCount"], "only one of them came in by the guest door")
 }
 
+// Test_lookup_KeepsWhatTheDaemonSaidWhenItsRelayURLDoesNotParse pins that only
+// the connect strings wait on the relay's URL. The clients, their counts, the
+// command and whether the session is open are the daemon's answer whatever its
+// host says, and a count of zero that the daemon never gave must not stand in
+// for the list it did.
+func Test_lookup_KeepsWhatTheDaemonSaidWhenItsRelayURLDoesNotParse(t *testing.T) {
+	setupSessionRoots(t)
+
+	d := claimSession(t, "badrelay")
+	releaseAtEnd(t, d)
+	require.NoError(t, d.Update(func(r *sessiondir.Record) {
+		r.Status = sessiondir.StatusReady
+		r.SessionID = "sid-badrelay"
+	}))
+	hostClient := &api.Client{Addr: "local", Version: "SSH-2.0-upterm-attach", Kind: api.Client_HOST}
+	guestClient := &api.Client{Addr: "1.2.3.4:5", Version: "SSH-2.0-x", Kind: api.Client_GUEST}
+	serveStubAdmin(t, d.AdminSocket(), &api.GetSessionResponse{
+		SessionId:        "sid-badrelay",
+		Host:             "://bad",
+		Command:          []string{"bash", "-l"},
+		ForceCommand:     []string{"tmux", "attach"},
+		Open:             true,
+		ConnectedClients: []*api.Client{hostClient, guestClient},
+	})
+
+	got := lookupJSON(t, "badrelay")
+	require.Equal(t, float64(2), got["clientCount"])
+	require.Equal(t, float64(1), got["guestCount"])
+	require.Equal(t, true, got["countsKnown"], "the daemon gave the list these were counted from")
+	require.Equal(t, []any{clientDesc(hostClient), clientDesc(guestClient)}, got["connectedClients"])
+	require.Equal(t, "bash -l", got["command"], "the daemon's, not the record's")
+	require.Equal(t, "tmux attach", got["forceCommand"])
+	require.Equal(t, true, got["open"])
+	require.Equal(t, "://bad", got["host"])
+	require.NotContains(t, got, "sshCommand", "built from the relay's URL, which does not parse")
+	require.NotContains(t, got, "joinCommand")
+
+	// The listing says the same of it.
+	infos, err := listInfos(context.Background(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, 2, infos[0].ClientCount)
+	require.Equal(t, 1, infos[0].GuestCount)
+	require.True(t, infos[0].CountsKnown)
+}
+
 // Test_lookup_ReachesASocketUnderAnotherRuntimeRoot is `session info`'s half
 // of the cross-root case: the record is found through the shared state root,
 // and the socket is dialled where the record says rather than under the
