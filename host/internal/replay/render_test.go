@@ -735,6 +735,48 @@ func TestReplayClearsATitleTheSessionCleared(t *testing.T) {
 	}
 }
 
+// A colour the session set by OSC, which the query filter lets into the ring
+// as it drops only the queries, and which the render doesn't restore, fails
+// it, named: a palette entry or a special colour, by OSC 4 or 5, even once
+// reset, and a dynamic colour, by OSC 10 to 19, by any specification, one of
+// several in one OSC included, until its own reset, OSC 110 to 119. A dynamic
+// colour set and then reset is the joiner's own again, and renders; so does a
+// palette reset alone, and a query, which never reaches the ring.
+func TestReplayFailsOnAChangedColour(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte(stream+"text\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a palette entry", "\x1b]4;1;rgb:ff/00/00\x07"},
+		{"a palette entry reset", "\x1b]4;1;rgb:ff/00/00\x07\x1b]104;1\x07"},
+		{"a special colour", "\x1b]5;0;rgb:ff/00/00\x1b\\"},
+		{"the foreground", "\x1b]10;#ffffff\x07"},
+		{"the background", "\x1b]11;rgb:00/00/80\x07"},
+		{"the background by a name", "\x1b]11;navy\x1b\\"},
+		{"the cursor colour", "\x1b]12;rgb:ff/00/00\x07"},
+		{"the highlight background", "\x1b]17;rgb:ff/00/00\x07"},
+		{"the last dynamic colour, and one past it", "\x1b]19;rgb:ff/00/00;rgb:00/ff/00\x07"},
+		{"the background after the foreground", "\x1b]10;rgb:ff/ff/ff;rgb:00/00/00\x07\x1b]110\x07"},
+		{"another colour's reset", "\x1b]11;rgb:00/00/80\x07\x1b]110\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a changed palette or dynamic colour")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the background reset", "\x1b]11;rgb:00/00/80\x07\x1b]111\x07"},
+		{"each one reset", "\x1b]10;red;blue;green\x07\x1b]110\x07\x1b]111;\x07\x1b]112\x1b\\"},
+		{"a palette reset alone", "\x1b]104\x07"},
+		{"a query", "\x1b]11;?\x07\x1b]4;1;?\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

@@ -5,9 +5,11 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/owenthereal/x/ansi"
@@ -70,6 +72,8 @@ type emulation struct {
 	// as the raw ring would, where a stream that set none leaves it.
 	title  string
 	titled bool
+	// colours is what the stream changed of the terminal's colours.
+	colours colours
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -148,9 +152,9 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title kept, and the meter stopped by ctx or the
-// deadline. Each callback runs inside the emulator's Write and touches only
-// the emulation.
+// to queries discarded, the title and the colours kept, and the meter stopped
+// by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -162,6 +166,60 @@ func (e *emulation) setUp() {
 	t.SetReplyFunc(func([]byte) {})
 	t.SetCallbacks(vt.Callbacks{Title: func(title string) { e.title, e.titled = title, true }})
 	t.SetStopFunc(func() bool { return e.stop() })
+	e.watchColours()
+}
+
+// colours is what the stream changed, by OSC, of the colours a terminal keeps
+// until they are reset, which the render doesn't restore: a raw replay
+// carries them to the joiner, and a render without them leaves the joiner
+// drawing in its own.
+//
+// x/vt keeps the default foreground, background and cursor colours, but only
+// those its colour parser reads, which takes no X11 colour name such as
+// "navy", and only from an OSC that sets one of them; it keeps no palette
+// from the stream at all. So the stream's OSCs are read here instead. A
+// palette entry or a special colour (OSC 4 or 5) counts once set, a reset
+// after it included: telling which entries a reset (OSC 104 or 105) puts
+// back would take keeping the palette. Each of xterm's ten dynamic colours,
+// OSC 10 to 19, the default foreground, background and cursor colours among
+// them, counts from a setting to its own reset, OSC 110 to 119.
+type colours struct {
+	palette bool
+	dynamic [10]bool
+}
+
+// changed reports a colour the stream set and hasn't reset.
+func (c *colours) changed() bool {
+	return c.palette || slices.Contains(c.dynamic[:], true)
+}
+
+// watchColours registers the OSC handlers that keep colours. The last
+// handler registered for an OSC is called first, so each of these is called
+// before x/vt's own, and returns false, so that x/vt's still handles the OSC.
+func (e *emulation) watchColours() {
+	t := e.term
+	for _, cmd := range []int{4, 5} {
+		t.RegisterOscHandler(cmd, func([]byte) bool {
+			e.colours.palette = true
+			return false
+		})
+	}
+	for i := range e.colours.dynamic {
+		t.RegisterOscHandler(10+i, func(data []byte) bool {
+			// After the number, each specification sets the next colour on,
+			// as in xterm, so OSC 10 ; fg ; bg sets the background too. Each
+			// one counts: the query filter drops an OSC that asks for any.
+			n := bytes.Count(data, []byte{';'})
+			for k := i; k < min(i+n, len(e.colours.dynamic)); k++ {
+				e.colours.dynamic[k] = true
+			}
+			return false
+		})
+		t.RegisterOscHandler(110+i, func([]byte) bool {
+			e.colours.dynamic[i] = false
+			return false
+		})
+	}
 }
 
 // Feed offers the emulation more of the stream and runs on to the next
