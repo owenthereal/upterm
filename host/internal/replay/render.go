@@ -481,8 +481,12 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.colours.changed() {
 		return rep{}, &IneligibleError{State: "a changed palette or dynamic colour"}
 	}
+	// A sixel is a device control string too, named as what it draws.
 	if e.graphics {
 		return rep{}, &IneligibleError{State: "terminal graphics"}
+	}
+	if e.dcs {
+		return rep{}, &IneligibleError{State: "a device control string"}
 	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}

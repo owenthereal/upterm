@@ -76,6 +76,9 @@ type emulation struct {
 	colours colours
 	// graphics is set once the stream has drawn an image (see watchGraphics).
 	graphics bool
+	// dcs is set once the stream has sent a device control string (see
+	// watchDCS).
+	dcs bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -154,9 +157,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title and the colours kept, images noted, and the
-// meter stopped by ctx or the deadline. Each callback and handler runs inside
-// the emulator's Write and touches only the emulation.
+// to queries discarded, the title and the colours kept, images and device
+// control strings noted, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -170,6 +174,7 @@ func (e *emulation) setUp() {
 	t.SetStopFunc(func() bool { return e.stop() })
 	e.watchColours()
 	e.watchGraphics()
+	e.watchDCS()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -254,6 +259,42 @@ func (e *emulation) watchGraphics() {
 		}
 		return false
 	})
+}
+
+// watchDCS registers a handler, under every key x/vt's parser can dispatch a
+// DCS by, that notes the stream sent one. x/vt has no DCS handler of its own,
+// so it drops each one, where a raw replay carries it to the joiner's
+// terminal, which acts on it: a tmux passthrough, which a joiner running in
+// tmux hands on to the terminal tmux runs in, DECUDK's keys, DECDLD's soft
+// font, ReGIS. Of the DCS a program sends, the query filter drops only the
+// requests, DECRQSS, XTGETTCAP and XTGETXRES, before the ring. A sixel is one
+// too, which watchGraphics also notes.
+//
+// The key is the DCS's prefix, its last intermediate and its final byte. The
+// parser takes a prefix only as the first byte, one of < = > ?, and after an
+// intermediate any byte from 0 on as the final (a DEC terminal ignores such a
+// string). A C0 control or an ESC as the first byte makes the key 0: x/vt
+// keeps it and what follows as the string's data, up to the next ESC, where a
+// DEC terminal ignores the C0, or ends the string at that first ESC, and reads
+// what follows as it comes, so the two read those bytes apart. That is 6,636
+// keys, registered in well under a millisecond.
+func (e *emulation) watchDCS() {
+	t := e.term
+	note := func(ansi.Params, []byte) bool {
+		e.dcs = true
+		return false
+	}
+	t.RegisterDcsHandler(0, note)
+	for _, prefix := range []byte{0, '<', '=', '>', '?'} {
+		for final := byte(0x40); final <= 0x7e; final++ {
+			t.RegisterDcsHandler(ansi.Command(prefix, 0, final), note)
+		}
+		for inter := byte(0x20); inter <= 0x2f; inter++ {
+			for final := byte(0x30); final <= 0x7e; final++ {
+				t.RegisterDcsHandler(ansi.Command(prefix, inter, final), note)
+			}
+		}
+	}
 }
 
 // Feed offers the emulation more of the stream and runs on to the next

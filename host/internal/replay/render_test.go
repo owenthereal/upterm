@@ -811,6 +811,51 @@ func TestReplayFailsOnTerminalGraphics(t *testing.T) {
 	}
 }
 
+// A DCS the session sent, which x/vt has no handler for and drops, fails the
+// render, named, as a raw replay carries it to the joiner's terminal, which
+// acts on it: a tmux passthrough, which a joiner running in tmux hands on to
+// the terminal tmux runs in; DECUDK's keys, DECDLD's soft font, ReGIS and
+// XTSETTCAP; and any other, under a private prefix or with a parameter after
+// its intermediate. So does one whose first byte is an ESC, which x/vt reads
+// as the string's data, to the next ESC, where a DEC terminal ends the string
+// at it: the filter drops an ESC P that an ESC follows, so it comes by the
+// 8-bit introducer, which the filter passes. An image in a tmux passthrough
+// is read as a DEC terminal reads it, the DCS ended by its first ESC and the
+// image a sequence of its own, so it is named as the image. The queries the
+// filter drops render.
+func TestReplayFailsOnADeviceControlString(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a tmux passthrough", "\x1bPtmux;\x1b\x1b[31mX\x1b\\"},
+		{"DECUDK", "\x1bP1;1|17/736F6D65\x1b\\"},
+		{"DECDLD", "\x1bP0;1;1;4;0;0{ @~~~~/~~~~\x1b\\"},
+		{"ReGIS", "\x1bP0pS(E)\x1b\\"},
+		{"XTSETTCAP", "\x1bP+p544e=787465726d\x1b\\"},
+		{"a private prefix", "\x1bP?1x\x1b\\"},
+		{"a parameter after the intermediate", "\x1bP$1x\x1b\\"},
+		{"an ESC first", "\x90\x1b[31mX\x1b\\"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a device control string")
+		})
+	}
+	t.Run("an image in a tmux passthrough", func(t *testing.T) {
+		requireIneligible(t, join(t, "\x1bPtmux;\x1b\x1b_Ga=T,f=100;AAAA\x1b\x1b\\\x1b\\"), "terminal graphics")
+	})
+	for _, tc := range []struct{ name, stream string }{
+		{"DECRQSS", "\x1bP$qm\x1b\\"},
+		{"XTGETTCAP", "\x1bP+q544e\x1b\\"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {
