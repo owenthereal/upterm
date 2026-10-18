@@ -1431,6 +1431,54 @@ func TestReplayFailsOnADoubleSizeLine(t *testing.T) {
 	})
 }
 
+// A synchronized update the session is inside at the handoff point, a frame
+// the program began with ?2026h and has yet to end, holds the session's
+// terminal's display until the program's own ?2026l, which the live bytes
+// carry: the render starts with ?2026h, so the joiner's terminal holds its
+// display, the render included, until then too. An update ended, or never
+// begun, sends no ?2026 at all. The ?2026h counts against the budget, as
+// everything the render sends does, the history included.
+func TestReplayStartsInsideAnOpenSynchronizedUpdate(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		return joined
+	}
+
+	joined := join(t, "text\r\n\x1b[?2026h\x1b[Hframe")
+	require.True(t, bytes.HasPrefix(joined, []byte("\x1b[?2026h"+preamble)), "%q", joined)
+	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b[?2026")), "%q", joined)
+	b, _ := newReference(80, 24)
+	_, _ = b.Write(joined)
+	require.True(t, b.Mode(ansi.ModeSynchronizedOutput).IsSet())
+
+	for _, stream := range []string{"text\r\n", "text\r\n\x1b[?2026h\x1b[Hframe\x1b[?2026l"} {
+		joined := join(t, stream)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "%q", joined)
+		require.NotContains(t, string(joined), "\x1b[?2026", "%q", joined)
+	}
+
+	setBudget(t, 1<<10)
+	over := func(n int) []byte {
+		return []byte("text\r\n\x1b[?2026h\x1b]52;c;" + strings.Repeat("A", n) + "\x07")
+	}
+	empty, err := fanOut(t, New(), over(0), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	require.NoError(t, err)
+	fits := budget - len(empty)
+	joined, err = fanOut(t, New(), over(fits), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = fanOut(t, New(), over(fits+1), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	requireIneligible(t, err, "a clipboard write too large to replay")
+
+	// Lines of history cost 3 bytes each, so the cut leaves less than the
+	// 8 bytes of the ?2026h over.
+	joined = join(t, strings.Repeat("x\r\n", budget)+"\x1b[?2026h")
+	require.True(t, bytes.HasPrefix(joined, []byte("\x1b[?2026h"+preamble)), "%q", joined[:min(len(joined), 32)])
+	require.LessOrEqual(t, len(joined), budget)
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

@@ -30,17 +30,20 @@ const preamble = "\r\x1b[m\x1b[J"
 // State it can't restore fails it before anything is written; a history line
 // it can't rebuild fails it once the lines to send are known. Within the
 // budget, everything but the history must fit on its own, or the render
-// fails, named when what doesn't fit is a clipboard write; the history then
-// fills what is left, newest lines first, cut at whole lines, between the
-// preamble and the rest.
+// fails, named when what doesn't fit is a clipboard write or the working
+// directory; the history then fills what is left, newest lines first, cut at
+// whole lines, between the preamble and the rest. A synchronized update open
+// at the handoff point is begun before all of it (see synced).
 func (e *emulation) render() ([]byte, error) {
 	parts := e.modes.ReplayParts()
 	rep, err := e.eligible(parts)
 	if err != nil {
 		return nil, err
 	}
+	lead := e.synced()
+	head := len(lead) + len(preamble)
 	enc := &e.enc
-	enc.reset(budget - len(preamble))
+	enc.reset(budget - head)
 	enc.stop = e.stop
 	r := renderer{
 		enc:     enc,
@@ -65,17 +68,32 @@ func (e *emulation) render() ([]byte, error) {
 	if enc.err != nil {
 		return nil, enc.err
 	}
-	from, size := e.hist.newest(budget - len(preamble) - len(enc.buf))
+	from, size := e.hist.newest(budget - head - len(enc.buf))
 	// A history line goes as it scrolled off, so one holding a split wide
 	// character can't be rebuilt either. Only the lines sent count, and which
 	// those are is known only once the rest is drawn.
 	if e.hist.splitFrom(from) {
 		return nil, &IneligibleError{State: splitWideState}
 	}
-	out := make([]byte, 0, len(preamble)+size+len(enc.buf))
+	out := make([]byte, 0, head+size+len(enc.buf))
+	out = append(out, lead...)
 	out = append(out, preamble...)
 	out = e.hist.appendFrom(out, from)
 	return append(out, enc.buf...), nil
+}
+
+// synced is what the render starts with: ?2026h when the stream is inside a
+// synchronized update at the handoff point, a frame the program began and
+// has yet to end, and nothing otherwise. The session's terminal holds its
+// display until the program's own ?2026l, which the live bytes carry, and a
+// joiner's terminal given ?2026h first holds the render and what follows it
+// until then too. An update ended leaves nothing to restore, which is why
+// the mode is otherwise among those the render ignores.
+func (e *emulation) synced() string {
+	if e.term.Mode(ansi.ModeSynchronizedOutput).IsSet() {
+		return ansi.SetModeSynchronizedOutput
+	}
+	return ""
 }
 
 // renderer draws what follows the history. Each step writes through the
@@ -477,7 +495,8 @@ var (
 	ignoredModes = map[ansi.DECMode]bool{
 		// The cursor's blink: appearance only.
 		ansi.DECMode(12): true,
-		// A synchronized update, which only holds back the drawing.
+		// A synchronized update, which only holds back the drawing. One open
+		// at the handoff point is begun again, before the rest (see synced).
 		ansi.ModeSynchronizedOutput: true,
 		// In-band resize reports: setting the mode makes a terminal report
 		// its size at once, and again on every change, in the input. From a

@@ -961,7 +961,9 @@ func (c contCase) run(wait time.Duration) contRun {
 	for _, line := range rendered {
 		full = append(append(full, line...), crlf...)
 	}
-	if !bytes.HasPrefix(r.render, full) {
+	// A render begun inside a synchronized update begins one first, which
+	// sameState checks, as it compares that mode.
+	if !bytes.HasPrefix(bytes.TrimPrefix(r.render, []byte(ansi.SetModeSynchronizedOutput)), full) {
 		r.diff = "the render carries less history than the replay kept"
 		return r
 	}

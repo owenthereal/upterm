@@ -372,7 +372,8 @@ func sameSlot(a, b vt.Cursor) string {
 // sameModes compares two emulators' modes by whether each is set: a mode one
 // side never heard of is as unset as one the other reset. The modes the
 // render ignores are left out, as it leaves them as the joiner's terminal
-// has them.
+// has them, but for synchronized output, which a render begins again when
+// the stream is inside an update at the handoff point.
 func sameModes(a, b ansi.Modes) string {
 	modes := slices.Collect(maps.Keys(a))
 	for m := range b {
@@ -381,7 +382,7 @@ func sameModes(a, b ansi.Modes) string {
 		}
 	}
 	for _, m := range modes {
-		if dec, ok := m.(ansi.DECMode); ok && ignoredModes[dec] {
+		if dec, ok := m.(ansi.DECMode); ok && ignoredModes[dec] && dec != ansi.ModeSynchronizedOutput {
 			continue
 		}
 		if a[m].IsSet() != b[m].IsSet() {
