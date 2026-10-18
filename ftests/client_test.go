@@ -543,10 +543,23 @@ func adminClientSession(socket string) (*api.GetSessionResponse, error) {
 // rather than the raw bytes, its rows placed by cursor moves instead of ended
 // by newlines, so the lines the test scans for never come. The host lists a
 // guest only once its output is attached.
+//
+// It asks over one connection, closed when it returns, rather than through
+// adminClientSession, which opens a connection per question and never closes
+// it.
 func awaitGuestsAttached(t *testing.T, socket string, n int) {
 	t.Helper()
+	conn, err := host.AdminConn(socket)
+	require.NoError(t, err)
+	defer func() {
+		_ = conn.Close()
+	}()
+	adminClient := api.NewAdminServiceClient(conn)
+
 	require.Eventually(t, func() bool {
-		sess, err := adminClientSession(socket)
+		ctx, cancel := context.WithTimeout(context.Background(), adminClientSessionTimeout)
+		defer cancel()
+		sess, err := adminClient.GetSession(ctx, &api.GetSessionRequest{})
 		if err != nil {
 			return false
 		}
