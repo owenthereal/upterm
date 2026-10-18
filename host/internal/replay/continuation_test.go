@@ -1373,11 +1373,9 @@ func feedSized(term *vt.Emulator, p []byte, start uint64, size termsize.Size, si
 // terminal that does. It is "" when they agree, and when the ring was empty
 // and nothing was captured.
 //
-// G0 is compared unless a saved cursor is restored after the last
-// designation of G0. DECRC restores the charsets DECSC saved with the cursor,
-// or a terminal's defaults from a slot nothing saved, but the tracker keeps
-// only the last ESC ( and no saved cursor, so after a DECRC its G0 is
-// whatever was designated last, not the slot's.
+// G0 is compared unless the ring restored it from a saved cursor no snapshot
+// can prime, which leaves the two apart however the joiner's is primed; see
+// lostG0.
 //
 // The joiner's terminal is primed the same way, by the raw replay and by the
 // emulation the replayer primes, so the region the tracker decided a DECSTBM
@@ -1391,6 +1389,10 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 		return ""
 	}
 	ringBytes := bytes.Join(c.Chunks, nil)
+	// The ring's offsets are in the stream its query filter kept.
+	var kept bytes.Buffer
+	_, _ = uio.NewTerminalQueryFilter(&kept).Write(stream)
+	require.True(t, bytes.Equal(kept.Bytes()[c.Start:], ringBytes), "the ring is the end of what the filter kept")
 	first := c.Sizes[0].Size
 	primed := vt.NewEmulator(first.Cols, first.Rows)
 	primed.SetReplyFunc(func([]byte) {})
@@ -1412,10 +1414,8 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 	if a, b := ref.IsAltScreen(), primed.IsAltScreen(); a != b {
 		return fmt.Sprintf("alternate screen showing: %v vs %v", a, b)
 	}
-	restored := max(bytes.LastIndex(stream, []byte("\x1b8")), bytes.LastIndex(stream, []byte("\x1b[?1049l")),
-		bytes.LastIndex(stream, []byte("\x1b[?1048l")))
-	designated := bytes.LastIndex(stream, []byte("\x1b("))
-	if a, _, _ := ref.Charsets(); designated < 0 || restored < designated {
+	if !lostG0(kept.Bytes(), int(c.Start)) {
+		a, _, _ := ref.Charsets()
 		if b, _, _ := primed.Charsets(); a[0] != b[0] {
 			return fmt.Sprintf("G0: %q vs %q", a[0], b[0])
 		}
@@ -1429,6 +1429,129 @@ func primingDiff(t testing.TB, stream []byte, sizes []uio.SizeEvent, ring int) s
 		return fmt.Sprintf("kitty stacks: %q %q %q vs %q %q %q", pa.MainKeys, pa.AltKeys, pa.HiddenAltKeys, pb.MainKeys, pb.AltKeys, pb.HiddenAltKeys)
 	}
 	return ""
+}
+
+// lostG0 reports whether the ring leaves the two terminals primingDiff
+// compares on different G0s even when the snapshot primes all it can, by
+// restoring G0 from a saved cursor no snapshot can prime. p is the stream as
+// the ring has it, which the ring starts start bytes into.
+//
+// A cursor save keeps G0 in the slot of the screen showing, and a restore
+// brings it back: ESC 7, CSI s while DECLRMM (?69) is reset, ?1048h and
+// ?1049h save, and ESC 8 and ?1048l restore, as ?1049l does, from the main
+// screen's slot, once it has switched back. A RIS, which leaves the
+// alternate screen, fills the main screen's slot with ASCII, and a DECSTR
+// the slot of the screen showing, as each puts G0 back to ASCII; a slot
+// nothing filled restores ASCII too.
+//
+// So lostG0 follows G0 and both slots on each terminal: the session's from
+// the stream's first byte, and the primed one from the ring's, as a snapshot
+// that primes all it can leaves it. That holds the session's G0; and while
+// the alternate screen shows, the session's main screen's slot, which the
+// snapshot fills by designating the G0 saved there ahead of the ?1049h it
+// replays, which saves the joiner's cursor anyway, or ahead of an ESC 7 of
+// its own before a ?47h or ?1047h. It fills no other slot, since a save
+// takes the joiner's cursor and pen of the moment with G0, which a snapshot
+// can't set to the session's: the main screen's slot while the main screen
+// shows, and the alternate screen's always, hold ASCII on the primed
+// terminal, whatever the session saved there before the ring. A save in the
+// ring is made on both, so only such a slot, restored in the ring, can leave
+// them apart.
+//
+// The stream is read as x/vt reads it, since both terminals are x/vt. That
+// is the tracker's reading but for two sequences: x/vt saves on a CSI s
+// with parameters too, where the tracker, as xterm, saves on a bare one
+// alone; and x/vt has no SCORC, so a CSI u restores nothing, where the
+// tracker restores on a bare one. A stream that tells the readings apart
+// before the ring is primed with the tracker's, which the terminal fed the
+// whole stream doesn't hold, and primingDiff reports it.
+func lostG0(p []byte, start int) bool {
+	// charsets is one terminal's G0, and the G0 each screen's saved slot
+	// holds, by mainScreen and altScreen, as the final byte of the SCS that
+	// designated it: 'B' for ASCII.
+	type charsets struct {
+		g0    byte
+		slots [2]byte
+	}
+	session := &charsets{'B', [2]byte{'B', 'B'}}
+	var primed *charsets // from the ring's first byte on
+	each := func(f func(c *charsets)) {
+		f(session)
+		if primed != nil {
+			f(primed)
+		}
+	}
+	var alt, lrmm bool // the alternate screen shows; DECLRMM, under which CSI s sets margins
+	screen := func() int {
+		if alt {
+			return altScreen
+		}
+		return mainScreen
+	}
+	save := func() {
+		s := screen()
+		each(func(c *charsets) { c.slots[s] = c.g0 })
+	}
+	restore := func(s int) { each(func(c *charsets) { c.g0 = c.slots[s] }) }
+	reset := func(s int) { each(func(c *charsets) { c.g0, c.slots[s] = 'B', 'B' }) }
+	parser := ansi.NewParser()
+	parser.SetHandler(ansi.Handler{
+		HandleEsc: func(cmd ansi.Cmd) {
+			switch {
+			case cmd.Intermediate() == '(':
+				each(func(c *charsets) { c.g0 = cmd.Final() })
+			case cmd == '7':
+				save()
+			case cmd == '8':
+				restore(screen())
+			case cmd == 'c':
+				alt, lrmm = false, false
+				reset(mainScreen)
+			}
+		},
+		HandleCsi: func(cmd ansi.Cmd, params ansi.Params) {
+			switch {
+			case cmd == 's' && !lrmm:
+				save()
+			case cmd == ansi.Cmd(ansi.Command(0, '!', 'p')):
+				lrmm = false
+				reset(screen())
+			case cmd == ansi.Cmd(ansi.Command('?', 0, 'h')), cmd == ansi.Cmd(ansi.Command('?', 0, 'l')):
+				set := cmd.Final() == 'h'
+				params.ForEach(0, func(_, n int, _ bool) {
+					switch n {
+					case 69:
+						lrmm = set
+					case 1048:
+						if set {
+							save()
+						} else {
+							restore(screen())
+						}
+					case 47, 1047:
+						alt = set
+					case 1049:
+						if set {
+							save()
+						} else {
+							restore(mainScreen)
+						}
+						alt = set
+					}
+				})
+			}
+		},
+	})
+	for i, b := range p {
+		if i == start {
+			primed = &charsets{session.g0, [2]byte{'B', 'B'}}
+			if alt {
+				primed.slots[mainScreen] = session.slots[mainScreen]
+			}
+		}
+		parser.Advance(b)
+	}
+	return primed != nil && primed.g0 != session.g0
 }
 
 // requirePrimes requires primingDiff to find nothing, and when it does find
@@ -1460,10 +1583,28 @@ func requirePrimes(t *testing.T, stream []byte, sizes []uio.SizeEvent, ring int,
 // given the ring agrees with the one given the whole stream on everything
 // the tracker models.
 func TestTrackerSnapshotPrimesWhatItModels(t *testing.T) {
-	// A stream that designates no G0 compares it, saved cursor or not: only
-	// a designation of G0 that a DECRC follows leaves G0 to the slot.
+	// A DECSC and DECRC the ring has lost are the tracker's to follow, so G0
+	// is compared after them, here where only G1 was designated.
 	requirePrimes(t, []byte("\x1b)0\x1b7text\x1b8\r\nmore text\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 8,
 		"a DECRC with no G0 designation")
+	// A restore in the ring, after the last designation of G0, leaves G0 to
+	// compare when the slot it reads is one the primed terminal holds as the
+	// session's does: saved in the ring; the main screen's, saved before the
+	// alternate screen was entered, which the snapshot fills; or refilled in
+	// the ring by a reset.
+	for _, tc := range []struct{ name, evicted, ring string }{
+		{"DECSC and DECRC in the ring, after an evicted designation", "\x1b(0", "\x1b7\x1b(Btext\x1b8"},
+		{"SCOSC and ?1048l in the ring, after an evicted designation", "\x1b(0", "\x1b[s\x1b(Btext\x1b[?1048l"},
+		{"an evicted ?1049h, restored by ?1049l", "\x1b(0\x1b[?1049h\x1b(B", "\x1b[?1049l"},
+		{"an evicted DECSC ahead of ?47h, restored by ?47l and DECRC", "\x1b(0\x1b7\x1b(B\x1b[?47h", "\x1b[?47l\x1b8"},
+		{"an evicted DECSC ahead of ?1047h, restored by ?1047l and DECRC", "\x1b(0\x1b7\x1b(B\x1b[?1047h", "\x1b[?1047l\x1b8"},
+		{"a RIS in the ring refills the main screen's slot", "\x1b(0\x1b7", "\x1bc\x1b(0\x1b8"},
+		{"a DECSTR in the ring refills the slot of the screen showing", "\x1b(0\x1b7", "\x1b[!p\x1b(0\x1b8"},
+	} {
+		evicted, ring := tc.evicted+"text\r\n", tc.ring+"text\r\n"
+		require.False(t, lostG0([]byte(evicted+ring), len(evicted)), "%s: G0 is compared", tc.name)
+		requirePrimes(t, []byte(evicted+ring), []uio.SizeEvent{event(1, 0, 80, 24)}, len(ring), tc.name)
+	}
 	seed := *propertySeed
 	for i := range 500 {
 		rnd := rand.New(rand.NewPCG(seed, 1<<32|uint64(i)))

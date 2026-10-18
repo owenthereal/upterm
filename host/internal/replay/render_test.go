@@ -139,6 +139,47 @@ func TestReplayRestoresSavedCharsets(t *testing.T) {
 	require.Equal(t, "─", cellAt(j.b, 0, 1).Content)
 }
 
+// A shell that designated line drawing, then a program on the alternate
+// screen, which designated ASCII there, and whose output has evicted all of
+// that from the ring: the joiner leaves the alternate screen with the main
+// screen's saved G0, line drawing, as the session's terminal does. The
+// tracker fills the main screen's slot ahead of the switch it replays, by
+// the ?1049h itself or by an ESC 7 ahead of a ?47h or ?1047h, and the render
+// saves the slot the emulator was primed with the same way.
+func TestReplayLeavesTheAlternateScreenWithAnEvictedMainG0(t *testing.T) {
+	var out strings.Builder
+	for i := 0; out.Len() < 8<<10; i++ {
+		fmt.Fprintf(&out, "line %d of the program's output\r\n", i)
+	}
+	for _, tc := range []struct{ name, enter, leave string }{
+		{"?1049h", "\x1b[?1049h", "\x1b[?1049l"},
+		{"ESC 7 and ?47h", "\x1b7\x1b[?47h", "\x1b[?47l\x1b8"},
+		{"ESC 7 and ?1047h", "\x1b7\x1b[?1047h", "\x1b[?1047l\x1b8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			head := "$ vim\r\n\x1b(0" + tc.enter + "\x1b(B"
+			stream := []byte(head + out.String())
+			capt := &capturing{r: New()}
+			joined, fellBack := fanOut(t, capt, stream, []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+			require.NoError(t, fellBack)
+			require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+			require.Greater(t, capt.c.Start, uint64(len(head)), "the designations and the switch are still in the ring")
+
+			a := vt.NewEmulator(80, 24)
+			_, _ = a.Write(stream)
+			b := vt.NewEmulator(80, 24)
+			_, _ = b.Write(joined)
+			for _, term := range []*vt.Emulator{a, b} {
+				g, _, _ := term.Charsets()
+				require.Equal(t, byte('B'), g[0], "the alternate screen's G0")
+				_, _ = term.WriteString(tc.leave)
+				g, _, _ = term.Charsets()
+				require.Equal(t, byte('0'), g[0], "the main screen's saved G0")
+			}
+		})
+	}
+}
+
 // G1 shifted into GL stays there for the live bytes.
 func TestReplayG1ShiftContinues(t *testing.T) {
 	j := joinAt(t, 80, 24, "text\r\n\x1b)0\x0e")
