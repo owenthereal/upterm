@@ -1600,7 +1600,9 @@ func TestTrackerSnapshotPrimesWhatItModels(t *testing.T) {
 	// each reads holds on the primed terminal what it holds on the session's:
 	// it was saved in the ring; or it is the main screen's, saved before the
 	// alternate screen was entered, which the snapshot fills; or a reset in
-	// the ring refilled it.
+	// the ring refilled it. In the last row nothing is restored: a CSI u with
+	// a parameter isn't SCORC, so the slot the evicted DECSC filled stays
+	// unread.
 	for _, tc := range []struct{ name, evicted, ring string }{
 		{"DECSC and DECRC in the ring, after an evicted designation", "\x1b(0", "\x1b7\x1b(Btext\x1b8"},
 		{"SCOSC and ?1048l in the ring, after an evicted designation", "\x1b(0", "\x1b[s\x1b(Btext\x1b[?1048l"},
@@ -1609,6 +1611,7 @@ func TestTrackerSnapshotPrimesWhatItModels(t *testing.T) {
 		{"an evicted DECSC ahead of ?1047h, restored by ?1047l and DECRC", "\x1b(0\x1b7\x1b(B\x1b[?1047h", "\x1b[?1047l\x1b8"},
 		{"a RIS in the ring refills the main screen's slot", "\x1b(0\x1b7", "\x1bc\x1b(0\x1b8"},
 		{"a DECSTR in the ring refills the slot of the screen showing", "\x1b(0\x1b7", "\x1b[!p\x1b(0\x1b8"},
+		{"a CSI u with a parameter, after an evicted DECSC", "\x1b(0\x1b7", "\x1b(B\x1b[1u"},
 	} {
 		evicted, ring := tc.evicted+"text\r\n", tc.ring+"text\r\n"
 		require.False(t, lostG0([]byte(evicted+ring), len(evicted)), "%s: G0 is compared", tc.name)
@@ -1619,8 +1622,10 @@ func TestTrackerSnapshotPrimesWhatItModels(t *testing.T) {
 	// snapshot can fill, so the two terminals end on different G0s however
 	// the joiner's is primed. Such a slot is the main screen's while the main
 	// screen shows, read by DECRC or SCORC alike, and the alternate screen's.
-	// In the last row x/vt ignores an SCS whose final it doesn't know, which
-	// leaves the two apart.
+	// The last row is the first's with an SCS after the restore whose final
+	// x/vt doesn't know, and ignores. It stands apart because a lostG0 that
+	// took any final, as the tracker does, would set both G0s to that final
+	// and miss the two ending apart.
 	for _, tc := range []struct{ name, evicted, ring string }{
 		{"an evicted DECSC on the main screen, restored by DECRC", "\x1b(0\x1b7\x1b(B", "\x1b8"},
 		{"an evicted DECSC on the main screen, restored by SCORC", "\x1b(0\x1b7\x1b(B", "\x1b[u"},
