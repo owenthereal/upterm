@@ -31,6 +31,11 @@ import (
 var (
 	flagAdminSocket string
 	flagOutput      string
+	// flagListOutput is `session list`'s own, not flagOutput: the list takes
+	// its format from the command line alone, and sharing the variable of the
+	// commands that also take it from env and config would let their value
+	// reach it.
+	flagListOutput string
 )
 
 // sessionQueryTimeout bounds every wait a read-only session command makes on
@@ -148,6 +153,13 @@ in constrained environments where XDG directories are unavailable.`, sessiondir.
 		Args: cobra.ExactArgs(0),
 		RunE: listRunE,
 	}
+
+	// Only the command line sets it: an output key or UPTERM_OUTPUT is meant
+	// for the commands that take one, and must neither turn this listing into
+	// JSON nor make it fail.
+	cmd.Flags().StringVarP(&flagListOutput, "output", "o", "", "Output format: json")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
+	_ = cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"})
 
 	return cmd
 }
@@ -754,16 +766,40 @@ func tidySessions(ctx context.Context) {
 }
 
 func listRunE(c *cobra.Command, args []string) error {
+	// Checked before anything is read, so a format that cannot be answered
+	// fails the same whether or not a session is running.
+	if flagListOutput != "" && flagListOutput != "json" {
+		return fmt.Errorf("invalid output format %q: must be 'json'", flagListOutput)
+	}
+
 	tidySessions(c.Context())
+
+	if flagListOutput == "json" {
+		infos, err := listInfos(c.Context(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+		if err != nil {
+			return err
+		}
+		return writeSessionsJSON(os.Stdout, infos)
+	}
 
 	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir(), utils.UptermStateDir())
 	if err != nil {
 		return err
 	}
+	if len(sessions) == 0 {
+		// On stderr, so a script that reads the table gets nothing rather than
+		// a sentence to skip.
+		_, _ = fmt.Fprintln(os.Stderr, "upterm: no sessions are running")
+		return nil
+	}
 
-	model := tui.NewSessionListModel(sessions)
-	_, err = tui.RunModel(model)
-	return err
+	// Only a terminal has a width to fit: a pipe gets every cell whole.
+	width := 0
+	if tui.IsTTY() {
+		width = tui.TermWidth()
+	}
+	writeSessionTable(os.Stdout, sessionRows(sessions), width)
+	return nil
 }
 
 // sessionInfo is the single shape `session info -o json` returns, live or not.
@@ -894,6 +930,18 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		return infoFromRecord(rec, statusEnded), nil, nil
 	}
 
+	return heldInfo(ctx, utils.UptermRuntimeDir(), rec)
+}
+
+// heldInfo reports a session whose name is held: what its record says, and,
+// when its admin socket answers for the run the record describes, what the
+// daemon says too. lookup answers for one name with it, and the listing for
+// each of the names it finds, so an element of the listing is the object
+// `session info` returns for that session.
+//
+// The response is nil unless the record says ready or reconnecting and the
+// socket answered for this launch: see lookup for why it is handed back.
+func heldInfo(ctx context.Context, runtimeRoot string, rec *sessiondir.Record) (sessionInfo, *api.GetSessionResponse, error) {
 	// Held: the recorded status is current and refines liveness — starting,
 	// ready, reconnecting or disconnected.
 	info := infoFromRecord(rec, rec.Status)
@@ -901,7 +949,7 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// Where the session answers, published for the caller and used for the
 	// dial below. The record's path, not one built under this process's
 	// runtime root: see adminSocketFor.
-	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	adminSocket, err := adminSocketFor(runtimeRoot, rec)
 	if err != nil {
 		return sessionInfo{}, nil, err
 	}

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
@@ -41,18 +40,6 @@ func IsTTY() bool {
 // TermWidth returns the terminal width, defaulting to 80 if unavailable
 func TermWidth() int {
 	return getTermWidth()
-}
-
-// RunModel runs a bubbletea model with automatic TTY detection.
-// For non-TTY environments, just prints View() once and returns.
-func RunModel(model tea.Model) (tea.Model, error) {
-	if !IsTTY() {
-		// Non-TTY: print View() once (lipgloss auto-strips colors)
-		fmt.Print(model.View())
-		return model, nil
-	}
-	p := tea.NewProgram(model, tea.WithAltScreen())
-	return p.Run()
 }
 
 // SessionDetail holds session information for display

@@ -34,9 +34,4 @@ var (
 	// Footer style - dark gray
 	FooterStyle = renderer.NewStyle().
 			Foreground(lipgloss.Color("8"))
-
-	// Empty/placeholder style - dark gray, italic
-	EmptyStyle = renderer.NewStyle().
-			Foreground(lipgloss.Color("8")).
-			Italic(true)
 )

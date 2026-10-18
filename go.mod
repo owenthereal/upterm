@@ -45,7 +45,6 @@ require (
 	charm.land/ssh v0.4.3
 	github.com/adrg/xdg v0.5.3
 	github.com/avast/retry-go/v4 v4.7.0
-	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/charmbracelet/x/conpty v0.2.0
