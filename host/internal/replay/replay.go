@@ -645,15 +645,16 @@ func (e *emulation) watchStatusLine() {
 	}
 }
 
-// sgrUndrawable reports whether params, an SGR's, set an attribute a cell
-// doesn't keep, which x/vt's SGR skips: an alternative font (11 to 19),
-// Fraktur (20), a double underline (21, which some terminals take for bold
-// off instead, which x/vt doesn't do either), proportional spacing (26),
-// framed or encircled (51, 52), overlined (53), an ideogram line or stress
-// mark (60 to 64), superscript or subscript (73, 74). The session's terminal
-// draws the cells printed under it so, and the render would draw them
-// without it. Once none is set, the numbers that turn them off (10, 50, 54,
-// 55, 65 and 75) change nothing the render draws.
+// sgrUndrawable reports whether params, an SGR's, hold a number x/vt's SGR
+// skips that changes how a terminal draws what is printed after it: an
+// alternative font (11 to 19), Fraktur (20), SGR 21, which x/vt reads neither
+// as a double underline, as xterm does, nor as bold off, as some terminals
+// do (a cell keeps a double underline, but set by 4:2), proportional spacing
+// (26), framed or encircled (51, 52), overlined (53), an ideogram line or
+// stress mark (60 to 64), superscript or subscript (73, 74). The session's
+// terminal draws the cells printed under one so, and the render would draw
+// them as x/vt keeps them. Once none is set, the numbers that turn them off
+// (10, 50, 54, 55, 65 and 75) change nothing the render draws.
 //
 // The parameters are read as ultraviolet's ReadStyle, x/vt's SGR, reads
 // them: 38, 48 and 58 take the colour ansi.ReadStyleColor reads after them,

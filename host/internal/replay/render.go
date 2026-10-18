@@ -15,10 +15,11 @@ import (
 	uio "github.com/owenthereal/upterm/io"
 )
 
-// preamble starts every render: the cursor to the start of its row, the
-// default pen, and the screen erased from there down. The joiner's own
-// output above the cursor stays, for the blank screen drawn after the
-// history to scroll into its scrollback.
+// preamble starts every render, after the ?2026h that begins again a
+// synchronized update open at the handoff point (see synced): the cursor to
+// the start of its row, the default pen, and the screen erased from there
+// down. The joiner's own output above the cursor stays, for the blank screen
+// drawn after the history to scroll into its scrollback.
 const preamble = "\r\x1b[m\x1b[J"
 
 // render reconstructs the emulator's state at the handoff point on the

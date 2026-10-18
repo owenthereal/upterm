@@ -1522,11 +1522,12 @@ func TestReplayFailsOnASavedRendition(t *testing.T) {
 	}
 }
 
-// An SGR the session sent that sets an attribute a cell doesn't keep fails
-// the render, named, as the cells printed under it would be drawn without it:
-// an alternative font, Fraktur, a double underline, proportional spacing,
-// framed, encircled, overlined, an ideogram line or stress mark, superscript
-// and subscript. It counts wherever it falls among the SGR's parameters, and
+// An SGR the session sent with a number x/vt's SGR skips, which changes how
+// a terminal draws what is printed after it, fails the render, named, as the
+// cells printed under it would be drawn as x/vt keeps them: an alternative
+// font, Fraktur, SGR 21, which x/vt doesn't read as a double underline (a
+// cell keeps one set by 4:2), proportional spacing, framed, encircled,
+// overlined, an ideogram line or stress mark, superscript and subscript. It counts wherever it falls among the SGR's parameters, and
 // still does once turned off. The numbers that turn those off render, and so
 // does a colour whose own numbers are among the attributes', as SGR reads
 // them as the colour.
@@ -1540,7 +1541,7 @@ func TestReplayFailsOnARenditionTheRenderCantDraw(t *testing.T) {
 		{"the first alternative font", "\x1b[11m"},
 		{"the last alternative font", "\x1b[19m"},
 		{"Fraktur", "\x1b[20m"},
-		{"a double underline", "\x1b[21m"},
+		{"SGR 21", "\x1b[21m"},
 		{"proportional spacing", "\x1b[26m"},
 		{"framed", "\x1b[51m"},
 		{"encircled", "\x1b[52m"},
