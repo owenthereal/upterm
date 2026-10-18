@@ -151,7 +151,7 @@ func attachTarget(ctx context.Context, r resolved) (target, error) {
 		return target{}, fmt.Errorf("no session named %q", name)
 	}
 	if !matchesLaunch(r, rec) {
-		return target{}, errors.New(refusalLine(name, endedFromRecord(goneRecord(r))))
+		return target{}, errors.New(alreadyEndedLine(r.named(strconv.Quote(name)), endedFromRecord(goneRecord(r))))
 	}
 	if !held {
 		return target{}, errors.New(refusalLine(name, endedFromRecord(rec)))

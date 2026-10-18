@@ -3152,8 +3152,25 @@ func TestStopByIDNeverStopsTheSessionThatReusedTheName(t *testing.T) {
 	}
 	t.Cleanup(func() { afterResolve = nil })
 	err := stopSession(context.Background(), "sid-1", io.Discard)
-	require.ErrorContains(t, err, "has been replaced since it was read")
+	// Named with the ID it was given; the pointer names the name, which shows
+	// what holds it now.
+	require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not stopped; inspect it again with 'upterm session info build'")
 	require.Empty(t, stopped, "launch B was never asked to stop")
+}
+
+// The same session, replaced after the record was read and before the request
+// reached the socket: the daemon behind it refuses a launch that is not its
+// own, and the line is the same.
+func TestStopByIDRefusedByTheSocketThatReusedTheNameNamesTheID(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	var stopped int
+	serveStubAdminWithStop(t, a.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", Host: "ssh://127.0.0.1:2222"}, "some-other-launch", func() { stopped++ })
+	var out bytes.Buffer
+	err := stopSession(context.Background(), "sid-1", &out)
+	require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not stopped; inspect it again with 'upterm session info build'")
+	require.Zero(t, stopped)
+	require.Empty(t, out.String())
 }
 
 func TestSetByIDChangesThatSession(t *testing.T) {
@@ -3178,8 +3195,98 @@ func TestSetByIDNeverChangesTheSessionThatReusedTheName(t *testing.T) {
 	}
 	t.Cleanup(func() { afterResolve = nil })
 	err := setSession(context.Background(), "sid-1", 10*time.Minute, io.Discard)
-	require.ErrorContains(t, err, "has been replaced since it was read")
+	require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'")
 	require.Empty(t, set, "launch B's join timeout was never changed")
+}
+
+// The two ways set learns of a replacement after the request left: the daemon
+// refuses a launch that is not its own, and a socket that went away is read
+// again and found to belong to another launch. Both name the ID the argument
+// was.
+func TestSetByIDReplacedAfterTheRequestLeftNamesTheID(t *testing.T) {
+	const want = "session build (ID sid-1) has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'"
+
+	t.Run("the socket refuses the launch", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		serveStubAdminWithSet(t, a.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.FailedPrecondition, "this socket holds launch other")
+		})
+		var out bytes.Buffer
+		require.EqualError(t, setSession(context.Background(), "sid-1", time.Minute, &out), want)
+		require.Empty(t, out.String())
+	})
+	t.Run("the name is read again and another launch holds it", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		successor := make(chan *sessiondir.Dir, 1)
+		serveStubAdminWithSet(t, a.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			releaseOnce(a)
+			next, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+				RuntimeRoot: utils.UptermRuntimeDir(), StateRoot: utils.UptermStateDir(),
+				Name: "build", Command: []string{"bash"},
+			})
+			if err == nil {
+				successor <- next
+			}
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		var out bytes.Buffer
+		err := setSession(context.Background(), "sid-1", time.Minute, &out)
+		select {
+		case next := <-successor:
+			releaseAtEnd(t, next)
+		default:
+			t.Fatal("the name was not claimed again")
+		}
+		require.EqualError(t, err, want)
+		require.Empty(t, out.String())
+	})
+}
+
+// A name names whatever holds it, so the lines about a replaced session given
+// by name are the ones they have always been: no ID, since none was given.
+func TestStopAndSetByNameOfAReplacedSessionDoNotNameAnID(t *testing.T) {
+	t.Run("stop, record read before the replacement", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		serveStubAdminWithStop(t, a.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", Host: "ssh://127.0.0.1:2222"}, "some-other-launch", func() {})
+		require.EqualError(t, stopSession(context.Background(), "build", io.Discard),
+			"session build has been replaced since it was read and was not stopped; inspect it again with 'upterm session info build'")
+	})
+	t.Run("set, refused by the socket", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		serveStubAdminWithSet(t, a.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.FailedPrecondition, "this socket holds launch other")
+		})
+		require.EqualError(t, setSession(context.Background(), "build", time.Minute, io.Discard),
+			"session build has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'")
+	})
+	t.Run("set, read again and another launch holds the name", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		successor := make(chan *sessiondir.Dir, 1)
+		serveStubAdminWithSet(t, a.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			releaseOnce(a)
+			next, err := sessiondir.Claim(context.Background(), sessiondir.ClaimOptions{
+				RuntimeRoot: utils.UptermRuntimeDir(), StateRoot: utils.UptermStateDir(),
+				Name: "build", Command: []string{"bash"},
+			})
+			if err == nil {
+				successor <- next
+			}
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		err := setSession(context.Background(), "build", time.Minute, io.Discard)
+		select {
+		case next := <-successor:
+			releaseAtEnd(t, next)
+		default:
+			t.Fatal("the name was not claimed again")
+		}
+		require.EqualError(t, err, "session build has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'")
+	})
 }
 
 // An ID whose session has ended answers from its record, like its name does.
@@ -3248,7 +3355,8 @@ func TestWaitByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
 	code, err := waitSession(ctx, "sid-1", &out)
 	require.NoError(t, err)
 	require.Equal(t, waitUnavailableCode, code, "nothing is known of how it ended")
-	require.Equal(t, "session build ended for a reason upterm didn't record\n", out.String())
+	// Named with the ID it was given: the name is the running session's now.
+	require.Equal(t, "session build (ID sid-1) ended for a reason upterm didn't record\n", out.String())
 }
 
 func TestInfoByIDIsInfoByName(t *testing.T) {
@@ -3267,6 +3375,8 @@ func TestInfoByIDOfAnEndedSession(t *testing.T) {
 	byName := runInfo(t, "old")
 	require.Contains(t, byName, "ended")
 	require.Equal(t, byName, runInfo(t, "sid-old"))
+	// Nothing else holds the name, so it names this session alone.
+	require.Contains(t, byName, viewRow("Name:", "old"))
 }
 
 func TestInfoByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
@@ -3288,7 +3398,8 @@ func TestInfoByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
 	t.Run("as text", func(t *testing.T) {
 		replaceAfterResolve(t)
 		out := runInfo(t, "sid-1")
-		require.Contains(t, out, "build")
+		// Named with the ID it was given: the name is the running session's now.
+		require.Contains(t, out, viewRow("Name:", "build (ID sid-1)"))
 		require.Contains(t, out, "ended")
 		require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
 	})

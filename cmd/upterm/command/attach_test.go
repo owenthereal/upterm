@@ -248,7 +248,8 @@ func TestAttachTargetByIDRefusesWhenTheNameWasReused(t *testing.T) {
 	require.NoError(t, b.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
 
 	got, err := attachTarget(context.Background(), r)
-	require.EqualError(t, err, `session "build" has already ended for a reason upterm didn't record`)
+	// Named with the ID it was given: the name is the running session's now.
+	require.EqualError(t, err, `session "build" (ID sid-1) has already ended for a reason upterm didn't record`)
 	require.Empty(t, got.Socket, "nothing to dial")
 
 	// Whereas the name, which never pinned a launch, attaches to what holds it.

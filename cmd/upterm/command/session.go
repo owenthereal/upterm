@@ -170,15 +170,28 @@ func goneRecord(r resolved) *sessiondir.Record {
 	return &sessiondir.Record{Name: r.Name, LaunchID: r.LaunchID, SessionID: r.SessionID, Reason: sessiondir.ReasonUnknown}
 }
 
-// replacedNotStopped and replacedNotChanged are what `session stop` and
-// `session set` say when the session they were asked about is no longer the
-// one holding its name. Nothing was sent to the one that does.
-func replacedNotStopped(name string) error {
-	return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
+// named is subject, the session's name as a line writes it, followed by the ID
+// the argument gave when it was one. It is for the lines about a session whose
+// name another launch holds now: the name alone would read as that other
+// session, which these commands have not touched. An argument that was a name
+// has no ID to add, and its line is the name's.
+func (r resolved) named(subject string) string {
+	if r.SessionID == "" {
+		return subject
+	}
+	return subject + " (ID " + r.SessionID + ")"
 }
 
-func replacedNotChanged(name string) error {
-	return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+// replacedNotStopped and replacedNotChanged are what `session stop` and
+// `session set` say when the session they were asked about is no longer the
+// one holding its name. Nothing was sent to the one that does. The pointer
+// names the name, which shows what holds it.
+func replacedNotStopped(r resolved) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", r.named(r.Name), r.Name)
+}
+
+func replacedNotChanged(r resolved) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", r.named(r.Name), r.Name)
 }
 
 // waitExitCode maps a finished session's recorded outcome onto this command's
@@ -531,7 +544,7 @@ func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, retentionText(sessiondir.RecordRetention))
 	}
 	if !matchesLaunch(r, rec) {
-		return finishWait(out, name, goneRecord(r))
+		return finishWait(out, r.named(name), goneRecord(r))
 	}
 
 	waited := rec.LaunchID
@@ -578,8 +591,8 @@ func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 	}
 }
 
-func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error) {
-	_, _ = fmt.Fprintln(out, waitLine(name, endedFromRecord(rec)))
+func finishWait(out io.Writer, subject string, rec *sessiondir.Record) (int, error) {
+	_, _ = fmt.Fprintln(out, waitLine(subject, endedFromRecord(rec)))
 	return waitExitCode(rec), nil
 }
 
@@ -638,7 +651,7 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	// session has ended and whose name another took, that is the other
 	// session's launch, and its daemon would accept the stop.
 	if !matchesLaunch(r, rec) {
-		return replacedNotStopped(name)
+		return replacedNotStopped(r)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -683,7 +696,7 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 		// below, for the reason Unimplemented is: it is an answer, and a
 		// guess from the record cannot improve on one.
 		if status.Code(err) == codes.FailedPrecondition {
-			return replacedNotStopped(name)
+			return replacedNotStopped(r)
 		}
 		if rec.Status == sessiondir.StatusStarting {
 			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
@@ -831,7 +844,7 @@ func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out 
 	}
 	// Before anything is sent, for stopSession's reason.
 	if !matchesLaunch(r, rec) {
-		return replacedNotChanged(name)
+		return replacedNotChanged(r)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -853,14 +866,14 @@ func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out 
 	// covers both: a socket that answers the dial answers at once.
 	if err := dialAdmin(rpcCtx, adminSocket); err != nil {
 		cancelRPC()
-		return setFailed(ctx, name, rec, err, false, out)
+		return setFailed(ctx, r, rec, err, false, out)
 	}
 	// The launch that was inspected, for stopSession's reason: a session that
 	// ended between the read and this call hands its name and socket on.
 	resp, err := client.SetJoinTimeout(rpcCtx, &api.SetJoinTimeoutRequest{LaunchId: rec.LaunchID, TimeoutNanos: int64(joinTimeout)})
 	cancelRPC()
 	if err != nil {
-		return setFailed(ctx, name, rec, err, true, out)
+		return setFailed(ctx, r, rec, err, true, out)
 	}
 	return printSetOutcome(out, name, resp)
 }
@@ -886,7 +899,8 @@ func dialAdmin(ctx context.Context, socket string) error {
 // and nothing was changed, which is the one thing that tells the two failures
 // apart; the record is still read, since the session may have ended or been
 // replaced while it was out of reach.
-func setFailed(ctx context.Context, name string, rec *sessiondir.Record, cause error, sent bool, out io.Writer) error {
+func setFailed(ctx context.Context, r resolved, rec *sessiondir.Record, cause error, sent bool, out io.Writer) error {
+	name := r.Name
 	// The failure for when nothing settles what became of the request.
 	unresolved := func() error {
 		logCause(ctx, "the admin socket did not confirm the change", name, cause)
@@ -901,7 +915,7 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, cause e
 		case codes.Unimplemented:
 			return fmt.Errorf("session %s was started by an upterm older than 0.32.0 and cannot take a join timeout (%s); upgrading this upterm does not change a running session, so start it again with upterm 0.32.0 or newer", name, pidOf(rec))
 		case codes.FailedPrecondition:
-			return replacedNotChanged(name)
+			return replacedNotChanged(r)
 		case codes.Unavailable:
 			// Unreachable: the record may say where the session is.
 		default:
@@ -918,7 +932,7 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, cause e
 	case cur == nil:
 		return errNoSession(name)
 	case cur.LaunchID != rec.LaunchID:
-		return replacedNotChanged(name)
+		return replacedNotChanged(r)
 	case !curHeld:
 		// The name was released: the session is over.
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(cur)))
@@ -1216,6 +1230,11 @@ type sessionInfo struct {
 	// answer for this launch, so that the human summary can say its status is
 	// the record's word; not part of the JSON, which has joinStateSource.
 	notAnswering bool
+	// nameLabel is what the human summary's Name row says when the name alone
+	// would name another session: a session given by ID whose name a later
+	// launch holds. Empty otherwise; not part of the JSON, whose name is the
+	// name and whose sessionId is the ID.
+	nameLabel string
 }
 
 // statusEnded is the reader's inference, not a status any session writes:
@@ -1269,7 +1288,9 @@ func lookup(ctx context.Context, r resolved) (sessionInfo, *api.GetSessionRespon
 	if !matchesLaunch(r, rec) {
 		// The session given by ID is over, whatever the record that holds its
 		// name now says about the one that took it.
-		return infoFromRecord(goneRecord(r), statusEnded), nil, nil
+		info := infoFromRecord(goneRecord(r), statusEnded)
+		info.nameLabel = r.named(r.Name)
+		return info, nil, nil
 	}
 
 	if !held {
@@ -1684,7 +1705,11 @@ func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	// word the same outage differently.
 	detail := withTunnelState(tui.SessionDetail{Status: info.Status}, info)
 
-	writeSummaryRow(w, "Name:", info.Name, 0)
+	name := info.Name
+	if info.nameLabel != "" {
+		name = info.nameLabel
+	}
+	writeSummaryRow(w, "Name:", name, 0)
 	status := tui.StatusText(detail)
 	if info.notAnswering && info.Status == sessiondir.StatusReady {
 		// The record says ready, and the session was asked and said nothing:

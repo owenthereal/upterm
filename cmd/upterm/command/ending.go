@@ -123,8 +123,10 @@ func (e ended) failedToStart() string {
 }
 
 // waitLine is `session wait`'s line for a session it saw end. The status is
-// the command's exit code to carry, so the line never repeats it.
-func waitLine(name string, e ended) string {
+// the command's exit code to carry, so the line never repeats it. The subject
+// is the session's name, with its ID after it where the name alone would name
+// another session: see resolved.named.
+func waitLine(subject string, e ended) string {
 	var how string
 	switch e.outcome() {
 	case outcomeExited:
@@ -140,13 +142,14 @@ func waitLine(name string, e ended) string {
 	default:
 		how = "ended for a reason upterm didn't record"
 	}
-	return "session " + name + " " + how
+	return "session " + subject + " " + how
 }
 
 // alreadyEndedLine is what `session stop` and `session set` say about a
-// session that had ended before they reached it.
-func alreadyEndedLine(name string, e ended) string {
-	return "session " + name + " " + alreadyEnded(e)
+// session that had ended before they reached it, and `upterm attach` about one
+// whose name another session holds now. The subject is as for waitLine.
+func alreadyEndedLine(subject string, e ended) string {
+	return "session " + subject + " " + alreadyEnded(e)
 }
 
 // refusalLine is `upterm attach`'s refusal of a session that has ended:
