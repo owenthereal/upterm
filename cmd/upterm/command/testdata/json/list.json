@@ -1,0 +1,35 @@
+[
+  {
+    "access": "anyone",
+    "adminSocket": "PATH",
+    "attachSocket": "PATH",
+    "clientCount": 0,
+    "command": "bash",
+    "countsKnown": true,
+    "guestCount": 0,
+    "host": "ssh://127.0.0.1:2222",
+    "joinCommand": "upterm join ssh://sid-1:MTI3LjAuMC4xOjIyMjI=@127.0.0.1:2222",
+    "joinStateSource": "record",
+    "launchId": "LAUNCH",
+    "name": "answering",
+    "pid": "PID",
+    "reason": "unknown",
+    "sessionId": "sid-1",
+    "sshCommand": "ssh sid-1:MTI3LjAuMC4xOjIyMjI=@127.0.0.1 -p 2222",
+    "status": "ready"
+  },
+  {
+    "adminSocket": "PATH",
+    "attachSocket": "PATH",
+    "clientCount": 0,
+    "command": "bash",
+    "countsKnown": false,
+    "guestCount": 0,
+    "joinStateSource": "record",
+    "launchId": "LAUNCH",
+    "name": "starting",
+    "pid": "PID",
+    "reason": "unknown",
+    "status": "starting"
+  }
+]

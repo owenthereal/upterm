@@ -23,7 +23,7 @@ func TestAttachTarget(t *testing.T) {
 	buildEndedAfterExit(t, "ended")
 
 	for _, name := range []string{"starting", "ready", "gone"} {
-		got, err := attachTarget(context.Background(), name)
+		got, err := attachTarget(context.Background(), resolved{Name: name})
 		require.NoError(t, err, name)
 		rec, err := sessiondir.ReadRecord(utils.UptermStateDir(), name)
 		require.NoError(t, err)
@@ -38,10 +38,10 @@ func TestAttachTarget(t *testing.T) {
 		}
 	}
 
-	_, err := attachTarget(context.Background(), "ended")
+	_, err := attachTarget(context.Background(), resolved{Name: "ended"})
 	require.EqualError(t, err, `session "ended" has already ended with status 3`, "the record's outcome is the explanation")
 
-	_, err = attachTarget(context.Background(), "never-existed")
+	_, err = attachTarget(context.Background(), resolved{Name: "never-existed"})
 	require.ErrorContains(t, err, "no session named")
 }
 
@@ -54,7 +54,7 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	// Nothing got the chance to write a reason, and the refusal says so
 	// rather than guessing one.
 	buildEndedAfterKill(t, "killed")
-	_, err := attachTarget(context.Background(), "killed")
+	_, err := attachTarget(context.Background(), resolved{Name: "killed"})
 	require.EqualError(t, err, `session "killed" has already ended for a reason upterm didn't record`,
 		"a session that ended without saying how still says that much")
 
@@ -67,7 +67,7 @@ func TestAttachTargetExplainsHowAnEndedSessionEnded(t *testing.T) {
 	rec.SignalNumber = ptr(15)
 	writeRecordRaw(t, path, rec)
 
-	_, err = attachTarget(context.Background(), "signaled")
+	_, err = attachTarget(context.Background(), resolved{Name: "signaled"})
 	require.EqualError(t, err, `session "signaled" has already ended by signal SIGTERM`,
 		"a signalled session names the signal, since there is no exit code to name")
 }
@@ -132,7 +132,7 @@ func TestAttachTargetRefusesARecordWithoutAnAttachSocket(t *testing.T) {
 	rec.AttachSocket = ""
 	writeRecordRaw(t, d.RecordPath(), rec)
 
-	_, err := attachTarget(context.Background(), "old")
+	_, err := attachTarget(context.Background(), resolved{Name: "old"})
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -150,7 +150,7 @@ func TestAttachTargetRefusesARecordWithoutHostKeys(t *testing.T) {
 		r.Status = sessiondir.StatusReady
 	}))
 
-	_, err := attachTarget(context.Background(), "no-host-key")
+	_, err := attachTarget(context.Background(), resolved{Name: "no-host-key"})
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -164,7 +164,7 @@ func TestAttachTargetTellsAStartingSessionApartFromAnOldOne(t *testing.T) {
 	d := claimSession(t, "still-starting")
 	releaseAtEnd(t, d)
 
-	_, err := attachTarget(context.Background(), "still-starting")
+	_, err := attachTarget(context.Background(), resolved{Name: "still-starting"})
 	require.ErrorContains(t, err, "still starting")
 	require.NotContains(t, err.Error(), "restart", "waiting is the advice, not restarting")
 }
@@ -181,7 +181,7 @@ func TestAttachTargetRefusesARecordWithAnUnparsableHostKey(t *testing.T) {
 		r.HostKeys = []string{"not a real key"}
 	}))
 
-	_, err := attachTarget(context.Background(), "bad-host-key")
+	_, err := attachTarget(context.Background(), resolved{Name: "bad-host-key"})
 	require.ErrorContains(t, err, "attach")
 }
 
@@ -191,18 +191,112 @@ func TestResolveAttachName(t *testing.T) {
 	require.ErrorContains(t, err, "no running session")
 
 	buildReady(t, "only")
-	name, err := resolveAttachName(context.Background(), "")
+	r, err := resolveAttachName(context.Background(), "")
 	require.NoError(t, err)
-	require.Equal(t, "only", name)
+	require.Equal(t, resolved{Name: "only"}, r, "the only session is a name, with no launch pinned")
 
 	buildReady(t, "another")
 	_, err = resolveAttachName(context.Background(), "")
 	require.ErrorContains(t, err, "another")
 	require.ErrorContains(t, err, "only")
 
-	name, err = resolveAttachName(context.Background(), "explicit")
+	r, err = resolveAttachName(context.Background(), "explicit")
 	require.NoError(t, err)
-	require.Equal(t, "explicit", name)
+	require.Equal(t, resolved{Name: "explicit"}, r)
+}
+
+// A session ID attaches to the session it names, to the same socket, with the
+// same keys, as its name does.
+func TestAttachTargetByID(t *testing.T) {
+	setupSessionRoots(t)
+	buildReady(t, "ready") // session ID sid-1
+
+	r, err := resolveAttachName(context.Background(), "sid-1")
+	require.NoError(t, err)
+	byID, err := attachTarget(context.Background(), r)
+	require.NoError(t, err)
+	byName, err := attachTarget(context.Background(), resolved{Name: "ready"})
+	require.NoError(t, err)
+	require.Equal(t, byName, byID)
+	require.Equal(t, "ready", r.Name)
+}
+
+// An ended session given by ID is refused as it is by name, in the words of
+// its record.
+func TestAttachRefusesAnEndedSessionGivenByIDInOneLine(t *testing.T) {
+	setupSessionRoots(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	endHeld(t, readyHeld(t, "build", "sid-1"))
+
+	stdout, stderr, code := runCLI(t, "attach", "sid-1")
+	require.Equal(t, exitAttachFailed, code)
+	require.Empty(t, stdout)
+	require.Equal(t, "upterm: session \"build\" has already ended with status 3\n", stderr)
+}
+
+// The session given by ID has ended and its name is another's: attach does
+// not dial the other session's socket, which the record found would name.
+func TestAttachTargetByIDRefusesWhenTheNameWasReused(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	require.NoError(t, a.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+	r, err := resolveAttachName(context.Background(), "sid-1")
+	require.NoError(t, err)
+
+	endHeld(t, a)
+	b := readyHeld(t, "build", "sid-2")
+	require.NoError(t, b.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+
+	got, err := attachTarget(context.Background(), r)
+	// Named with the ID it was given: the name is the running session's now.
+	require.EqualError(t, err, `session "build" (ID sid-1) has already ended for a reason upterm didn't record`)
+	require.Empty(t, got.Socket, "nothing to dial")
+
+	// Whereas the name, which never pinned a launch, attaches to what holds it.
+	got, err = attachTarget(context.Background(), resolved{Name: "build"})
+	require.NoError(t, err)
+	require.Equal(t, b.LaunchID(), got.LaunchID)
+}
+
+// The same for a record with no launch ID: the session ID the argument matched
+// pins it, so attach does not dial the socket of whatever took the name.
+func TestAttachTargetByIDOfARecordWithNoLaunchIDRefusesWhenTheNameWasReused(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	require.NoError(t, a.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+	rec := a.Record()
+	rec.LaunchID = ""
+	writeRecordRaw(t, a.RecordPath(), rec)
+	r, err := resolveAttachName(context.Background(), "sid-1")
+	require.NoError(t, err)
+	require.Empty(t, r.LaunchID)
+
+	endHeld(t, a)
+	b := readyHeld(t, "build", "sid-2")
+	require.NoError(t, b.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+
+	got, err := attachTarget(context.Background(), r)
+	require.EqualError(t, err, `session "build" (ID sid-1) has already ended for a reason upterm didn't record`)
+	require.Empty(t, got.Socket, "nothing to dial")
+}
+
+// ~? looks the session up by name, so an attachment made by ID reports on it
+// under the name the ID resolved to.
+func TestAttachStatusForASessionGivenByIDFindsIt(t *testing.T) {
+	setupSessionRoots(t)
+	buildReady(t, "ready") // session ID sid-1
+
+	r, err := resolveAttachName(context.Background(), "sid-1")
+	require.NoError(t, err)
+	tgt, err := attachTarget(context.Background(), r)
+	require.NoError(t, err)
+
+	src := attachStatusSource(r, tgt)
+	require.Equal(t, "ready", src.Name)
+	src.Escape = '~'
+	lines := statusLines(context.Background(), src, nil)
+	require.NotEmpty(t, lines)
+	require.Equal(t, "upterm: session ready: 0 guests; the relay is connected", lines[0])
 }
 
 func TestAttachExitError(t *testing.T) {

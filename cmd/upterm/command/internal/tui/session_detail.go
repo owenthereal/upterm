@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
@@ -41,18 +40,6 @@ func IsTTY() bool {
 // TermWidth returns the terminal width, defaulting to 80 if unavailable
 func TermWidth() int {
 	return getTermWidth()
-}
-
-// RunModel runs a bubbletea model with automatic TTY detection.
-// For non-TTY environments, just prints View() once and returns.
-func RunModel(model tea.Model) (tea.Model, error) {
-	if !IsTTY() {
-		// Non-TTY: print View() once (lipgloss auto-strips colors)
-		fmt.Print(model.View())
-		return model, nil
-	}
-	p := tea.NewProgram(model, tea.WithAltScreen())
-	return p.Run()
 }
 
 // SessionDetail holds session information for display
@@ -97,7 +84,18 @@ type SessionDetail struct {
 	TunnelReason  string
 	TunnelLostAt  time.Time
 	NextAttemptAt time.Time
+
+	// JoinLabel and JoinValue are the join timeout's row: its label ("Join
+	// timeout:" or "Join deadline:") and what it says, which the caller words
+	// since it depends on where the state came from. Both are empty when
+	// there is nothing to say, and the view then has no row.
+	JoinLabel string
+	JoinValue string
 }
+
+// LabelWidth is the width of the label column, in the view and in any text
+// that lines its rows up with it.
+const LabelWidth = 18
 
 // The values of SessionDetail.Access.
 const (
@@ -343,7 +341,7 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	var b strings.Builder
 
 	// Layout constants
-	labelWidth := 18
+	labelWidth := LabelWidth
 	valueWidth := max(width-labelWidth-2, 20)
 
 	// Title. A session that has not reached ready has no session ID yet, and a
@@ -403,6 +401,12 @@ func renderSessionDetail(detail SessionDetail, width int) string {
 	// row rather than one that guesses.
 	if detail.Guests != nil {
 		renderProseRow(&b, "Guests:", guestsRow(*detail.Guests), labelWidth, valueWidth, ValueStyle)
+	}
+	// The join timeout is a setting of the session like the rows above, so it
+	// sits with them in the labels' column. After the last client it ran
+	// under the guests, out of line with everything else.
+	if detail.JoinLabel != "" {
+		renderProseRow(&b, detail.JoinLabel, detail.JoinValue, labelWidth, valueWidth, ValueStyle)
 	}
 
 	// Commands section - each command on its own line for readability.

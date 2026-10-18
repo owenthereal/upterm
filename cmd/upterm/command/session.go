@@ -31,6 +31,11 @@ import (
 var (
 	flagAdminSocket string
 	flagOutput      string
+	// flagListOutput is `session list`'s own, not flagOutput: the list takes
+	// its format from the command line alone, and sharing the variable of the
+	// commands that also take it from env and config would let their value
+	// reach it.
+	flagListOutput string
 )
 
 // sessionQueryTimeout bounds every wait a read-only session command makes on
@@ -75,6 +80,130 @@ func errNoSession(name string) error {
 	return ExitCodeError{Code: notFoundCode, Err: fmt.Errorf("no session named %q", name)}
 }
 
+// resolved is what a session argument named: the session's name, and, when it
+// was given by ID, the launch that ID belongs to.
+//
+// The launch is what makes an ID name one session. A name is free the moment
+// its session ends, so a command that kept only the name could go on to stop
+// or change whichever session took it over. Every step after resolution
+// reads the record by name and checks it against LaunchID, when there is one:
+// see matchesLaunch.
+//
+// Every record upterm writes has a launch ID. One without, written by hand or
+// damaged, is pinned by the session ID the argument matched instead.
+type resolved struct {
+	Name string
+	// LaunchID is empty when the argument was a name, which names whatever
+	// launch holds it now, as it always has, or when the record the ID matched
+	// has no launch ID.
+	LaunchID string
+	// SessionID is the ID the argument matched, and empty when it was a name.
+	// It lets a report of a session whose name another launch took say whose
+	// ID it was given, when that session's own record is gone, and it pins
+	// the session when its record has no launch ID.
+	SessionID string
+}
+
+// afterResolve, when a test sets it, runs between resolveSession and the
+// first read of the session it resolved, so that the test can end the session
+// and let another take its name at the one point that can happen. Nil outside
+// tests.
+var afterResolve func()
+
+// resolveSession is the session an argument names: an exact name when one
+// has a record, held or ended, else the session whose ID is exactly arg, with
+// its launch. An argument that is neither comes back as itself, to be found
+// missing by the step that reads it, which says so in its own words and exit
+// code.
+//
+// The name comes first because it always has: an ID that happens to be some
+// other session's name must not make that name unreachable. Both are exact.
+func resolveSession(ctx context.Context, arg string) (resolved, error) {
+	r, err := resolveArg(ctx, arg)
+	if err != nil {
+		return resolved{}, err
+	}
+	if afterResolve != nil {
+		afterResolve()
+	}
+	return r, nil
+}
+
+func resolveArg(ctx context.Context, arg string) (resolved, error) {
+	stateRoot := utils.UptermStateDir()
+
+	// What is not a valid name is not looked up as one: Inspect would refuse
+	// it, and the step that reads it will say why.
+	if sessiondir.ValidateName(arg) == nil {
+		rec, _, err := sessiondir.Inspect(ctx, stateRoot, arg)
+		if err != nil {
+			return resolved{}, err
+		}
+		if rec != nil {
+			return resolved{Name: arg}, nil
+		}
+	}
+
+	name, launchID, found, err := sessiondir.FindByID(ctx, stateRoot, arg)
+	if err != nil {
+		return resolved{}, err
+	}
+	if !found {
+		return resolved{Name: arg}, nil
+	}
+	return resolved{Name: name, LaunchID: launchID, SessionID: arg}, nil
+}
+
+// matchesLaunch is the check every step after resolveSession makes of the
+// record it reads by name: when the argument was an ID, a record for any other
+// session means the one it named has ended and its name was reused. The launch
+// tells them apart, and for a record that has none (every record upterm writes
+// has one, so it was written by hand or damaged) the session ID the argument
+// matched does; a record with no session ID yet is not that session. A name
+// argument has neither to check, so it matches.
+func matchesLaunch(r resolved, rec *sessiondir.Record) bool {
+	switch {
+	case r.LaunchID != "":
+		return rec.LaunchID == r.LaunchID
+	case r.SessionID != "":
+		return rec.SessionID == r.SessionID
+	}
+	return true
+}
+
+// goneRecord stands for a session given by ID whose name another launch holds
+// now. Its own record went when that launch claimed the name, and with it the
+// only account of how it ended, so this says that the session is over, which
+// the ID established, and nothing about how. The ID is the one the argument
+// matched, so it is still this session's own.
+func goneRecord(r resolved) *sessiondir.Record {
+	return &sessiondir.Record{Name: r.Name, LaunchID: r.LaunchID, SessionID: r.SessionID, Reason: sessiondir.ReasonUnknown}
+}
+
+// named is subject, the session's name as a line writes it, followed by the ID
+// the argument gave when it was one. It is for the lines about a session whose
+// name another launch holds now: the name alone would read as that other
+// session, which these commands have not touched. An argument that was a name
+// has no ID to add, and its line is the name's.
+func (r resolved) named(subject string) string {
+	if r.SessionID == "" {
+		return subject
+	}
+	return subject + " (ID " + r.SessionID + ")"
+}
+
+// replacedNotStopped and replacedNotChanged are what `session stop` and
+// `session set` say when the session they were asked about is no longer the
+// one holding its name. Nothing was sent to the one that does. The pointer
+// names the name, which shows what holds it.
+func replacedNotStopped(r resolved) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", r.named(r.Name), r.Name)
+}
+
+func replacedNotChanged(r resolved) error {
+	return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", r.named(r.Name), r.Name)
+}
+
 // waitExitCode maps a finished session's recorded outcome onto this command's
 // exit status. Every reason is named; a default returning 0 would report an
 // outcome nobody established as a success, which is the one answer a waiter
@@ -101,13 +230,133 @@ func waitExitCode(rec *sessiondir.Record) int {
 	}
 }
 
-// sessionTemplateData holds data for template output
-type sessionTemplateData struct {
+// currentInfo is what `session current -o json` prints and what its template
+// reads. It is its own struct rather than sessionInfo because its presence
+// rules differ field by field: the five keys the command has always printed
+// are always there, and everything the daemon's answer may not carry is left
+// out when it doesn't. It is built from that answer alone, so the command
+// needs no record and answers wherever the admin socket does.
+type currentInfo struct {
+	// The five keys the command has always printed, present even when empty,
+	// from fields every daemon sends. The template has always read them by
+	// these names.
 	SessionID    string `json:"sessionId"`
 	ClientCount  int    `json:"clientCount"`
 	Host         string `json:"host"`
 	Command      string `json:"command"`
 	ForceCommand string `json:"forceCommand"`
+
+	// Always present too, and from the same kind of field: the connected
+	// clients and the authorized keys, which every daemon sends. ClientCount
+	// includes the session's own terminals and GuestCount doesn't, as in
+	// `session info`. The counts are the daemon's, so CountsKnown is always
+	// true here. Access is "anyone" when there are no authorized keys, else
+	// "allowlist". ConnectedClients is left out when nobody is connected.
+	GuestCount       int      `json:"guestCount"`
+	CountsKnown      bool     `json:"countsKnown"`
+	Access           string   `json:"access"`
+	ConnectedClients []string `json:"connectedClients,omitempty"`
+
+	// From fields a daemon has sent since 0.32.0 (launch_id and join_state)
+	// and since 0.37.0 (open). The launch is the daemon's: it sends none when
+	// it claimed no name (see launch_id in host/api/api.proto), and the key is
+	// left out then. Open is printed only when true, and as the daemon gives it
+	// whatever the status, where `session info` leaves it out for a session
+	// that isn't connected. The join fields are read as `session info` reads
+	// them: only when join_state is there, with a guest's join disabling the
+	// timeout. Times are UTC.
+	LaunchID           string    `json:"launchId,omitempty"`
+	Open               bool      `json:"open,omitempty"`
+	JoinStateSource    string    `json:"joinStateSource,omitempty"`
+	JoinTimeout        string    `json:"joinTimeout,omitempty"`
+	JoinDeadline       time.Time `json:"joinDeadline,omitzero"`
+	FirstGuestJoinedAt time.Time `json:"firstGuestJoinedAt,omitzero"`
+
+	// From the optional fields, which only a daemon newer than 0.38.0 sends.
+	// Each is left out when the daemon doesn't send it, and a string is left
+	// out when the daemon sends it empty too, which is how it says there is
+	// nothing to report: no reconnect before the relay has said, no reason
+	// while the tunnel is up. A false is the daemon's answer and is printed.
+	// Times are UTC.
+	Name                         string    `json:"name,omitempty"`
+	Status                       string    `json:"status,omitempty"`
+	Reconnect                    string    `json:"reconnect,omitempty"`
+	TunnelReason                 string    `json:"tunnelReason,omitempty"`
+	TunnelLostAt                 time.Time `json:"tunnelLostAt,omitzero"`
+	NextAttemptAt                time.Time `json:"nextAttemptAt,omitzero"`
+	StartConfirmed               *bool     `json:"startConfirmed,omitempty"`
+	ReadOnly                     *bool     `json:"readOnly,omitempty"`
+	FileTransfer                 string    `json:"fileTransfer,omitempty"`
+	FileTransferApprovalRequired *bool     `json:"fileTransferApprovalRequired,omitempty"`
+	LocalForwarding              *bool     `json:"localForwarding,omitempty"`
+
+	// The connect strings, built from the host and SSH user every daemon
+	// sends, but printed only when the status the daemon reports says guests
+	// can use them, which is `session info`'s rule: a disconnected session
+	// keeps a connect string that can't connect, and a daemon that doesn't
+	// report its status doesn't say whether its can.
+	SSHCommand  string `json:"sshCommand,omitempty"`
+	JoinCommand string `json:"joinCommand,omitempty"`
+}
+
+// currentInfoFrom builds currentInfo from the daemon's answer alone. The
+// join fields are read as `session info` reads a live answer
+// (withLiveJoinState), the claim rule included.
+func currentInfoFrom(sess *api.GetSessionResponse) currentInfo {
+	info := currentInfo{
+		SessionID:    sess.GetSessionId(),
+		ClientCount:  len(sess.GetConnectedClients()),
+		Host:         sess.GetHost(),
+		Command:      strings.Join(sess.GetCommand(), " "),
+		ForceCommand: strings.Join(sess.GetForceCommand(), " "),
+
+		GuestCount:  countGuests(sess.GetConnectedClients()),
+		CountsKnown: true,
+		Access:      accessOf(sess.GetAuthorizedKeys()),
+
+		LaunchID: sess.GetLaunchId(),
+		Open:     sess.GetOpen(),
+
+		Name:                         sess.GetName(),
+		Status:                       sess.GetStatus(),
+		Reconnect:                    sess.GetReconnect(),
+		TunnelReason:                 sess.GetTunnelReason(),
+		TunnelLostAt:                 unixNanoUTC(sess.GetTunnelLostAtUnixNano()),
+		NextAttemptAt:                unixNanoUTC(sess.GetNextAttemptAtUnixNano()),
+		StartConfirmed:               sess.StartConfirmed,
+		ReadOnly:                     sess.ReadOnly,
+		FileTransfer:                 sess.GetFileTransfer(),
+		FileTransferApprovalRequired: sess.FileTransferApprovalRequired,
+		LocalForwarding:              sess.LocalForwarding,
+	}
+	for _, c := range sess.GetConnectedClients() {
+		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
+	}
+
+	join := withLiveJoinState(sessionInfo{}, sess)
+	info.JoinStateSource = join.JoinStateSource
+	info.JoinTimeout = join.JoinTimeout
+	info.JoinDeadline = join.JoinDeadline
+	info.FirstGuestJoinedAt = join.FirstGuestJoinedAt
+
+	if joinable(info.Status) {
+		// A host URL that won't parse costs the connect strings, not the
+		// answer: the rest of it is still the daemon's.
+		if detail, err := buildSessionDetail(sess); err == nil {
+			info.SSHCommand = detail.SSHCommand
+			info.JoinCommand = detail.JoinCommand
+		}
+	}
+	return info
+}
+
+// unixNanoUTC is the moment n names, in UTC, or the zero time for 0, which
+// names none: the daemon leaves a time it doesn't have unset.
+func unixNanoUTC(n int64) time.Time {
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
 }
 
 func sessionCmd() *cobra.Command {
@@ -148,6 +397,17 @@ in constrained environments where XDG directories are unavailable.`, sessiondir.
 		Args: cobra.ExactArgs(0),
 		RunE: listRunE,
 	}
+
+	// Only the command line sets it: an output key or UPTERM_OUTPUT is meant
+	// for the commands that take one, and must neither turn this listing into
+	// JSON nor make it fail.
+	cmd.Flags().StringVarP(&flagListOutput, "output", "o", "", "Output format: json")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
+	_ = cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"})
+	// Registered here as `session info` registers it: env and config bind only
+	// to a command's own flags, so without it the listing's JSON would print
+	// the guest addresses they hide everywhere else.
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }
@@ -269,11 +529,20 @@ as in the example below, then run 'upterm session wait NAME'.`,
 // the socket dies with the process, so it can never answer "did it finish".
 //
 // Bound to the launch resolved on entry. A name is reused, so the session
-// that answers at the end need not be the one the caller asked about.
-func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
+// that answers at the end need not be the one the caller asked about. Given an
+// ID, the launch is the one the ID names, from the start: a name that was
+// reused before the first read is reported as the session that ended, not
+// waited on.
+func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 	stateRoot := utils.UptermStateDir()
 
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return 0, err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -282,10 +551,13 @@ func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
 	if rec == nil {
 		// Absent means only "not found within retained history": Prune
 		// removes anything unheld and older than RecordRetention.
-		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, sessiondir.RecordRetention)
+		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, retentionText(sessiondir.RecordRetention))
+	}
+	if !matchesLaunch(r, rec) {
+		return finishWait(out, r.named(name), goneRecord(r))
 	}
 
-	waited := rec.LaunchID
+	waited := rec
 	if !held {
 		return finishWait(out, name, rec)
 	}
@@ -316,8 +588,10 @@ func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
 		if cur == nil {
 			return 0, fmt.Errorf("session %s disappeared while waiting; its outcome is unavailable", name)
 		}
-		if cur.LaunchID != waited {
-			return 0, waitLaunchChanged(name, waited, cur.LaunchID)
+		// The ID's pin as well as the launch: a record with no launch ID has
+		// the same launch as any other that has none.
+		if cur.LaunchID != waited.LaunchID || !matchesLaunch(r, cur) {
+			return 0, waitLaunchChanged(name, waited, cur)
 		}
 		if curHeld {
 			continue
@@ -329,8 +603,8 @@ func waitSession(ctx context.Context, name string, out io.Writer) (int, error) {
 	}
 }
 
-func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error) {
-	_, _ = fmt.Fprintln(out, waitLine(name, endedFromRecord(rec)))
+func finishWait(out io.Writer, subject string, rec *sessiondir.Record) (int, error) {
+	_, _ = fmt.Fprintln(out, waitLine(subject, endedFromRecord(rec)))
 	return waitExitCode(rec), nil
 }
 
@@ -339,8 +613,21 @@ func finishWait(out io.Writer, name string, rec *sessiondir.Record) (int, error)
 // replacement would report the new session's outcome as the old one's, and
 // the caller cannot notice -- the name it asked about is the name that
 // answered.
-func waitLaunchChanged(name, waited, found string) error {
-	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, waited, found)
+func waitLaunchChanged(name string, waited, found *sessiondir.Record) error {
+	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, launchLabel(waited), launchLabel(found))
+}
+
+// launchLabel is what a message calls the launch a record describes: its launch
+// ID, or for a record that has none (see matchesLaunch) its session ID, so that
+// the two a message sets side by side are never both blank.
+func launchLabel(rec *sessiondir.Record) string {
+	switch {
+	case rec.LaunchID != "":
+		return rec.LaunchID
+	case rec.SessionID != "":
+		return rec.SessionID
+	}
+	return "a session with no ID"
 }
 
 func stop() *cobra.Command {
@@ -367,9 +654,15 @@ Exits 4 when no session has the name, and 1 for any other failure.`,
 }
 
 // stopSession asks the session named to end and waits for it to have ended.
-func stopSession(ctx context.Context, name string, out io.Writer) error {
+func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -377,6 +670,13 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	}
 	if rec == nil {
 		return errNoSession(name)
+	}
+	// Before anything is sent: the stop below names the launch of the record
+	// just read, which is whatever holds the name now. Given an ID whose
+	// session has ended and whose name another took, that is the other
+	// session's launch, and its daemon would accept the stop.
+	if !matchesLaunch(r, rec) {
+		return replacedNotStopped(r)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -421,12 +721,15 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		// below, for the reason Unimplemented is: it is an answer, and a
 		// guess from the record cannot improve on one.
 		if status.Code(err) == codes.FailedPrecondition {
-			return fmt.Errorf("session %s has been replaced since it was read and was not stopped; inspect it again with 'upterm session info %s'", name, name)
+			return replacedNotStopped(r)
 		}
 		if rec.Status == sessiondir.StatusStarting {
 			return fmt.Errorf("session %s is still starting and cannot be stopped yet (%s); try again in a moment", name, pidOf(rec))
 		}
-		return fmt.Errorf("session %s is not answering on its admin socket (%s): %w", name, pidOf(rec), err)
+		// What the socket said is for --debug: "rpc error: code = Unavailable
+		// ..." tells a person nothing they can act on, where the log does.
+		logCause(ctx, "the admin socket did not answer a stop", name, err)
+		return errors.New(isntAnswering(name, rec) + seeLog("; see %s", rec.LogPath))
 	}
 
 	// Acknowledged. The name is free once this launch has released it, or
@@ -437,14 +740,14 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastInspectErr != nil {
-				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, stopWaitTimeout, lastInspectErr)
+				return fmt.Errorf("session %s acknowledged the stop but its completion could not be confirmed after %s: %w", name, shortDuration(stopWaitTimeout), lastInspectErr)
 			}
-			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, stopWaitTimeout, pidOf(rec))
+			return fmt.Errorf("session %s acknowledged the stop but is still running after %s (%s)", name, shortDuration(stopWaitTimeout), pidOf(rec))
 		}
 		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
 		cancelPoll()
-		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
+		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID || !matchesLaunch(r, cur)) {
 			break
 		}
 		lastInspectErr = err
@@ -460,7 +763,7 @@ func stopSession(ctx context.Context, name string, out io.Writer) error {
 	// it. A record that can't be read, or that another launch has written
 	// since, says nothing about this launch, and the acknowledgement stands.
 	final, err := sessiondir.ReadRecord(stateRoot, name)
-	if err == nil && final != nil && final.LaunchID == rec.LaunchID && final.Reason != sessiondir.ReasonStopped {
+	if err == nil && final != nil && final.LaunchID == rec.LaunchID && matchesLaunch(r, final) && final.Reason != sessiondir.ReasonStopped {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(final)))
 		return err
 	}
@@ -535,7 +838,7 @@ info NAME' shows what the session holds.`,
 				return fmt.Errorf("nothing to set: pass --join-timeout")
 			}
 			if joinTimeout < 0 {
-				return fmt.Errorf("--join-timeout must not be negative, got %s", joinTimeout)
+				return fmt.Errorf("--join-timeout must not be negative, got %s", shortDuration(joinTimeout))
 			}
 			return setSession(c.Context(), args[0], joinTimeout, os.Stdout)
 		},
@@ -547,9 +850,15 @@ info NAME' shows what the session holds.`,
 
 // setSession sets the named session's join timeout and reports what the
 // session answered.
-func setSession(ctx context.Context, name string, joinTimeout time.Duration, out io.Writer) error {
+func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out io.Writer) error {
 	stateRoot := utils.UptermStateDir()
 	lookupCtx, cancelLookup := context.WithTimeout(ctx, sessionQueryTimeout)
+	r, err := resolveSession(lookupCtx, arg)
+	if err != nil {
+		cancelLookup()
+		return err
+	}
+	name := r.Name
 	rec, held, err := sessiondir.Inspect(lookupCtx, stateRoot, name)
 	cancelLookup()
 	if err != nil {
@@ -557,6 +866,10 @@ func setSession(ctx context.Context, name string, joinTimeout time.Duration, out
 	}
 	if rec == nil {
 		return errNoSession(name)
+	}
+	// Before anything is sent, for stopSession's reason.
+	if !matchesLaunch(r, rec) {
+		return replacedNotChanged(r)
 	}
 	if !held {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(rec)))
@@ -572,14 +885,33 @@ func setSession(ctx context.Context, name string, joinTimeout time.Duration, out
 		return err
 	}
 	rpcCtx, cancelRPC := context.WithTimeout(ctx, sessionQueryTimeout)
+	// Dialled before anything is sent. The client connects lazily, so a
+	// request that failed can't say whether it ever left; a dial that failed
+	// can, and then the text can promise that nothing was changed. One budget
+	// covers both: a socket that answers the dial answers at once.
+	if err := dialAdmin(rpcCtx, adminSocket); err != nil {
+		cancelRPC()
+		return setFailed(ctx, r, rec, err, false, out)
+	}
 	// The launch that was inspected, for stopSession's reason: a session that
 	// ended between the read and this call hands its name and socket on.
 	resp, err := client.SetJoinTimeout(rpcCtx, &api.SetJoinTimeoutRequest{LaunchId: rec.LaunchID, TimeoutNanos: int64(joinTimeout)})
 	cancelRPC()
 	if err != nil {
-		return setFailed(ctx, name, rec, err, out)
+		return setFailed(ctx, r, rec, err, true, out)
 	}
 	return printSetOutcome(out, name, resp)
+}
+
+// dialAdmin connects to the admin socket and hangs up, to find out whether
+// anything is listening before a request is sent.
+func dialAdmin(ctx context.Context, socket string) error {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }
 
 // setFailed explains a SetJoinTimeout that got no answer. It reports what
@@ -587,16 +919,33 @@ func setSession(ctx context.Context, name string, joinTimeout time.Duration, out
 // taken effect, and an unreachable socket does not mean the session is
 // ending -- Unavailable can be transient -- so anything short of evidence is
 // "could not confirm", exit 1, never a success.
-func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr error, out io.Writer) error {
-	switch status.Code(rpcErr) {
-	case codes.Unimplemented:
-		return fmt.Errorf("session %s was started by an upterm older than 0.32.0 and cannot take a join timeout (%s); upgrading this upterm does not change a running session, so start it again with upterm 0.32.0 or newer", name, pidOf(rec))
-	case codes.FailedPrecondition:
-		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
-	case codes.Unavailable:
-		// Unreachable: the record may say where the session is.
-	default:
-		return notConfirmed(name, rec, rpcErr)
+//
+// sent is whether the request left. When it didn't, cause is the dial's error
+// and nothing was changed, which is the one thing that tells the two failures
+// apart; the record is still read, since the session may have ended or been
+// replaced while it was out of reach.
+func setFailed(ctx context.Context, r resolved, rec *sessiondir.Record, cause error, sent bool, out io.Writer) error {
+	name := r.Name
+	// The failure for when nothing settles what became of the request.
+	unresolved := func() error {
+		logCause(ctx, "the admin socket did not confirm the change", name, cause)
+		if !sent {
+			return errors.New(isntAnswering(name, rec) + "; nothing was changed")
+		}
+		return notConfirmed(name)
+	}
+
+	if sent {
+		switch status.Code(cause) {
+		case codes.Unimplemented:
+			return fmt.Errorf("session %s was started by an upterm older than 0.32.0 and cannot take a join timeout (%s); upgrading this upterm does not change a running session, so start it again with upterm 0.32.0 or newer", name, pidOf(rec))
+		case codes.FailedPrecondition:
+			return replacedNotChanged(r)
+		case codes.Unavailable:
+			// Unreachable: the record may say where the session is.
+		default:
+			return unresolved()
+		}
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, sessionQueryTimeout)
@@ -604,11 +953,11 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr 
 	cancel()
 	switch {
 	case err != nil:
-		return notConfirmed(name, rec, rpcErr)
+		return unresolved()
 	case cur == nil:
 		return errNoSession(name)
-	case cur.LaunchID != rec.LaunchID:
-		return fmt.Errorf("session %s has been replaced since it was read and was not changed; inspect it again with 'upterm session info %s'", name, name)
+	case cur.LaunchID != rec.LaunchID || !matchesLaunch(r, cur):
+		return replacedNotChanged(r)
 	case !curHeld:
 		// The name was released: the session is over.
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(cur)))
@@ -619,13 +968,28 @@ func setFailed(ctx context.Context, name string, rec *sessiondir.Record, rpcErr 
 	case cur.Status == sessiondir.StatusStarting:
 		return fmt.Errorf("session %s is still starting and its admin socket is not up yet (%s); try again in a moment", name, pidOf(cur))
 	default:
-		return notConfirmed(name, rec, rpcErr)
+		return unresolved()
 	}
 }
 
 // notConfirmed is the failure for a change nobody can vouch for either way.
-func notConfirmed(name string, rec *sessiondir.Record, rpcErr error) error {
-	return fmt.Errorf("could not confirm the change to session %s (%s): %w; it may still have taken effect, running 'upterm session set' again restarts the window, and 'upterm session info %s' shows what the session holds", name, pidOf(rec), rpcErr, name)
+func notConfirmed(name string) error {
+	return fmt.Errorf("couldn't confirm the change to session %s; it may still have taken effect. upterm session info %s shows what it holds", name, name)
+}
+
+// isntAnswering is what `session stop` and `session set` say first when a
+// held session's admin socket gives them nothing, with the pid so that a
+// person can end the process themselves.
+func isntAnswering(name string, rec *sessiondir.Record) string {
+	return fmt.Sprintf("session %s isn't answering on its admin socket (%s)", name, pidOf(rec))
+}
+
+// logCause records what an admin socket said, for --debug. The error a person
+// reads has the words that tell them what to do; the transport's own are here.
+func logCause(ctx context.Context, msg, name string, cause error) {
+	if logger := uptermctx.Logger(ctx); logger != nil {
+		logger.Debug(msg, "session", name, "error", cause)
+	}
 }
 
 // printSetOutcome says what the session did with the request, one line.
@@ -754,16 +1118,40 @@ func tidySessions(ctx context.Context) {
 }
 
 func listRunE(c *cobra.Command, args []string) error {
+	// Checked before anything is read, so a format that cannot be answered
+	// fails the same whether or not a session is running.
+	if flagListOutput != "" && flagListOutput != "json" {
+		return fmt.Errorf("invalid output format %q: must be 'json'", flagListOutput)
+	}
+
 	tidySessions(c.Context())
+
+	if flagListOutput == "json" {
+		infos, err := listInfos(c.Context(), utils.UptermRuntimeDir(), utils.UptermStateDir())
+		if err != nil {
+			return err
+		}
+		return writeSessionsJSON(os.Stdout, infos)
+	}
 
 	sessions, err := listSessions(c.Context(), utils.UptermRuntimeDir(), utils.UptermStateDir())
 	if err != nil {
 		return err
 	}
+	if len(sessions) == 0 {
+		// On stderr, so a script that reads the table gets nothing rather than
+		// a sentence to skip.
+		_, _ = fmt.Fprintln(os.Stderr, "upterm: no sessions are running")
+		return nil
+	}
 
-	model := tui.NewSessionListModel(sessions)
-	_, err = tui.RunModel(model)
-	return err
+	// Only a terminal has a width to fit: a pipe gets every cell whole.
+	width := 0
+	if tui.IsTTY() {
+		width = tui.TermWidth()
+	}
+	writeSessionTable(os.Stdout, sessionRows(sessions), width)
+	return nil
 }
 
 // sessionInfo is the single shape `session info -o json` returns, live or not.
@@ -794,11 +1182,20 @@ type sessionInfo struct {
 	ForceCommand string `json:"forceCommand,omitempty"`
 	SSHCommand   string `json:"sshCommand,omitempty"`
 	JoinCommand  string `json:"joinCommand,omitempty"`
-	ClientCount  int    `json:"clientCount"`
+	// Host is the relay the session was started against, as the daemon
+	// reports it (`session current` prints the same value under the same
+	// key). Absent unless the daemon answered for this launch.
+	Host        string `json:"host,omitempty"`
+	ClientCount int    `json:"clientCount"`
 	// GuestCount counts currently connected guests, including forwarding but
 	// excluding the session's own terminals. Scripts asking whether a terminal
 	// or SFTP guest ever joined should use FirstGuestJoinedAt.
-	GuestCount       int      `json:"guestCount"`
+	GuestCount int `json:"guestCount"`
+	// CountsKnown says whether the two counts came from the daemon. They are
+	// counted only for a joinable session whose daemon answered for this
+	// launch; otherwise they are 0, and false here is what tells that 0 from
+	// a session nobody has joined.
+	CountsKnown      bool     `json:"countsKnown"`
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
 	ExitCode         *int     `json:"exitCode,omitempty"`
@@ -807,6 +1204,21 @@ type sessionInfo struct {
 	// Open is true when anyone with the session ID can join and nobody was
 	// asked: no allowlist, and started with --accept. Absent otherwise.
 	Open bool `json:"open,omitempty"`
+	// Access is who can join: "anyone" with the session ID, or the
+	// "allowlist". It comes from the authorized keys every daemon reports,
+	// so it is there whenever the daemon answered for this launch.
+	Access string `json:"access,omitempty"`
+	// What the host decided at startup, and guests may do: whether the host
+	// confirmed the start rather than passing --accept, read-only, which
+	// file transfers ("off", "downloads" or "all"), whether each transfer
+	// waits for the host's approval, and local port forwarding. Each is the
+	// daemon's own optional field, absent when the daemon doesn't report it:
+	// unknown, not false. A daemon that reports them reports false as false.
+	StartConfirmed               *bool  `json:"startConfirmed,omitempty"`
+	ReadOnly                     *bool  `json:"readOnly,omitempty"`
+	FileTransfer                 string `json:"fileTransfer,omitempty"`
+	FileTransferApprovalRequired *bool  `json:"fileTransferApprovalRequired,omitempty"`
+	LocalForwarding              *bool  `json:"localForwarding,omitempty"`
 	// FirstGuestJoinedAt is when a terminal or SFTP guest first joined,
 	// latched and never moved by a later join; zero and omitted when none
 	// ever did. Unlike this timestamp, guestCount includes forwarding
@@ -839,6 +1251,15 @@ type sessionInfo struct {
 	// joinCaveat is why a held session's join fields came from the record,
 	// for the human line; not part of the JSON.
 	joinCaveat string
+	// notAnswering is true for a held session whose admin socket gave no
+	// answer for this launch, so that the human summary can say its status is
+	// the record's word; not part of the JSON, which has joinStateSource.
+	notAnswering bool
+	// nameLabel is what the human summary's Name row says when the name alone
+	// would name another session: a session given by ID whose name a later
+	// launch holds. Empty otherwise; not part of the JSON, whose name is the
+	// name and whose sessionId is the ID.
+	nameLabel string
 }
 
 // statusEnded is the reader's inference, not a status any session writes:
@@ -856,7 +1277,9 @@ const (
 	caveatUnreported = "the session's upterm does not report it"
 )
 
-// lookup resolves a session by name.
+// lookup reports a resolved session: the one holding its name or, for a
+// session given by ID whose name another launch has taken since, that session
+// as ended (see goneRecord).
 //
 // Record and ownership come from one Inspect call, under the registry lock. An
 // earlier draft read them separately, which could mix generations — A's record
@@ -874,8 +1297,8 @@ const (
 // Handing it back is what stops a caller that wants the full live detail from
 // asking again: a second query returns whatever holds the name at that
 // instant, which need not be the session the first one confirmed.
-func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionResponse, error) {
-	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+func lookup(ctx context.Context, r resolved) (sessionInfo, *api.GetSessionResponse, error) {
+	rec, held, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), r.Name)
 	if err != nil {
 		return sessionInfo{}, nil, err
 	}
@@ -884,7 +1307,15 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		// No record at all, held or not: not found within retained history.
 		// Checked before either branch uses rec, which is the nil dereference
 		// the earlier draft had.
-		return sessionInfo{}, nil, errNoSession(name)
+		return sessionInfo{}, nil, errNoSession(r.Name)
+	}
+
+	if !matchesLaunch(r, rec) {
+		// The session given by ID is over, whatever the record that holds its
+		// name now says about the one that took it.
+		info := infoFromRecord(goneRecord(r), statusEnded)
+		info.nameLabel = r.named(r.Name)
+		return info, nil, nil
 	}
 
 	if !held {
@@ -894,6 +1325,18 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 		return infoFromRecord(rec, statusEnded), nil, nil
 	}
 
+	return heldInfo(ctx, utils.UptermRuntimeDir(), rec)
+}
+
+// heldInfo reports a session whose name is held: what its record says, and,
+// when its admin socket answers for the run the record describes, what the
+// daemon says too. lookup answers for one name with it, and the listing for
+// each of the names it finds, so an element of the listing is the object
+// `session info` returns for that session.
+//
+// The response is nil unless the record says ready or reconnecting and the
+// socket answered for this launch: see lookup for why it is handed back.
+func heldInfo(ctx context.Context, runtimeRoot string, rec *sessiondir.Record) (sessionInfo, *api.GetSessionResponse, error) {
 	// Held: the recorded status is current and refines liveness — starting,
 	// ready, reconnecting or disconnected.
 	info := infoFromRecord(rec, rec.Status)
@@ -901,7 +1344,7 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	// Where the session answers, published for the caller and used for the
 	// dial below. The record's path, not one built under this process's
 	// runtime root: see adminSocketFor.
-	adminSocket, err := adminSocketFor(utils.UptermRuntimeDir(), rec)
+	adminSocket, err := adminSocketFor(runtimeRoot, rec)
 	if err != nil {
 		return sessionInfo{}, nil, err
 	}
@@ -920,9 +1363,11 @@ func lookup(ctx context.Context, name string) (sessionInfo, *api.GetSessionRespo
 	sess, err := session(ctx, adminSocket)
 	if err != nil || !sameLaunch(rec, sess) {
 		info.joinCaveat = caveatUnanswered
+		info.notAnswering = true
 		return info, nil, nil
 	}
 	info = withLiveJoinState(info, sess)
+	info = withSessionReport(info, sess)
 
 	// Only ready and reconnecting say the connect string is one anyone can
 	// act on: a reconnecting session comes back under the same one. After a
@@ -982,8 +1427,34 @@ func withLiveJoinState(info sessionInfo, sess *api.GetSessionResponse) sessionIn
 	return info
 }
 
+// withSessionReport adds what the daemon's answer says about the session as a
+// whole, true whatever its tunnel is doing: the relay it was started against,
+// who can join, and what guests may do. The last are the daemon's optional
+// fields, each taken only when it is there, so a daemon from before them
+// leaves them unknown rather than false.
+func withSessionReport(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
+	info.Host = sess.GetHost()
+	info.Access = accessOf(sess.GetAuthorizedKeys())
+	info.StartConfirmed = sess.StartConfirmed
+	info.ReadOnly = sess.ReadOnly
+	info.FileTransfer = sess.GetFileTransfer()
+	info.FileTransferApprovalRequired = sess.FileTransferApprovalRequired
+	info.LocalForwarding = sess.LocalForwarding
+	return info
+}
+
+// accessOf is who can join a session with these authorized keys: anyone with
+// the session ID when there are none, else the allowlist.
+func accessOf(keys []*api.AuthorizedKey) string {
+	if len(keys) == 0 {
+		return tui.AccessAnyone
+	}
+	return tui.AccessAllowlist
+}
+
 // infoFromRecord reports what the record knows, under the status the caller
-// has decided on.
+// has decided on. Its times are given in UTC, whatever zone the record was
+// written in: the supervisor writes the tunnel's in local time.
 func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 	info := sessionInfo{
 		Name:               rec.Name,
@@ -998,19 +1469,27 @@ func infoFromRecord(rec *sessiondir.Record, status string) sessionInfo {
 		ExitCode:           rec.ExitCode,
 		Signal:             rec.Signal,
 		SignalNumber:       rec.SignalNumber,
-		FirstGuestJoinedAt: rec.FirstGuestJoinedAt,
-		Reconnect:          rec.Reconnect,
-		TunnelLostAt:       rec.TunnelLostAt,
-		TunnelReason:       rec.TunnelReason,
-		TunnelError:        rec.TunnelError,
-		NextAttemptAt:      rec.NextAttemptAt,
+		FirstGuestJoinedAt: rec.FirstGuestJoinedAt.UTC(),
 	}
+	info = withRecordedTunnel(info, rec)
 	if rec.JoinTimeout > 0 {
 		info.JoinTimeout = shortDuration(rec.JoinTimeout)
 	}
-	info.JoinDeadline = rec.JoinDeadline
+	info.JoinDeadline = rec.JoinDeadline.UTC()
 	info = withClaimRule(info)
 	info.JoinStateSource = joinStateFromRecord
+	return info
+}
+
+// withRecordedTunnel adds the record's account of the tunnel: whether the
+// relay reconnects, and the outage it is in or was in when it ended. Times
+// in UTC; a zero time stays zero, and is left out of the JSON.
+func withRecordedTunnel(info sessionInfo, rec *sessiondir.Record) sessionInfo {
+	info.Reconnect = rec.Reconnect
+	info.TunnelLostAt = rec.TunnelLostAt.UTC()
+	info.TunnelReason = rec.TunnelReason
+	info.TunnelError = rec.TunnelError
+	info.NextAttemptAt = rec.NextAttemptAt.UTC()
 	return info
 }
 
@@ -1023,6 +1502,19 @@ func withClaimRule(info sessionInfo) sessionInfo {
 		info.JoinDeadline = time.Time{}
 	}
 	return info
+}
+
+// retentionText is a retention period as a person says it: in days when it is
+// a whole number of them, since 168h0m0s is a week to nobody.
+func retentionText(d time.Duration) string {
+	const day = 24 * time.Hour
+	switch {
+	case d == day:
+		return "1 day"
+	case d > 0 && d%day == 0:
+		return fmt.Sprintf("%d days", d/day)
+	}
+	return shortDuration(d)
 }
 
 // shortDuration writes d compact and normalised: Go's duration syntax
@@ -1039,75 +1531,87 @@ func shortDuration(d time.Duration) string {
 	return s
 }
 
-// joinTimeoutLine says what happened to the session's join timeout, not only
+// localZone is the zone absTime writes in: the machine's. It is a variable so
+// that a test can pin it; swapping time.Local itself would race with every
+// time.Now in the process, which reads it.
+var localZone = time.Local
+
+// absTime is t in the reader's local time with its date and zone, for
+// deadlines and events in the past: a time of day alone doesn't say which day
+// or where. The zone is always named. Go writes UTC for UTC, the zone
+// database's abbreviation for any other, and the offset ("-0700") for a zone
+// that has no abbreviation, as on a machine without a zone database.
+func absTime(t time.Time) string {
+	return t.In(localZone).Format("2006-01-02 15:04:05 MST")
+}
+
+// joinTimeoutRow says what happened to the session's join timeout, not only
 // what is set: a claimed session and one with no timeout would otherwise
 // print the same nothing, and a held session shown from the record says so
 // and why. An ended session's history is only as good as its last write -- a
 // crash can leave a pending snapshot after counting began -- so only
 // join_timeout, the outcome the session recorded itself, is stated as fact.
-func joinTimeoutLine(info sessionInfo) string {
-	deadline := info.JoinDeadline.UTC().Format(time.RFC3339)
+//
+// It returns the row's label and its value, empty when there is nothing to say.
+func joinTimeoutRow(info sessionInfo) (label, value string) {
 	if !info.FirstGuestJoinedAt.IsZero() {
-		return "Join timeout: disabled (guest joined at " + info.FirstGuestJoinedAt.UTC().Format(time.RFC3339) + ")"
+		return "Join timeout:", "disabled (guest joined at " + absTime(info.FirstGuestJoinedAt) + ")"
 	}
 	if info.Status == statusEnded {
 		switch {
 		case info.Reason == sessiondir.ReasonJoinTimeout && !info.JoinDeadline.IsZero():
-			return "Join timeout: fired at " + deadline
+			return "Join timeout:", "fired at " + absTime(info.JoinDeadline)
 		case !info.JoinDeadline.IsZero():
-			return "Join deadline: " + deadline + " (last recorded before the session ended)"
+			return "Join deadline:", absTime(info.JoinDeadline) + " (last recorded before the session ended)"
 		case info.JoinTimeout != "":
-			return "Join timeout: " + info.JoinTimeout + " (last recorded before the session ended)"
+			return "Join timeout:", info.JoinTimeout + " (last recorded before the session ended)"
 		default:
-			return ""
+			return "", ""
 		}
 	}
-	var line string
 	switch {
 	case !info.JoinDeadline.IsZero():
-		line = "Join deadline: " + deadline
+		label, value = "Join deadline:", absTime(info.JoinDeadline)
 	case info.JoinTimeout != "":
-		line = "Join timeout: " + info.JoinTimeout + " (counts from readiness)"
+		label, value = "Join timeout:", info.JoinTimeout+" (counts from readiness)"
 	case info.JoinStateSource == joinStateFromRecord:
-		line = "Join timeout: none recorded"
+		label, value = "Join timeout:", "none recorded"
 	default:
-		return "" // the daemon confirms there is none
+		return "", "" // the daemon confirms there is none
 	}
 	if info.JoinStateSource == joinStateFromRecord {
 		caveat := info.joinCaveat
 		if caveat == "" {
 			caveat = caveatUnanswered
 		}
-		line += " (from the record; " + caveat + ")"
+		value += " (from the record; " + caveat + ")"
 	}
-	return line
-}
-
-// printJoinTimeout prints joinTimeoutLine, if there is one.
-func printJoinTimeout(info sessionInfo) {
-	if line := joinTimeoutLine(info); line != "" {
-		fmt.Println(line)
-	}
+	return label, value
 }
 
 // withLiveDetail adds what only a running session can answer: who is connected
 // and how to join them.
+//
+// Everything but the connect strings is the daemon's answer as it stands, so it
+// is taken whether or not the relay's URL parses. A URL that does not is a
+// reason to leave out the commands built from it, not the clients the daemon
+// listed: a count of none beside countsKnown false would say the daemon had
+// not answered, when it had.
 func withLiveDetail(info sessionInfo, sess *api.GetSessionResponse) sessionInfo {
-	detail, err := buildSessionDetail(sess)
-	if err != nil {
-		// The record's own view stands. A host URL we cannot parse is a reason
-		// to report less, not to fail a lookup that already has an answer.
-		return info
+	info.Command = strings.Join(sess.GetCommand(), " ")
+	info.ForceCommand = strings.Join(sess.GetForceCommand(), " ")
+	for _, c := range sess.GetConnectedClients() {
+		info.ConnectedClients = append(info.ConnectedClients, clientDesc(c))
 	}
+	info.ClientCount = len(sess.GetConnectedClients())
+	info.GuestCount = countGuests(sess.GetConnectedClients())
+	info.CountsKnown = true
+	info.Open = sess.GetOpen()
 
-	info.Command = detail.Command
-	info.ForceCommand = detail.ForceCommand
-	info.SSHCommand = detail.SSHCommand
-	info.JoinCommand = detail.JoinCommand
-	info.ConnectedClients = detail.ConnectedClients
-	info.ClientCount = len(detail.ConnectedClients)
-	info.GuestCount = countGuests(sess.ConnectedClients)
-	info.Open = detail.Open
+	if detail, err := buildSessionDetail(sess); err == nil {
+		info.SSHCommand = detail.SSHCommand
+		info.JoinCommand = detail.JoinCommand
+	}
 	return info
 }
 
@@ -1149,7 +1653,11 @@ func adminSocketFor(runtimeRoot string, rec *sessiondir.Record) (string, error) 
 }
 
 func infoRunE(c *cobra.Command, args []string) error {
-	name := args[0]
+	// Checked before anything is read, so a format that cannot be answered
+	// fails the same whether or not the session exists.
+	if flagOutput != "" && flagOutput != "json" {
+		return fmt.Errorf("invalid output format %q: must be 'json'", flagOutput)
+	}
 
 	// One deadline for the whole lookup, which waits on the registry and then
 	// on the admin socket: budgeting them separately would let a name that is
@@ -1157,16 +1665,16 @@ func infoRunE(c *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(c.Context(), sessionQueryTimeout)
 	defer cancel()
 
-	info, live, err := lookup(ctx, name)
+	r, err := resolveSession(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	info, live, err := lookup(ctx, r)
 	if err != nil {
 		return err
 	}
 
-	if flagOutput != "" {
-		if flagOutput != "json" {
-			return fmt.Errorf("invalid output format %q: must be 'json'", flagOutput)
-		}
-
+	if flagOutput == "json" {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(info)
@@ -1180,7 +1688,7 @@ func infoRunE(c *cobra.Command, args []string) error {
 	// name.
 	if live != nil {
 		if detail, err := buildSessionDetail(live); err == nil {
-			detail.Name = name
+			detail.Name = r.Name
 			// The status the lookup settled on, which the socket's answer does
 			// not carry: the summary below prints one for a session that has
 			// ended, and `session list` prints one for every row, so the one
@@ -1192,8 +1700,8 @@ func infoRunE(c *cobra.Command, args []string) error {
 			detail.AdminSocket = info.AdminSocket
 			// And the tunnel's state, which is the record's too.
 			detail = withTunnelState(detail, info)
+			detail.JoinLabel, detail.JoinValue = joinTimeoutRow(info)
 			tui.PrintSessionDetail(detail)
-			printJoinTimeout(info)
 			return nil
 		}
 	}
@@ -1201,10 +1709,6 @@ func infoRunE(c *cobra.Command, args []string) error {
 	printSessionSummary(info)
 	return nil
 }
-
-// summaryLabelWidth is the width of the summary's label column, which the
-// longest label ("Reconnect:") and a space fill.
-const summaryLabelWidth = 11
 
 // printSessionSummary prints what the record knows, for a session whose admin
 // socket is gone. Answering only while the process is alive would make
@@ -1216,36 +1720,53 @@ func printSessionSummary(info sessionInfo) {
 	// stays one line.
 	valueWidth := 0
 	if tui.IsTTY() {
-		valueWidth = tui.TermWidth() - summaryLabelWidth
+		valueWidth = tui.TermWidth() - tui.LabelWidth
 	}
 	writeSessionSummary(os.Stdout, info, valueWidth)
-	printJoinTimeout(info)
 }
 
-// writeSessionSummary writes the summary's rows to w. The status and hint are
-// sentences, so they wrap to valueWidth at spaces, with continuation lines
+// writeSessionSummary writes the summary's rows to w, in the view's label
+// column so that the two read as one layout. The status, hint and join row
+// are sentences, so they wrap to valueWidth at spaces, with continuation lines
 // indented under the value; a valueWidth of 0 leaves them on one line.
 func writeSessionSummary(w io.Writer, info sessionInfo, valueWidth int) {
 	// The status, hint and relay note are the detail view's, so the two never
 	// word the same outage differently.
 	detail := withTunnelState(tui.SessionDetail{Status: info.Status}, info)
 
-	_, _ = fmt.Fprintf(w, "Name:      %s\n", info.Name)
-	writeSummaryRow(w, "Status:", tui.StatusText(detail), valueWidth)
+	name := info.Name
+	if info.nameLabel != "" {
+		name = info.nameLabel
+	}
+	writeSummaryRow(w, "Name:", name, 0)
+	status := tui.StatusText(detail)
+	if info.notAnswering && info.Status == sessiondir.StatusReady {
+		// The record says ready, and the session was asked and said nothing:
+		// without this the row reads as the session's own word.
+		status += " (not answering)"
+	}
+	writeSummaryRow(w, "Status:", status, valueWidth)
 	if hint := tui.StatusHint(detail); hint != "" {
 		writeSummaryRow(w, "Hint:", hint, valueWidth)
 	}
 	if note := tui.ReconnectNote(detail); note != "" {
-		_, _ = fmt.Fprintf(w, "Reconnect: %s\n", note)
+		writeSummaryRow(w, "Reconnect:", note, 0)
 	}
-	if info.Reason != "" {
-		_, _ = fmt.Fprintf(w, "Reason:    %s\n", info.Reason)
+	// Only a session that has ended has an outcome. Until then the record
+	// holds the placeholder it was claimed with, and publishing that teardown
+	// has begun leaves it there, so a reason before the end reads as one
+	// nobody recorded.
+	if info.Reason != "" && info.Status == statusEnded {
+		writeSummaryRow(w, "Reason:", info.Reason, 0)
 	}
 	if info.ExitCode != nil {
-		_, _ = fmt.Fprintf(w, "Exit code: %d\n", *info.ExitCode)
+		writeSummaryRow(w, "Exit code:", strconv.Itoa(*info.ExitCode), 0)
 	}
 	if info.Signal != "" {
-		_, _ = fmt.Fprintf(w, "Signal:    %s\n", info.Signal)
+		writeSummaryRow(w, "Signal:", info.Signal, 0)
+	}
+	if label, value := joinTimeoutRow(info); label != "" {
+		writeSummaryRow(w, label, value, valueWidth)
 	}
 }
 
@@ -1259,9 +1780,9 @@ func writeSummaryRow(w io.Writer, label, value string, valueWidth int) {
 	}
 	for i, line := range lines {
 		if i == 0 {
-			_, _ = fmt.Fprintf(w, "%-*s%s\n", summaryLabelWidth, label, line)
+			_, _ = fmt.Fprintf(w, "%-*s%s\n", tui.LabelWidth, label, line)
 		} else {
-			_, _ = fmt.Fprintf(w, "%*s%s\n", summaryLabelWidth, "", line)
+			_, _ = fmt.Fprintf(w, "%*s%s\n", tui.LabelWidth, "", line)
 		}
 	}
 }
@@ -1296,6 +1817,11 @@ func currentRunE(c *cobra.Command, args []string) error {
 	}
 
 	if flagAdminSocket == "" {
+		// The flag was given, and empty: the variable, if set, isn't what
+		// is wrong here.
+		if c.Flags().Changed("admin-socket") {
+			return notInSession(quiet, "--admin-socket is empty")
+		}
 		return notInSession(quiet, "$UPTERM_ADMIN_SOCKET is not set")
 	}
 
@@ -1339,8 +1865,35 @@ func currentRunE(c *cobra.Command, args []string) error {
 		return ExitCodeError{Code: 1, Err: err}
 	}
 
-	tui.PrintSessionDetail(detail)
+	tui.PrintSessionDetail(withReportedState(detail, sess))
 	return nil
+}
+
+// withReportedState adds to detail what the daemon says of itself: its name,
+// and, once the session isn't ready, its status and the outage behind it, and
+// it takes the connect strings away where guests can't use them. All of it is
+// the daemon's own answer and never a record's, since this command works from
+// the socket alone; a daemon that sends none of it leaves the view as it was.
+// A ready session has no status row, as before, but a relay that can't bring a
+// dropped session back is said at every status.
+func withReportedState(detail tui.SessionDetail, sess *api.GetSessionResponse) tui.SessionDetail {
+	detail.Name = sess.GetName()
+	detail.Reconnect = sess.GetReconnect()
+	st := sess.GetStatus()
+	// Where guests can't use a connect string, none is shown, as in
+	// `session info` and the JSON. A daemon that reports no status doesn't
+	// say, and keeps its lines.
+	if st != "" && !joinable(st) {
+		detail.JoinCommand, detail.SSHCommand = "", ""
+		detail.SFTPEnabled, detail.SFTPCommand, detail.SCPUpload, detail.SCPDownload = false, "", "", ""
+	}
+	if st != "" && st != sessiondir.StatusReady {
+		detail.Status = st
+		detail.TunnelReason = sess.GetTunnelReason()
+		detail.TunnelLostAt = unixNanoUTC(sess.GetTunnelLostAtUnixNano())
+		detail.NextAttemptAt = unixNanoUTC(sess.GetNextAttemptAtUnixNano())
+	}
+	return detail
 }
 
 // notInSession is the answer to "is there a session here" when there is not
@@ -1365,21 +1918,11 @@ func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) erro
 		return nil, fmt.Errorf("invalid output format %q: must be 'json' or 'go-template=<template>'", format)
 	}
 
-	templateData := func(sess *api.GetSessionResponse) sessionTemplateData {
-		return sessionTemplateData{
-			SessionID:    sess.SessionId,
-			ClientCount:  len(sess.ConnectedClients),
-			Host:         sess.Host,
-			Command:      strings.Join(sess.Command, " "),
-			ForceCommand: strings.Join(sess.ForceCommand, " "),
-		}
-	}
-
 	if format == "json" {
 		return func(w io.Writer, sess *api.GetSessionResponse) error {
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
-			return enc.Encode(templateData(sess))
+			return enc.Encode(currentInfoFrom(sess))
 		}, nil
 	}
 
@@ -1393,7 +1936,7 @@ func sessionOutput(format string) (func(io.Writer, *api.GetSessionResponse) erro
 	}
 
 	return func(w io.Writer, sess *api.GetSessionResponse) error {
-		return tmpl.Execute(w, templateData(sess))
+		return tmpl.Execute(w, currentInfoFrom(sess))
 	}, nil
 }
 
@@ -1568,11 +2111,6 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		relay = strings.TrimSuffix(relay, ":"+port)
 	}
 
-	access := tui.AccessAllowlist
-	if len(sess.AuthorizedKeys) == 0 {
-		access = tui.AccessAnyone
-	}
-
 	var sshCmd string
 	if scheme == "ssh" {
 		sshCmd = fmt.Sprintf("ssh %s@%s", user, host)
@@ -1628,7 +2166,7 @@ func buildSessionDetail(sess *api.GetSessionResponse) (tui.SessionDetail, error)
 		AuthorizedKeys:   displayAuthorizedKeys(sess.AuthorizedKeys),
 		ConnectedClients: clients,
 		Open:             sess.GetOpen(),
-		Access:           access,
+		Access:           accessOf(sess.AuthorizedKeys),
 		Guests:           guestPermissions(sess),
 	}, nil
 }

@@ -35,15 +35,11 @@ func TestHostDetachKeyLeavesTheSessionRunning(t *testing.T) {
 	require.NoError(t, h.waitForText(h.host, "upterm: detached; the session continues. Reattach with upterm attach "+name+", or stop it with upterm session stop "+name, 10*time.Second))
 	require.NoError(t, h.waitForText(h.host, "HOST_STATUS=0", 10*time.Second), "a detach exits 0")
 
-	// Still running, and still answering. The marker is split across a shell
-	// concatenation so that the line typed does not itself contain it:
-	// waiting for a marker the terminal has already echoed back would match
-	// before upterm had printed a byte, and capture an empty screen.
-	require.NoError(t, h.host.SendLine(h.ctx, "upterm session info "+name+` -o json; echo "INFO""_DONE"`))
-	require.NoError(t, h.waitForText(h.host, "INFO_DONE", 20*time.Second))
-	out, err := h.host.Capture(h.ctx)
-	require.NoError(t, err)
-	require.Contains(t, out, `"status": "ready"`)
+	// Still running, and still answering. The JSON is read from the command
+	// rather than the pane, which is shorter than it.
+	out, err := h.runCLI(20*time.Second, "session", "info", name, "-o", "json")
+	require.NoError(t, err, "%s", out)
+	require.Contains(t, string(out), `"status": "ready"`)
 
 	// Another terminal picks it up, with the earlier output in the replay.
 	term := h.splitPane(h.host)
@@ -56,12 +52,10 @@ func TestHostDetachKeyLeavesTheSessionRunning(t *testing.T) {
 	// And session stop ends it, with the record saying so.
 	require.NoError(t, h.host.SendLine(h.ctx, "clear; upterm session stop "+name+"; echo STOP_STATUS=$?"))
 	require.NoError(t, h.waitForText(h.host, "STOP_STATUS=0", 40*time.Second))
-	require.NoError(t, h.host.SendLine(h.ctx, "clear; upterm session info "+name+` -o json; echo "INFO2""_DONE"`))
-	require.NoError(t, h.waitForText(h.host, "INFO2_DONE", 20*time.Second))
-	out, err = h.host.Capture(h.ctx)
-	require.NoError(t, err)
-	require.Contains(t, out, `"status": "ended"`)
-	require.Contains(t, out, `"reason": "stopped"`)
+	out, err = h.runCLI(20*time.Second, "session", "info", name, "-o", "json")
+	require.NoError(t, err, "%s", out)
+	require.Contains(t, string(out), `"status": "ended"`)
+	require.Contains(t, string(out), `"reason": "stopped"`)
 }
 
 // --detach starts a session with no terminal at all and prints how to reach
@@ -71,17 +65,16 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 	name := fmt.Sprintf("e2e-bg-%d", time.Now().UnixNano()%1_000_000)
 	h.stopOnCleanup(name)
 
-	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --skip-host-key-check --server %s --private-key %s --name %s -o json -- bash --rcfile %s --noprofile; echo DETACH_STATUS=$?",
-		h.serverURL, h.keyFile, name, h.rcFile)
+	// The JSON goes to a file, as a script would take it: it is taller than
+	// the pane.
+	jsonFile := filepath.Join(h.tmpDir, "detach.json")
+	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --skip-host-key-check --server %s --private-key %s --name %s -o json -- bash --rcfile %s --noprofile >%s; echo DETACH_STATUS=$?",
+		h.serverURL, h.keyFile, name, h.rcFile, jsonFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "DETACH_STATUS=0", 30*time.Second))
 
-	out, err := h.host.Capture(h.ctx)
+	out, err := os.ReadFile(jsonFile)
 	require.NoError(t, err)
-	// The JSON is indented one field per line, so it survives a 200-column
-	// pane intact; take the lines between the braces.
-	start, end := strings.Index(out, "{"), strings.LastIndex(out, "}")
-	require.True(t, start >= 0 && end > start, "no JSON in:\n%s", out)
 	var info struct {
 		Name         string `json:"name"`
 		Status       string `json:"status"`
@@ -91,7 +84,7 @@ func TestDetachedHostPrintsJSONAndCanBeAttachedAndStopped(t *testing.T) {
 		LogPath      string `json:"logPath"`
 		Pid          int    `json:"pid"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(out[start:end+1]), &info), "not JSON: %s", out[start:end+1])
+	require.NoError(t, json.Unmarshal(out, &info), "not JSON: %s", out)
 	require.Equal(t, name, info.Name)
 	require.Equal(t, "ready", info.Status)
 	require.NotEmpty(t, info.SessionID)
@@ -247,24 +240,27 @@ func TestDetachedHostWithACommandThatExitsAtOnceStillReportsStarted(t *testing.T
 	name := fmt.Sprintf("e2e-bgx-%d", time.Now().UnixNano()%1_000_000)
 	h.stopOnCleanup(name)
 
-	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --skip-host-key-check --server %s --private-key %s --name %s -o json -- sh -c 'exit 0'; echo DETACH_STATUS=$?",
-		h.serverURL, h.keyFile, name)
+	// The JSON goes to a file, as a script would take it: it is taller than
+	// the pane. What upterm says on stderr stays on the pane.
+	jsonFile := filepath.Join(h.tmpDir, "detach.json")
+	hostCmd := fmt.Sprintf("clear; upterm host --detach --accept --skip-host-key-check --server %s --private-key %s --name %s -o json -- sh -c 'exit 0' >%s; echo DETACH_STATUS=$?",
+		h.serverURL, h.keyFile, name, jsonFile)
 	require.NoError(t, h.host.SendLine(h.ctx, hostCmd))
 	require.NoError(t, h.waitForText(h.host, "DETACH_STATUS=0", 30*time.Second),
 		"a session whose command ran is not a session that failed to start")
 
-	out, err := h.host.Capture(h.ctx)
+	screen, err := h.host.Capture(h.ctx)
 	require.NoError(t, err)
-	require.NotContains(t, out, "exited before reporting whether it started")
+	require.NotContains(t, screen, "exited before reporting whether it started")
 
-	start, end := strings.Index(out, "{"), strings.LastIndex(out, "}")
-	require.True(t, start >= 0 && end > start, "no JSON in:\n%s", out)
+	out, err := os.ReadFile(jsonFile)
+	require.NoError(t, err)
 	var info struct {
 		Name      string `json:"name"`
 		Status    string `json:"status"`
 		SessionID string `json:"sessionId"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(out[start:end+1]), &info), "not JSON: %s", out[start:end+1])
+	require.NoError(t, json.Unmarshal(out, &info), "not JSON: %s", out)
 	require.Equal(t, name, info.Name)
 	require.NotEmpty(t, info.SessionID)
 	require.NotEmpty(t, info.Status, "the status is the record's, and a report without one is refused")

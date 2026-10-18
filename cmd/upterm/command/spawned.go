@@ -494,26 +494,56 @@ func (s *spawnedSession) printStarted(ctx context.Context, claimed *api.Claimed,
 			info.JoinCommand = detail.JoinCommand
 			info.Open = detail.Open
 		}
+		// The relay, who can join and what guests may do, as the daemon
+		// reported them when it created the session: none of them can
+		// change while it runs. The counts are not taken from it: it was
+		// sent before anyone could connect, so they stay 0, with
+		// countsKnown false beside them.
+		info = withSessionReport(info, sess)
+	}
+	// The tunnel's state, which started doesn't carry: the record's, as
+	// `session info` reads it a moment later. The outage only while the
+	// record still says the status reported above, so that the object
+	// describes one state of the session; a tunnel that has gone down or come
+	// back since leaves it out rather than set beside a status it doesn't
+	// describe. Whether the relay reconnects never changes once known, so
+	// any record of this launch has it.
+	if rec := launchRecord(ctx, claimed.Name, claimed.LaunchId); rec != nil {
+		if rec.Status == st.Status {
+			info = withRecordedTunnel(info, rec)
+		} else {
+			info.Reconnect = rec.Reconnect
+		}
 	}
 	enc := json.NewEncoder(s.stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(info)
 }
 
-// statusHintTimeout bounds the record read behind --detach's hint: the
-// session is up and the line is all that is left to print, so a registry
-// that is slow to answer costs the hint, not the exit.
+// statusHintTimeout bounds the record read behind --detach's hint and its
+// JSON's tunnel fields: the session is up and the output is all that is left
+// to print, so a registry that is slow to answer costs those, not the exit.
 const statusHintTimeout = time.Second
+
+// launchRecord is name's record as it is now, when launchID's: nil when it
+// can't be read within statusHintTimeout or another launch holds the name.
+func launchRecord(ctx context.Context, name, launchID string) *sessiondir.Record {
+	ctx, cancel := context.WithTimeout(ctx, statusHintTimeout)
+	defer cancel()
+	rec, _, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
+	if err != nil || rec == nil || rec.LaunchID != launchID {
+		return nil
+	}
+	return rec
+}
 
 // recordedStatusHint is the view's Hint for launchID's status as its record
 // has it now: the record has the reason the tunnel is down, which the daemon's
 // report doesn't carry. "" when the record can't be read in time, is another
 // launch's, or doesn't say.
 func recordedStatusHint(ctx context.Context, name, launchID string) string {
-	ctx, cancel := context.WithTimeout(ctx, statusHintTimeout)
-	defer cancel()
-	rec, _, err := sessiondir.Inspect(ctx, utils.UptermStateDir(), name)
-	if err != nil || rec == nil || rec.LaunchID != launchID {
+	rec := launchRecord(ctx, name, launchID)
+	if rec == nil {
 		return ""
 	}
 	return tui.StatusHint(tui.SessionDetail{Status: rec.Status, TunnelReason: rec.TunnelReason})

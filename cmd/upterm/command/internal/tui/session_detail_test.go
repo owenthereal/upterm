@@ -591,6 +591,46 @@ func Test_renderSessionDetail_GuestsRowPosition(t *testing.T) {
 	assert.NotContains(t, renderSessionDetail(detail, 80), "Guests:", "a daemon that did not report permissions gets no row")
 }
 
+// The join timeout is a row of its own, in the labels' column with the rows
+// that describe the session, so it sits above the commands and the connected
+// guests instead of under the last of them. The caller words it; a view with
+// nothing to say about it has no row.
+func Test_renderSessionDetail_JoinRow(t *testing.T) {
+	detail := SessionDetail{
+		Name:             "demo",
+		Status:           "ready",
+		SessionID:        "sid-1",
+		Command:          "bash",
+		Host:             "ssh://example.com",
+		Access:           AccessAnyone,
+		SSHCommand:       "ssh sid-1@example.com",
+		ConnectedClients: []string{"guest 203.0.113.7:51234 SSH-2.0-OpenSSH_9.6"},
+		JoinLabel:        "Join deadline:",
+		JoinValue:        "2026-10-12 22:31:02 PDT (from the record; the session did not answer)",
+	}
+
+	want := "Session: sid-1\n\n" +
+		row("Name:", "demo") +
+		row("Status:", "ready") +
+		row("Command:", "bash") +
+		row("Relay:", "ssh://example.com") +
+		row("Access:", "open: anyone with the session ID can join") +
+		row("Join deadline:", "2026-10-12 22:31:02 PDT (from the record; the session did not answer)") +
+		"\n➤ SSH:\n    ssh sid-1@example.com\n" +
+		"\nConnected:\n  guest 203.0.113.7:51234 SSH-2.0-OpenSSH_9.6\n"
+	assert.Equal(t, want, renderSessionDetail(detail, 80))
+
+	detail.JoinLabel, detail.JoinValue = "", ""
+	assert.NotContains(t, renderSessionDetail(detail, 80), "Join", "nothing to say, no row")
+}
+
+// The summary lines its rows up with the view's, so the two read as one
+// layout: the label column is the view's.
+func TestLabelWidthIsTheViewsLabelColumn(t *testing.T) {
+	out := renderSessionDetail(SessionDetail{SessionID: "id", Name: "demo"}, 80)
+	assert.Contains(t, out, fmt.Sprintf("%-*s%s\n", LabelWidth, "Name:", "demo"))
+}
+
 // pinTerminal makes the view think stdout is a terminal, which is when it wraps.
 func pinTerminal(t *testing.T) {
 	t.Helper()

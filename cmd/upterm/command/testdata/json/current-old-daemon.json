@@ -1,0 +1,15 @@
+{
+  "access": "anyone",
+  "clientCount": 1,
+  "command": "bash",
+  "connectedClients": [
+    "host [redacted] SSH-2.0-upterm-attach SHA256:host"
+  ],
+  "countsKnown": true,
+  "forceCommand": "",
+  "guestCount": 0,
+  "host": "ssh://127.0.0.1:2222",
+  "joinStateSource": "daemon",
+  "launchId": "LAUNCH",
+  "sessionId": "sid-1"
+}

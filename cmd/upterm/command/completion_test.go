@@ -103,6 +103,7 @@ func TestOutputFormatsComplete(t *testing.T) {
 		// go-template= is a prefix, the template follows it: no space after.
 		{[]string{"session", "current", "-o", "g"}, []string{"go-template="}, noFileCompNoSpace},
 		{[]string{"session", "current", "-o", ""}, []string{"json", "go-template="}, noFileCompNoSpace},
+		{[]string{"version", "-o", ""}, []string{"json"}, noFileComp},
 	} {
 		got, directive := complete(t, tc.words...)
 		require.ElementsMatch(t, tc.want, got, tc.words)

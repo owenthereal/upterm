@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/protobuf/proto"
 )
 
 // scriptedDaemon is the far end of a spawn: a bootstrap.Child driven by a
@@ -39,6 +40,10 @@ type scriptedDaemon struct {
 	launchID string
 	ready    chan struct{} // closed once spawn has built the child
 	gone     chan struct{} // closed when the child's watcher fires (parent left while armed)
+
+	// amend, when set, adds to the session the daemon reports as created,
+	// for a case about what a daemon reports beyond the basics.
+	amend func(*api.GetSessionResponse)
 }
 
 func newScriptedDaemon(t *testing.T) (spawnFunc, *scriptedDaemon) {
@@ -78,7 +83,11 @@ func (d *scriptedDaemon) startup(t *testing.T, name string) <-chan api.Accept_De
 	go func() {
 		child := d.await()
 		_ = child.Claimed(&api.Claimed{Name: name, LaunchId: d.launchID, AdminSocket: "/run/a.sock", AttachSocket: "/run/t.sock", LogPath: "/var/log/upterm.log", Pid: 4242})
-		dec, err := child.SessionCreated(&api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open})
+		created := &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222", NodeAddr: "127.0.0.1:2222", SshUser: "u", Command: []string{"bash"}, Open: d.open}
+		if d.amend != nil {
+			d.amend(created)
+		}
+		dec, err := child.SessionCreated(created)
 		got <- dec
 		if err != nil || dec != api.Accept_ACCEPTED {
 			child.Failed("declined", false, true)
@@ -278,6 +287,8 @@ func TestHostChecksTheLaunchItStartedAfterADisconnect(t *testing.T) {
 }
 
 func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
+	// The JSON reads the session's record; there is none under these roots.
+	setupSessionRoots(t)
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
@@ -305,7 +316,26 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 	require.Equal(t, joinStateFromDaemon, info.JoinStateSource,
 		"joinStateSource is a key `session info -o json` always publishes; this shape has to match it too, "+
 			"and a daemon that reported its join state is the source even when there is no timeout")
+	require.Equal(t, "ssh://127.0.0.1:2222", info.Host)
+	require.Equal(t, "anyone", info.Access, "the daemon reported no authorized keys")
 	require.Empty(t, stderr.String())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+	// Both counts are there, as they always were, and say they weren't
+	// counted: nothing asked the daemon who is connected.
+	require.Equal(t, float64(0), got["clientCount"])
+	require.Equal(t, float64(0), got["guestCount"])
+	require.Equal(t, false, got["countsKnown"])
+	// This daemon reported none of what guests may do, so none of it is
+	// printed: unknown, not false.
+	for _, key := range []string{"startConfirmed", "readOnly", "fileTransfer", "fileTransferApprovalRequired", "localForwarding"} {
+		require.NotContains(t, got, key)
+	}
+	// And no record says anything about the tunnel.
+	for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
+		require.NotContains(t, got, key)
+	}
 
 	// The parent left after started; the daemon's watcher stays quiet.
 	select {
@@ -321,6 +351,7 @@ func TestSpawnedSessionDetachPrintsJSON(t *testing.T) {
 // deadline a `session info` run a moment later would show, not an inference
 // from the flag.
 func TestSpawnedSessionDetachPrintsJoinTimeout(t *testing.T) {
+	setupSessionRoots(t)
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
@@ -348,6 +379,7 @@ func TestSpawnedSessionDetachPrintsJoinTimeout(t *testing.T) {
 // relay that cannot reconnect -- and `upterm session info` would then answer
 // that for the launch this JSON describes.
 func TestSpawnedSessionDetachPrintsTheStatusItWasGiven(t *testing.T) {
+	setupSessionRoots(t)
 	spawn, d := newScriptedDaemon(t)
 	var stdout, stderr bytes.Buffer
 	s := newSession(t, spawn, nil, &stdout, &stderr)
@@ -362,6 +394,102 @@ func TestSpawnedSessionDetachPrintsTheStatusItWasGiven(t *testing.T) {
 	require.Equal(t, sessiondir.StatusDisconnected, info.Status,
 		"the parent prints the status the record carried, not ready by assumption")
 	require.Equal(t, "sid-1", info.SessionID, "the session is up; only its tunnel is not")
+}
+
+// The tunnel's state is the record's, as `session info` reads it, since
+// started carries the status and not the outage behind it. The outage is
+// printed only while the record still says the status that was reported, so
+// that the object describes one state of the session; reconnect is the
+// relay's and never changes, so any record of the launch has it. Times come
+// out in UTC, whatever zone the record was written in.
+func TestSpawnedSessionDetachPrintsTheTunnelFromTheRecord(t *testing.T) {
+	lost := time.Date(2026, 10, 13, 5, 0, 0, 0, time.FixedZone("PDT", -7*3600))
+	for _, tc := range []struct {
+		name      string
+		reported  string // the status started carries
+		recorded  string // the record's status when the parent reads it
+		ownLaunch bool
+		want      map[string]any
+	}{
+		{"the record says the status reported", sessiondir.StatusReconnecting, sessiondir.StatusReconnecting, true, map[string]any{
+			"reconnect":     "supported",
+			"tunnelLostAt":  "2026-10-13T12:00:00Z",
+			"tunnelReason":  "network",
+			"tunnelError":   "dial tcp 127.0.0.1:2222: connect: connection refused",
+			"nextAttemptAt": "2026-10-13T12:00:30Z",
+		}},
+		{"the tunnel went down after the status was reported", sessiondir.StatusReady, sessiondir.StatusReconnecting, true, map[string]any{
+			"reconnect": "supported",
+		}},
+		{"the record is another launch's", sessiondir.StatusReconnecting, sessiondir.StatusReconnecting, false, map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSessionRoots(t)
+			dir := claimSession(t, "s")
+			releaseAtEnd(t, dir)
+			require.NoError(t, dir.Update(func(r *sessiondir.Record) {
+				r.Status = tc.recorded
+				r.Reconnect = sessiondir.ReconnectSupported
+				r.TunnelLostAt = lost
+				r.TunnelReason = sessiondir.TunnelReasonNetwork
+				r.TunnelError = "dial tcp 127.0.0.1:2222: connect: connection refused"
+				r.NextAttemptAt = lost.Add(30 * time.Second)
+			}))
+
+			spawn, d := newScriptedDaemon(t)
+			if tc.ownLaunch {
+				d.launchID = dir.LaunchID()
+			}
+			var stdout, stderr bytes.Buffer
+			s := newSession(t, spawn, nil, &stdout, &stderr)
+			s.detach, s.jsonOut = true, true
+			dec := d.startup(t, "s")
+			go func() { <-dec; d.startWith(tc.reported) }()
+			require.NoError(t, s.run(context.Background()))
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+			require.Equal(t, tc.reported, got["status"], "the status is the one reported, whatever the record says now")
+			tunnel := map[string]any{}
+			for _, key := range []string{"reconnect", "tunnelLostAt", "tunnelReason", "tunnelError", "nextAttemptAt"} {
+				if v, ok := got[key]; ok {
+					tunnel[key] = v
+				}
+			}
+			require.Equal(t, tc.want, tunnel)
+		})
+	}
+}
+
+// What guests may do is what the daemon reported as it created the session:
+// a false it reported is printed as false, since only a daemon that knows
+// says it at all.
+func TestSpawnedSessionDetachPrintsWhatGuestsMayDo(t *testing.T) {
+	setupSessionRoots(t)
+	spawn, d := newScriptedDaemon(t)
+	d.amend = func(r *api.GetSessionResponse) {
+		r.AuthorizedKeys = []*api.AuthorizedKey{{Comment: "github:alice", PublicKeyFingerprints: []string{"SHA256:alice"}}}
+		r.StartConfirmed = proto.Bool(false)
+		r.ReadOnly = proto.Bool(true)
+		r.FileTransfer = proto.String("downloads")
+		r.FileTransferApprovalRequired = proto.Bool(false)
+		r.LocalForwarding = proto.Bool(false)
+	}
+	var stdout, stderr bytes.Buffer
+	s := newSession(t, spawn, nil, &stdout, &stderr)
+	s.detach, s.jsonOut = true, true
+	dec := d.startup(t, "s")
+	go func() { <-dec; d.start() }()
+	require.NoError(t, s.run(context.Background()))
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+	require.Equal(t, "allowlist", got["access"])
+	require.Equal(t, false, got["startConfirmed"])
+	require.Equal(t, true, got["readOnly"])
+	require.Equal(t, "downloads", got["fileTransfer"])
+	require.Equal(t, false, got["fileTransferApprovalRequired"])
+	require.Equal(t, false, got["localForwarding"])
 }
 
 // TestSpawnedSessionDetachRefusesAStatuslessReport: no daemon that speaks this
@@ -390,6 +518,7 @@ func TestSpawnedSessionDetachRefusesAStatuslessReport(t *testing.T) {
 func TestSpawnedSessionWarnsThatItIsOpen(t *testing.T) {
 	for _, jsonOut := range []bool{false, true} {
 		t.Run(fmt.Sprintf("json=%t", jsonOut), func(t *testing.T) {
+			setupSessionRoots(t)
 			spawn, d := newScriptedDaemon(t)
 			d.open = true
 			var stdout, stderr bytes.Buffer

@@ -539,6 +539,129 @@ func Test_ListLive_ReturnsOnlyHeldNames(t *testing.T) {
 	require.Equal(t, "sid-b", live[1].SessionID)
 }
 
+func Test_FindByID_FindsHeldAndEndedSessionsByTheirExactID(t *testing.T) {
+	runtimeA, runtimeB, stateRoot := splitRoots(t)
+	ctx := context.Background()
+
+	held, err := claim(t, runtimeA, stateRoot, "held")
+	require.NoError(t, err)
+	defer func() { _ = held.Release(ctx) }()
+	require.NoError(t, held.Update(func(r *Record) { r.SessionID = "sid-held" }))
+
+	// A session claimed under another runtime root is found all the same:
+	// the ID is looked up in the records, which the roots share.
+	other, err := claim(t, runtimeB, stateRoot, "other")
+	require.NoError(t, err)
+	defer func() { _ = other.Release(ctx) }()
+	require.NoError(t, other.Update(func(r *Record) { r.SessionID = "sid-other" }))
+
+	// Ended: the record stays, and a session ID names it still.
+	ended, err := claim(t, runtimeA, stateRoot, "ended")
+	require.NoError(t, err)
+	require.NoError(t, ended.Update(func(r *Record) { r.SessionID = "sid-ended" }))
+	require.NoError(t, ended.Release(ctx))
+
+	// Killed: a free lock under a record that still says ready.
+	killed, err := claim(t, runtimeA, stateRoot, "killed")
+	require.NoError(t, err)
+	require.NoError(t, killed.Update(func(r *Record) { r.Status = StatusReady; r.SessionID = "sid-killed" }))
+	require.NoError(t, killed.releaseKeepingDir())
+
+	for _, tc := range []struct {
+		id     string
+		name   string
+		launch string
+	}{
+		{"sid-held", "held", held.LaunchID()},
+		{"sid-other", "other", other.LaunchID()},
+		{"sid-ended", "ended", ended.LaunchID()},
+		{"sid-killed", "killed", killed.LaunchID()},
+	} {
+		name, launch, found, err := FindByID(ctx, stateRoot, tc.id)
+		require.NoError(t, err, tc.id)
+		require.True(t, found, tc.id)
+		require.Equal(t, tc.name, name, tc.id)
+		require.Equal(t, tc.launch, launch, "the launch that ID belongs to: %s", tc.id)
+	}
+}
+
+func Test_FindByID_IsExact(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	ctx := context.Background()
+
+	d, err := claim(t, runtimeRoot, stateRoot, "demo")
+	require.NoError(t, err)
+	defer func() { _ = d.Release(ctx) }()
+	require.NoError(t, d.Update(func(r *Record) { r.SessionID = "AbC123" }))
+
+	for _, id := range []string{"AbC12", "AbC1234", "abc123", "demo", " AbC123", "AbC123 "} {
+		_, _, found, err := FindByID(ctx, stateRoot, id)
+		require.NoError(t, err, id)
+		require.False(t, found, "%q is not the session's ID: no prefix, no case folding, no name", id)
+	}
+}
+
+// A session still starting has no ID yet, so its record's empty one would
+// match an empty argument. An argument that names nothing resolves to nothing.
+func Test_FindByID_NeverMatchesAnEmptyID(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	ctx := context.Background()
+
+	starting, err := claim(t, runtimeRoot, stateRoot, "starting")
+	require.NoError(t, err)
+	defer func() { _ = starting.Release(ctx) }()
+	require.Empty(t, starting.Record().SessionID, "a fresh claim has no session ID yet")
+
+	name, launch, found, err := FindByID(ctx, stateRoot, "")
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Empty(t, name)
+	require.Empty(t, launch)
+}
+
+func Test_FindByID_SkipsARecordItCannotRead(t *testing.T) {
+	runtimeRoot, stateRoot := roots(t)
+	ctx := context.Background()
+
+	corrupt, err := claim(t, runtimeRoot, stateRoot, "corrupt")
+	require.NoError(t, err)
+	defer func() { _ = corrupt.Release(ctx) }()
+	require.NoError(t, os.WriteFile(corrupt.RecordPath(), []byte("{not json"), 0600))
+
+	good, err := claim(t, runtimeRoot, stateRoot, "good")
+	require.NoError(t, err)
+	defer func() { _ = good.Release(ctx) }()
+	require.NoError(t, good.Update(func(r *Record) { r.SessionID = "sid-good" }))
+
+	name, _, found, err := FindByID(ctx, stateRoot, "sid-good")
+	require.NoError(t, err, "one bad entry costs its own row and not the lookup")
+	require.True(t, found)
+	require.Equal(t, "good", name)
+}
+
+func Test_FindByID_WithNoResultsDirectoryFindsNothing(t *testing.T) {
+	_, stateRoot := roots(t)
+	_, _, found, err := FindByID(context.Background(), stateRoot, "sid-1")
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+// The lookup reads records under the results registry lock, as Inspect does,
+// so that it cannot read one a claim is midway through publishing.
+func Test_FindByID_HoldsTheResultsRegistryLock(t *testing.T) {
+	_, stateRoot := roots(t)
+
+	held, err := lockRegistry(context.Background(), resultsRoot(stateRoot))
+	require.NoError(t, err)
+	defer releaseRegistry(held)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _, found, err := FindByID(ctx, stateRoot, "sid-1")
+	require.Error(t, err, "a registry held elsewhere is waited for, not read around")
+	require.False(t, found)
+}
+
 func TestReasonJoinTimeoutValue(t *testing.T) {
 	require.Equal(t, "join_timeout", ReasonJoinTimeout)
 }
