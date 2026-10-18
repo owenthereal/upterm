@@ -3554,6 +3554,113 @@ func TestAnIDOfARecordWithNoLaunchIDActsOnThatSession(t *testing.T) {
 	})
 }
 
+// endHeldWithoutLaunchID is endHeld for a record with no launch ID, which
+// Update would put back: the outcome is published by a direct write.
+func endHeldWithoutLaunchID(t *testing.T, d *sessiondir.Dir) {
+	t.Helper()
+
+	code := 3
+	rec := d.Record()
+	rec.LaunchID, rec.Status, rec.Reason, rec.ExitCode = "", sessiondir.StatusEnding, sessiondir.ReasonExited, &code
+	writeRecordRaw(t, d.RecordPath(), rec)
+	releaseOnce(d)
+}
+
+// The ID's pin holds for every read a command makes of the name, not only the
+// first. Two records with no launch ID have the same launch, so a check of
+// launches alone takes a replacement that has none either for the session the
+// ID named.
+
+// The wait follows the ID's session, not the name: a replacement with no
+// launch ID and another session ID is not the session being waited on, though
+// it ends with an outcome the wait could report.
+func TestWaitByIDOfARecordWithNoLaunchIDRefusesAReplacementWithNone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+
+		type result struct {
+			code int
+			err  error
+		}
+		done := make(chan result, 1)
+		var out bytes.Buffer
+		go func() {
+			code, err := waitSession(context.Background(), "sid-1", &out)
+			done <- result{code, err}
+		}()
+
+		// The wait has read the record and is blocked on its poll timer.
+		synctest.Wait()
+		endHeld(t, a)
+		endHeldWithoutLaunchID(t, readyHeldWithoutLaunchID(t, "build", "sid-2"))
+
+		time.Sleep(stopPollInterval)
+		synctest.Wait()
+		res := <-done
+		require.EqualError(t, res.err, "session build was replaced while waiting: sid-1 ended and sid-2 holds the name now; its outcome is not this one's")
+		require.Empty(t, out.String(), "nothing of the replacement's outcome")
+	})
+}
+
+// The error names each session by its launch ID, and by its session ID when it
+// has no launch ID, so that it never reads "  ended and  holds the name now".
+func TestWaitLaunchChangedNamesEachSessionByWhatIdentifiesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		waited, found sessiondir.Record
+		want          string
+	}{
+		{"both have launches", sessiondir.Record{LaunchID: "L1", SessionID: "sid-1"}, sessiondir.Record{LaunchID: "L2", SessionID: "sid-2"}, "L1 ended and L2 holds"},
+		{"neither has one", sessiondir.Record{SessionID: "sid-1"}, sessiondir.Record{SessionID: "sid-2"}, "sid-1 ended and sid-2 holds"},
+		{"only the replacement has one", sessiondir.Record{SessionID: "sid-1"}, sessiondir.Record{LaunchID: "L2"}, "sid-1 ended and L2 holds"},
+		{"the replacement has no ID at all", sessiondir.Record{SessionID: "sid-1"}, sessiondir.Record{}, "sid-1 ended and a session with no ID holds"},
+	} {
+		err := waitLaunchChanged("build", &tc.waited, &tc.found)
+		require.ErrorContains(t, err, tc.want, tc.name)
+	}
+}
+
+// A stop that was acknowledged is done once the name is free or another
+// session holds it, and a replacement with no launch ID is another session.
+// Neither the wait for that nor the look at the record afterwards takes it
+// for the one stopped.
+func TestStopByIDOfARecordWithNoLaunchIDTreatsAReplacementWithNoneAsAnotherSession(t *testing.T) {
+	old := stopWaitTimeout
+	stopWaitTimeout = time.Second
+	t.Cleanup(func() { stopWaitTimeout = old })
+
+	setupSessionRoots(t)
+	a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+	// The launch the daemon answers for is the record's: none. It ends and the
+	// name is taken before the answer leaves, so the first look at the name
+	// finds the replacement.
+	serveStubAdminWithStop(t, a.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, "", func() {
+		endHeld(t, a)
+		readyHeldWithoutLaunchID(t, "build", "sid-2")
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, stopSession(context.Background(), "sid-1", &out))
+	require.Equal(t, "session build stopped\n", out.String(), "the replacement's record says nothing about the session stopped")
+}
+
+// And set, when the request got no answer and the name is read again.
+func TestSetByIDOfARecordWithNoLaunchIDNamesTheIDWhenAReplacementWithNoneHoldsTheName(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+	serveStubAdminWithSet(t, a.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+		endHeld(t, a)
+		readyHeldWithoutLaunchID(t, "build", "sid-2")
+		return nil, status.Error(codes.Unavailable, "gone")
+	})
+
+	var out bytes.Buffer
+	err := setSession(context.Background(), "sid-1", time.Minute, &out)
+	require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'")
+	require.Empty(t, out.String())
+}
+
 // Not found keeps each command's code and words, whether or not the argument
 // could have been an ID.
 func TestWhatNeitherANameNorAnIDIsNotFoundAsBefore(t *testing.T) {

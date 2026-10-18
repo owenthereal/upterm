@@ -557,7 +557,7 @@ func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 		return finishWait(out, r.named(name), goneRecord(r))
 	}
 
-	waited := rec.LaunchID
+	waited := rec
 	if !held {
 		return finishWait(out, name, rec)
 	}
@@ -588,8 +588,10 @@ func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 		if cur == nil {
 			return 0, fmt.Errorf("session %s disappeared while waiting; its outcome is unavailable", name)
 		}
-		if cur.LaunchID != waited {
-			return 0, waitLaunchChanged(name, waited, cur.LaunchID)
+		// The ID's pin as well as the launch: a record with no launch ID has
+		// the same launch as any other that has none.
+		if cur.LaunchID != waited.LaunchID || !matchesLaunch(r, cur) {
+			return 0, waitLaunchChanged(name, waited, cur)
 		}
 		if curHeld {
 			continue
@@ -611,8 +613,21 @@ func finishWait(out io.Writer, subject string, rec *sessiondir.Record) (int, err
 // replacement would report the new session's outcome as the old one's, and
 // the caller cannot notice -- the name it asked about is the name that
 // answered.
-func waitLaunchChanged(name, waited, found string) error {
-	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, waited, found)
+func waitLaunchChanged(name string, waited, found *sessiondir.Record) error {
+	return fmt.Errorf("session %s was replaced while waiting: %s ended and %s holds the name now; its outcome is not this one's", name, launchLabel(waited), launchLabel(found))
+}
+
+// launchLabel is what a message calls the launch a record describes: its launch
+// ID, or for a record that has none (see matchesLaunch) its session ID, so that
+// the two a message sets side by side are never both blank.
+func launchLabel(rec *sessiondir.Record) string {
+	switch {
+	case rec.LaunchID != "":
+		return rec.LaunchID
+	case rec.SessionID != "":
+		return rec.SessionID
+	}
+	return "a session with no ID"
 }
 
 func stop() *cobra.Command {
@@ -732,7 +747,7 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 		pollCtx, cancelPoll := context.WithTimeout(ctx, min(sessionQueryTimeout, remaining))
 		cur, curHeld, err := sessiondir.Inspect(pollCtx, stateRoot, name)
 		cancelPoll()
-		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID) {
+		if err == nil && (!curHeld || cur == nil || cur.LaunchID != rec.LaunchID || !matchesLaunch(r, cur)) {
 			break
 		}
 		lastInspectErr = err
@@ -748,7 +763,7 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	// it. A record that can't be read, or that another launch has written
 	// since, says nothing about this launch, and the acknowledgement stands.
 	final, err := sessiondir.ReadRecord(stateRoot, name)
-	if err == nil && final != nil && final.LaunchID == rec.LaunchID && final.Reason != sessiondir.ReasonStopped {
+	if err == nil && final != nil && final.LaunchID == rec.LaunchID && matchesLaunch(r, final) && final.Reason != sessiondir.ReasonStopped {
 		_, err := fmt.Fprintln(out, alreadyEndedLine(name, endedFromRecord(final)))
 		return err
 	}
@@ -941,7 +956,7 @@ func setFailed(ctx context.Context, r resolved, rec *sessiondir.Record, cause er
 		return unresolved()
 	case cur == nil:
 		return errNoSession(name)
-	case cur.LaunchID != rec.LaunchID:
+	case cur.LaunchID != rec.LaunchID || !matchesLaunch(r, cur):
 		return replacedNotChanged(r)
 	case !curHeld:
 		// The name was released: the session is over.
