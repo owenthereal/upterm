@@ -42,13 +42,14 @@ func (e *emulation) render() ([]byte, error) {
 	enc.reset(budget - len(preamble))
 	enc.stop = e.stop
 	r := renderer{
-		enc:   enc,
-		term:  e.term,
-		parts: parts,
-		title: e.title,
-		rows:  e.join.Rows,
-		fits:  e.join.Cols == e.term.Width(),
-		rep:   rep,
+		enc:    enc,
+		term:   e.term,
+		parts:  parts,
+		title:  e.title,
+		titled: e.titled,
+		rows:   e.join.Rows,
+		fits:   e.join.Cols == e.term.Width(),
+		rep:    rep,
 	}
 	r.draw()
 	if enc.err != nil {
@@ -75,8 +76,11 @@ type renderer struct {
 	enc   *encoder
 	term  *vt.Emulator
 	parts uio.ReplayParts
-	title string
-	rows  int // the joiner's
+	// title is the one the stream last set, if titled: an empty one too,
+	// which clears the joiner's.
+	title  string
+	titled bool
+	rows   int // the joiner's
 	// fits is a joiner as wide as the render, where a character printed in
 	// the render's last column leaves a wrap pending, as it did on the
 	// session's terminal. A wider joiner gets no wrap, as a wider live
@@ -366,7 +370,7 @@ func (r *renderer) continuation(reprinted int) {
 	if t.Mode(modeReverseVideo).IsSet() {
 		_ = enc.put("\x1b[?5h")
 	}
-	if r.title != "" {
+	if r.titled {
 		_ = enc.put("\x1b]2;", r.title, "\x07")
 	}
 	if style, blink := t.CursorStyle(); style != vt.CursorBlock || !blink {

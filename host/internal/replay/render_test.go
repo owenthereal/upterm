@@ -708,6 +708,33 @@ func TestReplayTitleAndCursorStyle(t *testing.T) {
 	require.NotContains(t, string(render), "\x1b]2;")
 }
 
+// A title the session set and then cleared, by OSC 2 or OSC 0, is cleared on
+// the joiner's terminal too, as the raw ring clears it there. A session that
+// never set one, or set only the icon name, by OSC 1, sends none, and leaves
+// the joiner's own.
+func TestReplayClearsATitleTheSessionCleared(t *testing.T) {
+	join := func(t *testing.T, stream string) (joined []byte, title string) {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		b, _ := newReference(80, 24)
+		got := watchTitle(b)
+		_, _ = b.WriteString("\x1b]2;the joiner's own\x07")
+		_, _ = b.Write(joined)
+		return joined, *got
+	}
+	for _, clear := range []string{"\x1b]2;\x07", "\x1b]0;\x1b\\"} {
+		_, title := join(t, "\x1b]2;the title\x07text\r\n"+clear+"more\r\n")
+		require.Empty(t, title, "cleared by %q", clear)
+	}
+	for _, stream := range []string{"text\r\n", "\x1b]1;an icon name\x07text\r\n"} {
+		joined, title := join(t, stream)
+		require.NotContains(t, string(joined), "\x1b]2;")
+		require.Equal(t, "the joiner's own", title)
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

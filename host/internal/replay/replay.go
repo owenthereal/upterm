@@ -63,8 +63,13 @@ type emulation struct {
 	size  termsize.Size    // term's, the size of the last event passed
 	stop  func() bool      // ctx or the deadline, for the meter and the encoder
 	hist  history
-	title string
 	enc   encoder
+
+	// title is the window title the stream last set, by OSC 0 or OSC 2, and
+	// titled whether it set one at all: an empty title clears the joiner's,
+	// as the raw ring would, where a stream that set none leaves it.
+	title  string
+	titled bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -155,7 +160,7 @@ func (e *emulation) setUp() {
 	t.SetScrollOffFunc(e.hist.push)
 	t.SetScrollbackClearFunc(e.hist.clear)
 	t.SetReplyFunc(func([]byte) {})
-	t.SetCallbacks(vt.Callbacks{Title: func(title string) { e.title = title }})
+	t.SetCallbacks(vt.Callbacks{Title: func(title string) { e.title, e.titled = title, true }})
 	t.SetStopFunc(func() bool { return e.stop() })
 }
 
