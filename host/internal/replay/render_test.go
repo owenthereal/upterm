@@ -1169,6 +1169,40 @@ func TestReplayFailsOnASelectiveErase(t *testing.T) {
 	}
 }
 
+// A title the session pushed onto the terminal's title stack, by XTWINOPS 22
+// (CSI 22 ; Ps t), fails the render, named: x/vt keeps no stack, so a later
+// pop, XTWINOPS 23, would put back on the session's terminal a title the
+// joiner's never saved. A push of either name or of both counts, and still
+// does once popped. A pop alone renders: what it puts back was pushed before
+// the ring, which neither a raw replay nor the render holds.
+func TestReplayFailsOnASavedTitle(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"both names pushed", "\x1b[22;0t"},
+		{"a push with no second parameter", "\x1b[22t"},
+		{"the icon name pushed", "\x1b[22;1t"},
+		{"the window title pushed", "\x1b[22;2t"},
+		{"a push popped", "\x1b[22;0t\x1b]2;a title\x07\x1b[23;0t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a saved title")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a pop alone", "\x1b[23t"},
+		{"a pop of both names", "\x1b[23;0t"},
+		{"a pop of the window title", "\x1b[23;2t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

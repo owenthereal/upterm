@@ -85,6 +85,8 @@ type emulation struct {
 	// protected is set once the stream has turned character protection on,
 	// and selective once it has erased selectively (see watchProtection).
 	protected, selective bool
+	// savedTitle is set once the stream has pushed a title (see watchSaves).
+	savedTitle bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -183,6 +185,7 @@ func (e *emulation) setUp() {
 	e.watchDCS()
 	e.watchClipboard()
 	e.watchProtection()
+	e.watchSaves()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -423,6 +426,23 @@ func (e *emulation) watchProtection() {
 			return false
 		})
 	}
+}
+
+// watchSaves registers the handlers that note the stream saving state the
+// terminal keeps aside for a later sequence to put back: a title pushed onto
+// the title stack, by XTWINOPS 22 (CSI 22 ; Ps t), whichever names Ps saves.
+// x/vt keeps no such stack and ignores the pop, XTWINOPS 23, that restores
+// from it, so once a title is pushed the render can't tell what a pop on the
+// session's terminal puts back, and a joiner's terminal, which the push never
+// reached, would put back its own. x/vt has no CSI t handler of its own; this
+// returns false all the same, as watchColours' do.
+func (e *emulation) watchSaves() {
+	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+		if n, _, _ := params.Param(0, 0); n == 22 {
+			e.savedTitle = true
+		}
+		return false
+	})
 }
 
 // Feed offers the emulation more of the stream and runs on to the next

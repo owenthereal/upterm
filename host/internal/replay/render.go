@@ -521,6 +521,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.selective {
 		return rep{}, &IneligibleError{State: "a selective erase"}
 	}
+	if e.savedTitle {
+		return rep{}, &IneligibleError{State: "a saved title"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
