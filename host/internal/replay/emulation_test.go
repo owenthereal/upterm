@@ -477,6 +477,45 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("eee")}, collect(&h))
 }
 
+// The history tells whether the lines a render sends, from its cut on, hold
+// a wide character split in two, as splitWide tells for a screen's rows: a
+// split line it keeps is reported while the cut takes it in, and no longer
+// once the budget trims it off the front or a clear empties the history.
+func TestHistoryReportsALineWithASplitWideCharacter(t *testing.T) {
+	// The lines cost the history "a\r\n", 3 bytes; "中\r\n", 5; and "中a\r\n",
+	// 6, the "a" over the placeholder.
+	plain := uv.Line{{Content: "a", Width: 1}}
+	whole := uv.Line{{Content: "中", Width: 2}, {}}
+	split := uv.Line{{Content: "中", Width: 2}, {Content: "a", Width: 1}}
+	sends := func(h *history, room int) bool {
+		from, _ := h.newest(room)
+		return h.splitFrom(from)
+	}
+
+	h := history{max: 16}
+	h.push(whole)
+	require.False(t, sends(&h, h.max), "a whole wide character")
+	h.push(split)
+	h.push(plain)
+	require.True(t, sends(&h, h.max), "a split line kept")
+	require.True(t, sends(&h, 9), "a cut at the split line")
+	require.False(t, sends(&h, 8), "a split line older than the cut")
+
+	// Within 16 bytes, one more plain line trims the whole line off the
+	// front, and two more the split line.
+	h.push(plain)
+	require.True(t, sends(&h, h.max), "a split line kept past a trim")
+	h.push(plain)
+	h.push(plain)
+	require.Equal(t, [][]byte{[]byte("a"), []byte("a"), []byte("a"), []byte("a")}, collect(&h))
+	require.False(t, sends(&h, h.max), "a split line trimmed off the front")
+
+	h.push(split)
+	h.clear()
+	h.push(plain)
+	require.False(t, sends(&h, h.max), "a split line cleared")
+}
+
 // The history takes at most its budget, and keeps as many lines as fit
 // it, even of lines that cost the render only their CRLF.
 func TestHistoryStaysWithinItsBudget(t *testing.T) {

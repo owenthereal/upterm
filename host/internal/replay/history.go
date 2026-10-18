@@ -25,22 +25,35 @@ const crlf = "\r\n"
 type history struct {
 	max  int
 	data []byte // the lines kept, oldest first, each followed by a CRLF
-	enc  encoder
+	// split is where the newest line kept that holds a wide character split
+	// in two ends, its CRLF included, or 0 for none. Only the newest matters:
+	// a render sends the newest lines, so one that sends any such line sends
+	// that one.
+	split int
+	enc   encoder
 }
 
 // push encodes line and keeps it, dropping the oldest lines past the
 // budget. A line that alone, with its CRLF, costs more than the budget is
 // dropped itself: no render could hold it. It runs inside the emulator's
 // Write, as its scroll-off function, and the line is the screen's own
-// storage, so it is encoded here and never kept.
+// storage, so it is encoded here and never kept, and whether it holds a
+// split wide character is told here too.
 func (h *history) push(line uv.Line) {
 	h.enc.reset(max(h.max-len(crlf), 0))
 	if h.enc.row(line) != nil {
 		return
 	}
 	h.data = append(append(h.data, h.enc.buf...), crlf...)
+	if splitLine(line) {
+		h.split = len(h.data)
+	}
 	if over := len(h.data) - h.max; over > 0 {
-		h.data = h.data[h.lineAt(over):]
+		cut := h.lineAt(over)
+		h.data = h.data[cut:]
+		// The cut is at a line's start, so a split line it took is gone whole,
+		// and the mark with it.
+		h.split = max(h.split-cut, 0)
 	}
 }
 
@@ -63,7 +76,7 @@ func (h *history) lineAt(off int) int {
 
 // clear forgets every line, as ED 3 and RIS clear history.
 func (h *history) clear() {
-	h.data = nil
+	h.data, h.split = nil, 0
 }
 
 // all yields the lines kept, oldest first, without their CRLFs. Each is the
@@ -86,6 +99,12 @@ func (h *history) all() iter.Seq[[]byte] {
 func (h *history) newest(room int) (from, size int) {
 	from = h.lineAt(len(h.data) - room)
 	return from, len(h.data) - from
+}
+
+// splitFrom reports whether a line from from, a line's start, on holds a
+// wide character split in two: the newest such line ends past from.
+func (h *history) splitFrom(from int) bool {
+	return h.split > from
 }
 
 // appendFrom appends the lines from from on, oldest first, each followed by

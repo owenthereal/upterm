@@ -27,7 +27,8 @@ const preamble = "\r\x1b[m\x1b[J"
 // decides how the next bytes are read, so that the raw stream from the
 // handoff point on lands on it as it did on the session's own terminal.
 //
-// State it can't restore fails it before anything is written. Within the
+// State it can't restore fails it before anything is written; a history line
+// it can't rebuild fails it once the lines to send are known. Within the
 // budget, everything but the history must fit on its own, or the render
 // fails; the history then fills what is left, newest lines first, cut at
 // whole lines, between the preamble and the rest.
@@ -54,6 +55,12 @@ func (e *emulation) render() ([]byte, error) {
 		return nil, enc.err
 	}
 	from, size := e.hist.newest(budget - len(preamble) - len(enc.buf))
+	// A history line goes as it scrolled off, so one holding a split wide
+	// character can't be rebuilt either. Only the lines sent count, and which
+	// those are is known only once the rest is drawn.
+	if e.hist.splitFrom(from) {
+		return nil, &IneligibleError{State: splitWideState}
+	}
 	out := make([]byte, 0, len(preamble)+size+len(enc.buf))
 	out = append(out, preamble...)
 	out = e.hist.appendFrom(out, from)
@@ -468,40 +475,49 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 		return rep{}, &IneligibleError{State: state}
 	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
-		return rep{}, &IneligibleError{State: "a wide character split in two"}
+		return rep{}, &IneligibleError{State: splitWideState}
 	}
 	return e.repPlan()
 }
 
-// splitWide reports a row of scr that holds a wide character split in two: a
-// placeholder not right after the wide cell it belongs to, or a wide cell not
-// followed by its placeholders. A scroll inside left and right margins can
-// move half of a wide character across a margin, and no print draws what it
-// leaves, as printing a wide character brings its placeholders: the render
-// would draw another row. A screen the render doesn't draw holds nothing, so
-// both are checked.
+// splitWideState is what a render falls back on when a row it would draw, of
+// a screen or of the history, holds a wide character split in two.
+const splitWideState = "a wide character split in two"
+
+// splitWide reports a row of scr that holds a wide character split in two.
+// A screen the render doesn't draw holds nothing, so both are checked.
 func splitWide(scr *vt.Screen) bool {
 	for y := range scr.Height() {
-		line := scr.Line(y)
-		owed := 0 // the placeholders the last wide cell has yet to be followed by
-		for x := range line {
-			switch w := line[x].Width; {
-			case w == 0:
-				if owed == 0 {
-					return true
-				}
-				owed--
-			case owed > 0:
-				return true
-			default:
-				owed = w - 1
-			}
-		}
-		if owed > 0 {
+		if splitLine(scr.Line(y)) {
 			return true
 		}
 	}
 	return false
+}
+
+// splitLine reports whether line holds a wide character split in two: a
+// placeholder not right after the wide cell it belongs to, or a wide cell not
+// followed by its placeholders. A scroll inside left and right margins can
+// move half of a wide character across a margin, and no print draws what it
+// leaves, as printing a wide character brings its placeholders: the render
+// would draw another row, a line of history included, which a joiner's
+// terminal also wraps where it prints wider than the screen.
+func splitLine(line uv.Line) bool {
+	owed := 0 // the placeholders the last wide cell has yet to be followed by
+	for x := range line {
+		switch w := line[x].Width; {
+		case w == 0:
+			if owed == 0 {
+				return true
+			}
+			owed--
+		case owed > 0:
+			return true
+		default:
+			owed = w - 1
+		}
+	}
+	return owed > 0
 }
 
 // unrestored names the first state, in a fixed order, that would change how

@@ -1971,6 +1971,14 @@ func TestReplayHistoryKeepsColoursTheRenderWritesAsRGB(t *testing.T) {
 // placeholder. No print draws either, as printing the character brings its
 // placeholder, so the render can't rebuild that row, and the join falls back,
 // on either screen, rather than continue from a different one.
+//
+// The same holds for a line of history the render sends. In the last case,
+// x/vt wraps the emoji to column 0, outside the left margin, and the scroll
+// inside the margins takes its placeholder up a row and brings text in after
+// it; DECSTR then resets the margins, and the row scrolls off, so neither
+// screen holds a split. The history line takes a column more than the
+// screen's 7, so a joiner's terminal would wrap it in two, where the
+// session's kept one line.
 func TestReplayFailsOnAWideCharacterSplitInTwo(t *testing.T) {
 	setBudget(t, 64<<20)
 	const split = "\x1b[?69h\x1b[2s\x1b[64H中\nh\x1b[?69l"
@@ -1993,6 +2001,10 @@ func TestReplayFailsOnAWideCharacterSplitInTwo(t *testing.T) {
 		{"on the hidden alternate screen", contCase{
 			prefix: []byte("main\r\n\x1b[?47h" + split + "\x1b[?47l"),
 			sizes:  []uio.SizeEvent{event(1, 0, 72, 29)},
+		}},
+		{"in a line of history the render sends", contCase{
+			prefix: []byte("\x1b[7d#mf``tn\x1b[?69h\x1b[2s\x1b[9G😀\x1b[56HO(b+Mv ;uzP y|]W[?7h%<sH -nn*\n\x1b[!p\x1b[15b\x1be"),
+			sizes:  []uio.SizeEvent{event(1, 0, 40, 34), event(2, 0, 7, 19)},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
