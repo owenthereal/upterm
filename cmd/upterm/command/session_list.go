@@ -1,16 +1,14 @@
 package command
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
-	"text/tabwriter"
 	"unicode"
-	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/owenthereal/upterm/cmd/upterm/command/internal/tui"
 	"github.com/owenthereal/upterm/host/sessiondir"
 )
@@ -79,22 +77,31 @@ func writeSessionTable(w io.Writer, rows []sessionRow, width int) {
 		fitToWidth(lines, width)
 	}
 
-	var table bytes.Buffer
-	tw := tabwriter.NewWriter(&table, 0, 0, columnGap, ' ', 0)
-	for _, line := range lines {
-		_, _ = fmt.Fprintln(tw, strings.Join(line, "\t"))
+	// Padded by hand, to each column's width in terminal columns: tabwriter
+	// pads by characters, which leaves the columns after a cell holding a wide
+	// character or a combining mark out of line.
+	widths := make([]int, len(sessionTableHeader))
+	for c := range widths {
+		widths[c] = columnWidth(lines, c)
 	}
-	_ = tw.Flush()
-
-	// A row with no relay would end in the padding of the cell before it.
-	for _, line := range strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n") {
-		_, _ = fmt.Fprintln(w, strings.TrimRight(line, " "))
+	for _, cells := range lines {
+		var line strings.Builder
+		for c, cell := range cells {
+			line.WriteString(cell)
+			if c < len(cells)-1 {
+				line.WriteString(strings.Repeat(" ", widths[c]-ansi.StringWidth(cell)+columnGap))
+			}
+		}
+		// A row with no relay would end in the padding of the cell before it.
+		_, _ = fmt.Fprintln(w, strings.TrimRight(line.String(), " "))
 	}
 }
 
 // oneLine makes a cell safe to print on one row: a command can hold a newline
 // or a tab, which would split its row or push the columns after it out of
-// line, and an escape sequence, which a terminal would act on.
+// line, and an escape sequence, which a terminal would act on. It runs before a
+// cell is measured, because the width functions skip an escape sequence: a cell
+// still holding one would be measured as less than it prints.
 func oneLine(cell string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -128,8 +135,8 @@ func fitToWidth(lines [][]string, width int) {
 		return
 	}
 
-	commandMin := utf8.RuneCountInString(sessionTableHeader[columnCommand])
-	relayMin := utf8.RuneCountInString(sessionTableHeader[columnRelay])
+	commandMin := ansi.StringWidth(sessionTableHeader[columnCommand])
+	relayMin := ansi.StringWidth(sessionTableHeader[columnRelay])
 	room = max(room, commandMin+relayMin)
 	half := room / 2
 	var commandLimit, relayLimit int
@@ -155,23 +162,22 @@ func fitToWidth(lines [][]string, width int) {
 	}
 }
 
-// columnWidth is the width of the widest cell of column c, in characters, as
-// tabwriter counts them.
+// columnWidth is the width of the widest cell of column c, in terminal
+// columns.
 func columnWidth(lines [][]string, c int) int {
 	w := 0
 	for _, line := range lines {
-		w = max(w, utf8.RuneCountInString(line[c]))
+		w = max(w, ansi.StringWidth(line[c]))
 	}
 	return w
 }
 
-// shorten cuts cell to limit characters, the last of them "…", when it is
-// longer.
+// shorten cuts cell to limit terminal columns, the last of them "…", when it
+// is wider. The cut falls between the characters as they are drawn, never
+// inside one, so a wide character that would straddle the limit is dropped
+// whole and the cell comes out a column short.
 func shorten(cell string, limit int) string {
-	if utf8.RuneCountInString(cell) <= limit {
-		return cell
-	}
-	return string([]rune(cell)[:limit-1]) + "…"
+	return ansi.Truncate(cell, limit, "…")
 }
 
 // listInfos is listSessions for `-o json`: the `session info` object of every

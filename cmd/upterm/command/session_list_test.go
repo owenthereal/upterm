@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/owenthereal/upterm/host/api"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/stretchr/testify/require"
@@ -457,5 +459,162 @@ func TestShortenedColumnsNeverGoBelowTheirHeaders(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// A cell is measured in terminal columns, not characters: a CJK character or an
+// emoji takes two columns, a combining mark none, and an emoji with a skin-tone
+// modifier is two characters in two columns, not four. Counting characters
+// instead leaves the columns after such a cell out of line, lets a row that
+// would wrap pass for one that fits, and can cut a cell in the middle of what
+// is drawn as one character.
+
+// wideRows are rows whose COMMAND and RELAY hold what is wider, or narrower,
+// in columns than in characters. The combining mark and the modifier are
+// written as escapes so that nothing normalises them away.
+func wideRows() []sessionRow {
+	const id = "Abc123Def456Ghi789Jk"
+	return []sessionRow{
+		{Name: "cjk", Status: "ready", SessionID: id, Command: "vim 文件.txt --and-then-a-long-tail-of-flags", Relay: "ssh://relay.example:2222"},
+		{Current: true, Name: "emoji", Status: "ready", SessionID: id, Command: "echo \U0001F44D\U0001F3FD well done, and then some more words", Relay: "ssh://relay.example:2222/emoji"},
+		{Name: "mark", Status: "reconnecting", SessionID: id, Command: "cafe\u0301 --au-lait --and-a-long-tail-of-flags", Relay: "ssh://relay.example:2222"},
+		{Name: "path", Status: "ready", SessionID: id, Command: "sh", Relay: "wss://relais.例え.example:8443/路径/で/すか-and-a-long-path-after-it"},
+	}
+}
+
+// relayScheme finds where the RELAY cell of a row of wideRows starts: every
+// relay there begins with one of the two schemes, which no command holds.
+var relayScheme = regexp.MustCompile(`(ssh|wss):`)
+
+func TestWideAndCombiningCellsKeepTheColumnsAligned(t *testing.T) {
+	rows := wideRows()
+	var b bytes.Buffer
+	writeSessionTable(&b, rows, 0)
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	require.Len(t, lines, len(rows)+1)
+
+	want := strings.Index(lines[0], "RELAY") // the header is ASCII: bytes are columns
+	for _, line := range lines[1:] {
+		at := relayScheme.FindStringIndex(line)
+		require.NotNil(t, at, line)
+		require.Equal(t, want, ansi.StringWidth(line[:at[0]]), "RELAY starts at the header's column: %q", line)
+	}
+	require.NotContains(t, b.String(), "…", "nothing was cut without a terminal")
+}
+
+// widestAndNarrowest are the widths of the widest line of the table printed
+// whole, and of the header line when COMMAND and RELAY hold nothing but their
+// headers: the narrowest the table gets.
+func widestAndNarrowest(rows []sessionRow) (widest, narrowest int) {
+	bare := make([]sessionRow, len(rows))
+	for i, r := range rows {
+		r.Command, r.Relay = "", ""
+		bare[i] = r
+	}
+	var b bytes.Buffer
+	writeSessionTable(&b, bare, 0)
+	narrowest = ansi.StringWidth(strings.SplitN(b.String(), "\n", 2)[0])
+
+	b.Reset()
+	writeSessionTable(&b, rows, 0)
+	for _, line := range strings.Split(b.String(), "\n") {
+		widest = max(widest, ansi.StringWidth(line))
+	}
+	return widest, narrowest
+}
+
+func TestWideAndCombiningCellsNeverRunPastTheTerminal(t *testing.T) {
+	rows := wideRows()
+	widest, narrowest := widestAndNarrowest(rows)
+	require.Greater(t, widest, narrowest)
+
+	for width := narrowest; width <= widest+1; width++ {
+		var b bytes.Buffer
+		writeSessionTable(&b, rows, width)
+		lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+		require.Len(t, lines, len(rows)+1, "width %d", width)
+		for _, line := range lines {
+			require.LessOrEqual(t, ansi.StringWidth(line), width, "width %d: %q", width, line)
+		}
+
+		want := strings.Index(lines[0], "RELAY")
+		for _, line := range lines[1:] {
+			at := relayScheme.FindStringIndex(line)
+			require.NotNil(t, at, "width %d: %q", width, line)
+			require.Equal(t, want, ansi.StringWidth(line[:at[0]]), "width %d: RELAY starts at the header's column: %q", width, line)
+		}
+	}
+}
+
+// graphemePrefix reports whether prefix is the first clusters of s, whole: the
+// cut falls between two drawn characters, not inside one.
+func graphemePrefix(s, prefix string) bool {
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	for rest := s; ; {
+		if len(s)-len(rest) == len(prefix) {
+			return true
+		}
+		if rest == "" {
+			return false
+		}
+		cluster, _ := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
+		rest = rest[len(cluster):]
+	}
+}
+
+func TestACutCellIsAWholeGraphemePrefixOfTheOriginal(t *testing.T) {
+	rows := wideRows()
+	widest, narrowest := widestAndNarrowest(rows)
+
+	cut := 0
+	for width := narrowest; width <= widest+1; width++ {
+		var b bytes.Buffer
+		writeSessionTable(&b, rows, width)
+		lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+		commandAt := strings.Index(lines[0], "COMMAND")
+
+		for i, line := range lines[1:] {
+			relayAt := relayScheme.FindStringIndex(line)[0]
+			// The cells before COMMAND are ASCII, so a byte is a column there.
+			for _, tc := range []struct{ got, original string }{
+				{strings.TrimRight(line[commandAt:relayAt], " "), rows[i].Command},
+				{line[relayAt:], rows[i].Relay},
+			} {
+				if !strings.HasSuffix(tc.got, "…") {
+					require.Equal(t, tc.original, tc.got, "width %d: a cell that was not cut is as it was", width)
+					continue
+				}
+				cut++
+				prefix := strings.TrimSuffix(tc.got, "…")
+				require.True(t, graphemePrefix(tc.original, prefix), "width %d: %q is not whole characters of %q", width, tc.got, tc.original)
+			}
+		}
+	}
+	require.Positive(t, cut, "the sweep cut cells")
+}
+
+// Where the cut falls is the characters' to decide: a wide one that would
+// straddle the limit is dropped whole, and the cell comes out a column short.
+func TestShortenCutsBetweenCharactersAndNeverPastTheLimit(t *testing.T) {
+	for _, tc := range []struct {
+		cell  string
+		limit int
+		want  string
+	}{
+		{"vim 文件.txt", 12, "vim 文件.txt"},
+		{"vim 文件.txt", 11, "vim 文件.t…"},
+		{"vim 文件.txt", 9, "vim 文件…"},
+		{"vim 文件.txt", 8, "vim 文…"},
+		{"echo \U0001F44D\U0001F3FD ok", 10, "echo \U0001F44D\U0001F3FD ok"},
+		{"echo \U0001F44D\U0001F3FD ok", 8, "echo \U0001F44D\U0001F3FD…"},
+		{"echo \U0001F44D\U0001F3FD ok", 7, "echo …"},
+		{"cafe\u0301 au lait", 5, "cafe\u0301…"},
+		{"cafe\u0301 au lait", 4, "caf…"},
+	} {
+		got := shorten(tc.cell, tc.limit)
+		require.Equal(t, tc.want, got, "%q to %d", tc.cell, tc.limit)
+		require.LessOrEqual(t, ansi.StringWidth(got), tc.limit, "%q to %d", tc.cell, tc.limit)
 	}
 }
