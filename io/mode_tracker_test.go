@@ -721,15 +721,19 @@ func TestResetsRefillTheSlotOfTheScreenTheySaveOn(t *testing.T) {
 // IsLeftRightMode first). CSI u is a restore either way: CASE_ANSI_RC doesn't
 // look at the mode. The mode is one bit of the terminal's flags, not one per
 // screen, and ReallyReset clears it for RIS and DECSTR alike
-// (resetMarginMode). The tracker keeps it only to tell the two apart, so it
-// replays nothing of it, nor resets it on the way out.
+// (resetMarginMode).
+//
+// So the snapshot replays it while it is set: a joiner whose ring has lost the
+// ?69h would otherwise read a later bare CSI s as a save where the session
+// reads margins. And Restore resets it, which in xterm resets the left and
+// right margins too, where a terminal leaving should have them anyway.
 func TestDECLRMMMakesABareCSIsMargins(t *testing.T) {
 	for _, tc := range []struct{ name, stream, want string }{
-		{"set, CSI s is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", ""},
+		{"set, CSI s is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?69h"},
 		{"reset, it is one again", "\x1b[?69h\x1b[?69l\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
-		{"one for both screens", "\x1b[?69h\x1b[?1049h\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?1049h"},
-		{"set on the alternate screen, still set on the normal one", "\x1b[?1047h\x1b[?69h\x1b[?1047l\x1b(0\x1b[s\x1b(B\x1b[u", ""},
-		{"CSI u is still a restore", "\x1b[?69h\x1b(0\x1b7\x1b(B\x1b[u", "\x1b(0"},
+		{"one for both screens", "\x1b[?69h\x1b[?1049h\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?69h\x1b[?1049h"},
+		{"set on the alternate screen, still set on the normal one", "\x1b[?1047h\x1b[?69h\x1b[?1047l\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?69h"},
+		{"CSI u is still a restore", "\x1b[?69h\x1b(0\x1b7\x1b(B\x1b[u", "\x1b[?69h\x1b(0"},
 		{"RIS resets it", "\x1b[?69h\x1bc\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
 		{"DECSTR resets it", "\x1b[?69h\x1b[!p\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b(0"},
 	} {
@@ -740,13 +744,42 @@ func TestDECLRMMMakesABareCSIsMargins(t *testing.T) {
 			require.Equal(t, tc.want, string(m.Snapshot()))
 		})
 	}
-	t.Run("not replayed or reset", func(t *testing.T) {
-		m := NewModeTracker()
-		_, err := m.Write([]byte("\x1b[?69h"))
-		require.NoError(t, err)
-		require.Empty(t, m.Snapshot())
-		require.Empty(t, m.Restore())
-	})
+	for _, tc := range []struct{ name, stream, snapshot, restore string }{
+		{"set", "\x1b[?69h", "\x1b[?69h", "\x1b[?69l"},
+		{"set among the modes", "\x1b[?2004h\x1b[?69h\x1b[?25l", "\x1b[?25l\x1b[?2004h\x1b[?69h", "\x1b[?25h\x1b[?2004l\x1b[?69l"},
+		{"set and reset", "\x1b[?69h\x1b[?69l", "", ""},
+		{"never set", "\x1b[?2004h", "\x1b[?2004h", "\x1b[?2004l"},
+	} {
+		t.Run("replayed and reset: "+tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.snapshot, string(m.Snapshot()))
+			require.Equal(t, tc.restore, string(m.Restore()))
+		})
+	}
+}
+
+// The replay and the charset guard read a control inside a G0 designation or
+// a cursor save apart, on purpose. xterm executes the control and the
+// sequence goes on, so ESC ( CR B designates ASCII, and the snapshot replays
+// what xterm then holds. kitty abandons the ESC at the control, which leaves
+// G0 as it was, so NonASCIICharset, which answers whether a terminal might be
+// off ASCII on any terminal's reading, still says it might.
+func TestAControlInsideADesignationIsXtermsToTheReplayAndCautiousToTheGuard(t *testing.T) {
+	for _, tc := range []struct{ name, stream, snapshot string }{
+		{"inside the designation", "\x1b(0\x1b(\rB", "\x1b(B"},
+		{"before its parenthesis", "\x1b(0\x1b\r(B", "\x1b(B"},
+		{"a save and a restore", "\x1b(0\x1b\r7\x1b(B\x1b\r8", "\x1b(0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.snapshot, string(m.Snapshot()), "the replay is xterm's")
+			require.True(t, m.NonASCIICharset(), "the guard stays cautious")
+		})
+	}
 }
 
 // In an escape sequence, as in a CSI, a C0 control is executed where it
@@ -759,11 +792,19 @@ func TestDECLRMMMakesABareCSIsMargins(t *testing.T) {
 // restore or the designation behind it. Neither control is part of the
 // sequence, so neither is replayed with it.
 //
+// Only those are followed past a control, for the G0 the snapshot replays: a
+// CSI, a string or a RIS begun there is dropped, as by a DEC parser that drops
+// the sequence at the control, which is the reading the charset guard is
+// built on and the screen its saves are read against.
+//
 // A joiner's replay never met this: the filter in front of the ring moves
 // the control out ahead of the escape. A tracker fed output as it is written
 // did, as attach's and the host's per-guest one are.
 func TestAC0ControlInsideAnEscapeIsExecutedAndTheEscapeGoesOn(t *testing.T) {
 	for _, tc := range []struct{ name, stream, want string }{
+		{"a CSI past one is dropped", "\x1b\r[?2004h", ""},
+		{"and a RIS", "\x1b[?2004h\x1b\rc", "\x1b[?2004h"},
+		{"and a string", "\x1b\r]0;t", ""},
 		{"a save", "\x1b(0\x1b\x077\x1b(B\x1b8", "\x1b(0"},
 		{"a restore", "\x1b(0\x1b7\x1b(B\x1b\x7f8", "\x1b(0"},
 		{"a designation", "\x1b\x08(\x070", "\x1b(0"},

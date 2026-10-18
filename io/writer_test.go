@@ -309,12 +309,13 @@ func Test_MultiWriter_SnapshotDescribesTheRingStartNotTheLatestState(t *testing.
 // terminal printed letters, or the other way round.
 //
 // Which bytes are a save matters as much: a bare CSI s while DECLRMM (?69) is
-// set is margins, not a save.
+// set is margins, not a save. And the joiner is put in ?69 too, so that it
+// reads the next bare CSI s as margins as well.
 func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
 	for _, tc := range []struct{ name, stream, want string }{
 		{"a restore with nothing saved", "\x1b(0\x1b8", ""},
 		{"a restore of a save", "\x1b(0\x1b7\x1b(B\x1b8", "\x1b(0"},
-		{"a CSI s under DECLRMM is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", ""},
+		{"a CSI s under DECLRMM is no save", "\x1b[?69h\x1b(0\x1b[s\x1b(B\x1b[u", "\x1b[?69h"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewMultiWriter(16)
