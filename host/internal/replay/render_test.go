@@ -1312,6 +1312,41 @@ func TestReplayFailsOnSavedDECModes(t *testing.T) {
 	}
 }
 
+// A rendition the session pushed by XTPUSHSGR (CSI Pm # {, or its alias
+// CSI Pm # p) fails the render, named: x/vt keeps no stack and ignores the
+// XTPOPSGR (CSI # }, or CSI # q) that pops it, so the render can't tell what
+// pen a later pop gives the session's terminal, and a joiner's terminal,
+// which the push never reached, would pop its own. A push of the whole pen or
+// of the attributes Pm names counts, and still does once popped. A pop alone
+// renders: what it puts back was pushed before the ring, which neither a raw
+// replay nor the render holds.
+func TestReplayFailsOnASavedRendition(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the pen pushed", "\x1b[#{"},
+		{"some attributes pushed", "\x1b[1;31#{"},
+		{"the pen pushed by the alias", "\x1b[#p"},
+		{"an attribute pushed by the alias", "\x1b[2#p"},
+		{"a push popped", "\x1b[#{\x1b[1m\x1b[#}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a saved rendition")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a pop alone", "\x1b[#}"},
+		{"a pop alone by the alias", "\x1b[#q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

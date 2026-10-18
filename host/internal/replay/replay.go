@@ -89,9 +89,10 @@ type emulation struct {
 	// protected is set once the stream has turned character protection on,
 	// and selective once it has erased selectively (see watchProtection).
 	protected, selective bool
-	// savedTitle is set once the stream has pushed a title, and savedModes
-	// once it has saved DEC modes (see watchSaves).
-	savedTitle, savedModes bool
+	// savedTitle is set once the stream has pushed a title, savedModes once
+	// it has saved DEC modes, and savedRendition once it has pushed a
+	// rendition (see watchSaves).
+	savedTitle, savedModes, savedRendition bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -443,14 +444,17 @@ func (e *emulation) watchProtection() {
 // watchSaves registers the handlers that note the stream saving state the
 // terminal keeps aside for a later sequence to put back: a title pushed onto
 // the title stack, by XTWINOPS 22 (CSI 22 ; Ps t), whichever names Ps saves;
-// and DEC private modes saved by XTSAVE (CSI ? Pm s), whichever modes Pm
-// names. x/vt keeps neither and ignores what restores each, XTWINOPS 23 and
-// XTRESTORE (CSI ? Pm r), so once one is saved the render can't tell what a
-// restore on the session's terminal puts back, and a joiner's terminal, which
-// the save never reached, would put back its own. x/vt keys a CSI handler by
-// its prefix too, so XTSAVE's sees neither SCOSC nor DECSLRM, the bare CSI s.
-// x/vt has no handler of its own for either; these return false all the same,
-// as watchColours' do.
+// DEC private modes saved by XTSAVE (CSI ? Pm s), whichever modes Pm names;
+// and a rendition pushed by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p),
+// the whole pen or the attributes Pm names. x/vt keeps none of them and
+// ignores what restores each, XTWINOPS 23, XTRESTORE (CSI ? Pm r) and
+// XTPOPSGR (CSI # }, or CSI # q), so once one is saved the render can't tell
+// what a restore on the session's terminal puts back, and a joiner's
+// terminal, which the save never reached, would put back its own. x/vt keys a
+// CSI handler by its prefix and intermediate too, so XTSAVE's handler sees
+// neither SCOSC nor DECSLRM, both the bare CSI s, and the alias's sees no CSI
+// p without the #, such as DECSTR's CSI ! p. x/vt has no handler of its own
+// for any of them; these return false all the same, as watchColours' do.
 func (e *emulation) watchSaves() {
 	t := e.term
 	t.RegisterCsiHandler('t', func(params ansi.Params) bool {
@@ -463,6 +467,12 @@ func (e *emulation) watchSaves() {
 		e.savedModes = true
 		return false
 	})
+	for _, final := range []byte{'{', 'p'} {
+		t.RegisterCsiHandler(ansi.Command(0, '#', final), func(ansi.Params) bool {
+			e.savedRendition = true
+			return false
+		})
+	}
 }
 
 // Feed offers the emulation more of the stream and runs on to the next
