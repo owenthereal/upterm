@@ -30,8 +30,9 @@ const preamble = "\r\x1b[m\x1b[J"
 // State it can't restore fails it before anything is written; a history line
 // it can't rebuild fails it once the lines to send are known. Within the
 // budget, everything but the history must fit on its own, or the render
-// fails; the history then fills what is left, newest lines first, cut at
-// whole lines, between the preamble and the rest.
+// fails, named when what doesn't fit is a clipboard write; the history then
+// fills what is left, newest lines first, cut at whole lines, between the
+// preamble and the rest.
 func (e *emulation) render() ([]byte, error) {
 	parts := e.modes.ReplayParts()
 	rep, err := e.eligible(parts)
@@ -50,8 +51,12 @@ func (e *emulation) render() ([]byte, error) {
 		rows:   e.join.Rows,
 		fits:   e.join.Cols == e.term.Width(),
 		rep:    rep,
+		clips:  e.clips,
 	}
 	r.draw()
+	if r.clipOver {
+		return nil, &IneligibleError{State: "a clipboard write too large to replay"}
+	}
 	if enc.err != nil {
 		return nil, enc.err
 	}
@@ -87,6 +92,10 @@ type renderer struct {
 	// client doesn't.
 	fits bool
 	rep  rep
+	// clips are the clipboard writes to send, and clipOver says one didn't
+	// fit.
+	clips    clipboard
+	clipOver bool
 }
 
 // draw writes everything but the preamble and the history, in an order each
@@ -346,7 +355,8 @@ func (r *renderer) reportModes() {
 // that neither moves the cursor nor clears a pending wrap, after the last
 // print, which the charsets would remap and insert mode would shift: the
 // charsets, insert mode, the application keypad, reverse video, the title,
-// the cursor's style, autowrap, and last the active pen and link.
+// the cursor's style, autowrap, and the active pen and link. The clipboard
+// writes still in force, which change none of that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -382,8 +392,25 @@ func (r *renderer) continuation(reprinted int) {
 	cur := t.ActiveScreen().Cursor()
 	_ = enc.penTo(cur.Pen)
 	_ = enc.linkTo(cur.Link)
+	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
+	}
+}
+
+// clipboard writes the clipboard writes still in force, each as the stream
+// sent it, ended by BEL. One that doesn't fit the budget with everything
+// before it, or that was too long to keep, sets clipOver instead, and the
+// render fails on it.
+func (r *renderer) clipboard() {
+	if r.enc.err != nil {
+		return
+	}
+	for _, w := range r.clips {
+		if w.over || r.enc.put("\x1b]52;", w.pc, ";", w.pd, "\x07") != nil {
+			r.clipOver = true
+			return
+		}
 	}
 }
 

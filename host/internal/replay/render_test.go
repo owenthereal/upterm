@@ -856,6 +856,110 @@ func TestReplayFailsOnADeviceControlString(t *testing.T) {
 	}
 }
 
+// selectionsOf is what xterm's selections hold once a terminal that holds
+// none is given p: each OSC 52 that writes one applied in turn, as xterm does.
+// An empty Pc names s and 0, a character xterm has no selection for names
+// nothing, a Pd of ? asks rather than writes, and an OSC 52 with no ';' after
+// Pc does nothing.
+func selectionsOf(p []byte) map[byte]string {
+	held := map[byte]string{}
+	term := vt.NewEmulator(80, 24)
+	term.SetReplyFunc(func([]byte) {})
+	term.RegisterOscHandler(52, func(data []byte) bool {
+		f := strings.SplitN(string(data), ";", 3)
+		if len(f) < 3 || f[2] == "?" {
+			return true
+		}
+		pc := f[1]
+		if pc == "" {
+			pc = "s0"
+		}
+		for _, c := range []byte(pc) {
+			if strings.IndexByte("cpqs01234567", c) >= 0 {
+				held[c] = f[2]
+			}
+		}
+		return true
+	})
+	_, _ = term.Write(p)
+	return held
+}
+
+// The clipboard writes the session made by OSC 52, which the query filter
+// lets into the ring and a raw replay hands the joiner in order, end on the
+// joiner as they would: the render sends, last, each write that is still
+// the last to one of xterm's selections, in the stream's order, as the stream
+// sent it, and no other. A session that wrote none sends none.
+func TestReplayReplaysTheClipboard(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		require.Equal(t, selectionsOf([]byte(stream)), selectionsOf(joined), "the joiner's selections: %q", joined)
+		return joined
+	}
+
+	joined := join(t, "\x1b]52;c;Zmlyc3Q=\x07text\r\n\x1b]52;p;cHJpbWFyeQ==\x1b\\\x1b]52;c;bGFzdA==\x07more\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]52;p;cHJpbWFyeQ==\x07\x1b]52;c;bGFzdA==\x07")), "%q", joined)
+	require.Equal(t, 2, bytes.Count(joined, []byte("\x1b]52;")), "%q", joined)
+
+	for _, tc := range []struct {
+		name, stream string
+		sent         int
+	}{
+		{"none", "", 0},
+		{"one write to two selections, then one of them", "\x1b]52;cp;QQ==\x07\x1b]52;c;Qg==\x07", 2},
+		{"the default, then both its selections", "\x1b]52;;QQ==\x07\x1b]52;s0;Qg==\x07", 1},
+		{"the default, then one of its selections", "\x1b]52;;QQ==\x07\x1b]52;s;Qg==\x07", 2},
+		{"a clear", "\x1b]52;c;QQ==\x07\x1b]52;c;!\x07", 1},
+		{"a selection xterm doesn't have", "\x1b]52;c;QQ==\x07\x1b]52;x;Qg==\x07", 1},
+		{"no data", "\x1b]52;c;QQ==\x07\x1b]52;c\x07", 1},
+		{"a query, which the filter drops", "\x1b]52;c;QQ==\x07\x1b]52;c;?\x07", 1},
+		{"a number with a leading zero", "\x1b]052;c;QQ==\x07", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			require.Equal(t, tc.sent, bytes.Count(joined, []byte("\x1b]52;")), "%q", joined)
+		})
+	}
+
+	// A query that reached the emulation all the same is no write.
+	render, err := renderAt(t, 80, 24, "\x1b]52;c;?\x07text\r\n")
+	require.NoError(t, err)
+	require.NotContains(t, string(render), "\x1b]52;")
+}
+
+// A clipboard write the render can't fit in its budget with everything else
+// fails it, named; one longer than the whole budget keeps none of its bytes.
+// One that fits exactly renders.
+func TestReplayFailsOnAClipboardWriteTooLargeToReplay(t *testing.T) {
+	setBudget(t, 8<<10)
+	stream := func(n int) []byte {
+		return []byte("text\r\n\x1b]52;c;" + strings.Repeat("A", n) + "\x07more\r\n")
+	}
+	join := func(t *testing.T, n int) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), stream(n), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	}
+	empty, err := join(t, 0)
+	require.NoError(t, err)
+	fits := budget - len(empty)
+
+	joined, err := join(t, fits)
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = join(t, fits+1)
+	requireIneligible(t, err, "a clipboard write too large to replay")
+	_, err = join(t, budget)
+	requireIneligible(t, err, "a clipboard write too large to replay")
+
+	e := startFor(t, captureOf(string(stream(budget)), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+	require.Len(t, e.clips, 1)
+	require.True(t, e.clips[0].over)
+	require.Empty(t, e.clips[0].pd)
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

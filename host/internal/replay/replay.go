@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/owenthereal/x/ansi"
@@ -79,6 +80,8 @@ type emulation struct {
 	// dcs is set once the stream has sent a device control string (see
 	// watchDCS).
 	dcs bool
+	// clips are the stream's clipboard writes still in force.
+	clips clipboard
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -157,10 +160,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title and the colours kept, images and device
-// control strings noted, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// to queries discarded, the title, the colours and the clipboard kept, images
+// and device control strings noted, and the meter stopped by ctx or the
+// deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -175,6 +178,7 @@ func (e *emulation) setUp() {
 	e.watchColours()
 	e.watchGraphics()
 	e.watchDCS()
+	e.watchClipboard()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -295,6 +299,82 @@ func (e *emulation) watchDCS() {
 			}
 		}
 	}
+}
+
+// clipboard is what the stream wrote to the terminal's selections, by OSC 52,
+// that is still in force. A raw replay hands the joiner every write in the
+// ring, in order; the render sends, in the stream's order, each one that is
+// still the last write to some selection, and leaves out the others, so the
+// joiner's selections end as the raw replay leaves them.
+//
+// The selections are xterm's: OSC 52 ; Pc ; Pd writes Pd to each selection Pc
+// names, c, p, q, s and the cut buffers 0 to 7, and an empty Pc names s and 0;
+// a character xterm has no selection for names nothing. A Pd that isn't
+// base64 clears the selections instead, which the joiner's terminal does as
+// well when it is sent the same write, so the two needn't be told apart. A Pd
+// of ? asks for a selection, which the query filter drops, and an OSC 52 with
+// no ';' after Pc does nothing.
+type clipboard []clipWrite
+
+// clipWrite is a clipboard write still in force.
+type clipWrite struct {
+	// sel is the selections it is the last write to, a bit for each, by its
+	// index in selections.
+	sel    uint16
+	pc, pd string // as the stream sent them
+	// over is a write longer than any render may be, whose bytes aren't kept.
+	over bool
+}
+
+// selections are xterm's, in the order clipWrite.sel indexes them.
+const selections = "cpqs01234567"
+
+// write records a write of pd to the selections pc names, which no earlier
+// write is the last to any more.
+func (c *clipboard) write(pc, pd []byte) {
+	names := pc
+	if len(names) == 0 {
+		names = []byte("s0")
+	}
+	var sel uint16
+	for _, b := range names {
+		if i := strings.IndexByte(selections, b); i >= 0 {
+			sel |= 1 << i
+		}
+	}
+	if sel == 0 {
+		return
+	}
+	kept := (*c)[:0]
+	for _, w := range *c {
+		if w.sel &^= sel; w.sel != 0 {
+			kept = append(kept, w)
+		}
+	}
+	w := clipWrite{sel: sel}
+	if len("\x1b]52;;\x07")+len(pc)+len(pd) > budget {
+		w.over = true
+	} else {
+		w.pc, w.pd = string(pc), string(pd)
+	}
+	*c = append(kept, w)
+}
+
+// watchClipboard registers the handler that keeps the clipboard writes. x/vt
+// has no OSC 52 handler of its own; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchClipboard() {
+	e.term.RegisterOscHandler(52, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		_, pt, ok := bytes.Cut(data, []byte{';'})
+		if !ok {
+			return false
+		}
+		if pc, pd, ok := bytes.Cut(pt, []byte{';'}); ok && string(pd) != "?" {
+			e.clips.write(pc, pd)
+		}
+		return false
+	})
 }
 
 // Feed offers the emulation more of the stream and runs on to the next
