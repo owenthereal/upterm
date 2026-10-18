@@ -91,7 +91,8 @@ func (k *keyStack) top() *int {
 // 1048 is not listed: it saves the cursor on set and restores it on reset, as
 // DECSC and DECRC do, and leaves the terminal in no mode. Replayed, it would
 // save wherever a terminal's cursor happens to be, and undone, it would move
-// the cursor to wherever the session last saved it.
+// the cursor to wherever the session last saved it. It is heard as the save
+// and restore it is, for the G0 those carry; see mainSavedG0.
 var restorable = map[int]bool{
 	1:    false, // DECCKM, application cursor keys
 	7:    true,  // DECAWM, autowrap
@@ -218,6 +219,12 @@ type ModeTracker struct {
 	altScreen bool
 	altVia    int // 47, 1047 or 1049
 
+	// savedBy1049 is whether the alternate screen showing was entered from
+	// the normal one by ?1049h, which saved the normal screen's cursor on the
+	// way. A ?47h or ?1047h there after it changes altVia and not that: a
+	// ?1049l still restores the save. Only meaningful while altScreen is set.
+	savedBy1049 bool
+
 	// The scrolling region is the whole terminal's, as in xterm, and no screen
 	// switch changes it. A terminal decides a DECSTBM at its height, so the
 	// tracker hears resizes too, and while eviction has crossed resizes whose
@@ -240,7 +247,31 @@ type ModeTracker struct {
 	// clears it, and nothing the candidates decide does.
 	marginsSet bool
 
-	charsetG0 []byte // last "ESC ( X", verbatim
+	// charsetG0 is G0 as the terminal holds it, as the "ESC ( X" that
+	// designated it, verbatim, or nil for ASCII, where a terminal starts. A
+	// cursor restore sets it too, so it is not simply the last designation.
+	// It is xterm's reading, for the replay; NonASCIICharset keeps a
+	// cautious one of its own (see g0Graphics).
+	charsetG0 []byte
+
+	// mainSavedG0 and altSavedG0 are the G0 each screen's saved cursor holds,
+	// in charsetG0's form. A cursor save keeps the charsets with the cursor
+	// and a restore brings them back, and xterm keeps one saved cursor per
+	// screen buffer, so each save and restore uses the slot of the screen
+	// showing. A slot nothing saved restores ASCII, which nil already is.
+	// Only G0 is kept, because only G0 is tracked.
+	mainSavedG0 []byte
+	altSavedG0  []byte
+
+	// leftRightMargins is DECLRMM, ?69, which makes a bare CSI s set the
+	// left and right margins rather than save the cursor. It is the
+	// terminal's, not a screen's, as in xterm, where it is one bit of the
+	// terminal's flags. Snapshot replays it while it is set, so a joiner
+	// reads the next bare CSI s as the session does, and Restore resets it,
+	// which in xterm resets the margins it enabled too. It isn't one of the
+	// restorable modes, which a reconstruction is handed whole: the margins
+	// themselves aren't tracked.
+	leftRightMargins bool
 
 	// The kitty keyboard protocol's flag stacks. The protocol gives each
 	// screen buffer its own, so that a full-screen program can push what it
@@ -274,14 +305,28 @@ type ModeTracker struct {
 	state    modeState
 	kind     stringKind // which string sequence msString is inside
 
-	// What InSequence knows beyond state, which keeps the DEC reading the
-	// bookkeeping above is built on. watchSequence keeps them, ahead of step.
+	// pastControl is that the parser is inside an ESC sequence, a G0
+	// designation, or a string's ESC, past a control or DEL executed there,
+	// which xterm executes or ignores without leaving the sequence: so ESC
+	// CR 7 is a cursor save, and ESC ( CR B designates ASCII. It follows
+	// only those, for the G0 and the saved cursors the snapshot replays, and
+	// drops a CSI, a string or a RIS begun there, as a DEC parser that drops
+	// the sequence at the control does: any of them could move the screen
+	// the watch's own reading of the saves depends on. The watch reads the
+	// parser as that DEC parser (see watchState).
+	pastControl bool
+
+	// What InSequence knows beyond the parser's state as watchState gives it,
+	// the DEC reading these are built on. watchSequence keeps them, ahead of
+	// step.
 	//
 	// escFinal: an ESC sequence has had its intermediates (0x20-0x2F), or a
 	// control character or DEL a terminal executes or ignores inside it, and
 	// waits for its final byte. The parser completes only a G0 designation,
-	// leaves every other one at its introducer and drops one at a control,
-	// which costs it nothing: none of them is a mode it tracks.
+	// leaves every other one at its introducer, and past a control follows
+	// only a cursor save, a restore or a G0 designation (see pastControl),
+	// which costs it nothing: none of the rest is a mode it tracks. The watch
+	// reads it as dropping the sequence at the control (see watchState).
 	//
 	// unended: a string the program ended ambiguously -- by CAN, SUB or an ESC
 	// that isn't ST -- which a DEC parser ends there and kitty, and tmux for a
@@ -326,9 +371,13 @@ type ModeTracker struct {
 	// after its ESC, and none of them inside an unended string, which is the
 	// string's on a terminal that keeps it open. A DECSTR lowers nothing,
 	// since tmux ignores it, and nor does a RIS with a control inside it,
-	// since kitty abandons the ESC there. charsetG0 keeps the parser's DEC
-	// reading, for the replay; these are for NonASCIICharset and InSequence
-	// alone, and nothing is replayed from them.
+	// since kitty abandons the ESC there. charsetG0 and the saved G0s keep
+	// xterm's reading, for the replay, and these a cautious one, for
+	// NonASCIICharset and InSequence alone, and nothing is replayed from
+	// them. They differ on purpose: the replay gives a joiner what xterm
+	// holds, where these answer whether any terminal might be off ASCII. So
+	// ESC ( CR B designates ASCII there, as xterm executes the CR and takes
+	// the B, and leaves these raised, since kitty drops the ESC at the CR.
 	//
 	// savedGL and savedG0Graphics are the sets a cursor save took with it, as
 	// cautiously, one copy for both screens: a save on the main screen and
@@ -439,6 +488,8 @@ func (m *ModeTracker) Clone() *ModeTracker {
 		c.candidates[i].written = slices.Clone(m.candidates[i].written)
 	}
 	c.charsetG0 = slices.Clone(m.charsetG0)
+	c.mainSavedG0 = slices.Clone(m.mainSavedG0)
+	c.altSavedG0 = slices.Clone(m.altSavedG0)
 	c.mainKeys.entries = slices.Clone(m.mainKeys.entries)
 	c.altKeys.entries = slices.Clone(m.altKeys.entries)
 	c.modifyOtherKeys = slices.Clone(m.modifyOtherKeys)
@@ -621,8 +672,24 @@ func (m *ModeTracker) Write(p []byte) (int, error) {
 	for _, b := range p {
 		m.watchSequence(b)
 		m.step(b)
+		if m.state == msNormal {
+			m.pastControl = false
+		}
 	}
 	return len(p), nil
+}
+
+// watchState is the parser's state as the watch reads it: a DEC parser's
+// that drops an ESC sequence at a control executed inside it, which is at
+// ground for the rest of it. The parser itself goes on there to read a
+// cursor save, a restore or a G0 designation as xterm does (see
+// pastControl), and the watch, which is built on the dropping reading, must
+// not see it do so.
+func (m *ModeTracker) watchState() modeState {
+	if m.pastControl {
+		return msNormal
+	}
+	return m.state
 }
 
 // watchSequence keeps what InSequence and NonASCIICharset know beyond the
@@ -655,15 +722,17 @@ func (m *ModeTracker) watchSequence(b byte) {
 	// Whether b arrives outside every sequence, where a terminal draws it as
 	// a character or executes it as a control: read before anything below
 	// moves the state on.
-	ground := m.state == msNormal && !m.escFinal && !m.csiPending
+	state := m.watchState()
+	ground := state == msNormal && !m.escFinal && !m.csiPending
 	cancel := b == 0x18 || b == 0x1a
 	intermediate := b >= 0x20 && b <= 0x2f
 	// A control character (0x00-0x1F) other than CAN, SUB and ESC is executed
 	// inside an ESC sequence, and DEL ignored there; the sequence goes on
-	// waiting for its final byte either way. The parser drops the sequence at
-	// one, which its bookkeeping can afford and this can't: what follows is
-	// still the sequence's on the terminal.
-	executed := (b < 0x20 && !cancel && b != 0x1b) || b == 0x7f
+	// waiting for its final byte either way. The watch reads the parser as
+	// one that drops the sequence at one (see watchState), which that reading
+	// can afford and this can't: what follows is still the sequence's on the
+	// terminal.
+	executed := isExecuted(b)
 	final := b >= 0x30 && b <= 0x7e
 	// The sequence b is the final byte of, if it is one, and what the
 	// sequence was, for watchCharsets: the shifts, RIS, the designations and
@@ -694,7 +763,7 @@ func (m *ModeTracker) watchSequence(b byte) {
 			m.escAs = m.escAs.then(b)
 		}
 	}
-	switch m.state {
+	switch state {
 	case msEsc:
 		// "(" is the parser's own msCharset.
 		if (intermediate && b != '(') || executed {
@@ -921,7 +990,7 @@ func (m *ModeTracker) watchCharsets(b byte, ground bool, end ending) {
 			m.restoreCharsets()
 		}
 	}
-	switch m.state {
+	switch m.watchState() {
 	case msString:
 		// A string ignores SO and SI, or hands them to its handler, and
 		// nothing else inside it is a sequence.
@@ -980,9 +1049,21 @@ func (m *ModeTracker) step(b byte) {
 			m.openPartial()
 		}
 	case msEsc:
+		if isExecuted(b) {
+			m.pastControl = true
+			return
+		}
+		if m.pastControl && b != 0x1b && b != '7' && b != '8' && b != '(' {
+			// Past a control, only what the replay's G0 needs is followed;
+			// see pastControl.
+			m.state = msNormal
+			m.closePartial()
+			return
+		}
 		switch b {
 		case 0x1b:
 			// ESC ESC: restart rather than fall out of sync.
+			m.pastControl = false
 			m.reset()
 			m.openPartial()
 		case '[':
@@ -1008,6 +1089,16 @@ func (m *ModeTracker) step(b byte) {
 			m.resetToDefaults()
 			m.state = msNormal
 			m.closePartial()
+		case '7':
+			// DECSC.
+			m.saveCursor()
+			m.state = msNormal
+			m.closePartial()
+		case '8':
+			// DECRC.
+			m.restoreCursor()
+			m.state = msNormal
+			m.closePartial()
 		default:
 			m.state = msNormal
 			m.closePartial()
@@ -1019,8 +1110,12 @@ func (m *ModeTracker) step(b byte) {
 			// designator both loses whatever sequence it opened and leaves
 			// the snapshot ending mid-escape.
 			m.state = msEsc
+			m.pastControl = false
 			m.reset()
 			m.openPartial()
+		case isExecuted(b):
+			// Acted on, and the designation goes on.
+			m.pastControl = true
 		case b < 0x30 || b > 0x7e:
 			// Not a designator at all; no charset was selected.
 			m.state = msNormal
@@ -1087,9 +1182,20 @@ func (m *ModeTracker) step(b byte) {
 			m.appendString(b)
 		}
 	case msStringEsc:
-		if b == '\\' {
+		switch {
+		case b == '\\':
 			// ST, which ends any of them.
 			m.endString()
+			return
+		case b == 0x07 && m.kind == skOSC:
+			// xterm keeps the string open across the ESC, and a BEL read
+			// there still ends an OSC.
+			m.endString()
+			return
+		case isExecuted(b):
+			// The ESC is still waiting for the byte that ends the string or
+			// opens a sequence.
+			m.pastControl = true
 			return
 		}
 		// Anything else and the string was abandoned, which is how a
@@ -1102,6 +1208,21 @@ func (m *ModeTracker) step(b byte) {
 		m.openPartial()
 		m.step(b)
 	}
+}
+
+// isASCII reports a G0, in charsetG0's form, that is US ASCII: nil, where a
+// terminal starts, or designated as such.
+func isASCII(g0 []byte) bool { return len(g0) == 0 || string(g0) == "\x1b(B" }
+
+// isExecuted reports a byte a terminal acts on inside an escape sequence
+// without leaving it: a C0 control, executed where it stands, or DEL, which is
+// ignored. xterm's esc_table and the tables that designate a charset
+// (VTPrsTbl.c) share their C0 column with its CSI tables, as the DEC parser
+// does. Neither is part of the sequence or replayed with it: the session's
+// terminal has already acted on it. ESC is not one, since it restarts a
+// sequence, nor are CAN and SUB, which end one.
+func isExecuted(b byte) bool {
+	return (b < 0x20 && b != 0x1b && b != 0x18 && b != 0x1a) || b == 0x7f
 }
 
 // startString enters a string sequence, whose payload the tracker consumes
@@ -1161,12 +1282,20 @@ func (m *ModeTracker) closePartial() {
 
 // resetToDefaults forgets everything recorded, which is what a terminal does
 // to itself on RIS: it comes back at power-on, on the normal screen.
+//
+// Everything but the alternate screen's saved G0. xterm's RIS leaves the
+// alternate screen, then saves the cursor, and the charsets it has just reset
+// with it, on the normal screen alone: the alternate screen's saved cursor
+// stays as it was, for a restore there to bring back.
 func (m *ModeTracker) resetToDefaults() {
 	clear(m.decPrivate)
 	m.altScreen = false
 	m.altVia = 0
+	m.savedBy1049 = false
 	m.clearRegions()
 	m.charsetG0 = nil
+	m.mainSavedG0 = nil
+	m.leftRightMargins = false
 	m.mainKeys = keyStack{}
 	m.altKeys = keyStack{}
 	m.modifyOtherKeys = nil
@@ -1189,6 +1318,12 @@ func (m *ModeTracker) softReset() {
 	}
 	m.clearRegions()
 	m.charsetG0 = nil
+	// xterm's soft reset ends with a cursor save, after the charsets are
+	// reset, so the slot of the screen showing holds ASCII. The other
+	// screen's is left alone.
+	*m.savedG0() = nil
+	// And it resets DECLRMM, as RIS does.
+	m.leftRightMargins = false
 	// kitty's soft reset clears both keyboard stacks, as its hard reset does.
 	// The protocol is kitty's, so its reset is the one to follow here.
 	m.mainKeys = keyStack{}
@@ -1218,6 +1353,23 @@ func (m *ModeTracker) clearRegions() {
 
 func (m *ModeTracker) altActive() bool { return m.altScreen }
 
+// savedG0 returns the saved cursor's G0 of the screen that is showing.
+func (m *ModeTracker) savedG0() *[]byte {
+	if m.altActive() {
+		return &m.altSavedG0
+	}
+	return &m.mainSavedG0
+}
+
+// saveCursor is a cursor save -- DECSC, SCOSC, ?1048h, and ?1049h before it
+// switches -- of the one piece of what it saves that the tracker models: G0.
+func (m *ModeTracker) saveCursor() { *m.savedG0() = slices.Clone(m.charsetG0) }
+
+// restoreCursor is a cursor restore -- DECRC, SCORC, ?1048l, and ?1049l after
+// it switches back -- which brings back the G0 the save held, or ASCII from a
+// slot nothing saved.
+func (m *ModeTracker) restoreCursor() { m.charsetG0 = slices.Clone(*m.savedG0()) }
+
 func (m *ModeTracker) finishCSI(final byte) {
 	params := m.seq
 
@@ -1233,15 +1385,44 @@ func (m *ModeTracker) finishCSI(final byte) {
 			if err != nil {
 				continue
 			}
+			if n == 1048 {
+				// A cursor save and restore, not a mode; see restorable.
+				if set {
+					m.saveCursor()
+				} else {
+					m.restoreCursor()
+				}
+				continue
+			}
+			if n == 69 {
+				m.leftRightMargins = set
+				continue
+			}
 			if _, ok := restorable[n]; !ok {
 				continue
 			}
 			if altScreenModes[n] {
+				if n == 1049 && set {
+					// 1049 saves the cursor before it switches, in the slot
+					// of the screen showing: the normal one, unless the
+					// alternate one already is.
+					m.saveCursor()
+				}
+				if set && !m.altScreen {
+					// Entered from the normal screen: by ?1049h, which has
+					// just saved its cursor, or by a mode that saves nothing.
+					m.savedBy1049 = n == 1049
+				}
 				m.altScreen = set
 				if set {
 					// Whichever mode entered last is the one to replay, since
 					// it is the one the session's own reset will match.
 					m.altVia = n
+				}
+				if n == 1049 && !set {
+					// And restores it once it has switched back, from the
+					// normal screen's slot, whichever screen was showing.
+					m.restoreCursor()
 				}
 				continue
 			}
@@ -1255,7 +1436,20 @@ func (m *ModeTracker) finishCSI(final byte) {
 		if len(params) == 1 && params[0] == '!' {
 			m.softReset()
 		}
+	case 's':
+		// SCOSC, while DECLRMM (?69) is reset, and only bare: xterm saves on
+		// a CSI s with no parameter at all. While ?69 is set it is DECSLRM,
+		// the left and right margins, bare or not. With a prefix it is
+		// neither: CSI ? s is XTSAVE.
+		if len(params) == 0 && !m.leftRightMargins {
+			m.saveCursor()
+		}
 	case 'u':
+		if len(params) == 0 {
+			// SCORC; see kittyKeyboard.
+			m.restoreCursor()
+			return
+		}
 		m.kittyKeyboard(params)
 	case 'm':
 		// XTMODKEYS is marked by a leading '>'. Without one this is SGR,
@@ -1573,13 +1767,24 @@ func (m *ModeTracker) Restore() []byte {
 			out = append(out, 'l')
 		}
 	}
+	if m.leftRightMargins {
+		// Which resets the left and right margins too.
+		out = appendMode(out, 69, false)
+	}
 
 	out = kittyPop(out, m.mainKeys)
 	if m.modifyOtherKeys != nil {
 		out = append(out, "\x1b[>4m"...)
 	}
 
-	if len(m.charsetG0) > 0 {
+	// The G0 the terminal holds after all of the above: ?1049l restores the
+	// one ?1049h saved, and nothing else here changes it, the trip to the
+	// alternate screen's stack saving and restoring it as it is.
+	g0 := m.charsetG0
+	if m.altActive() && m.altVia == 1049 {
+		g0 = m.mainSavedG0
+	}
+	if len(g0) > 0 {
 		// US ASCII into G0, which is where a terminal starts.
 		out = append(out, 0x1b, '(', 'B')
 	}
@@ -1590,7 +1795,8 @@ func (m *ModeTracker) Restore() []byte {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the screen switch, the region, the charset and
+// len(restorable) plus DECLRMM, the screen switch and a save ahead of it, the
+// region, the charset (twice, on either side of the switch) and
 // modifyOtherKeys, each one sequence of at most maxSequenceBytes parameters,
 // two kitty keyboard stacks of kittyStackDepth entries, and one partial
 // sequence. Only the partial is sized by the stream rather than by this file,
@@ -1619,9 +1825,27 @@ func (m *ModeTracker) Restore() []byte {
 // bytes then complete it on the joiner's terminal instead of printing as text
 // -- which is what they did when the trim boundary fell inside a sequence and
 // the snapshot said nothing about it.
+//
+// Of the saved cursors, the normal screen's is replayed while the alternate
+// screen shows: its G0 is designated and saved ahead of the switch, by the
+// ?1049h replayed when one entered and by an ESC 7 otherwise. That save
+// brackets the alternate screen's whole stay -- ?1049h to ?1049l, or ESC 7
+// ?47h to ?47l ESC 8 -- so it is routinely evicted while the restore is still
+// to come. Either save also takes the joiner's cursor position and pen of the
+// moment, which a snapshot can't set to the session's; a replayed ?1049h
+// always did.
+//
+// Every other save is a limit: a restore in the ring whose save was evicted
+// -- ESC 8, ?1048l or CSI u after ESC 7, ?1048h or CSI s, on the screen
+// showing -- reads a slot on the joiner that nothing filled, and gives ASCII
+// where the session's gives what it saved. Those saves bracket a stretch of
+// drawing on one screen, so it takes a ring's start falling inside one.
 func (m *ModeTracker) Snapshot() []byte {
 	out := m.candidates[len(m.candidates)-1].appendRegion(nil)
 	out = m.appendModes(out, 0)
+	if m.leftRightMargins {
+		out = appendMode(out, 69, true)
+	}
 	out = kittyPushes(out, m.mainKeys)
 	out = append(out, m.modifyOtherKeys...)
 	if !m.altActive() && len(m.altKeys.entries) > 0 {
@@ -1631,13 +1855,45 @@ func (m *ModeTracker) Snapshot() []byte {
 		out = kittyPushes(out, m.altKeys)
 		out = append(out, "\x1b[?47l\x1b8"...)
 	}
+	var savedG0 []byte
 	if m.altActive() {
-		// Replayed through the mode that entered, so a joiner is left in the
-		// state the session's own "l" will match.
-		out = appendMode(out, m.altVia, true)
+		// fill is whether the normal screen's saved G0 needs saving ahead of
+		// a ?47h or ?1047h: not when it is ASCII, which a joiner's slot that
+		// nothing filled restores too. A replayed ?1049h saves it whatever
+		// it is.
+		fill := m.altVia != 1049 && !isASCII(m.mainSavedG0)
+		switch {
+		case m.altVia == 1049 || (fill && m.savedBy1049):
+			// ?1049h saves the cursor, G0 with it, for the session's ?1049l
+			// to restore, and the joiner's ?1049h saves the joiner's. So the
+			// G0 the session saved is designated just ahead of it, which
+			// costs no save of its own. When a ?47h or ?1047h came after it,
+			// saving nothing, the ?1049h is replayed ahead of that mode
+			// anyway, as the session sent it, and that mode finds the joiner
+			// on the alternate screen already.
+			savedG0 = m.mainSavedG0
+			out = append(out, savedG0...)
+			out = appendMode(out, 1049, true)
+		case fill:
+			// Saved by something else, ESC 7 most often, ahead of a ?47h or
+			// ?1047h, which save nothing: an ESC 7 of the snapshot's own
+			// saves it.
+			savedG0 = m.mainSavedG0
+			out = append(out, savedG0...)
+			out = append(out, "\x1b7"...)
+		}
+		if m.altVia != 1049 {
+			// Replayed through the mode that entered last, so a joiner is
+			// left in the state the session's own "l" will match.
+			out = appendMode(out, m.altVia, true)
+		}
 		out = kittyPushes(out, m.altKeys)
 	}
 	out = append(out, m.charsetG0...)
+	if len(m.charsetG0) == 0 && len(savedG0) > 0 {
+		// The joiner holds the saved G0 now, and the session ASCII.
+		out = append(out, "\x1b(B"...)
+	}
 	out = append(out, m.partial...)
 	return out
 }
@@ -1660,6 +1916,11 @@ type ReplayParts struct {
 // switch through AltVia and AltKeys, or HiddenAltKeys, which Snapshot pushes
 // on a trip to the alternate screen and back. The render builds its own trip,
 // so the pushes come alone.
+//
+// It doesn't carry the normal screen's saved G0 either, which Snapshot
+// designates and saves ahead of the switch to the alternate screen, with a
+// ?1049h or an ESC 7, nor DECLRMM (?69), which Snapshot replays after the
+// modes.
 func (m *ModeTracker) ReplayParts() ReplayParts {
 	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
 	for n, def := range restorable {
