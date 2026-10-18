@@ -914,3 +914,25 @@ func TestReplayIgnoresTheSaveCursorMode(t *testing.T) {
 	j.then(t, "\x1b[m\x1b[H\x1b[?1048lY")
 	require.Equal(t, "Y", cellAt(j.b, 4, 2).Content)
 }
+
+// A status line drawn at the top between SCOSC and SCORC, as a prompt draws
+// one: the bare CSI u takes the cursor back to where the CSI s saved it, so
+// the joiner's cursor is there, not after the status line, and the next
+// character lands there, as it does on the session's terminal.
+func TestReplayRestoresTheCursorSCORCReturnsTo(t *testing.T) {
+	const stream = "\x1b[5;10H\x1b[s\x1b[1;1Hstatus\x1b[u"
+	joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+	require.NoError(t, fellBack)
+	require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+
+	a, aHist := newReference(80, 24)
+	_, _ = a.WriteString(stream)
+	b, bHist := newReference(80, 24)
+	_, _ = b.Write(joined)
+	require.Equal(t, uv.Pos(9, 4), b.CursorPosition(), "the joiner's cursor")
+	for _, term := range []*vt.Emulator{a, b} {
+		_, _ = term.WriteString("X")
+		require.Equal(t, "X", cellAt(term, 9, 4).Content)
+	}
+	require.Empty(t, sameState(a, b, *aHist, *bHist, "", ""))
+}
