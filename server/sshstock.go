@@ -293,9 +293,9 @@ func (p *SSHRouting) stockConnection(ctx context.Context, accepted net.Conn, ins
 	if clientVersion == upterm.HostSSHClientVersion {
 		defer p.hostActivity.track(downstream.SessionID(), raw)()
 	}
-	// How the verdict reads that this node sends the client, or passes on to it
-	// from the next node: in a sentence for a person using plain ssh, and as the
-	// wire text for anyone that matches it.
+	// How this node words the rejections it sends the client, its own or the
+	// next node's: a sentence for plain ssh, the wire text for join, a host and
+	// relay hops.
 	_, hop := downstream.Permissions.Extensions[permHop]
 	sessionID, _, _ := p.Auth.SessionManager.GetEncodeDecoder().Decode(downstream.User())
 	rewrite := rejectionRewriteFor(clientVersion, hop, sessionID)

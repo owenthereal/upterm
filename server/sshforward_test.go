@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
@@ -627,6 +628,27 @@ func TestSSHRejectChannelsRewritesEveryRejection(t *testing.T) {
 		func(msg string) string { return "worded: " + msg }))
 	require.Equal(t, "worded: upstream has no session", (<-first).Message)
 	require.Equal(t, "worded: upstream has no session", (<-buffered).Message)
+}
+
+// The rewrite is for the guest's channel opens only: the body of a global
+// request's reply is still the wire text. A host reads it, and OpenSSH
+// ignores it.
+func TestSSHRejectChannelsKeepsTheWireTextInAGlobalRequestsReply(t *testing.T) {
+	client, downstream := forwardTestPair(t, nil, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- rejectSSHChannels(t.Context(), downstream, errUpstreamNoHost, rejectionRewriteFor("SSH-2.0-OpenSSH_9.6", false, "s"))
+	}()
+	ok, body, err := client.conn.SendRequest("keepalive@openssh.com", true, nil)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, upterm.UpstreamNoHost, string(body))
+	// The same rewrite words the open, which shows it was set.
+	_, _, err = client.conn.OpenChannel("session", nil)
+	var rejection *ssh.OpenChannelError
+	require.ErrorAs(t, err, &rejection)
+	require.Equal(t, "upterm: no host is connected for session s right now; it may have ended, or the ID may be wrong.", rejection.Message)
+	require.NoError(t, forwardTestReceive(t, done))
 }
 
 func TestSSHRejectChannelsBoundedWait(t *testing.T) {

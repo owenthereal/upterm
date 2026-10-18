@@ -35,3 +35,29 @@ func TestDisplayRejectionPassesOtherTextsThrough(t *testing.T) {
 	rewrite := rejectionRewriteFor("SSH-2.0-OpenSSH_9.6", false, "s")
 	require.Equal(t, "host policy explanation", rewrite.apply("host policy explanation"))
 }
+
+// Only a plain ssh client is shown the sentences: upterm join and a relay node
+// match the wire texts, and a host reads them. A host opens no channel, so no
+// end-to-end test sees its branch; this one does.
+func TestRejectionRewriteForWordsOnlyForPlainClients(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		clientVersion string
+		hop           bool
+		words         bool
+	}{
+		{"join", upterm.JoinSSHClientVersion, false, false},
+		{"host", upterm.HostSSHClientVersion, false, false},
+		{"hop", "SSH-2.0-Go", true, false},
+		{"plain", "SSH-2.0-OpenSSH_9.6", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rewrite := rejectionRewriteFor(tc.clientVersion, tc.hop, "s")
+			if tc.words {
+				require.NotNil(t, rewrite)
+			} else {
+				require.Nil(t, rewrite)
+			}
+		})
+	}
+}

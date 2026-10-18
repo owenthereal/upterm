@@ -37,6 +37,6 @@ func testClientToldOfMissingSessionThroughAnotherNode(t *testing.T, hostNodeAddr
 		c := &Client{PrivateKeys: []string{ClientPrivateKey}, ClientVersion: clientVersion}
 		var rejection *ssh.OpenChannelError
 		require.ErrorAs(t, c.Join(missingSession(hostNodeAddr), clientJoinURL), &rejection, "%q", clientVersion)
-		require.Equal(t, want, rejection.Message)
+		require.Equal(t, want, rejection.Message, "%q", clientVersion)
 	}
 }

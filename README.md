@@ -281,6 +281,8 @@ is told:
 upterm: no host is connected for session ID right now. If it's reconnecting, try again once it's back; on some relays the host then has a new command to share. Otherwise it may have ended, or the ID may be wrong.
 ```
 
+(A plain `ssh` guest who enters at another node of a multi-node relay reads a shorter form, in ssh's `channel 0: open failed` line: `…right now; it may have ended, or the ID may be wrong.`)
+
 For machines without upterm, this script rejoins an interactive session
 automatically and leaves the terminal usable after a drop. Save it as
 `upterm-rejoin` and run it in place of `ssh`, with the same arguments:

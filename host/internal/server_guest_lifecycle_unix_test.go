@@ -210,6 +210,24 @@ func TestAReadOnlySessionsRefusedForwardSaysSo(t *testing.T) {
 	require.Equal(t, "upterm: this session is read-only, so it doesn't allow port forwarding.", open.Message)
 }
 
+// A forward the session allows but the dial fails keeps the library's own
+// connect-failure text: only the refusal for a session that doesn't allow
+// forwarding is reworded.
+func TestAForwardThatCantConnectKeepsTheLibrarysText(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closed := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	h := startHost(t, &Server{Command: readsALine("READY", 0), AllowLocalTCPForwarding: true})
+	_, err = h.guestClient(t).Dial("tcp", closed)
+	var open *ssh.OpenChannelError
+	require.ErrorAs(t, err, &open)
+	require.Equal(t, ssh.ConnectionFailed, open.Reason)
+	require.Contains(t, open.Message, "connection refused")
+	require.NotContains(t, open.Message, "port forwarding")
+}
+
 // A guest whose forced command can't start is told so on its stderr, and where
 // to find why: the host's log. The guest has a pty, and its terminal is raw,
 // so the line ends with a carriage return as well.
