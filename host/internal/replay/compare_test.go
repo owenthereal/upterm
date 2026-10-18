@@ -272,12 +272,125 @@ func sameCursorStyle(a, b *vt.Emulator) string {
 	return ""
 }
 
-// watchTitle has term report each title it is set to into title, and
-// returns title.
-func watchTitle(term *vt.Emulator) *string {
-	title := new(string)
-	term.SetCallbacks(vt.Callbacks{Title: func(s string) { *title = s }})
-	return title
+// watchTitle has term report the window title it shows into title, and
+// returns title: "" until the stream sets one, as for a terminal whose own
+// title is "" (see watchTitleFrom).
+func watchTitle(term *vt.Emulator) *string { return watchTitleFrom(term, "") }
+
+// watchTitleFrom has term, a terminal whose own window title is own, report
+// the title it shows into title, and returns title: each one it is set to, by
+// OSC 0 or OSC 2, and each one a pop of its title stack puts back, the stack
+// kept as xterm keeps it (see xtermTitles). x/vt keeps no title stack, so
+// without it a pop would leave the title as the last OSC set it.
+func watchTitleFrom(term *vt.Emulator, own string) *string {
+	x := &xtermTitles{title: own}
+	term.SetCallbacks(vt.Callbacks{Title: func(s string) { x.title = s }})
+	term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+		op, _, _ := params.Param(0, 0)
+		ps, _, _ := params.Param(1, 0)
+		which, _, _ := params.Param(2, 0)
+		switch op {
+		case 22:
+			x.push(ps, which)
+		case 23:
+			x.pop(ps, which)
+		}
+		return false
+	})
+	return &x.title
+}
+
+// xtermTitles is xterm's title stack, as its xtermPushTitle and
+// xtermPopTitle (misc.c) keep it, and the window title it shows: ten slots,
+// a count of pushes that wraps round them, a pop that takes a name its entry
+// lacks from the nearest of the nine slots below that has one, and that
+// empties the slot it pops; a third parameter from 1 stores into, or reads,
+// a slot in place. A name not saved, or a slot emptied, is nil, and putting
+// back nil changes nothing, as xterm's ChangeGroup ignores it. The icon name
+// is only there or not: the render doesn't send it.
+type xtermTitles struct {
+	title string
+	used  int
+	data  [10]struct {
+		icon   bool
+		window *string
+	}
+}
+
+func (x *xtermTitles) push(ps, which int) {
+	var item struct {
+		icon   bool
+		window *string
+	}
+	title := x.title
+	switch ps {
+	case 0:
+		item.icon, item.window = true, &title
+	case 1:
+		item.icon = true
+	case 2:
+		item.window = &title
+	}
+	if which--; which < 0 {
+		which = x.used
+		x.used++
+	}
+	x.data[which%10] = item
+}
+
+func (x *xtermTitles) pop(ps, which int) {
+	popped := false
+	switch {
+	case which > 0:
+		which = (which - 1) % 10
+	case x.used > 0:
+		x.used--
+		which = x.used % 10
+		popped = true
+	default:
+		return
+	}
+	window := x.data[which].window
+	for n := 1; window == nil && n < 10; n++ {
+		window = x.data[(which-n+10)%10].window
+	}
+	if popped {
+		x.data[which].icon, x.data[which].window = false, nil
+	}
+	if (ps == 0 || ps == 2) && window != nil {
+		x.title = *window
+	}
+}
+
+// The title stack's model follows xterm: a pop of an entry that saved only
+// the icon name puts back the title of the one below it, as vim's exit
+// relies on; past ten pushes the oldest is overwritten, and a pop that comes
+// down to it finds nothing; a pop of an empty stack does nothing.
+func TestXtermTitlesFollowsXterm(t *testing.T) {
+	x := &xtermTitles{title: "own"}
+	x.push(2, 0)
+	x.title = "vim"
+	x.push(1, 0)
+	x.pop(2, 0)
+	require.Equal(t, "own", x.title)
+	x.pop(1, 0)
+	require.Equal(t, "own", x.title)
+
+	x = &xtermTitles{title: "own"}
+	for i := range 11 {
+		x.title = fmt.Sprint(i)
+		x.push(0, 0)
+	}
+	x.title = "now"
+	for i := 10; i >= 1; i-- {
+		x.pop(0, 0)
+		require.Equal(t, fmt.Sprint(i), x.title)
+	}
+	x.pop(0, 0)
+	require.Equal(t, "1", x.title, "the overwritten entry")
+	x.pop(0, 0)
+	require.Equal(t, "1", x.title, "the empty stack")
+	require.Zero(t, x.used)
 }
 
 // sameScreen compares two screens of one size cell by cell, styles by

@@ -46,19 +46,25 @@ func (e *emulation) render() ([]byte, error) {
 	enc.reset(budget - head)
 	enc.stop = e.stop
 	r := renderer{
-		enc:     enc,
-		term:    e.term,
-		parts:   parts,
-		title:   e.title,
-		titled:  e.titled,
-		rows:    e.join.Rows,
-		fits:    e.join.Cols == e.term.Width(),
-		rep:     rep,
-		cwd:     e.cwd,
-		cwdTold: e.cwdTold,
-		clips:   e.clips,
+		enc:    enc,
+		term:   e.term,
+		parts:  parts,
+		title:  e.title,
+		titled: e.titled,
+		titles: e.titles,
+		// A title a pop put back too long to keep can't be sent.
+		titleOver: e.titled && e.titleOver,
+		rows:      e.join.Rows,
+		fits:      e.join.Cols == e.term.Width(),
+		rep:       rep,
+		cwd:       e.cwd,
+		cwdTold:   e.cwdTold,
+		clips:     e.clips,
 	}
 	r.draw()
+	if r.titleOver {
+		return nil, &IneligibleError{State: "a saved title too long to replay"}
+	}
 	if r.cwdOver {
 		return nil, &IneligibleError{State: "a working directory too long to replay"}
 	}
@@ -104,11 +110,15 @@ type renderer struct {
 	enc   *encoder
 	term  *vt.Emulator
 	parts uio.ReplayParts
-	// title is the one the stream last set, if titled: an empty one too,
-	// which clears the joiner's.
+	// title is the one the stream last set or a pop put back, if titled: an
+	// empty one too, which clears the joiner's.
 	title  string
 	titled bool
-	rows   int // the joiner's
+	// titles is the title stack to push again, and titleOver says a title
+	// it or the current one holds was too long to keep.
+	titles    titleStack
+	titleOver bool
+	rows      int // the joiner's
 	// fits is a joiner as wide as the render, where a character printed in
 	// the render's last column leaves a wrap pending, as it did on the
 	// session's terminal. A wider joiner gets no wrap, as a wider live
@@ -381,10 +391,10 @@ func (r *renderer) reportModes() {
 // continuation sets the state that decides how the next bytes are read and
 // that neither moves the cursor nor clears a pending wrap, after the last
 // print, which the charsets would remap and insert mode would shift: the
-// charsets, insert mode, the application keypad, reverse video, the title,
-// the cursor's style, autowrap, and the active pen and link. The working
-// directory and the clipboard writes still in force, which change none of
-// that, come last of all.
+// charsets, insert mode, the application keypad, reverse video, the title
+// stack and then the title, the cursor's style, autowrap, and the active pen
+// and link. The working directory and the clipboard writes still in force,
+// which change none of that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -408,7 +418,8 @@ func (r *renderer) continuation(reprinted int) {
 	if t.Mode(modeReverseVideo).IsSet() {
 		_ = enc.put("\x1b[?5h")
 	}
-	if r.titled {
+	r.titleStack()
+	if r.titled && !r.titleOver {
 		_ = enc.put("\x1b]2;", r.title, "\x07")
 	}
 	if style, blink := t.CursorStyle(); style != vt.CursorBlock || !blink {
@@ -437,6 +448,39 @@ func (r *renderer) workingDirectory() {
 	}
 	if r.enc.put("\x1b]7;", r.cwd, "\x07") != nil {
 		r.cwdOver = true
+	}
+}
+
+// titleStack pushes the title stack's entries again, oldest first, the
+// window title each saved set before it where the stream had set that one.
+// Where it hadn't, the joiner's own title still shows, as the session's own
+// did: such an entry is pushed only while the title is the terminal's own,
+// so every entry under it is one too, and none of their titles is set first.
+// A title too long to keep sets titleOver instead, and the render fails on
+// it.
+//
+// Places lost under the entries (see the type) say the session's terminal
+// pushed past ten: each of the ten places of xterm's stack holds what the
+// stream pushed there, or nothing once popped, and what the stack held
+// before the ring is gone. The joiner's is made so too: entries of neither
+// name, which put nothing back, as a lost place doesn't, fill the places the
+// entries leave, below them, so that what the joiner's held is gone as well.
+func (r *renderer) titleStack() {
+	enc, s := r.enc, r.titles
+	if s.lost > 0 {
+		for range maxTitles - len(s.entries) {
+			_ = enc.put("\x1b[22;3t")
+		}
+	}
+	for _, en := range s.entries {
+		if en.titled && en.over {
+			r.titleOver = true
+			return
+		}
+		if en.titled {
+			_ = enc.put("\x1b]2;", en.title, "\x07")
+		}
+		_ = enc.put("\x1b[22;", strconv.Itoa(en.ps), "t")
 	}
 }
 
@@ -564,8 +608,8 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.selective {
 		return rep{}, &IneligibleError{State: "a selective erase"}
 	}
-	if e.savedTitle {
-		return rep{}, &IneligibleError{State: "a saved title"}
+	if e.titleIndexed {
+		return rep{}, &IneligibleError{State: "a title stack entry by index"}
 	}
 	if e.savedModes {
 		return rep{}, &IneligibleError{State: "saved DEC modes"}

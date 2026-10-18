@@ -69,11 +69,18 @@ type emulation struct {
 	hist  history
 	enc   encoder
 
-	// title is the window title the stream last set, by OSC 0 or OSC 2, and
-	// titled whether it set one at all: an empty title clears the joiner's,
-	// as the raw ring would, where a stream that set none leaves it.
-	title  string
-	titled bool
+	// title is the window title the stream last set, by OSC 0 or OSC 2, or
+	// that a pop of the title stack put back, and titled whether it is one
+	// the stream set: an empty title clears the joiner's, as the raw ring
+	// would, where a stream that set none, or a pop that put back the
+	// terminal's own, leaves it. titleOver is a title a pop put back that was
+	// too long to keep (see titleEntry).
+	title             string
+	titled, titleOver bool
+	// titles is the title stack (see titleStack), and titleIndexed is set
+	// once the stream has saved or restored a title by its index on it.
+	titles       titleStack
+	titleIndexed bool
 	// cwd is the working directory the stream last reported, by OSC 7, and
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
@@ -90,10 +97,9 @@ type emulation struct {
 	// protected is set once the stream has turned character protection on,
 	// and selective once it has erased selectively (see watchProtection).
 	protected, selective bool
-	// savedTitle is set once the stream has pushed a title, savedModes once
-	// it has saved DEC modes, and savedRendition once it has pushed a
-	// rendition (see watchSaves).
-	savedTitle, savedModes, savedRendition bool
+	// savedModes is set once the stream has saved DEC modes, and
+	// savedRendition once it has pushed a rendition (see watchSaves).
+	savedModes, savedRendition bool
 	// undrawable is set once the stream has set an attribute a cell doesn't
 	// keep, and doubleSize once it has made a line double-width or
 	// double-height (see watchRendition).
@@ -179,12 +185,12 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either
 // screen, the history kept through the scroll-off function instead, replies
-// to queries discarded, the title, the working directory, the colours and the
-// clipboard kept, images, device control strings, character protection,
-// selective erases, saves, renditions and line sizes the cells can't hold,
-// and a status line noted, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// to queries discarded, the title and the title stack, the working
+// directory, the colours and the clipboard kept, images, device control
+// strings, character protection, selective erases, saves, renditions and line
+// sizes the cells can't hold, and a status line noted, and the meter stopped
+// by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -195,7 +201,7 @@ func (e *emulation) setUp() {
 	t.SetScrollbackClearFunc(e.hist.clear)
 	t.SetReplyFunc(func([]byte) {})
 	t.SetCallbacks(vt.Callbacks{
-		Title: func(title string) { e.title, e.titled = title, true },
+		Title: func(title string) { e.title, e.titled, e.titleOver = title, true, false },
 		// x/vt keeps the directory too, as this string, which keeping it here
 		// doesn't copy: it is what follows the OSC's first ';', as the stream
 		// sent it, and an OSC 7 without one reports nothing.
@@ -207,6 +213,7 @@ func (e *emulation) setUp() {
 	e.watchDCS()
 	e.watchClipboard()
 	e.watchProtection()
+	e.watchTitles()
 	e.watchSaves()
 	e.watchRendition()
 	e.watchStatusLine()
@@ -452,28 +459,131 @@ func (e *emulation) watchProtection() {
 	}
 }
 
-// watchSaves registers the handlers that note the stream saving state the
-// terminal keeps aside for a later sequence to put back: a title pushed onto
-// the title stack, by XTWINOPS 22 (CSI 22 ; Ps t), whichever names Ps saves;
-// DEC private modes saved by XTSAVE (CSI ? Pm s), whichever modes Pm names;
-// and a rendition pushed by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p),
-// the whole pen or the attributes Pm names. x/vt keeps none of them and
-// ignores what restores each, XTWINOPS 23, XTRESTORE (CSI ? Pm r) and
-// XTPOPSGR (CSI # }, or CSI # q), so once one is saved the render can't tell
-// what a restore on the session's terminal puts back, and a joiner's
-// terminal, which the save never reached, would put back its own. x/vt keys a
-// CSI handler by its prefix and intermediate too, so XTSAVE's handler sees
-// neither SCOSC nor DECSLRM, both the bare CSI s, and the alias's sees no CSI
-// p without the #, such as DECSTR's CSI ! p. x/vt has no handler of its own
-// for any of them; these return false all the same, as watchColours' do.
-func (e *emulation) watchSaves() {
-	t := e.term
-	t.RegisterCsiHandler('t', func(params ansi.Params) bool {
-		if n, _, _ := params.Param(0, 0); n == 22 {
-			e.savedTitle = true
+// maxTitles is how many entries xterm's title stack holds.
+const maxTitles = 10
+
+// titleStack is the title stack the stream pushed onto, by XTWINOPS 22
+// (CSI 22 ; Ps t), and popped, by XTWINOPS 23 (CSI 23 ; Ps t), as xterm keeps
+// it. x/vt keeps none, where a raw replay's pushes and pops reach the
+// joiner's terminal, which then puts back on a later pop what the session's
+// does: so the render pushes the entries again (see renderer.titleStack).
+//
+// xterm's holds ten entries. A push past them takes the place of the oldest,
+// and a pop that comes down to where that was finds nothing there, nor in
+// any place below it: lost counts those places, under the entries. A pop
+// past them all pops what the session's terminal pushed before the ring,
+// which neither a raw replay nor the render holds, so it changes nothing
+// here.
+type titleStack struct {
+	entries []titleEntry // oldest first
+	lost    int
+}
+
+// titleEntry is what a push saved. ps is its second parameter, which says
+// which names: 0, or none given, both; 1 the icon name; 2 the window title;
+// any other neither, which xterm pushes all the same. The window title, if ps
+// saves it, is the emulation's as of the push, the terminal's own where the
+// stream had set none (see emulation.title). One longer than any render may
+// be is over, its bytes not kept. The icon name isn't kept at all, as the
+// render sends none.
+type titleEntry struct {
+	ps           int
+	title        string
+	titled, over bool
+}
+
+// savesTitle reports whether XTWINOPS 22 or 23 with ps saves or puts back
+// the window title.
+func savesTitle(ps int) bool { return ps == 0 || ps == 2 }
+
+// watchTitles registers the handler that keeps the title stack. A third
+// parameter from 1 on is an index on xterm's stack, counted from its bottom:
+// a push stores into that entry in place and a pop reads it, where the
+// session's terminal may have pushed below the ring's first entry, so which
+// entry that is can't be told, and the render falls back on it. x/vt has no
+// CSI t handler of its own; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchTitles() {
+	e.term.RegisterCsiHandler('t', func(params ansi.Params) bool {
+		op, _, _ := params.Param(0, 0)
+		if op != 22 && op != 23 {
+			return false
+		}
+		ps, _, _ := params.Param(1, 0)
+		switch i, _, _ := params.Param(2, 0); {
+		case i > 0:
+			e.titleIndexed = true
+		case op == 22:
+			e.pushTitle(ps)
+		default:
+			e.popTitle(ps)
 		}
 		return false
 	})
+}
+
+// pushTitle pushes what ps saves, the oldest entry giving its place up to
+// it once there are ten.
+func (e *emulation) pushTitle(ps int) {
+	en := titleEntry{ps: ps}
+	if savesTitle(ps) && e.titled {
+		en.titled = true
+		if en.over = e.titleOver || len(e.title) > budget; !en.over {
+			en.title = e.title
+		}
+	}
+	s := &e.titles
+	if len(s.entries) == maxTitles {
+		copy(s.entries, s.entries[1:])
+		s.entries[maxTitles-1] = titleEntry{}
+		s.entries = s.entries[:maxTitles-1]
+		s.lost++
+	}
+	s.entries = append(s.entries, en)
+}
+
+// popTitle pops an entry, or a lost place, and puts back the window title
+// when ps restores it: the entry's own, or for an entry that saved none, as
+// xterm takes it, that of the nearest one below it that saved one. Below
+// the entries there is none to take: a lost place holds nothing, and what
+// the session's terminal pushed before the ring isn't known.
+func (e *emulation) popTitle(ps int) {
+	s := &e.titles
+	n := len(s.entries)
+	if n == 0 {
+		s.lost = max(s.lost-1, 0)
+		return
+	}
+	en := s.entries[n-1]
+	s.entries[n-1] = titleEntry{}
+	s.entries = s.entries[:n-1]
+	if !savesTitle(ps) {
+		return
+	}
+	for i := len(s.entries) - 1; !savesTitle(en.ps); i-- {
+		if i < 0 {
+			return
+		}
+		en = s.entries[i]
+	}
+	e.title, e.titled, e.titleOver = en.title, en.titled, en.over
+}
+
+// watchSaves registers the handlers that note the stream saving state the
+// terminal keeps aside for a later sequence to put back: DEC private modes
+// saved by XTSAVE (CSI ? Pm s), whichever modes Pm names; and a rendition
+// pushed by XTPUSHSGR (CSI Pm # {, or its alias CSI Pm # p), the whole pen or
+// the attributes Pm names. x/vt keeps neither and ignores what restores
+// each, XTRESTORE (CSI ? Pm r) and XTPOPSGR (CSI # }, or CSI # q), so once
+// one is saved the render can't tell what a restore on the session's
+// terminal puts back, and a joiner's terminal, which the save never reached,
+// would put back its own. x/vt keys a CSI handler by its prefix and
+// intermediate too, so XTSAVE's handler sees neither SCOSC nor DECSLRM, both
+// the bare CSI s, and the alias's sees no CSI p without the #, such as
+// DECSTR's CSI ! p. x/vt has no handler of its own for either; these return
+// false all the same, as watchColours' do.
+func (e *emulation) watchSaves() {
+	t := e.term
 	t.RegisterCsiHandler(ansi.Command('?', 0, 's'), func(ansi.Params) bool {
 		e.savedModes = true
 		return false

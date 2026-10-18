@@ -541,6 +541,7 @@ func TestContinuationStateLeavesThePendingWrap(t *testing.T) {
 		"\x1b(0", "\x1b)0", "\x1b*0", "\x1b+0", "\x1b(A", "\x1b(B",
 		"\x0f", "\x0e", "\x1bn", "\x1bo",
 		"\x1b[4h", "\x1b=", "\x1b[?5h", "\x1b]2;a title\x07",
+		"\x1b[22;0t", "\x1b[22;1t", "\x1b[22;2t", "\x1b[22;3t",
 		"\x1b[1 q", "\x1b[2 q", "\x1b[3 q", "\x1b[4 q", "\x1b[5 q", "\x1b[6 q",
 		"\x1b[?7l", "\x1b[m", "\x1b[1;4:3;38;2;1;2;3m",
 		"\x1b]8;;https://x.example\x07", "\x1b]8;id=1;\x07",
@@ -1243,38 +1244,212 @@ func TestReplayFailsOnASelectiveErase(t *testing.T) {
 	}
 }
 
-// A title the session pushed onto the terminal's title stack, by XTWINOPS 22
-// (CSI 22 ; Ps t), fails the render, named: x/vt keeps no stack, so a later
-// pop, XTWINOPS 23, would put back on the session's terminal a title the
-// joiner's never saved. A push of either name or of both counts, and still
-// does once popped. A pop alone renders: what it puts back was pushed before
-// the ring, which neither a raw replay nor the render holds.
-func TestReplayFailsOnASavedTitle(t *testing.T) {
-	join := func(t *testing.T, stream string) error {
+// titlesJoin joins a terminal to a session whose stream is stream, and
+// requires the render, not the raw ring. It returns what the joiner was sent,
+// and then, which feeds live to the session's terminal and the joiner's and
+// requires the two to show the same title: each has a title of its own, so a
+// pop that puts back the terminal's own leaves each showing its own, and one
+// that puts back a title the stream set leaves both showing it. The title
+// stack is kept as xterm keeps it (see xtermTitles). joinerStack, if given,
+// goes to the joiner's terminal first: its own stack, which the joiner had
+// before it joined.
+func titlesJoin(t *testing.T, stream, joinerStack string) (joined []byte, then func(live string)) {
+	t.Helper()
+	joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	require.NoError(t, fellBack)
+	require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+	const sessionsOwn, joinersOwn = "the session's own", "the joiner's own"
+	a, b := vt.NewEmulator(80, 24), vt.NewEmulator(80, 24)
+	a.SetReplyFunc(func([]byte) {})
+	b.SetReplyFunc(func([]byte) {})
+	aTitle, bTitle := watchTitleFrom(a, sessionsOwn), watchTitleFrom(b, joinersOwn)
+	_, _ = b.WriteString(joinerStack)
+	*bTitle = joinersOwn
+	shown := func(title *string, own string) string {
+		if *title == own {
+			return "the terminal's own"
+		}
+		return *title
+	}
+	same := func(after string) {
 		t.Helper()
+		require.Equal(t, shown(aTitle, sessionsOwn), shown(bTitle, joinersOwn), "the title after %q; the render: %q", after, joined)
+	}
+	_, _ = a.WriteString(stream)
+	_, _ = b.Write(joined)
+	same("the join")
+	return joined, func(live string) {
+		t.Helper()
+		_, _ = a.WriteString(live)
+		_, _ = b.WriteString(live)
+		same(live)
+	}
+}
+
+// The title stack the session pushed onto, by XTWINOPS 22 (CSI 22 ; Ps t),
+// and popped, by XTWINOPS 23, which x/vt keeps none of, is pushed again on
+// the joiner's terminal, oldest first, each entry under the title it saved:
+// one the stream set is set again first; where the stream had set none, the
+// joiner's own still shows, and is what the joiner pushes, as a raw replay
+// would have it push. A pop the joiner's terminal then makes puts back what
+// the session's puts back: the same title the stream set, or each one's own.
+// vim pushes the window title and the icon name apart as it starts, and pops
+// them as it exits.
+func TestReplayRebuildsTheTitleStack(t *testing.T) {
+	const vimStart, vimScreen = "\x1b[22;2t\x1b[22;1t", "\x1b[?1049h\x1b[H\x1b[2J~\r\n~\x1b[H"
+	for _, tc := range []struct{ name, before, after string }{
+		{"no title set", "", ""},
+		{"a title the shell set", "\x1b]2;the shell\x07", ""},
+		{"a title vim set", "", "\x1b]2;vim\x07"},
+		{"both", "\x1b]2;the shell\x07", "\x1b]0;vim\x07"},
+	} {
+		for _, start := range []string{vimStart, "\x1b[22;1t\x1b[22;2t"} {
+			for _, exit := range []string{"\x1b[23;2t\x1b[23;1t", "\x1b[23;1t\x1b[23;2t"} {
+				t.Run(fmt.Sprintf("%s, %q then %q", tc.name, start, exit), func(t *testing.T) {
+					_, then := titlesJoin(t, tc.before+"$ vim\r\n"+start+tc.after+vimScreen, "")
+					then("\x1b[?1049l")
+					for i := 0; i < len(exit); i += len("\x1b[23;2t") {
+						then(exit[i : i+len("\x1b[23;2t")])
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("two entries, in order", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[22;2ttext\r\n\x1b]2;three\x07", "")
+		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[22;2t\x1b]2;three\x07")
+		require.Equal(t, 2, bytes.Count(joined, []byte("\x1b[22;")), "%q", joined)
+		then("\x1b[23;2t")
+		then("\x1b[23;0t")
+		then("\x1b[23;0t")
+	})
+	t.Run("an entry the stream never titled", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b[22;0t\x1b]2;vim\x07text\r\n", "")
+		require.Contains(t, string(joined), "\x1b[22;0t\x1b]2;vim\x07")
+		require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]2;")), "%q", joined)
+		then("\x1b[23;0t")
+	})
+	t.Run("a push popped in the ring", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[23;0ttext\r\n", "")
+		require.NotContains(t, string(joined), "\x1b[22;")
+		then("\x1b[23;0t")
+	})
+	t.Run("a pop in the ring that puts back the terminal's own", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b[22;2t\x1b]2;vim\x07\x1b[23;2ttext\r\n", "")
+		require.NotContains(t, string(joined), "\x1b]2;")
+		then("\x1b]2;later\x07")
+	})
+	t.Run("a pop in the ring of an entry that saved only the icon name", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[22;1t\x1b[23;2ttext\r\n", "")
+		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t\x1b]2;one\x07")
+		then("\x1b[23;0t")
+	})
+	t.Run("a pop of the icon name", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0t\x1b]2;two\x07\x1b[23;1ttext\r\n", "")
+		require.NotContains(t, string(joined), "\x1b[22;")
+		then("\x1b[23;0t")
+	})
+	t.Run("an entry of neither name", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22t\x1b]2;two\x07\x1b[22;3ttext\r\n", "")
+		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t\x1b[22;3t\x1b]2;two\x07")
+		then("\x1b[23;2t")
+		then("\x1b[23;2t")
+	})
+	t.Run("a pop past the ring's pushes", func(t *testing.T) {
+		_, then := titlesJoin(t, "\x1b]2;one\x07\x1b[23;0ttext\r\n", "")
+		then("\x1b[23;0t")
+	})
+
+	// Past ten, xterm's oldest entry is overwritten, and a pop that comes down
+	// to it finds nothing, there or below, on the joiner's terminal as on the
+	// session's: the joiner's own stack is gone as well.
+	pushes := func(n int) string {
+		var s strings.Builder
+		for i := range n {
+			fmt.Fprintf(&s, "\x1b]2;title %d\x07\x1b[22;0t", i)
+		}
+		return s.String()
+	}
+	const joinerStack = "\x1b]2;the joiner's saved\x07\x1b[22;0t"
+	for _, tc := range []struct {
+		name, stream string
+		pops         int
+	}{
+		{"eleven pushes", pushes(11), 13},
+		{"twelve pushes, four popped in the ring", pushes(12) + strings.Repeat("\x1b[23;0t", 4), 10},
+		{"thirty pushes", pushes(30), 32},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, then := titlesJoin(t, tc.stream+"\x1b]2;now\x07text\r\n", joinerStack)
+			for range tc.pops {
+				then("\x1b[23;0t")
+			}
+		})
+	}
+	t.Run("twelve pushes, all popped in the ring", func(t *testing.T) {
+		joined, _ := titlesJoin(t, pushes(12)+strings.Repeat("\x1b[23;0t", 12)+"text\r\n", "")
+		require.NotContains(t, string(joined), "\x1b[22;", "%q", joined)
+		require.NotContains(t, string(joined), "\x1b[23;", "%q", joined)
+		require.Contains(t, string(joined), "\x1b]2;title 2\x07", "the title the oldest entry put back, which the pops of the lost places left")
+	})
+
+	// Nearby forms: a window op whose later parameter is 22, and a push whose
+	// third parameter is 0, which is no index.
+	t.Run("a resize with a parameter of 22", func(t *testing.T) {
+		joined, _ := titlesJoin(t, "\x1b[8;22;1ttext\r\n", "")
+		require.NotContains(t, string(joined), "\x1b[22;")
+	})
+	t.Run("a push with no index", func(t *testing.T) {
+		joined, then := titlesJoin(t, "\x1b]2;one\x07\x1b[22;0;0ttext\r\n", "")
+		require.Contains(t, string(joined), "\x1b]2;one\x07\x1b[22;0t")
+		then("\x1b[23;0t")
+	})
+}
+
+// A title saved or restored by its index on xterm's stack, the third
+// parameter of XTWINOPS 22 or 23, fails the render, named: the index counts
+// from the bottom of the stack, which the session's terminal may have pushed
+// onto before the ring, so neither the entry it saves into nor the one it
+// reads can be told.
+func TestReplayFailsOnAnIndexedTitleStackEntry(t *testing.T) {
+	for _, stream := range []string{"\x1b[22;0;1t", "\x1b[22;2;10t", "\x1b[23;0;3t"} {
 		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
-		return fellBack
+		requireIneligible(t, fellBack, "a title stack entry by index")
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"both names pushed", "\x1b[22;0t"},
-		{"a push with no second parameter", "\x1b[22t"},
-		{"the icon name pushed", "\x1b[22;1t"},
-		{"the window title pushed", "\x1b[22;2t"},
-		{"a push popped", "\x1b[22;0t\x1b]2;a title\x07\x1b[23;0t"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			requireIneligible(t, join(t, tc.stream), "a saved title")
-		})
+}
+
+// The title stack counts against the render's budget: entries that don't fit
+// with everything else fail it, over the budget. A saved title longer than
+// any render may be keeps none of its bytes, and fails the render, named,
+// while it is on the stack or a pop has put it back.
+func TestReplayFailsOnATitleStackTooLargeToReplay(t *testing.T) {
+	setBudget(t, 8<<10)
+	stream := func(n int) string {
+		return "text\r\n\x1b]2;" + strings.Repeat("A", n) + "\x07\x1b[22;2t\x1b]2;now\x07more\r\n"
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"a pop alone", "\x1b[23t"},
-		{"a pop of both names", "\x1b[23;0t"},
-		{"a pop of the window title", "\x1b[23;2t"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, join(t, tc.stream))
-		})
+	join := func(t *testing.T, stream string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
 	}
+	empty, err := join(t, stream(0))
+	require.NoError(t, err)
+	fits := budget - len(empty)
+	joined, err := join(t, stream(fits))
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = join(t, stream(fits+1))
+	require.ErrorIs(t, err, ErrOverBudget)
+
+	_, err = join(t, stream(budget+1))
+	requireIneligible(t, err, "a saved title too long to replay")
+	e := startFor(t, captureOf(stream(budget+1), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+	require.Len(t, e.titles.entries, 1)
+	require.True(t, e.titles.entries[0].over)
+	require.Empty(t, e.titles.entries[0].title)
+
+	_, err = join(t, stream(budget+1)+"\x1b[23;2t")
+	requireIneligible(t, err, "a saved title too long to replay")
 }
 
 // DEC private modes the session saved by XTSAVE (CSI ? Pm s) fail the
