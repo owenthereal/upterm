@@ -449,7 +449,9 @@ func TestReplaySetsUpTheEmulator(t *testing.T) {
 
 // The history keeps the newest lines that fit its budget, each
 // costing its bytes and the CRLF the render follows it with; a line over the
-// whole budget is dropped, and the clear function empties it.
+// whole budget is dropped, and every older line with it, as a render that sent
+// them would send them next to the newer ones with that line missing between;
+// and the clear function empties it.
 func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	line := func(s string) uv.Line {
 		l := uv.NewLine(20)
@@ -466,10 +468,11 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("bbb"), []byte("ccc")}, collect(&h))
 
 	h.push(line("ddddddddddddd"))
-	require.Equal(t, [][]byte{[]byte("bbb"), []byte("ccc")}, collect(&h), "a line over the budget alone")
+	require.Empty(t, collect(&h), "a line over the budget alone, and the older lines with it")
 
 	h.push(line(""))
-	require.Equal(t, [][]byte{[]byte("ccc"), {}}, collect(&h))
+	h.push(line("eee"))
+	require.Equal(t, [][]byte{{}, []byte("eee")}, collect(&h))
 
 	h.clear()
 	require.Empty(t, collect(&h))
@@ -480,7 +483,8 @@ func TestHistoryKeepsTheNewestLinesWithinItsBudget(t *testing.T) {
 // The history tells whether the lines a render sends, from its cut on, hold
 // a wide character split in two, as splitWide tells for a screen's rows: a
 // split line it keeps is reported while the cut takes it in, and no longer
-// once the budget trims it off the front or a clear empties the history.
+// once the budget trims it off the front, a clear empties the history, or a
+// line over the whole budget takes it with the other older lines.
 func TestHistoryReportsALineWithASplitWideCharacter(t *testing.T) {
 	// The lines cost the history "a\r\n", 3 bytes; "中\r\n", 5; and "中a\r\n",
 	// 6, the "a" over the placeholder.
@@ -514,6 +518,17 @@ func TestHistoryReportsALineWithASplitWideCharacter(t *testing.T) {
 	h.clear()
 	h.push(plain)
 	require.False(t, sends(&h, h.max), "a split line cleared")
+
+	// 20 cells cost 22 bytes, over the whole budget.
+	long := make(uv.Line, 20)
+	for i := range long {
+		long[i] = uv.Cell{Content: "a", Width: 1}
+	}
+	h.push(split)
+	h.push(long)
+	h.push(plain)
+	require.Equal(t, [][]byte{[]byte("a")}, collect(&h))
+	require.False(t, sends(&h, h.max), "a split line dropped with the lines older than one over the budget")
 }
 
 // The history takes at most its budget, and keeps as many lines as fit

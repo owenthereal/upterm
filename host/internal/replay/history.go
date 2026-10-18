@@ -35,13 +35,18 @@ type history struct {
 
 // push encodes line and keeps it, dropping the oldest lines past the
 // budget. A line that alone, with its CRLF, costs more than the budget is
-// dropped itself: no render could hold it. It runs inside the emulator's
-// Write, as its scroll-off function, and the line is the screen's own
-// storage, so it is encoded here and never kept, and whether it holds a
+// dropped itself: no render could hold it. Every older line goes with it, as
+// the render sends the lines kept one after another, and the joiner would
+// see the older ones run on into the newer ones with that line missing
+// between; a joiner's history then starts after it. It runs inside the
+// emulator's Write, as its scroll-off function, and the line is the screen's
+// own storage, so it is encoded here and never kept, and whether it holds a
 // split wide character is told here too.
 func (h *history) push(line uv.Line) {
 	h.enc.reset(max(h.max-len(crlf), 0))
 	if h.enc.row(line) != nil {
+		// The split mark goes too, with the lines it is in.
+		h.clear()
 		return
 	}
 	h.data = append(append(h.data, h.enc.buf...), crlf...)
