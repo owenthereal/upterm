@@ -627,9 +627,9 @@ func TestRestoreEndsAtTheG0ItsOwnSequenceLeaves(t *testing.T) {
 // and restore uses the slot of the screen showing at the time: ?1049h saves
 // before it switches, so on the normal screen, and ?1049l restores after it
 // switches back, so from the normal screen's slot too. ?1047 switches without
-// either. x/vt's vt/csi_mode.go, setMode, does the same. While ?1049h is
-// what shows the alternate screen, the snapshot designates the normal
-// screen's saved G0 ahead of it, for the joiner's ?1049h to save.
+// either. x/vt's vt/csi_mode.go, setMode, does the same. While the alternate
+// screen shows, the snapshot designates the normal screen's saved G0 ahead of
+// the switch, for the joiner's ?1049h, or an ESC 7, to save.
 func TestEachScreenRestoresFromItsOwnSlot(t *testing.T) {
 	m := NewModeTracker()
 	for _, step := range []struct{ stream, want, why string }{
@@ -637,7 +637,7 @@ func TestEachScreenRestoresFromItsOwnSlot(t *testing.T) {
 		{"\x1b8", "\x1b(0\x1b[?1049h\x1b(B", "the alternate screen's slot is its own, and nothing has filled it"},
 		{"\x1b(A\x1b7\x1b(0\x1b8", "\x1b(0\x1b[?1049h\x1b(A", "the alternate screen restores its own save"},
 		{"\x1b[?1049l", "\x1b(0", "?1049l restores the normal screen's slot, not the alternate's"},
-		{"\x1b[?1047h\x1b(B\x1b8", "\x1b[?1047h\x1b(A", "the alternate screen's slot outlives a trip away"},
+		{"\x1b[?1047h\x1b(B\x1b8", "\x1b(0\x1b7\x1b[?1047h\x1b(A", "the alternate screen's slot outlives a trip away"},
 		{"\x1b[?1047l\x1b8", "\x1b(0", "and so does the normal screen's"},
 	} {
 		_, err := m.Write([]byte(step.stream))
@@ -789,15 +789,14 @@ func TestAC0ControlInsideAnEscapeIsExecutedAndTheEscapeGoesOn(t *testing.T) {
 // session's ?1049l still restores it. The snapshot replays the switch through
 // the mode that entered last, so after one of those it replays the ?1049h
 // ahead of it, with the saved G0 designated first, for the joiner's ?1049h to
-// save the same. A ?47h or ?1047h from the normal screen saves nothing, and
-// nothing is replayed for it.
+// save the same; a save of ASCII adds nothing, since a joiner's slot that
+// nothing filled restores ASCII too.
 func TestTheSaveA1049hMadeOutlivesARedundantSwitch(t *testing.T) {
 	for _, tc := range []struct{ name, stream, want string }{
 		{"?47h", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B"},
 		{"?1047h", "\x1b(0\x1b[?1049h\x1b[?1047h", "\x1b(0\x1b[?1049h\x1b[?1047h\x1b(0"},
-		{"?47h from the normal screen", "\x1b(0\x1b7\x1b[?47h", "\x1b[?47h\x1b(0"},
-		{"?47h after leaving", "\x1b(0\x1b[?1049h\x1b[?47l\x1b[?47h", "\x1b[?47h\x1b(0"},
 		{"?1049h on the alternate screen still replays the normal screen's save", "\x1b(0\x1b7\x1b[?47h\x1b[?1049h", "\x1b(0\x1b[?1049h\x1b(0"},
+		{"a save of ASCII adds nothing", "\x1b(B\x1b[?1049h\x1b[?47h", "\x1b[?47h\x1b(B"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewModeTracker()
@@ -806,6 +805,39 @@ func TestTheSaveA1049hMadeOutlivesARedundantSwitch(t *testing.T) {
 			require.Equal(t, tc.want, string(m.Snapshot()))
 		})
 	}
+}
+
+// While the alternate screen shows, the normal screen's saved cursor is the
+// one a ?1049l, or a ?47l and ESC 8, brings back on the way out, whichever
+// form saved it: ESC 7 ?47h is how many a program enters. A ?47h or ?1047h
+// saves nothing, so the snapshot designates the saved G0 and saves it with an
+// ESC 7 ahead of the switch, then designates the alternate screen's own.
+// With nothing saved, or ASCII, the snapshot is as it was: a joiner's slot
+// that nothing filled restores ASCII too.
+func TestTheNormalScreensSaveIsFilledWhileTheAlternateScreenShows(t *testing.T) {
+	for _, tc := range []struct{ name, stream, want string }{
+		{"ESC 7, then ?47h", "\x1b(0\x1b7\x1b(B\x1b[?47h", "\x1b(0\x1b7\x1b[?47h\x1b(B"},
+		{"ESC 7, then ?1047h", "\x1b(0\x1b7\x1b(B\x1b[?1047h", "\x1b(0\x1b7\x1b[?1047h\x1b(B"},
+		{"CSI s, then ?47h", "\x1b(0\x1b[s\x1b[?47h", "\x1b(0\x1b7\x1b[?47h\x1b(0"},
+		{"the save ?1049h made, back by ?47h", "\x1b(0\x1b[?1049h\x1b[?47l\x1b[?47h", "\x1b(0\x1b7\x1b[?47h\x1b(0"},
+		{"the alternate screen in ASCII", "\x1b(0\x1b7\x1b[?47h\x1b8", "\x1b(0\x1b7\x1b[?47h\x1b(B"},
+		{"nothing saved", "\x1b[?47h\x1b(0", "\x1b[?47h\x1b(0"},
+		{"ASCII saved", "\x1b7\x1b[?47h\x1b(0", "\x1b[?47h\x1b(0"},
+		{"ASCII designated and saved", "\x1b(B\x1b7\x1b[?1047h\x1b(0", "\x1b[?1047h\x1b(0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModeTracker()
+			_, err := m.Write([]byte(tc.stream))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(m.Snapshot()))
+		})
+	}
+	t.Run("Restore is as it was", func(t *testing.T) {
+		m := NewModeTracker()
+		_, err := m.Write([]byte("\x1b(0\x1b7\x1b(B\x1b[?47h"))
+		require.NoError(t, err)
+		require.Equal(t, "\x1b[?47l\x1b(B", string(m.Restore()))
+	})
 }
 
 // CAN and SUB cancel a sequence from any state on the DEC parser terminals

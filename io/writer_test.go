@@ -336,13 +336,19 @@ func Test_MultiWriter_JoinerGetsTheG0ACursorRestoreLeft(t *testing.T) {
 // joiner to a session that entered the alternate screen in line drawing and
 // left it in the live stream came back in ASCII. A ?47h after the ?1049h,
 // on the alternate screen already, changes nothing of the save, so the
-// snapshot replays the ?1049h ahead of it. io has no terminal emulator, so a
-// tracker fed what the joiner was sent stands in for its terminal: it follows
-// G0 through saves and restores as xterm does.
+// snapshot replays the ?1049h ahead of it. A save before a ?47h or ?1047h,
+// which save nothing themselves -- ESC 7 ?47h is how many a program enters,
+// and ?47l ESC 8 how it leaves -- is replayed with an ESC 7 ahead of the
+// switch. io has no terminal emulator, so a tracker fed what the joiner was
+// sent stands in for its terminal: it follows G0 through saves and restores
+// as xterm does.
 func Test_MultiWriter_JoinerLeavesTheAlternateScreenWithTheSavedG0(t *testing.T) {
-	for _, tc := range []struct{ name, entered, snapshot string }{
-		{"?1049h", "\x1b(0\x1b[?1049h\x1b(B", "\x1b(0\x1b[?1049h\x1b(B"},
-		{"?1049h, then ?47h", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B"},
+	for _, tc := range []struct{ name, entered, snapshot, left string }{
+		{"?1049h", "\x1b(0\x1b[?1049h\x1b(B", "\x1b(0\x1b[?1049h\x1b(B", "\x1b[?1049lq"},
+		{"?1049h, then ?47h", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b(0\x1b[?1049h\x1b[?47h\x1b(B", "\x1b[?1049lq"},
+		{"ESC 7, then ?47h", "\x1b(0\x1b7\x1b(B\x1b[?47h", "\x1b(0\x1b7\x1b[?47h\x1b(B", "\x1b[?1049lq"},
+		{"ESC 7, then ?1047h", "\x1b(0\x1b7\x1b(B\x1b[?1047h", "\x1b(0\x1b7\x1b[?1047h\x1b(B", "\x1b[?1049lq"},
+		{"ESC 7, then ?47h, left by ?47l and ESC 8", "\x1b(0\x1b7\x1b(B\x1b[?47h", "\x1b(0\x1b7\x1b[?47h\x1b(B", "\x1b[?47l\x1b8q"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewMultiWriter(16)
@@ -352,16 +358,22 @@ func Test_MultiWriter_JoinerLeavesTheAlternateScreenWithTheSavedG0(t *testing.T)
 
 			late := bytes.NewBuffer(nil)
 			require.NoError(t, w.Append(late))
-			const left = "\x1b[?1049lq"
-			writeString(w, left)
+
+			// A joiner that detaches before the session leaves is put
+			// back to ASCII, the extra save notwithstanding.
+			departing := NewModeTracker()
+			_, _ = departing.Write(late.Bytes())
+			require.True(t, strings.HasSuffix(string(departing.Restore()), "\x1b(B"), "%q", departing.Restore())
+
+			writeString(w, tc.left)
 
 			joiner, session := NewModeTracker(), NewModeTracker()
 			_, _ = joiner.Write(late.Bytes())
-			_, _ = session.Write([]byte(tc.entered + plain + left))
+			_, _ = session.Write([]byte(tc.entered + plain + tc.left))
 			require.Equal(t, "\x1b(0", string(session.Snapshot()), "the session's terminal is back in line drawing")
 			require.Equal(t, string(session.Snapshot()), string(joiner.Snapshot()), "and so is the joiner's")
 
-			require.Equal(t, tc.snapshot+plain+left, late.String(),
+			require.Equal(t, tc.snapshot+plain+tc.left, late.String(),
 				"line drawing designated for the switch to save, then the alternate screen's ASCII")
 		})
 	}

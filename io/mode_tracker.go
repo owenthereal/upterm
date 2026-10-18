@@ -1158,6 +1158,10 @@ func (m *ModeTracker) step(b byte) {
 	}
 }
 
+// isASCII reports a G0, in charsetG0's form, that is US ASCII: nil, where a
+// terminal starts, or designated as such.
+func isASCII(g0 []byte) bool { return len(g0) == 0 || string(g0) == "\x1b(B" }
+
 // isExecuted reports a byte a terminal acts on inside an escape sequence
 // without leaving it: a C0 control, executed where it stands, or DEL, which is
 // ignored. xterm's esc_table and the tables that designate a charset
@@ -1733,13 +1737,14 @@ func (m *ModeTracker) Restore() []byte {
 // Snapshot returns the bytes that put a fresh terminal into the recorded
 // modes. State already at the terminal's default is left out, so a session
 // that never changed anything replays nothing. Its length is bounded by
-// len(restorable) plus the screen switch, the region, the charset (twice, on
-// either side of a ?1049h) and modifyOtherKeys, each one sequence of at most
-// maxSequenceBytes parameters, two kitty keyboard stacks of kittyStackDepth
-// entries, and one partial sequence. Only the partial is sized by the stream
-// rather than by this file, and its own bound is maxSequenceBytes for a mode
-// sequence or maxStringBytes for a string: the ceiling is a few kilobytes,
-// not the hundreds of bytes everything else comes to.
+// len(restorable) plus the screen switch and a save ahead of it, the region,
+// the charset (twice, on either side of the switch) and modifyOtherKeys, each
+// one sequence of at most maxSequenceBytes parameters, two kitty keyboard
+// stacks of kittyStackDepth entries, and one partial sequence. Only the
+// partial is sized by the stream rather than by this file, and its own bound
+// is maxSequenceBytes for a mode sequence or maxStringBytes for a string: the
+// ceiling is a few kilobytes, not the hundreds of bytes everything else comes
+// to.
 //
 // The order is the order the stream would have had to use to reach this
 // state: the margins, then the modes, then the normal screen's kitty keyboard
@@ -1763,14 +1768,20 @@ func (m *ModeTracker) Restore() []byte {
 // -- which is what they did when the trim boundary fell inside a sequence and
 // the snapshot said nothing about it.
 //
-// Of the saved cursors, only the one ?1049h saves on the normal screen is
-// replayed, as the G0 designated ahead of the switch, because the switch saves
-// the cursor anyway. Every other save is a limit: a restore in the ring whose
-// save was evicted -- ESC 8, ?1048l or CSI u after ESC 7, ?1048h or CSI s,
-// on either screen -- reads a slot on the joiner that nothing filled, and
-// gives ASCII where the session's gives what it saved. Filling one would take
-// a cursor save of the snapshot's own, which saves the joiner's cursor
-// position and pen as well, wherever they happen to be.
+// Of the saved cursors, the normal screen's is replayed while the alternate
+// screen shows: its G0 is designated and saved ahead of the switch, by the
+// ?1049h replayed when one entered and by an ESC 7 otherwise. That save
+// brackets the alternate screen's whole stay -- ?1049h to ?1049l, or ESC 7
+// ?47h to ?47l ESC 8 -- so it is routinely evicted while the restore is still
+// to come. Either save also takes the joiner's cursor position and pen of the
+// moment, which a snapshot can't set to the session's; a replayed ?1049h
+// always did.
+//
+// Every other save is a limit: a restore in the ring whose save was evicted
+// -- ESC 8, ?1048l or CSI u after ESC 7, ?1048h or CSI s, on the screen
+// showing -- reads a slot on the joiner that nothing filled, and gives ASCII
+// where the session's gives what it saved. Those saves bracket a stretch of
+// drawing on one screen, so it takes a ring's start falling inside one.
 func (m *ModeTracker) Snapshot() []byte {
 	out := m.candidates[len(m.candidates)-1].appendRegion(nil)
 	out = m.appendModes(out, 0)
@@ -1785,19 +1796,30 @@ func (m *ModeTracker) Snapshot() []byte {
 	}
 	var savedG0 []byte
 	if m.altActive() {
-		if m.altVia == 1049 || (m.savedBy1049 && len(m.mainSavedG0) > 0) {
+		// fill is whether the normal screen's saved G0 needs saving ahead of
+		// a ?47h or ?1047h: not when it is ASCII, which a joiner's slot that
+		// nothing filled restores too. A replayed ?1049h saves it whatever
+		// it is.
+		fill := m.altVia != 1049 && !isASCII(m.mainSavedG0)
+		switch {
+		case m.altVia == 1049 || (fill && m.savedBy1049):
 			// ?1049h saves the cursor, G0 with it, for the session's ?1049l
 			// to restore, and the joiner's ?1049h saves the joiner's. So the
 			// G0 the session saved is designated just ahead of it, which
-			// costs no save of its own and changes nothing the joiner sees.
-			// When a ?47h or ?1047h came after it, saving nothing, the
-			// ?1049h is replayed ahead of that mode anyway, as the session
-			// sent it, and that mode finds the joiner on the alternate screen
-			// already -- unless the save holds ASCII, which a joiner's slot
-			// that nothing filled restores too.
+			// costs no save of its own. When a ?47h or ?1047h came after it,
+			// saving nothing, the ?1049h is replayed ahead of that mode
+			// anyway, as the session sent it, and that mode finds the joiner
+			// on the alternate screen already.
 			savedG0 = m.mainSavedG0
 			out = append(out, savedG0...)
 			out = appendMode(out, 1049, true)
+		case fill:
+			// Saved by something else, ESC 7 most often, ahead of a ?47h or
+			// ?1047h, which save nothing: an ESC 7 of the snapshot's own
+			// saves it.
+			savedG0 = m.mainSavedG0
+			out = append(out, savedG0...)
+			out = append(out, "\x1b7"...)
 		}
 		if m.altVia != 1049 {
 			// Replayed through the mode that entered last, so a joiner is
@@ -1835,8 +1857,8 @@ type ReplayParts struct {
 // so the pushes come alone.
 //
 // It doesn't carry the normal screen's saved G0 either, which Snapshot
-// designates ahead of a ?1049h, nor the ?1049h Snapshot replays for it ahead
-// of a ?47h or ?1047h that came after one.
+// designates and saves ahead of the switch to the alternate screen, with a
+// ?1049h or an ESC 7.
 func (m *ModeTracker) ReplayParts() ReplayParts {
 	p := ReplayParts{DECModes: make(map[int]bool, len(restorable))}
 	for n, def := range restorable {
