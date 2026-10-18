@@ -89,17 +89,18 @@ func errNoSession(name string) error {
 // reads the record by name and checks it against LaunchID, when there is one:
 // see matchesLaunch.
 //
-// A record from before launch IDs (a release before 0.32, pruned seven days
-// after it ends) has none: found by ID it resolves to its name with no launch
-// pinned, and the steps after it check nothing, as for a name argument.
+// Every record upterm writes has a launch ID. One without, written by hand or
+// damaged, is pinned by the session ID the argument matched instead.
 type resolved struct {
 	Name string
 	// LaunchID is empty when the argument was a name, which names whatever
-	// launch holds it now, as it always has.
+	// launch holds it now, as it always has, or when the record the ID matched
+	// has no launch ID.
 	LaunchID string
 	// SessionID is the ID the argument matched, and empty when it was a name.
 	// It lets a report of a session whose name another launch took say whose
-	// ID it was given, when that session's own record is gone.
+	// ID it was given, when that session's own record is gone, and it pins
+	// the session when its record has no launch ID.
 	SessionID string
 }
 
@@ -155,10 +156,19 @@ func resolveArg(ctx context.Context, arg string) (resolved, error) {
 
 // matchesLaunch is the check every step after resolveSession makes of the
 // record it reads by name: when the argument was an ID, a record for any other
-// launch means the session it named has ended and its name was reused. A name
-// argument has no launch to check, so it matches.
+// session means the one it named has ended and its name was reused. The launch
+// tells them apart, and for a record that has none (every record upterm writes
+// has one, so it was written by hand or damaged) the session ID the argument
+// matched does; a record with no session ID yet is not that session. A name
+// argument has neither to check, so it matches.
 func matchesLaunch(r resolved, rec *sessiondir.Record) bool {
-	return r.LaunchID == "" || rec.LaunchID == r.LaunchID
+	switch {
+	case r.LaunchID != "":
+		return rec.LaunchID == r.LaunchID
+	case r.SessionID != "":
+		return rec.SessionID == r.SessionID
+	}
+	return true
 }
 
 // goneRecord stands for a session given by ID whose name another launch holds

@@ -3424,6 +3424,136 @@ func TestInfoByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
 	})
 }
 
+// readyHeldWithoutLaunchID is readyHeld for a record no release of upterm
+// writes: one without a launch ID. Update puts the launch back on every write,
+// so the record is rewritten directly, after anything else a case publishes.
+func readyHeldWithoutLaunchID(t *testing.T, name, id string) *sessiondir.Dir {
+	t.Helper()
+	d := readyHeld(t, name, id)
+	rec := d.Record()
+	rec.LaunchID = ""
+	writeRecordRaw(t, d.RecordPath(), rec)
+	return d
+}
+
+// Every record upterm writes has a launch ID, but one written by hand or
+// damaged may not. An ID that matched such a record still names one session:
+// with no launch to pin, the session ID it matched pins it, so a name that is
+// reused afterwards is not followed onto the session that took it.
+
+func TestAnIDResolvesToARecordWithNoLaunchID(t *testing.T) {
+	setupSessionRoots(t)
+	readyHeldWithoutLaunchID(t, "build", "sid-1")
+	r, err := resolveSession(context.Background(), "sid-1")
+	require.NoError(t, err)
+	require.Equal(t, resolved{Name: "build", SessionID: "sid-1"}, r)
+}
+
+func TestMatchesLaunchPinsARecordWithNoLaunchIDBySessionID(t *testing.T) {
+	r := resolved{Name: "build", SessionID: "sid-1"}
+	for _, tc := range []struct {
+		name string
+		rec  sessiondir.Record
+		want bool
+	}{
+		{"the session it matched", sessiondir.Record{SessionID: "sid-1"}, true},
+		{"another session", sessiondir.Record{SessionID: "sid-2", LaunchID: "launch-2"}, false},
+		{"another session with no launch either", sessiondir.Record{SessionID: "sid-2"}, false},
+		{"a session with no ID yet", sessiondir.Record{LaunchID: "launch-2"}, false},
+	} {
+		require.Equal(t, tc.want, matchesLaunch(r, &tc.rec), tc.name)
+	}
+
+	// Given a launch, that is what pins; and a name pins nothing.
+	require.False(t, matchesLaunch(resolved{Name: "build", LaunchID: "launch-1", SessionID: "sid-1"}, &sessiondir.Record{LaunchID: "launch-2", SessionID: "sid-1"}))
+	require.True(t, matchesLaunch(resolved{Name: "build"}, &sessiondir.Record{LaunchID: "launch-2", SessionID: "sid-2"}))
+}
+
+// The session is replaced at the one point that can happen: after the ID was
+// resolved and before the name is read. Nothing reaches the replacement.
+func TestAnIDOfARecordWithNoLaunchIDNeverFollowsTheNameToAReplacement(t *testing.T) {
+	replaceAfterResolve := func(t *testing.T, serve func(b *sessiondir.Dir)) {
+		t.Helper()
+		setupSessionRoots(t)
+		a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+		afterResolve = func() {
+			endHeld(t, a)
+			b := readyHeld(t, "build", "sid-2")
+			serve(b)
+		}
+		t.Cleanup(func() { afterResolve = nil })
+	}
+
+	t.Run("stop", func(t *testing.T) {
+		var stopped []string
+		replaceAfterResolve(t, func(b *sessiondir.Dir) {
+			stubStopOn(t, b, func(launch string) { stopped = append(stopped, launch) })
+		})
+		var out bytes.Buffer
+		err := stopSession(context.Background(), "sid-1", &out)
+		require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not stopped; inspect it again with 'upterm session info build'")
+		require.Empty(t, stopped, "the replacement was never asked to stop")
+		require.Empty(t, out.String())
+	})
+
+	t.Run("set", func(t *testing.T) {
+		var set []string
+		replaceAfterResolve(t, func(b *sessiondir.Dir) {
+			stubSetOn(t, b, func(launch string) { set = append(set, launch) })
+		})
+		err := setSession(context.Background(), "sid-1", 10*time.Minute, io.Discard)
+		require.EqualError(t, err, "session build (ID sid-1) has been replaced since it was read and was not changed; inspect it again with 'upterm session info build'")
+		require.Empty(t, set, "the replacement's join timeout was never changed")
+	})
+
+	t.Run("info", func(t *testing.T) {
+		replaceAfterResolve(t, func(b *sessiondir.Dir) {
+			serveStubAdmin(t, b.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", LaunchId: b.LaunchID(), Host: "ssh://127.0.0.1:2222"})
+		})
+		out := runInfo(t, "sid-1")
+		require.Contains(t, out, viewRow("Name:", "build (ID sid-1)"))
+		require.Contains(t, out, "ended")
+		require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
+	})
+}
+
+// And a record with no launch ID that is still the session it was found as is
+// acted on, as any other.
+func TestAnIDOfARecordWithNoLaunchIDActsOnThatSession(t *testing.T) {
+	t.Run("stop", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+		// The launch the daemon answers for is the record's: none.
+		stub := serveStubAdminWithStop(t, a.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"}, "", func() {
+			go func() {
+				rec := a.Record()
+				rec.LaunchID, rec.Status, rec.Reason = "", sessiondir.StatusEnding, sessiondir.ReasonStopped
+				writeRecordRaw(t, a.RecordPath(), rec)
+				releaseOnce(a)
+			}()
+		})
+		var asked []string
+		stub.mu.Lock()
+		stub.sawStop = func(launch string) { asked = append(asked, launch) }
+		stub.mu.Unlock()
+
+		var out bytes.Buffer
+		require.NoError(t, stopSession(context.Background(), "sid-1", &out))
+		require.Equal(t, "session build stopped\n", out.String())
+		require.Equal(t, []string{""}, asked, "the request reached that session's socket, naming the launch its record has")
+	})
+
+	t.Run("info", func(t *testing.T) {
+		setupSessionRoots(t)
+		a := readyHeldWithoutLaunchID(t, "build", "sid-1")
+		serveStubAdmin(t, a.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-1", Host: "ssh://127.0.0.1:2222"})
+		byID := runInfo(t, "sid-1")
+		require.Equal(t, runInfo(t, "build"), byID, "the name printed is the session's, not the argument")
+		require.Contains(t, byID, viewRow("Name:", "build"))
+		require.NotContains(t, byID, "ended")
+	})
+}
+
 // Not found keeps each command's code and words, whether or not the argument
 // could have been an ID.
 func TestWhatNeitherANameNorAnIDIsNotFoundAsBefore(t *testing.T) {

@@ -258,6 +258,28 @@ func TestAttachTargetByIDRefusesWhenTheNameWasReused(t *testing.T) {
 	require.Equal(t, b.LaunchID(), got.LaunchID)
 }
 
+// The same for a record with no launch ID: the session ID the argument matched
+// pins it, so attach does not dial the socket of whatever took the name.
+func TestAttachTargetByIDOfARecordWithNoLaunchIDRefusesWhenTheNameWasReused(t *testing.T) {
+	setupSessionRoots(t)
+	a := readyHeld(t, "build", "sid-1")
+	require.NoError(t, a.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+	rec := a.Record()
+	rec.LaunchID = ""
+	writeRecordRaw(t, a.RecordPath(), rec)
+	r, err := resolveAttachName(context.Background(), "sid-1")
+	require.NoError(t, err)
+	require.Empty(t, r.LaunchID)
+
+	endHeld(t, a)
+	b := readyHeld(t, "build", "sid-2")
+	require.NoError(t, b.Update(func(r *sessiondir.Record) { r.HostKeys = []string{testHostKeyLine(t)} }))
+
+	got, err := attachTarget(context.Background(), r)
+	require.EqualError(t, err, `session "build" (ID sid-1) has already ended for a reason upterm didn't record`)
+	require.Empty(t, got.Socket, "nothing to dial")
+}
+
 // ~? looks the session up by name, so an attachment made by ID reports on it
 // under the name the ID resolved to.
 func TestAttachStatusForASessionGivenByIDFindsIt(t *testing.T) {
