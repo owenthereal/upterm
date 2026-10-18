@@ -2,6 +2,7 @@ package ftests
 
 import (
 	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/owenthereal/upterm/host/api"
@@ -21,8 +22,7 @@ func testClientBannerForMissingSession(t *testing.T, hostNodeAddr, clientJoinURL
 	var banners []string
 	c := &Client{PrivateKeys: []string{ClientPrivateKey}, BannerCallback: func(m string) error { banners = append(banners, m); return nil }}
 	require.Error(t, c.Join(missingSession(hostNodeAddr), clientJoinURL))
-	require.Len(t, banners, 1)
-	require.Contains(t, banners[0], "no host is connected for session nosuchsession")
+	require.Equal(t, []string{fmt.Sprintf(upterm.BannerNoHostFormat, "nosuchsession")}, banners)
 }
 
 // A guest whose handshake another node completes hears that the session isn't

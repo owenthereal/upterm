@@ -326,7 +326,7 @@ func testProxyExitStatus(t *testing.T, hostShareURL, hostNodeAddr, clientJoinURL
 	require.ErrorAs(t, err, &exitErr, "expected a non-zero exit status, got %v", err)
 	assert.Equal(t, 1, exitErr.ExitStatus(), "exit status payload should survive the relay")
 
-	assert.Contains(t, stdout.String(), "PTY is required",
+	assert.Contains(t, stdout.String(), "upterm: this session needs a terminal; run ssh without a command, or with -t.",
 		"output written before the exit status should not be truncated by the close")
 }
 

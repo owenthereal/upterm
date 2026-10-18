@@ -105,6 +105,15 @@ type hopRefusal struct{ err error }
 func (e *hopRefusal) Error() string { return e.err.Error() }
 func (e *hopRefusal) Unwrap() error { return e.err }
 
+// undecodableUser marks a guest's user that an embedded-mode relay can't
+// decode. Such a user carries the session's node as well as its ID, so one that
+// doesn't decode names no session at all: most likely the ID alone, or part of
+// the user the host shared, which the guest can be told how to put right.
+type undecodableUser struct{ err error }
+
+func (e *undecodableUser) Error() string { return e.err.Error() }
+func (e *undecodableUser) Unwrap() error { return e.err }
+
 // permHop is the permissions extension that marks a connection from another
 // relay node, presenting a guest's key. A hop announces x/crypto's default
 // version, as any Go client does, so the certificate it authenticated with is
@@ -112,9 +121,10 @@ func (e *hopRefusal) Unwrap() error { return e.err }
 const permHop = "upterm-hop"
 
 // bannerFor is the banner to send with err, the refusal of meta's connection,
-// or "" for none. A guest earns one only by a failed lookup of its session: the
+// or "" for none. A guest earns one by a failed lookup of its session: the
 // session isn't stored (its host may be reconnecting, and about to store it
-// again) or the store couldn't say. Refusing the guest itself, a key the
+// again) or the store couldn't say. On an embedded-mode relay it earns one too
+// by a user that names no session at all. Refusing the guest itself, a key the
 // session doesn't admit, say, sends none, and neither does a host's connection.
 // A key refused to another relay node earns the hop banner, for that node to
 // read. sessionID is the one meta's user names.
@@ -123,8 +133,18 @@ func bannerFor(meta ssh.ConnMetadata, sessionID string, err error) string {
 	if errors.As(err, &hop) {
 		return upterm.HopBannerKeyRefused
 	}
+	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion {
+		return ""
+	}
+	var undecodable *undecodableUser
+	if errors.As(err, &undecodable) {
+		// The user prints on the guest's own terminal, so anything unprintable
+		// in it is escaped, as bannerSessionID escapes an odd ID. It is quoted
+		// whatever its shape, being no session ID.
+		return fmt.Sprintf("upterm: %q isn't a session on this relay; use the whole ssh command the host shared.\n", meta.User())
+	}
 	var lookup *lookupError
-	if string(meta.ClientVersion()) == upterm.HostSSHClientVersion || !errors.As(err, &lookup) {
+	if !errors.As(err, &lookup) {
 		return ""
 	}
 	var missing *ErrSessionNotFound
@@ -279,7 +299,14 @@ func (a proxyAuth) authenticate(conn ssh.ConnMetadata, pk ssh.PublicKey) (*AuthR
 			return nil, nil, false, fmt.Errorf("empty session ID for host connection")
 		}
 	} else if _, _, err := a.SessionManager.GetEncodeDecoder().Decode(conn.User()); err != nil {
-		return nil, nil, false, fmt.Errorf("invalid SSH user format: %w", err)
+		err = fmt.Errorf("invalid SSH user format: %w", err)
+		// Only an embedded-mode user carries more than the session ID, and so
+		// can be cut short to the ID alone. A Consul-mode user is the ID
+		// itself, and any but an empty one decodes.
+		if a.SessionManager.GetRoutingMode() == routing.ModeEmbedded {
+			err = &undecodableUser{err}
+		}
+		return nil, nil, false, err
 	}
 	checker := UserCertChecker{
 		IsUserAuthority: a.isOwnAuthority,

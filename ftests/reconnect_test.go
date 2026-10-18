@@ -18,6 +18,7 @@ import (
 	"github.com/owenthereal/upterm/internal/testhelpers"
 	"github.com/owenthereal/upterm/routing"
 	"github.com/owenthereal/upterm/server"
+	"github.com/owenthereal/upterm/upterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -454,8 +455,7 @@ func requireNoHostBanner(t *testing.T, session *api.GetSessionResponse, joinURL 
 	}}
 	t.Cleanup(c.Close)
 	require.Error(t, c.Join(session, joinURL), "a guest joined a session with no host connected")
-	require.Len(t, banners, 1, "%q", banners)
-	require.Contains(t, banners[0], "no host is connected for session "+session.SessionId)
+	require.Equal(t, []string{fmt.Sprintf(upterm.BannerNoHostFormat, session.SessionId)}, banners)
 }
 
 // consulTestClient is the one client these tests read Consul with: each client

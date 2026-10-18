@@ -275,7 +275,11 @@ and when it tries next until then. If the connect string changed, as in the
 note above, it keeps waiting on the old one and, after 5 minutes, adds that the
 session may have ended or moved: stop it with Ctrl-C and join the new one. A
 plain `ssh` guest rejoins with the same command; one who tries during the gap
-is told `no host is connected for session … right now`.
+is told:
+
+```text
+upterm: no host is connected for session ID right now. If it's reconnecting, try again once it's back; on some relays the host then has a new command to share. Otherwise it may have ended, or the ID may be wrong.
+```
 
 For machines without upterm, this script rejoins an interactive session
 automatically and leaves the terminal usable after a drop. Save it as
@@ -285,13 +289,21 @@ automatically and leaves the terminal usable after a drop. Save it as
 #!/usr/bin/env bash
 # upterm-rejoin: rejoin an interactive upterm session when the connection drops.
 # Retries only when ssh itself fails (exit 255). Any other exit status is the
-# remote side ending — your shell's own `exit 1` included — and stops.
+# remote side ending — your shell's own `exit 1` included — and stops. It stops
+# too after 10 tries in a row that fail within 5 s, before the session starts.
 reset_modes() { printf '\030\0337\033[?1049l\033[?1047l\033[?47l\033[r\0338\033[?1l\033[?7h\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?2004l\033[<u\033[>4m\033(B'; }
 trap reset_modes EXIT   # also runs on Ctrl-C
+fails=0
 while :; do
+  start=$SECONDS
   ssh -t "$@"; rc=$?
   reset_modes
   [ "$rc" -eq 255 ] || exit "$rc"
+  if [ $((SECONDS - start)) -lt 5 ]; then fails=$((fails + 1)); else fails=0; fi
+  if [ "$fails" -ge 10 ]; then
+    echo "upterm-rejoin: 10 tries in a row failed within 5 s; stopping. upterm join says why, and waits for a host that's reconnecting." >&2
+    exit 255
+  fi
   echo "upterm-rejoin: connection lost; rejoining in 3 s (Ctrl-C to stop)" >&2
   sleep 3 || exit 130
 done
@@ -302,6 +314,10 @@ done
 - ssh's `~.` also exits 255, and so reconnects; follow it with Ctrl-C.
 - A remote command that exits 255 is retried too, which is why the script is
   for interactive sessions only.
+- A refused key, a session that has ended and a host that's still away all
+  exit 255 before the session starts, so after about half a minute of those
+  the script stops. [`upterm join`](#joining-with-upterm-join) tells them
+  apart, and keeps waiting for a host that's reconnecting.
 
 Reconnecting needs a server that supports it: uptermd 0.34.0 or later, which
 uptermd.upterm.dev runs. With an older one, `upterm session info` says

@@ -43,9 +43,10 @@ func webHandler(h http.Handler) http.Handler {
 			// TODO: better getting-started guide
 			data := `1. Install the upterm CLI by following https://github.com/owenthereal/upterm#installation.
 2. On your machine, host a session with "upterm host --server wss://%s -- YOUR_COMMAND". More details in https://github.com/owenthereal/upterm#quick-start.
-3. Your pair(s) join the session with "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
+3. Your pair(s) join the session with "upterm join wss://TOKEN@%s", which rejoins on its own if the connection drops.
+4. Or with ssh: "ssh -o ProxyCommand='upterm proxy wss://TOKEN@%s' TOKEN@%s:443".
 `
-			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host)
+			_, _ = fmt.Fprintf(w, data, r.Host, r.Host, r.Host, r.Host)
 			return
 		default:
 			h.ServeHTTP(w, r)

@@ -178,6 +178,17 @@ type forwardingChannel struct {
 	accepted func()
 }
 
+// Reject words the library's refusal of a forward the session doesn't allow,
+// "port forwarding is disabled", for the guest: it names the flag the host
+// would pass to allow it. The library refuses that way only when the session's
+// forwarding callback does. Every other refusal keeps its message.
+func (c *forwardingChannel) Reject(reason ssh.RejectionReason, message string) error {
+	if reason == ssh.Prohibited {
+		message = "upterm: this session doesn't allow port forwarding; the host can allow it with --allow-local-tcp-forwarding."
+	}
+	return c.NewChannel.Reject(reason, message)
+}
+
 func (c *forwardingChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
 	channel, requests, err := c.NewChannel.Accept()
 	if err == nil {

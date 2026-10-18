@@ -1510,8 +1510,10 @@ func TestStockSSHBanner(t *testing.T) {
 		require.Contains(t, b[0], "can't look up sessions")
 		require.NotContains(t, b[0], "no host is connected")
 	})
-	// A user that doesn't decode is refused for its format, which is no lookup.
-	t.Run("a user that doesn't decode", func(t *testing.T) {
+	// A Consul-mode user is the session ID alone, and the only one that
+	// doesn't decode has an empty ID. It is refused for its format, which is
+	// no lookup, and earns no banner.
+	t.Run("a Consul-mode user that doesn't decode", func(t *testing.T) {
 		logger := slog.New(slog.DiscardHandler)
 		_, addr, _, _ := stockTestProxy(t, time.Second, dialer, func(p *sshProxy) {
 			p.SessionManager = newSessionManagerWithStore(newMemorySessionStore(logger), routing.NewEncodeDecoder(routing.ModeConsul))
@@ -1559,6 +1561,22 @@ func TestStockSSHBanner(t *testing.T) {
 	}
 }
 
+// An embedded-mode user carries the session's node as well as its ID, so one
+// that doesn't decode names no session at all: a guest who typed the ID alone,
+// or only part of the user the host shared. It is told, once however many keys
+// it offers, what to use instead.
+func TestEmbeddedRelayExplainsAUserItCantDecode(t *testing.T) {
+	k1, _ := ssh.ParsePrivateKey([]byte(TestPrivateKeyContent))
+	k2, _ := ssh.ParsePrivateKey([]byte(HostPrivateKeyContent))
+	_, addr, _, _ := stockTestProxy(t, time.Second, &stockTestDialer{addr: "127.0.0.1:1"})
+	// The ID alone is routing.ErrInvalidSSHUser; a node that isn't base64 is
+	// a decode error that doesn't wrap it.
+	for _, user := range []string{"bareid", "id:!!notbase64"} {
+		require.Equal(t, []string{"upterm: \"" + user + "\" isn't a session on this relay; use the whole ssh command the host shared.\n"},
+			dialForBanners(t, addr, user, k1, k2), user)
+	}
+}
+
 // fickleStore answers the first lookup, and fails every one after it with err.
 type fickleStore struct {
 	*memorySessionStore
@@ -1589,6 +1607,10 @@ func TestBannerFor(t *testing.T) {
 		{"a session not stored, in a wrapped chain", guest, fmt.Errorf("refused: %w", notFound), fmt.Sprintf(upterm.BannerNoHostFormat, "s")},
 		{"a store that fails", guest, unreachable, upterm.BannerLookupFailed},
 		{"a host connection", host, notFound, ""},
+		// The user goes to the guest's own terminal, escaped as an odd
+		// session ID is.
+		{"a user that doesn't decode", &fakeConnMetadata{user: "a\x1b[2Jb"}, &undecodableUser{routing.ErrInvalidSSHUser},
+			`upterm: "a\x1b[2Jb" isn't a session on this relay; use the whole ssh command the host shared.` + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, bannerFor(tc.meta, "s", tc.err))

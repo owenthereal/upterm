@@ -65,9 +65,10 @@ func TestHandleSessionDoesNotBlockOnAStalledReadOnlyGuest(t *testing.T) {
 }
 
 // fakeGuestSession is the whole of gssh.Session that HandleSession touches:
-// Close, Context, Exit, Pty, SendRequest, and the Read and Write of the
-// embedded channel. The rest is left nil on purpose, so a handler that grows a
-// new dependency on the session panics here instead of passing quietly.
+// Close, Context, Exit, Pty, SendRequest, Stderr, and the Read and Write of
+// the embedded channel. The rest is left nil on purpose, so a handler that
+// grows a new dependency on the session panics here instead of passing
+// quietly.
 type fakeGuestSession struct {
 	gssh.Session
 
@@ -85,6 +86,10 @@ func (f *fakeGuestSession) Write(p []byte) (int, error) { return f.out.Write(p) 
 func (f *fakeGuestSession) Close() error                { return nil }
 func (f *fakeGuestSession) Exit(int) error              { return nil }
 func (f *fakeGuestSession) Context() gssh.Context       { return f.ctx }
+
+// Stderr is where a guest whose forced command can't start is told so. It
+// writes where the output does, and reads as the input does.
+func (f *fakeGuestSession) Stderr() io.ReadWriter { return f }
 
 func (f *fakeGuestSession) Pty() (gssh.Pty, <-chan gssh.Window, bool) {
 	return gssh.Pty{Term: "xterm"}, f.winCh, true

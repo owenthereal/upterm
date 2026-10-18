@@ -72,7 +72,10 @@ func TestGuestDoorStillRequiresAPty(t *testing.T) {
 	out, err := sess.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, sess.Shell())
-	readUntil(t, out, "PTY is required")
+	// With no pty, the guest's ssh client leaves its terminal cooked, so a
+	// bare newline ends the line.
+	readUntil(t, out, "upterm: this session needs a terminal; run ssh without a command, or with -t.\n")
+	requireExitStatus(t, sess.Wait(), 1)
 }
 
 // When the session ends because the command exited, every shared-pty client
@@ -384,7 +387,7 @@ func TestHostDoorIgnoresReadOnly(t *testing.T) {
 	in, out, _ := h.connectHost(t, &hostPty{term: "xterm", cols: 80, rows: 24})
 	readUntil(t, out, "RO")
 	_, guestOut := h.connectGuest(t)
-	readUntil(t, guestOut, "read-only session")
+	readUntil(t, guestOut, "\r\nupterm: this session is read-only; what you type isn't sent.\r\n\r\n")
 
 	_, err := io.WriteString(in, "host-types\n")
 	require.NoError(t, err)
