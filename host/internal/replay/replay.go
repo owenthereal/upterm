@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"slices"
 	"strings"
 	"time"
@@ -93,6 +94,9 @@ type emulation struct {
 	// it has saved DEC modes, and savedRendition once it has pushed a
 	// rendition (see watchSaves).
 	savedTitle, savedModes, savedRendition bool
+	// undrawable is set once the stream has set an attribute a cell doesn't
+	// keep (see watchRendition).
+	undrawable bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -199,6 +203,7 @@ func (e *emulation) setUp() {
 	e.watchClipboard()
 	e.watchProtection()
 	e.watchSaves()
+	e.watchRendition()
 }
 
 // colours is what the stream changed, by OSC, of the colours a terminal keeps
@@ -473,6 +478,48 @@ func (e *emulation) watchSaves() {
 			return false
 		})
 	}
+}
+
+// watchRendition registers the SGR handler that notes the stream setting an
+// attribute a cell doesn't keep (see sgrUndrawable). x/vt's SGR, which keeps
+// the rest in the pen, runs after it, as it returns false.
+func (e *emulation) watchRendition() {
+	e.term.RegisterCsiHandler('m', func(params ansi.Params) bool {
+		if sgrUndrawable(params) {
+			e.undrawable = true
+		}
+		return false
+	})
+}
+
+// sgrUndrawable reports whether params, an SGR's, set an attribute a cell
+// doesn't keep, which x/vt's SGR skips: an alternative font (11 to 19),
+// Fraktur (20), a double underline (21, which some terminals take for bold
+// off instead, which x/vt doesn't do either), proportional spacing (26),
+// framed or encircled (51, 52), overlined (53), an ideogram line or stress
+// mark (60 to 64), superscript or subscript (73, 74). The session's terminal
+// draws the cells printed under it so, and the render would draw them
+// without it. Once none is set, the numbers that turn them off (10, 50, 54,
+// 55, 65 and 75) change nothing the render draws.
+//
+// The parameters are read as ultraviolet's ReadStyle, x/vt's SGR, reads
+// them: 38, 48 and 58 take the colour ansi.ReadStyleColor reads after them,
+// so a colour's own numbers, the 53 of 38;5;53, are no attribute. ReadStyle's
+// other jump, over an underline's style (4:0 to 4:5), passes over no number
+// listed here.
+func sgrUndrawable(params ansi.Params) bool {
+	for i := 0; i < len(params); i++ {
+		switch p, _, _ := params.Param(i, 0); p {
+		case 38, 48, 58:
+			var c color.Color
+			if n := ansi.ReadStyleColor(params[i:], &c); n > 0 {
+				i += n - 1
+			}
+		case 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 51, 52, 53, 60, 61, 62, 63, 64, 73, 74:
+			return true
+		}
+	}
+	return false
 }
 
 // Feed offers the emulation more of the stream and runs on to the next

@@ -1347,6 +1347,63 @@ func TestReplayFailsOnASavedRendition(t *testing.T) {
 	}
 }
 
+// An SGR the session sent that sets an attribute a cell doesn't keep fails
+// the render, named, as the cells printed under it would be drawn without it:
+// an alternative font, Fraktur, a double underline, proportional spacing,
+// framed, encircled, overlined, an ideogram line or stress mark, superscript
+// and subscript. It counts wherever it falls among the SGR's parameters, and
+// still does once turned off. The numbers that turn those off render, and so
+// does a colour whose own numbers are among the attributes', as SGR reads
+// them as the colour.
+func TestReplayFailsOnARenditionTheRenderCantDraw(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\x1b[m\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the first alternative font", "\x1b[11m"},
+		{"the last alternative font", "\x1b[19m"},
+		{"Fraktur", "\x1b[20m"},
+		{"a double underline", "\x1b[21m"},
+		{"proportional spacing", "\x1b[26m"},
+		{"framed", "\x1b[51m"},
+		{"encircled", "\x1b[52m"},
+		{"overlined", "\x1b[53m"},
+		{"the first ideogram attribute", "\x1b[60m"},
+		{"the last ideogram attribute", "\x1b[64m"},
+		{"superscript", "\x1b[73m"},
+		{"subscript", "\x1b[74m"},
+		{"after other attributes", "\x1b[1;4;53m"},
+		{"after an underline style", "\x1b[4:3;53m"},
+		{"after an indexed colour", "\x1b[38;5;1;53m"},
+		{"after a direct colour", "\x1b[48;2;1;2;3;53m"},
+		{"after a direct colour with its colour space", "\x1b[58:2::1:2:3;53m"},
+		{"turned off again", "\x1b[53mover\x1b[55m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a rendition the render can't draw")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the primary font", "\x1b[10m"},
+		{"proportional spacing off", "\x1b[50m"},
+		{"neither framed nor encircled", "\x1b[54m"},
+		{"not overlined", "\x1b[55m"},
+		{"no ideogram attribute", "\x1b[65m"},
+		{"neither superscript nor subscript", "\x1b[75m"},
+		{"an indexed foreground", "\x1b[38;5;53m"},
+		{"an indexed background", "\x1b[48;5;21m"},
+		{"an indexed underline colour", "\x1b[58;5;73m"},
+		{"a direct colour", "\x1b[38;2;53;51;52m"},
+		{"a direct colour with its colour space", "\x1b[48:2::53:60:74m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
+
 // Insert mode, the application keypad and reverse video are set for the
 // live bytes, which they change.
 func TestReplayRestoresInsertKeypadAndReverseVideo(t *testing.T) {

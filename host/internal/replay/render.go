@@ -554,6 +554,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.savedRendition {
 		return rep{}, &IneligibleError{State: "a saved rendition"}
 	}
+	if e.undrawable {
+		return rep{}, &IneligibleError{State: "a rendition the render can't draw"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
