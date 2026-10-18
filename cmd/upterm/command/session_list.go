@@ -111,6 +111,12 @@ func oneLine(cell string) string {
 // What the two columns have is shared so that neither is squeezed while the
 // other has room it is not using: a column that fits in half keeps its whole
 // width and the other takes the rest.
+//
+// Neither goes below its header's width. A column is never narrower than its
+// header, so a cell cut to less would leave the column as wide as it was and
+// the rows past the edge for nothing. When the room is less than the two
+// headers together, that is the width they get, and the table is as wide as
+// its header line.
 func fitToWidth(lines [][]string, width int) {
 	before := 0
 	for c := range columnCommand {
@@ -122,8 +128,9 @@ func fitToWidth(lines [][]string, width int) {
 		return
 	}
 
-	// At least one character each, for the "…", however little is left.
-	room = max(room, 2)
+	commandMin := utf8.RuneCountInString(sessionTableHeader[columnCommand])
+	relayMin := utf8.RuneCountInString(sessionTableHeader[columnRelay])
+	room = max(room, commandMin+relayMin)
 	half := room / 2
 	var commandLimit, relayLimit int
 	switch {
@@ -133,6 +140,14 @@ func fitToWidth(lines [][]string, width int) {
 		commandLimit, relayLimit = room-relay, relay
 	default:
 		commandLimit, relayLimit = room-half, half
+	}
+	// The side below its header takes what it lacks from the other, which has
+	// it: the room is at least both headers.
+	switch {
+	case commandLimit < commandMin:
+		commandLimit, relayLimit = commandMin, room-commandMin
+	case relayLimit < relayMin:
+		commandLimit, relayLimit = room-relayMin, relayMin
 	}
 	for _, line := range lines[1:] {
 		line[columnCommand] = shorten(line[columnCommand], commandLimit)

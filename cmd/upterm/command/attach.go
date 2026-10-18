@@ -150,7 +150,7 @@ func attachTarget(ctx context.Context, r resolved) (target, error) {
 	if rec == nil {
 		return target{}, fmt.Errorf("no session named %q", name)
 	}
-	if sameLaunchOrReplaced(r, rec) != nil {
+	if !matchesLaunch(r, rec) {
 		return target{}, errors.New(refusalLine(name, endedFromRecord(goneRecord(r))))
 	}
 	if !held {

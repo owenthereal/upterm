@@ -2297,6 +2297,41 @@ func Test_setSession_failures(t *testing.T) {
 		err := setSession(context.Background(), "slow-2", time.Minute, io.Discard)
 		require.EqualError(t, err, "couldn't confirm the change to session slow-2; it may still have taken effect. upterm session info slow-2 shows what it holds")
 	})
+	// The dial found the socket, so the request did leave: unlike a socket
+	// that never answered the dial, nothing can promise that it changed
+	// nothing. Each leaves the session held and ready, so the re-read settles
+	// nothing either.
+	t.Run("a socket that took the dial and answers the request Unavailable may have taken effect", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "unavail-2")
+		serveStubAdminWithSet(t, d.AdminSocket(), func(*api.SetJoinTimeoutRequest) (*api.SetJoinTimeoutResponse, error) {
+			return nil, status.Error(codes.Unavailable, "gone")
+		})
+		var out bytes.Buffer
+		err := setSession(context.Background(), "unavail-2", time.Minute, &out)
+		require.EqualError(t, err, "couldn't confirm the change to session unavail-2; it may still have taken effect. upterm session info unavail-2 shows what it holds")
+		require.Empty(t, out.String(), "nothing may read as success")
+	})
+	t.Run("a socket that takes the dial and then hangs up on the request may have taken effect", func(t *testing.T) {
+		setupSessionRoots(t)
+		d := heldReady(t, "hangup-2")
+		ln, err := net.Listen("unix", d.AdminSocket())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = conn.Close()
+			}
+		}()
+		var out bytes.Buffer
+		err = setSession(context.Background(), "hangup-2", time.Minute, &out)
+		require.EqualError(t, err, "couldn't confirm the change to session hangup-2; it may still have taken effect. upterm session info hangup-2 shows what it holds")
+		require.Empty(t, out.String(), "nothing may read as success")
+	})
 	t.Run("a session still starting says so", func(t *testing.T) {
 		setupSessionRoots(t)
 		d := claimSession(t, "early-2")
@@ -3049,7 +3084,7 @@ func TestAnIDResolvesToItsSession(t *testing.T) {
 	a := readyHeld(t, "build", "sid-1")
 	r, err := resolveSession(context.Background(), "sid-1")
 	require.NoError(t, err)
-	require.Equal(t, resolved{Name: "build", LaunchID: a.LaunchID()}, r)
+	require.Equal(t, resolved{Name: "build", LaunchID: a.LaunchID(), SessionID: "sid-1"}, r)
 }
 
 func TestAnExactNameIsNeverShadowedByAnID(t *testing.T) {
@@ -3235,30 +3270,47 @@ func TestInfoByIDOfAnEndedSession(t *testing.T) {
 }
 
 func TestInfoByIDAfterTheNameWasReusedReportsTheSessionEnded(t *testing.T) {
-	setupSessionRoots(t)
-	a := readyHeld(t, "build", "sid-1")
-	afterResolve = func() {
-		endHeld(t, a)
-		b := readyHeld(t, "build", "sid-2")
-		serveStubAdmin(t, b.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", LaunchId: b.LaunchID(), Host: "ssh://127.0.0.1:2222"})
+	// The session is replaced at the one point that can happen: after the ID
+	// was resolved and before the name is read.
+	replaceAfterResolve := func(t *testing.T) *sessiondir.Dir {
+		t.Helper()
+		setupSessionRoots(t)
+		a := readyHeld(t, "build", "sid-1")
+		afterResolve = func() {
+			endHeld(t, a)
+			b := readyHeld(t, "build", "sid-2")
+			serveStubAdmin(t, b.AdminSocket(), &api.GetSessionResponse{SessionId: "sid-2", LaunchId: b.LaunchID(), Host: "ssh://127.0.0.1:2222"})
+		}
+		t.Cleanup(func() { afterResolve = nil })
+		return a
 	}
-	t.Cleanup(func() { afterResolve = nil })
 
-	out := runInfo(t, "sid-1")
-	require.Contains(t, out, "build")
-	require.Contains(t, out, "ended")
-	require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
+	t.Run("as text", func(t *testing.T) {
+		replaceAfterResolve(t)
+		out := runInfo(t, "sid-1")
+		require.Contains(t, out, "build")
+		require.Contains(t, out, "ended")
+		require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
+	})
 
-	// The same session as JSON: ended, its own launch, no admin socket to dial.
-	r := resolved{Name: "build", LaunchID: a.LaunchID()}
-	info, live, err := lookup(context.Background(), r)
-	require.NoError(t, err)
-	require.Nil(t, live)
-	require.Equal(t, statusEnded, info.Status)
-	require.Equal(t, "build", info.Name)
-	require.Equal(t, a.LaunchID(), info.LaunchID)
-	require.Empty(t, info.AdminSocket)
-	require.Empty(t, info.SessionID, "the replacement's ID is not this session's")
+	// Ended, its own launch and its own ID, which the argument was and the
+	// record that held it is gone; no admin socket to dial.
+	t.Run("as JSON", func(t *testing.T) {
+		a := replaceAfterResolve(t)
+		prevOutput := flagOutput
+		t.Cleanup(func() { flagOutput = prevOutput })
+		flagOutput = "json"
+
+		out := runInfo(t, "sid-1")
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+		require.Equal(t, statusEnded, got["status"])
+		require.Equal(t, "build", got["name"])
+		require.Equal(t, a.LaunchID(), got["launchId"])
+		require.Equal(t, "sid-1", got["sessionId"])
+		require.NotContains(t, got, "adminSocket")
+		require.NotContains(t, out, "sid-2", "nothing of the session that took the name")
+	})
 }
 
 // Not found keeps each command's code and words, whether or not the argument

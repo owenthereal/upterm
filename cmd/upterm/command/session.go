@@ -87,12 +87,20 @@ func errNoSession(name string) error {
 // its session ends, so a command that kept only the name could go on to stop
 // or change whichever session took it over. Every step after resolution
 // reads the record by name and checks it against LaunchID, when there is one:
-// see sameLaunchOrReplaced.
+// see matchesLaunch.
+//
+// A record from before launch IDs (a release before 0.32, pruned seven days
+// after it ends) has none: found by ID it resolves to its name with no launch
+// pinned, and the steps after it check nothing, as for a name argument.
 type resolved struct {
 	Name string
 	// LaunchID is empty when the argument was a name, which names whatever
 	// launch holds it now, as it always has.
 	LaunchID string
+	// SessionID is the ID the argument matched, and empty when it was a name.
+	// It lets a report of a session whose name another launch took say whose
+	// ID it was given, when that session's own record is gone.
+	SessionID string
 }
 
 // afterResolve, when a test sets it, runs between resolveSession and the
@@ -142,26 +150,24 @@ func resolveArg(ctx context.Context, arg string) (resolved, error) {
 	if !found {
 		return resolved{Name: arg}, nil
 	}
-	return resolved{Name: name, LaunchID: launchID}, nil
+	return resolved{Name: name, LaunchID: launchID, SessionID: arg}, nil
 }
 
-// sameLaunchOrReplaced is the check every step after resolveSession makes of
-// the record it reads by name: when the argument was an ID, a record for any
-// other launch means the session it named has ended and its name was reused.
-// A name argument has no launch to check, so it passes.
-func sameLaunchOrReplaced(r resolved, rec *sessiondir.Record) error {
-	if r.LaunchID == "" || rec.LaunchID == r.LaunchID {
-		return nil
-	}
-	return fmt.Errorf("session %s was replaced: %s ended and %s holds the name now", r.Name, r.LaunchID, rec.LaunchID)
+// matchesLaunch is the check every step after resolveSession makes of the
+// record it reads by name: when the argument was an ID, a record for any other
+// launch means the session it named has ended and its name was reused. A name
+// argument has no launch to check, so it matches.
+func matchesLaunch(r resolved, rec *sessiondir.Record) bool {
+	return r.LaunchID == "" || rec.LaunchID == r.LaunchID
 }
 
 // goneRecord stands for a session given by ID whose name another launch holds
 // now. Its own record went when that launch claimed the name, and with it the
 // only account of how it ended, so this says that the session is over, which
-// the ID established, and nothing about how.
+// the ID established, and nothing about how. The ID is the one the argument
+// matched, so it is still this session's own.
 func goneRecord(r resolved) *sessiondir.Record {
-	return &sessiondir.Record{Name: r.Name, LaunchID: r.LaunchID, Reason: sessiondir.ReasonUnknown}
+	return &sessiondir.Record{Name: r.Name, LaunchID: r.LaunchID, SessionID: r.SessionID, Reason: sessiondir.ReasonUnknown}
 }
 
 // replacedNotStopped and replacedNotChanged are what `session stop` and
@@ -229,9 +235,12 @@ type currentInfo struct {
 	ConnectedClients []string `json:"connectedClients,omitempty"`
 
 	// From fields a daemon has sent since 0.32.0 (launch_id and join_state)
-	// and since 0.37.0 (open), read by `session info`'s rules: the launch only
-	// when the daemon claimed a name, open only when true, and the join
-	// fields only when join_state is there, with a guest's join disabling the
+	// and since 0.37.0 (open). The launch is the daemon's: it sends none when
+	// it claimed no name (see launch_id in host/api/api.proto), and the key is
+	// left out then. Open is printed only when true, and as the daemon gives it
+	// whatever the status, where `session info` leaves it out for a session
+	// that isn't connected. The join fields are read as `session info` reads
+	// them: only when join_state is there, with a guest's join disabling the
 	// timeout. Times are UTC.
 	LaunchID           string    `json:"launchId,omitempty"`
 	Open               bool      `json:"open,omitempty"`
@@ -372,6 +381,10 @@ in constrained environments where XDG directories are unavailable.`, sessiondir.
 	cmd.Flags().StringVarP(&flagListOutput, "output", "o", "", "Output format: json")
 	_ = cmd.RegisterFlagCompletionFunc("output", completeValues("json"))
 	_ = cmd.Flags().SetAnnotation("output", annotationCLIOnly, []string{"true"})
+	// Registered here as `session info` registers it: env and config bind only
+	// to a command's own flags, so without it the listing's JSON would print
+	// the guest addresses they hide everywhere else.
+	cmd.Flags().BoolVar(&flagHideClientIP, "hide-client-ip", false, "Hide client IP addresses from output (auto-enabled in CI environments).")
 
 	return cmd
 }
@@ -517,7 +530,7 @@ func waitSession(ctx context.Context, arg string, out io.Writer) (int, error) {
 		// removes anything unheld and older than RecordRetention.
 		return 0, fmt.Errorf("no session named %q (a session that ended more than %s ago is no longer retained)", name, retentionText(sessiondir.RecordRetention))
 	}
-	if sameLaunchOrReplaced(r, rec) != nil {
+	if !matchesLaunch(r, rec) {
 		return finishWait(out, name, goneRecord(r))
 	}
 
@@ -624,7 +637,7 @@ func stopSession(ctx context.Context, arg string, out io.Writer) error {
 	// just read, which is whatever holds the name now. Given an ID whose
 	// session has ended and whose name another took, that is the other
 	// session's launch, and its daemon would accept the stop.
-	if sameLaunchOrReplaced(r, rec) != nil {
+	if !matchesLaunch(r, rec) {
 		return replacedNotStopped(name)
 	}
 	if !held {
@@ -817,7 +830,7 @@ func setSession(ctx context.Context, arg string, joinTimeout time.Duration, out 
 		return errNoSession(name)
 	}
 	// Before anything is sent, for stopSession's reason.
-	if sameLaunchOrReplaced(r, rec) != nil {
+	if !matchesLaunch(r, rec) {
 		return replacedNotChanged(name)
 	}
 	if !held {
@@ -1253,7 +1266,7 @@ func lookup(ctx context.Context, r resolved) (sessionInfo, *api.GetSessionRespon
 		return sessionInfo{}, nil, errNoSession(r.Name)
 	}
 
-	if sameLaunchOrReplaced(r, rec) != nil {
+	if !matchesLaunch(r, rec) {
 		// The session given by ID is over, whatever the record that holds its
 		// name now says about the one that took it.
 		return infoFromRecord(goneRecord(r), statusEnded), nil, nil

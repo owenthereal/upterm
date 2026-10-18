@@ -91,11 +91,12 @@ var (
 
 // BuildInfo contains version and build information. It is what `upterm
 // version -o json` prints, so its JSON keys are read by scripts: add to them,
-// but don't rename or remove one.
+// but don't rename or remove one. They are camelCase, as the keys of every
+// other upterm JSON are.
 type BuildInfo struct {
 	Version   string `json:"version"`
-	GitCommit string `json:"git_commit,omitempty"`
-	BuildDate string `json:"build_date,omitempty"`
+	GitCommit string `json:"gitCommit,omitempty"`
+	BuildDate string `json:"buildDate,omitempty"`
 }
 
 // Parse parses a version string using hashicorp's go-version library
