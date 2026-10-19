@@ -235,7 +235,7 @@ func reportUnknownCommands(c *cobra.Command) {
 func helpOnlyForKnownCommands(root *cobra.Command) {
 	help := root.HelpFunc()
 	root.SetHelpFunc(func(c *cobra.Command, args []string) {
-		if _, unknown := unknownCommand(c, c.Flags().Args()); unknown {
+		if _, _, unknown := unknownCommand(c, c.Flags().Args()); unknown {
 			return
 		}
 		help(c, args)
@@ -252,8 +252,8 @@ func helpOnlyForKnownCommands(root *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			if arg, unknown := unknownCommand(target, rest); unknown {
-				return unknownCommandError(target, arg)
+			if at, arg, unknown := unknownCommand(target, rest); unknown {
+				return unknownCommandError(at, arg)
 			}
 			if target.Context() == nil {
 				target.SetContext(c.Context())
@@ -265,18 +265,25 @@ func helpOnlyForKnownCommands(root *cobra.Command) {
 	}
 }
 
-// unknownCommand is the first of args when c is the root or a group and it
-// names none of c's commands: what reportUnknownCommands reports.
-func unknownCommand(c *cobra.Command, args []string) (string, bool) {
-	if !c.HasSubCommands() || len(args) == 0 {
-		return "", false
+// unknownCommand walks args down the command tree from c: while the command
+// it is at has commands and words remain, a word naming one of them (an alias
+// included) goes into it. The first word that names none is unknown, and
+// unknownCommand returns it with the command it was looked up in, which is
+// what unknownCommandError names; what follows a command with no commands of
+// its own is that command's arguments.
+//
+// A typo can follow a known command: in `upterm --help session lsit` cobra's
+// lookup takes session for --help's value and leaves "session lsit" at the
+// root, so checking the first word alone would find session known.
+func unknownCommand(c *cobra.Command, args []string) (at *cobra.Command, word string, unknown bool) {
+	for len(args) > 0 && c.HasSubCommands() {
+		sub, _, err := c.Find(args[:1])
+		if err != nil || sub == c {
+			return c, args[0], true
+		}
+		c, args = sub, args[1:]
 	}
-	// In `upterm --help session` cobra's lookup takes session for --help's
-	// value and stops at the root: it is left over, but it is a command.
-	if sub, _, err := c.Find(args[:1]); err == nil && sub != c {
-		return "", false
-	}
-	return args[0], true
+	return nil, "", false
 }
 
 // bindFlagsToEnv binds cmd's flags to the config file and environment

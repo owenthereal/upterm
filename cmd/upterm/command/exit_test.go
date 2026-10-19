@@ -241,6 +241,8 @@ func TestHelpForAnUnknownCommandIsAnError(t *testing.T) {
 		session    = "upterm: unknown command \"lsit\" for upterm session; did you mean list, set or wait?\n"
 		config     = "upterm: unknown command \"edti\" for upterm config; did you mean edit?\n"
 		completion = "upterm: unknown command \"bahs\" for upterm completion; did you mean bash?\n"
+		// bsh is within two edits of bash, fish and zsh.
+		completionBsh = "upterm: unknown command \"bsh\" for upterm completion; did you mean bash, fish or zsh?\n"
 	)
 	for _, tc := range []struct {
 		args []string
@@ -257,6 +259,13 @@ func TestHelpForAnUnknownCommandIsAnError(t *testing.T) {
 		{[]string{"help", "config", "edti"}, config},
 		{[]string{"completion", "bahs", "--help"}, completion},
 		{[]string{"help", "completion", "bahs"}, completion},
+		// cobra takes the word after --help for its value and leaves the
+		// rest at the root; a typo after a known command is still a typo.
+		{[]string{"--help", "session", "lsit"}, session},
+		{[]string{"-h", "session", "lsit"}, session},
+		{[]string{"-h", "se", "lsit"}, session},
+		{[]string{"--help", "config", "edti"}, config},
+		{[]string{"--help", "completion", "bsh"}, completionBsh},
 	} {
 		stdout, stderr, code := runCLI(t, tc.args...)
 		require.Equal(t, 1, code, tc.args)
@@ -277,6 +286,28 @@ func TestHelpForAnUnknownCommandIsAnError(t *testing.T) {
 		require.NoError(t, err)
 		first, _, _ := strings.Cut(cmp.Or(c.Long, c.Short), "\n")
 
+		stdout, stderr, code := runCLI(t, args...)
+		require.Equal(t, 0, code, args)
+		require.Empty(t, stderr, args)
+		require.True(t, strings.HasPrefix(stdout, first+"\n"), "%q: %s", args, stdout)
+	}
+}
+
+// With --help in front, cobra leaves the words after the first command at the
+// root, and the root prints its help. Words that name a command, and a command
+// with no commands of its own followed by arguments, are known.
+func TestHelpBeforeKnownCommandsIsHelp(t *testing.T) {
+	setupSessionRoots(t)
+	withConfig(t, "")
+
+	first, _, _ := strings.Cut(cmp.Or(Root().Long, Root().Short), "\n")
+	for _, args := range [][]string{
+		{"--help", "session"},
+		{"--help", "session", "list"},
+		{"--help", "session", "info", "NAME"},
+		{"-h", "se", "i", "NAME"},
+		{"--help", "completion", "bash"},
+	} {
 		stdout, stderr, code := runCLI(t, args...)
 		require.Equal(t, 0, code, args)
 		require.Empty(t, stderr, args)

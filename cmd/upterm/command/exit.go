@@ -45,8 +45,8 @@ func Main() int {
 func execute(root *cobra.Command) (*cobra.Command, error) {
 	cmd, err := root.ExecuteC()
 	if err == nil && cmd != nil {
-		if arg, unknown := unknownCommand(cmd, cmd.Flags().Args()); unknown {
-			err = unknownCommandError(cmd, arg)
+		if at, arg, unknown := unknownCommand(cmd, cmd.Flags().Args()); unknown {
+			err = unknownCommandError(at, arg)
 		}
 	}
 	return cmd, err
