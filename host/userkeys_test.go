@@ -473,7 +473,7 @@ func Test_githubUserKeys_usesTheAPIWithAHostScopedToken(t *testing.T) {
 func pinHostScopedToken(t *testing.T, token string) {
 	t.Helper()
 	restore := hostScopedTokenFunc
-	hostScopedTokenFunc = func(context.Context, string) (string, error) { return token, nil }
+	hostScopedTokenFunc = func(context.Context, string, time.Duration) (string, error) { return token, nil }
 	t.Cleanup(func() { hostScopedTokenFunc = restore })
 }
 
@@ -488,7 +488,7 @@ func Test_githubUserKeys_propagatesCredentialLookupFailure(t *testing.T) {
 	defer server.Close()
 
 	restore := hostScopedTokenFunc
-	hostScopedTokenFunc = func(ctx context.Context, hostname string) (string, error) {
+	hostScopedTokenFunc = func(ctx context.Context, hostname string, _ time.Duration) (string, error) {
 		<-ctx.Done()
 		return "", fmt.Errorf("credential lookup for %s did not complete: %w", hostname, ctx.Err())
 	}
@@ -517,18 +517,15 @@ func Test_githubUserKeys_propagatesCredentialLookupFailure(t *testing.T) {
 	}
 }
 
-func shortCredentialTimeout(t *testing.T) {
-	t.Helper()
-	restore := credentialTimeout
-	// 1s, not a tighter value: keyringToken applies credentialTimeout as a
-	// deadline from the moment it is called, so it must cover the stub's own
-	// process startup as well as the post-cancel WaitDelay. Writing a fresh
-	// executable and running it measures ~270ms on macOS, which is why 200ms
-	// killed the stub before it could touch its marker file and the test's
-	// Eventually never fired.
-	credentialTimeout = 1 * time.Second
-	t.Cleanup(func() { credentialTimeout = restore })
-}
+// shortCredentialTimeout is the credential timeout tests pass to keyringToken
+// and set on a Fetcher, in place of defaultCredentialTimeout.
+//
+// 1s, not a tighter value: keyringToken applies its timeout as a deadline from
+// the moment it is called, so it must cover the stub's own process startup as
+// well as the post-cancel WaitDelay. Writing a fresh executable and running it
+// measures ~270ms on macOS, which is why 200ms killed the stub before it could
+// touch its marker file and the test's Eventually never fired.
+const shortCredentialTimeout = 1 * time.Second
 
 func Test_keyringToken_honorsGHPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -544,7 +541,7 @@ func Test_keyringToken_honorsGHPath(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("GH_PATH", stub)
 
-	got, err := keyringToken(t.Context(), "ghe.corp.com")
+	got, err := keyringToken(t.Context(), "ghe.corp.com", defaultCredentialTimeout)
 	require.NoError(t, err)
 	assert.Equal(t, "keyring-token", got)
 }
@@ -570,12 +567,11 @@ func Test_keyringToken_boundsALookupWhoseDescendantHoldsThePipe(t *testing.T) {
 	require.NoError(t, os.WriteFile(stub, []byte(script), 0o755))
 
 	t.Setenv("GH_PATH", stub)
-	shortCredentialTimeout(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		_, err := keyringToken(ctx, "ghe.corp.com")
+		_, err := keyringToken(ctx, "ghe.corp.com", shortCredentialTimeout)
 		done <- err
 	}()
 
@@ -588,10 +584,13 @@ func Test_keyringToken_boundsALookupWhoseDescendantHoldsThePipe(t *testing.T) {
 
 	cancel()
 
+	// WaitDelay starts when the context ends, so the lookup returns about one
+	// timeout after the cancel. Configured 1s < guard 3s < default 5s: a
+	// lookup that applied the default instead of its timeout fails here.
 	select {
 	case err := <-done:
 		assert.ErrorContains(t, err, "did not complete")
-	case <-time.After(5 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("keyringToken outlived its context and WaitDelay")
 	}
 }
@@ -1043,7 +1042,7 @@ func Test_githubUserKeys_doesNotSendAPortlessCredentialToAnotherPort(t *testing.
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			restore := hostScopedTokenFunc
-			hostScopedTokenFunc = func(_ context.Context, hostname string) (string, error) {
+			hostScopedTokenFunc = func(_ context.Context, hostname string, _ time.Duration) (string, error) {
 				if hostname == c.storedAt {
 					return "scoped-token", nil
 				}
@@ -1102,11 +1101,11 @@ func Test_hostScopedToken_readsHostScopedStorageOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { config.Read = restore })
 
-	got, err := hostScopedToken(t.Context(), "ghe.corp.com")
+	got, err := hostScopedToken(t.Context(), "ghe.corp.com", defaultCredentialTimeout)
 	require.NoError(t, err)
 	assert.Equal(t, "right-token", got)
 
-	got, err = hostScopedToken(t.Context(), "other.corp.com")
+	got, err = hostScopedToken(t.Context(), "other.corp.com", defaultCredentialTimeout)
 	require.NoError(t, err)
 	assert.Empty(t, got,
 		"a host with no stored credential must not inherit the ambient enterprise token")
@@ -1159,7 +1158,7 @@ func Test_githubUserKeys_defaultModeUsesAmbientCredentials(t *testing.T) {
 	assert.Equal(t, "token ambient-token", gotAuth)
 }
 
-func pinKeyringToken(t *testing.T, fn func(context.Context, string) (string, error)) {
+func pinKeyringToken(t *testing.T, fn func(context.Context, string, time.Duration) (string, error)) {
 	t.Helper()
 	restore := keyringTokenFunc
 	keyringTokenFunc = fn
@@ -1212,7 +1211,7 @@ func Test_anonymousAfterIncompleteLookup(t *testing.T) {
 // The whole fetch, with the keyring lookup pinned instead of shelled out, so
 // the fallback is exercised on Windows too.
 func Test_githubUserKeys_fallbackDecisionThroughTheLookup(t *testing.T) {
-	timedOut := func(_ context.Context, host string) (string, error) {
+	timedOut := func(_ context.Context, host string, _ time.Duration) (string, error) {
 		return "", fmt.Errorf("credential lookup for %s did not complete: %w", host, context.DeadlineExceeded)
 	}
 
@@ -1258,7 +1257,7 @@ func Test_githubUserKeys_fallbackDecisionThroughTheLookup(t *testing.T) {
 	})
 	t.Run("a cancelled caller stays closed", func(t *testing.T) {
 		noAmbientCredential(t)
-		pinKeyringToken(t, func(ctx context.Context, host string) (string, error) {
+		pinKeyringToken(t, func(ctx context.Context, host string, _ time.Duration) (string, error) {
 			return "", fmt.Errorf("credential lookup for %s did not complete: %w", host, ctx.Err())
 		})
 		pinGitHubHost(t, "github.com")
@@ -1274,9 +1273,42 @@ func Test_githubUserKeys_fallbackDecisionThroughTheLookup(t *testing.T) {
 	})
 }
 
-// stubHungGH makes `gh auth token` hang past a shortened credentialTimeout, as
-// a cold gh on a Windows runner did, with no ambient credential to short-cut
-// the keyring lookup.
+// A Fetcher hands each keyring lookup its own credential timeout, or the
+// default when it leaves that zero or negative. The lookup is pinned, so this
+// checks what the Fetcher passes; the keyring tests check how it is applied.
+func Test_githubUserKeys_passesTheFetchersTimeoutToTheLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  time.Duration
+		want time.Duration
+	}{
+		{"set", shortCredentialTimeout, shortCredentialTimeout},
+		{"zero", 0, defaultCredentialTimeout},
+		{"negative", -time.Second, defaultCredentialTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			noAmbientCredential(t)
+			pinGitHubHost(t, "github.com")
+			var got time.Duration
+			pinKeyringToken(t, func(_ context.Context, _ string, timeout time.Duration) (string, error) {
+				got = timeout
+				return "", nil
+			})
+			ref, err := ParseUserRef("github:alice")
+			require.NoError(t, err)
+
+			f := &Fetcher{Logger: testLogger(), Transport: &recordingRT{body: testPublicKey}, credentialTimeout: tc.set}
+			_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// stubHungGH makes `gh auth token` hang, as a cold gh on a Windows runner did,
+// with no ambient credential to short-cut the keyring lookup. A test sets its
+// Fetcher's credentialTimeout to shortCredentialTimeout, so the lookup gives
+// up well before the default would.
 func stubHungGH(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1288,7 +1320,6 @@ func stubHungGH(t *testing.T) {
 	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexec "+sleepExe+" 60\n"), 0o755))
 	t.Setenv("GH_PATH", stub)
 	noAmbientCredential(t)
-	shortCredentialTimeout(t)
 }
 
 // github.com's keys are public: a credential buys rate limit and nothing
@@ -1300,7 +1331,7 @@ func Test_githubUserKeys_githubDotComFetchesAnonymouslyAfterATimedOutLookup(t *t
 
 	ref, err := ParseUserRef("github:alice")
 	require.NoError(t, err)
-	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	f := &Fetcher{Logger: testLogger(), Transport: rec, credentialTimeout: shortCredentialTimeout}
 	aks, err := f.AuthorizedKeys(t.Context(), []UserRef{ref})
 	require.NoError(t, err)
 	require.Len(t, aks, 1)
@@ -1320,7 +1351,7 @@ func Test_githubUserKeys_enterpriseDefaultStaysClosedAfterATimedOutLookup(t *tes
 
 	ref, err := ParseUserRef("github:alice")
 	require.NoError(t, err)
-	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	f := &Fetcher{Logger: testLogger(), Transport: rec, credentialTimeout: shortCredentialTimeout}
 	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
 	require.ErrorContains(t, err, "did not complete")
 	require.Empty(t, rec.reqs, "no request may go out")
@@ -1335,7 +1366,7 @@ func Test_githubUserKeys_hostScopedStaysClosedAfterATimedOutLookup(t *testing.T)
 	ref, err := ParseUserRef("github:alice@github.com")
 	require.NoError(t, err)
 	require.Equal(t, CredentialHostScoped, ref.Mode)
-	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	f := &Fetcher{Logger: testLogger(), Transport: rec, credentialTimeout: shortCredentialTimeout}
 	_, err = f.AuthorizedKeys(t.Context(), []UserRef{ref})
 	require.ErrorContains(t, err, "did not complete")
 	require.Empty(t, rec.reqs)
@@ -1351,7 +1382,7 @@ func Test_githubUserKeys_cancelledCallerStaysClosed(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	f := &Fetcher{Logger: testLogger(), Transport: rec}
+	f := &Fetcher{Logger: testLogger(), Transport: rec, credentialTimeout: shortCredentialTimeout}
 	_, err = f.AuthorizedKeys(ctx, []UserRef{ref})
 	require.Error(t, err)
 	require.Empty(t, rec.reqs)

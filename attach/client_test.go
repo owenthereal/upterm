@@ -210,9 +210,7 @@ func (b *blockingOnLastSink) Write(p []byte) (int, error) {
 // interrupt it. Within the same bound as the drain it follows, because the
 // two are the same terminal and it is the total the caller is waiting on.
 func TestClientReturnsWhenTheTerminalStopsOnTheModeRestore(t *testing.T) {
-	orig := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = orig })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	door := serveDoor(t, func(s gssh.Session) {
 		_, _ = io.WriteString(s, "\x1b[?1049h\x1b[?25lfull screen")
@@ -221,7 +219,7 @@ func TestClientReturnsWhenTheTerminalStopsOnTheModeRestore(t *testing.T) {
 
 	sink := &blockingOnLastSink{stopAfter: 1, entered: make(chan struct{})}
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink,
-		Pty: &Pty{Term: "xterm", Size: termsize.Default}}
+		Pty: &Pty{Term: "xterm", Size: termsize.Default}, limits: lim}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -237,10 +235,13 @@ func TestClientReturnsWhenTheTerminalStopsOnTheModeRestore(t *testing.T) {
 	case <-time.After(testTimeout):
 		t.Fatal("the restore write never reached the stopped terminal")
 	}
+	// The drain configured, 200 ms, < this guard, 3 s, < the default drain,
+	// 5 s: a Run that waited out the default instead of its own limit fails
+	// here, and one that kept to its limit has seconds to spare.
 	select {
 	case res := <-returned:
 		require.Equal(t, Result{Reason: Exited}, res, "the session's own ending is still what is reported")
-	case <-time.After(5 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("Run was held by a terminal that stopped on the mode restore")
 	}
 }
@@ -650,9 +651,7 @@ func (b *blockingOnLastSink) count() int {
 // means the process is not stopped: the attachment is over, and fg would
 // only bring back a detach.
 func TestClient_SuspendDetachesWhenTheTerminalDoesNotTakeAModeWrite(t *testing.T) {
-	orig := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = orig })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	for _, tc := range []struct {
 		name       string
@@ -677,7 +676,8 @@ func TestClient_SuspendDetachesWhenTheTerminalDoesNotTakeAModeWrite(t *testing.T
 					hooked.Store(true)
 					more <- "while stopped"
 					return termsize.Size{}, true
-				}}
+				},
+				limits: lim}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := runAsync(t, ctx, c)
@@ -751,9 +751,7 @@ func TestClient_SuspendHoldsTheSessionsOutputUntilTheTerminalIsBack(t *testing.T
 // that write still in flight, to complete over the foreground shell's screen
 // once bg has continued it.
 func TestClient_SuspendDetachesWhenATerminalStoppedTakingOutput(t *testing.T) {
-	orig := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = orig })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	sigs := make(chan gssh.Signal, 1)
 	more := make(chan string, 1)
@@ -768,7 +766,8 @@ func TestClient_SuspendDetachesWhenATerminalStoppedTakingOutput(t *testing.T) {
 		Suspend: func() (termsize.Size, bool) {
 			hooked.Store(true)
 			return termsize.Size{}, true
-		}}
+		},
+		limits: lim}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -965,9 +964,7 @@ func (b *blockedSink) count() int {
 // The door waits until the sink has entered its blocked write before
 // disconnecting, because two channel writes can reach the sink as one.
 func TestClientReturnsWhenDisconnectedEvenIfStdoutIsBlocked(t *testing.T) {
-	orig := outputDrainTimeout
-	outputDrainTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { outputDrainTimeout = orig })
+	lim := terminalLimits{outputDrain: 200 * time.Millisecond}
 
 	sink := newBlockedSink()
 	door := serveDoor(t, func(s gssh.Session) {
@@ -978,7 +975,7 @@ func TestClientReturnsWhenDisconnectedEvenIfStdoutIsBlocked(t *testing.T) {
 		conn := s.Context().Value(gssh.ContextKeyConn).(*ssh.ServerConn)
 		_ = conn.Close()
 	})
-	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink}
+	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdout: sink, limits: lim}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)
@@ -1165,9 +1162,7 @@ const sshWindow = 2 << 20
 // exhausted window, never returns, and a detach that waited for it would
 // never reach the cancellation that releases it.
 func TestClientDetachIsNotHeldByAnInputWriteOnAnExhaustedWindow(t *testing.T) {
-	orig := inputFlushTimeout
-	inputFlushTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { inputFlushTimeout = orig })
+	lim := terminalLimits{inputFlush: 200 * time.Millisecond}
 
 	for _, tc := range []struct {
 		name       string
@@ -1186,7 +1181,8 @@ func TestClientDetachIsNotHeldByAnInputWriteOnAnExhaustedWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			door := serveDoor(t, func(s gssh.Session) { select {} }) // never reads its input
 			pr, pw := io.Pipe()
-			c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~'}
+			c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
+				limits: lim}
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 			done := runAsync(t, ctx, c)
@@ -1408,15 +1404,12 @@ func TestClientDetachDeliversTheBytesItOwes(t *testing.T) {
 	require.Equal(t, "x\r", door.taken(), "the detach left behind what the session was owed")
 }
 
-// Reading without bound would be its own defect. Past inputBacklogLimit the
+// Reading without bound would be its own defect. Past the backlog limit the
 // session is not taking input and the keystrokes are dropped — with one
 // bounded warning, however many reads are dropped — while the escape is still
 // recognised, which is the whole point of reading on.
 func TestClientDropsInputBeyondTheBacklogAndStillDetaches(t *testing.T) {
-	origLimit := inputBacklogLimit
-	inputBacklogLimit = 64 << 10
-	t.Cleanup(func() { inputBacklogLimit = origLimit })
-	limit := inputBacklogLimit
+	const limit = 64 << 10
 
 	release := make(chan struct{})
 	defer close(release)
@@ -1426,7 +1419,7 @@ func TestClientDropsInputBeyondTheBacklogAndStillDetaches(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
 	c := &Client{Socket: door.socket, HostKeys: door.pin(), Stdin: pr, Stdout: io.Discard, Escape: '~',
-		Logger: slog.New(handler)}
+		Logger: slog.New(handler), limits: terminalLimits{inputBacklog: limit}}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	done := runAsync(t, ctx, c)

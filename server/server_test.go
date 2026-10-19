@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gliderssh "charm.land/ssh"
@@ -354,7 +356,7 @@ func TestServerShutdownWaitsForServingToStop(t *testing.T) {
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(serveStopDeadline):
+	case <-time.After(defaultServeStopDeadline):
 		t.Fatal("Shutdown did not return once serving stopped")
 	}
 }
@@ -362,21 +364,48 @@ func TestServerShutdownWaitsForServingToStop(t *testing.T) {
 // Serving that never stops must not hang the daemon: the wait is bounded, and
 // what it reports says a listener may still be bound rather than claiming a
 // clean shutdown.
+//
+// It runs in a synctest bubble, where time is fake, with the wait set to
+// 50 ms. The bound is checked on both sides of it, and against the default:
+// 50 ms - 1 ns (still waiting) < 50 ms (returned) < defaultServeStopDeadline
+// (8 s), where a Shutdown that ignored the setting would return.
 func TestServerShutdownReportsServingThatWillNotStop(t *testing.T) {
-	restore := serveStopDeadline
-	serveStopDeadline = 50 * time.Millisecond
-	t.Cleanup(func() { serveStopDeadline = restore })
+	synctest.Test(t, func(t *testing.T) {
+		const deadline = 50 * time.Millisecond
+		logger := slog.New(slog.DiscardHandler)
+		served := make(chan struct{}) // never closed while the test runs
+		// Stop serving once the test is over, so a Shutdown still waiting on
+		// it, as one that ignored its deadline would be, can return rather
+		// than outlive the test.
+		t.Cleanup(sync.OnceFunc(func() { close(served) }))
+		s := &Server{
+			NodeAddr:          "127.0.0.1:0",
+			SessionManager:    newEmbeddedSessionManager(logger),
+			Logger:            logger,
+			cancel:            func() {},
+			served:            served,
+			serveStopDeadline: deadline,
+		}
 
-	logger := slog.New(slog.DiscardHandler)
-	s := &Server{
-		NodeAddr:       "127.0.0.1:0",
-		SessionManager: newEmbeddedSessionManager(logger),
-		Logger:         logger,
-		cancel:         func() {},
-		served:         make(chan struct{}), // never closed
-	}
+		done := make(chan error, 1)
+		go func() { done <- s.Shutdown() }()
 
-	require.ErrorIs(t, s.Shutdown(), errShutdownIncomplete)
+		time.Sleep(deadline - time.Nanosecond)
+		synctest.Wait() // every wake due before the deadline has run
+		select {
+		case err := <-done:
+			t.Fatalf("Shutdown returned before its deadline: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait() // the deadline's own wake, and the session cleanup after it, have run
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, errShutdownIncomplete)
+		default:
+			t.Fatal("Shutdown was still waiting for serving at its deadline")
+		}
+	})
 }
 
 // Shutdown waits on a channel ServeWithContext creates, so a Server that never

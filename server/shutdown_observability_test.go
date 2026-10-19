@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owenthereal/upterm/routing"
@@ -20,13 +22,14 @@ import (
 type hangingListStore struct {
 	SessionStore
 	entered chan struct{}
-	release chan struct{}
+	gate    chan struct{}
+	release func() // opens gate; safe to call more than once
 	deleted chan []string
 }
 
 func (s hangingListStore) List() ([]*Session, error) {
 	close(s.entered)
-	<-s.release
+	<-s.gate
 	return s.SessionStore.List()
 }
 
@@ -39,10 +42,12 @@ func (s hangingListStore) BatchDelete(sessionIDs []string) error {
 }
 
 func newHangingListStore(logger *slog.Logger) hangingListStore {
+	gate := make(chan struct{})
 	return hangingListStore{
 		SessionStore: newMemorySessionStore(logger),
 		entered:      make(chan struct{}),
-		release:      make(chan struct{}),
+		gate:         gate,
+		release:      sync.OnceFunc(func() { close(gate) }),
 		deleted:      make(chan []string, 1),
 	}
 }
@@ -53,40 +58,56 @@ func newHangingListStore(logger *slog.Logger) hangingListStore {
 // therefore has to bound it. Until it did, the whole of Shutdown had a floor
 // but no ceiling, and a supervisor's grace period cannot be set against an
 // unbounded shutdown -- fly.toml's kill_timeout is set against this one.
+//
+// It runs in a synctest bubble, where time is fake, with the cleanup's bound
+// set to 50 ms. The bound is checked on both sides of it, and against the
+// default: 50 ms - 1 ns (still waiting) < 50 ms (returned) <
+// defaultSessionCleanupDeadline (3 s), where a Shutdown that ignored the
+// setting would return.
 func TestServerShutdownBoundsSessionCleanup(t *testing.T) {
-	restore := sessionCleanupDeadline
-	sessionCleanupDeadline = 50 * time.Millisecond
-	t.Cleanup(func() { sessionCleanupDeadline = restore })
+	synctest.Test(t, func(t *testing.T) {
+		const deadline = 50 * time.Millisecond
+		logger := slog.New(slog.DiscardHandler)
+		store := newHangingListStore(logger)
+		// Let the abandoned goroutine finish so it does not outlive the test.
+		t.Cleanup(store.release)
 
-	logger := slog.New(slog.DiscardHandler)
-	store := newHangingListStore(logger)
-	// Let the abandoned goroutine finish so it does not outlive the test.
-	t.Cleanup(func() { close(store.release) })
+		s := &Server{
+			NodeAddr:       "127.0.0.1:0",
+			SessionManager: newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded)),
+			Logger:         logger,
+			cancel:         func() {},
+			// served is nil: this Server never served, so the wait before the
+			// cleanup is skipped and only the cleanup's own bound is under test.
+			sessionCleanupDeadline: deadline,
+		}
 
-	s := &Server{
-		NodeAddr:       "127.0.0.1:0",
-		SessionManager: newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded)),
-		Logger:         logger,
-		cancel:         func() {},
-		// served is nil: this Server never served, so the wait before the
-		// cleanup is skipped and only the cleanup's own bound is under test.
-	}
+		done := make(chan error, 1)
+		go func() { done <- s.Shutdown() }()
 
-	done := make(chan error, 1)
-	go func() { done <- s.Shutdown() }()
+		synctest.Wait() // the cleanup has reached List, which holds it
+		select {
+		case <-store.entered:
+		default:
+			t.Fatal("session cleanup never started, so its deadline proves nothing")
+		}
 
-	select {
-	case <-store.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("session cleanup never started, so its deadline proves nothing")
-	}
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, errSessionCleanupTimeout)
-	case <-time.After(5 * time.Second):
-		t.Fatal("Shutdown did not return while session cleanup was stuck")
-	}
+		time.Sleep(deadline - time.Nanosecond)
+		synctest.Wait() // every wake due before the deadline has run
+		select {
+		case err := <-done:
+			t.Fatalf("Shutdown returned before its cleanup deadline: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait() // the deadline's own expiry, and Shutdown's return on it, have run
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, errSessionCleanupTimeout)
+		default:
+			t.Fatal("Shutdown was still waiting on the stuck cleanup at its deadline")
+		}
+	})
 }
 
 // Bounding the cleanup means it can still be running after Shutdown has given
@@ -97,57 +118,77 @@ func TestServerShutdownBoundsSessionCleanup(t *testing.T) {
 // conditional on this process's leases, which spares them there, but a store
 // without that check would delete them. Giving up therefore has to revoke its
 // permission to delete, not merely stop waiting for it.
+//
+// It runs in a synctest bubble, where time is fake, with the cleanup's bound
+// set to 50 ms. The bound is checked on both sides of it, and against the
+// default: 50 ms - 1 ns (still waiting) < 50 ms (returned) <
+// defaultSessionCleanupDeadline (3 s), where a Shutdown that ignored the
+// setting would return. Released after that, the cleanup runs to its end
+// with no time passing, so what it did is settled, not waited for.
 func TestAbandonedSessionCleanupDoesNotDelete(t *testing.T) {
-	restore := sessionCleanupDeadline
-	sessionCleanupDeadline = 50 * time.Millisecond
-	t.Cleanup(func() { sessionCleanupDeadline = restore })
+	synctest.Test(t, func(t *testing.T) {
+		const deadline = 50 * time.Millisecond
+		logger := slog.New(slog.DiscardHandler)
+		store := newHangingListStore(logger)
+		// Let the abandoned goroutine finish so it does not outlive the test,
+		// should the test fail before it releases List itself.
+		t.Cleanup(store.release)
 
-	logger := slog.New(slog.DiscardHandler)
-	store := newHangingListStore(logger)
+		nodeAddr := "127.0.0.1:2222"
+		sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
+		_, err := sm.CreateSession(NewSession("doomed", nodeAddr, "owen", nil, nil))
+		require.NoError(t, err)
 
-	nodeAddr := "127.0.0.1:2222"
-	sm := newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeEmbedded))
-	_, err := sm.CreateSession(NewSession("doomed", nodeAddr, "owen", nil, nil))
-	require.NoError(t, err)
+		s := &Server{
+			NodeAddr:               nodeAddr,
+			SessionManager:         sm,
+			Logger:                 logger,
+			cancel:                 func() {},
+			sessionCleanupDeadline: deadline,
+		}
 
-	s := &Server{
-		NodeAddr:       nodeAddr,
-		SessionManager: sm,
-		Logger:         logger,
-		cancel:         func() {},
-	}
+		done := make(chan error, 1)
+		go func() { done <- s.Shutdown() }()
 
-	done := make(chan error, 1)
-	go func() { done <- s.Shutdown() }()
+		synctest.Wait() // the cleanup has reached List, which holds it
+		select {
+		case <-store.entered:
+		default:
+			t.Fatal("session cleanup never started")
+		}
 
-	select {
-	case <-store.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("session cleanup never started")
-	}
+		time.Sleep(deadline - time.Nanosecond)
+		synctest.Wait() // every wake due before the deadline has run
+		select {
+		case err := <-done:
+			t.Fatalf("Shutdown returned before its cleanup deadline: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait() // the deadline's own expiry, and Shutdown's return on it, have run
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, errSessionCleanupTimeout)
+		default:
+			t.Fatal("Shutdown was still waiting on the stuck cleanup at its deadline")
+		}
 
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, errSessionCleanupTimeout)
-	case <-time.After(5 * time.Second):
-		t.Fatal("Shutdown did not return while session cleanup was stuck")
-	}
+		// Shutdown has given up. Unblock the cleanup and stand in for the server
+		// that took this node address next: its session must survive.
+		store.release()
+		synctest.Wait() // the released cleanup has run to its end
+		select {
+		case ids := <-store.deleted:
+			t.Fatalf("abandoned cleanup deleted %v after Shutdown had given up", ids)
+		default:
+		}
 
-	// Shutdown has given up. Unblock the cleanup and stand in for the server
-	// that took this node address next: its session must survive.
-	close(store.release)
-
-	select {
-	case ids := <-store.deleted:
-		t.Fatalf("abandoned cleanup deleted %v after Shutdown had given up", ids)
-	case <-time.After(time.Second):
-	}
-
-	// Read through the embedded store: the override closes entered, and would
-	// panic on a second call.
-	surviving, err := store.SessionStore.List()
-	require.NoError(t, err)
-	require.Len(t, surviving, 1, "abandoned cleanup emptied the store it no longer owned")
+		// Read through the embedded store: the override closes entered, and would
+		// panic on a second call.
+		surviving, err := store.SessionStore.List()
+		require.NoError(t, err)
+		require.Len(t, surviving, 1, "abandoned cleanup emptied the store it no longer owned")
+	})
 }
 
 // run.Group's interrupt signature is func(error), so a failing Shutdown had

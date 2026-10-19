@@ -112,6 +112,11 @@ type Fetcher struct {
 	// Transport, when set, is the base round tripper for every request. Tests
 	// use it to trust httptest certificates; production leaves it nil.
 	Transport http.RoundTripper
+
+	// credentialTimeout bounds each credential lookup. Zero or negative takes
+	// defaultCredentialTimeout, so production, which never sets it, gets that;
+	// tests set it to shorten a lookup that hangs.
+	credentialTimeout time.Duration
 }
 
 // AuthorizedKeysFromUserRefs resolves refs using a default Fetcher. A non-nil
@@ -260,10 +265,10 @@ func checkStatus(resp *http.Response, ref UserRef) error {
 	}
 }
 
-// credentialTimeout bounds credential resolution, which may shell out to `gh`
-// and touch a system keyring that can block on a locked keychain. It is a
-// variable so tests can shrink it.
-var credentialTimeout = 5 * time.Second
+// defaultCredentialTimeout bounds credential resolution, which may shell out
+// to `gh` and touch a system keyring that can block on a locked keychain,
+// unless the Fetcher's credentialTimeout is positive.
+const defaultCredentialTimeout = 5 * time.Second
 
 // hostScopedTokenFunc is a variable so tests can pin credential resolution.
 var hostScopedTokenFunc = hostScopedToken
@@ -276,7 +281,7 @@ var keyringTokenFunc = keyringToken
 // GH_ENTERPRISE_TOKEN and GITHUB_ENTERPRISE_TOKEN. Those variables are not
 // host-scoped: go-gh returns them for *any* non-github.com host, so honoring
 // them would send one enterprise instance's token to another.
-func hostScopedToken(ctx context.Context, hostname string) (string, error) {
+func hostScopedToken(ctx context.Context, hostname string, timeout time.Duration) (string, error) {
 	normalized := auth.NormalizeHostname(hostname)
 
 	if cfg, err := config.Read(nil); err == nil {
@@ -285,16 +290,17 @@ func hostScopedToken(ctx context.Context, hostname string) (string, error) {
 		}
 	}
 
-	return keyringToken(ctx, normalized)
+	return keyringToken(ctx, normalized, timeout)
 }
 
-// keyringToken shells out to `gh auth token`, bounded and cancellable.
+// keyringToken shells out to `gh auth token`, bounded by timeout and
+// cancellable.
 //
 // A missing `gh` or a non-zero exit means "no credential stored" — an ordinary
 // answer. A context error means the lookup could not be completed, which must
 // not be reported as absence: silently fetching anonymously would treat "could
 // not check" as "confirmed none".
-func keyringToken(ctx context.Context, hostname string) (string, error) {
+func keyringToken(ctx context.Context, hostname string, timeout time.Duration) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("credential lookup for %s did not complete: %w", hostname, err)
 	}
@@ -313,7 +319,7 @@ func keyringToken(ctx context.Context, hostname string) (string, error) {
 
 	// A keyring lookup can block indefinitely on a locked keychain, which would
 	// otherwise outlast the HTTP client's timeout and ignore cancellation.
-	ctx, cancel := context.WithTimeout(ctx, credentialTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ghExe, "auth", "token", "--secure-storage", "--hostname", hostname)
@@ -321,7 +327,7 @@ func keyringToken(ctx context.Context, hostname string) (string, error) {
 	// output pipes, Output blocks until they close, which a surviving
 	// grandchild can defer indefinitely. WaitDelay bounds that wait and makes
 	// Output return exec.ErrWaitDelay instead of hanging.
-	cmd.WaitDelay = credentialTimeout
+	cmd.WaitDelay = timeout
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -344,15 +350,15 @@ func keyringToken(ctx context.Context, hostname string) (string, error) {
 // would outlive the caller. auth.TokenFromEnvOrConfig covers the same
 // environment-then-config precedence without spawning anything, and the
 // keyring step is then performed by our own cancellable implementation.
-func resolveToken(ctx context.Context, ref UserRef, hostname string) (string, error) {
+func resolveToken(ctx context.Context, ref UserRef, hostname string, timeout time.Duration) (string, error) {
 	switch ref.Mode {
 	case CredentialHostScoped:
-		return hostScopedTokenFunc(ctx, hostname)
+		return hostScopedTokenFunc(ctx, hostname, timeout)
 	case CredentialDefault:
 		if token, _ := auth.TokenFromEnvOrConfig(hostname); token != "" {
 			return token, nil
 		}
-		return keyringTokenFunc(ctx, hostname)
+		return keyringTokenFunc(ctx, hostname, timeout)
 	default:
 		return "", nil
 	}
@@ -379,13 +385,17 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref U
 	// for the GHES on ghe.corp.com to whatever answers on :8443.
 	authority := ref.ResolveHost()
 
-	token, err := resolveToken(ctx, ref, authority)
+	timeout := f.credentialTimeout
+	if timeout <= 0 {
+		timeout = defaultCredentialTimeout
+	}
+	token, err := resolveToken(ctx, ref, authority, timeout)
 	if err != nil {
 		if !anonymousAfterIncompleteLookup(ctx, ref, authority, err) {
 			return nil, err
 		}
 		logger.Warn("credential lookup did not complete; fetching public keys anonymously",
-			"host", authority, "timeout", credentialTimeout, "error", err)
+			"host", authority, "timeout", timeout, "error", err)
 		token = ""
 	}
 	if token == "" {
@@ -469,7 +479,7 @@ func (f *Fetcher) githubUserKeys(ctx context.Context, logger *slog.Logger, ref U
 // returns the same keys with or without a credential, so a credential buys
 // rate limit and nothing else, and "could not check" cannot change who is
 // authorized. A cold `gh auth token` on a Windows runner outlived
-// credentialTimeout often enough to fail sessions outright.
+// defaultCredentialTimeout often enough to fail sessions outright.
 //
 // Everywhere else the failure stands, which is keyringToken's rule: an
 // Enterprise instance in private mode answers an anonymous request

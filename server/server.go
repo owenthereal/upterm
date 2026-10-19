@@ -353,13 +353,22 @@ type Server struct {
 	// waits on it so that callers keep the guarantee they had when Shutdown
 	// closed the listeners itself: once it returns, nothing is still bound.
 	served chan struct{}
+
+	// serveStopDeadline and sessionCleanupDeadline bound Shutdown's two waits.
+	// Zero or negative takes defaultServeStopDeadline and
+	// defaultSessionCleanupDeadline, so uptermd, which sets neither, gets
+	// those. Shutdown reads each once, as it starts; tests set them to shorten
+	// a wait.
+	serveStopDeadline      time.Duration
+	sessionCleanupDeadline time.Duration
 }
 
 // errShutdownIncomplete reports that serving did not finish inside the
 // shutdown deadline, so a listener may still be bound.
 var errShutdownIncomplete = errors.New("serving did not stop within the shutdown deadline")
 
-// serveStopDeadline bounds how long Shutdown waits for serving to stop.
+// defaultServeStopDeadline bounds how long Shutdown waits for serving to stop,
+// unless the Server's serveStopDeadline is positive.
 //
 // run.Group runs its interrupts one after another, so the components' own
 // budgets add up: routing joins its workers for up to routingShutdownDeadline,
@@ -370,24 +379,23 @@ var errShutdownIncomplete = errors.New("serving did not stop within the shutdown
 // would answer such a shutdown with a false errShutdownIncomplete and an Error
 // log, which is the noise this deadline exists alongside. Hence the extra
 // serverShutDownDeadline of slack.
-//
-// A variable so tests can shorten it; nothing outside tests assigns to it.
-var serveStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadline
+const defaultServeStopDeadline = routingShutdownDeadline + 3*serverShutDownDeadline
 
 // errSessionCleanupTimeout reports that deleting this node's sessions did not
 // finish in time, so the store may still route joiners to a node that is gone
 // until the entries reach their TTL.
 var errSessionCleanupTimeout = errors.New("session cleanup did not finish within its deadline")
 
-// sessionCleanupDeadline bounds the session cleanup that follows the wait for
-// serving to stop.
+// defaultSessionCleanupDeadline bounds the session cleanup that follows the
+// wait for serving to stop, unless the Server's sessionCleanupDeadline is
+// positive.
 //
 // Without it Shutdown had a floor but no ceiling: SessionManager.Shutdown lists
 // every session in the store, deletes this node's in serial 32-key Consul
 // transactions and closes the store, none of which carries a deadline of its
 // own. A supervisor's grace period cannot be set against an unbounded shutdown,
 // and uptermd's is set against this one -- fly.toml's kill_timeout has to clear
-// serveStopDeadline + sessionCleanupDeadline.
+// defaultServeStopDeadline + defaultSessionCleanupDeadline.
 //
 // The in-flight store calls are not cancelled when this expires, because List
 // and BatchDelete take no context; threading one through them is the better fix
@@ -405,9 +413,7 @@ var errSessionCleanupTimeout = errors.New("session cleanup did not finish within
 // an embedder calling Shutdown against a store that keeps overrunning would
 // accumulate them. A cleanup that half-finished still beats one the supervisor
 // killed outright, with the session TTL catching whatever is left.
-//
-// A variable so tests can shorten it; nothing outside tests assigns to it.
-var sessionCleanupDeadline = 3 * time.Second
+const defaultSessionCleanupDeadline = 3 * time.Second
 
 // Shutdown cancels serving and waits for it to finish. It deliberately does not
 // close sshln or wsln: each is owned by the component serving it, which closes
@@ -416,6 +422,15 @@ var sessionCleanupDeadline = 3 * time.Second
 // the loser of that race reported "use of closed network connection" from
 // whichever side it landed on.
 func (s *Server) Shutdown() error {
+	// Resolved once, here: both waits below use these.
+	serveStop, cleanupDeadline := s.serveStopDeadline, s.sessionCleanupDeadline
+	if serveStop <= 0 {
+		serveStop = defaultServeStopDeadline
+	}
+	if cleanupDeadline <= 0 {
+		cleanupDeadline = defaultSessionCleanupDeadline
+	}
+
 	s.mux.Lock()
 	cancel, served := s.cancel, s.served
 	s.mux.Unlock()
@@ -429,20 +444,20 @@ func (s *Server) Shutdown() error {
 	// A Server that never served has nothing to wait for. Waiting on a nil
 	// channel would block until the deadline and report a false timeout.
 	if served != nil {
-		timer := time.NewTimer(serveStopDeadline)
+		timer := time.NewTimer(serveStop)
 		defer timer.Stop()
 		select {
 		case <-served:
 		case <-timer.C:
-			s.Logger.Error("timed out waiting for serving to stop", "deadline", serveStopDeadline)
+			s.Logger.Error("timed out waiting for serving to stop", "deadline", serveStop)
 			err = errors.Join(err, errShutdownIncomplete)
 		}
 	}
 
 	// Clean up sessions created by this node, under a deadline of its own so
 	// the whole of Shutdown is bounded and a supervisor's grace period can be
-	// set against it. See sessionCleanupDeadline for why the work is abandoned
-	// rather than cancelled on expiry.
+	// set against it. See defaultSessionCleanupDeadline for why the work is
+	// abandoned rather than cancelled on expiry.
 	//
 	// The deadline is a context rather than a timer so that giving up also
 	// revokes the abandoned cleanup's permission to delete anything: the defer
@@ -451,7 +466,7 @@ func (s *Server) Shutdown() error {
 	// replacement server had taken this node address would still delete, and
 	// only Consul's lease checks, which not every store has, would stand
 	// between it and that server's live sessions.
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), sessionCleanupDeadline)
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupDeadline)
 	defer cancelCleanup()
 
 	cleaned := make(chan error, 1)
@@ -466,7 +481,7 @@ func (s *Server) Shutdown() error {
 			s.Logger.Debug("cleaned up sessions during shutdown")
 		}
 	case <-cleanupCtx.Done():
-		s.Logger.Error("timed out cleaning up sessions during shutdown", "deadline", sessionCleanupDeadline)
+		s.Logger.Error("timed out cleaning up sessions during shutdown", "deadline", cleanupDeadline)
 		err = errors.Join(err, errSessionCleanupTimeout)
 	}
 

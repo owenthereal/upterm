@@ -312,6 +312,12 @@ type Host struct {
 	// record is published.
 	Name string
 
+	// ClaimTimeout bounds how long Run waits for the session registry when it
+	// claims its name. Zero uses the package's ClaimTimeout; any other value is
+	// used as it is, so zero or less than zero in the package's, or less than
+	// zero here, gives the claim no time to wait for a held registry lock.
+	ClaimTimeout time.Duration
+
 	// SessionDir is claimed by Run and readable for as long as Run is
 	// running. Run clears it on the way out: the directory is released by
 	// then, a released Dir may not be touched again, and leaving it here
@@ -518,7 +524,7 @@ func (l *guestJoinLatch) note(client *api.Client) error {
 }
 
 // ClaimTimeout bounds how long Run waits for the session registry when it
-// takes a name.
+// takes a name, for a Host whose own ClaimTimeout is zero.
 //
 // Claim waits on two lock files, either of which can be held by a process that
 // is stopped rather than slow — a wait no amount of patience resolves. The
@@ -528,9 +534,20 @@ func (l *guestJoinLatch) note(client *api.Client) error {
 // sessionQueryTimeout. Ten seconds matches those read paths, since they wait
 // on the same locks.
 //
-// A var, not a const, so an embedder on a slower filesystem and a test that
-// wants to observe the timeout can both move it.
+// A var, not a const, so that an embedder on a slower filesystem can set it
+// as startup configuration.
+//
+// Deprecated: set Host.ClaimTimeout. As a default it is startup
+// configuration: set it before running any host.
 var ClaimTimeout = 10 * time.Second
+
+// claimTimeout is the bound for this Run: the field, or else the package's.
+func (c *Host) claimTimeout() time.Duration {
+	if c.ClaimTimeout != 0 {
+		return c.ClaimTimeout
+	}
+	return ClaimTimeout
+}
 
 // Run hosts one session and returns when it ends.
 //
@@ -612,11 +629,11 @@ func (c *Host) Run(ctx context.Context) (runErr error) {
 			return err
 		}
 
-		// Bounded by ClaimTimeout rather than by ctx, which for the CLI never
-		// ends. Cancelled as soon as Claim returns: the claim it produces
+		// Bounded by the claim timeout rather than by ctx, which for the CLI
+		// never ends. Cancelled as soon as Claim returns: the claim it produces
 		// outlives this call and must not be tied to a context that is about
 		// to expire.
-		claimCtx, cancelClaim := context.WithTimeout(ctx, ClaimTimeout)
+		claimCtx, cancelClaim := context.WithTimeout(ctx, c.claimTimeout())
 		dir, err := sessiondir.Claim(claimCtx, sessiondir.ClaimOptions{
 			RuntimeRoot:  runtimeDir,
 			StateRoot:    utils.UptermStateDir(),

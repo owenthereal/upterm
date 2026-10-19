@@ -1859,3 +1859,21 @@ func TestSessionSetAfterTheJoinTimeoutCommitsAnswersEnding(t *testing.T) {
 	require.NoError(t, f.result(t))
 	require.Equal(t, sessiondir.ReasonJoinTimeout, f.record(t).Reason)
 }
+
+// A Host's ClaimTimeout wins; left zero, the package's applies, read when Run
+// asks rather than copied anywhere. This test assigns the deprecated package
+// variable on purpose: it pins that the variable still works for a Host that
+// sets nothing.
+func TestClaimTimeoutIsTheFieldOrElseThePackages(t *testing.T) {
+	orig := ClaimTimeout
+	t.Cleanup(func() { ClaimTimeout = orig })
+	var h Host
+	require.Equal(t, ClaimTimeout, h.claimTimeout())
+	ClaimTimeout = 3 * time.Second
+	require.Equal(t, 3*time.Second, h.claimTimeout(), "read when Run asks, not cached")
+	h.ClaimTimeout = 200 * time.Millisecond
+	require.Equal(t, 200*time.Millisecond, h.claimTimeout())
+	h.ClaimTimeout = -time.Second
+	require.Equal(t, -time.Second, h.claimTimeout(),
+		"a negative field gives the claim no time to wait for a held registry lock, as the package's does")
+}
