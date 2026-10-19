@@ -100,11 +100,11 @@ const eraseSavedLines = "\x1b[3J"
 // State it can't restore fails it before anything is written; a history line
 // it can't rebuild fails it once the lines to send are known. Within the
 // budget, everything but the history must fit on its own, or the render
-// fails, named when what doesn't fit is a clipboard write or the working
-// directory; the history then fills what is left, newest lines first, cut at
-// whole lines, between the preamble, with the ED 3 that follows it, and the
-// rest. A synchronized update open at the handoff point is begun before all
-// of it (see synced).
+// fails, named when what doesn't fit is a clipboard write, the working
+// directory or the pointer shape; the history then fills what is left, newest
+// lines first, cut at whole lines, between the preamble, with the ED 3 that
+// follows it, and the rest. A synchronized update open at the handoff point is
+// begun before all of it (see synced).
 func (e *emulation) render() ([]byte, error) {
 	parts := e.modes.ReplayParts()
 	rep, err := e.eligible(parts)
@@ -139,7 +139,11 @@ func (e *emulation) render() ([]byte, error) {
 		colours:   &e.colours,
 		cwd:       e.cwd,
 		cwdTold:   e.cwdTold,
-		clips:     e.clips,
+		// The pointer shape, which can't be sent once too long to keep.
+		pointer:     e.pointer,
+		pointerSet:  e.pointerSet,
+		pointerOver: e.pointerOver,
+		clips:       e.clips,
 	}
 	r.draw()
 	if r.titleOver {
@@ -150,6 +154,9 @@ func (e *emulation) render() ([]byte, error) {
 	}
 	if r.cwdOver {
 		return nil, &IneligibleError{State: "a working directory too long to replay"}
+	}
+	if r.pointerOver {
+		return nil, &IneligibleError{State: "a pointer shape too long to replay"}
 	}
 	if r.clipOver {
 		return nil, &IneligibleError{State: "a clipboard write too large to replay"}
@@ -255,6 +262,10 @@ type renderer struct {
 	// didn't fit.
 	cwd              string
 	cwdTold, cwdOver bool
+	// pointer is the pointer shape to send, if pointerSet, and pointerOver
+	// says it was too long to keep or didn't fit.
+	pointer                 string
+	pointerSet, pointerOver bool
 	// clips are the clipboard writes to send, and clipOver says one didn't
 	// fit.
 	clips    clipboard
@@ -522,8 +533,8 @@ func (r *renderer) reportModes() {
 // charsets, insert mode, the application keypad, reverse video, the title
 // stack and then the icon name and the title, the cursor's style, autowrap,
 // and the active pen and link. The colours the stream reset, the working
-// directory and the clipboard writes still in force, which change none of
-// that, come last of all.
+// directory, the pointer shape and the clipboard writes still in force, which
+// change none of that, come last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -565,6 +576,7 @@ func (r *renderer) continuation(reprinted int) {
 	_ = enc.linkTo(cur.Link)
 	r.colourResets()
 	r.workingDirectory()
+	r.pointerShape()
 	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
@@ -630,6 +642,20 @@ func (r *renderer) workingDirectory() {
 	}
 	if r.enc.put("\x1b]7;", r.cwd, "\x07") != nil {
 		r.cwdOver = true
+	}
+}
+
+// pointerShape writes the pointer shape the stream last set, as the stream
+// sent its name, ended by BEL: a raw replay hands the joiner every OSC 22 in
+// the ring, which leave it at the last one it acts on. One too long to keep,
+// or that doesn't fit the budget with everything before it, sets pointerOver
+// instead, and the render fails on it.
+func (r *renderer) pointerShape() {
+	if !r.pointerSet || r.pointerOver || r.enc.err != nil {
+		return
+	}
+	if r.enc.put("\x1b]22;", r.pointer, "\x07") != nil {
+		r.pointerOver = true
 	}
 }
 

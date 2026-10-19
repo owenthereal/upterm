@@ -1440,6 +1440,86 @@ func TestReplayFailsOnAWorkingDirectoryTooLongToReplay(t *testing.T) {
 	requireIneligible(t, err, "a working directory too long to replay")
 }
 
+// The pointer shape the session last set by OSC 22, which the query filter
+// lets into the ring and a raw replay hands the joiner with every earlier
+// one, ends on the joiner as it would: the render sends the last one xterm
+// acts on, its name as the stream sent it, ended by BEL, after the working
+// directory and before the clipboard writes. xterm acts on every OSC 22 with
+// a name after its ';', one it has no shape for too, which puts back its own
+// pointer, and keeps it through RIS; it ignores one with no name, with no
+// ';', or with anything but digits before the ';', and a session that set
+// none sends none.
+func TestReplayReplaysThePointerShape(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		return joined
+	}
+
+	joined := join(t, "\x1b]22;watch\x07text\r\n\x1b]22;hand2\x1b\\more\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;hand2\x07")), "%q", joined)
+	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]22;")), "%q", joined)
+
+	joined = join(t, "\x1b]52;c;QQ==\x07\x1b]22;hand2\x07\x1b]7;file://host/dir\x07text\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]7;file://host/dir\x07\x1b]22;hand2\x07\x1b]52;c;QQ==\x07")), "%q", joined)
+
+	for _, tc := range []struct{ name, stream, sent string }{
+		{"none", "", ""},
+		{"one with no name", "\x1b]22;watch\x07\x1b]22;\x07", "watch"},
+		{"one with no ';'", "\x1b]22;watch\x07\x1b]22\x07", "watch"},
+		{"one with more than digits before the ';'", "\x1b]22;watch\x07\x1b]22x;hand2\x07", "watch"},
+		{"a number with a leading zero", "\x1b]022;hand2\x07", "hand2"},
+		{"a name xterm has no shape for", "\x1b]22;hand2\x07\x1b]22;no such shape\x07", "no such shape"},
+		{"then RIS", "\x1b]22;hand2\x07\x1bc", "hand2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			if tc.sent == "" {
+				require.Zero(t, bytes.Count(joined, []byte("\x1b]22")), "%q", joined)
+				return
+			}
+			require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;"+tc.sent+"\x07")), "%q", joined)
+			require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]22")), "%q", joined)
+		})
+	}
+}
+
+// A pointer shape the render can't fit in its budget with everything else
+// fails it, named, and one longer than the whole budget too, which keeps none
+// of its bytes; one that fits exactly renders, and so does one too long that
+// a later one replaces.
+func TestReplayFailsOnAPointerShapeTooLongToReplay(t *testing.T) {
+	setBudget(t, 8<<10)
+	stream := func(n int) string {
+		return "text\r\n\x1b]22;" + strings.Repeat("a", n) + "\x07more\r\n"
+	}
+	join := func(t *testing.T, s string) ([]byte, error) {
+		t.Helper()
+		return fanOut(t, New(), []byte(s), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+	}
+	one, err := join(t, stream(1))
+	require.NoError(t, err)
+	fits := budget - len(one) + 1
+
+	joined, err := join(t, stream(fits))
+	require.NoError(t, err)
+	require.Len(t, joined, budget)
+	_, err = join(t, stream(fits+1))
+	requireIneligible(t, err, "a pointer shape too long to replay")
+	_, err = join(t, stream(budget))
+	requireIneligible(t, err, "a pointer shape too long to replay")
+
+	e := startFor(t, captureOf(stream(budget), event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+	require.True(t, e.pointerOver)
+	require.Empty(t, e.pointer)
+
+	joined, err = join(t, "text\r\n\x1b]22;"+strings.Repeat("a", budget)+"\x07\x1b]22;hand2\x07more\r\n")
+	require.NoError(t, err)
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;hand2\x07")), "%q", joined)
+}
+
 // A write that supersedes every earlier one leaves none of them past the
 // clipboard's length, where its array would still hold their bytes.
 func TestReplayClipboardLetsGoOfSupersededWrites(t *testing.T) {

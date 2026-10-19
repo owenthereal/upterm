@@ -92,6 +92,12 @@ type emulation struct {
 	// cwdTold whether it reported one at all, as title and titled are.
 	cwd     string
 	cwdTold bool
+	// pointer is the pointer shape the stream last set, by OSC 22, and
+	// pointerSet whether it set one at all, as title and titled are;
+	// pointerOver is one longer than any render may be, whose bytes aren't
+	// kept (see watchPointer).
+	pointer                 string
+	pointerSet, pointerOver bool
 	// colours is the last change the stream made to each of the terminal's
 	// colours.
 	colours colours
@@ -226,17 +232,17 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // setUp makes the emulator a replay's: no scrollback on either screen, the
 // history kept through the scroll-off function instead, and a clear of it
 // noted (see history.erase), replies to queries discarded, the title, the
-// icon name and the title stack, the working directory, the colours, the
-// clipboard and synchronized output's DCS form kept, images, device control
-// strings that change the terminal's state, title modes, character
-// protection, selective erases, saves, renditions and line sizes the cells
-// can't hold, a status line, a font, a rectangular attribute extent, a
+// icon name and the title stack, the working directory, the pointer shape,
+// the colours, the clipboard and synchronized output's DCS form kept, images,
+// device control strings that change the terminal's state, title modes,
+// character protection, selective erases, saves, renditions and line sizes the
+// cells can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
-// 94-character set x/vt drops, a 96-character set, a window operation,
-// printer controller mode and a memory lock noted, auto print and the tab
-// stops past the screen's edge kept, and the meter stopped by ctx or the
-// deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// 94-character set x/vt drops, a 96-character set, a window operation, printer
+// controller mode and a memory lock noted, auto print and the tab stops past
+// the screen's edge kept, and the meter stopped by ctx or the deadline. Each
+// callback and handler runs inside the emulator's Write and touches only the
+// emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -261,6 +267,7 @@ func (e *emulation) setUp() {
 	e.watchGraphics()
 	e.watchDCS()
 	e.watchClipboard()
+	e.watchPointer()
 	e.watchProtection()
 	e.watchTitles()
 	e.watchSaves()
@@ -647,6 +654,33 @@ func (e *emulation) watchClipboard() {
 		}
 		if pc, pd, ok := bytes.Cut(pt, []byte{';'}); ok && string(pd) != "?" {
 			e.clips.write(pc, pd)
+		}
+		return false
+	})
+}
+
+// watchPointer registers the handler that keeps the pointer shape the stream
+// last set by OSC 22, which x/vt drops, where a raw replay sets it on the
+// joiner's terminal. It keeps the OSC 22s xterm acts on: those with a name
+// after the number and its ';'. xterm ignores one with no name, with no ';',
+// or with anything but digits before the ';', which x/vt still hands this
+// handler as OSC 22, by the digits it starts with. It acts on a name it has no
+// shape for too, setting the shape it starts with, so that is kept as the
+// stream sent it; and its RIS leaves the shape as it is. The query filter
+// drops no OSC 22. x/vt has no handler of its own for it; this returns false
+// all the same, as watchColours' do.
+func (e *emulation) watchPointer() {
+	e.term.RegisterOscHandler(22, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		num, name, _ := bytes.Cut(data, []byte{';'})
+		if len(name) == 0 || bytes.ContainsFunc(num, func(r rune) bool { return r < '0' || r > '9' }) {
+			return false
+		}
+		e.pointerSet = true
+		if e.pointerOver = len("\x1b]22;\x07")+len(name) > budget; e.pointerOver {
+			e.pointer = ""
+		} else {
+			e.pointer = string(name)
 		}
 		return false
 	})
