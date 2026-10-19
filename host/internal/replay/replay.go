@@ -279,11 +279,14 @@ const (
 	colourReset
 )
 
-// tableSize is how many entries xterm's colour table holds: the 256 palette
-// entries, then its five special colours, those it draws bold, underlined,
-// blinking, reversed and italic text in. OSC 5 and 105 number the special
-// colours from 0, and OSC 4 and 104 from 256, after the palette.
-const tableSize = 256 + 5
+// tableSize is how many entries xterm's colour table holds: the palette's
+// paletteSize entries, then its five special colours, those it draws bold,
+// underlined, blinking, reversed and italic text in. OSC 5 and 105 number the
+// special colours from 0, and OSC 4 and 104 from 256, after the palette.
+const (
+	paletteSize = 256
+	tableSize   = paletteSize + 5
+)
 
 // changed reports a colour the stream set and hasn't reset.
 func (c *colours) changed() bool {
@@ -388,7 +391,7 @@ func (e *emulation) watchColours() {
 			return false
 		})
 	}
-	for _, osc := range []struct{ set, reset, first int }{{4, 104, 0}, {5, 105, 256}} {
+	for _, osc := range []struct{ set, reset, first int }{{4, 104, 0}, {5, 105, paletteSize}} {
 		t.RegisterOscHandler(osc.set, func(data []byte) bool {
 			c.setEntries(data, osc.first)
 			return false

@@ -569,38 +569,51 @@ func (r *renderer) continuation(reprinted int) {
 
 // colourResets resets each colour whose last change in the stream was its
 // reset (see colours), as a raw replay leaves it on a joiner's terminal that
-// a program of its own gave a colour of its own. The entries of the colour
-// table go by one OSC 104, which lists them by their place in the table,
-// special colours included, as xterm's takes them, or lists none when every
-// entry was reset, which resets them all. Each dynamic colour goes by its own
+// a program of its own gave a colour of its own. The palette's entries go by
+// one OSC 104 listing them, and the special colours by one OSC 105 listing
+// them, numbered from 0, as every terminal that has OSC 105 reads them:
+// xterm's OSC 104 takes them too, numbered on from the palette's 256, but
+// another terminal's may skip the numbers past 255, as Alacritty's does. Each
+// goes with no list, which resets them all, once every entry it resets was
+// reset, but OSC 104 only once the whole table was: xterm's with no list
+// resets the special colours as well. Each dynamic colour goes by its own
 // reset, OSC 110 to 119, as xterm ignores one that names more.
 func (r *renderer) colourResets() {
-	enc, c := r.enc, r.colours
-	n := 0
-	for _, ch := range c.table {
-		if ch == colourReset {
-			n++
-		}
-	}
-	switch n {
-	case 0:
-	case tableSize:
-		_ = enc.put("\x1b]104\x07")
-	default:
-		list := make([]byte, 0, len("\x1b]104\x07")+4*n)
-		list = append(list, "\x1b]104"...)
-		for i, ch := range c.table {
-			if ch == colourReset {
-				list = strconv.AppendInt(append(list, ';'), int64(i), 10)
-			}
-		}
-		_ = enc.bytes(append(list, '\a'))
-	}
+	c := r.colours
+	special := c.table[paletteSize:]
+	r.tableResets("104", c.table[:paletteSize], allReset(c.table[:]))
+	r.tableResets("105", special, allReset(special))
 	for i, ch := range c.dynamic {
 		if ch == colourReset {
-			_ = enc.put("\x1b]", strconv.Itoa(110+i), "\x07")
+			_ = r.enc.put("\x1b]", strconv.Itoa(110+i), "\x07")
 		}
 	}
+}
+
+// tableResets sends osc, OSC 104 or 105, for part, the entries of the colour
+// table it numbers from 0: with no list when bare, else listing each entry
+// whose last change was a reset, and nothing at all when none was.
+func (r *renderer) tableResets(osc string, part []colourChange, bare bool) {
+	if bare {
+		_ = r.enc.put("\x1b]", osc, "\x07")
+		return
+	}
+	list := append([]byte("\x1b]"), osc...)
+	head := len(list)
+	for i, ch := range part {
+		if ch == colourReset {
+			list = strconv.AppendInt(append(list, ';'), int64(i), 10)
+		}
+	}
+	if len(list) > head {
+		_ = r.enc.bytes(append(list, '\a'))
+	}
+}
+
+// allReset reports whether the last change to every colour of part was its
+// reset.
+func allReset(part []colourChange) bool {
+	return !slices.ContainsFunc(part, func(ch colourChange) bool { return ch != colourReset })
 }
 
 // workingDirectory writes the working directory the stream last reported, as

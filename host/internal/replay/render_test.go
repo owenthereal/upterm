@@ -869,12 +869,16 @@ func coloursOf(p []byte) xtermColours {
 // terminal as well, the render resets there too, at its end: each dynamic
 // colour whose last change was its reset, by that reset, OSC 110 to 119; and
 // the entries of xterm's colour table whose last change was a reset, the
-// palette's and then the special colours', by one OSC 104 listing them, or
-// listing none once the whole table was. A joiner whose own programs left it
-// colours of their own then ends with the ones a raw replay leaves it, those
-// the session reset at their defaults and the rest its own, as xterm reads
-// the OSCs (see coloursOf). The first case is x/vt's own background too,
-// which x/vt reads only from a reset with nothing after the number.
+// palette's by one OSC 104 listing them, then the special colours' by one
+// OSC 105 listing them, numbered from 0, as every terminal that has OSC 105
+// reads them, where only some read them in OSC 104. Each lists none once
+// every entry it resets was reset, but OSC 104 only once the whole table was,
+// as xterm's OSC 104 alone resets the special colours too. A joiner whose own
+// programs left it colours of their own then ends with the ones a raw replay
+// leaves it, those the session reset at their defaults and the rest its own,
+// as xterm reads the OSCs (see coloursOf). The first case is x/vt's own
+// background too, which x/vt reads only from a reset with nothing after the
+// number.
 func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
 	const own = "\x1b]10;rgb:aa/aa/aa\x07\x1b]11;rgb:00/00/80\x07\x1b]12;rgb:ff/00/00\x07\x1b]17;rgb:00/ff/00\x07" +
 		"\x1b]4;1;rgb:ff/00/00;200;rgb:00/ff/00\x07\x1b]5;0;rgb:00/00/ff\x07"
@@ -888,6 +892,12 @@ func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
 		require.Equal(t, coloursOf([]byte(own+stream)), coloursOf([]byte(own+string(sent))), "the joiner's colours: %q", sent)
 		return sent
 	}
+
+	var entries strings.Builder
+	for i := range 256 {
+		fmt.Fprintf(&entries, ";%d", i)
+	}
+	everyEntry := entries.String()
 
 	t.Run("the background, on x/vt", func(t *testing.T) {
 		const stream = "\x1b]11;rgb:00/80/00\x07text\r\n\x1b]111\x07more\r\n"
@@ -909,15 +919,21 @@ func TestReplayResetsTheColoursTheSessionReset(t *testing.T) {
 		{"the background, by a reset with nothing after its ';'", "\x1b]11;navy\x07\x1b]111;\x07text\r\n", "\x1b]111\x07"},
 		{"the highlight colours", "\x1b]17;rgb:00/00/80\x07\x1b]117\x07\x1b]119\x07text\r\n", "\x1b]117\x07\x1b]119\x07"},
 		{"three set by one, each reset", "\x1b]10;red;blue;green\x07\x1b]112\x07\x1b]110\x07\x1b]111\x07text\r\n", "\x1b]110\x07\x1b]111\x07\x1b]112\x07"},
-		{"the whole table", "text\r\n\x1b]104\x07more\r\n", "\x1b]104\x07"},
-		{"the whole table, by an empty list", "\x1b]104;\x07text\r\n", "\x1b]104\x07"},
+		{"the whole table", "text\r\n\x1b]104\x07more\r\n", "\x1b]104\x07\x1b]105\x07"},
+		{"the whole table, by an empty list", "\x1b]104;\x07text\r\n", "\x1b]104\x07\x1b]105\x07"},
 		{"a palette entry", "\x1b]104;1\x07text\r\n", "\x1b]104;1\x07"},
 		{"a palette entry, set and then reset", "\x1b]4;1;rgb:00/00/80\x07text\r\n\x1b]104;1\x07more\r\n", "\x1b]104;1\x07"},
 		{"palette entries, in the table's order", "\x1b]4;7;red;3;blue\x07\x1b]104;7;3\x07text\r\n", "\x1b]104;3;7\x07"},
-		{"a special colour", "\x1b]5;0;rgb:00/00/80\x07\x1b]105;0\x07text\r\n", "\x1b]104;256\x07"},
-		{"every special colour", "\x1b]105\x07text\r\n", "\x1b]104;256;257;258;259;260\x07"},
-		{"the whole table, then an entry again", "\x1b]4;1;red\x07\x1b]104\x07\x1b]104;1\x07text\r\n", "\x1b]104\x07"},
-		{"an entry, then the whole table", "\x1b]104;1\x07\x1b]4;2;red\x07\x1b]104\x07text\r\n", "\x1b]104\x07"},
+		{"a special colour", "\x1b]5;0;rgb:00/00/80\x07\x1b]105;0\x07text\r\n", "\x1b]105;0\x07"},
+		{"a special colour by its palette number", "\x1b]4;258;red\x07\x1b]104;258\x07text\r\n", "\x1b]105;2\x07"},
+		{"special colours, in their order", "\x1b]105;4;1\x07text\r\n", "\x1b]105;1;4\x07"},
+		{"every special colour", "\x1b]105\x07text\r\n", "\x1b]105\x07"},
+		{"every special colour, by their palette numbers", "\x1b]104;260;259;258;257;256\x07text\r\n", "\x1b]105\x07"},
+		{"a palette entry and a special colour", "\x1b]105;1\x07\x1b]104;3\x07text\r\n", "\x1b]104;3\x07\x1b]105;1\x07"},
+		{"every palette entry, listed", "\x1b]104" + everyEntry + "\x07text\r\n", "\x1b]104" + everyEntry + "\x07"},
+		{"every palette entry, listed, and every special colour", "\x1b]104" + everyEntry + "\x07\x1b]105\x07text\r\n", "\x1b]104\x07\x1b]105\x07"},
+		{"the whole table, then an entry again", "\x1b]4;1;red\x07\x1b]104\x07\x1b]104;1\x07text\r\n", "\x1b]104\x07\x1b]105\x07"},
+		{"an entry, then the whole table", "\x1b]104;1\x07\x1b]4;2;red\x07\x1b]104\x07text\r\n", "\x1b]104\x07\x1b]105\x07"},
 		{"a palette entry and the background", "\x1b]111\x07\x1b]104;200\x07text\r\n", "\x1b]104;200\x07\x1b]111\x07"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
