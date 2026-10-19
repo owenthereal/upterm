@@ -101,6 +101,9 @@ type emulation struct {
 	// warningBell and marginBell are the volumes the stream last set the
 	// warning bell and the margin bell to (see watchBellVolumes).
 	warningBell, marginBell bellVolume
+	// progress is the progress indicator the stream last set (see
+	// watchProgress).
+	progress progress
 	// colours is the last change the stream made to each of the terminal's
 	// colours, and colourModes is set once it has turned the use of a special
 	// colour on or off (see watchColourModes).
@@ -244,19 +247,19 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 
 // setUp makes the emulator a replay's: no scrollback on either screen, the
 // history kept through the scroll-off function instead, and a clear of it
-// noted (see history.erase), replies to queries discarded, the title, the icon
-// name and the title stack, the working directory, the pointer shape, the
-// bell's volumes, the colours, the clipboard and synchronized output's DCS
-// form kept, images, special colour modes, device control strings that change
-// the terminal's state, title modes, character protection, selective erases,
-// saves, renditions and line sizes the cells can't hold, a status line, a
-// font, a rectangular attribute extent, a conformance level, a reset of a mode
-// a terminal starts with set, a 94-character set x/vt drops, a 96-character
-// set, a window operation, printer controller mode, a memory lock, a key
-// format, locator reporting and the locator's events noted, auto print and the
-// tab stops past the screen's edge kept, and the meter stopped by ctx or the
-// deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// noted (see history.erase), replies to queries discarded, the title, the
+// icon name and the title stack, the working directory, the pointer shape,
+// the bell's volumes, the progress indicator, the colours, the clipboard and
+// synchronized output's DCS form kept, images, special colour modes, device
+// control strings that change the terminal's state, title modes, character
+// protection, selective erases, saves, renditions and line sizes the cells
+// can't hold, a status line, a font, a rectangular attribute extent, a
+// conformance level, a reset of a mode a terminal starts with set, a
+// 94-character set x/vt drops, a 96-character set, a window operation,
+// printer controller mode, a memory lock, a key format, locator reporting and
+// the locator's events noted, auto print and the tab stops past the screen's
+// edge kept, and the meter stopped by ctx or the deadline. Each callback and
+// handler runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -284,6 +287,7 @@ func (e *emulation) setUp() {
 	e.watchClipboard()
 	e.watchPointer()
 	e.watchBellVolumes()
+	e.watchProgress()
 	e.watchProtection()
 	e.watchTitles()
 	e.watchSaves()
@@ -758,6 +762,72 @@ func (e *emulation) watchBellVolumes() {
 			return false
 		})
 	}
+}
+
+// progress is the last setting the stream made of the progress indicator, if
+// set: its state, and its value, or -1 for none.
+type progress struct {
+	set          bool
+	state, value int
+}
+
+// watchProgress registers the handler that keeps the progress indicator the
+// stream last set by ConEmu's OSC 9 ; 4 ; state ; value, which Windows
+// Terminal and kitty show until a state of 0 removes it, and which x/vt
+// drops, where a raw replay hands the joiner every one, which leave it at the
+// last. A state of 0 is kept too: sent, it removes the joiner's own, as a raw
+// replay's does. Kept are those the two read alike: a 4 after the OSC's
+// number, then the state, from 0 to 4, the value, if any, and any fields
+// after it, each of digits alone, and the number before them of digits alone
+// too, as x/vt hands this handler an OSC by the digits it starts with,
+// whatever follows them. A value past 100, which both read as 100, is kept as
+// 100. Both ignore a state past 4 and a field that isn't a number; they read
+// apart an empty field, and a second field that is a 4 written otherwise or
+// has no ';' after it, which kitty takes for a notification: none of those is
+// kept. Every other OSC 9 is iTerm2's notification, shown once, which the
+// render doesn't send again. Windows Terminal's RIS leaves the indicator as
+// it is, and it is kept through one. The query filter drops no OSC 9. x/vt
+// has no handler of its own for it; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchProgress() {
+	e.term.RegisterOscHandler(9, func(data []byte) bool {
+		// data is the whole OSC, its number first.
+		num, rest, _ := bytes.Cut(data, []byte{';'})
+		fields, ok := bytes.CutPrefix(rest, []byte("4;"))
+		if _, digits := decimal(num); !ok || !digits {
+			return false
+		}
+		p := progress{set: true, value: -1}
+		for i, f := range bytes.Split(fields, []byte{';'}) {
+			n, ok := decimal(f)
+			if !ok {
+				return false
+			}
+			switch i {
+			case 0:
+				p.state = n
+			case 1:
+				p.value = min(n, 100)
+			}
+		}
+		if p.state <= 4 {
+			e.progress = p
+		}
+		return false
+	})
+}
+
+// decimal reads f as a decimal number, of digits alone and at least one,
+// which past 1000 is 1000, more than any it is read for.
+func decimal(f []byte) (int, bool) {
+	n := 0
+	for _, b := range f {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+		n = min(n*10+int(b-'0'), 1000)
+	}
+	return n, len(f) > 0
 }
 
 // watchProtection registers the handlers that note DECSCA (CSI Ps " q)

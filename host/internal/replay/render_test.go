@@ -574,6 +574,7 @@ func TestContinuationStateLeavesThePendingWrap(t *testing.T) {
 		"\x1b]8;;https://x.example\x07", "\x1b]8;id=1;\x07",
 		"\x1b]7;file://host/dir\x07", "\x1b]22;hand2\x07",
 		"\x1b[5 t", "\x1b[5 u", "\x1b[ t", "\x1b[ u",
+		"\x1b]9;4;1;80\x07", "\x1b]9;4;0\x07",
 		"\x1b]52;c;QQ==\x07",
 		"\x00",
 	} {
@@ -1609,6 +1610,66 @@ func TestReplayReplaysTheBellVolumes(t *testing.T) {
 			joined := join(t, tc.stream+"text\r\n")
 			require.Equal(t, tc.sent, string(bytes.Join(bellVolumes.FindAll(joined, -1), nil)), "%q", joined)
 			require.True(t, bytes.HasSuffix(joined, []byte(tc.sent)), "%q", joined)
+		})
+	}
+}
+
+// The progress indicator the session last set, by ConEmu's
+// OSC 9 ; 4 ; state ; value, which Windows Terminal and kitty show until a
+// state of 0 removes it, and which the query filter lets into the ring and a
+// raw replay hands the joiner with every earlier one, ends on the joiner as
+// it would: the render sends the last, after the bell's volumes and before
+// the clipboard writes, its numbers as both read them. A last one of state 0
+// is sent too, which removes the joiner's own indicator, as a raw replay's
+// does. Only one both read alike counts, and both keep it through RIS.
+// iTerm2's notifications, every other OSC 9, are shown once, and none is
+// sent.
+func TestReplayReplaysTheProgress(t *testing.T) {
+	join := func(t *testing.T, stream string) []byte {
+		t.Helper()
+		joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+		require.NoError(t, fellBack)
+		require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+		return joined
+	}
+
+	joined := join(t, "\x1b]9;4;1;50\x1b\\text\r\n\x1b]9;4;1;80\x07more\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]9;4;1;80\x07")), "%q", joined)
+	require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]9;")), "%q", joined)
+
+	joined = join(t, "\x1b]52;c;QQ==\x07\x1b]9;4;1;80\x07\x1b[5 t\x1b]22;hand2\x07text\r\n")
+	require.True(t, bytes.HasSuffix(joined, []byte("\x1b]22;hand2\x07\x1b[5 t\x1b]9;4;1;80\x07\x1b]52;c;QQ==\x07")), "%q", joined)
+
+	const set = "\x1b]9;4;1;50\x07"
+	for _, tc := range []struct{ name, stream, sent string }{
+		{"none", "", ""},
+		{"removed", set + "\x1b]9;4;0\x07", "\x1b]9;4;0\x07"},
+		{"removed, with a value", set + "\x1b]9;4;0;0\x07", "\x1b]9;4;0;0\x07"},
+		{"an error, with no value", "\x1b]9;4;2\x07", "\x1b]9;4;2\x07"},
+		{"indeterminate", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"},
+		{"paused, with a value", "\x1b]9;4;4;60\x07", "\x1b]9;4;4;60\x07"},
+		{"leading zeros", "\x1b]09;4;01;050\x07", set},
+		{"a value past 100", "\x1b]9;4;1;150\x07", "\x1b]9;4;1;100\x07"},
+		{"more numbers after the value", "\x1b]9;4;1;50;7\x07", set},
+		{"an iTerm2 notification", "\x1b]9;build done\x07", ""},
+		{"an iTerm2 notification after it", set + "\x1b]9;build done\x07", set},
+		{"a state neither has", set + "\x1b]9;4;5;80\x07", set},
+		{"a value that isn't a number", set + "\x1b]9;4;1;x\x07", set},
+		{"an empty state", set + "\x1b]9;4;;80\x07", set},
+		{"an empty value", set + "\x1b]9;4;1;\x07", set},
+		{"no state", set + "\x1b]9;4\x07", set},
+		{"a 4 with a leading zero", set + "\x1b]9;04;1;80\x07", set},
+		{"more than digits before the ';'", set + "\x1b]9x;4;1;80\x07", set},
+		{"then RIS", set + "\x1bc", set},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := join(t, tc.stream+"text\r\n")
+			if tc.sent == "" {
+				require.Zero(t, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
+				return
+			}
+			require.True(t, bytes.HasSuffix(joined, []byte(tc.sent)), "%q", joined)
+			require.Equal(t, 1, bytes.Count(joined, []byte("\x1b]9")), "%q", joined)
 		})
 	}
 }

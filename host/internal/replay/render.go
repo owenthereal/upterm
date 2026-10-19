@@ -170,9 +170,11 @@ func (e *emulation) render() ([]byte, error) {
 		pointer:     e.pointer,
 		pointerSet:  e.pointerSet,
 		pointerOver: e.pointerOver,
-		// The bell's volumes and the clipboard writes still in force.
+		// The bell's volumes, the progress indicator and the clipboard
+		// writes still in force.
 		warningBell: e.warningBell,
 		marginBell:  e.marginBell,
+		progress:    e.progress,
 		clips:       e.clips,
 	}
 	r.draw()
@@ -298,6 +300,8 @@ type renderer struct {
 	pointerSet, pointerOver bool
 	// warningBell and marginBell are the bell's volumes to set.
 	warningBell, marginBell bellVolume
+	// progress is the progress indicator to set.
+	progress progress
 	// clips are the clipboard writes to send, and clipOver says one didn't
 	// fit.
 	clips    clipboard
@@ -565,8 +569,9 @@ func (r *renderer) reportModes() {
 // charsets, insert mode, the application keypad, reverse video, the title
 // stack and then the icon name and the title, the cursor's style, autowrap,
 // and the active pen and link. The colours the stream reset, the working
-// directory, the pointer shape, the bell's volumes and the clipboard writes
-// still in force, which change none of that, come last of all.
+// directory, the pointer shape, the bell's volumes, the progress indicator
+// and the clipboard writes still in force, which change none of that, come
+// last of all.
 //
 // Autowrap goes off here, after every wrap reprint. A character that fills
 // the line leaves a wrap pending with autowrap on or off, so where ?7l goes
@@ -610,6 +615,7 @@ func (r *renderer) continuation(reprinted int) {
 	r.workingDirectory()
 	r.pointerShape()
 	r.bellVolumes()
+	r.progressIndicator()
 	r.clipboard()
 	if len(enc.buf) == reprinted {
 		_ = enc.put("\x00")
@@ -709,6 +715,22 @@ func (r *renderer) bellVolumes() {
 			_ = r.enc.put("\x1b[", strconv.Itoa(bell.vol.ps), bell.final)
 		}
 	}
+}
+
+// progressIndicator sets the progress indicator the stream last set, by
+// OSC 9 ; 4, its numbers as the stream's were read and no value where it sent
+// none, ended by BEL: a raw replay hands the joiner every one in the ring,
+// which leave it at the last.
+func (r *renderer) progressIndicator() {
+	p := r.progress
+	if !p.set {
+		return
+	}
+	value := ""
+	if p.value >= 0 {
+		value = ";" + strconv.Itoa(p.value)
+	}
+	_ = r.enc.put("\x1b]9;4;", strconv.Itoa(p.state), value, "\x07")
 }
 
 // titleStack pushes the title stack's entries again, oldest first, the icon
