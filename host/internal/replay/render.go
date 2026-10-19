@@ -1023,6 +1023,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.iTerm2 != "" {
 		return rep{}, &IneligibleError{State: "iTerm2 state (" + e.iTerm2 + ")"}
 	}
+	if e.leds {
+		return rep{}, &IneligibleError{State: "keyboard LEDs"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

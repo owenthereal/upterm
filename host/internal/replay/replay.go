@@ -169,6 +169,9 @@ type emulation struct {
 	// iTerm2 is the key of the first command the stream has sent that changes
 	// iTerm2's state for as long as it lasts (see watchITerm2), or "".
 	iTerm2 string
+	// leds is set once the stream has lit or put out the keyboard's LEDs (see
+	// watchLEDs).
+	leds bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -267,10 +270,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // conformance level, a reset of a mode a terminal starts with set, a
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
-// the locator's events and a change to iTerm2's state noted, auto print and
-// the tab stops past the screen's edge kept, and the meter stopped by ctx or
-// the deadline. Each callback and handler runs inside the emulator's Write
-// and touches only the emulation.
+// the locator's events, a change to iTerm2's state and the keyboard's LEDs
+// noted, auto print and the tab stops past the screen's edge kept, and the
+// meter stopped by ctx or the deadline. Each callback and handler runs inside
+// the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -317,6 +320,7 @@ func (e *emulation) setUp() {
 	e.watchKeyFormats()
 	e.watchLocator()
 	e.watchITerm2()
+	e.watchLEDs()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1619,6 +1623,28 @@ func (e *emulation) watchITerm2() {
 		case e.iTerm2 == "" && iTerm2State[string(key)]:
 			e.iTerm2 = string(key)
 		}
+		return false
+	})
+}
+
+// watchLEDs registers the handler that notes DECLL (CSI Ps q), which lights
+// or puts out the keyboard's LEDs, each parameter in turn as xterm reads
+// them: 0 or none puts every one out, 1 to 3 light Num Lock, Caps Lock and
+// Scroll Lock, and 21 to 23 are documented as putting each out. x/vt keeps
+// no LEDs, where a raw replay sets those of the joiner's keyboard, as xterm
+// does through the X server's keyboard control. Every one counts, whatever
+// its parameters, a clear too, as it puts out LEDs the joiner's keyboard had
+// lit, and the note stays, whatever follows, though xterm's RIS puts every
+// LED out. x/vt keys a CSI handler by its prefix and intermediate too, so
+// this one sees neither DECSCUSR (CSI Ps SP q), DECSCA (CSI Ps " q) nor
+// XTVERSION (CSI > Ps q), and no other sequence has a bare q, nor does the
+// query filter drop any DECLL. A prefix byte after a parameter, which makes
+// xterm ignore the sequence, x/vt's parser skips, so CSI 1 > q is noted too.
+// x/vt has no handler of its own for it; this returns false all the same, as
+// watchColours' do.
+func (e *emulation) watchLEDs() {
+	e.term.RegisterCsiHandler('q', func(ansi.Params) bool {
+		e.leds = true
 		return false
 	})
 }

@@ -3885,6 +3885,55 @@ func TestReplayFailsOnITerm2State(t *testing.T) {
 	}
 }
 
+// DECLL (CSI Ps q), which lights or puts out the keyboard's LEDs, fails the
+// render, named: x/vt keeps no LEDs, where a raw replay sets the joiner's
+// keyboard's. Every one counts, whatever its parameters, a clear too, as it
+// puts out LEDs the joiner's keyboard had lit, and the note stays once
+// another puts them out, or RIS does. So does one with a prefix byte after
+// its parameter, which xterm ignores and x/vt's parser reads as DECLL.
+//
+// The sequences that share its final byte with an intermediate or a prefix
+// render: DECSCUSR (CSI Ps SP q), which the render restores, DECSCA
+// (CSI Ps " q) leaving characters unprotected, and XTVERSION (CSI > Ps q).
+func TestReplayFailsOnKeyboardLEDs(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"every LED out", "\x1b[q"},
+		{"every LED out, by 0", "\x1b[0q"},
+		{"Num Lock lit", "\x1b[1q"},
+		{"Caps Lock lit", "\x1b[2q"},
+		{"Scroll Lock lit", "\x1b[3q"},
+		{"Num Lock put out", "\x1b[21q"},
+		{"three at once", "\x1b[1;2;3q"},
+		{"an LED xterm doesn't have", "\x1b[4q"},
+		{"one lit, then every one out", "\x1b[1q\x1b[0q"},
+		{"one lit, then RIS", "\x1b[2q\x1bc"},
+		{"a prefix after its parameter", "\x1b[1>q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "keyboard LEDs")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a cursor style", "\x1b[2 q"},
+		{"the cursor style reset", "\x1b[ q"},
+		{"characters left unprotected", "\x1b[0\"q"},
+		{"characters unprotected", "\x1b[2\"q"},
+		{"the terminal's version asked for", "\x1b[>q"},
+		{"the terminal's version asked for, with a parameter", "\x1b[>1q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that
