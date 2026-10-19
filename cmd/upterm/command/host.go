@@ -123,10 +123,10 @@ var (
 
 // How a guest's file transfers are approved, as host's help says it in its
 // description and at --accept, --read-only and --no-sftp: the dialog's Allow
-// lets that file through for the guest's connection, Allow All every later
-// operation in it.
+// lets the file asked about through for the rest of that scp or sftp
+// command, and Allow All everything in it; the next command asks again.
 const (
-	transferApprovalHelp = "file transfers need your approval in a desktop dialog on this machine, which can allow one or all of that guest's transfers"
+	transferApprovalHelp = "file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command"
 	transferDeniedHelp   = "where no dialog can be shown, transfers are denied"
 )
 
@@ -156,8 +156,9 @@ What guests may do: type into the session, or only watch it with
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
 to what this machine can reach, only with --allow-local-tcp-forwarding.
 Unless --accept, a guest's file transfers need your approval in a desktop
-dialog on this machine, which can allow one or all of that guest's
-transfers; where no dialog can be shown, transfers are denied.
+dialog on this machine, which can allow the file asked about, or everything
+in that scp or sftp command; where no dialog can be shown, transfers are
+denied.
 
 The session runs in a process of its own, and this terminal is attached to
 it. NAME is the session's name, which upterm prints (--name chooses it).

@@ -24,9 +24,9 @@ upterm join is the simpler way to join such a session: it takes the
 connect string on the host's Join line, and needs no ssh options.
 
 Exit status: 1 when it can't connect to the relay, including a usage or
-configuration error. Once connected, whichever end comes first decides: 0
-when ssh closes the connection, 1 when the relay closes it or a read or write
-fails.`,
+configuration error. Once connected, the first result reported decides: 0
+for end-of-input from ssh, 1 when the relay closes the connection or a read
+or write fails.`,
 		Example: `  # A host shares a session over a WebSocket:
   upterm host --server wss://uptermd.upterm.dev
 

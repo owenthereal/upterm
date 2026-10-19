@@ -505,8 +505,10 @@ func TestBuildDaemonHostPassesOnAccept(t *testing.T) {
 			h, err := buildDaemonHost(context.Background(), "d", testHostOptions(), child, discardLogger())
 			require.NoError(t, err)
 			require.Equal(t, accept, h.AutoAccept)
-			// Each file transfer waits for the host's dialog unless the host
-			// said not to ask; the session reports what the checker does.
+			// File transfers need the host's approval in a dialog, which can
+			// allow the file asked about or everything in that scp or sftp
+			// command, unless the host said not to ask; the session reports
+			// what the checker does.
 			_, autoAllows := h.SFTPPermissionChecker.(*AutoAllowPermissionChecker)
 			require.Equal(t, accept, autoAllows)
 			require.Equal(t, !accept, h.FileTransferApprovalRequired)

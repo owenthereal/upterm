@@ -35,8 +35,9 @@ What guests may do: type into the session, or only watch it with
 only with --read-only, none with --no-sftp); and forward TCP ports (ssh -L)
 to what this machine can reach, only with --allow-local-tcp-forwarding.
 Unless --accept, a guest's file transfers need your approval in a desktop
-dialog on this machine, which can allow one or all of that guest's
-transfers; where no dialog can be shown, transfers are denied.
+dialog on this machine, which can allow the file asked about, or everything
+in that scp or sftp command; where no dialog can be shown, transfers are
+denied.
 
 .PP
 The session runs in a process of its own, and this terminal is attached to
@@ -73,7 +74,7 @@ command's own 1 or 254 reads the same.
 
 .SH OPTIONS
 \fB--accept\fP[=false]
-	Start the session without asking, and let guests transfer files without your approval. Without it, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow one or all of that guest's transfers; where no dialog can be shown, transfers are denied.
+	Start the session without asking, and let guests transfer files without your approval. Without it, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied.
 
 .PP
 \fB--allow-local-tcp-forwarding\fP[=false]
@@ -121,7 +122,7 @@ command's own 1 or 254 reads the same.
 
 .PP
 \fB--no-sftp\fP[=false]
-	Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow one or all of that guest's transfers; where no dialog can be shown, transfers are denied.
+	Turn off file transfer (sftp and scp) for guests. Without it, guests transfer files with your access (downloads only with --read-only), and unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied.
 
 .PP
 \fB-o\fP, \fB--output\fP=""
@@ -141,7 +142,7 @@ command's own 1 or 254 reads the same.
 
 .PP
 \fB-r\fP, \fB--read-only\fP[=false]
-	Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow one or all of that guest's transfers; where no dialog can be shown, transfers are denied. Can't be used with --allow-local-tcp-forwarding.
+	Let guests only watch: they can't type into the session, and can only download files. Unless --accept, a guest's file transfers need your approval in a desktop dialog on this machine, which can allow the file asked about, or everything in that scp or sftp command; where no dialog can be shown, transfers are denied. Can't be used with --allow-local-tcp-forwarding.
 
 .PP
 \fB--server\fP="ssh://uptermd.upterm.dev:22"
