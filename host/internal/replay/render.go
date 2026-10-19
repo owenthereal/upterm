@@ -886,6 +886,12 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.windowOp {
 		return rep{}, &IneligibleError{State: "a window operation"}
 	}
+	switch e.printer {
+	case printerController:
+		return rep{}, &IneligibleError{State: "printer controller mode"}
+	case autoPrint:
+		return rep{}, &IneligibleError{State: "auto print mode"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

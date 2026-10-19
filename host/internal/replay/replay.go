@@ -136,6 +136,9 @@ type emulation struct {
 	// windowOp is set once the stream has changed the terminal's window (see
 	// watchWindowOps).
 	windowOp bool
+	// printer is the printer mode the stream left the terminal in (see
+	// watchPrinter).
+	printer printerMode
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -224,10 +227,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
-// 96-character set and a window operation noted, the tab stops past the
-// screen's edge kept, and the meter stopped by ctx or the deadline. Each
-// callback and handler runs inside the emulator's Write and touches only the
-// emulation.
+// 96-character set and a window operation noted, the printer's mode and the
+// tab stops past the screen's edge kept, and the meter stopped by ctx or the
+// deadline. Each callback and handler runs inside the emulator's Write and
+// touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -264,6 +267,7 @@ func (e *emulation) setUp() {
 	e.watchDefaultModes()
 	e.watchCharsets96()
 	e.watchWindowOps()
+	e.watchPrinter()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1110,6 +1114,68 @@ func (e *emulation) watchWindowOps() {
 		switch op, _, _ := params.Param(0, 0); {
 		case op >= 1 && op <= 6, op >= 8 && op <= 10, op >= 24:
 			e.windowOp = true
+		}
+		return false
+	})
+}
+
+// printerMode is what a terminal with a printer does with what it is sent,
+// as xterm keeps it.
+type printerMode uint8
+
+const (
+	// printerOff draws it, and prints only what a media copy asks for.
+	printerOff printerMode = iota
+	// autoPrint draws it, and prints each line the cursor leaves by a line
+	// feed, a form feed, a vertical tab or a wrap: auto print, set by
+	// CSI ? 5 i.
+	autoPrint
+	// printerController sends every byte to the printer instead, until the
+	// end: printer controller mode, set by CSI 5 i.
+	printerController
+)
+
+// watchPrinter registers the handlers that keep the printer's mode, as xterm
+// reads the media copies that set it: CSI 5 i turns printer controller mode
+// on and CSI 4 i off; CSI ? 5 i turns auto print on and CSI ? 4 i off, and
+// CSI 4 i turns it off too. Each reads its first parameter, but in printer
+// controller mode the terminal reads no sequence at all: it matches CSI 4 i
+// byte for byte and sends everything else to the printer, so auto print's
+// end, RIS or an end with another parameter doesn't end it. RIS ends neither
+// mode. x/vt has no printer, where a raw replay sets the mode on a joiner's
+// terminal that has one, which then prints the live bytes, or sends them to
+// the printer instead of drawing them: a mode on at the handoff fails the
+// render (see eligible). One ended before it renders: the bytes it covered
+// are drawn, as on a terminal without a printer, which is what x/vt is. The
+// media copies that only print, the screen (CSI i) or the cursor's line
+// (CSI ? 1 i) among them, change no mode. x/vt has no handler of its own for
+// either; these return false all the same, as watchColours' do.
+func (e *emulation) watchPrinter() {
+	t := e.term
+	t.RegisterCsiHandler('i', func(params ansi.Params) bool {
+		if e.printer == printerController {
+			if len(params) == 1 && params[0] == 4 {
+				e.printer = printerOff
+			}
+			return false
+		}
+		switch n, _, _ := params.Param(0, 0); n {
+		case 4:
+			e.printer = printerOff
+		case 5:
+			e.printer = printerController
+		}
+		return false
+	})
+	t.RegisterCsiHandler(ansi.Command('?', 0, 'i'), func(params ansi.Params) bool {
+		if e.printer == printerController {
+			return false
+		}
+		switch n, _, _ := params.Param(0, 0); n {
+		case 4:
+			e.printer = printerOff
+		case 5:
+			e.printer = autoPrint
 		}
 		return false
 	})

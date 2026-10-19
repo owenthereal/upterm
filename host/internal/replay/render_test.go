@@ -3124,3 +3124,49 @@ func TestReplayFailsOnAWindowOperation(t *testing.T) {
 		})
 	}
 }
+
+// Printer controller mode (CSI 5 i) on at the handoff fails the render,
+// named: a raw replay leaves a joiner's terminal that has a printer sending
+// the live bytes to it instead of drawing them, where the render leaves it
+// drawing them. Such a terminal reads no sequence in that mode but CSI 4 i,
+// matched byte for byte, so neither auto print's end nor RIS nor an end with
+// another parameter ends it. Auto print (CSI ? 5 i), which prints each line
+// the cursor leaves, fails it too, named, until CSI ? 4 i or CSI 4 i, and RIS
+// doesn't end it either. A mode ended before the handoff renders, as do the
+// media copies that only print.
+func TestReplayFailsOnAPrinterMode(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream, state string }{
+		{"the controller", "\x1b[5i", "printer controller mode"},
+		{"the controller, then text", "\x1b[5itext", "printer controller mode"},
+		{"the controller ended, then on again", "\x1b[5ix\x1b[4i\x1b[5i", "printer controller mode"},
+		{"auto print, then the controller", "\x1b[?5i\x1b[5i", "printer controller mode"},
+		{"the controller, then auto print's end", "\x1b[5i\x1b[?4i", "printer controller mode"},
+		{"the controller, then RIS", "\x1b[5i\x1bc", "printer controller mode"},
+		{"the controller, then an end with another parameter", "\x1b[5i\x1b[4;0i", "printer controller mode"},
+		{"auto print", "\x1b[?5i", "auto print mode"},
+		{"auto print, then RIS", "\x1b[?5i\x1bc", "auto print mode"},
+		{"auto print ended, then on again", "\x1b[?5ix\x1b[?4i\x1b[?5i", "auto print mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), tc.state)
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"the controller ended", "\x1b[5ix\x1b[4i"},
+		{"auto print ended", "\x1b[?5ix\x1b[?4i"},
+		{"auto print ended by the controller's end", "\x1b[?5i\x1b[4i"},
+		{"auto print ended by an end with another parameter", "\x1b[?5i\x1b[4;0i"},
+		{"the ends alone", "\x1b[4i\x1b[?4i"},
+		{"the screen printed", "\x1b[i\x1b[0i"},
+		{"the cursor's line printed", "\x1b[?1i"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
