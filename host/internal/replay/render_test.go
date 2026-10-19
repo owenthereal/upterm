@@ -2261,9 +2261,12 @@ func TestReplayResetsTheJoinersRegionAndEditingModes(t *testing.T) {
 		{"none of them", ""},
 		{"a scroll region, the cursor in it", "\x1b[5;10r\x1b[6;1H"},
 		{"a scroll region, the cursor below it", "\x1b[3;6r\x1b[9;1H"},
+		{"a scroll region, the cursor above it", "\x1b[5;10r\x1b[3;1H"},
 		{"insert mode", "\x1b[4h"},
 		{"LNM", "\x1b[20h"},
 		{"left and right margins, the cursor inside them", "\x1b[?69h\x1b[10;40s\x1b[5;12H"},
+		{"left and right margins, the cursor left of them", "\x1b[?69h\x1b[30;60s\x1b[5;3H"},
+		{"left and right margins, the cursor right of them", "\x1b[?69h\x1b[10;40s\x1b[5;60H"},
 		{"origin mode in a scroll region", "\x1b[5;10r\x1b[?6h\x1b[2;3H"},
 		{"all of them", "\x1b[5;10r\x1b[?69h\x1b[10;40s\x1b[?6h\x1b[4h\x1b[20h\x1b[2;3H"},
 	} {
