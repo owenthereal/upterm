@@ -184,6 +184,9 @@ type emulation struct {
 	// eightBit is whether the stream left the terminal sending the program
 	// 8-bit controls (see watchControls).
 	eightBit bool
+	// sizedText is set once the stream has drawn text in kitty's sizes (see
+	// watchSizedText).
+	sizedText bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -283,10 +286,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // 94-character set x/vt drops, a 96-character set, a window operation,
 // printer controller mode, a memory lock, a key format, locator reporting,
 // the locator's events, a change to iTerm2's state, the keyboard's LEDs, a
-// log file, a window property and a coding other than UTF-8 noted, auto
-// print, 8-bit controls and the tab stops past the screen's edge kept, and
-// the meter stopped by ctx or the deadline. Each callback and handler runs
-// inside the emulator's Write and touches only the emulation.
+// log file, a window property, a coding other than UTF-8 and sized text
+// noted, auto print, 8-bit controls and the tab stops past the screen's edge
+// kept, and the meter stopped by ctx or the deadline. Each callback and
+// handler runs inside the emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -338,6 +341,7 @@ func (e *emulation) setUp() {
 	e.watchWindowProperty()
 	e.watchCoding()
 	e.watchControls()
+	e.watchSizedText()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1752,6 +1756,25 @@ func (e *emulation) watchControls() {
 	})
 	t.RegisterEscHandler('c', func() bool {
 		e.eightBit = false
+		return false
+	})
+}
+
+// watchSizedText registers the handler that notes OSC 66, kitty's text
+// sizing, OSC 66 ; metadata ; text, which draws the text scaled, each
+// character over a block of cells up to seven rows high, or in as many cells
+// as the metadata says, and moves the cursor past them on its row. x/vt drops
+// the whole OSC, the text and the cursor's move with it, where a raw replay
+// hands it to the joiner's kitty, which draws it as the session's did, and
+// what follows it on that row lands where kitty's cursor went. Every one
+// counts, one kitty ignores too, as one with metadata it can't read or with
+// no text, and the note stays, whatever follows, RIS included: the raw ring
+// is exact whatever came after. OSC 66 asks for nothing, so the query filter
+// drops none. x/vt has no handler of its own for it; this returns false all
+// the same, as watchColours' do.
+func (e *emulation) watchSizedText() {
+	e.term.RegisterOscHandler(66, func([]byte) bool {
+		e.sizedText = true
 		return false
 	})
 }

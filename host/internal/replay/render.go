@@ -1038,6 +1038,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.eightBit {
 		return rep{}, &IneligibleError{State: "8-bit controls"}
 	}
+	if e.sizedText {
+		return rep{}, &IneligibleError{State: "sized text"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

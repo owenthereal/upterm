@@ -4087,6 +4087,50 @@ func TestReplayFailsOn8BitControls(t *testing.T) {
 	}
 }
 
+// OSC 66, kitty's text sizing, which draws its text scaled or in as many
+// cells as it says and moves the cursor past them, fails the render, named:
+// x/vt drops the whole OSC, its text and the cursor's move with it, where a
+// raw replay hands it to the joiner's kitty, which draws it as the session's
+// did. Every one counts, one kitty ignores too, and the note stays once the
+// text is erased, or RIS comes. The query filter drops none, as OSC 66 asks
+// for nothing: kitty's probe for it asks by the CPRs around one, which the
+// filter drops. An OSC of another number renders.
+func TestReplayFailsOnSizedText(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"double-sized text", "\x1b]66;s=2;Double sized\x07"},
+		{"ended by ST", "\x1b]66;s=2;Double sized\x1b\\"},
+		{"half-sized text, two characters a cell", "\x1b]66;n=1:d=2:w=1;Ha\x07"},
+		{"a width alone", "\x1b]66;w=2;\U0001F408\x07"},
+		{"no metadata", "\x1b]66;;text\x07"},
+		{"its number with a leading 0", "\x1b]066;s=2;big\x07"},
+		{"kitty's probe for it, between CPRs", "\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n\r\n"},
+		{"metadata kitty can't read", "\x1b]66;x=2;big\x07"},
+		{"no text, which kitty ignores", "\x1b]66;s=2;\x07"},
+		{"no data at all", "\x1b]66\x07"},
+		{"one, then erased", "\x1b]66;s=2;big\x07\x1b[2J"},
+		{"one, then RIS", "\x1b]66;s=2;big\x07\x1bc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "sized text")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"OSC 67", "\x1b]67;s=2;big\x07"},
+		{"OSC 660", "\x1b]660;s=2;big\x07"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}
+
 // screenTitleString is a window title string of GNU screen's and tmux's, as
 // tmux reads one: ESC k after an ESC and any C0 controls tmux executes where
 // they stand but CAN and SUB, then the title, up to the ESC, CAN or SUB that
