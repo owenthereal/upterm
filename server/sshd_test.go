@@ -162,6 +162,18 @@ func newTestSSHD(t *testing.T, options ...func(*sshd)) *testSSHD {
 	return &testSSHD{sshd: sshd, addr: addr, signer: signer, reg: reg, network: network}
 }
 
+// withObserverFirst is a newTestSSHD option that registers fn with the sshd's
+// SessionManager before Serve registers reconcile. Each delivery then reaches
+// fn after the store's cache has taken it and before reconcile acts on it, so
+// fn holding a delivery holds reconcile too.
+//
+// It registers with the SessionManager the sshd has when the option runs, so
+// it goes after any option that replaces it; the embedded store would drop fn,
+// since a store no other writer shares delivers nothing.
+func withObserverFirst(fn func(epoch, index uint64, entries map[string]StoreEntry)) func(*sshd) {
+	return func(d *sshd) { d.SessionManager.Observe(fn) }
+}
+
 func (s *testSSHD) dial(t *testing.T) *ssh.Client {
 	t.Helper()
 	return s.dialAs(t, "1234")
@@ -1378,6 +1390,75 @@ func Test_sshd_DelayedAdoptionCannotEvictItsReplacement(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a guest reaching the session socket never reached generation 2")
 	}
+}
+
+// beforeConfirm runs in adoption once add has given the registration its slot,
+// and before confirm reads the store's view: a newer registration that reaches
+// the cache while it holds is still found, and the registration is refused.
+// The host's reply waits for it.
+func Test_sshd_BeforeConfirmRunsBetweenAddAndConfirm(t *testing.T) {
+	store := newFakeConsulStore(t, newFakeConsul(t))
+	held := make(chan *Registration, 1)
+	resume := make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	s := newTestSSHD(t, func(d *sshd) {
+		d.SessionManager = newSessionManagerWithStore(store, routing.NewEncodeDecoder(routing.ModeConsul))
+		d.beforeConfirm = func(reg *Registration) {
+			held <- reg
+			<-resume
+		}
+	})
+	host := newProven(t)
+	client := s.dialAs(t, "conn-1")
+	t.Cleanup(release) // runs before the dial's cleanup closes the connection
+	// Signed here: require must not run on the goroutine below.
+	proof, err := registration.Sign(host.key, []byte("conn-1"), host.secret, 1)
+	require.NoError(t, err)
+	req, err := proto.Marshal(&CreateSessionRequest{HostUser: "owen", HostPublicKeys: host.hostKeys(),
+		SessionSecret: host.secret, Generation: 1, HostKeyProof: proof})
+	require.NoError(t, err)
+	type reply struct {
+		ok  bool
+		err error
+	}
+	result := make(chan reply, 1)
+	go func() {
+		ok, _, err := client.SendRequest(upterm.ServerCreateSessionRequestType, true, req)
+		result <- reply{ok, err}
+	}()
+
+	var reg *Registration
+	select {
+	case reg = <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("adoption never reached beforeConfirm")
+	}
+	slot := s.slot(host.id())
+	require.NotNil(t, slot, "beforeConfirm ran before add gave the registration its slot")
+	require.True(t, slot.reg.Same(reg))
+	require.Equal(t, 1.0, s.gauge(t), "the gauge doesn't count the slot add made")
+	// adopt is blocked in the hook, and the reply is sent only once it returns.
+	select {
+	case r := <-result:
+		t.Fatalf("the host had its reply while beforeConfirm held adoption: %+v", r)
+	default:
+	}
+
+	// Another node's newer registration reaches the cache, and no delivery
+	// carries it to reconcile: only confirm can find it now.
+	store.cache.Set(host.id(), cachedSession{session: &Session{ID: host.id(), NodeAddr: "node-b:22", Generation: 2},
+		index: reg.index + 1, lease: "lease-b"}, store.cache.Epoch())
+	release()
+
+	select {
+	case r := <-result:
+		require.False(t, r.ok && r.err == nil, "adoption kept a registration the store showed superseded")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never had its reply")
+	}
+	waitClosed(t, client, "the superseded registration's connection")
+	require.Nil(t, s.slot(host.id()), "the superseded registration kept its slot")
+	require.Equal(t, 0.0, s.gauge(t))
 }
 
 // A reconnect-capable host's connection is pinged, and closed when it goes

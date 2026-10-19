@@ -839,11 +839,22 @@ type forwardTestPeer struct {
 	ended    chan struct{}
 	end      func()
 
-	// rejection answers every channel opened toward this peer. It is handed
-	// back only once answered closes: the goroutine that passes an answer on
-	// can run well after the answer arrived, and after the transport ended.
+	// rejection, set before the first open, answers every channel opened
+	// toward this peer. It is handed back only once answered closes: the
+	// goroutine that passes an answer on can run well after the answer
+	// arrived, and after the transport ended. With no rejection an open is
+	// unanswered, and fails once the transport ends, as x/crypto's mux fails
+	// an open still waiting when it closes.
 	rejection error
 	answered  chan struct{}
+
+	// opened closes when the first channel open reaches this peer.
+	opened     chan struct{}
+	markOpened func()
+	// waitGate, if not nil, holds Wait past the end until it closes: the
+	// transport has ended, and forwardSSH, which learns from Wait that a peer
+	// has left, hasn't learned it yet.
+	waitGate chan struct{}
 }
 
 func newForwardTestPeer() *forwardTestPeer {
@@ -852,16 +863,30 @@ func newForwardTestPeer() *forwardTestPeer {
 		requests: make(chan *ssh.Request),
 		ended:    make(chan struct{}),
 		answered: make(chan struct{}),
+		opened:   make(chan struct{}),
 	}
 	p.end = sync.OnceFunc(func() { close(p.ended); close(p.channels); close(p.requests) })
+	p.markOpened = sync.OnceFunc(func() { close(p.opened) })
 	return p
 }
 
 func (p *forwardTestPeer) sshPeer() sshPeer { return sshPeer{p, p.channels, p.requests} }
 
+// OpenChannel follows x/crypto's mux: an answer that arrived is handed back
+// even after the transport ended, and an open still waiting for one fails
+// when it ends.
 func (p *forwardTestPeer) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.Request, error) {
-	<-p.answered
-	return nil, nil, p.rejection
+	p.markOpened()
+	if p.rejection != nil {
+		<-p.answered
+		return nil, nil, p.rejection
+	}
+	select {
+	case <-p.answered:
+		return nil, nil, nil
+	case <-p.ended:
+		return nil, nil, errors.New("ssh: unexpected packet in response to channel open: <nil>")
+	}
 }
 
 func (p *forwardTestPeer) Close() error {
@@ -871,6 +896,9 @@ func (p *forwardTestPeer) Close() error {
 
 func (p *forwardTestPeer) Wait() error {
 	<-p.ended
+	if p.waitGate != nil {
+		<-p.waitGate
+	}
 	return io.EOF
 }
 
