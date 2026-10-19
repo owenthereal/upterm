@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owenthereal/upterm/host"
 	"github.com/owenthereal/upterm/host/sessiondir"
 	"github.com/owenthereal/upterm/utils"
 	"github.com/stretchr/testify/require"
@@ -31,14 +30,11 @@ const registryLockFile = ".registry.lock"
 // Unix-only: holding the lock from outside sessiondir means calling flock
 // directly.
 func Test_Host_StartupClaimIsBounded(t *testing.T) {
-	// Far shorter than the assertion's budget below, so the gap between the
-	// two is what proves the claim gave up rather than got lucky. Restored so
-	// no later test inherits it.
-	origClaimTimeout := host.ClaimTimeout
-	host.ClaimTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { host.ClaimTimeout = origClaimTimeout })
-
 	run := newOutcomeRun(t, []string{"sh", "-c", "exit 0"})
+	// Far shorter than the assertion's budget below, so the gap between the
+	// two is what proves the claim gave up rather than got lucky: 200 ms here
+	// < the 2 s budget < the 10 s default.
+	run.host.ClaimTimeout = 200 * time.Millisecond
 
 	// The first of the two locks Claim takes, held for the whole test by
 	// something that will never answer — which is what a stopped host is.
