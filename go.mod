@@ -26,7 +26,7 @@ require (
 	github.com/hashicorp/consul/api v1.34.5
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c // indirect
-	github.com/jpillora/chisel v1.12.1
+	github.com/jpillora/chisel v1.13.0
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/oklog/run v1.2.0
