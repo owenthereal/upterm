@@ -892,6 +892,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	case autoPrint:
 		return rep{}, &IneligibleError{State: "auto print mode"}
 	}
+	if e.memoryLock {
+		return rep{}, &IneligibleError{State: "a memory lock"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}

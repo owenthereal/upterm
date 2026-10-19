@@ -139,6 +139,9 @@ type emulation struct {
 	// printer is the printer mode the stream left the terminal in (see
 	// watchPrinter).
 	printer printerMode
+	// memoryLock is set once the stream has locked or unlocked memory so as
+	// to move the scroll region's top margin (see watchMemoryLock).
+	memoryLock bool
 	// pastEdge is what the emulator keeps of the tab stops past the screen's
 	// right edge (see the type).
 	pastEdge pastEdge
@@ -227,10 +230,10 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // protection, selective erases, saves, renditions and line sizes the cells
 // can't hold, a status line, a font, a rectangular attribute extent, a
 // conformance level, a reset of a mode a terminal starts with set, a
-// 96-character set and a window operation noted, the printer's mode and the
-// tab stops past the screen's edge kept, and the meter stopped by ctx or the
-// deadline. Each callback and handler runs inside the emulator's Write and
-// touches only the emulation.
+// 96-character set, a window operation and a memory lock noted, the printer's
+// mode and the tab stops past the screen's edge kept, and the meter stopped
+// by ctx or the deadline. Each callback and handler runs inside the
+// emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
 	t.SetScrollbackSize(0)
@@ -268,6 +271,7 @@ func (e *emulation) setUp() {
 	e.watchCharsets96()
 	e.watchWindowOps()
 	e.watchPrinter()
+	e.watchMemoryLock()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -1176,6 +1180,39 @@ func (e *emulation) watchPrinter() {
 			e.printer = printerOff
 		case 5:
 			e.printer = autoPrint
+		}
+		return false
+	})
+}
+
+// watchMemoryLock registers the handlers that note HP's memory lock (ESC l)
+// and unlock (ESC m), which xterm implements by moving the scroll region's
+// top margin, keeping its bottom one: a lock moves it to the cursor's row,
+// locking the rows above in place, and an unlock back to the screen's top,
+// but neither sets a region that ends at or above its top. x/vt implements
+// neither. Once one has moved the margin, xterm scrolls only the rows from it
+// down and moves the cursor up no further than it, where x/vt scrolls and
+// moves as before, so the emulator's screen may differ from the session's
+// terminal's from there on, and neither an unlock nor a DECSTBM after it
+// brings it back: the note stays. One that leaves the margin where it is, a
+// lock on the region's top row, on its bottom row or below it, or an unlock
+// with the region at the screen's top, changes nothing and isn't noted. The
+// region and the cursor read are the emulator's, which the session's
+// terminal holds too until a lock or an unlock has moved the margin. x/vt has
+// no handler of its own for either; these return false all the same, as
+// watchColours' do.
+func (e *emulation) watchMemoryLock() {
+	t := e.term
+	t.RegisterEscHandler('l', func() bool {
+		reg, y := t.ActiveScreen().ScrollRegion(), t.CursorPosition().Y
+		if y != reg.Min.Y && y < reg.Max.Y-1 {
+			e.memoryLock = true
+		}
+		return false
+	})
+	t.RegisterEscHandler('m', func() bool {
+		if t.ActiveScreen().ScrollRegion().Min.Y != 0 {
+			e.memoryLock = true
 		}
 		return false
 	})

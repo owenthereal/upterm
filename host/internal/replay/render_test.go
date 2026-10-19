@@ -3170,3 +3170,45 @@ func TestReplayFailsOnAPrinterMode(t *testing.T) {
 		})
 	}
 }
+
+// HP's memory lock (ESC l) and unlock (ESC m) fail the render, named, once
+// either moves the scroll region's top margin, as xterm implements them: a
+// lock moves it to the cursor's row and an unlock back to the screen's top.
+// Once it has moved, xterm scrolls only the rows from it down and moves the
+// cursor up no further than it, which x/vt, implementing neither, doesn't, so
+// the emulator's screen may differ from the session's terminal's whatever
+// follows, an unlock or a DECSTBM among it. A lock or an unlock that leaves
+// the margin where it is renders: a lock on the region's top row, on its
+// bottom row or below it, where xterm sets no region that ends at or above
+// its top, and an unlock with the region at the screen's top.
+func TestReplayFailsOnAMemoryLock(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a lock", "\x1bl"},
+		{"a lock, then an unlock", "\x1bl\x1bm"},
+		{"a lock, then lines that scroll, then an unlock", "\x1bl" + strings.Repeat("line\r\n", 30) + "\x1bm"},
+		{"a lock, then a region", "\x1bl\x1b[r"},
+		{"a lock above the region", "\x1b[5;20r\x1b[2H\x1bl"},
+		{"a lock inside the region", "\x1b[5;20r\x1b[10H\x1bl"},
+		{"an unlock under a region below the screen's top", "\x1b[5;20r\x1bm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a memory lock")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"an unlock", "\x1bm"},
+		{"a lock on the screen's top row", "\x1b[H\x1bl"},
+		{"a lock on the region's top row", "\x1b[5;20r\x1b[5H\x1bl"},
+		{"a lock on the region's bottom row", "\x1b[24H\x1bl"},
+		{"a lock below the region", "\x1b[1;10r\x1b[15H\x1bl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+		})
+	}
+}
