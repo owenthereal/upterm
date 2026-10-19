@@ -50,7 +50,7 @@ func startRepainting(t *testing.T, first string, srv *Server) *hostHarness {
 	srv.Command = repaintsOnWinch(first, ready)
 	h := startHost(t, srv)
 	require.Eventually(t, func() bool { _, err := os.Stat(ready); return err == nil },
-		harnessTimeout, time.Millisecond, "the command never printed its first output")
+		harnessTimeout, time.Millisecond, "the command never signalled ready")
 	return h
 }
 
@@ -196,9 +196,9 @@ func TestASmallerGuestGetsTheEmulatedScreen(t *testing.T) {
 // An 80x24 guest of an 80x24 session gets the screen exactly: fed to a
 // terminal of that size, its first bytes leave the same cells, cursor and
 // scrolled-off lines as the ring does fed to another. The ring scrolls,
-// styles text, moves the cursor, erases, and ends in text with no newline.
-// The bytes are a reconstruction, not the ring, which the viewer, counting
-// towards no size, is handed.
+// styles text, moves the cursor and erases, and ends in the repaint the
+// viewer's join prompted. The bytes are a reconstruction, not the ring, which
+// the viewer, counting towards no size, is handed.
 func TestAnEqualGuestGetsExactGeometry(t *testing.T) {
 	var first strings.Builder
 	first.WriteString(`\033[1;31mRED\033[m plain\n`)
@@ -258,11 +258,13 @@ func TestAnIneligibleJoinFallsBackAndSaysWhy(t *testing.T) {
 		Logger: slog.New(slog.NewTextHandler(logs, nil)),
 	})
 	_, viewer, _ := h.connectHost(t, nil)
-	ring := readUntil(t, viewer, "ORIGIN-MARK")
+	// The viewer is read up to the repaint its own join prompted, so that
+	// the repaint is in the ring the guest is handed. Each stream is cut at
+	// its first repaint, that one, wherever its reads happen to split it.
+	ring := replayed(t, viewer, desktop)
 
 	_, out := h.connectGuest(t, withWindow(desktop))
 	got := replayed(t, out, desktop)
-	ring += replayed(t, viewer, desktop)
 	require.Equal(t, ring, got, "the guest wasn't handed the raw ring")
 
 	var fellBack []string
