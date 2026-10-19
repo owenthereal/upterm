@@ -116,6 +116,9 @@ type emulation struct {
 	// rectExtent is set once the stream has made DECCARA and DECRARA change
 	// a rectangle (see watchAttributeExtent).
 	rectExtent bool
+	// conformance is set once the stream has set the terminal's conformance
+	// level (see watchConformanceLevel).
+	conformance bool
 
 	// The handoff point: the end of what the emulator consumed, and the last
 	// event it passed, applied or skipped as a no-op.
@@ -198,8 +201,8 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 // directory, the colours, the clipboard and synchronized output's DCS form
 // kept, images, device control strings, character protection, selective
 // erases, saves, renditions and line sizes the cells can't hold, a status
-// line, a font and a rectangular attribute extent noted, and the meter
-// stopped by ctx or the deadline. Each callback and handler runs inside the
+// line, a font, a rectangular attribute extent and a conformance level noted,
+// and the meter stopped by ctx or the deadline. Each callback and handler runs inside the
 // emulator's Write and touches only the emulation.
 func (e *emulation) setUp() {
 	t := e.term
@@ -231,6 +234,7 @@ func (e *emulation) setUp() {
 	e.watchStatusLine()
 	e.watchFont()
 	e.watchAttributeExtent()
+	e.watchConformanceLevel()
 }
 
 // colours is the last change the stream made, by OSC, to each of the colours
@@ -822,6 +826,26 @@ func (e *emulation) watchAttributeExtent() {
 		if n, _, _ := params.Param(0, 0); n == 2 {
 			e.rectExtent = true
 		}
+		return false
+	})
+}
+
+// watchConformanceLevel registers the handler that notes DECSCL
+// (CSI Pl ; Pc " p), which sets the terminal's conformance level, a VT100's
+// to a VT500's, and whether it sends its controls as 7-bit or 8-bit bytes.
+// xterm's soft-resets the terminal too, as DECSTR does, and at a lower level
+// ignores what a higher one added, SS2 and SS3 at a VT100's among them. x/vt
+// does nothing for it, where a raw replay does all of that on the joiner's
+// terminal, so the render would restore what the session's had reset and
+// leave the joiner at its own level. Every one counts, whatever its
+// parameters: xterm ignores a level it doesn't have, which another terminal
+// may not. x/vt keys a CSI handler by its intermediate too, so this one sees
+// neither DECSTR (CSI ! p) nor DECRQM (CSI Ps $ p and CSI ? Ps $ p), which
+// the query filter drops. x/vt has no handler of its own for it; this returns
+// false all the same, as watchColours' do.
+func (e *emulation) watchConformanceLevel() {
+	e.term.RegisterCsiHandler(ansi.Command(0, '"', 'p'), func(ansi.Params) bool {
+		e.conformance = true
 		return false
 	})
 }

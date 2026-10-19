@@ -2303,3 +2303,43 @@ func TestReplayFailsOnARectangularAttributeExtent(t *testing.T) {
 		})
 	}
 }
+
+// DECSCL (CSI Pl ; Pc " p), which sets the terminal's conformance level and
+// whether it sends 7-bit or 8-bit controls, fails the render, named, once the
+// stream has sent one, whatever its parameters, and still after a DECSTR:
+// x/vt does nothing for it, where xterm's soft-resets the terminal as well.
+// DECSTR (CSI ! p) and DECRQM (CSI Ps $ p, CSI ? Ps $ p), the same final
+// with another intermediate, aren't DECSCL, nor is a CSI p with none; DECRQM,
+// which the filter drops, doesn't count given to the emulation directly
+// either.
+func TestReplayFailsOnAConformanceLevel(t *testing.T) {
+	join := func(t *testing.T, stream string) error {
+		t.Helper()
+		_, fellBack := fanOut(t, New(), []byte("text\r\n"+stream+"more\r\n"), []uio.SizeEvent{event(1, 0, 80, 24)}, 4<<10)
+		return fellBack
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a VT100, with 7-bit controls", "\x1b[61;1\"p"},
+		{"a VT200", "\x1b[62\"p"},
+		{"a VT500, with 8-bit controls", "\x1b[65;2\"p"},
+		{"no parameters", "\x1b[\"p"},
+		{"a level xterm doesn't have", "\x1b[60\"p"},
+		{"a level, then a soft reset", "\x1b[61\"p\x1b[!p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireIneligible(t, join(t, tc.stream), "a conformance level")
+		})
+	}
+	for _, tc := range []struct{ name, stream string }{
+		{"a soft reset", "\x1b[!p"},
+		{"a DEC mode asked for", "\x1b[?2026$p"},
+		{"an ANSI mode asked for", "\x1b[4$p"},
+		{"no intermediate", "\x1b[61;1p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, join(t, tc.stream))
+			_, err := renderAt(t, 80, 24, "text\r\n"+tc.stream+"more\r\n")
+			require.NoError(t, err, "given to the emulation")
+		})
+	}
+}

@@ -723,6 +723,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.rectExtent {
 		return rep{}, &IneligibleError{State: "a rectangular attribute extent"}
 	}
+	if e.conformance {
+		return rep{}, &IneligibleError{State: "a conformance level"}
+	}
 	if splitWide(e.term.MainScreen()) || splitWide(e.term.AltScreen()) {
 		return rep{}, &IneligibleError{State: splitWideState}
 	}
