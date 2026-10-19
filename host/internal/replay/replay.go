@@ -46,11 +46,31 @@ var errNoHandoff = errors.New("replay: the ring starts inside a sequence with no
 // sequence longer than the tracker keeps.
 var errRingStartsInsideALongSequence = errors.New("replay: the ring starts inside a sequence too long to prime")
 
-// New returns the replayer the host installs in its fan-out. It logs
-// nothing: io tells the fan-out's fallback callback why a join fell back.
-func New() uio.Replayer { return replayer{} }
+// New returns the replayer for a session whose program runs under a TERM
+// that is neither GNU screen's nor tmux's, or whose TERM isn't known:
+// NewForTerm("").
+func New() uio.Replayer { return NewForTerm("") }
 
-type replayer struct{}
+// NewForTerm returns the replayer the host installs in the fan-out of a
+// session whose program runs under TERM term, which says how the session's
+// terminal reads a screen title string (see screenTitles). It logs nothing:
+// io tells the fan-out's fallback callback why a join fell back.
+func NewForTerm(term string) uio.Replayer { return replayer{screen: screenTerm(term)} }
+
+// replayer is screen when the session's TERM is GNU screen's or tmux's.
+type replayer struct{ screen bool }
+
+// screenTerm is whether term is a TERM of GNU screen's or tmux's, by the test
+// oh-my-zsh, which sends a screen title string at every prompt, sends one by:
+// it starts with screen or tmux. Every terminfo entry so named is screen's or
+// tmux's: screen, and screen.<term> for the terminal it runs in, which screen
+// sets; the variants terminfo names after either (screen-256color,
+// tmux-direct), which tmux's default-terminal must be one of; and screen2 to
+// screen5, for screen's releases. A name that holds one only later, as
+// putty-screen does, is another terminal's.
+func screenTerm(term string) bool {
+	return strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux")
+}
 
 // emulation is one join's emulation of the stream, from the ring's first
 // byte to a handoff point that moves on as the stream is fed.
@@ -212,7 +232,7 @@ type emulation struct {
 	h, lastSeq uint64
 	// tail is what was offered past h: bytes the emulator hasn't consumed,
 	// a copy, since the lookahead needs them in one piece, and the
-	// emulation's own, in which screen title strings are made x/vt's (see
+	// emulation's own, in which screen title strings are read for x/vt (see
 	// screenTitles), which follows what was offered.
 	tail         []byte
 	screenTitles screenTitles
@@ -229,7 +249,7 @@ type emulation struct {
 // Start emulates c for a joiner whose terminal is size: from the state the
 // tracker clone holds as of the ring's first byte, through the ring, as far
 // as a handoff point.
-func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
+func (r replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, size termsize.Size) (uio.Emulation, error) {
 	if len(c.Sizes) == 0 {
 		return nil, uio.ErrReplayCoverage
 	}
@@ -248,14 +268,15 @@ func (replayer) Start(ctx context.Context, deadline time.Time, c *uio.Capture, s
 	}
 
 	e := &emulation{
-		term:       vt.NewEmulator(first.Size.Cols, first.Size.Rows),
-		modes:      c.Modes,
-		join:       size,
-		size:       first.Size,
-		hist:       history{max: budget},
-		h:          c.Start,
-		lastSeq:    first.Seq,
-		offeredSeq: first.Seq,
+		term:         vt.NewEmulator(first.Size.Cols, first.Size.Rows),
+		modes:        c.Modes,
+		join:         size,
+		size:         first.Size,
+		hist:         history{max: budget},
+		h:            c.Start,
+		lastSeq:      first.Seq,
+		offeredSeq:   first.Seq,
+		screenTitles: screenTitles{screen: r.screen},
 	}
 	e.stop = func() bool { return ctx.Err() != nil || !time.Now().Before(deadline) }
 	e.setUp()
@@ -1997,34 +2018,44 @@ func (e *emulation) Feed(chunks [][]byte, sizes []uio.SizeEvent) error {
 	return e.offer(chunks, sizes)
 }
 
-// screenTitles hands x/vt the window title strings of GNU screen and tmux,
-// ESC k title ST, as those terminals read them when one is the session's own
-// terminal, under whose TERM oh-my-zsh sends one at every prompt: a string,
-// ended by an ESC, CAN or SUB, BEL included, none of which is drawn (tmux's
-// rename_string state). x/vt, as xterm, reads ESC k as a sequence done at the
-// k and draws the title as text. So the k of each ESC k is handed to it as
-// ^, which makes the string a PM: x/ansi's parser consumes one as tmux does
-// the title, to an ESC, CAN or SUB, with BEL and well-formed UTF-8 inside it.
-// A PM rather than an APC, which the parser reads alike, as watchGraphics
-// notes an APC whose data starts with G, as a title may, and nothing handles
-// a PM. The tracker clone, fed what x/vt is, reads the PM as a string too,
-// and tracks nothing a title holds either way. The byte is replaced in the
-// emulation's own copy of the stream, never in the ring's chunks, and in
-// place, so every offset, the handoff point's included, stays the stream's.
+// screenTitles reads the stream's window title strings of GNU screen and
+// tmux, ESC k title ST, for x/vt, by the TERM the session's program runs
+// under. A terminal that is screen or tmux, under whose TERM oh-my-zsh sends
+// one at every prompt, reads one as a string, ended by an ESC, CAN or SUB,
+// BEL included, none of which is drawn (tmux's rename_string state); xterm
+// reads ESC k as a sequence done at the k and draws the title as text, as
+// x/vt does; and any other TERM doesn't say which the session's terminal is.
+//
+// Under screen's or tmux's TERM, screen is set, and the k of each ESC k is
+// handed to x/vt as ^, which makes the string a PM: x/ansi's parser consumes
+// one as tmux does the title, to an ESC, CAN or SUB, with BEL and well-formed
+// UTF-8 inside it. A PM rather than an APC, which the parser reads alike, as
+// watchGraphics notes an APC whose data starts with G, as a title may, and
+// nothing handles a PM. The tracker clone, fed what x/vt is, reads the PM as
+// a string too, and tracks nothing a title holds either way. The byte is
+// replaced in the emulation's own copy of the stream, never in the ring's
+// chunks, and in place, so every offset, the handoff point's included, stays
+// the stream's. A ring that starts inside a title, after its k, starts it as
+// text, as a raw replay does on a joiner's tmux.
+//
+// Under any other TERM, x/vt is handed the stream as it is, and sent notes
+// the first ESC k, which fails the render, whatever follows, as a raw replay
+// hands each joiner its own terminal's reading of it. The batch run on the
+// bytes an ESC k arrives in ends no earlier than its k, as the parser is at
+// a handoff point after an ESC dispatch, so x/vt has consumed every one
+// noted, and the note is of what the render holds.
 //
 // esc is that x/vt's parser is in its escape state with no intermediate,
 // where a k completes an ESC k: after an ESC, which enters that state from
 // every state, ending a string too, and through any C0 control but CAN and
 // SUB, which it executes there, and DEL, which it ignores. It carries from
 // the tracker's snapshot into the ring, and across every piece of the stream
-// offered, so an ESC and its k split between them are read as one.
-//
-// A ring that starts inside a title, after its k, starts it as text, as a
-// raw replay does on a joiner's tmux.
-type screenTitles struct{ esc bool }
+// offered, so an ESC and its k split between them are read as one, under
+// either TERM.
+type screenTitles struct{ screen, esc, sent bool }
 
 // read replaces in p, the next bytes x/vt's parser reads, the k of each
-// ESC k with ^.
+// ESC k with ^, under screen's or tmux's TERM, or notes it, under any other.
 func (s *screenTitles) read(p []byte) {
 	for i, b := range p {
 		switch {
@@ -2032,7 +2063,11 @@ func (s *screenTitles) read(p []byte) {
 			s.esc = true
 		case !s.esc:
 		case b == 'k':
-			p[i] = '^'
+			if s.screen {
+				p[i] = '^'
+			} else {
+				s.sent = true
+			}
 			s.esc = false
 		case b < 0x18 || b == 0x19 || b >= 0x1c && b <= 0x1f || b == 0x7f:
 			// Executed or ignored where it stands, in the escape state.
@@ -2070,7 +2105,7 @@ func placed(events []uio.SizeEvent, afterSeq, from, end uint64) error {
 }
 
 // offer adds chunks and events, already validated, to what waits in the
-// tail, with each screen title string made x/vt's (see screenTitles), and
+// tail, with each screen title string read for x/vt (see screenTitles), and
 // runs a batch. A failure spends the emulation.
 func (e *emulation) offer(chunks [][]byte, sizes []uio.SizeEvent) error {
 	for _, chunk := range chunks {

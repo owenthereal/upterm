@@ -170,9 +170,14 @@ func releaseSessions(cmdDone <-chan struct{}, timeout time.Duration, release fun
 var onGuestPacer func(*guestPacer)
 
 // sessionReplayer builds the replayer each session's fan-out reconstructs a
-// joining terminal's screen with, rather than handing it the raw ring. A var
-// so that a test can install its own; nil hands every join the raw ring.
-var sessionReplayer = replay.New
+// joining terminal's screen with, rather than handing it the raw ring, for
+// the TERM the session's command runs under, as the command's own
+// environment has it (see command.termName): Server.Term, or, with none, the
+// one the command inherits, CommandEnv's over the host's. A forced command
+// runs under its guest's own TERM, but its output goes to that guest alone,
+// never through the fan-out. A var so that a test can install its own; nil
+// hands every join the raw ring.
+var sessionReplayer = replay.NewForTerm
 
 // logReplayFallback is what a session's fan-out tells of each join it handed
 // the raw ring rather than a reconstruction of the screen, and why. A screen
@@ -199,11 +204,6 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 	}
 
 	writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
-	// Installed before anything can join: SetReplayer is once, before any
-	// join.
-	if sessionReplayer != nil {
-		writers.SetReplayer(sessionReplayer(), logReplayFallback(s.Logger))
-	}
 	// The pty as the doors see it: the host door serves before the command
 	// starts, so a client can reach this handle before there is a pty behind
 	// it.
@@ -226,6 +226,11 @@ func (s *Server) ServeWithContext(ctx context.Context, guest, host net.Listener)
 		s.Logger,
 	)
 	cmd.stopGrace = s.StopGrace
+	// Installed before anything can join: SetReplayer is once, before any
+	// join.
+	if sessionReplayer != nil {
+		writers.SetReplayer(sessionReplayer(cmd.termName()), logReplayFallback(s.Logger))
+	}
 	// With no primary, the earliest guest paces the command, through this.
 	// It lives on the command's context, so stopping the session ends any
 	// hold at once rather than waiting on a slow guest.

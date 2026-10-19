@@ -1004,6 +1004,9 @@ func (e *emulation) eligible(parts uio.ReplayParts) (rep, error) {
 	if e.titleModes {
 		return rep{}, &IneligibleError{State: "a title mode"}
 	}
+	if e.screenTitles.sent {
+		return rep{}, &IneligibleError{State: "a screen title string"}
+	}
 	if e.savedModes {
 		return rep{}, &IneligibleError{State: "saved DEC modes"}
 	}

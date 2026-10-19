@@ -159,7 +159,7 @@ func (e *doorEmulation) Render() ([]byte, error) {
 func installReplayer(t *testing.T, r uio.Replayer) {
 	t.Helper()
 	orig := sessionReplayer
-	sessionReplayer = func() uio.Replayer { return r }
+	sessionReplayer = func(string) uio.Replayer { return r }
 	t.Cleanup(func() { sessionReplayer = orig })
 }
 

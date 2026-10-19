@@ -31,6 +31,15 @@ func startFor(t *testing.T, c *uio.Capture, size termsize.Size) *emulation {
 	return em.(*emulation)
 }
 
+// startForTerm is startFor by the replayer for a session whose program runs
+// under TERM term.
+func startForTerm(t *testing.T, term string, c *uio.Capture, size termsize.Size) *emulation {
+	t.Helper()
+	em, err := NewForTerm(term).Start(context.Background(), time.Now().Add(time.Minute), c, size)
+	require.NoError(t, err)
+	return em.(*emulation)
+}
+
 // joined is a join at one size, which is the joiner's too: a is the
 // session's own terminal, fed the stream whole, and b a fresh terminal fed
 // the render, then the deferred tail raw, as io sends them.
@@ -4493,62 +4502,132 @@ func tmuxReads(stream string) string {
 	return screenTitleString.ReplaceAllString(stream, "$1")
 }
 
-// The session's own terminal may be tmux or GNU screen, under whose TERM
-// oh-my-zsh sends a window title string, ESC k title ST, at every prompt,
-// and which take it as the window's name and draw none of it. x/vt, as
-// xterm, would read ESC k as a sequence done at the k and draw the title, so
-// the emulation hands x/vt each as a string it consumes, and the join
-// renders: a joiner's tmux, given the render and the raw bytes after it, is
-// left as the session's tmux is, none of the title drawn. tmux ends the title only at an ESC, CAN or SUB,
-// not at BEL; an ESC with controls inside it before the k is one, as tmux
-// executes them there; and neither one with an intermediate nor one an ESC,
-// CAN or SUB cancelled before the k is one. A title that starts with G, as
-// kitty's graphics commands do, is no image.
-func TestReplayConsumesAScreenTitleString(t *testing.T) {
+// screenTERMs are TERMs a session's program runs under when the session's
+// terminal is GNU screen or tmux: screen's own, screen and screen.<term> for
+// the terminal it runs in, tmux and the variants terminfo names after
+// either, which tmux's default-terminal must be one of, and screen5,
+// ncurses' entry for a release of screen. otherTERMs say nothing of which
+// terminal the session's is: xterm's, the host's default; none; vt100, which
+// screen falls back on for a terminal it has no entry for; and putty-screen,
+// ncurses' entry for PuTTY with its screen resizing extensions, a name that
+// holds screen's only after its start.
+var (
+	screenTERMs = []string{"screen", "screen-256color", "screen.xterm-256color", "screen5", "tmux", "tmux-256color", "tmux-direct"}
+	otherTERMs  = []string{"xterm-256color", "", "vt100", "putty-screen"}
+)
+
+// screenTitleRow is a stream that sends a window title string of GNU
+// screen's and tmux's, ESC k title ST, or comes close to one: title is
+// whether a k in it completes an ESC k, as x/vt's parser reads one, which
+// begins a title string.
+type screenTitleRow struct {
+	name, stream string
+	title        bool
+}
+
+// screenTitleRows are the ways a stream sends a screen title string, at
+// every prompt as oh-my-zsh does, ended in each way tmux ends one, a name
+// in each form, a control inside its ESC, a second ESC before it, and RIS
+// after it; and the ways a stream comes close: an ESC k with an
+// intermediate, an ESC cancelled before the k, and a title by OSC 2 alone.
+func screenTitleRows() []screenTitleRow {
 	var prompts strings.Builder
 	for i := range 3 {
 		fmt.Fprintf(&prompts, "\x1bkzsh\x1b\\\x1b]2;owen@host: ~\x07~/src $ ls\r\n\x1bkls\x1b\\file%d\r\n", i)
 	}
-	for _, tc := range []struct{ name, stream string }{
-		{"at every prompt", prompts.String() + "\x1bkzsh\x1b\\~/src $ "},
-		{"ended by ST", "\x1bkzsh\x1b\\$ "},
-		{"ended by BEL, which tmux reads as more of it", "\x1bkzsh\x07zsh too\x1b\\$ "},
-		{"ended by the sequence after it", "\x1bkzsh\x1b[1m$ \x1b[m"},
-		{"ended by CAN", "\x1bkzsh\x18$ "},
-		{"empty", "\x1bk\x1b\\$ "},
-		{"a name not in ASCII", "\x1bk✳ zsh\x1b\\$ "},
-		{"a name that starts with G", "\x1bkGzsh\x1b\\$ "},
-		{"a control inside its ESC", "\x1b\rkzsh\x1b\\$ "},
-		{"an ESC k with an intermediate", "\x1b kzsh$ "},
-		{"an ESC cancelled before the k", "\x1b\x18kzsh$ "},
-		{"an ESC before the k's ESC", "\x1b\x1bkzsh\x1b\\$ "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stream := "text\r\n" + tc.stream
-			joined, fellBack := fanOut(t, New(), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
-			require.NoError(t, fellBack)
-			require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
-			require.NotContains(t, string(joined), "\x1b^", "the stream's raw bytes, which the emulation's reading leaves as they are")
-			a, aHist := newReference(80, 24)
-			aNames := watchTitle(a)
-			_, _ = a.WriteString(tmuxReads(stream))
-			// The joiner's terminal is tmux too, which reads the raw bytes after
-			// the handoff point, here those after an ESC k a CAN ends, which
-			// closes nothing a handoff point needs, as the session's did.
-			b, bHist := newReference(80, 24)
-			bNames := watchTitle(b)
-			_, _ = b.WriteString(tmuxReads(string(joined)))
-			require.Empty(t, sameState(a, b, *aHist, *bHist, *aNames, *bNames), "the render: %q", joined)
-			if !strings.Contains(tmuxReads(stream), "zsh") {
-				for y := range b.Height() {
-					require.NotContains(t, b.MainScreen().Line(y).String(), "zsh", "row %d", y)
-				}
-			}
-		})
+	return []screenTitleRow{
+		{"at every prompt", prompts.String() + "\x1bkzsh\x1b\\~/src $ ", true},
+		{"ended by ST", "\x1bkzsh\x1b\\$ ", true},
+		{"ended by BEL, which tmux reads as more of it", "\x1bkzsh\x07zsh too\x1b\\$ ", true},
+		{"ended by the sequence after it", "\x1bkzsh\x1b[1m$ \x1b[m", true},
+		{"ended by CAN", "\x1bkzsh\x18$ ", true},
+		{"empty", "\x1bk\x1b\\$ ", true},
+		{"a name not in ASCII", "\x1bk✳ zsh\x1b\\$ ", true},
+		{"a name that starts with G", "\x1bkGzsh\x1b\\$ ", true},
+		{"a control inside its ESC", "\x1b\rkzsh\x1b\\$ ", true},
+		{"an ESC before the k's ESC", "\x1b\x1bkzsh\x1b\\$ ", true},
+		{"then RIS", "\x1bkzsh\x1b\\\x1bc$ ls\r\n", true},
+		{"an ESC k with an intermediate", "\x1b kzsh$ ", false},
+		{"an ESC cancelled before the k", "\x1b\x18kzsh$ ", false},
+		{"none, a title by OSC 2", "\x1b]2;owen@host: ~\x07~/src $ ", false},
 	}
 }
 
-// The emulation reads a screen title string as x/vt's parser would read
+// The session's own terminal may be tmux or GNU screen, under whose TERM
+// oh-my-zsh sends a window title string, ESC k title ST, at every prompt,
+// and which take it as the window's name and draw none of it. x/vt, as
+// xterm, would read ESC k as a sequence done at the k and draw the title, so
+// under each of their TERMs the emulation hands x/vt each as a string it
+// consumes, and the join renders: a joiner's tmux, given the render and the
+// raw bytes after it, is left as the session's tmux is, none of the title
+// drawn. tmux ends the title only at an ESC, CAN or SUB, not at BEL; an ESC
+// with controls inside it before the k is one, as tmux executes them there;
+// and neither one with an intermediate nor one an ESC, CAN or SUB cancelled
+// before the k is one. A title that starts with G, as kitty's graphics
+// commands do, is no image.
+func TestReplayConsumesAScreenTitleString(t *testing.T) {
+	for _, term := range screenTERMs {
+		for _, tc := range screenTitleRows() {
+			t.Run(term+"/"+tc.name, func(t *testing.T) {
+				stream := "text\r\n" + tc.stream
+				joined, fellBack := fanOut(t, NewForTerm(term), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+				require.NoError(t, fellBack)
+				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+				require.NotContains(t, string(joined), "\x1b^", "the stream's raw bytes, which the emulation's reading leaves as they are")
+				a, aHist := newReference(80, 24)
+				aNames := watchTitle(a)
+				_, _ = a.WriteString(tmuxReads(stream))
+				// The joiner's terminal is tmux too, which reads the raw bytes
+				// after the handoff point, here those after an ESC k a CAN ends,
+				// which closes nothing a handoff point needs, as the session's
+				// did.
+				b, bHist := newReference(80, 24)
+				bNames := watchTitle(b)
+				_, _ = b.WriteString(tmuxReads(string(joined)))
+				require.Empty(t, sameState(a, b, *aHist, *bHist, *aNames, *bNames), "the render: %q", joined)
+				if !strings.Contains(tmuxReads(stream), "zsh") {
+					for y := range b.Height() {
+						require.NotContains(t, b.MainScreen().Line(y).String(), "zsh", "row %d", y)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Under any other TERM the session's terminal may read a screen title string
+// as xterm does, ESC k a sequence done at the k and the title drawn as text,
+// or as tmux does, or otherwise: the TERM doesn't say which. So the emulation
+// hands x/vt the stream as it is, and the render fails, named, once the
+// stream has sent one, whatever follows, where a raw replay hands each joiner
+// its own terminal's reading. A stream that sends none renders, those that
+// come close included, and a joiner's terminal, reading the render and the
+// raw bytes after it as x/vt does, is left as the session's is.
+func TestReplayFailsOnAScreenTitleStringUnderAnotherTERM(t *testing.T) {
+	for _, term := range otherTERMs {
+		for _, tc := range screenTitleRows() {
+			t.Run(fmt.Sprintf("%q/%s", term, tc.name), func(t *testing.T) {
+				stream := "text\r\n" + tc.stream
+				joined, fellBack := fanOut(t, NewForTerm(term), []byte(stream), []uio.SizeEvent{event(1, 0, 80, 24)}, 64<<10)
+				if tc.title {
+					requireIneligible(t, fellBack, "a screen title string")
+					return
+				}
+				require.NoError(t, fellBack)
+				require.True(t, bytes.HasPrefix(joined, []byte(preamble)), "the render, not the raw ring")
+				a, aHist := newReference(80, 24)
+				aNames := watchTitle(a)
+				_, _ = a.WriteString(stream)
+				b, bHist := newReference(80, 24)
+				bNames := watchTitle(b)
+				_, _ = b.Write(joined)
+				require.Empty(t, sameState(a, b, *aHist, *bHist, *aNames, *bNames), "the render: %q", joined)
+			})
+		}
+	}
+}
+
+// The emulation finds a screen title string where x/vt's parser would read
 // ESC k, wherever the k lands: the ring may start after its ESC, which the
 // tracker's snapshot then ends with, and the stream may be offered in pieces,
 // at Start or later, split between the ESC and the k, or between an ESC, a
@@ -4557,51 +4636,65 @@ func TestReplayConsumesAScreenTitleString(t *testing.T) {
 // no title string of the k, which x/vt then prints or reads as the final of
 // another sequence. (io's query filter leaves the ring a lone ESC for two,
 // and the control before the ESC, but what reaches the emulation is read as
-// x/vt would read it whatever the filter leaves.)
-func TestReplayConsumesAScreenTitleStringInPieces(t *testing.T) {
-	t.Run("the ring starting after its ESC", func(t *testing.T) {
-		const ring = "kzsh\x1b\\$ ls\r\n"
-		modes := uio.NewModeTracker()
-		_, _ = modes.Write([]byte("before\r\n\x1b"))
-		c := &uio.Capture{Modes: modes, Chunks: [][]byte{[]byte(ring)}, Sizes: []uio.SizeEvent{event(1, 9, 80, 24)}, Start: 9, End: 9 + uint64(len(ring))}
-		e := startFor(t, c, termsize.Size{Cols: 80, Rows: 24})
+// x/vt would read it whatever the filter leaves.) Under tmux's TERM, x/vt
+// consumes each one it finds; under xterm's, each fails the render instead,
+// which stays failed as more of the stream is fed.
+func TestReplayReadsAScreenTitleStringInPieces(t *testing.T) {
+	const tmux, xterm = "tmux-256color", "xterm-256color"
+	// The render, under term, of a stream in which title says a k began a
+	// title string, and in which x/vt then draws row on the row after text,
+	// or on the first row for no text.
+	rendered := func(t *testing.T, term string, e *emulation, title bool, text, row string) {
+		t.Helper()
 		_, err := e.Render()
+		if term == xterm && title {
+			requireIneligible(t, err, "a screen title string")
+			return
+		}
 		require.NoError(t, err)
-		require.Equal(t, "$ ls", e.term.MainScreen().Line(0).String())
-	})
-	for _, tc := range []struct {
-		name   string
-		pieces []string
-		row    string // what x/vt then draws on the row after "text"
-	}{
-		{"split after the ESC", []string{"text\r\n\x1b", "kzsh\x1b\\$ ls\r\n"}, "$ ls"},
-		{"a control inside the ESC, in three pieces", []string{"text\r\n\x1b", "\r", "kzsh\x1b\\$ ls\r\n"}, "$ ls"},
-		{"a second ESC before the k", []string{"text\r\n\x1b", "\x1bkzsh\x1b\\$ ls\r\n"}, "$ ls"},
-		{"an ESC a CAN cancels before the k", []string{"text\r\n\x1b", "\x18kzsh\x1b\\$ ls\r\n"}, "kzsh$ ls"},
-		{"an ESC with an intermediate", []string{"text\r\n\x1b", " kzsh$ ls\r\n"}, "zsh$ ls"},
-	} {
-		t.Run(tc.name+", at Start", func(t *testing.T) {
-			c := captureOf("", event(1, 0, 80, 24))
-			c.Chunks = nil
-			for _, p := range tc.pieces {
-				c.Chunks = append(c.Chunks, []byte(p))
-				c.End += uint64(len(p))
-			}
-			e := startFor(t, c, termsize.Size{Cols: 80, Rows: 24})
-			_, err := e.Render()
-			require.NoError(t, err)
-			require.Equal(t, "text", e.term.MainScreen().Line(0).String())
-			require.Equal(t, tc.row, e.term.MainScreen().Line(1).String())
+		y := 0
+		if text != "" {
+			require.Equal(t, text, e.term.MainScreen().Line(0).String())
+			y = 1
+		}
+		require.Equal(t, row, e.term.MainScreen().Line(y).String())
+	}
+	for _, term := range []string{tmux, xterm} {
+		t.Run(term+"/the ring starting after its ESC", func(t *testing.T) {
+			const ring = "kzsh\x1b\\$ ls\r\n"
+			modes := uio.NewModeTracker()
+			_, _ = modes.Write([]byte("before\r\n\x1b"))
+			c := &uio.Capture{Modes: modes, Chunks: [][]byte{[]byte(ring)}, Sizes: []uio.SizeEvent{event(1, 9, 80, 24)}, Start: 9, End: 9 + uint64(len(ring))}
+			rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), true, "", "$ ls")
 		})
-		t.Run(tc.name+", fed after Start", func(t *testing.T) {
-			e := startFor(t, captureOf(tc.pieces[0], event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
-			for _, p := range tc.pieces[1:] {
-				require.NoError(t, e.Feed([][]byte{[]byte(p)}, nil))
-			}
-			_, err := e.Render()
-			require.NoError(t, err)
-			require.Equal(t, "text", e.term.MainScreen().Line(0).String())
-			require.Equal(t, tc.row, e.term.MainScreen().Line(1).String())
-		})
+		for _, tc := range []struct {
+			name   string
+			pieces []string
+			title  bool
+			row    string // what x/vt then draws on the row after "text"
+		}{
+			{"split after the ESC", []string{"text\r\n\x1b", "kzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
+			{"a control inside the ESC, in three pieces", []string{"text\r\n\x1b", "\r", "kzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
+			{"a second ESC before the k", []string{"text\r\n\x1b", "\x1bkzsh\x1b\\$ ls\r\n"}, true, "$ ls"},
+			{"an ESC a CAN cancels before the k", []string{"text\r\n\x1b", "\x18kzsh\x1b\\$ ls\r\n"}, false, "kzsh$ ls"},
+			{"an ESC with an intermediate", []string{"text\r\n\x1b", " kzsh$ ls\r\n"}, false, "zsh$ ls"},
+		} {
+			t.Run(term+"/"+tc.name+", at Start", func(t *testing.T) {
+				c := captureOf("", event(1, 0, 80, 24))
+				c.Chunks = nil
+				for _, p := range tc.pieces {
+					c.Chunks = append(c.Chunks, []byte(p))
+					c.End += uint64(len(p))
+				}
+				rendered(t, term, startForTerm(t, term, c, termsize.Size{Cols: 80, Rows: 24}), tc.title, "text", tc.row)
+			})
+			t.Run(term+"/"+tc.name+", fed after Start, then more", func(t *testing.T) {
+				e := startForTerm(t, term, captureOf(tc.pieces[0], event(1, 0, 80, 24)), termsize.Size{Cols: 80, Rows: 24})
+				for _, p := range slices.Concat(tc.pieces[1:], []string{"more\r\n"}) {
+					require.NoError(t, e.Feed([][]byte{[]byte(p)}, nil))
+				}
+				rendered(t, term, e, tc.title, "text", tc.row)
+			})
+		}
 	}
 }

@@ -4,6 +4,7 @@ package internal
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -244,4 +245,53 @@ func Test_Command_SessionEnvBeatsTheInheritedOne(t *testing.T) {
 
 	require.Contains(t, string(out.bytes()), `NAME=inner-session SOCKET=C:\inner\admin.sock`,
 		"the session's own environment must beat the one it inherited")
+}
+
+// Test_Command_TermIsAppendedSoItBeatsTheInheritedOne is the Windows half of
+// the case of the same name in command_unix_test.go. termName is the TERM the
+// command runs under, which the session's replayer is built for, and here
+// what decides it is conpty.Spawn's dedup, which keeps the last of two names
+// that differ only in case. So the host's own is inherited spelled Term, as
+// this platform lets a variable be named, and termName is checked against
+// what the command itself was given.
+func Test_Command_TermIsAppendedSoItBeatsTheInheritedOne(t *testing.T) {
+	const inheritedTerm = "upterm-inherited-term"
+	for _, tc := range []struct {
+		name string
+		env  []string
+		term string
+		want string
+	}{
+		{name: "the host names a term", term: "vt100", want: "TERM=vt100"},
+		{name: "the host names none", term: "", want: "TERM=" + inheritedTerm},
+		{name: "the session's environment names one", env: []string{"TERM=upterm-session-term"}, want: "TERM=upterm-session-term"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Set, then removed, so that the host's own is put back after
+			// the test, and the inherited one is a variable named Term.
+			t.Setenv("TERM", "")
+			require.NoError(t, os.Unsetenv("TERM"))
+			require.NoError(t, os.Setenv("Term", inheritedTerm))
+
+			writers := uio.NewMultiWriter(uio.DefaultReplayBytes)
+			out := &recordingWriter{}
+			require.NoError(t, writers.Append(out))
+
+			cmd := newCommand(
+				"cmd", []string{"/c", "echo", "TERM=%TERM%"},
+				tc.env, termsize.Default, false, tc.term,
+				emitter.New(1), writers, testLogger(t),
+			)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			_, err := cmd.Start(ctx, termsize.Size{})
+			require.NoError(t, err)
+			require.NoError(t, cmd.Run())
+
+			require.Contains(t, string(out.bytes()), tc.want)
+			require.Equal(t, tc.want, "TERM="+cmd.termName(), "the TERM the command runs under")
+		})
+	}
 }

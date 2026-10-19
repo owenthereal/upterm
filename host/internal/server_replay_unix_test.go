@@ -278,6 +278,45 @@ func TestAnIneligibleJoinFallsBackAndSaysWhy(t *testing.T) {
 	require.Contains(t, fellBack[0], "origin mode")
 }
 
+// The session's command runs under tmux's TERM and sends a window title
+// string, ESC k title ST, as oh-my-zsh does at every prompt there, which a
+// terminal that is tmux takes as the window's name and draws none of. The
+// session's replayer is built for the TERM its command runs under, whether
+// the host names it, over the one the host inherited, or names none and the
+// command inherits the host's, so the guest is handed a reconstruction, none
+// of the title drawn. Where the host names xterm's over an inherited tmux,
+// a TERM the replayer doesn't know to be screen's or tmux's, the join falls
+// back: the guest is handed the raw ring, as the viewer is.
+func TestTheReplayerReadsTheSessionsTERM(t *testing.T) {
+	for _, tc := range []struct {
+		name, inherited, term string
+		renders               bool
+	}{
+		{"the host names it", "xterm-256color", "tmux-256color", true},
+		{"the host names none", "tmux-256color", "", true},
+		{"the host names another", "tmux-256color", "xterm-256color", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TERM", tc.inherited)
+			h := startRepainting(t, `\033kzsh\033\\TITLE-MARK`, &Server{Term: tc.term})
+			_, viewer, _ := h.connectHost(t, nil)
+			// The viewer, counting towards no size, is handed the raw ring,
+			// here up to the repaint its own join prompted, which the guest
+			// then captures.
+			ring := replayed(t, viewer, desktop)
+
+			_, out := h.connectGuest(t, withWindow(desktop))
+			got := replayed(t, out, desktop)
+			if !tc.renders {
+				require.Equal(t, ring, got, "the guest wasn't handed the raw ring")
+				return
+			}
+			require.NotEqual(t, ring, got, "the guest was handed the raw ring")
+			require.Equal(t, "TITLE-MARKREPAINT 24 80", newTerminal(t, desktop, got).rows()[0])
+		})
+	}
+}
+
 // A join that falls back is logged at Info, with why: the screen held state
 // the reconstruction doesn't restore, which is expected. One whose replayer
 // panicked is logged at Error, with the panic's stack: that is a bug.

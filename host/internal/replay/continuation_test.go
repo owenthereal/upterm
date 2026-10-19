@@ -884,8 +884,8 @@ func genCase(rnd *rand.Rand) contCase {
 // at the joiner's size, fed the render, the deferred tail and the suffix (a
 // joiner larger than the render, only the render, and A only up to the
 // handoff point); and the outcome. Both read the stream's screen title
-// strings as the emulation does (see screenTitlesRead). A case that rendered and held has none of
-// skip, bug and diff.
+// strings as tmux does, under whose TERM the replay runs (see contTERM). A
+// case that rendered and held has none of skip, bug and diff.
 type contRun struct {
 	a, b       *vt.Emulator
 	aOff, bOff *scrollOff
@@ -900,6 +900,12 @@ type contRun struct {
 	diff string
 }
 
+// contTERM is the TERM the property's session runs its program under:
+// tmux's, so that the replay hands x/vt each screen title string the stream
+// sends, as A and B read them (see screenTitlesRead), rather than falling
+// back on it.
+const contTERM = "tmux-256color"
+
 // screenTitleOpener is ESC k as x/vt's parser reads it: after an ESC, and any
 // C0 controls but CAN and SUB, which it executes in its escape state, and
 // DEL, which it ignores there.
@@ -909,7 +915,7 @@ var screenTitleOpener = regexp.MustCompile("\x1b([\x00-\x17\x19\x1c-\x1f\x7f]*)k
 // reads its window title strings, ESC k title ST, for x/vt to read them so:
 // each k of an ESC k made a ^, which makes the title a PM that x/vt's parser
 // consumes to the ESC, CAN or SUB that ends it, as tmux consumes the title,
-// the length kept. The emulation reads the stream so too.
+// the length kept. The emulation reads the stream so too, under tmux's TERM.
 func screenTitlesRead(p []byte) []byte {
 	return screenTitleOpener.ReplaceAll(p, []byte("\x1b$1^"))
 }
@@ -925,14 +931,15 @@ func eventsUpTo(sizes []uio.SizeEvent, offset int) int {
 
 // replay emulates c's prefix as io does: from the ring's first byte, with a
 // fresh tracker, by Start and then each Feed, offering each piece of the
-// prefix with the events in it, for c's joiner.
+// prefix with the events in it, for c's joiner, by the replayer for a
+// session whose program runs under contTERM.
 func (c contCase) replay(deadline time.Time) (uio.Emulation, error) {
 	ends := c.offers
 	if ends == nil {
 		ends = []int{len(c.prefix)}
 	}
 	k := eventsUpTo(c.sizes, ends[0])
-	em, err := New().Start(context.Background(), deadline, &uio.Capture{
+	em, err := NewForTerm(contTERM).Start(context.Background(), deadline, &uio.Capture{
 		Modes:  uio.NewModeTracker(),
 		Chunks: [][]byte{c.prefix[:ends[0]]},
 		Sizes:  c.sizes[:k],
@@ -1914,9 +1921,9 @@ func TestReplayContinuesAcrossASplitCluster(t *testing.T) {
 
 // A screen title string the stream sends, which a session's terminal that is
 // GNU screen or tmux consumes, continues alike, wherever io's offers split
-// it, its ESC and its k apart included: the replay reads it as the
-// terminals do (see screenTitlesRead). The first case is one the fuzzer
-// found, a title an ESC 0 ends.
+// it, its ESC and its k apart included: the replay, under tmux's TERM,
+// reads it as the terminals do (see screenTitlesRead). The first case is one
+// the fuzzer found, a title an ESC 0 ends.
 func TestReplayContinuesAfterAScreenTitleString(t *testing.T) {
 	for _, c := range []contCase{
 		{prefix: []byte("000\x1bk0000000000\x1b0"), suffix: []byte("00000"), offers: []int{5, 17}},
